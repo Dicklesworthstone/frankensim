@@ -1599,7 +1599,8 @@ fn g0_reconciliation_forks_and_cycles_are_explicit() {
         conflict.kind == InventoryConflictKind::ReconciliationConflict
             && conflict
                 .detail
-                .contains("participates in multiple exact merge topologies")
+                .contains("participates in 2 exact merge topologies")
+            && conflict.detail.contains(&overlap_a_id.to_hex())
     }));
 }
 
