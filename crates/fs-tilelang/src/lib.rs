@@ -234,7 +234,8 @@ impl KernelMeta {
         Ok(out)
     }
 
-    /// One bounded JSON metadata object. Admitted metadata retains the
+    /// One bounded JSON metadata object. Ordinary macro-generated names and
+    /// legacy names whose escaping was already canonical retain their
     /// historical exact bytes. Invalid public struct literals produce a
     /// bounded, structured refusal object that never repeats attacker text;
     /// callers needing typed refusal should use [`Self::try_descr`].

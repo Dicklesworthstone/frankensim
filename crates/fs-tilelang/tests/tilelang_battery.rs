@@ -662,9 +662,7 @@ fn outer_logger_uses_a_nested_metadata_object_with_exact_stable_bytes() {
 fn exhaustive_hostile_metadata_and_labels_remain_valid_and_round_trip() {
     let mut hostile = "prefix\"\\".to_owned();
     hostile.extend((0_u32..=31).map(|value| char::from_u32(value).expect("C0 scalar")));
-    hostile.push('\u{007f}');
-    hostile.push('\u{0085}');
-    hostile.push('\u{009f}');
+    hostile.extend((0x7f_u32..=0x9f).map(|value| char::from_u32(value).expect("C1 scalar")));
     hostile.push('\u{2028}');
     hostile.push('\u{2029}');
     hostile.push('é');
@@ -688,6 +686,14 @@ fn exhaustive_hostile_metadata_and_labels_remain_valid_and_round_trip() {
         hostile.as_str()
     );
     assert_eq!(inner.lines().count(), 1);
+    for value in 0x7f_u32..=0x9f {
+        let escaped = format!("\\u{value:04x}");
+        assert_eq!(
+            inner.matches(&escaped).count(),
+            1,
+            "inner metadata must escape C1 scalar U+{value:04X} exactly once"
+        );
+    }
 
     let record = meta
         .render_log_record(&hostile, &hostile)
@@ -695,6 +701,14 @@ fn exhaustive_hostile_metadata_and_labels_remain_valid_and_round_trip() {
     assert_log_record_round_trips(&record, &hostile, &hostile, &meta);
     assert_eq!(record.lines().count(), 1);
     assert!(record.len() <= MAX_LOG_RECORD_BYTES);
+    for value in 0x7f_u32..=0x9f {
+        let escaped = format!("\\u{value:04x}");
+        assert_eq!(
+            record.matches(&escaped).count(),
+            3,
+            "kernel, case, and verdict must each escape C1 scalar U+{value:04X}"
+        );
+    }
 }
 
 #[test]

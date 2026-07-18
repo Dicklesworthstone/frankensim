@@ -35,8 +35,9 @@ impossible. fs-opdsl (tfz.4) generates INTO this layer.
   quotes, backslashes, every C0/C1 control, and Unicode line/paragraph
   separators while preserving other Unicode exactly. `try_descr` and
   `render_log_record` return typed `MetadataRenderError` refusals. To preserve
-  existing static-kernel report consumers, infallible `descr()` returns the
-  historical exact object for admitted metadata and a bounded structured
+  existing static-kernel report consumers, infallible `descr()` preserves the
+  historical exact object for ordinary macro-generated names and legacy names
+  whose escaping was already canonical. It returns a bounded structured
   refusal object, containing no attacker text, for an invalid public literal.
 - `DeterminismClass::{BitwiseAllTiers, PerTier}`;
   `ReductionKind::{None, DeterministicSum, FastSum}`.
