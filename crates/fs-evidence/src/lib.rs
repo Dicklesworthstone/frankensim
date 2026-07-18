@@ -71,8 +71,11 @@ pub use identity::{
     ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
     ColorEvidenceSourceIdV1, ColorEvidenceSourceIdentitySchemaV1, ColorEvidenceSourceReceiptV1,
     ColorEvidenceSourceV1, EvidenceIdentityCancellationProbe, EvidenceIdentityLimits,
-    EvidenceIdentityTrustState, MAX_COLOR_EVIDENCE_NODE_BYTES_V1, compose_color_evidence_nodes_v1,
-    identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
+    EvidenceIdentityTrustState, IdentifiedValidityDomainV1, MAX_COLOR_EVIDENCE_NODE_BYTES_V1,
+    MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1, VALIDITY_DOMAIN_IDENTITY_VERSION_V1, ValidityDomainIdV1,
+    ValidityDomainIdentityError, ValidityDomainIdentitySchemaV1, ValidityDomainReceiptV1,
+    compose_color_evidence_nodes_v1, identify_color_evidence_source_node_v1,
+    identify_color_evidence_source_v1, identify_validity_domain_v1,
 };
 
 /// Crate version, re-exported for provenance stamping.

@@ -1,4 +1,4 @@
-//! G0/G3/G4 coverage for typed color-evidence graph identity.
+//! G0/G3/G4 coverage for typed evidence identities.
 //!
 //! A retained cross-ISA known-answer vector is still required for G5.
 
@@ -10,9 +10,10 @@ use fs_evidence::{
     COLOR_ALGEBRA_VERSION, Color, ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError,
     ColorEvidenceNodeIdV1, ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1,
     ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
-    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, ValidityDomain,
-    compose_color_evidence_nodes_v1, identify_color_evidence_source_node_v1,
-    identify_color_evidence_source_v1,
+    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, IdentifiedValidityDomainV1, ValidityDomain,
+    ValidityDomainIdV1, ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
+    identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
+    identify_validity_domain_v1,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(16_384, 8_192, 32, 64, 256);
@@ -62,6 +63,304 @@ fn parent_reference_bytes(parent: ColorEvidenceNodeIdV1) -> [u8; 65] {
         .copy_from_slice(SchemaId::<ColorEvidenceNodeIdentitySchemaV1>::for_schema().as_bytes());
     output[33..].copy_from_slice(parent.as_bytes());
     output
+}
+
+fn identified_domain(domain: ValidityDomain) -> IdentifiedValidityDomainV1 {
+    identify_validity_domain_v1(domain, LIMITS, || false).expect("valid normalized domain")
+}
+
+#[test]
+fn validity_domain_identity_normalizes_order_and_binds_every_bound_bit() {
+    let first_domain = ValidityDomain::unconstrained()
+        .with("z-axis", -3.0, 4.0)
+        .with("a-axis", 0.0, 1.0);
+    let replay_domain = ValidityDomain::unconstrained()
+        .with("a-axis", 0.0, 1.0)
+        .with("z-axis", -3.0, 4.0);
+    let first = identified_domain(first_domain.clone());
+    let replay = identified_domain(replay_domain);
+
+    assert_eq!(first.id(), replay.id());
+    assert_eq!(first.domain(), &first_domain);
+    let audit = first.receipt().audit_record();
+    assert_eq!(first.trust_state(), TrustState::Unanchored);
+    assert_eq!(audit.trust(), TrustState::Unanchored);
+    assert_eq!(audit.no_claim(), NoClaimState::ExternalTrustRequired);
+    assert_eq!(audit.id(), first.id_bytes());
+
+    let renamed = identified_domain(
+        ValidityDomain::unconstrained()
+            .with("a-axis-renamed", 0.0, 1.0)
+            .with("z-axis", -3.0, 4.0),
+    );
+    let rebound = identified_domain(
+        ValidityDomain::unconstrained()
+            .with("a-axis", 0.0, 1.0_f64.next_up())
+            .with("z-axis", -3.0, 4.0),
+    );
+    assert_ne!(first.id(), renamed.id());
+    assert_ne!(first.id(), rebound.id());
+
+    let negative_zero = identified_domain(ValidityDomain::unconstrained().with("x", -0.0, 0.0));
+    let positive_zero = identified_domain(ValidityDomain::unconstrained().with("x", 0.0, 0.0));
+    assert_ne!(negative_zero.id(), positive_zero.id());
+
+    let unconstrained = identified_domain(ValidityDomain::unconstrained());
+    assert!(unconstrained.domain().bounds().is_empty());
+}
+
+#[test]
+fn validity_domain_identity_binds_arbitrary_utf8_axis_bytes() {
+    let spaced = identified_domain(
+        ValidityDomain::unconstrained()
+            .with("Mach number", 0.0, 1.0)
+            .with("α", -1.0, 1.0),
+    );
+    let renamed = identified_domain(
+        ValidityDomain::unconstrained()
+            .with("Mach-number", 0.0, 1.0)
+            .with("alpha", -1.0, 1.0),
+    );
+
+    assert!(spaced.domain().bounds().contains_key("Mach number"));
+    assert!(spaced.domain().bounds().contains_key("α"));
+    assert_ne!(spaced.id(), renamed.id());
+}
+
+#[test]
+fn validity_domain_identity_refuses_invalid_bounds_resources_and_cancellation() {
+    let non_finite = identify_validity_domain_v1(
+        ValidityDomain::unconstrained().with("x", 0.0, f64::INFINITY),
+        LIMITS,
+        || false,
+    );
+    assert_eq!(
+        non_finite,
+        Err(ValidityDomainIdentityError::InvalidBounds {
+            axis_index: 0,
+            reason: "bounds must be finite",
+        })
+    );
+
+    let left = ValidityDomain::unconstrained().with("x", 0.0, 1.0);
+    let right = ValidityDomain::unconstrained().with("x", 2.0, 3.0);
+    let disjoint = identify_validity_domain_v1(left.intersect(&right), LIMITS, || false);
+    assert_eq!(
+        disjoint,
+        Err(ValidityDomainIdentityError::InvalidBounds {
+            axis_index: 0,
+            reason: "lower bound exceeds upper bound",
+        })
+    );
+
+    let three_axes = ValidityDomain::unconstrained()
+        .with("a", 0.0, 1.0)
+        .with("b", 0.0, 1.0)
+        .with("c", 0.0, 1.0);
+    let collection_tiny = CanonicalLimits::new(4096, 512, 32, 2, 64);
+    let bounded = identify_validity_domain_v1(three_axes, collection_tiny, || false);
+    assert!(matches!(
+        bounded,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 3,
+                limit: 2,
+            }
+        ))
+    ));
+
+    let field_tiny = CanonicalLimits::new(4096, 43, 32, 8, 64);
+    let field_bounded = identify_validity_domain_v1(
+        ValidityDomain::unconstrained().with("axis", 0.0, 1.0),
+        field_tiny,
+        || false,
+    );
+    assert!(matches!(
+        field_bounded,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 44,
+                limit: 43,
+            }
+        ))
+    ));
+
+    let aggregate_tiny = CanonicalLimits::new(4096, 73, 32, 8, 64);
+    let aggregate_bounded = identify_validity_domain_v1(
+        ValidityDomain::unconstrained()
+            .with("a", 0.0, 1.0)
+            .with("b", 0.0, 1.0),
+        aggregate_tiny,
+        || false,
+    );
+    assert!(matches!(
+        aggregate_bounded,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 74,
+                limit: 73,
+            }
+        ))
+    ));
+
+    let mut sixteen_axes = ValidityDomain::unconstrained();
+    for axis_index in 0..16 {
+        sixteen_axes = sixteen_axes.with(format!("axis-{axis_index:02}"), 0.0, 1.0);
+    }
+    identified_domain(sixteen_axes.clone());
+    let chunk_bounded =
+        identify_validity_domain_v1(sixteen_axes.with("axis-16", 0.0, 1.0), LIMITS, || false);
+    assert!(matches!(
+        chunk_bounded,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::StreamChunks,
+                requested: 68,
+                limit: 64,
+            }
+        ))
+    ));
+
+    let canonical_tiny = CanonicalLimits::new(49, 128, 32, 8, 32);
+    let canonical_bounded = identify_validity_domain_v1(
+        ValidityDomain::unconstrained()
+            .with("a", 0.0, 1.0)
+            .with("b", 0.0, 1.0),
+        canonical_tiny,
+        || false,
+    );
+    assert!(matches!(
+        canonical_bounded,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit: 49,
+            }
+        )) if requested > 49
+    ));
+
+    let invalid_limits = identify_validity_domain_v1(
+        ValidityDomain::unconstrained(),
+        CanonicalLimits::new(4096, 512, 32, 8, 0),
+        || false,
+    );
+    assert_eq!(
+        invalid_limits,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    );
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+    let cancelled = identify_validity_domain_v1(
+        ValidityDomain::unconstrained()
+            .with("a", 0.0, 1.0)
+            .with("b", 0.0, 1.0),
+        LIMITS,
+        CancelAfter {
+            successful_polls: 2,
+        },
+    );
+    assert!(matches!(
+        cancelled,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::Cancelled { .. }
+        ))
+    ));
+
+    let late_domain = ValidityDomain::unconstrained()
+        .with("Mach number", 0.0, 1.0)
+        .with("α", -1.0, 1.0);
+    let poll_count = std::cell::Cell::new(0_usize);
+    identify_validity_domain_v1(late_domain.clone(), LIMITS, || {
+        poll_count.set(poll_count.get() + 1);
+        false
+    })
+    .expect("baseline poll count");
+    let late_cancelled = identify_validity_domain_v1(
+        late_domain,
+        LIMITS,
+        CancelAfter {
+            successful_polls: poll_count.get() - 1,
+        },
+    );
+    assert!(matches!(
+        late_cancelled,
+        Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+}
+
+#[test]
+fn validity_domain_helper_matches_independent_canonical_rows() {
+    let domain = ValidityDomain::unconstrained()
+        .with("z-axis", -3.0, 4.0)
+        .with("a-axis", -0.0, 1.0);
+    let identified = identified_domain(domain.clone());
+    let mut rows = Vec::new();
+    for (axis, (lo, hi)) in domain.bounds() {
+        let mut row = Vec::new();
+        row.extend_from_slice(
+            &u64::try_from(axis.len())
+                .expect("axis length")
+                .to_le_bytes(),
+        );
+        row.extend_from_slice(axis.as_bytes());
+        row.extend_from_slice(&lo.to_bits().to_le_bytes());
+        row.extend_from_slice(&hi.to_bits().to_le_bytes());
+        rows.push(row);
+    }
+    let manual = CanonicalEncoder::<ValidityDomainIdV1, _>::new(LIMITS, || false)
+        .expect("validity-domain schema")
+        .ordered_bytes(
+            Field::new(0, "axes"),
+            u64::try_from(rows.len()).expect("row count"),
+            rows.iter().map(|row| row.as_slice()),
+        )
+        .expect("canonical rows")
+        .finish()
+        .expect("manual validity identity");
+    assert_eq!(identified.id(), manual.id());
+    assert_eq!(
+        identified.receipt().canonical_preimage(),
+        manual.canonical_preimage()
+    );
+}
+
+#[test]
+fn raw_validity_domain_receipt_is_only_schema_shaped() {
+    let malformed = CanonicalEncoder::<ValidityDomainIdV1, _>::new(LIMITS, || false)
+        .expect("validity-domain schema")
+        .ordered_bytes(Field::new(0, "axes"), 1, [b"malformed".as_slice()])
+        .expect("schema-shaped raw row")
+        .finish()
+        .expect("raw receipt");
+    let admitted = identified_domain(ValidityDomain::unconstrained().with("malformed", 0.0, 1.0));
+
+    assert_ne!(malformed.id(), admitted.id());
+    assert_eq!(malformed.audit_record().trust(), TrustState::Unanchored);
+    assert_eq!(
+        malformed.audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
 }
 
 #[test]

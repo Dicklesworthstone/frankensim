@@ -1,11 +1,11 @@
-//! Typed, canonical identities for color-evidence graph nodes.
+//! Typed, canonical identities for evidence semantics.
 //!
-//! This module deliberately starts at the narrow evidence surface that already
-//! has a versioned canonical payload: [`Color::canonical_bytes`]. It does not
-//! reinterpret [`crate::ProvenanceHash`], and it publishes only an unanchored
-//! [`IdentityReceipt`]. Origin verification, policy admission, structural
-//! [`crate::Certified`] consistency, and scientific color rank remain separate
-//! axes.
+//! This module covers exact color-evidence graph replay and normalized validity
+//! domains through separate schemas. It does not reinterpret
+//! [`crate::ProvenanceHash`], and it publishes only unanchored
+//! [`IdentityReceipt`] values. Origin verification, policy admission,
+//! structural [`crate::Certified`] consistency, and scientific color rank
+//! remain separate axes.
 
 use core::fmt;
 
@@ -15,20 +15,27 @@ pub use fs_blake3::identity::{
 };
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalSchema, ChildSpec, EvidenceNodeId, Field, FieldSpec,
-    IdentityAdjudication, IdentityReceipt, LimitKind, ObservedIdentity, SchemaId, SourceId,
-    StrongIdentity, WireType, adjudicate,
+    IdentityAdjudication, IdentityReceipt, LimitKind, ObservedIdentity, OrderedBytesStreamError,
+    SchemaId, SemanticId, SourceId, StrongIdentity, WireType, adjudicate,
 };
 
 use crate::{
-    COLOR_ALGEBRA_VERSION, Color, ColorPayloadError, IntervalOp, compose, validate_color_payload,
+    COLOR_ALGEBRA_VERSION, Color, ColorPayloadError, IntervalOp, ValidityDomain, compose,
+    validate_color_payload,
 };
 
 /// Identity schema version for exact retained color-evidence sources.
 pub const COLOR_EVIDENCE_SOURCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for color-evidence graph nodes.
 pub const COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for normalized evidence-validity domains.
+pub const VALIDITY_DOMAIN_IDENTITY_VERSION_V1: u32 = 1;
 /// Hard allocation ceiling for one canonical output-color payload.
 pub const MAX_COLOR_EVIDENCE_NODE_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for the ordered axes field of one validity domain.
+pub const MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Non-semantic scatter/gather writes emitted for each streamed axis row.
+const VALIDITY_DOMAIN_STREAM_CHUNKS_PER_AXIS_V1: u64 = 4;
 
 /// Canonical identity schema for one retained source that may root a color
 /// evidence graph. The resulting identity is content-bound but untrusted.
@@ -52,6 +59,72 @@ impl CanonicalSchema for ColorEvidenceSourceIdentitySchemaV1 {
 /// helper-enforced source-domain and version invariants belong to
 /// [`ColorEvidenceSourceV1`].
 pub type ColorEvidenceSourceIdV1 = SourceId<ColorEvidenceSourceIdentitySchemaV1>;
+
+/// Canonical identity schema for one normalized evidence-validity domain.
+pub enum ValidityDomainIdentitySchemaV1 {}
+
+impl CanonicalSchema for ValidityDomainIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.validity-domain.v1";
+    const NAME: &'static str = "validity-domain";
+    const VERSION: u32 = VALIDITY_DOMAIN_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "sorted exact validity-axis UTF-8 bytes and finite IEEE-754 bounds; no empirical membership or model authority";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("axes", WireType::OrderedBytes)];
+}
+
+/// Low-level canonical-frame identity for one normalized validity domain.
+///
+/// Direct generic encoder output proves only schema-shaped framing. Exact axis
+/// decoding, finite ordered bounds, normalization, and resource admission
+/// belong to [`IdentifiedValidityDomainV1`].
+pub type ValidityDomainIdV1 = SemanticId<ValidityDomainIdentitySchemaV1>;
+
+/// Low-level producer receipt underlying an opaque validated domain.
+pub type ValidityDomainReceiptV1 = IdentityReceipt<ValidityDomainIdV1>;
+
+/// A normalized validity domain kept attached to its unanchored identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentifiedValidityDomainV1 {
+    domain: ValidityDomain,
+    receipt: ValidityDomainReceiptV1,
+}
+
+impl IdentifiedValidityDomainV1 {
+    /// Read-only normalized domain committed by this identity.
+    #[must_use]
+    pub const fn domain(&self) -> &ValidityDomain {
+        &self.domain
+    }
+
+    /// Typed semantic identity.
+    #[must_use]
+    pub const fn id(&self) -> ValidityDomainIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> ValidityDomainReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the plain domain.
+    #[must_use]
+    pub fn into_domain(self) -> ValidityDomain {
+        self.domain
+    }
+}
 
 static COLOR_EVIDENCE_SOURCE_CHILD_V1: ChildSpec =
     ChildSpec::for_identity::<ColorEvidenceSourceIdV1>();
@@ -306,6 +379,49 @@ pub enum ColorEvidenceIdentityError {
     Canonical(CanonicalError),
 }
 
+/// Fail-closed refusal from normalized validity-domain identity construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidityDomainIdentityError {
+    /// A sorted axis has unusable interval bounds.
+    InvalidBounds {
+        /// Zero-based axis position in canonical `BTreeMap` order.
+        axis_index: u64,
+        /// Finite-ordering refusal.
+        reason: &'static str,
+    },
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for ValidityDomainIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBounds { axis_index, reason } => write!(
+                formatter,
+                "validity-domain identity refused bounds for axis {axis_index}: {reason}"
+            ),
+            Self::Canonical(error) => {
+                write!(formatter, "validity-domain identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ValidityDomainIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::InvalidBounds { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for ValidityDomainIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
 impl fmt::Display for ColorEvidenceIdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -346,14 +462,12 @@ impl From<CanonicalError> for ColorEvidenceIdentityError {
     }
 }
 
-fn poll_identity_cancellation<C>(cancellation: &mut C) -> Result<(), ColorEvidenceIdentityError>
+fn poll_identity_cancellation<C>(cancellation: &mut C) -> Result<(), CanonicalError>
 where
     C: EvidenceIdentityCancellationProbe,
 {
     if cancellation.is_cancelled() {
-        Err(ColorEvidenceIdentityError::Canonical(
-            CanonicalError::Cancelled { absorbed_bytes: 0 },
-        ))
+        Err(CanonicalError::Cancelled { absorbed_bytes: 0 })
     } else {
         Ok(())
     }
@@ -382,9 +496,8 @@ fn add_bounded_color_bytes(
     Ok(())
 }
 
-fn bounded_len(value: usize) -> Result<u64, ColorEvidenceIdentityError> {
-    u64::try_from(value)
-        .map_err(|_| ColorEvidenceIdentityError::Canonical(CanonicalError::LengthOverflow))
+fn bounded_len(value: usize) -> Result<u64, CanonicalError> {
+    u64::try_from(value).map_err(|_| CanonicalError::LengthOverflow)
 }
 
 fn push_color_len(output: &mut Vec<u8>, length: usize) {
@@ -395,6 +508,142 @@ fn push_color_len(output: &mut Vec<u8>, length: usize) {
 fn push_color_field(output: &mut Vec<u8>, bytes: &[u8]) {
     push_color_len(output, bytes.len());
     output.extend_from_slice(bytes);
+}
+
+/// Normalize and identify one evidence-validity domain.
+///
+/// The owned input is retained inside the opaque result, preventing the
+/// admitted semantic identity from being detached from different bounds. Axis
+/// rows use `BTreeMap` order and bind the axis byte length, exact UTF-8 bytes
+/// without normalization, and both IEEE-754 endpoint bit patterns. An
+/// unconstrained domain is the canonical empty row sequence; it is not an
+/// invalid domain.
+///
+/// # Errors
+/// Refuses non-finite or inverted bounds, invalid limits, resource overflow, or
+/// cancellation. No partial identity is published.
+pub fn identify_validity_domain_v1<C>(
+    domain: ValidityDomain,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedValidityDomainV1, ValidityDomainIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive"),
+        ));
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    let axis_count = bounded_len(domain.bounds().len())?;
+    if axis_count > limits.max_collection_items() {
+        return Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: LimitKind::CollectionItems,
+                requested: axis_count,
+                limit: limits.max_collection_items(),
+            },
+        ));
+    }
+
+    let field_limit = limits
+        .max_field_bytes()
+        .min(MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1);
+    let mut field_payload_bytes = u64::from(u64::BITS / 8);
+    if field_payload_bytes > field_limit {
+        return Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: field_payload_bytes,
+                limit: field_limit,
+            },
+        ));
+    }
+    for (axis_index, (axis, (lo, hi))) in domain.bounds().iter().enumerate() {
+        poll_identity_cancellation(&mut cancellation)?;
+        let axis_index = bounded_len(axis_index)?;
+        if !lo.is_finite() || !hi.is_finite() {
+            return Err(ValidityDomainIdentityError::InvalidBounds {
+                axis_index,
+                reason: "bounds must be finite",
+            });
+        }
+        if lo > hi {
+            return Err(ValidityDomainIdentityError::InvalidBounds {
+                axis_index,
+                reason: "lower bound exceeds upper bound",
+            });
+        }
+        let row_bytes = 24_u64
+            .checked_add(bounded_len(axis.len())?)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        let framed_row_bytes = u64::from(u64::BITS / 8)
+            .checked_add(row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        field_payload_bytes = field_payload_bytes
+            .checked_add(framed_row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        if field_payload_bytes > field_limit {
+            return Err(ValidityDomainIdentityError::Canonical(
+                CanonicalError::LimitExceeded {
+                    kind: LimitKind::FieldBytes,
+                    requested: field_payload_bytes,
+                    limit: field_limit,
+                },
+            ));
+        }
+    }
+    let required_stream_chunks = axis_count
+        .checked_mul(VALIDITY_DOMAIN_STREAM_CHUNKS_PER_AXIS_V1)
+        .ok_or(CanonicalError::LengthOverflow)?;
+    if required_stream_chunks > limits.max_collection_items() {
+        return Err(ValidityDomainIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: LimitKind::StreamChunks,
+                requested: required_stream_chunks,
+                limit: limits.max_collection_items(),
+            },
+        ));
+    }
+
+    let receipt = {
+        let row_lengths = domain.bounds().keys().map(|axis| {
+            bounded_len(axis.len()).and_then(|axis_bytes| {
+                24_u64
+                    .checked_add(axis_bytes)
+                    .ok_or(CanonicalError::LengthOverflow)
+            })
+        });
+        let mut rows = domain.bounds().iter();
+        CanonicalEncoder::<ValidityDomainIdV1, _>::new(limits, cancellation)?
+            .ordered_bytes_stream(
+                Field::new(0, "axes"),
+                axis_count,
+                row_lengths,
+                |row_index, mut sink| -> Result<(), CanonicalError> {
+                    let Some((axis, (lo, hi))) = rows.next() else {
+                        return Err(CanonicalError::DeclaredLengthMismatch {
+                            declared: axis_count,
+                            observed: row_index,
+                        });
+                    };
+                    sink.write(&bounded_len(axis.len())?.to_le_bytes())?;
+                    sink.write(axis.as_bytes())?;
+                    sink.write(&lo.to_bits().to_le_bytes())?;
+                    sink.write(&hi.to_bits().to_le_bytes())?;
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                OrderedBytesStreamError::Canonical { source, .. }
+                | OrderedBytesStreamError::Producer { source, .. } => {
+                    ValidityDomainIdentityError::Canonical(source)
+                }
+            })?
+            .finish()?
+    };
+    Ok(IdentifiedValidityDomainV1 { domain, receipt })
 }
 
 /// Reproduce `Color::canonical_bytes` under a hard allocation ceiling and

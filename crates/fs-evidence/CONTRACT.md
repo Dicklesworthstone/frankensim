@@ -72,6 +72,18 @@ telemetry/legacy correlation.
   encoding is cancellation-polled and hard-capped at 1 MiB before allocation.
   Construction returns only unanchored receipts: it neither authenticates
   origin nor changes `Color`, `Certified<T>`, or `AdmittedColor` trust state.
+- `identity` module (sj31i.52.2 tranche 2) —
+  `ValidityDomainIdV1` is a low-level schema-shaped `SemanticId`; only the
+  opaque `IdentifiedValidityDomainV1` proves helper validation of a normalized
+  declared parameter box. The helper consumes and retains the exact domain
+  while binding sorted, length-framed axis UTF-8 bytes without normalization
+  plus both finite, ordered IEEE-754 endpoint bit patterns. Unconstrained is the
+  canonical empty row sequence. Axis count and the exact ordered-field payload
+  are admitted before allocation-free row streaming; the payload is hard-capped
+  at 1 MiB and the complete frame separately obeys caller `CanonicalLimits`.
+  The current scatter/gather producer preflights exactly four non-semantic
+  stream chunks per axis against the caller's shared collection/chunk budget.
+  Raw frame aliases remain low-level framing, not a semantic-admission bypass.
 
 - `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
   `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
@@ -227,6 +239,13 @@ telemetry/legacy correlation.
     canonical construction for every color variant. Raw frame-ID/receipt
     aliases do not assert these helper-level semantic invariants. Legacy
     `ProvenanceHash` has no conversion or rehash bridge into either typed role.
+14. Opaque helper-built validity domains (sj31i.52.2, G0/G3/G4) normalize
+    insertion order through `BTreeMap`, preserve arbitrary exact UTF-8 axis
+    bytes and signed-zero endpoint bits, and change identity for every
+    normalized axis or endpoint-bit mutation. Non-finite/inverted bounds,
+    row-count/field/chunk/frame resource overflow, and entry or mid-stream
+    cancellation refuse without publishing an identity. Helper output agrees
+    with independently framed canonical rows.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -242,11 +261,14 @@ Bit-stable across runs and platforms up to fs-math-class scalar-arithmetic
 divergence.
 
 ## Cancellation behavior
-Core certificate/color algebra is bounded small synchronous work. Falsifier
-allocation and history review iterate caller data without a `Cx`; allocation
-length and distinct history rows are defensively capped, but these diagnostic
-APIs are not P7 hot-kernel or cancellation-authoritative paths. Callers must not
-place large reviews inside latency-bounded tile loops.
+Core certificate/color algebra is bounded small synchronous work. Typed color
+and validity-domain identity helpers accept an explicit cancellation probe,
+poll before allocation and at variable-row boundaries, and consume their
+encoder on refusal. Falsifier allocation and history review iterate caller data
+without a `Cx`; allocation length and distinct history rows are defensively
+capped, but these diagnostic APIs are not P7 hot-kernel or
+cancellation-authoritative paths. Callers must not place large reviews inside
+latency-bounded tile loops.
 
 ## Unsafe boundary
 None. `unsafe_code` denied workspace-wide.
@@ -593,6 +615,11 @@ physical validation, process-standard conformance, or decision fitness.
   it (same upgrade path as fs-obs). It remains legacy deterministic
   correlation only and cannot construct `ColorEvidenceSourceIdV1` or
   `ColorEvidenceNodeIdV1`.
+- `IdentifiedValidityDomainV1` proves helper validation and exact normalized
+  declared bounds. A raw `ValidityDomainIdV1`/receipt proves only schema-shaped
+  framing. Neither proves that observations occupy the box, that a model is
+  valid there, or that any source/calibration authority admitted the
+  declaration.
 - A successful opaque helper build proves canonical source framing or exact
   replay of the named Add/Mul/Hull color operation. It proves
   nothing about source origin, experimental membership, model correctness, or
