@@ -183,12 +183,17 @@ admitted derived-geometry boundary.
   independent exact-length planner that does not serialize or retain payload.
   Every additive byte count uses checked arithmetic, and each native `usize`
   plan is checked into the canonical `u64` declaration. The encoder admits
-  that declaration before the indexed producer receives one empty `Vec` with
-  an exact `try_reserve_exact` request for the admitted bytes. The producer
-  fills only that reserved row; an unexpected capacity increase refuses as a
-  producer defect, and an unavailable reservation is a distinct typed
-  allocation refusal rather than a canonical limit, producer, or cancellation
-  error. Oversized rows therefore refuse before payload allocation. The former
+  that declaration before one empty backing `Vec` receives an exact
+  `try_reserve_exact` request for the admitted bytes. The indexed producer sees
+  only an opaque append-only row writer, never the `Vec`, and every append is
+  checked against the admitted logical cap before mutation. A one-over producer
+  attempt therefore returns a typed declared-length mismatch without changing
+  row length, growing capacity, or publishing an identity. An unavailable
+  reservation remains a distinct typed allocation refusal rather than a
+  canonical limit, producer, or cancellation error. Both public graph and
+  receipt refusals preserve that allocation payload alongside ordered-stream
+  diagnostics even though their canonical-error accessor is necessarily
+  `None`. Oversized rows therefore refuse before payload allocation. The former
   collection-wide `Vec<Vec<u8>>` batches no longer multiply retained canonical
   payload by row cardinality. Graph/receipt refusals retain the ordered field,
   origin, phase, row, declared/written bytes, completed prefix, and
@@ -220,9 +225,10 @@ admitted derived-geometry boundary.
   bounded aggregate strides. Maximum-size node support/activation rows,
   condition rows, derived-lineage rows, incidence rows, receipt domains, and
   conditional-outcome rows derive exact checked payload lengths. Ordered rows
-  fallibly reserve that admitted length once before serialization and refuse
-  any capacity growth; a late legal reallocation therefore cannot evade a poll
-  boundary. Within those canonical ordering and identity stages, cancellation
+  fallibly reserve that admitted length once before serialization, and their
+  cap-enforcing writer rejects an over-plan append before it can trigger a late
+  legal reallocation or evade a poll boundary. Within those canonical ordering
+  and identity stages, cancellation
   returns a typed refusal before structure, artifact, outcome, or evidence
   identity publication rather than being deferred across one maximum-size
   legal row or collection.
@@ -1381,13 +1387,19 @@ constructor-boundary assertions retain their exact typed error variants.
   identical typed receipts, semantic roots, canonical-preimage roots, canonical
   byte counts, and collection counts. Actual equation, variable, condition,
   lineage, incidence, matching, derivative-variable, and unknown-axis fixtures
-  also pin independent declared lengths to their payload serializers. G0/G4
+  also pin independent declared lengths to their payload serializers. An
+  exhaustive G0 byte-parity law binds the checked signal writer to the
+  authoritative Machine terminal-quantity and terminal-shape wire vocabulary
+  across every sealed variant. G0/G4
   adapter laws prove field and row admission precede payload allocation, admit
   empty and exact reduced-limit rows, refuse one-over counts/rows before
-  production, inject a deterministic reserve failure, and detect declared/payload
-  disagreement. They retain canonical-versus-producer-versus-allocation origin,
-  phase, row, declared/written bytes, completed prefix, and canonical-byte
-  progress on refusal.
+  production, reject an exact one-over producer append before row mutation or
+  allocation growth, inject a deterministic reserve failure, and detect
+  declared/payload disagreement. They retain canonical-versus-producer-versus-
+  allocation origin, phase, row, declared/written bytes, completed prefix, and
+  canonical-byte progress on refusal; graph and receipt wrapper laws separately
+  require the typed allocation payload to survive public propagation when no
+  canonical error exists.
 
 `tests/machine_semantics.rs` (Machine-IR E0 PR-3, G0/G3): fully populated
 behavior-overlay admission; complete state/initial/boundary/body-motion closure;
