@@ -1,6 +1,6 @@
 //! Typed kernels for the Walking Fish Group benchmark family.
 //!
-//! The production kernel currently implements normalized WFG1 through WFG7
+//! The production kernel implements the complete normalized WFG1 through WFG9
 //! compositions for arbitrary valid objective, position-parameter, and
 //! distance-parameter counts.  Its transformations and shapes follow the
 //! corrected WFG toolkit as represented by jMetal revision
@@ -10,17 +10,18 @@
 //!
 //! Determinism is structural within the evaluator: reductions have a fixed
 //! left-to-right order and transcendental calls use [`fs_math::det`].  This
-//! module does not yet claim the complete WFG8-WFG9 suite, executable parity
-//! with an external oracle, optimizer convergence, cancellation coverage,
-//! cross-ISA bit stability, or performance evidence.
-//! Direct WFG6 nonseparable reductions and WFG7 suffix conditioning retain
-//! canonical fixed-order arithmetic; no subquadratic complexity claim is made.
+//! module does not yet claim executable parity with an external oracle,
+//! optimizer convergence, cancellation coverage, cross-ISA bit stability, or
+//! performance evidence. Direct WFG6/WFG9 nonseparable reductions and
+//! WFG7/WFG8 conditioning retain canonical fixed-order arithmetic; no
+//! subquadratic complexity claim is made.
 
 #![deny(unsafe_code)]
 
 const CORRECTION_EPSILON: f64 = 1.0e-10;
 const S_MULTI_A: f64 = 30.0;
 const S_MULTI_B: f64 = 10.0;
+const S_MULTI_WFG9_B: f64 = 95.0;
 const S_MULTI_CENTER: f64 = 0.35;
 const S_DECEPT_CENTER: f64 = 0.35;
 const S_DECEPT_RADIUS: f64 = 0.001;
@@ -501,7 +502,8 @@ impl Wfg6 {
     pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
         self.spec.validate_input(input)?;
         let transformed = wfg6_transform(input, self.spec.position_parameters)?;
-        let reduced = wfg6_reduce(&transformed, self.spec)?;
+        let reduced =
+            nonseparable_group_reduce(&transformed, self.spec, "WFG6 reduced coordinates")?;
         let positioned = identity_positioned(&reduced)?;
         let shape = concave_shape(&positioned)?;
         finish_evaluation(transformed, reduced, positioned, shape)
@@ -543,6 +545,89 @@ impl Wfg7 {
         self.spec.validate_input(input)?;
         let transformed = wfg7_transform(input, self.spec.position_parameters)?;
         let reduced = equal_group_reduce(&transformed, self.spec)?;
+        let positioned = identity_positioned(&reduced)?;
+        let shape = concave_shape(&positioned)?;
+        finish_evaluation(transformed, reduced, positioned, shape)
+    }
+}
+
+/// A validated normalized WFG8 problem definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wfg8 {
+    spec: WfgSpec,
+}
+
+impl Wfg8 {
+    /// Validate a normalized WFG8 problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for an invalid objective count, position
+    /// partition, distance count, or checked total dimension.
+    pub fn new(
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        Ok(Self {
+            spec: WfgSpec::new(objectives, position_parameters, distance_parameters)?,
+        })
+    }
+
+    wfg_accessors!();
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for invalid input or failed intermediate
+    /// storage admission. No transformation runs before input validation.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        self.spec.validate_input(input)?;
+        let transformed = wfg8_transform(input, self.spec.position_parameters)?;
+        let reduced = equal_group_reduce(&transformed, self.spec)?;
+        let positioned = identity_positioned(&reduced)?;
+        let shape = concave_shape(&positioned)?;
+        finish_evaluation(transformed, reduced, positioned, shape)
+    }
+}
+
+/// A validated normalized WFG9 problem definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wfg9 {
+    spec: WfgSpec,
+}
+
+impl Wfg9 {
+    /// Validate a normalized WFG9 problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for an invalid objective count, position
+    /// partition, distance count, or checked total dimension.
+    pub fn new(
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        Ok(Self {
+            spec: WfgSpec::new(objectives, position_parameters, distance_parameters)?,
+        })
+    }
+
+    wfg_accessors!();
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for invalid input or failed intermediate
+    /// storage admission. No transformation runs before input validation.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        self.spec.validate_input(input)?;
+        let transformed = wfg9_transform(input, self.spec.position_parameters)?;
+        let reduced =
+            nonseparable_group_reduce(&transformed, self.spec, "WFG9 reduced coordinates")?;
         let positioned = identity_positioned(&reduced)?;
         let shape = concave_shape(&positioned)?;
         finish_evaluation(transformed, reduced, positioned, shape)
@@ -737,6 +822,37 @@ fn wfg7_transform(input: &[f64], position_parameters: usize) -> Result<Vec<f64>,
     Ok(transformed)
 }
 
+fn wfg8_transform(input: &[f64], position_parameters: usize) -> Result<Vec<f64>, WfgError> {
+    let mut transformed = reserved_vec("WFG8 transformed coordinates", input.len())?;
+    transformed.extend_from_slice(&input[..position_parameters]);
+    for (offset, &value) in input[position_parameters..].iter().enumerate() {
+        let index = position_parameters + offset;
+        let conditioning = equal_weight_reduction(&input[..index]);
+        let biased = b_param(value, conditioning, B_PARAM_A, B_PARAM_B, B_PARAM_C);
+        transformed.push(s_linear(biased, 0.35));
+    }
+    Ok(transformed)
+}
+
+fn wfg9_transform(input: &[f64], position_parameters: usize) -> Result<Vec<f64>, WfgError> {
+    let mut transformed = reserved_vec("WFG9 transformed coordinates", input.len())?;
+    for (index, &value) in input.iter().enumerate() {
+        let biased = if index + 1 < input.len() {
+            let conditioning = equal_weight_reduction(&input[index + 1..]);
+            b_param(value, conditioning, B_PARAM_A, B_PARAM_B, B_PARAM_C)
+        } else {
+            value
+        };
+        let final_value = if index < position_parameters {
+            s_decept(biased, S_DECEPT_CENTER, S_DECEPT_RADIUS, S_DECEPT_FLOOR)
+        } else {
+            s_multi_with_parameters(biased, S_MULTI_A, S_MULTI_WFG9_B, S_MULTI_CENTER)
+        };
+        transformed.push(final_value);
+    }
+    Ok(transformed)
+}
+
 fn wfg1_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, WfgError> {
     let mut reduced = reserved_vec("WFG1 reduced coordinates", spec.objectives)?;
     for group in 0..spec.objectives - 1 {
@@ -764,8 +880,12 @@ fn equal_group_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, Wf
     Ok(reduced)
 }
 
-fn wfg6_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, WfgError> {
-    let mut reduced = reserved_vec("WFG6 reduced coordinates", spec.objectives)?;
+fn nonseparable_group_reduce(
+    transformed: &[f64],
+    spec: WfgSpec,
+    allocation_name: &'static str,
+) -> Result<Vec<f64>, WfgError> {
+    let mut reduced = reserved_vec(allocation_name, spec.objectives)?;
     for group in 0..spec.objectives - 1 {
         let start = group * spec.position_group_size;
         let end = start + spec.position_group_size;
@@ -874,15 +994,21 @@ fn r_nonsep(values: &[f64], subproblem_size: usize) -> f64 {
 
 /// Canonical WFG `s_multi(y, A=30, B=10, C=0.35)` transformation.
 fn s_multi(value: f64) -> f64 {
-    let denominator = if value <= S_MULTI_CENTER {
-        2.0 * S_MULTI_CENTER
+    s_multi_with_parameters(value, S_MULTI_A, S_MULTI_B, S_MULTI_CENTER)
+}
+
+fn s_multi_with_parameters(value: f64, modes: f64, bias: f64, center: f64) -> f64 {
+    debug_assert!(modes > 0.0 && bias > 0.0);
+    debug_assert!(0.0 < center && center < 1.0);
+    let denominator = if value <= center {
+        2.0 * center
     } else {
-        2.0 * (S_MULTI_CENTER - 1.0)
+        2.0 * (center - 1.0)
     };
-    let ratio = (value - S_MULTI_CENTER).abs() / denominator;
-    let phase = (4.0 * S_MULTI_A + 2.0) * core::f64::consts::PI * (0.5 - ratio);
-    let quadratic = 4.0 * S_MULTI_B * ratio * ratio;
-    correct_to_01((1.0 + fs_math::det::cos(phase) + quadratic) / (S_MULTI_B + 2.0))
+    let ratio = (value - center).abs() / denominator;
+    let phase = (4.0 * modes + 2.0) * core::f64::consts::PI * (0.5 - ratio);
+    let quadratic = 4.0 * bias * ratio * ratio;
+    correct_to_01((1.0 + fs_math::det::cos(phase) + quadratic) / (bias + 2.0))
 }
 
 fn equal_weight_reduction(values: &[f64]) -> f64 {
@@ -1037,6 +1163,13 @@ mod tests {
                 actual: 5,
             }
         );
+        assert_eq!(
+            evaluate(&[0.0; 7]).unwrap_err(),
+            WfgError::WrongInputLength {
+                expected: 6,
+                actual: 7,
+            }
+        );
 
         for (value, expected) in [
             (
@@ -1051,6 +1184,13 @@ mod tests {
                 WfgError::NonFiniteInput {
                     component: 2,
                     bits: f64::INFINITY.to_bits(),
+                },
+            ),
+            (
+                f64::NEG_INFINITY,
+                WfgError::NonFiniteInput {
+                    component: 2,
+                    bits: f64::NEG_INFINITY.to_bits(),
                 },
             ),
             (
@@ -1083,6 +1223,8 @@ mod tests {
             Wfg5::new(1, 1, 2).unwrap_err(),
             Wfg6::new(1, 1, 2).unwrap_err(),
             Wfg7::new(1, 1, 2).unwrap_err(),
+            Wfg8::new(1, 1, 2).unwrap_err(),
+            Wfg9::new(1, 1, 2).unwrap_err(),
         ] {
             assert_eq!(error, WfgError::TooFewObjectives { objectives: 1 });
         }
@@ -1093,6 +1235,8 @@ mod tests {
             Wfg5::new(4, 4, 2).unwrap_err(),
             Wfg6::new(4, 4, 2).unwrap_err(),
             Wfg7::new(4, 4, 2).unwrap_err(),
+            Wfg8::new(4, 4, 2).unwrap_err(),
+            Wfg9::new(4, 4, 2).unwrap_err(),
         ] {
             assert_eq!(
                 error,
@@ -1109,6 +1253,8 @@ mod tests {
             Wfg5::new(3, 4, 0).unwrap_err(),
             Wfg6::new(3, 4, 0).unwrap_err(),
             Wfg7::new(3, 4, 0).unwrap_err(),
+            Wfg8::new(3, 4, 0).unwrap_err(),
+            Wfg9::new(3, 4, 0).unwrap_err(),
         ] {
             assert_eq!(error, WfgError::NoDistanceParameters);
         }
@@ -1158,6 +1304,8 @@ mod tests {
         assert!(Wfg5::new(3, 4, 3).is_ok());
         assert!(Wfg6::new(3, 4, 3).is_ok());
         assert!(Wfg7::new(3, 4, 3).is_ok());
+        assert!(Wfg8::new(3, 4, 3).is_ok());
+        assert!(Wfg9::new(3, 4, 3).is_ok());
     }
 
     #[test]
@@ -1197,6 +1345,18 @@ mod tests {
         assert_eq!(wfg7.position_parameters(), 8);
         assert_eq!(wfg7.distance_parameters(), 4);
         assert_eq!(wfg7.dimension(), 12);
+
+        let wfg8 = Wfg8::new(3, 4, 3).unwrap();
+        assert_eq!(wfg8.objectives(), 3);
+        assert_eq!(wfg8.position_parameters(), 4);
+        assert_eq!(wfg8.distance_parameters(), 3);
+        assert_eq!(wfg8.dimension(), 7);
+
+        let wfg9 = Wfg9::new(4, 6, 5).unwrap();
+        assert_eq!(wfg9.objectives(), 4);
+        assert_eq!(wfg9.position_parameters(), 6);
+        assert_eq!(wfg9.distance_parameters(), 5);
+        assert_eq!(wfg9.dimension(), 11);
     }
 
     #[test]
@@ -1208,6 +1368,8 @@ mod tests {
         let wfg5 = Wfg5::new(3, 4, 2).unwrap();
         let wfg6 = Wfg6::new(3, 4, 2).unwrap();
         let wfg7 = Wfg7::new(3, 4, 2).unwrap();
+        let wfg8 = Wfg8::new(3, 4, 2).unwrap();
+        let wfg9 = Wfg9::new(3, 4, 2).unwrap();
 
         assert_common_input_refusals(|input| wfg1.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg2.evaluate_normalized(input));
@@ -1216,6 +1378,8 @@ mod tests {
         assert_common_input_refusals(|input| wfg5.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg6.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg7.evaluate_normalized(input));
+        assert_common_input_refusals(|input| wfg8.evaluate_normalized(input));
+        assert_common_input_refusals(|input| wfg9.evaluate_normalized(input));
     }
 
     #[test]
@@ -1331,6 +1495,29 @@ mod tests {
         assert_close(
             r_nonsep(&[0.1, 0.2, 0.4, 0.7, 0.9], 5),
             0.713_333_333_333_333_3,
+        );
+    }
+
+    #[test]
+    fn canonical_wfg9_multimodal_bias_95_anchors_match_the_toolkit() {
+        assert_close(s_multi_with_parameters(0.0, 30.0, 95.0, 0.35), 1.0);
+        assert_close(s_multi_with_parameters(0.35, 30.0, 95.0, 0.35), 0.0);
+        assert_close(s_multi_with_parameters(1.0, 30.0, 95.0, 0.35), 1.0);
+        assert_close(
+            s_multi_with_parameters(0.17, 30.0, 95.0, 0.35),
+            0.273_397_480_864_936_37,
+        );
+        assert_ne!(
+            s_multi_with_parameters(0.17, 30.0, 95.0, 0.35).to_bits(),
+            s_multi(0.17).to_bits(),
+        );
+        assert_close(
+            s_multi_with_parameters(0.73, 30.0, 95.0, 0.35),
+            0.340_027_377_732_080_7,
+        );
+        assert_ne!(
+            s_multi_with_parameters(0.73, 30.0, 95.0, 0.35).to_bits(),
+            s_multi(0.73).to_bits(),
         );
     }
 
@@ -1817,6 +2004,328 @@ mod tests {
         let problem = Wfg7::new(4, 6, 4).unwrap();
         let first = problem.evaluate_normalized(&input).unwrap();
         let second = problem.evaluate_normalized(&input).unwrap();
+        assert_evaluation_bits_eq(&first, &second);
+        assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
+    }
+
+    #[test]
+    fn pinned_reference_probe_matches_wfg8_full_pipeline() {
+        // Frozen from an independent direct f64 port of the corrected
+        // normalized equations at the pinned jMetal revision. Prefix means
+        // [.5, .44, .49875, .54, .505] cross both b_param branches.
+        let evaluation = Wfg8::new(4, 6, 5)
+            .unwrap()
+            .evaluate_normalized(&[
+                0.12, 0.24, 0.36, 0.48, 0.84, 0.96, 0.08, 0.91, 0.87, 0.19, 0.73,
+            ])
+            .unwrap();
+
+        assert_slice_close(
+            evaluation.transformed(),
+            &[
+                0.12,
+                0.24,
+                0.36,
+                0.48,
+                0.84,
+                0.96,
+                0.771_428_571_428_571_4,
+                0.877_152_197_225_494_5,
+                0.800_456_750_371_557,
+                0.999_192_021_745_912_9,
+                0.424_120_392_160_531_7,
+            ],
+        );
+        assert_slice_close(
+            evaluation.reduced(),
+            &[0.18, 0.42, 0.9, 0.774_469_986_586_413_5],
+        );
+        assert_slice_close(evaluation.positioned(), evaluation.reduced());
+        assert_slice_close(
+            evaluation.shape(),
+            &[
+                0.168_890_377_004_149_13,
+                0.026_749_607_838_002_145,
+                0.220_446_220_845_134_77,
+                0.960_293_685_676_943_1,
+            ],
+        );
+        assert_slice_close(
+            evaluation.objectives(),
+            &[
+                1.112_250_740_594_711_7,
+                0.881_468_417_938_422_1,
+                2.097_147_311_657_222_3,
+                8.456_819_472_001_959,
+            ],
+        );
+    }
+
+    #[test]
+    fn pinned_reference_probe_matches_wfg9_full_pipeline() {
+        // M=4, k=9, l=5 combines strict-suffix bias on all but the final
+        // coordinate, deceptive positions, B=95 multimodal distance, and
+        // nonseparable A=3/A=5 reductions in one independent frozen trace.
+        let evaluation = Wfg9::new(4, 9, 5)
+            .unwrap()
+            .evaluate_normalized(&[
+                0.07, 0.19, 0.31, 0.46, 0.58, 0.73, 0.14, 0.67, 0.92, 0.02, 0.27, 0.44, 0.69, 0.96,
+            ])
+            .unwrap();
+
+        assert_slice_close(
+            evaluation.transformed(),
+            &[
+                0.249_936_027_976_360_4,
+                0.089_311_334_172_644_36,
+                0.066_006_191_427_145_03,
+                0.101_235_059_537_476_36,
+                0.260_128_051_086_625_3,
+                0.814_545_522_483_265_2,
+                0.050_000_917_378_806_41,
+                0.306_294_634_436_505_95,
+                0.161_810_791_293_283_24,
+                1.0,
+                0.999_999_999_983_413_2,
+                0.999_999_999_989_152_6,
+                0.999_999_790_065_218_1,
+                0.880_237_676_103_566,
+            ],
+        );
+        assert_slice_close(
+            evaluation.reduced(),
+            &[
+                0.190_162_149_962_168_51,
+                0.671_525_080_815_087,
+                0.257_213_535_223_232_26,
+                0.389_222_459_800_570_6,
+            ],
+        );
+        assert_slice_close(evaluation.positioned(), evaluation.reduced());
+        assert_slice_close(
+            evaluation.shape(),
+            &[
+                0.100_629_811_296_251_55,
+                0.235_362_840_713_073_62,
+                0.145_192_651_346_676,
+                0.955_718_090_382_763_3,
+            ],
+        );
+        assert_slice_close(
+            evaluation.objectives(),
+            &[
+                0.590_482_082_393_073_6,
+                1.330_673_822_652_865,
+                1.260_378_367_880_626_6,
+                8.034_967_182_862_678,
+            ],
+        );
+    }
+
+    #[test]
+    fn wfg8_conditioning_uses_original_strict_prefixes() {
+        let problem = Wfg8::new(4, 6, 5).unwrap();
+        let input = [
+            0.12, 0.24, 0.36, 0.48, 0.84, 0.96, 0.08, 0.91, 0.87, 0.19, 0.73,
+        ];
+        let baseline = problem.evaluate_normalized(&input).unwrap();
+
+        let mut first_changed = input;
+        first_changed[0] = 0.22;
+        let first_changed = problem.evaluate_normalized(&first_changed).unwrap();
+        assert_ne!(
+            baseline.transformed()[0].to_bits(),
+            first_changed.transformed()[0].to_bits()
+        );
+        assert_slice_bits_eq(
+            &baseline.transformed()[1..6],
+            &first_changed.transformed()[1..6],
+        );
+        for (index, (&baseline_value, &changed_value)) in baseline.transformed()[6..]
+            .iter()
+            .zip(&first_changed.transformed()[6..])
+            .enumerate()
+        {
+            assert_ne!(
+                baseline_value.to_bits(),
+                changed_value.to_bits(),
+                "distance coordinate {} ignored the first prefix member",
+                index + 6
+            );
+        }
+
+        let mut middle_changed = input;
+        middle_changed[7] = 0.71;
+        let middle_changed = problem.evaluate_normalized(&middle_changed).unwrap();
+        assert_slice_bits_eq(
+            &baseline.transformed()[..7],
+            &middle_changed.transformed()[..7],
+        );
+        for (index, (&baseline_value, &changed_value)) in baseline.transformed()[7..]
+            .iter()
+            .zip(&middle_changed.transformed()[7..])
+            .enumerate()
+        {
+            assert_ne!(
+                baseline_value.to_bits(),
+                changed_value.to_bits(),
+                "coordinate {} escaped its forward prefix cone",
+                index + 7
+            );
+        }
+
+        let mut last_changed = input;
+        last_changed[10] = 0.63;
+        let last_changed = problem.evaluate_normalized(&last_changed).unwrap();
+        assert_slice_bits_eq(
+            &baseline.transformed()[..10],
+            &last_changed.transformed()[..10],
+        );
+        assert_ne!(
+            baseline.transformed()[10].to_bits(),
+            last_changed.transformed()[10].to_bits()
+        );
+
+        let mut sum_preserved = input;
+        sum_preserved[0] += 0.05;
+        sum_preserved[1] -= 0.05;
+        let sum_preserved = problem.evaluate_normalized(&sum_preserved).unwrap();
+        assert_ne!(
+            baseline.transformed()[0].to_bits(),
+            sum_preserved.transformed()[0].to_bits()
+        );
+        assert_ne!(
+            baseline.transformed()[1].to_bits(),
+            sum_preserved.transformed()[1].to_bits()
+        );
+        assert_slice_bits_eq(
+            &baseline.transformed()[2..6],
+            &sum_preserved.transformed()[2..6],
+        );
+        assert_slice_close(
+            &baseline.transformed()[6..],
+            &sum_preserved.transformed()[6..],
+        );
+    }
+
+    #[test]
+    fn wfg9_conditioning_uses_original_strict_suffixes() {
+        let problem = Wfg9::new(4, 9, 5).unwrap();
+        let input = [
+            0.07, 0.19, 0.31, 0.46, 0.58, 0.73, 0.14, 0.67, 0.92, 0.02, 0.27, 0.44, 0.69, 0.96,
+        ];
+        let baseline = problem.evaluate_normalized(&input).unwrap();
+
+        let mut second_changed = input;
+        second_changed[1] = 0.29;
+        let second_changed = problem.evaluate_normalized(&second_changed).unwrap();
+        assert_ne!(
+            baseline.transformed()[0].to_bits(),
+            second_changed.transformed()[0].to_bits()
+        );
+        assert_ne!(
+            baseline.transformed()[1].to_bits(),
+            second_changed.transformed()[1].to_bits()
+        );
+        assert_slice_bits_eq(
+            &baseline.transformed()[2..],
+            &second_changed.transformed()[2..],
+        );
+
+        let mut final_changed = input;
+        final_changed[13] = 0.86;
+        let final_changed = problem.evaluate_normalized(&final_changed).unwrap();
+        for (index, (&baseline_value, &changed_value)) in baseline
+            .transformed()
+            .iter()
+            .zip(final_changed.transformed())
+            .enumerate()
+        {
+            assert_ne!(
+                baseline_value.to_bits(),
+                changed_value.to_bits(),
+                "coordinate {index} ignored the final suffix member"
+            );
+        }
+
+        let mut sum_preserved = input;
+        sum_preserved[12] += 0.05;
+        sum_preserved[13] -= 0.05;
+        let sum_preserved = problem.evaluate_normalized(&sum_preserved).unwrap();
+        assert_slice_close(
+            &baseline.transformed()[..12],
+            &sum_preserved.transformed()[..12],
+        );
+        assert_ne!(
+            baseline.transformed()[12].to_bits(),
+            sum_preserved.transformed()[12].to_bits()
+        );
+        assert_ne!(
+            baseline.transformed()[13].to_bits(),
+            sum_preserved.transformed()[13].to_bits()
+        );
+        assert_close(
+            baseline.transformed()[13],
+            s_multi_with_parameters(input[13], 30.0, 95.0, 0.35),
+        );
+    }
+
+    #[test]
+    fn pinned_minimum_dimension_traces_cover_wfg8_and_wfg9() {
+        let input = [0.2, 0.7];
+        let wfg8 = Wfg8::new(2, 1, 1)
+            .unwrap()
+            .evaluate_normalized(&input)
+            .unwrap();
+        assert_slice_close(wfg8.transformed(), &[0.2, 0.789_749_348_925_109_4]);
+        assert_slice_close(wfg8.reduced(), wfg8.transformed());
+        assert_slice_close(wfg8.positioned(), wfg8.reduced());
+        assert_slice_close(
+            wfg8.shape(),
+            &[0.309_016_994_374_947_4, 0.951_056_516_295_153_5],
+        );
+        assert_slice_close(
+            wfg8.objectives(),
+            &[1.407_783_337_675_004_2, 4.593_975_414_105_723],
+        );
+
+        let wfg9 = Wfg9::new(2, 1, 1)
+            .unwrap()
+            .evaluate_normalized(&input)
+            .unwrap();
+        assert_slice_close(
+            wfg9.transformed(),
+            &[0.050_000_000_000_040_234, 0.303_400_357_978_124_2],
+        );
+        assert_slice_close(wfg9.reduced(), wfg9.transformed());
+        assert_slice_close(wfg9.positioned(), wfg9.reduced());
+        assert_slice_close(
+            wfg9.shape(),
+            &[0.078_459_095_727_907_95, 0.996_917_333_733_123],
+        );
+        assert_slice_close(
+            wfg9.objectives(),
+            &[0.460_318_549_433_940_1, 4.291_069_692_910_616],
+        );
+    }
+
+    #[test]
+    fn wfg8_and_wfg9_repeated_evaluations_are_bitwise_identical() {
+        let wfg8_input = [
+            0.12, 0.24, 0.36, 0.48, 0.84, 0.96, 0.08, 0.91, 0.87, 0.19, 0.73,
+        ];
+        let problem = Wfg8::new(4, 6, 5).unwrap();
+        let first = problem.evaluate_normalized(&wfg8_input).unwrap();
+        let second = problem.evaluate_normalized(&wfg8_input).unwrap();
+        assert_evaluation_bits_eq(&first, &second);
+        assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
+
+        let wfg9_input = [
+            0.07, 0.19, 0.31, 0.46, 0.58, 0.73, 0.14, 0.67, 0.92, 0.02, 0.27, 0.44, 0.69, 0.96,
+        ];
+        let problem = Wfg9::new(4, 9, 5).unwrap();
+        let first = problem.evaluate_normalized(&wfg9_input).unwrap();
+        let second = problem.evaluate_normalized(&wfg9_input).unwrap();
         assert_evaluation_bits_eq(&first, &second);
         assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
     }
