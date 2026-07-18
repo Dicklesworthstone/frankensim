@@ -1,11 +1,14 @@
+use std::mem::size_of;
+
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalLimits, CanonicalSchema, ContentId, Field, FieldSpec,
     IdentityReceipt, SemanticId, TrustState, WireType, legacy::LegacyProvenanceV1,
 };
 use fs_ledger::{
     ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeRole,
-    ExtensionTable, FiveExplicits, IdentityMigrationClaim, Ledger, LedgerError,
-    MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
+    ExtensionTable, FiveExplicits, IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION, IdentityMigrationClaim,
+    IdentityMigrationReceipt, IdentityMigrationWireError, Ledger, LedgerError,
+    MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES, MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(64 * 1024, 16 * 1024, 8, 16, 4096);
@@ -86,6 +89,20 @@ fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
         stored.typed_semantic_id::<DemoSemanticId>(),
         Some(semantic.id())
     );
+    let wire = stored.to_wire_bytes().expect("encode complete v1 receipt");
+    assert!(wire.len() <= MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES);
+    assert_eq!(
+        u32::from_le_bytes(wire[8..12].try_into().unwrap()),
+        IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION
+    );
+    let transported = IdentityMigrationReceipt::from_wire_bytes(&wire)
+        .expect("decode and independently reconstruct complete v1 receipt");
+    assert_eq!(transported, stored);
+    assert_eq!(transported.legacy_fnv().value(), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(
+        transported.typed_semantic_id::<DemoSemanticId>(),
+        Some(semantic.id())
+    );
 
     let retry = ledger
         .record_identity_migration(claim(semantic, legacy, canonical, "demo-json-v0-to-v1"))
@@ -132,6 +149,90 @@ fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
     ] {
         assert_ne!(changed.receipt_id(), first.receipt_id());
     }
+}
+
+#[test]
+fn wire_transport_refuses_truncation_extension_future_version_and_forged_id() {
+    const WIRE_VERSION_OFFSET: usize = 8;
+    const RECEIPT_ID_OFFSET: usize = WIRE_VERSION_OFFSET + size_of::<u32>();
+    const LEGACY_LENGTH_OFFSET: usize = RECEIPT_ID_OFFSET + 32;
+    const LEGACY_BYTES_OFFSET: usize = LEGACY_LENGTH_OFFSET + size_of::<u32>();
+
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
+    let semantic = semantic_receipt(b"wire-subject");
+    let write = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy-wire-payload",
+            b"canonical-wire-payload",
+            "demo-wire-v0-to-v1",
+        ))
+        .expect("record wire fixture");
+    let stored = ledger
+        .identity_migration_receipt(write.receipt_id())
+        .expect("reverify stored wire fixture")
+        .expect("stored wire fixture exists");
+    let wire = stored
+        .to_wire_bytes()
+        .expect("encode complete wire fixture");
+
+    let mut truncated = wire.clone();
+    let _ = truncated.pop();
+    assert!(matches!(
+        IdentityMigrationReceipt::from_wire_bytes(&truncated),
+        Err(IdentityMigrationWireError::Truncated { .. })
+    ));
+
+    let mut extended = wire.clone();
+    extended.push(0);
+    assert_eq!(
+        IdentityMigrationReceipt::from_wire_bytes(&extended),
+        Err(IdentityMigrationWireError::TrailingBytes { remaining: 1 })
+    );
+
+    let unsupported_version = IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION + 1;
+    let mut future_version = wire.clone();
+    future_version[WIRE_VERSION_OFFSET..RECEIPT_ID_OFFSET]
+        .copy_from_slice(&unsupported_version.to_le_bytes());
+    assert_eq!(
+        IdentityMigrationReceipt::from_wire_bytes(&future_version),
+        Err(IdentityMigrationWireError::UnsupportedVersion {
+            found: unsupported_version,
+        })
+    );
+
+    let mut forged_id = wire.clone();
+    forged_id[RECEIPT_ID_OFFSET] ^= 0x80;
+    assert!(matches!(
+        IdentityMigrationReceipt::from_wire_bytes(&forged_id),
+        Err(IdentityMigrationWireError::ReceiptIdMismatch { .. })
+    ));
+
+    let mut wrong_magic = wire.clone();
+    wrong_magic[0] ^= 0x80;
+    assert_eq!(
+        IdentityMigrationReceipt::from_wire_bytes(&wrong_magic),
+        Err(IdentityMigrationWireError::Magic)
+    );
+
+    let mut mismatched_content = wire.clone();
+    mismatched_content[LEGACY_BYTES_OFFSET] ^= 0x40;
+    assert!(matches!(
+        IdentityMigrationReceipt::from_wire_bytes(&mismatched_content),
+        Err(IdentityMigrationWireError::InvalidReceipt { .. })
+    ));
+
+    let mut oversized_legacy = wire;
+    oversized_legacy[LEGACY_LENGTH_OFFSET..LEGACY_LENGTH_OFFSET + size_of::<u32>()]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        IdentityMigrationReceipt::from_wire_bytes(&oversized_legacy),
+        Err(IdentityMigrationWireError::FieldLength {
+            field: "legacy_bytes",
+            found: usize::try_from(u32::MAX).unwrap(),
+            max: MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
+        })
+    );
 }
 
 #[test]

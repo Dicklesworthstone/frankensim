@@ -13,7 +13,7 @@
 //! lookup exposes that ambiguity without selecting a winner; callers obtain a
 //! typed semantic ID only by naming the exact expected Rust schema.
 
-use std::str;
+use std::{fmt, str};
 
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalLimits, CanonicalSchema, ContentId, Field, FieldSpec,
@@ -52,6 +52,20 @@ pub const MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES: usize = 256;
 pub const MAX_IDENTITY_MIGRATION_CONTEXT_BYTES: usize = 4096;
 /// Maximum receipt IDs exposed by one legacy-candidate lookup.
 pub const MAX_IDENTITY_MIGRATION_CANDIDATES: usize = 256;
+/// Version of the complete migration-receipt package/process transport.
+pub const IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION: u32 = 1;
+/// Maximum encoded bytes accepted by the complete migration-receipt transport.
+pub const MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES: usize =
+    IDENTITY_MIGRATION_RECEIPT_WIRE_BASE_BYTES
+        + (2 * MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES)
+        + MAX_IDENTITY_MIGRATION_RULE_BYTES
+        + MAX_IDENTITY_MIGRATION_DOMAIN_BYTES
+        + MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES
+        + MAX_IDENTITY_MIGRATION_CONTEXT_BYTES
+        + (3 * 32);
+
+const IDENTITY_MIGRATION_RECEIPT_WIRE_MAGIC: &[u8; 8] = b"FSMIGR01";
+const IDENTITY_MIGRATION_RECEIPT_WIRE_BASE_BYTES: usize = 290;
 
 const RECEIPT_ID_LIMITS: CanonicalLimits = CanonicalLimits::new(64 * 1024, 8 * 1024, 64, 64, 4096);
 
@@ -99,6 +113,87 @@ impl CanonicalSchema for IdentityMigrationReceiptSchemaV1 {
 /// Typed identity of one immutable migration receipt.
 pub type IdentityMigrationReceiptId = SemanticId<IdentityMigrationReceiptSchemaV1>;
 
+/// Structured refusal from the bounded migration-receipt wire codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityMigrationWireError {
+    /// The whole transport exceeds its public allocation envelope.
+    TransportLength { found: usize, max: usize },
+    /// The fixed transport domain marker is absent or changed.
+    Magic,
+    /// The transport version is unknown to this decoder.
+    UnsupportedVersion { found: u32 },
+    /// A fixed or declared-length field runs past the available bytes.
+    Truncated {
+        field: &'static str,
+        needed: usize,
+        remaining: usize,
+    },
+    /// A declared variable field exceeds its field-specific bound.
+    FieldLength {
+        field: &'static str,
+        found: usize,
+        max: usize,
+    },
+    /// A required UTF-8 field contains invalid bytes.
+    Utf8 { field: &'static str },
+    /// A closed enum or optional-field tag is outside its declared universe.
+    InvalidTag { field: &'static str, found: u8 },
+    /// Extra bytes follow the complete v1 field sequence.
+    TrailingBytes { remaining: usize },
+    /// Complete decoded fields violate the receipt contract.
+    InvalidReceipt { detail: String },
+    /// The carried primary identity differs from independent reconstruction.
+    ReceiptIdMismatch {
+        stored: IdentityMigrationReceiptId,
+        derived: IdentityMigrationReceiptId,
+    },
+}
+
+impl fmt::Display for IdentityMigrationWireError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TransportLength { found, max } => {
+                write!(formatter, "transport length {found} exceeds {max} bytes")
+            }
+            Self::Magic => formatter.write_str("migration receipt wire magic differs from v1"),
+            Self::UnsupportedVersion { found } => {
+                write!(
+                    formatter,
+                    "unsupported migration receipt wire version {found}"
+                )
+            }
+            Self::Truncated {
+                field,
+                needed,
+                remaining,
+            } => write!(
+                formatter,
+                "wire field {field} needs {needed} bytes but only {remaining} remain"
+            ),
+            Self::FieldLength { field, found, max } => write!(
+                formatter,
+                "wire field {field} declares {found} bytes, exceeding {max}"
+            ),
+            Self::Utf8 { field } => write!(formatter, "wire field {field} is not UTF-8"),
+            Self::InvalidTag { field, found } => {
+                write!(formatter, "wire field {field} has unknown tag {found}")
+            }
+            Self::TrailingBytes { remaining } => {
+                write!(formatter, "wire transport has {remaining} trailing bytes")
+            }
+            Self::InvalidReceipt { detail } => {
+                write!(formatter, "decoded migration receipt is invalid: {detail}")
+            }
+            Self::ReceiptIdMismatch { stored, derived } => write!(
+                formatter,
+                "wire receipt ID {stored} differs from independently derived {derived}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IdentityMigrationWireError {}
+
 /// Owner-local declaration consumed by `xtask check-identities`.
 pub const IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
@@ -109,8 +204,8 @@ pub const IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION: &[&str] = &[
     "domain_const=IDENTITY_MIGRATION_RECEIPT_DOMAIN",
     "encoder=derive_receipt_id",
     "encoder_helpers=receipt_body_from_claim,validate_receipt_body",
-    "schema_constants=IDENTITY_MIGRATION_RECEIPT_VERSION,IDENTITY_MIGRATION_RECEIPT_DOMAIN,MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,MAX_IDENTITY_MIGRATION_RULE_BYTES,MAX_IDENTITY_MIGRATION_DOMAIN_BYTES,MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,MAX_IDENTITY_MIGRATION_CONTEXT_BYTES,crates/fs-ledger/src/schema.rs#V13",
-    "schema_functions=derive_receipt_id,receipt_body_from_claim,validate_receipt_body,IdentityMigrationReceipt::typed_semantic_id,Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish",
+    "schema_constants=IDENTITY_MIGRATION_RECEIPT_VERSION,IDENTITY_MIGRATION_RECEIPT_DOMAIN,IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION,MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES,MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,MAX_IDENTITY_MIGRATION_RULE_BYTES,MAX_IDENTITY_MIGRATION_DOMAIN_BYTES,MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,MAX_IDENTITY_MIGRATION_CONTEXT_BYTES,crates/fs-ledger/src/schema.rs#V13",
+    "schema_functions=derive_receipt_id,receipt_body_from_claim,validate_receipt_body,IdentityMigrationReceipt::typed_semantic_id,IdentityMigrationReceipt::to_wire_bytes,IdentityMigrationReceipt::from_wire_bytes,Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish",
     "schema_dependencies=fs-blake3:canonical-identity-frame,fs-blake3:schema-id",
     "digest=fs-blake3",
     "encoding=typed-binary",
@@ -120,12 +215,12 @@ pub const IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=receipt-schema-domain,receipt-schema-version,canonical-field-order",
     "semantic_fields=receipt-schema-domain,receipt-schema-version,canonical-field-order,legacy-content-id,legacy-byte-count,legacy-fnv-le-u64,canonical-content-id,canonical-byte-count,semantic-rule,identity-role,semantic-id,identity-domain,identity-schema-name,identity-schema-id,identity-schema-version,identity-context,canonical-preimage-content-id,canonical-frame-bytes,field-count,collection-items,max-canonical-bytes,max-field-bytes,max-fields,max-collection-items,cancellation-poll-bytes,trust-state,anchor-content-id,verifier-id,key-policy-id,no-claim-state",
     "excluded_fields=exact-legacy-bytes:bound-by-content-id,exact-canonical-bytes:bound-by-content-id,created-at:provenance-envelope-only",
-    "consumers=Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,IdentityMigrationReceipt::typed_semantic_id,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,Ledger::bind_evidence_semantic_identity,Ledger::evidence_semantic_binding",
+    "consumers=Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,IdentityMigrationReceipt::typed_semantic_id,IdentityMigrationReceipt::to_wire_bytes,IdentityMigrationReceipt::from_wire_bytes,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,Ledger::bind_evidence_semantic_identity,Ledger::evidence_semantic_binding",
     "mutations=receipt-schema-domain:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,receipt-schema-version:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-field-order:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-byte-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-fnv-le-u64:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-byte-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,semantic-rule:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-role:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,semantic-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-domain:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-name:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-version:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-context:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-preimage-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-frame-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,field-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,collection-items:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-canonical-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-field-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-fields:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-collection-items:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,cancellation-poll-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,trust-state:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,anchor-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,verifier-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,key-policy-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,no-claim-state:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state",
     "nonsemantic_mutations=created-at:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state",
     "field_guard=classify_identity_migration_receipt_fields",
-    "transport_guard=Ledger::identity_migration_receipt",
-    "version_guard=crates/fs-ledger/tests/identity_migration.rs#typed_projection_refuses_a_different_schema",
+    "transport_guard=IdentityMigrationReceipt::from_wire_bytes",
+    "version_guard=crates/fs-ledger/tests/identity_migration.rs#wire_transport_refuses_truncation_extension_future_version_and_forged_id",
     "coupling_surface=fs-ledger:identity-migration-receipt",
 ];
 
@@ -397,6 +492,30 @@ impl IdentityMigrationReceipt {
             return None;
         }
         I::parse_slice(&self.body.semantic_id)
+    }
+
+    /// Encode every retained receipt field into the exact bounded v1
+    /// package/process transport. Fixed-width integers are little-endian;
+    /// variable fields carry explicit lengths and optional identities carry
+    /// closed 0/1 tags.
+    ///
+    /// # Errors
+    /// Refuses an internally inconsistent receipt or any field outside the
+    /// published v1 transport bounds.
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, IdentityMigrationWireError> {
+        encode_identity_migration_receipt(self)
+    }
+
+    /// Decode and independently reconstruct one complete transport candidate.
+    ///
+    /// Successful decoding proves only self-consistency. It does not grant
+    /// ledger membership, semantic authority, verifier trust, or promotion.
+    ///
+    /// # Errors
+    /// Refuses oversized, truncated, extended, future-version, invalid-UTF-8,
+    /// unknown-tag, incoherent, content-mismatched, or forged-ID transports.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, IdentityMigrationWireError> {
+        decode_identity_migration_receipt(bytes)
     }
 }
 
@@ -1071,6 +1190,432 @@ fn no_claim_state_from_tag(tag: i64) -> Option<NoClaimState> {
         1 => Some(NoClaimState::ScientificCorrectnessNotProven),
         _ => None,
     }
+}
+
+fn wire_invalid(detail: impl Into<String>) -> IdentityMigrationWireError {
+    IdentityMigrationWireError::InvalidReceipt {
+        detail: detail.into(),
+    }
+}
+
+fn push_wire_u16_text(
+    output: &mut Vec<u8>,
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), IdentityMigrationWireError> {
+    let len = value.len();
+    if len > max {
+        return Err(IdentityMigrationWireError::FieldLength {
+            field,
+            found: len,
+            max,
+        });
+    }
+    let len = u16::try_from(len).map_err(|_| IdentityMigrationWireError::FieldLength {
+        field,
+        found: len,
+        max,
+    })?;
+    output.extend_from_slice(&len.to_le_bytes());
+    output.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn push_wire_u32_bytes(
+    output: &mut Vec<u8>,
+    field: &'static str,
+    value: &[u8],
+    max: usize,
+) -> Result<(), IdentityMigrationWireError> {
+    let len = value.len();
+    if len > max {
+        return Err(IdentityMigrationWireError::FieldLength {
+            field,
+            found: len,
+            max,
+        });
+    }
+    let len = u32::try_from(len).map_err(|_| IdentityMigrationWireError::FieldLength {
+        field,
+        found: len,
+        max,
+    })?;
+    output.extend_from_slice(&len.to_le_bytes());
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn push_wire_optional_fixed(output: &mut Vec<u8>, value: Option<&[u8; 32]>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            output.extend_from_slice(value);
+        }
+        None => output.push(0),
+    }
+}
+
+fn encode_identity_migration_receipt(
+    receipt: &IdentityMigrationReceipt,
+) -> Result<Vec<u8>, IdentityMigrationWireError> {
+    validate_receipt_body(&receipt.body).map_err(wire_invalid)?;
+    let derived = derive_receipt_id(&receipt.body)
+        .map_err(|error| wire_invalid(format!("receipt ID reconstruction refused: {error}")))?;
+    if derived != receipt.receipt_id {
+        return Err(IdentityMigrationWireError::ReceiptIdMismatch {
+            stored: receipt.receipt_id,
+            derived,
+        });
+    }
+
+    let body = &receipt.body;
+    let capacity = IDENTITY_MIGRATION_RECEIPT_WIRE_BASE_BYTES
+        .saturating_add(body.legacy_bytes.len())
+        .saturating_add(body.canonical_bytes.len())
+        .saturating_add(body.semantic_rule.len())
+        .saturating_add(body.identity_domain.len())
+        .saturating_add(body.identity_schema_name.len())
+        .saturating_add(body.identity_context.len())
+        .saturating_add(body.anchor_content_id.map_or(0, |_| 32))
+        .saturating_add(body.verifier_id.map_or(0, |_| 32))
+        .saturating_add(body.key_policy_id.map_or(0, |_| 32));
+    if capacity > MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES {
+        return Err(IdentityMigrationWireError::TransportLength {
+            found: capacity,
+            max: MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES,
+        });
+    }
+
+    let mut output = Vec::with_capacity(capacity);
+    output.extend_from_slice(IDENTITY_MIGRATION_RECEIPT_WIRE_MAGIC);
+    output.extend_from_slice(&IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION.to_le_bytes());
+    output.extend_from_slice(receipt.receipt_id.as_bytes());
+    push_wire_u32_bytes(
+        &mut output,
+        "legacy_bytes",
+        &body.legacy_bytes,
+        MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
+    )?;
+    output.extend_from_slice(body.legacy_content_id.as_bytes());
+    output.extend_from_slice(&body.legacy_fnv.value().to_le_bytes());
+    push_wire_u32_bytes(
+        &mut output,
+        "canonical_bytes",
+        &body.canonical_bytes,
+        MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
+    )?;
+    output.extend_from_slice(body.canonical_content_id.as_bytes());
+    push_wire_u16_text(
+        &mut output,
+        "semantic_rule",
+        &body.semantic_rule,
+        MAX_IDENTITY_MIGRATION_RULE_BYTES,
+    )?;
+    output.extend_from_slice(&body.semantic_id);
+    output.push(body.identity_role.tag());
+    push_wire_u16_text(
+        &mut output,
+        "identity_domain",
+        &body.identity_domain,
+        MAX_IDENTITY_MIGRATION_DOMAIN_BYTES,
+    )?;
+    push_wire_u16_text(
+        &mut output,
+        "identity_schema_name",
+        &body.identity_schema_name,
+        MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
+    )?;
+    output.extend_from_slice(&body.identity_schema_id);
+    output.extend_from_slice(&body.identity_schema_version.to_le_bytes());
+    push_wire_u16_text(
+        &mut output,
+        "identity_context",
+        &body.identity_context,
+        MAX_IDENTITY_MIGRATION_CONTEXT_BYTES,
+    )?;
+    output.extend_from_slice(body.canonical_preimage_id.as_bytes());
+    output.extend_from_slice(&body.canonical_frame_bytes.to_le_bytes());
+    output.extend_from_slice(&body.field_count.to_le_bytes());
+    output.extend_from_slice(&body.collection_items.to_le_bytes());
+    output.extend_from_slice(&body.limits.max_canonical_bytes().to_le_bytes());
+    output.extend_from_slice(&body.limits.max_field_bytes().to_le_bytes());
+    output.extend_from_slice(&body.limits.max_fields().to_le_bytes());
+    output.extend_from_slice(&body.limits.max_collection_items().to_le_bytes());
+    output.extend_from_slice(&body.limits.cancellation_poll_bytes().to_le_bytes());
+    output.push(
+        u8::try_from(trust_state_tag(body.trust_state))
+            .map_err(|_| wire_invalid("trust-state tag exceeds one byte"))?,
+    );
+    let anchor = body.anchor_content_id.as_ref().map(ContentId::as_bytes);
+    push_wire_optional_fixed(&mut output, anchor);
+    push_wire_optional_fixed(&mut output, body.verifier_id.as_ref());
+    push_wire_optional_fixed(&mut output, body.key_policy_id.as_ref());
+    output.push(
+        u8::try_from(no_claim_state_tag(body.no_claim_state))
+            .map_err(|_| wire_invalid("no-claim-state tag exceeds one byte"))?,
+    );
+    if output.len() != capacity {
+        return Err(wire_invalid(format!(
+            "wire length accounting expected {capacity} bytes but encoded {}",
+            output.len()
+        )));
+    }
+    Ok(output)
+}
+
+struct IdentityMigrationWireCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> IdentityMigrationWireCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(
+        &mut self,
+        len: usize,
+        field: &'static str,
+    ) -> Result<&'a [u8], IdentityMigrationWireError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        let Some(end) = self.offset.checked_add(len) else {
+            return Err(IdentityMigrationWireError::Truncated {
+                field,
+                needed: len,
+                remaining,
+            });
+        };
+        let Some(value) = self.bytes.get(self.offset..end) else {
+            return Err(IdentityMigrationWireError::Truncated {
+                field,
+                needed: len,
+                remaining,
+            });
+        };
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn fixed<const N: usize>(
+        &mut self,
+        field: &'static str,
+    ) -> Result<[u8; N], IdentityMigrationWireError> {
+        let bytes = self.take(N, field)?;
+        let mut value = [0_u8; N];
+        value.copy_from_slice(bytes);
+        Ok(value)
+    }
+
+    fn u8(&mut self, field: &'static str) -> Result<u8, IdentityMigrationWireError> {
+        self.take(1, field)?
+            .first()
+            .copied()
+            .ok_or(IdentityMigrationWireError::Truncated {
+                field,
+                needed: 1,
+                remaining: 0,
+            })
+    }
+
+    fn u16(&mut self, field: &'static str) -> Result<u16, IdentityMigrationWireError> {
+        Ok(u16::from_le_bytes(self.fixed(field)?))
+    }
+
+    fn u32(&mut self, field: &'static str) -> Result<u32, IdentityMigrationWireError> {
+        Ok(u32::from_le_bytes(self.fixed(field)?))
+    }
+
+    fn u64(&mut self, field: &'static str) -> Result<u64, IdentityMigrationWireError> {
+        Ok(u64::from_le_bytes(self.fixed(field)?))
+    }
+
+    fn u32_bytes(
+        &mut self,
+        field: &'static str,
+        max: usize,
+    ) -> Result<Box<[u8]>, IdentityMigrationWireError> {
+        let found = usize::try_from(self.u32(field)?).map_err(|_| {
+            IdentityMigrationWireError::FieldLength {
+                field,
+                found: usize::MAX,
+                max,
+            }
+        })?;
+        if found > max {
+            return Err(IdentityMigrationWireError::FieldLength { field, found, max });
+        }
+        Ok(self.take(found, field)?.into())
+    }
+
+    fn u16_text(
+        &mut self,
+        field: &'static str,
+        max: usize,
+    ) -> Result<Box<str>, IdentityMigrationWireError> {
+        let found = usize::from(self.u16(field)?);
+        if found > max {
+            return Err(IdentityMigrationWireError::FieldLength { field, found, max });
+        }
+        let bytes = self.take(found, field)?;
+        let value =
+            str::from_utf8(bytes).map_err(|_| IdentityMigrationWireError::Utf8 { field })?;
+        Ok(value.into())
+    }
+
+    fn optional_fixed(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Option<[u8; 32]>, IdentityMigrationWireError> {
+        match self.u8(field)? {
+            0 => Ok(None),
+            1 => self.fixed(field).map(Some),
+            found => Err(IdentityMigrationWireError::InvalidTag { field, found }),
+        }
+    }
+
+    fn finish(self) -> Result<(), IdentityMigrationWireError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining == 0 {
+            Ok(())
+        } else {
+            Err(IdentityMigrationWireError::TrailingBytes { remaining })
+        }
+    }
+}
+
+fn wire_content_id(
+    bytes: [u8; 32],
+    field: &'static str,
+) -> Result<ContentId, IdentityMigrationWireError> {
+    ContentId::parse_slice(&bytes)
+        .ok_or_else(|| wire_invalid(format!("{field} is not a typed 32-byte content ID")))
+}
+
+fn decode_identity_migration_receipt(
+    bytes: &[u8],
+) -> Result<IdentityMigrationReceipt, IdentityMigrationWireError> {
+    if bytes.len() > MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES {
+        return Err(IdentityMigrationWireError::TransportLength {
+            found: bytes.len(),
+            max: MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES,
+        });
+    }
+    let mut cursor = IdentityMigrationWireCursor::new(bytes);
+    if cursor.fixed::<8>("magic")? != *IDENTITY_MIGRATION_RECEIPT_WIRE_MAGIC {
+        return Err(IdentityMigrationWireError::Magic);
+    }
+    let version = cursor.u32("wire_version")?;
+    if version != IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION {
+        return Err(IdentityMigrationWireError::UnsupportedVersion { found: version });
+    }
+    let stored_id_bytes = cursor.fixed::<32>("receipt_id")?;
+    let stored_id = IdentityMigrationReceiptId::parse_slice(&stored_id_bytes)
+        .ok_or_else(|| wire_invalid("receipt_id is not a typed 32-byte identity"))?;
+    let legacy_bytes = cursor.u32_bytes("legacy_bytes", MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES)?;
+    let legacy_content_id =
+        wire_content_id(cursor.fixed("legacy_content_id")?, "legacy_content_id")?;
+    let legacy_fnv = LegacyProvenanceV1::new(cursor.u64("legacy_fnv")?);
+    let canonical_bytes =
+        cursor.u32_bytes("canonical_bytes", MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES)?;
+    let canonical_content_id = wire_content_id(
+        cursor.fixed("canonical_content_id")?,
+        "canonical_content_id",
+    )?;
+    let semantic_rule = cursor.u16_text("semantic_rule", MAX_IDENTITY_MIGRATION_RULE_BYTES)?;
+    let semantic_id = cursor.fixed("semantic_id")?;
+    let identity_role_tag = cursor.u8("identity_role")?;
+    let identity_role = identity_role_from_tag(i64::from(identity_role_tag)).ok_or(
+        IdentityMigrationWireError::InvalidTag {
+            field: "identity_role",
+            found: identity_role_tag,
+        },
+    )?;
+    let identity_domain =
+        cursor.u16_text("identity_domain", MAX_IDENTITY_MIGRATION_DOMAIN_BYTES)?;
+    let identity_schema_name = cursor.u16_text(
+        "identity_schema_name",
+        MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
+    )?;
+    let identity_schema_id = cursor.fixed("identity_schema_id")?;
+    let identity_schema_version = cursor.u32("identity_schema_version")?;
+    let identity_context =
+        cursor.u16_text("identity_context", MAX_IDENTITY_MIGRATION_CONTEXT_BYTES)?;
+    let canonical_preimage_id = wire_content_id(
+        cursor.fixed("canonical_preimage_id")?,
+        "canonical_preimage_id",
+    )?;
+    let canonical_frame_bytes = cursor.u64("canonical_frame_bytes")?;
+    let field_count = cursor.u32("field_count")?;
+    let collection_items = cursor.u64("collection_items")?;
+    let limits = CanonicalLimits::new(
+        cursor.u64("max_canonical_bytes")?,
+        cursor.u64("max_field_bytes")?,
+        cursor.u32("max_fields")?,
+        cursor.u64("max_collection_items")?,
+        cursor.u32("cancellation_poll_bytes")?,
+    );
+    let trust_tag = cursor.u8("trust_state")?;
+    let trust_state = trust_state_from_tag(i64::from(trust_tag)).ok_or(
+        IdentityMigrationWireError::InvalidTag {
+            field: "trust_state",
+            found: trust_tag,
+        },
+    )?;
+    let anchor_content_id = cursor
+        .optional_fixed("anchor_content_id")?
+        .map(|value| wire_content_id(value, "anchor_content_id"))
+        .transpose()?;
+    let verifier_id = cursor.optional_fixed("verifier_id")?;
+    let key_policy_id = cursor.optional_fixed("key_policy_id")?;
+    let no_claim_tag = cursor.u8("no_claim_state")?;
+    let no_claim_state = no_claim_state_from_tag(i64::from(no_claim_tag)).ok_or(
+        IdentityMigrationWireError::InvalidTag {
+            field: "no_claim_state",
+            found: no_claim_tag,
+        },
+    )?;
+    cursor.finish()?;
+
+    let body = IdentityMigrationBody {
+        legacy_bytes,
+        legacy_content_id,
+        legacy_fnv,
+        canonical_bytes,
+        canonical_content_id,
+        semantic_rule,
+        semantic_id,
+        identity_role,
+        identity_domain,
+        identity_schema_name,
+        identity_schema_id,
+        identity_schema_version,
+        identity_context,
+        canonical_preimage_id,
+        canonical_frame_bytes,
+        field_count,
+        collection_items,
+        limits,
+        trust_state,
+        anchor_content_id,
+        verifier_id,
+        key_policy_id,
+        no_claim_state,
+    };
+    validate_receipt_body(&body).map_err(wire_invalid)?;
+    let derived = derive_receipt_id(&body)
+        .map_err(|error| wire_invalid(format!("receipt ID reconstruction refused: {error}")))?;
+    if stored_id != derived {
+        return Err(IdentityMigrationWireError::ReceiptIdMismatch {
+            stored: stored_id,
+            derived,
+        });
+    }
+    Ok(IdentityMigrationReceipt {
+        receipt_id: stored_id,
+        body,
+    })
 }
 
 fn fixed_bytes<const N: usize>(

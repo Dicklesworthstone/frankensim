@@ -255,6 +255,17 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   deterministic, explicitly non-authoritative receipt-ID prefix with a
   truncation bit and never chooses a winner. Migration from v12 creates an
   empty table and infers no strong identity or authority from historical rows.
+  `IdentityMigrationReceipt::to_wire_bytes` and `from_wire_bytes` define the
+  complete receipt transport for package/process boundaries under the fixed
+  `FSMIGR01` marker and wire version 1. The bounded transport uses an exact
+  canonical field order, little-endian fixed-width integers, explicit UTF-8
+  and byte-string lengths, closed enum/optional tags, and a 2,102,402-byte
+  whole-message ceiling. Admission re-hashes both retained payloads, validates
+  the complete authority state, independently reconstructs the typed receipt
+  ID, rejects trailing bytes and unknown versions, and never truncates or
+  guesses a field. Successful decoding proves transport self-consistency only;
+  it does not establish ledger membership, semantic correctness, verifier
+  trust, or promotion authority.
 - Artifact typed-content sidecars (`identity_migration`, schema v14): every
   retained `artifacts.hash` has exactly one `artifact_content_identities` row
   that stores the same 32 digest bytes as a typed raw-byte `ContentId` under
@@ -1020,8 +1031,11 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   receipts, or strengthens the receipt's authority state. Schema v17 does the
   same only for explicitly bound exact evidence JSON bytes; it neither
   canonicalizes historical JSON nor infers semantics from it. Historical
-  op/cache/package rows remain untouched;
-  cross-surface database-wire-package parity, resumable fleet backfill, a
+  op/cache rows remain untouched. The v1 migration-receipt wire transport now
+  preserves every receipt field and fails closed on truncation, extension,
+  unknown versions, forged IDs, malformed lengths, and content divergence, but
+  package integration and end-to-end database-wire-package parity remain open;
+  resumable fleet backfill, a
   declared multi-version compatibility window beyond already-open trigger
   coverage, cancellation/crash fault injection, and rollback views remain
   required before the parent persistence bead can close.
