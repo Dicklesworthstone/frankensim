@@ -34,20 +34,159 @@ use crate::factor::qr;
 /// product is checked before bytes or allocations are formed.
 pub const MAX_EIGEN_WORK_ELEMENTS: usize = 64 * 1024 * 1024;
 
+/// Schema version for [`JacobiEighAdmission`].
+pub const JACOBI_EIGH_ADMISSION_SCHEMA_VERSION: u32 = 1;
+
 /// Conservative cap for scalar work performed between cooperative polls by
 /// the service wrapper. It bounds in-house algebra only; a caller-supplied
 /// operator must separately honor its own bounded-call contract.
 pub const MAX_EIGEN_UNPOLLED_SCALAR_WORK: usize = 128 * 1024 * 1024;
 
+/// Sealed evidence that one dense Jacobi eigendecomposition fits the checked
+/// shape arithmetic and practical aggregate-work cap.
+///
+/// This receipt is allocation-free structural evidence. It does not reserve
+/// memory, prove that the allocator can satisfy the request, or make a
+/// bounded-latency claim for the cubic sweep work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JacobiEighAdmission {
+    schema_version: u32,
+    dimension: usize,
+    matrix_entries: usize,
+    aggregate_work_elements: usize,
+    work_element_cap: usize,
+}
+
+impl JacobiEighAdmission {
+    /// Admission schema version.
+    #[must_use]
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    /// Admitted square-matrix dimension.
+    #[must_use]
+    pub const fn dimension(self) -> usize {
+        self.dimension
+    }
+
+    /// Checked `n * n` entry count used by every dense square allocation.
+    #[must_use]
+    pub const fn matrix_entries(self) -> usize {
+        self.matrix_entries
+    }
+
+    /// Conservative aggregate element envelope `4 * n * n + 3 * n`.
+    #[must_use]
+    pub const fn aggregate_work_elements(self) -> usize {
+        self.aggregate_work_elements
+    }
+
+    /// Practical aggregate element cap applied by this admission schema.
+    #[must_use]
+    pub const fn work_element_cap(self) -> usize {
+        self.work_element_cap
+    }
+}
+
+/// Allocation-free refusal from [`admit_jacobi_eigh`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JacobiEighAdmissionError {
+    /// The square matrix shape `n * n` left the target's `usize` domain.
+    MatrixShapeOverflow {
+        /// Requested matrix dimension.
+        dimension: usize,
+    },
+    /// The aggregate formula `4 * n * n + 3 * n` left `usize`.
+    AggregateWorkOverflow {
+        /// Requested matrix dimension.
+        dimension: usize,
+    },
+    /// The representable aggregate formula exceeds the practical work cap.
+    WorkCapExceeded {
+        /// Requested matrix dimension.
+        dimension: usize,
+        /// Exact representable aggregate element requirement.
+        required_elements: usize,
+        /// Aggregate element cap applied by this schema.
+        cap_elements: usize,
+    },
+}
+
+impl core::fmt::Display for JacobiEighAdmissionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::MatrixShapeOverflow { dimension } => {
+                write!(
+                    formatter,
+                    "Jacobi matrix shape {dimension} * {dimension} overflowed"
+                )
+            }
+            Self::AggregateWorkOverflow { dimension } => write!(
+                formatter,
+                "Jacobi aggregate work overflowed for dimension {dimension}"
+            ),
+            Self::WorkCapExceeded {
+                dimension,
+                required_elements,
+                cap_elements,
+            } => write!(
+                formatter,
+                "Jacobi dimension {dimension} needs {required_elements} aggregate elements but the practical cap is {cap_elements}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for JacobiEighAdmissionError {}
+
+/// Check the complete dense Jacobi shape and aggregate-work envelope without
+/// allocating.
+///
+/// Arithmetic refusal precedes the practical cap so callers can distinguish
+/// an unrepresentable proposition from a representable but inadmissible one.
+/// Dimension zero retains the low-level kernel's established empty-matrix
+/// semantics.
+///
+/// # Errors
+/// Returns [`JacobiEighAdmissionError::MatrixShapeOverflow`] when `n * n`
+/// cannot be represented, [`JacobiEighAdmissionError::AggregateWorkOverflow`]
+/// when `4 * n * n + 3 * n` cannot be represented, or
+/// [`JacobiEighAdmissionError::WorkCapExceeded`] when that aggregate exceeds
+/// [`MAX_EIGEN_WORK_ELEMENTS`].
+#[must_use]
+pub fn admit_jacobi_eigh(n: usize) -> Result<JacobiEighAdmission, JacobiEighAdmissionError> {
+    let matrix_entries = n
+        .checked_mul(n)
+        .ok_or(JacobiEighAdmissionError::MatrixShapeOverflow { dimension: n })?;
+    let dense_work = matrix_entries
+        .checked_mul(4)
+        .ok_or(JacobiEighAdmissionError::AggregateWorkOverflow { dimension: n })?;
+    let linear_work = n
+        .checked_mul(3)
+        .ok_or(JacobiEighAdmissionError::AggregateWorkOverflow { dimension: n })?;
+    let aggregate_work_elements = dense_work
+        .checked_add(linear_work)
+        .ok_or(JacobiEighAdmissionError::AggregateWorkOverflow { dimension: n })?;
+    if aggregate_work_elements > MAX_EIGEN_WORK_ELEMENTS {
+        return Err(JacobiEighAdmissionError::WorkCapExceeded {
+            dimension: n,
+            required_elements: aggregate_work_elements,
+            cap_elements: MAX_EIGEN_WORK_ELEMENTS,
+        });
+    }
+    Ok(JacobiEighAdmission {
+        schema_version: JACOBI_EIGH_ADMISSION_SCHEMA_VERSION,
+        dimension: n,
+        matrix_entries,
+        aggregate_work_elements,
+        work_element_cap: MAX_EIGEN_WORK_ELEMENTS,
+    })
+}
+
 fn checked_work_len(rows: usize, cols: usize) -> Option<usize> {
     rows.checked_mul(cols)
         .filter(|&len| len <= MAX_EIGEN_WORK_ELEMENTS)
-}
-
-fn checked_jacobi_len(n: usize) -> Option<usize> {
-    let square = checked_work_len(n, n)?;
-    let aggregate = square.checked_mul(4)?.checked_add(n.checked_mul(3)?)?;
-    (aggregate <= MAX_EIGEN_WORK_ELEMENTS).then_some(square)
 }
 
 fn checked_lanczos_storage(n: usize, m: usize, k_want: usize) -> Option<()> {
@@ -113,12 +252,14 @@ pub struct EigenPair {
 /// callers apply a separate checked cubic-work admission before reaching it.
 ///
 /// # Panics
-/// The trusted low-level kernel panics if `n*n` overflows, its aggregate
-/// dense workspace exceeds the practical cap, or it does not equal `a.len()`.
+/// The trusted low-level kernel panics if its shape or aggregate-work
+/// arithmetic overflows, its aggregate dense workspace exceeds the practical
+/// cap, or `a.len()` does not equal the admitted `n * n` shape.
 #[must_use]
 pub fn jacobi_eigh(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let square =
-        checked_jacobi_len(n).expect("Jacobi aggregate workspace must fit the practical work cap");
+    let admission =
+        admit_jacobi_eigh(n).expect("Jacobi aggregate workspace must fit the practical work cap");
+    let square = admission.matrix_entries();
     assert_eq!(a.len(), square, "a must be n*n = {square}");
     let mut m = a.to_vec();
     let mut v = vec![0.0f64; square];
