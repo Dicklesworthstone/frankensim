@@ -59,10 +59,13 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
   work, then implements fs-geom `Chart`: inside/outside
   from occupancy, distance magnitude from the exact DT on both
   polarities (complement DT inside), an exact active-center scan
-  fallback outside the DT box, and an HONEST error certificate — an
-  Enclosure of ± half a voxel diagonal, never "exact". An invalid world
-  query returns a NaN signed distance with an explicit `NoClaim`
-  certificate and no Lipschitz claim.
+  fallback outside the DT box, and an explicitly piecewise-constant
+  center-metric representative. Cell selection jumps at voxel faces, so
+  the chart advertises no continuity, differentiability, or Lipschitz
+  authority. Finite samples carry an estimate-grade ± full-voxel-diagonal
+  resolution band for the two center substitutions; this is never promoted
+  to an `Enclosure`. A non-finite sample or bound, and any invalid world
+  query, carries explicit `NoClaim` numerical evidence.
 
 ## Invariants
 
@@ -81,8 +84,9 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
 5. **Realization behaves like a closed solid**: strut midpoints inside,
    far field outside, straight probes cross the boundary an even number
    of times.
-6. **Resolution error is declared**: every chart sample carries the
-   ±half-diagonal enclosure.
+6. **Resolution error is honest**: finite chart samples carry only an
+   estimate-grade ±full-diagonal band. The discontinuous center metric never
+   mints an enclosure, C0, or finite Lipschitz claim.
 7. **Frames cannot be mixed silently**: occupancy booleans require equal
    voxel size and origin, and any mismatch leaves the receiver unchanged.
 8. **Dense work is admitted before execution**: DT and complement boxes
@@ -131,9 +135,10 @@ exactness vs O(n²) + 1-Lipschitz; rv-003 radius/kNN vs brute force +
 sphere normals (the ring fixture DELIBERATELY breaks kNN connectivity —
 it caught the propagation gap during development); rv-004 fnx
 round-trip + degenerate refusals + level-set probe parity + realization
-receipts; rv-005 the chart contract (inside/outside, DT-backed distance
-near analytic, declared resolution error, out-of-box fallback, and
-no-claim samples for invalid world coordinates); rv-006 non-finite-origin
+receipts; rv-005 the chart contract (inside/outside, DT-backed center
+distance near analytic, estimate-only resolution band, analytic one-voxel
+face counterexample, no continuity/Lipschitz authority, out-of-box fallback,
+and no-claim samples for invalid world coordinates); rv-006 non-finite-origin
 refusal, frame-mismatch/no-mutation, floor-preserving fallible coordinate
 conversion, and empty-chart refusal; rv-007 full-`i32` span and
 dense-volume budget refusal, complement halo refusal at both coordinate

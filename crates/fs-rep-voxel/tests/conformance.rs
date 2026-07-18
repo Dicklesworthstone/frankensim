@@ -447,7 +447,7 @@ fn rv_004_lattice_round_trip_degenerates_and_realization() {
 fn rv_005_occupancy_chart_contract() {
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-    use fs_geom::Point3;
+    use fs_geom::{Differentiability, Point3};
     let field = ball(6); // voxel_size 0.1, centered at origin voxel
     let chart = OccupancyChart::try_new(field, TEST_DT_BUDGET).expect("admissible chart");
     let gate = CancelGate::new();
@@ -480,10 +480,11 @@ fn rv_005_occupancy_chart_contract() {
             "chart distance {} vs analytic {analytic}",
             s.signed_distance
         );
-        // The error certificate is an HONEST enclosure containing the value.
-        let half = 0.5 * 3.0f64.sqrt() * 0.1;
-        assert!(half > 0.08, "declared resolution error present");
-        let _ = &s.error;
+        // Center-metric error is estimate-grade: the piecewise-constant
+        // representative has no continuity or Lipschitz authority.
+        assert_eq!(s.error.kind, fs_evidence::NumericalKind::Estimate);
+        assert!(s.lipschitz.is_none());
+        assert_eq!(chart.differentiability(), Differentiability::Unknown);
         // Support box contains the ball.
         let support = chart.support();
         assert!(chart.inside(Point3::new(0.05, 0.05, 0.05), &cx));
@@ -499,11 +500,41 @@ fn rv_005_occupancy_chart_contract() {
             assert!(sample.lipschitz.is_none());
             assert_eq!(sample.error.kind, fs_evidence::NumericalKind::NoClaim);
         }
+
+        // G0 regression for the authority bug: the abstract solid is the
+        // closed unit cube. Floor semantics choose the empty cell at x = 1,
+        // whose center is one unit from the occupied center. The returned
+        // representative is therefore +1 even though the true signed
+        // distance on the cube face is exactly zero. A half-diagonal band
+        // falsely excluded zero; the chart must not label any such band a
+        // rigorous enclosure, continuous field, or Lipschitz field.
+        let mut one_voxel = OccupancyField::new(1.0, [0.0; 3]).expect("one-voxel frame");
+        one_voxel.set([0, 0, 0]);
+        let one_voxel = OccupancyChart::try_new(one_voxel, 27).expect("one-voxel chart");
+        let face = one_voxel.eval(Point3::new(1.0, 0.5, 0.5), &cx);
+        assert_eq!(face.signed_distance.to_bits(), 1.0f64.to_bits());
+        assert_eq!(face.error.kind, fs_evidence::NumericalKind::Estimate);
+        assert!(
+            face.error.lo <= 0.0 && face.error.hi >= 0.0,
+            "resolution estimate must include the analytic face distance: {:?}",
+            face.error
+        );
+        assert!(face.lipschitz.is_none());
+        assert_eq!(one_voxel.differentiability(), Differentiability::Unknown);
+
+        let just_inside_x = f64::from_bits(1.0f64.to_bits() - 1);
+        let just_inside = one_voxel.eval(Point3::new(just_inside_x, 0.5, 0.5), &cx);
+        assert_eq!(just_inside.signed_distance.to_bits(), (-1.0f64).to_bits());
+        assert_eq!(
+            (face.signed_distance - just_inside.signed_distance).to_bits(),
+            2.0f64.to_bits(),
+            "center metric must remain explicitly discontinuous at the voxel face"
+        );
     });
     verdict(
         "rv-005",
-        "occupancy chart: inside/outside, DT-backed distance near analytic, resolution \
-         error declared",
+        "occupancy chart: center metric is estimate-only, with no false continuity, \
+         Lipschitz, or enclosure authority",
     );
 }
 

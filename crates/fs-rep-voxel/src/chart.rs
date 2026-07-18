@@ -1,8 +1,9 @@
 //! The voxel chart: an fs-geom `Chart` over an occupancy field.
-//! Inside/outside from occupancy; distance magnitude from the exact
-//! Euclidean DT (both polarities); the declared error model is HONEST —
-//! an Enclosure of half a voxel diagonal (resolution error), never
-//! "exact".
+//! Inside/outside comes from occupancy and distance magnitude comes from
+//! exact center-to-center Euclidean DTs (both polarities). The resulting
+//! representative is piecewise constant over voxel cells: it is not a
+//! continuous signed-distance field. Its error model is therefore an
+//! estimate-grade full-voxel-diagonal resolution band, never an enclosure.
 
 use crate::VoxelError;
 use crate::dt::{CheckedBox, DistanceField, active_bounds, checked_dense_box, euclidean_dt};
@@ -19,7 +20,11 @@ pub struct OccupancyChart {
     /// Distance to the void (negative side, from the complement within
     /// a one-voxel-padded bounding box).
     to_void: Option<DistanceField>,
-    half_diagonal: f64,
+    /// Conservative geometric scale for the two center substitutions: the
+    /// query point to its voxel center and the target cube to its center.
+    /// This is reported only as an estimate because the center metric is not
+    /// itself a continuous realization of the union-of-cubes boundary.
+    resolution_band: f64,
 }
 
 impl OccupancyChart {
@@ -45,12 +50,12 @@ impl OccupancyChart {
             checked_dense_box(min, max, 1, max_voxels, "occupancy complement halo")?;
         let to_solid = euclidean_dt(&field, max_voxels)?;
         let to_void = complement_dt(&field, max_voxels, complement_box)?;
-        let half_diagonal = 0.5 * fs_math::det::sqrt(3.0) * field.voxel_size();
+        let resolution_band = fs_math::det::sqrt(3.0) * field.voxel_size();
         Ok(OccupancyChart {
             field,
             to_solid,
             to_void,
-            half_diagonal,
+            resolution_band,
         })
     }
 
@@ -117,14 +122,24 @@ impl Chart for OccupancyChart {
                 })
         };
         let signed = if inside { -magnitude } else { magnitude };
+        let error = if signed.is_finite() && self.resolution_band.is_finite() {
+            let lo = signed - self.resolution_band;
+            let hi = signed + self.resolution_band;
+            if lo.is_finite() && hi.is_finite() {
+                NumericalCertificate::estimate(lo, hi)
+            } else {
+                NumericalCertificate::no_claim()
+            }
+        } else {
+            NumericalCertificate::no_claim()
+        };
         ChartSample {
             signed_distance: signed,
             gradient: None,
-            lipschitz: Some(1.0),
-            error: NumericalCertificate::enclosure(
-                signed - self.half_diagonal,
-                signed + self.half_diagonal,
-            ),
+            // Center selection changes discontinuously at voxel faces, so a
+            // finite local Lipschitz claim would be false there.
+            lipschitz: None,
+            error,
         }
     }
 
@@ -153,6 +168,6 @@ impl Chart for OccupancyChart {
     }
 
     fn differentiability(&self) -> Differentiability {
-        Differentiability::C0
+        Differentiability::Unknown
     }
 }
