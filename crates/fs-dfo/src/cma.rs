@@ -53,7 +53,11 @@ pub const BIPOP_RESTART_SCHEMA_VERSION: u32 = 1;
 
 /// Schema version for the root, callback trace, restart ledger, and full-study
 /// identity retained by [`BipopReport`].
-pub const BIPOP_REPORT_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 makes the earliest IEEE-754 total-order minimum authoritative
+/// inside each CMA restart, separates that representative from numeric target
+/// witnesses, and composes the length-framed trace-identity v2.
+pub const BIPOP_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Schema version for each borrowed [`BipopEvaluationRecord`].
 pub const BIPOP_EVALUATION_SCHEMA_VERSION: u32 = 1;
@@ -62,10 +66,14 @@ pub const BIPOP_EVALUATION_SCHEMA_VERSION: u32 = 1;
 pub const BIPOP_ROOT_IDENTITY_KIND: &str = "fs-dfo-bipop-root-v1";
 
 /// Schema version for the allocation-free streaming trace identity.
-pub const BIPOP_TRACE_IDENTITY_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 length-frames the domain before the fixed-width trace header, so
+/// cross-domain separation follows from the byte grammar rather than from a
+/// registry convention about domain suffixes.
+pub const BIPOP_TRACE_IDENTITY_SCHEMA_VERSION: u32 = 2;
 
 /// Domain prefix for the production BIPOP callback-trace BLAKE3.
-pub const BIPOP_TRACE_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-callback-trace.v1";
+pub const BIPOP_TRACE_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-callback-trace.v2";
 
 /// Schema version for the complete production BIPOP study identity.
 pub const BIPOP_STUDY_IDENTITY_SCHEMA_VERSION: u32 = 1;
@@ -764,13 +772,16 @@ struct CmaGeneratedPointError {
 pub struct CmaReport {
     /// Best point found.
     pub x_best: Vec<f64>,
-    /// Best objective value.
+    /// Earliest best objective under exact [`f64::total_cmp`] ordering.
     pub f_best: f64,
     /// Objective evaluations consumed.
     pub evals: usize,
     /// Generations run.
     pub generations: usize,
-    /// Whether `f_target` was reached.
+    /// Whether any evaluated objective numerically reached the finite target.
+    ///
+    /// This is deliberately independent of [`Self::f_best`]: IEEE-754 total
+    /// order can select a negative NaN ahead of a finite target witness.
     pub converged: bool,
     /// Final step size (diagnostic).
     pub sigma: f64,
@@ -895,6 +906,7 @@ fn cmaes_with_stop_target<F: FnMut(&[f64]) -> f64>(
         .is_some_and(|next_generation| next_generation <= params.max_evals)
     {
         generations += 1;
+        let mut generation_reached_target = false;
         // Refresh eigendecomposition on cadence (SPD maintenance).
         if generations % params.eigen_interval.max(1) == 1 || params.eigen_interval <= 1 {
             // Symmetrize (roundoff hygiene) then eigh; floor eigenvalues.
@@ -942,7 +954,8 @@ fn cmaes_with_stop_target<F: FnMut(&[f64]) -> f64>(
             }
             fitness[k] = f(&x);
             evals += 1;
-            if fitness[k] < f_best {
+            generation_reached_target |= target.is_some_and(|target| fitness[k] <= target);
+            if fitness[k].total_cmp(&f_best).is_lt() {
                 if f_best - fitness[k] > 1e-12 * (1.0 + f_best.abs()) {
                     gens_since_improve = 0;
                 }
@@ -951,7 +964,7 @@ fn cmaes_with_stop_target<F: FnMut(&[f64]) -> f64>(
             }
         }
         gens_since_improve += 1;
-        if target.is_some_and(|target| f_best <= target) {
+        if generation_reached_target {
             return Ok((
                 CmaReport {
                     x_best,
@@ -1127,11 +1140,11 @@ impl BipopRootInputs {
 
 /// Strong streaming identity over the exact root-bound callback trace.
 ///
-/// The BLAKE3 preimage is domain-separated and includes the trace schema,
-/// canonical root-input identity preimage, dimension, row count, every row's
-/// restart ownership/local offset/objective bits, and every decision bit in
-/// global callback order. The preimage is streamed and is not duplicated in
-/// memory beside the retained trace.
+/// The BLAKE3 preimage starts with the domain byte length plus exact domain,
+/// then includes the trace schema, canonical root-input identity preimage,
+/// dimension, row count, every row's restart ownership/local offset/objective
+/// bits, and every decision bit in global callback order. The preimage is
+/// streamed and is not duplicated in memory beside the retained trace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BipopTraceIdentity {
     schema_version: u32,
@@ -1237,6 +1250,11 @@ fn build_bipop_trace_identity(
             what: "trace row count",
         })?;
     let root_bytes = root.identity.canonical_bytes();
+    let encoded_domain_bytes = u64::try_from(BIPOP_TRACE_IDENTITY_DOMAIN.len()).map_err(|_| {
+        BipopError::IdentityFieldOverflow {
+            what: "trace identity domain byte length",
+        }
+    })?;
     let encoded_root_bytes =
         u64::try_from(root_bytes.len()).map_err(|_| BipopError::IdentityFieldOverflow {
             what: "root identity byte length",
@@ -1254,6 +1272,7 @@ fn build_bipop_trace_identity(
     }
 
     let mut hasher = Blake3::new();
+    hasher.update(&encoded_domain_bytes.to_le_bytes());
     hasher.update(BIPOP_TRACE_IDENTITY_DOMAIN.as_bytes());
     hasher.update(&BIPOP_TRACE_IDENTITY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(&encoded_dimension.to_le_bytes());
@@ -1617,6 +1636,69 @@ impl std::error::Error for BipopStudyAdmissionError {
         match self {
             Self::Ledger { error } => Some(error),
             _ => None,
+        }
+    }
+}
+
+/// Typed refusal from replay-backed BIPOP semantic admission.
+///
+/// This is intentionally distinct from [`BipopStudyAdmissionError`]. The cheap
+/// identity/ledger gate authenticates retained bytes against an external
+/// reference without invoking user code. Replay-backed admission performs that
+/// gate first, then executes a caller-supplied objective oracle from the exact
+/// retained root and requires the independently produced complete study to have
+/// the same identity.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BipopReplayAdmissionError {
+    /// The callback-free payload, ledger, or external-reference gate refused.
+    EvidenceAdmission {
+        /// Exact cheap-admission refusal. The replay oracle was not invoked.
+        error: BipopStudyAdmissionError,
+    },
+    /// Re-executing the retained root against the supplied oracle failed.
+    ReplayExecution {
+        /// Exact production execution refusal from the replay attempt.
+        error: BipopError,
+    },
+    /// Replay completed and validated, but produced a different complete study.
+    SemanticMismatch {
+        /// Identity of the admitted retained report.
+        retained: BipopStudyIdentity,
+        /// Identity independently produced by replaying the objective oracle.
+        replayed: BipopStudyIdentity,
+    },
+}
+
+impl core::fmt::Display for BipopReplayAdmissionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EvidenceAdmission { error } => {
+                write!(
+                    formatter,
+                    "BIPOP replay admission refused retained evidence: {error}"
+                )
+            }
+            Self::ReplayExecution { error } => {
+                write!(
+                    formatter,
+                    "BIPOP semantic replay failed to execute: {error}"
+                )
+            }
+            Self::SemanticMismatch { retained, replayed } => write!(
+                formatter,
+                "BIPOP semantic replay mismatch: retained {retained}, replayed {replayed}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BipopReplayAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EvidenceAdmission { error } => Some(error),
+            Self::ReplayExecution { error } => Some(error),
+            Self::SemanticMismatch { .. } => None,
         }
     }
 }
@@ -2040,6 +2122,12 @@ impl BipopReport {
     /// semantic ledger failures, and an internally valid but different study is
     /// classified only after both checks succeed.
     ///
+    /// This is the cheap, callback-free evidence gate. It proves that all
+    /// retained fields match their strong identity and the structural ledger,
+    /// but it does not reconstruct candidate generation, final CMA state, or
+    /// objective semantics. Call [`Self::admit_study_identity_with_replay`] when
+    /// those causal semantics must be checked against an executable oracle.
+    ///
     /// # Errors
     /// Returns a typed payload, ledger, encoding, or reference mismatch.
     pub fn admit_study_identity(
@@ -2055,6 +2143,58 @@ impl BipopReport {
             Err(BipopStudyAdmissionError::ReferenceIdentityMismatch {
                 expected,
                 found: self.study_identity,
+            })
+        }
+    }
+
+    /// Admit retained evidence and then replay its exact root against an oracle.
+    ///
+    /// The callback-free [`Self::admit_study_identity`] gate always runs first.
+    /// Consequently, stale payloads, invalid ledgers, and wrong external
+    /// references invoke `objective_oracle` zero times. After that gate succeeds,
+    /// the method re-executes BIPOP with the retained start, sigma, hard budget,
+    /// target, and seed. The production executor validates the replayed ledger;
+    /// equality of the complete study identities then binds every replayed root,
+    /// callback, restart, report, and compatibility-projection bit.
+    ///
+    /// The supplied oracle is executable authority: it must implement the same
+    /// deterministic objective semantics claimed by the retained study. Panics
+    /// are not caught, and replay consumes the full retained callback budget (or
+    /// terminates under the same recorded rule). This method is therefore an
+    /// expensive semantic gate rather than a replacement for cheap admission.
+    ///
+    /// # Errors
+    /// Returns [`BipopReplayAdmissionError::EvidenceAdmission`] before invoking
+    /// the oracle when cheap admission fails,
+    /// [`BipopReplayAdmissionError::ReplayExecution`] when replay cannot
+    /// complete, or [`BipopReplayAdmissionError::SemanticMismatch`] when a valid
+    /// replay produces different complete evidence.
+    pub fn admit_study_identity_with_replay<F>(
+        &self,
+        expected: BipopStudyIdentity,
+        objective_oracle: &mut F,
+    ) -> Result<(), BipopReplayAdmissionError>
+    where
+        F: FnMut(&[f64]) -> f64,
+    {
+        self.admit_study_identity(expected)
+            .map_err(|error| BipopReplayAdmissionError::EvidenceAdmission { error })?;
+        let replay = try_bipop_cmaes(
+            objective_oracle,
+            &self.root.start,
+            self.root.sigma,
+            self.root.total_budget,
+            self.root.target,
+            self.root.seed,
+        )
+        .map_err(|error| BipopReplayAdmissionError::ReplayExecution { error })?;
+        let replayed = replay.study_identity;
+        if replayed == self.study_identity {
+            Ok(())
+        } else {
+            Err(BipopReplayAdmissionError::SemanticMismatch {
+                retained: self.study_identity,
+                replayed,
             })
         }
     }
@@ -2250,12 +2390,7 @@ impl BipopReport {
             }
             match record.stop_reason {
                 CmaStopReason::TargetReached => {
-                    if !record.report.converged
-                        || !self
-                            .root
-                            .target
-                            .is_some_and(|target| record.report.f_best <= target)
-                    {
+                    if !record.report.converged || self.root.target.is_none() {
                         return Err(BipopLedgerError::at(index, "terminal-reason"));
                     }
                 }
@@ -2265,24 +2400,12 @@ impl BipopReport {
                         .evals
                         .checked_add(record.lambda)
                         .ok_or_else(|| BipopLedgerError::at(index, "evaluation-overflow"))?;
-                    if record.report.converged
-                        || self
-                            .root
-                            .target
-                            .is_some_and(|target| record.report.f_best <= target)
-                        || next_generation <= record.allocated_budget
-                    {
+                    if record.report.converged || next_generation <= record.allocated_budget {
                         return Err(BipopLedgerError::at(index, "terminal-reason"));
                     }
                 }
                 CmaStopReason::Stagnated => {
-                    if record.report.converged
-                        || self
-                            .root
-                            .target
-                            .is_some_and(|target| record.report.f_best <= target)
-                        || record.report.generations == 0
-                    {
+                    if record.report.converged || record.report.generations == 0 {
                         return Err(BipopLedgerError::at(index, "terminal-reason"));
                     }
                 }
@@ -2373,6 +2496,14 @@ impl BipopReport {
                 .trace_rows
                 .get(record.trace_start..record.trace_end)
                 .ok_or_else(|| BipopLedgerError::at(restart_index, "trace-row-range"))?;
+            let target_witnessed = self
+                .root
+                .target
+                .is_some_and(|target| rows.iter().any(|row| row.objective <= target));
+            let target_terminal = record.stop_reason == CmaStopReason::TargetReached;
+            if target_witnessed != target_terminal || record.report.converged != target_terminal {
+                return Err(BipopLedgerError::at(restart_index, "terminal-reason"));
+            }
             let mut local_best = 0usize;
             for (local_offset, row) in rows.iter().enumerate() {
                 let global_offset = record
@@ -2407,7 +2538,7 @@ impl BipopReport {
                         "trace-start-projection",
                     ));
                 }
-                if row.objective < rows[local_best].objective {
+                if row.objective.total_cmp(&rows[local_best].objective).is_lt() {
                     local_best = local_offset;
                 }
             }
@@ -2463,6 +2594,9 @@ impl BipopReport {
 /// seed-range, dimension, population, and local-budget formula is checked
 /// before the first callback. Per-restart start generation and accounting are
 /// checked again before that restart becomes visible to the callback.
+/// A finite target is reached when any callback is numerically at or below it;
+/// that witness is independent of the exact total-order representative retained
+/// as [`CmaReport::f_best`].
 ///
 /// # Errors
 /// Returns [`BipopError`] without invoking `f` for raw-input or preflight
@@ -3666,6 +3800,137 @@ mod tests {
             }
             other => panic!("expected semantic ledger refusal, found {other:?}"),
         }
+    }
+
+    /// G3: a correctly resealed `TargetReached` receipt still needs a numeric
+    /// witness in its retained callback trace; the total-order best alone is
+    /// neither necessary nor sufficient evidence of that terminal condition.
+    #[test]
+    fn ledger_refuses_resealed_target_terminal_without_callback_witness() {
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0024);
+        let values = [negative_nan, 4.0, 0.25, 3.0, 2.0];
+        let mut calls = 0usize;
+        let mut objective = |_point: &[f64]| {
+            let value = values[calls];
+            calls += 1;
+            value
+        };
+        let mut report = try_bipop_cmaes(&mut objective, &[1.0], 0.5, 5, Some(0.5), 11)
+            .expect("target-witness mutation fixture admits");
+        assert_eq!(report.best.f_best.to_bits(), negative_nan.to_bits());
+        assert_eq!(report.records[0].stop_reason, CmaStopReason::TargetReached);
+
+        let witness = report
+            .trace_rows
+            .iter_mut()
+            .find(|row| row.objective.to_bits() == 0.25_f64.to_bits())
+            .expect("fixture retains its finite target witness");
+        witness.objective = 0.75;
+        reseal_private_identities(&mut report);
+
+        let error = report
+            .validate_ledger()
+            .expect_err("resealing cannot invent a missing numeric target witness");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "terminal-reason");
+    }
+
+    /// G3/G5: cheap admission intentionally authenticates retained bytes and
+    /// structural ledger semantics without replaying objective/CMA state. The
+    /// replay-backed gate must reject correctly resealed mutations from every
+    /// class that requires causal re-execution to distinguish.
+    #[test]
+    fn replay_admission_refuses_resealed_sigma_point_objective_and_stop_reason() {
+        let make_report = || {
+            let mut objective = |point: &[f64]| {
+                point
+                    .iter()
+                    .map(|coordinate| coordinate * coordinate)
+                    .sum::<f64>()
+            };
+            try_bipop_cmaes(&mut objective, &[2.0, -1.0], 0.75, 20, None, 11)
+                .expect("semantic replay mutation fixture admits")
+        };
+        let assert_replay_refuses =
+            |mut forged: BipopReport, canonical_identity: BipopStudyIdentity| {
+                reseal_private_identities(&mut forged);
+                let forged_identity = forged.study_identity;
+                forged
+                    .admit_study_identity(forged_identity)
+                    .expect("resealed fixture remains cheap-admission consistent");
+                let mut calls = 0usize;
+                let mut oracle = |point: &[f64]| {
+                    calls += 1;
+                    point
+                        .iter()
+                        .map(|coordinate| coordinate * coordinate)
+                        .sum::<f64>()
+                };
+                assert_eq!(
+                    forged.admit_study_identity_with_replay(forged_identity, &mut oracle),
+                    Err(BipopReplayAdmissionError::SemanticMismatch {
+                        retained: forged_identity,
+                        replayed: canonical_identity,
+                    })
+                );
+                assert_eq!(calls, forged.total_evals);
+            };
+
+        let canonical = make_report();
+        let canonical_identity = canonical.study_identity;
+        let nonbest_restart = if canonical.best_restart == 0 { 1 } else { 0 };
+
+        let mut changed_sigma = canonical.clone();
+        changed_sigma.records[nonbest_restart].report.sigma = f64::from_bits(
+            changed_sigma.records[nonbest_restart]
+                .report
+                .sigma
+                .to_bits()
+                .checked_add(1)
+                .expect("finite sigma fixture admits one ULP"),
+        );
+        assert_replay_refuses(changed_sigma, canonical_identity);
+
+        let first = &canonical.records[0];
+        let nonwinning_global = (first.trace_start + 1..first.trace_end)
+            .find(|global| {
+                canonical.trace_rows[*global]
+                    .objective
+                    .total_cmp(&first.report.f_best)
+                    .is_gt()
+            })
+            .expect("fixture retains one noninitial nonwinning callback");
+
+        let mut changed_point = canonical.clone();
+        let point_coordinate = nonwinning_global
+            .checked_mul(changed_point.root.start.len())
+            .expect("fixture coordinate offset fits");
+        changed_point.trace_points[point_coordinate] =
+            f64::from_bits(changed_point.trace_points[point_coordinate].to_bits() ^ 1);
+        assert_replay_refuses(changed_point, canonical_identity);
+
+        let mut changed_objective = canonical.clone();
+        let objective_bits = changed_objective.trace_rows[nonwinning_global]
+            .objective
+            .to_bits();
+        changed_objective.trace_rows[nonwinning_global].objective = f64::from_bits(
+            objective_bits
+                .checked_add(1)
+                .expect("finite objective ULP fits"),
+        );
+        assert_replay_refuses(changed_objective, canonical_identity);
+
+        let mut changed_stop_reason = canonical;
+        let plausible_stagnation = changed_stop_reason
+            .records
+            .iter_mut()
+            .find(|record| {
+                record.stop_reason == CmaStopReason::BudgetExhausted
+                    && record.report.generations > 0
+            })
+            .expect("fixture contains a generated budget terminal");
+        plausible_stagnation.stop_reason = CmaStopReason::Stagnated;
+        assert_replay_refuses(changed_stop_reason, canonical_identity);
     }
 
     /// G0: an overflowing hypothetical next generation is not evidence that a

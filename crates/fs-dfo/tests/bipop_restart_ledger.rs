@@ -115,7 +115,7 @@ fn g0_restart_records_partition_the_trace_and_name_the_best_run() {
     assert_eq!(trace_identity.dimension(), 2);
     assert_eq!(
         BIPOP_TRACE_IDENTITY_DOMAIN,
-        "frankensim.fs-dfo.bipop-callback-trace.v1"
+        "frankensim.fs-dfo.bipop-callback-trace.v2"
     );
     let trace = report.evaluations().collect::<Vec<_>>();
     assert_eq!(trace.len(), report.total_evals);
@@ -332,4 +332,106 @@ fn g0_trace_retains_nonfinite_objective_bits_as_data() {
     assert_eq!(evaluation.objective().to_bits(), payload_nan.to_bits());
     assert_eq!(report.best.f_best.to_bits(), payload_nan.to_bits());
     assert!(evaluation.point().iter().all(|value| value.is_finite()));
+}
+
+/// G0/G3: local CMA best selection uses the same exact total order as the
+/// aggregate restart selector. This exercises signed zero inside one complete
+/// population; ordinary `<` would incorrectly retain the initial `+0.0`.
+#[test]
+fn g0_within_restart_signed_zero_uses_earliest_total_cmp_minimum() {
+    let mut calls = 0usize;
+    let values = [0.0, -0.0, 3.0, 2.0, 1.0];
+    let mut objective = |_point: &[f64]| {
+        let value = values[calls];
+        calls += 1;
+        value
+    };
+    let report = try_bipop_cmaes(&mut objective, &[1.0], 0.5, values.len(), None, ROOT_SEED)
+        .expect("one-generation signed-zero fixture admits");
+    report
+        .validate_ledger()
+        .expect("total-ordered signed-zero ledger validates");
+
+    assert_eq!(report.records().len(), 1);
+    assert_eq!(report.best.f_best.to_bits(), (-0.0_f64).to_bits());
+    let expected = report
+        .evaluation(1)
+        .expect("negative-zero callback retained");
+    assert_eq!(expected.objective().to_bits(), (-0.0_f64).to_bits());
+    assert_slice_bits(&report.best.x_best, expected.point());
+}
+
+/// G0/G3: positive and negative NaN payloads participate in the exact IEEE-754
+/// total order without normalization. A positive NaN initial value, a finite
+/// improvement, and then a negative NaN minimum force two updates that ordinary
+/// comparison would both suppress.
+#[test]
+fn g0_within_restart_nan_and_finite_values_use_exact_total_order() {
+    let positive_nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    let negative_nan = f64::from_bits(0xfff8_0000_0000_0024);
+    let values = [positive_nan, 4.0, negative_nan, f64::NEG_INFINITY, 1.0];
+    let mut calls = 0usize;
+    let mut objective = |_point: &[f64]| {
+        let value = values[calls];
+        calls += 1;
+        value
+    };
+    let report = try_bipop_cmaes(&mut objective, &[1.0], 0.5, values.len(), None, ROOT_SEED)
+        .expect("one-generation NaN/finite fixture admits");
+    report
+        .validate_ledger()
+        .expect("total-ordered NaN/finite ledger validates");
+
+    assert_eq!(report.records().len(), 1);
+    assert_eq!(report.best.f_best.to_bits(), negative_nan.to_bits());
+    let expected = report
+        .evaluation(2)
+        .expect("negative-NaN callback retained");
+    assert_eq!(expected.objective().to_bits(), negative_nan.to_bits());
+    assert_slice_bits(&report.best.x_best, expected.point());
+}
+
+/// G0/G3: target stopping is an existential numeric callback witness, not an
+/// implication of the total-order representative. A negative NaN remains the
+/// exact `f_best`, while a later finite value in the same complete generation
+/// still reaches the target and terminates the study.
+#[test]
+fn g0_finite_target_witness_survives_a_negative_nan_total_order_best() {
+    let negative_nan = f64::from_bits(0xfff8_0000_0000_0024);
+    let values = [negative_nan, 4.0, 0.25, 3.0, 2.0];
+    let mut calls = 0usize;
+    let mut objective = |_point: &[f64]| {
+        let value = values[calls];
+        calls += 1;
+        value
+    };
+    let report = try_bipop_cmaes(
+        &mut objective,
+        &[1.0],
+        0.5,
+        values.len(),
+        Some(0.5),
+        ROOT_SEED,
+    )
+    .expect("one-generation target-witness fixture admits");
+    report
+        .validate_ledger()
+        .expect("retained finite target witness validates independently of f_best");
+
+    assert_eq!(calls, values.len());
+    assert_eq!(report.records().len(), 1);
+    assert_eq!(report.best.f_best.to_bits(), negative_nan.to_bits());
+    assert!(report.best.converged);
+    assert_eq!(
+        report.records()[0].stop_reason(),
+        CmaStopReason::TargetReached
+    );
+    assert_eq!(
+        report
+            .evaluation(2)
+            .expect("finite target callback retained")
+            .objective()
+            .to_bits(),
+        0.25_f64.to_bits()
+    );
 }

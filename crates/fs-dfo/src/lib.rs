@@ -28,9 +28,9 @@ pub use cma::{
     BIPOP_RESTART_SCHEMA_VERSION, BIPOP_ROOT_IDENTITY_KIND, BIPOP_STUDY_IDENTITY_DOMAIN,
     BIPOP_STUDY_IDENTITY_SCHEMA_VERSION, BIPOP_TRACE_IDENTITY_DOMAIN,
     BIPOP_TRACE_IDENTITY_SCHEMA_VERSION, BipopAdmission, BipopError, BipopEvaluationRecord,
-    BipopLane, BipopLedgerError, BipopReport, BipopRestartRecord, BipopRootInputs,
-    BipopStudyAdmissionError, BipopStudyIdentity, BipopTraceIdentity, CmaParams, CmaReport,
-    CmaStopReason, admit_bipop, bipop_cmaes, cmaes, try_bipop_cmaes,
+    BipopLane, BipopLedgerError, BipopReplayAdmissionError, BipopReport, BipopRestartRecord,
+    BipopRootInputs, BipopStudyAdmissionError, BipopStudyIdentity, BipopTraceIdentity, CmaParams,
+    CmaReport, CmaStopReason, admit_bipop, bipop_cmaes, cmaes, try_bipop_cmaes,
 };
 pub use dro::{DroReport, wasserstein_worst_case};
 pub use moo::{
