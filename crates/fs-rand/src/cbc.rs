@@ -518,7 +518,7 @@ impl CbcProblem {
         let candidate_phase_bytes = if candidate_count == 0 {
             0
         } else {
-            let live_score_count = match mode {
+            let live_score_count: u128 = match mode {
                 CbcExecutionMode::Construction => 2,
                 CbcExecutionMode::Certified => 3,
             };
