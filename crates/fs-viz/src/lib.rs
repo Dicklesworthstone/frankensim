@@ -9,9 +9,10 @@
 //!   integration of a flow field; on a rotation field the streamline is a
 //!   circle (radius conserved), on a saddle field it is a hyperbola (`xy`
 //!   conserved). [`streamline`] is the no-authority compatibility wrapper;
-//! - [`classify_hessian`] — the Morse critical-point type (min / max / saddle)
-//!   and index from a scalar field's Hessian — the atom of a Morse–Smale
-//!   complex;
+//! - [`classify_hessian_with_policy`] — the Morse critical-point type (min /
+//!   max / saddle) and index from a scalar field's Hessian under an explicit
+//!   symmetry policy. [`classify_hessian`] is the exact-symmetry compatibility
+//!   wrapper — the atom of a Morse–Smale complex;
 //! - [`Grid2::isocontour_crossings`] — bounded, fail-closed isocontour edge
 //!   intersections of an admitted scalar grid, which on a circle SDF all lie
 //!   on the circle.
@@ -1602,22 +1603,55 @@ pub enum CriticalKind {
 pub struct CriticalPoint {
     /// The Morse type.
     pub kind: CriticalKind,
-    /// The Morse index (number of negative Hessian eigenvalues).
+    /// The number of negative Hessian eigenvalues for a classified Morse
+    /// point. Zero is a no-index-claimed sentinel when `kind` is
+    /// [`CriticalKind::Degenerate`] because numeric admission failed.
     pub morse_index: usize,
 }
 
-/// Classify a critical point from its (symmetric) `2×2` Hessian: the Morse index
-/// is the number of negative eigenvalues; a near-zero eigenvalue is degenerate.
-/// Non-finite entries and non-finite or negative tolerances fail closed as
-/// degenerate with no claimed negative eigenvalues.
+/// The authority used to admit a nominal `2×2` Hessian as symmetric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HessianSymmetryPolicy {
+    /// Require the two off-diagonal entries to be numerically equal. IEEE-754
+    /// signed zeros are equal under this policy. No averaging or other
+    /// symmetrization is performed.
+    Exact,
+}
+
+/// Classify a critical point from a nominal `2×2` Hessian under an explicit
+/// symmetry policy.
+///
+/// The Morse index is the number of negative eigenvalues; an eigenvalue within
+/// `eigenvalue_tolerance` of zero is degenerate. The tolerance applies only to
+/// eigenvalue degeneracy, never to symmetry admission. A matrix refused by the
+/// symmetry policy, any non-finite entry, or a non-finite or negative tolerance
+/// fails closed as degenerate with no claimed negative eigenvalues.
 #[must_use]
-pub fn classify_hessian(hessian: [[f64; 2]; 2], tol: f64) -> CriticalPoint {
-    if !tol.is_finite() || tol < 0.0 || hessian.iter().flatten().any(|value| !value.is_finite()) {
+pub fn classify_hessian_with_policy(
+    hessian: [[f64; 2]; 2],
+    eigenvalue_tolerance: f64,
+    symmetry_policy: HessianSymmetryPolicy,
+) -> CriticalPoint {
+    if !eigenvalue_tolerance.is_finite()
+        || eigenvalue_tolerance < 0.0
+        || hessian.iter().flatten().any(|value| !value.is_finite())
+    {
         return CriticalPoint {
             kind: CriticalKind::Degenerate,
             morse_index: 0,
         };
     }
+
+    let symmetric = match symmetry_policy {
+        HessianSymmetryPolicy::Exact => hessian[0][1] == hessian[1][0],
+    };
+    if !symmetric {
+        return CriticalPoint {
+            kind: CriticalKind::Degenerate,
+            morse_index: 0,
+        };
+    }
+
     let (a, b, c) = (hessian[0][0], hessian[0][1], hessian[1][1]);
     let mean = f64::midpoint(a, c);
     let half_diff = f64::midpoint(a, -c);
@@ -1630,10 +1664,11 @@ pub fn classify_hessian(hessian: [[f64; 2]; 2], tol: f64) -> CriticalPoint {
         scale * (x * x + y * y).sqrt()
     };
     let (l1, l2) = (mean - disc, mean + disc);
-    if l1.abs() <= tol || l2.abs() <= tol {
+    if l1.abs() <= eigenvalue_tolerance || l2.abs() <= eigenvalue_tolerance {
         return CriticalPoint {
             kind: CriticalKind::Degenerate,
-            morse_index: usize::from(l1 < -tol) + usize::from(l2 < -tol),
+            morse_index: usize::from(l1 < -eigenvalue_tolerance)
+                + usize::from(l2 < -eigenvalue_tolerance),
         };
     }
     let morse_index = usize::from(l1 < 0.0) + usize::from(l2 < 0.0);
@@ -1643,6 +1678,16 @@ pub fn classify_hessian(hessian: [[f64; 2]; 2], tol: f64) -> CriticalPoint {
         _ => CriticalKind::Maximum,
     };
     CriticalPoint { kind, morse_index }
+}
+
+/// Classify a critical point from an exactly symmetric `2×2` Hessian.
+///
+/// This compatibility entry point uses [`HessianSymmetryPolicy::Exact`]. The
+/// tolerance applies only to eigenvalue degeneracy and cannot authorize an
+/// asymmetric input.
+#[must_use]
+pub fn classify_hessian(hessian: [[f64; 2]; 2], eigenvalue_tolerance: f64) -> CriticalPoint {
+    classify_hessian_with_policy(hessian, eigenvalue_tolerance, HessianSymmetryPolicy::Exact)
 }
 
 /// A scalar field sampled on a regular 2-D grid.

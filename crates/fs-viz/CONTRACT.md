@@ -22,8 +22,14 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   enforcement, contained callback unwinds, private staging, structured terminal
   evidence, declared early termination, and a domain-separated BLAKE3 identity.
 - `CriticalKind` (`Minimum`/`Saddle`/`Maximum`/`Degenerate`), `CriticalPoint {
-  kind, morse_index }`, `classify_hessian(hessian, tol)` — the Morse type + index
-  (number of negative Hessian eigenvalues) of a critical point.
+  kind, morse_index }`, `HessianSymmetryPolicy`, and
+  `classify_hessian_with_policy(hessian, eigenvalue_tolerance, symmetry_policy)`
+  — the Morse type + index (number of negative eigenvalues) of a nominal
+  Hessian admitted under caller-explicit symmetry authority.
+  `classify_hessian(hessian, eigenvalue_tolerance)` is the compatibility wrapper
+  fixed to `HessianSymmetryPolicy::Exact`. For a fail-closed `Degenerate`
+  result caused by invalid input, index 0 is a no-index-claimed sentinel rather
+  than evidence of positive inertia.
 - `Grid2::from_fn(nx, ny, lo, hi, node_limit, field) -> Result<Grid2,
   Grid2Error>` — an admitted finite scalar field on a genuinely 2-D regular
   grid; `at` and `point` expose its x-fastest nodes.
@@ -81,9 +87,13 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   publication. Its identity binds method/version, units, seed/dt/step bits,
   domain/termination policies, actual termination/counters, and every point bit
   under `org.frankensim.fs-viz.streamline-rk4.v1`.
-- `classify_hessian` recovers the known Morse type: `x²+y²`→min (index 0),
-  `x²−y²`/`xy`→saddle (index 1), `−(x²+y²)`→max (index 2); a zero eigenvalue is
-  degenerate.
+- Hessian classification recovers the known Morse type:
+  `x²+y²`→min (index 0), `x²−y²`/`xy`→saddle (index 1),
+  `−(x²+y²)`→max (index 2); a zero eigenvalue is degenerate. The exact policy
+  admits only finite, numerically equal off-diagonal entries (`+0.0` and `-0.0`
+  are equal), performs no implicit symmetrization, and fails closed with
+  `Degenerate`/index 0 on asymmetry. `eigenvalue_tolerance` applies only to
+  zero-eigenvalue classification and never widens symmetry admission.
 - A `Grid2` has at least two nodes per axis, an admitted product and allocation,
   finite strictly increasing bounds with finite extent, and finite samples in
   deterministic row-major/x-fastest order. Every generated coordinate is
@@ -174,6 +184,9 @@ never returns a silently truncated mesh.
 `ScalarField3Error` distinguishes sample/byte budget refusal, malformed or
 unsupported schema bytes, ambiguous semantics, invalid geometry, non-finite
 values, allocation refusal, and node/cell layout mismatch.
+Hessian classification is total and fail-closed: non-finite matrix entries,
+invalid eigenvalue tolerances, and off-diagonal disagreement under the selected
+policy return `Degenerate` with index 0 rather than a confident Morse claim.
 
 ## Determinism class
 
@@ -227,8 +240,10 @@ metamorphisms, boundary/stagnation policy,
 pre-requested and injected cancellation, ambient deadline/cost/poll refusal, callback
 panic/non-finite results, callback-requested cancellation observed at the next
 indivisible complete-step boundary, arithmetic overflow, allocation fault, and identical
-retry; Hessian classification recovers the
-Morse type; a circle-SDF isocontour lies on the circle (+ empty out-of-range);
+retry; Hessian classification recovers the Morse type, retains inertia under
+large finite positive scaling, and exercises exact/asymmetric/near-mismatch,
+transpose, power-of-two scale, signed-zero, and non-finite symmetry admission;
+a circle-SDF isocontour lies on the circle (+ empty out-of-range);
 2-D grid sampling/addressing; fail-before-sampling dimension, budget, bounds,
 overflow, coordinate-collapse, and non-finite-value admission; non-finite-level
 and crossing-budget refusal; exact-node ownership and coincident-edge refusal;
@@ -257,6 +272,14 @@ truncation, semantic validation, and non-finite payload rejection.
 
 - v0 is the ANALYTICALLY-VERIFIABLE core: RK4 streamlines, Morse critical-point
   classification, 2-D edge crossings, and regular-grid marching tetrahedra.
+  Hessian classification accepts exact numeric symmetry only; it does not infer
+  equality of mixed partials before binary64 rounding, average disagreeing
+  entries, attach a symmetrization receipt, or provide absolute, relative, ULP,
+  or backward-error symmetry admission. It does not prove that the gradient
+  vanishes, that the supplied matrix is an analytic Hessian, or that a continuum
+  critical point exists. `Degenerate` includes refused/unclassifiable numeric
+  input and is not itself evidence that a valid critical point is mathematically
+  degenerate.
   Grid2 crossings are points only: they do not provide marching-squares
   connectivity, resolve saddle cells, represent plateau segments/regions, or
   certify the unsampled continuum field or its topology.

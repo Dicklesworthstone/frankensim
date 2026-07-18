@@ -6,14 +6,15 @@
 use fs_blake3::DomainHasher;
 use fs_exec::{Budget, BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_viz::{
-    CriticalKind, Grid2, Grid2Error, Grid3, Grid3Error, ISO_CONTOUR_ARTIFACT_IDENTITY_DOMAIN,
-    IsoContourDisposition, IsoContourError, IsoContourResource, IsoSurfaceError,
-    SCALAR_FIELD3_ARTIFACT_KIND, SCALAR_FIELD3_SCHEMA_VERSION, STREAMLINE_ARTIFACT_IDENTITY_DOMAIN,
-    STREAMLINE_ARTIFACT_IDENTITY_VERSION, ScalarField3, ScalarField3Error, ScalarFieldSemantics,
-    ScalarLayout3, StreamlineBoundaryPolicy, StreamlineDisposition, StreamlineDomain2,
-    StreamlineError, StreamlineRequest, StreamlineResource, StreamlineStage,
-    StreamlineStagnationPolicy, StreamlineTermination, classify_hessian,
-    required_streamline_budget, streamline, streamline_plan, streamline_with_cx,
+    CriticalKind, Grid2, Grid2Error, Grid3, Grid3Error, HessianSymmetryPolicy,
+    ISO_CONTOUR_ARTIFACT_IDENTITY_DOMAIN, IsoContourDisposition, IsoContourError,
+    IsoContourResource, IsoSurfaceError, SCALAR_FIELD3_ARTIFACT_KIND, SCALAR_FIELD3_SCHEMA_VERSION,
+    STREAMLINE_ARTIFACT_IDENTITY_DOMAIN, STREAMLINE_ARTIFACT_IDENTITY_VERSION, ScalarField3,
+    ScalarField3Error, ScalarFieldSemantics, ScalarLayout3, StreamlineBoundaryPolicy,
+    StreamlineDisposition, StreamlineDomain2, StreamlineError, StreamlineRequest,
+    StreamlineResource, StreamlineStage, StreamlineStagnationPolicy, StreamlineTermination,
+    classify_hessian, classify_hessian_with_policy, required_streamline_budget, streamline,
+    streamline_plan, streamline_with_cx,
 };
 use std::cell::Cell;
 use std::mem::size_of;
@@ -694,6 +695,75 @@ fn hessian_classification_recovers_the_morse_type() {
         classify_hessian([[1.0, 0.0], [0.0, 1.0]], f64::NAN).kind,
         CriticalKind::Degenerate
     );
+}
+
+#[test]
+fn hessian_symmetry_admission_is_explicit_and_fail_closed() {
+    let t = 1e-9;
+    let exact = [[3.0, 1.0], [1.0, 3.0]];
+    assert_eq!(
+        classify_hessian(exact, t),
+        classify_hessian_with_policy(exact, t, HessianSymmetryPolicy::Exact)
+    );
+    assert_eq!(classify_hessian(exact, t).kind, CriticalKind::Minimum);
+    let axis_swapped = [[2.0, 1.0], [1.0, 4.0]];
+    assert_eq!(
+        classify_hessian([[4.0, 1.0], [1.0, 2.0]], t),
+        classify_hessian(axis_swapped, t)
+    );
+
+    // G0: a nominal Hessian with conflicting mixed partials has no symmetric
+    // eigenvalue authority, even when one triangle alone looks positive.
+    let asymmetric = [[1.0, 100.0], [-100.0, 1.0]];
+    for refused in [asymmetric, [[1.0, -100.0], [100.0, 1.0]]] {
+        assert_eq!(
+            classify_hessian(refused, t),
+            fs_viz::CriticalPoint {
+                kind: CriticalKind::Degenerate,
+                morse_index: 0,
+            }
+        );
+    }
+
+    // G3: the eigenvalue tolerance is not an implicit symmetry tolerance.
+    // Both a near mismatch and its transpose fail closed, before and after an
+    // exact power-of-two scale transformation.
+    let next_after_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    let near = [[3.0, 1.0], [next_after_one, 3.0]];
+    assert!((near[0][1] - near[1][0]).abs() < t);
+    let near_transpose = [[3.0, next_after_one], [1.0, 3.0]];
+    let scaled_near = [
+        [near[0][0] * 2.0, near[0][1] * 2.0],
+        [near[1][0] * 2.0, near[1][1] * 2.0],
+    ];
+    for refused in [near, near_transpose, scaled_near] {
+        let classified = classify_hessian(refused, t);
+        assert_eq!(classified.kind, CriticalKind::Degenerate);
+        assert_eq!(classified.morse_index, 0);
+    }
+
+    // IEEE-754 signed zeros are numerically equal under Exact; changing which
+    // triangle carries the sign bit cannot change the Morse evidence.
+    let upper_negative_zero = classify_hessian([[2.0, -0.0], [0.0, 2.0]], t);
+    let lower_negative_zero = classify_hessian([[2.0, 0.0], [-0.0, 2.0]], t);
+    assert_eq!(upper_negative_zero.kind, CriticalKind::Minimum);
+    assert_eq!(upper_negative_zero, lower_negative_zero);
+
+    // The previously ignored lower triangle is also covered by numeric
+    // admission; it cannot hide a non-finite value.
+    for non_finite in [
+        [[1.0, 0.0], [f64::INFINITY, 1.0]],
+        [[1.0, 0.0], [f64::NAN, 1.0]],
+    ] {
+        let classified = classify_hessian(non_finite, t);
+        assert_eq!(classified.kind, CriticalKind::Degenerate);
+        assert_eq!(classified.morse_index, 0);
+    }
+    for invalid_tolerance in [f64::NAN, f64::INFINITY, -f64::EPSILON] {
+        let classified = classify_hessian(exact, invalid_tolerance);
+        assert_eq!(classified.kind, CriticalKind::Degenerate);
+        assert_eq!(classified.morse_index, 0);
+    }
 }
 
 #[test]
