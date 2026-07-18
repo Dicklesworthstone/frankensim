@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Generative geometry program synthesis (fs-shapeprog): a typed constructive-geometry DSL with SDF semantics, a rewrite engine that simplifies/canonicalizes programs under exact-or-certified geometric identities (offset composition, union canonicalization, transform distribution) verified by SDF sampling, content-hash dedup, and seeded shape-grammar derivation. The discrete-invention medium."
+description = "Generative geometry program synthesis (fs-shapeprog): a typed constructive-geometry DSL with deterministic SDF semantics, bit-equivalent exact rewrites, compositional outward error bounds for approximate rewrites, transactional structured refusal, canonical content identities, and seeded shape-grammar derivation. The discrete-invention medium."
 
 [package.metadata.frankensim]
 layer = "L2"
