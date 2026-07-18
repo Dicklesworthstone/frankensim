@@ -3,7 +3,10 @@
 //! acceptance demands (an intentionally failing case must yield a
 //! structured failure record and a non-green report).
 
-use fs_casebook::{CaseOutcome, CaseRecord, Suite, ToleranceSpec, fnv1a64};
+use fs_casebook::{
+    CASEBOOK_DISAGREEMENT_RECORD_VERSION, CASEBOOK_REPLAY_RECORD_VERSION, CaseOutcome, CaseRecord,
+    DisagreementRecord, ReplayError, ReplaySpec, Suite, ToleranceSpec, fnv1a64,
+};
 
 /// The demo suite: exactly how a crate registers conformance cases.
 /// Each case binds (stable id, inputs digest, tolerance claim, runner).
@@ -58,6 +61,10 @@ fn demo_suite_runs_green_with_structured_records() {
     let report = demo_suite().run();
     report.assert_green();
     assert_eq!(report.records.len(), 3);
+    assert!(
+        report.replay_records.is_empty() && report.disagreements.is_empty(),
+        "legacy Suite::case emits exactly its legacy case records"
+    );
     for record in &report.records {
         assert_eq!(record.version, 1);
         assert_eq!(record.suite, "casebook-demo");
@@ -160,4 +167,274 @@ fn digest_helper_is_the_canonical_fnv1a64() {
     assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
     assert_ne!(fnv1a64(b"a"), fnv1a64(b"b"));
     assert_eq!(fnv1a64(b"casebook"), fnv1a64(b"casebook"));
+}
+
+#[test]
+fn replay_spec_round_trips_and_records_verify_frame_integrity() {
+    let frame = b"casebook-replay-canonical-frame-v1".to_vec();
+    let command = "cargo test -p fs-casebook --test casebook replay_spec_round_trips -- --exact";
+    let spec = ReplaySpec::new(command, frame.clone());
+    assert_eq!(spec.command(), command);
+    assert_eq!(spec.canonical_inputs(), frame.as_slice());
+    assert_eq!(spec.inputs_digest(), fnv1a64(&frame));
+
+    let encoded = spec.canonical_inputs_hex();
+    let reconstructed = ReplaySpec::from_hex(command, &encoded).expect("canonical hex decodes");
+    assert_eq!(reconstructed, spec);
+
+    let first = Suite::new("casebook-replay-selftest")
+        .case_replayable("cb-replay-001", spec.clone(), ToleranceSpec::Exact, || {
+            CaseOutcome::pass("replay companion retained")
+        })
+        .run();
+    let replay = Suite::new("casebook-replay-selftest")
+        .case_replayable("cb-replay-001", spec, ToleranceSpec::Exact, || {
+            CaseOutcome::pass("replay companion retained")
+        })
+        .run();
+    assert!(first.all_passed() && replay.all_passed());
+    assert_eq!(
+        first.records[0].inputs_digest,
+        format!("{:016x}", fnv1a64(&frame))
+    );
+    let first_record = first
+        .replay_for("cb-replay-001")
+        .expect("replayable case emits a companion");
+    let replay_record = replay
+        .replay_for("cb-replay-001")
+        .expect("replay emits the same companion");
+    assert_eq!(first_record.version, CASEBOOK_REPLAY_RECORD_VERSION);
+    assert_eq!(
+        first_record.verify_and_decode().expect("record verifies"),
+        frame
+    );
+    assert_eq!(first_record.json_line(), replay_record.json_line());
+    assert_eq!(
+        first_record.json_line(),
+        "{\"casebook_replay\":1,\"suite\":\"casebook-replay-selftest\",\"case\":\"cb-replay-001\",\"command\":\"cargo test -p fs-casebook --test casebook replay_spec_round_trips -- --exact\",\"inputs_digest\":\"01ff42e80c555e77\",\"inputs_len\":34,\"canonical_inputs_hex\":\"63617365626f6f6b2d7265706c61792d63616e6f6e6963616c2d6672616d652d7631\"}"
+    );
+
+    let mut wrong_length = first_record.clone();
+    wrong_length.inputs_len += 1;
+    assert!(matches!(
+        wrong_length.verify_and_decode(),
+        Err(ReplayError::LengthMismatch { .. })
+    ));
+
+    let mut wrong_digest = first_record.clone();
+    wrong_digest.inputs_digest = "0000000000000000".to_owned();
+    assert!(matches!(
+        wrong_digest.verify_and_decode(),
+        Err(ReplayError::DigestMismatch { .. })
+    ));
+    let mut uppercase_frame = first_record.clone();
+    uppercase_frame.canonical_inputs_hex = uppercase_frame.canonical_inputs_hex.to_uppercase();
+    assert!(matches!(
+        uppercase_frame.verify_and_decode(),
+        Err(ReplayError::NonCanonicalHex { .. })
+    ));
+    assert!(matches!(
+        ReplaySpec::from_hex(command, "0"),
+        Err(ReplayError::OddHexLength { length: 1 })
+    ));
+    assert!(matches!(
+        ReplaySpec::from_hex(command, "0g"),
+        Err(ReplayError::InvalidHex {
+            offset: 1,
+            byte: b'g'
+        })
+    ));
+}
+
+#[test]
+fn identical_frames_have_no_disagreement() {
+    let frame = b"identical-frame";
+    assert!(
+        DisagreementRecord::first(
+            "casebook-disagreement-selftest",
+            "cb-disagreement-identical",
+            "implementation",
+            "reference",
+            frame,
+            frame,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn seeded_byte_corruption_emits_stable_bug_report_and_fails_closed() {
+    const SEED: u64 = 0xF5CB_0023_0000_0103;
+    let reference = b"casebook-disagreement-reference-v1".to_vec();
+    let offset = usize::try_from(SEED % reference.len() as u64).expect("offset fits usize");
+    let bit = u32::try_from((SEED >> 8) % 8).expect("bit fits u32");
+    let mut implementation = reference.clone();
+    implementation[offset] ^= 1_u8 << bit;
+
+    let first = DisagreementRecord::first(
+        "casebook-disagreement-selftest",
+        "cb-disagreement-seeded-byte",
+        "frankensim",
+        "frankenscipy",
+        &implementation,
+        &reference,
+    )
+    .expect("seeded corruption disagrees");
+    let replay = DisagreementRecord::first(
+        "casebook-disagreement-selftest",
+        "cb-disagreement-seeded-byte",
+        "frankensim",
+        "frankenscipy",
+        &implementation,
+        &reference,
+    )
+    .expect("replayed corruption disagrees");
+    assert_eq!(first, replay);
+    assert_eq!(first.version, CASEBOOK_DISAGREEMENT_RECORD_VERSION);
+    assert_eq!(first.mismatch_kind(), "byte");
+    assert_eq!(first.first_offset, offset);
+    assert_eq!(first.implementation_byte, Some(implementation[offset]));
+    assert_eq!(first.reference_byte, Some(reference[offset]));
+    assert_ne!(first.implementation_digest, first.reference_digest);
+    let line = first.json_line();
+    assert_eq!(line, replay.json_line());
+    assert!(!line.contains('\n'));
+    assert_eq!(
+        line,
+        "{\"casebook_disagreement\":1,\"suite\":\"casebook-disagreement-selftest\",\"case\":\"cb-disagreement-seeded-byte\",\"implementation\":\"frankensim\",\"reference\":\"frankenscipy\",\"mismatch_kind\":\"byte\",\"implementation_len\":34,\"reference_len\":34,\"implementation_digest\":\"6a4cbec3a30ceded\",\"reference_digest\":\"6b3fe07ef2feb8af\",\"first_offset\":11,\"implementation_byte\":\"71\",\"reference_byte\":\"73\"}"
+    );
+
+    let replay_spec = ReplaySpec::new(
+        "cargo test -p fs-casebook --test casebook seeded_byte_corruption -- --exact",
+        reference,
+    );
+    let report = Suite::new("casebook-disagreement-selftest")
+        .case_replayable(
+            "cb-disagreement-seeded-byte",
+            replay_spec,
+            ToleranceSpec::Exact,
+            move || {
+                CaseOutcome::pass(format!("seed=0x{SEED:016x}; disclosed corruption"))
+                    .with_disagreement(first)
+            },
+        )
+        .run();
+    assert!(
+        !report.all_passed(),
+        "attaching a disagreement cannot leave a case green"
+    );
+    assert_eq!(report.replay_records.len(), 1);
+    assert_eq!(report.disagreements.len(), 1);
+    assert_eq!(
+        report
+            .disagreements_for("cb-disagreement-seeded-byte")
+            .len(),
+        1
+    );
+
+    let panic = std::panic::catch_unwind(|| report.assert_green())
+        .expect_err("assert_green must carry replay and disagreement records");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("Casebook refusal carries text");
+    assert!(message.contains("\"casebook_replay\":1"));
+    assert!(message.contains("\"casebook_disagreement\":1"));
+    assert!(message.contains(&format!("seed=0x{SEED:016x}")));
+}
+
+#[test]
+fn length_boundary_disagreement_localizes_the_first_absent_byte() {
+    let implementation = [0x10, 0x20, 0x30];
+    let reference = [0x10, 0x20, 0x30, 0x40];
+    let disagreement = DisagreementRecord::first(
+        "casebook-disagreement-selftest",
+        "cb-disagreement-length",
+        "short-implementation",
+        "long-reference",
+        &implementation,
+        &reference,
+    )
+    .expect("different lengths disagree");
+    assert_eq!(disagreement.mismatch_kind(), "length-boundary");
+    assert_eq!(disagreement.first_offset, 3);
+    assert_eq!(disagreement.implementation_byte, None);
+    assert_eq!(disagreement.reference_byte, Some(0x40));
+    let line = disagreement.json_line();
+    assert!(line.contains("\"mismatch_kind\":\"length-boundary\""));
+    assert!(line.contains("\"implementation_byte\":null"));
+    assert!(line.contains("\"reference_byte\":\"40\""));
+}
+
+#[test]
+fn disagreement_identity_is_bound_to_its_owning_case() {
+    let disagreement = DisagreementRecord::first(
+        "foreign-suite",
+        "foreign-case",
+        "implementation",
+        "reference",
+        b"different",
+        b"reference",
+    )
+    .expect("frames disagree");
+    let report = Suite::new("owning-suite")
+        .case("owning-case", 7, ToleranceSpec::Exact, move || {
+            CaseOutcome::pass("identity must be rebound").with_disagreement(disagreement)
+        })
+        .run();
+
+    assert!(!report.all_passed());
+    let retained = report
+        .disagreements_for("owning-case")
+        .into_iter()
+        .next()
+        .expect("bound disagreement remains discoverable");
+    assert_eq!(retained.suite, "owning-suite");
+    assert_eq!(retained.case, "owning-case");
+    assert!(report.disagreements_for("foreign-case").is_empty());
+
+    let panic = std::panic::catch_unwind(|| report.assert_green())
+        .expect_err("bound disagreement keeps its owner red");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("Casebook refusal carries text");
+    assert!(message.contains("\"suite\":\"owning-suite\""));
+    assert!(message.contains("\"case\":\"owning-case\""));
+    assert!(!message.contains("foreign-case"));
+}
+
+#[test]
+fn replay_and_disagreement_json_escape_all_free_text() {
+    let suite = "quote\"suite\nline";
+    let case = "case\twith\\slash";
+    let disagreement = DisagreementRecord::first(
+        suite,
+        case,
+        "impl\"name\nline",
+        "ref\\name\tvalue",
+        b"a",
+        b"b",
+    )
+    .expect("frames disagree");
+    let report = Suite::new(suite)
+        .case_replayable(
+            case,
+            ReplaySpec::new("runner --label \"quoted\"\nnext\targ\\path", b"a".to_vec()),
+            ToleranceSpec::Exact,
+            move || CaseOutcome::fail("escaped companion rows").with_disagreement(disagreement),
+        )
+        .run();
+
+    let replay_line = report.replay_records[0].json_line();
+    let disagreement_line = report.disagreements[0].json_line();
+    assert!(!replay_line.contains('\n'));
+    assert!(!disagreement_line.contains('\n'));
+    assert!(replay_line.contains("quote\\\"suite\\nline"));
+    assert!(replay_line.contains("case\\twith\\\\slash"));
+    assert!(replay_line.contains("runner --label \\\"quoted\\\"\\nnext\\targ\\\\path"));
+    assert!(disagreement_line.contains("impl\\\"name\\nline"));
+    assert!(disagreement_line.contains("ref\\\\name\\tvalue"));
 }
