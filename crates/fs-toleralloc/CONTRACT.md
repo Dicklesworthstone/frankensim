@@ -153,6 +153,65 @@ The stricter robustness/admission policy is evidence-semantic. The consuming
 silently reinterpreted under the sealed-sensitivity, typed-event, sampled-only
 policy.
 
+## Perfect-dependence grouped allocation v1
+
+`allocate_grouped(&GroupedDependenceModel, variance_budget, k)` is the bounded
+dependency-aware complement to the legacy independent allocator. The admitted
+dependence class is deliberately fixed: members of one nonempty group share a
+perfectly positively correlated standardized shock, while different groups
+are mutually uncorrelated at second order. Sensitivities are strictly positive
+magnitudes, so coherent member loadings add and never silently cancel.
+
+For feature sensitivity `s_i`, cost coefficient `c_i`, tolerance `t_i`, and
+group `g`, this lane minimizes `sum(c_i / t_i)` subject to
+
+`sum_g (sum_(i in g) s_i t_i / k)^2 <= variance_budget`.
+
+Define `J_g = sum_(i in g) sqrt(c_i s_i)`,
+`D = sum_g J_g^(4/3)`, and `alpha = sqrt(variance_budget / D)`. The unique
+strictly convex optimum is
+
+`t_i = k alpha sqrt(c_i / s_i) J_g^(-1/3)`.
+
+The implementation evaluates this formula with deterministic max-shifted
+log-sum-exp, stable ordinal order, compensated public sums, and one common
+binary64 scale correction that preserves every KKT ratio while tightening the
+published budget residual. It refuses a vanished positive log-sum-exp term,
+nonrepresentable tolerance/loading/cost/variance, empty or oversized group and
+feature tables (128 each), empty groups, unstable or colliding names, invalid
+group references, and nonpositive/non-finite inputs. No iterative optimizer or
+callback is used.
+
+The privately constructed receipt retains the exact caller model and identity,
+budget, `k`, feature order and membership, tolerances, baseline actions, costs,
+coherent loadings, per-group log shapes/standard deviations/variances, and the
+counterfactual independent variances. Each published group standard deviation
+is the compensated sum of that receipt's published member loadings, so group
+and budget diagnostics audit through one numeric path. The receipt publishes
+coherent-minus-independent variance deltas, budget and closed-form cost
+residuals, plus the largest log-domain KKT stationarity mismatch. Singleton
+groups reduce to the legacy independent allocation algebra.
+
+`tests/dependency_allocation.rs` supplies G0/G3/G5 evidence. Its three-feature
+manufactured fixture has exact optimal tolerances `1/2`, group variances `1`
+and `1`, total variance `2`, and total cost `8`. Re-evaluating the legacy
+independent allocation under the declared coherent groups exceeds the true
+budget by a large margin. An unequal coherent pair independently checks the
+within-group sensitivity/cost ratio and receipt closure. The battery also
+covers common sensitivity and cost rescaling, singleton reduction, exact
+retained replay, group/name/reference admission, positive-domain refusals, and
+lost log-domain contribution refusal.
+
+Group membership and perfect `+1` dependence are supplied assertions, not
+inferred or calibrated facts. This lane makes no negative/partial correlation,
+cross-group covariance, signed cancellation, nonlinear response,
+distributional, tail/reliability, confidence, causality, or manufacturing-fit
+claim. It does not prove the declared block correlation describes the physical
+population. Sensitivity and tolerance scalars carry no typed units; compatible
+units remain a caller responsibility. The semantic digest is retained but not
+computed from, verified against, or authenticated for the group/feature bytes.
+Binary64 residuals are diagnostics, not exact-real certificates.
+
 ## Structured finite-population propagation v1
 
 `propagate_structured_population(&StructuredPopulationModel)` is the bounded
@@ -222,10 +281,12 @@ caller admission responsibility.
 
 - Sensitivities are SUPPLIED (from Proposal 1 adjoint `∂QoI/∂geometry` fields);
   this crate consumes them and their color, it does not compute them.
-- `allocate` remains the legacy independent-feature optimizer. The additive
-  correlated lane evaluates a supplied first-order stack; it does not yet solve
-  dependency-aware tolerance allocation or silently reinterpret old allocation
-  receipts.
+- `allocate` remains the legacy independent-feature optimizer and old receipts
+  are never silently reinterpreted. `allocate_grouped` solves only its admitted
+  block-diagonal perfect-`+1` dependence class; neither allocator solves general
+  covariance-constrained or nonlinear dependency-aware allocation. The
+  additive correlated lane evaluates a supplied fixed first-order stack rather
+  than allocating it.
 - Factor admission proves PSD structure from `C = L Lᵀ`. Its row-norm test is a
   binary64-computed near-unit check, not an exact-real unit-diagonal proof. It
   does not prove that the caller-supplied digest authenticates the factor bytes,

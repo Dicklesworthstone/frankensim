@@ -37,6 +37,13 @@ use std::{collections::BTreeMap, num::NonZeroU64};
 
 use fs_math::det;
 
+pub use dependency_allocation::{
+    DependencyGroup, DependencyGroupId, DependencyGroupReceipt, GROUPED_ALLOCATION_SCHEMA_V1,
+    GroupedAllocationError, GroupedAllocationItem, GroupedAllocationReceipt,
+    GroupedAllocationResource, GroupedDependenceIdentity, GroupedDependenceModel,
+    GroupedDerivedQuantity, GroupedFeature, MAX_DEPENDENCY_GROUPS_V1, MAX_DEPENDENCY_NAME_BYTES_V1,
+    MAX_DEPENDENCY_NAMESPACE_BYTES_V1, MAX_GROUPED_FEATURES_V1, allocate_grouped,
+};
 pub use fs_evidence::ColorRank;
 pub use structured_propagation::{
     ClampDisposition, InteriorKnotOwner, MAX_EXACT_STRUCTURED_WEIGHT_V1, MAX_STRUCTURED_DEPTH_V1,
@@ -52,6 +59,7 @@ pub use structured_propagation::{
     propagate_structured_population,
 };
 
+mod dependency_allocation;
 mod structured_propagation;
 
 /// Maximum axis count admitted by the version-one correlated-stack lane.
