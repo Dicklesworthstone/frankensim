@@ -4766,7 +4766,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
     assert_eq!(34 + 2 * 8 + 2 + 9 * 32 + 2 * 8, 356);
     assert_eq!(403 + 2 * 32, 467);
     assert_eq!(261_447_712u64 + 6_987_744, 268_435_456);
-    assert_eq!(35 + 32 + 2 * 8 + 2 + 8 * (8 + 265), 2_269);
+    assert_eq!(35 + 32 + 2 * 8 + 2 + 9 * (8 + 265), 2_542);
     assert_eq!(43 + 32 + 2 * 8 + 3 * 8 + 10 * 32, 435);
     assert_eq!(357 + 32, 389);
     assert_eq!(502 + 32, 534);
@@ -4811,7 +4811,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
     assert_eq!(35 + 2 * 8 + 2 * 32 + 2 * 2 + 5 * 32 + 1 + 2 * 8, 296);
     assert_eq!(38 + 2 * 8 + 2 * 32 + 2 * 2 + 2 + 11 * 32 + 2 * 8, 492);
     assert_eq!(77 + 4 * (8 + 69), 385);
-    assert_eq!(505 + 3 * 32, 601);
+    assert_eq!(505 + 4 * 32, 633);
     assert_eq!(27 + 32 + 4 * 8 + 32, 123);
     assert_eq!(32 + 2 * 8 + 1 + 3 * 32 + 2 * 8 + 2 * 32, 225);
     assert_eq!(225 + 2 * 32, 289);
