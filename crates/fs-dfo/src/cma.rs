@@ -3012,7 +3012,7 @@ fn run_admitted_bipop<F: FnMut(&[f64]) -> f64>(
     let best_restart = best_restart.ok_or(BipopError::InternalInvariant {
         what: "positive admitted budget must launch one restart",
     })?;
-    let schedule = records.iter().map(BipopRestartRecord::lambda).collect();
+    let schedule: Vec<usize> = records.iter().map(BipopRestartRecord::lambda).collect();
     let best = records[best_restart].report.clone();
     let trace_identity = build_bipop_trace_identity(&root, &trace_rows, &trace_points)?;
     let study_identity = build_bipop_study_identity(
