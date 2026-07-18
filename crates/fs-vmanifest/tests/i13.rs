@@ -5763,10 +5763,22 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         ),
         (
             "bootstrap_capacity_aggregate_outcome_append_receipt_a",
-            "bootstrap_capacity_allocation_evidence_bundle",
+            "bootstrap_capacity_outcome_durable_both_v4",
         ),
         (
             "bootstrap_capacity_aggregate_outcome_append_receipt_b",
+            "bootstrap_capacity_outcome_durable_both_v4",
+        ),
+        (
+            "bootstrap_capacity_aggregate_outcome_append_receipt_a",
+            "bootstrap_capacity_outcome_durable_a_only_v4",
+        ),
+        (
+            "bootstrap_capacity_aggregate_outcome_append_receipt_b",
+            "bootstrap_capacity_outcome_durable_b_only_v4",
+        ),
+        (
+            "bootstrap_capacity_reserved_trace_completion_sum",
             "bootstrap_capacity_allocation_evidence_bundle",
         ),
         (
@@ -5950,6 +5962,14 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         (
             "global_closure_evidence_artifact_sum",
             "global_expiry_durability_authority_set",
+        ),
+        (
+            "bootstrap_capacity_aggregate_outcome_append_receipt_a",
+            "bootstrap_capacity_allocation_evidence_bundle",
+        ),
+        (
+            "bootstrap_capacity_aggregate_outcome_append_receipt_b",
+            "bootstrap_capacity_allocation_evidence_bundle",
         ),
     ] {
         let mut frontier = BTreeSet::from([start]);

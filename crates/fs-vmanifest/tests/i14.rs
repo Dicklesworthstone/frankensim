@@ -5406,7 +5406,7 @@ fn i14_v2_terminal_authority_binds_first_boundary_card_and_lifecycle() {
     let timeout_pre_onset_boundary = I14TerminalBoundaryRecordV2 {
         boundary: I14TerminalBoundaryV1 {
             boundary_ordinal: 2,
-            logical_sequence: 85,
+            logical_sequence: 65,
             monotonic_ns: 2_500_000_000,
             completed: false,
             ..boundary_0
