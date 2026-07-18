@@ -65,6 +65,9 @@ pub const BIPOP_EVALUATION_SCHEMA_VERSION: u32 = 1;
 /// Canonical fs-obs identity kind for one exact BIPOP root-input preimage.
 pub const BIPOP_ROOT_IDENTITY_KIND: &str = "fs-dfo-bipop-root-v1";
 
+/// Schema version for the canonical BIPOP root-input identity.
+pub const BIPOP_ROOT_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
 /// Schema version for the allocation-free streaming trace identity.
 ///
 /// Version 2 length-frames the domain before the fixed-width trace header, so
@@ -80,6 +83,96 @@ pub const BIPOP_STUDY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 /// Domain prefix for the complete root, callback, and restart-ledger identity.
 pub const BIPOP_STUDY_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-full-study.v1";
+
+/// Owner-local declaration for the canonical BIPOP root-input identity.
+pub const BIPOP_ROOT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-dfo:bipop-root-inputs",
+    "version_const=BIPOP_ROOT_IDENTITY_SCHEMA_VERSION",
+    "version=1",
+    "domain=fs-dfo-bipop-root-v1",
+    "domain_const=BIPOP_ROOT_IDENTITY_KIND",
+    "encoder=bipop_root_identity",
+    "encoder_helpers=none",
+    "schema_constants=BIPOP_ROOT_IDENTITY_SCHEMA_VERSION,BIPOP_ROOT_IDENTITY_KIND,BIPOP_REPORT_SCHEMA_VERSION,BIPOP_ADMISSION_SCHEMA_VERSION",
+    "schema_functions=build_bipop_root_inputs",
+    "schema_dependencies=fs-obs:replay-identity-frame",
+    "digest=fnv1a64",
+    "encoding=typed-binary",
+    "sources=BipopRootIdentitySource",
+    "source_fields=BipopRootIdentitySource.start:semantic,BipopRootIdentitySource.sigma:semantic,BipopRootIdentitySource.total_budget:semantic,BipopRootIdentitySource.target:semantic,BipopRootIdentitySource.seed:semantic",
+    "source_bindings=BipopRootIdentitySource.start>dimension+start-coordinate-bits,BipopRootIdentitySource.sigma>initial-sigma-bits,BipopRootIdentitySource.total_budget>total-budget,BipopRootIdentitySource.target>target-presence+target-bits,BipopRootIdentitySource.seed>root-seed",
+    "external_semantic_fields=root-domain,root-schema-version,canonical-field-order,report-schema-version,admission-schema-version",
+    "semantic_fields=root-domain,root-schema-version,canonical-field-order,report-schema-version,admission-schema-version,dimension,start-coordinate-bits,initial-sigma-bits,total-budget,target-presence,target-bits,root-seed",
+    "excluded_fields=none",
+    "consumers=build_bipop_root_inputs,BipopReport::root_inputs,BipopReport::validate_ledger,BipopReport::admit_study_identity_with_replay",
+    "mutations=root-domain:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,root-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,canonical-field-order:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,report-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,admission-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,dimension:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,start-coordinate-bits:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,initial-sigma-bits:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,total-budget:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,target-presence:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,target-bits:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently,root-seed:crates/fs-dfo/src/cma.rs#bipop_root_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_bipop_root_identity_fields",
+    "transport_guard=BipopReport::validate_ledger",
+    "version_guard=crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed",
+    "coupling_surface=fs-dfo:bipop-root-inputs",
+];
+
+/// Owner-local declaration for the root-bound production callback trace.
+pub const BIPOP_TRACE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-dfo:bipop-callback-trace",
+    "version_const=BIPOP_TRACE_IDENTITY_SCHEMA_VERSION",
+    "version=2",
+    "domain=frankensim.fs-dfo.bipop-callback-trace.v2",
+    "domain_const=BIPOP_TRACE_IDENTITY_DOMAIN",
+    "encoder=bipop_trace_identity",
+    "encoder_helpers=none",
+    "schema_constants=BIPOP_TRACE_IDENTITY_SCHEMA_VERSION,BIPOP_TRACE_IDENTITY_DOMAIN,BIPOP_EVALUATION_SCHEMA_VERSION",
+    "schema_functions=build_bipop_trace_identity,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,crates/fs-blake3/src/lib.rs#ContentHash::as_bytes",
+    "schema_dependencies=fs-dfo:bipop-root-inputs",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=BipopTraceIdentitySource",
+    "source_fields=BipopTraceIdentitySource.root_canonical_bytes:semantic,BipopTraceIdentitySource.dimension:semantic,BipopTraceIdentitySource.rows:semantic,BipopTraceIdentitySource.points:semantic",
+    "source_bindings=BipopTraceIdentitySource.root_canonical_bytes>root-canonical-bytes,BipopTraceIdentitySource.dimension>dimension,BipopTraceIdentitySource.rows>row-count+row-schema-version+restart-ordinal+local-offset+objective-bits+row-order,BipopTraceIdentitySource.points>point-coordinate-bits+point-order",
+    "external_semantic_fields=trace-domain,trace-schema-version,canonical-field-order",
+    "semantic_fields=trace-domain,trace-schema-version,canonical-field-order,root-canonical-bytes,dimension,row-count,row-schema-version,restart-ordinal,local-offset,objective-bits,row-order,point-coordinate-bits,point-order",
+    "excluded_fields=none",
+    "consumers=build_bipop_trace_identity,BipopReport::trace_identity,BipopReport::validate_ledger,BipopReport::validate_study_identity",
+    "mutations=trace-domain:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,trace-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,canonical-field-order:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,root-canonical-bytes:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,dimension:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,row-count:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,row-schema-version:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,restart-ordinal:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,local-offset:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,objective-bits:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,row-order:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,point-coordinate-bits:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently,point-order:crates/fs-dfo/src/cma.rs#bipop_trace_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_bipop_trace_identity_fields",
+    "transport_guard=BipopReport::validate_ledger",
+    "version_guard=crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed",
+    "coupling_surface=fs-dfo:bipop-callback-trace",
+];
+
+/// Owner-local declaration for the complete BIPOP study identity.
+pub const BIPOP_STUDY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-dfo:bipop-full-study",
+    "version_const=BIPOP_STUDY_IDENTITY_SCHEMA_VERSION",
+    "version=1",
+    "domain=frankensim.fs-dfo.bipop-full-study.v1",
+    "domain_const=BIPOP_STUDY_IDENTITY_DOMAIN",
+    "encoder=bipop_study_identity",
+    "encoder_helpers=study_hash_field,study_hash_u64,study_hash_usize,study_hash_u32,study_hash_f64,study_hash_flag,bipop_lane_tag,cma_stop_reason_tag",
+    "schema_constants=BIPOP_STUDY_IDENTITY_SCHEMA_VERSION,BIPOP_STUDY_IDENTITY_DOMAIN,BIPOP_REPORT_SCHEMA_VERSION,BIPOP_ADMISSION_SCHEMA_VERSION,BIPOP_RESTART_SCHEMA_VERSION,BIPOP_EVALUATION_SCHEMA_VERSION,BIPOP_TRACE_IDENTITY_SCHEMA_VERSION,crates/fs-rand/src/lib.rs#STREAM_SEMANTICS_VERSION,crates/fs-la/src/eigen.rs#JACOBI_EIGH_ADMISSION_SCHEMA_VERSION,K_CMA,BIPOP_RESTART_SEED_STRIDE,BIPOP_LARGE_RUN_CAP,BIPOP_GENERATIONS_PER_RESTART",
+    "schema_functions=build_bipop_study_identity,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,crates/fs-blake3/src/lib.rs#ContentHash::as_bytes",
+    "schema_dependencies=fs-dfo:bipop-root-inputs,fs-dfo:bipop-callback-trace",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=BipopStudyIdentitySource",
+    "source_fields=BipopStudyIdentitySource.report_schema_version:semantic,BipopStudyIdentitySource.root:semantic,BipopStudyIdentitySource.root_content_identity:semantic,BipopStudyIdentitySource.schedule:semantic,BipopStudyIdentitySource.total_evals:semantic,BipopStudyIdentitySource.records:semantic,BipopStudyIdentitySource.best_restart:semantic,BipopStudyIdentitySource.best:semantic,BipopStudyIdentitySource.retained_trace_identity:semantic,BipopStudyIdentitySource.callback_content_identity:semantic",
+    "source_bindings=BipopStudyIdentitySource.report_schema_version>report-schema-version,BipopStudyIdentitySource.root>retained-root-canonical-bytes,BipopStudyIdentitySource.root_content_identity>recomputed-root-canonical-bytes,BipopStudyIdentitySource.schedule>schedule,BipopStudyIdentitySource.total_evals>total-evals,BipopStudyIdentitySource.records>restart-records,BipopStudyIdentitySource.best_restart>best-restart,BipopStudyIdentitySource.best>best-projection,BipopStudyIdentitySource.retained_trace_identity>retained-trace-identity,BipopStudyIdentitySource.callback_content_identity>callback-content-identity",
+    "external_semantic_fields=study-domain,study-schema-version,canonical-field-order,admission-schema-version,restart-schema-version,evaluation-schema-version,trace-schema-version,rand-stream-semantics-version,jacobi-admission-schema-version,cma-stream-kernel,restart-seed-stride,large-run-cap,generations-per-restart",
+    "semantic_fields=study-domain,study-schema-version,canonical-field-order,report-schema-version,admission-schema-version,restart-schema-version,evaluation-schema-version,trace-schema-version,rand-stream-semantics-version,jacobi-admission-schema-version,cma-stream-kernel,restart-seed-stride,large-run-cap,generations-per-restart,retained-root-canonical-bytes,recomputed-root-canonical-bytes,schedule,total-evals,restart-records,best-restart,best-projection,retained-trace-identity,callback-content-identity",
+    "excluded_fields=none",
+    "consumers=build_bipop_study_identity,BipopReport::study_identity,BipopReport::validate_study_identity,BipopReport::admit_study_identity,BipopReport::admit_study_identity_with_replay",
+    "mutations=study-domain:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,study-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,canonical-field-order:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,report-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,admission-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,restart-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,evaluation-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,trace-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,rand-stream-semantics-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,jacobi-admission-schema-version:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,cma-stream-kernel:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,restart-seed-stride:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,large-run-cap:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,generations-per-restart:crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed,retained-root-canonical-bytes:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,recomputed-root-canonical-bytes:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,schedule:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,total-evals:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,restart-records:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,best-restart:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,best-projection:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,retained-trace-identity:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently,callback-content-identity:crates/fs-dfo/src/cma.rs#bipop_study_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_bipop_study_identity_fields",
+    "transport_guard=BipopReport::admit_study_identity",
+    "version_guard=crates/fs-dfo/src/cma.rs#bipop_identity_versions_and_domains_fail_closed",
+    "coupling_surface=fs-dfo:bipop-full-study",
+];
 
 /// Sealed result of callback-free BIPOP input and arithmetic admission.
 ///
@@ -1084,6 +1177,56 @@ pub enum BipopLane {
     Small,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BipopRootIdentitySource<'a> {
+    start: &'a [f64],
+    sigma: f64,
+    total_budget: usize,
+    target: Option<f64>,
+    seed: u64,
+}
+
+#[allow(dead_code)]
+fn classify_bipop_root_identity_fields(source: &BipopRootIdentitySource<'_>) {
+    let BipopRootIdentitySource {
+        start: _,
+        sigma: _,
+        total_budget: _,
+        target: _,
+        seed: _,
+    } = source;
+}
+
+fn bipop_root_identity(source: &BipopRootIdentitySource<'_>) -> Result<ReplayIdentity, BipopError> {
+    let dimension = u64::try_from(source.start.len())
+        .map_err(|_| BipopError::IdentityFieldOverflow { what: "dimension" })?;
+    let identity_budget =
+        u64::try_from(source.total_budget).map_err(|_| BipopError::IdentityFieldOverflow {
+            what: "total budget",
+        })?;
+    let mut builder = IdentityBuilder::new(BIPOP_ROOT_IDENTITY_KIND)
+        .u64(
+            "report-schema-version",
+            u64::from(BIPOP_REPORT_SCHEMA_VERSION),
+        )
+        .u64(
+            "admission-schema-version",
+            u64::from(BIPOP_ADMISSION_SCHEMA_VERSION),
+        )
+        .u64("dimension", dimension)
+        .u64("total-budget", identity_budget)
+        .u64("root-seed", source.seed)
+        .f64_bits("initial-sigma", source.sigma)
+        .flag("target-present", source.target.is_some());
+    if let Some(target) = source.target {
+        builder = builder.f64_bits("target", target);
+    }
+    for coordinate in source.start {
+        builder = builder.f64_bits("start-coordinate", *coordinate);
+    }
+    Ok(builder.finish())
+}
+
 /// Exact causal inputs for one BIPOP study.
 ///
 /// The nested [`ReplayIdentity`] is a canonical, typed fs-obs preimage over
@@ -1186,39 +1329,20 @@ fn build_bipop_root_inputs(
     target: Option<f64>,
     seed: u64,
 ) -> Result<BipopRootInputs, BipopError> {
-    let dimension = u64::try_from(start.len())
-        .map_err(|_| BipopError::IdentityFieldOverflow { what: "dimension" })?;
-    let identity_budget =
-        u64::try_from(total_budget).map_err(|_| BipopError::IdentityFieldOverflow {
-            what: "total budget",
-        })?;
-    let mut builder = IdentityBuilder::new(BIPOP_ROOT_IDENTITY_KIND)
-        .u64(
-            "report-schema-version",
-            u64::from(BIPOP_REPORT_SCHEMA_VERSION),
-        )
-        .u64(
-            "admission-schema-version",
-            u64::from(BIPOP_ADMISSION_SCHEMA_VERSION),
-        )
-        .u64("dimension", dimension)
-        .u64("total-budget", identity_budget)
-        .u64("root-seed", seed)
-        .f64_bits("initial-sigma", sigma)
-        .flag("target-present", target.is_some());
-    if let Some(target) = target {
-        builder = builder.f64_bits("target", target);
-    }
-    for coordinate in start {
-        builder = builder.f64_bits("start-coordinate", *coordinate);
-    }
+    let source = BipopRootIdentitySource {
+        start,
+        sigma,
+        total_budget,
+        target,
+        seed,
+    };
     Ok(BipopRootInputs {
         start: start.to_vec(),
         sigma,
         total_budget,
         target,
         seed,
-        identity: builder.finish(),
+        identity: bipop_root_identity(&source)?,
     })
 }
 
@@ -1230,42 +1354,73 @@ struct BipopEvaluationRow {
     objective: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BipopTraceIdentitySource<'a> {
+    root_canonical_bytes: &'a [u8],
+    dimension: usize,
+    rows: &'a [BipopEvaluationRow],
+    points: &'a [f64],
+}
+
+#[allow(dead_code)]
+fn classify_bipop_trace_identity_fields(source: &BipopTraceIdentitySource<'_>) {
+    let BipopTraceIdentitySource {
+        root_canonical_bytes: _,
+        dimension: _,
+        rows: _,
+        points: _,
+    } = source;
+}
+
 fn build_bipop_trace_identity(
     root: &BipopRootInputs,
     rows: &[BipopEvaluationRow],
     points: &[f64],
 ) -> Result<BipopTraceIdentity, BipopError> {
-    let dimension = root.start.len();
-    if dimension == 0 {
+    let source = BipopTraceIdentitySource {
+        root_canonical_bytes: root.identity.canonical_bytes(),
+        dimension: root.start.len(),
+        rows,
+        points,
+    };
+    bipop_trace_identity(&source)
+}
+
+fn bipop_trace_identity(
+    source: &BipopTraceIdentitySource<'_>,
+) -> Result<BipopTraceIdentity, BipopError> {
+    if source.dimension == 0 {
         return Err(BipopError::InternalInvariant {
             what: "callback trace dimension must be positive",
         });
     }
     let encoded_dimension =
-        u64::try_from(dimension).map_err(|_| BipopError::IdentityFieldOverflow {
+        u64::try_from(source.dimension).map_err(|_| BipopError::IdentityFieldOverflow {
             what: "trace dimension",
         })?;
     let encoded_rows =
-        u64::try_from(rows.len()).map_err(|_| BipopError::IdentityFieldOverflow {
+        u64::try_from(source.rows.len()).map_err(|_| BipopError::IdentityFieldOverflow {
             what: "trace row count",
         })?;
-    let root_bytes = root.identity.canonical_bytes();
     let encoded_domain_bytes = u64::try_from(BIPOP_TRACE_IDENTITY_DOMAIN.len()).map_err(|_| {
         BipopError::IdentityFieldOverflow {
             what: "trace identity domain byte length",
         }
     })?;
-    let encoded_root_bytes =
-        u64::try_from(root_bytes.len()).map_err(|_| BipopError::IdentityFieldOverflow {
+    let encoded_root_bytes = u64::try_from(source.root_canonical_bytes.len()).map_err(|_| {
+        BipopError::IdentityFieldOverflow {
             what: "root identity byte length",
-        })?;
+        }
+    })?;
     let expected_points =
-        rows.len()
-            .checked_mul(dimension)
+        source
+            .rows
+            .len()
+            .checked_mul(source.dimension)
             .ok_or(BipopError::DimensionOverflow {
                 what: "callback trace coordinate entries",
             })?;
-    if points.len() != expected_points {
+    if source.points.len() != expected_points {
         return Err(BipopError::InternalInvariant {
             what: "callback trace points must form a dense row-major matrix",
         });
@@ -1278,8 +1433,12 @@ fn build_bipop_trace_identity(
     hasher.update(&encoded_dimension.to_le_bytes());
     hasher.update(&encoded_rows.to_le_bytes());
     hasher.update(&encoded_root_bytes.to_le_bytes());
-    hasher.update(root_bytes);
-    for (row, point) in rows.iter().zip(points.chunks_exact(dimension)) {
+    hasher.update(source.root_canonical_bytes);
+    for (row, point) in source
+        .rows
+        .iter()
+        .zip(source.points.chunks_exact(source.dimension))
+    {
         let encoded_local =
             u64::try_from(row.local_offset).map_err(|_| BipopError::IdentityFieldOverflow {
                 what: "trace local offset",
@@ -1294,8 +1453,8 @@ fn build_bipop_trace_identity(
     }
     Ok(BipopTraceIdentity {
         schema_version: BIPOP_TRACE_IDENTITY_SCHEMA_VERSION,
-        rows: rows.len(),
-        dimension,
+        rows: source.rows.len(),
+        dimension: source.dimension,
         digest: *hasher.finalize().as_bytes(),
     })
 }
@@ -1764,6 +1923,36 @@ fn cma_stop_reason_tag(reason: CmaStopReason) -> u8 {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BipopStudyIdentitySource<'a> {
+    report_schema_version: u32,
+    root: &'a BipopRootInputs,
+    root_content_identity: &'a ReplayIdentity,
+    schedule: &'a [usize],
+    total_evals: usize,
+    records: &'a [BipopRestartRecord],
+    best_restart: usize,
+    best: &'a CmaReport,
+    retained_trace_identity: BipopTraceIdentity,
+    callback_content_identity: BipopTraceIdentity,
+}
+
+#[allow(dead_code)]
+fn classify_bipop_study_identity_fields(source: &BipopStudyIdentitySource<'_>) {
+    let BipopStudyIdentitySource {
+        report_schema_version: _,
+        root: _,
+        root_content_identity: _,
+        schedule: _,
+        total_evals: _,
+        records: _,
+        best_restart: _,
+        best: _,
+        retained_trace_identity: _,
+        callback_content_identity: _,
+    } = source;
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_bipop_study_identity(
     report_schema_version: u32,
@@ -1777,6 +1966,37 @@ fn build_bipop_study_identity(
     retained_trace_identity: BipopTraceIdentity,
     callback_content_identity: BipopTraceIdentity,
 ) -> Result<BipopStudyIdentity, BipopError> {
+    let source = BipopStudyIdentitySource {
+        report_schema_version,
+        root,
+        root_content_identity,
+        schedule,
+        total_evals,
+        records,
+        best_restart,
+        best,
+        retained_trace_identity,
+        callback_content_identity,
+    };
+    bipop_study_identity(&source)
+}
+
+#[allow(clippy::too_many_lines)] // One ordered encoder keeps every retained projection visibly bound.
+fn bipop_study_identity(
+    source: &BipopStudyIdentitySource<'_>,
+) -> Result<BipopStudyIdentity, BipopError> {
+    let BipopStudyIdentitySource {
+        report_schema_version,
+        root,
+        root_content_identity,
+        schedule,
+        total_evals,
+        records,
+        best_restart,
+        best,
+        retained_trace_identity,
+        callback_content_identity,
+    } = *source;
     let mut hasher = Blake3::new();
     study_hash_field(
         &mut hasher,
@@ -3126,6 +3346,262 @@ mod tests {
         report.study_identity = report
             .computed_study_identity()
             .expect("mutated test study remains representable");
+    }
+
+    #[test]
+    fn bipop_root_identity_fields_move_independently() {
+        let start = [1.0, -2.0];
+        let source = BipopRootIdentitySource {
+            start: &start,
+            sigma: 0.5,
+            total_budget: 20,
+            target: Some(-1.0),
+            seed: 7,
+        };
+        let base = bipop_root_identity(&source).expect("canonical root identity");
+
+        let changed_start = [1.0, -2.5];
+        let mut changed = source;
+        changed.start = &changed_start;
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        let changed_dimension = [1.0, -2.0, 3.0];
+        changed = source;
+        changed.start = &changed_dimension;
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.sigma = f64::from_bits(source.sigma.to_bits() ^ 1);
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.total_budget += 1;
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.target = None;
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.target = Some(f64::from_bits((-1.0_f64).to_bits() ^ 1));
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.seed ^= 1;
+        assert_ne!(bipop_root_identity(&changed).unwrap(), base);
+
+        let reordered = IdentityBuilder::new(BIPOP_ROOT_IDENTITY_KIND)
+            .u64(
+                "admission-schema-version",
+                u64::from(BIPOP_ADMISSION_SCHEMA_VERSION),
+            )
+            .u64(
+                "report-schema-version",
+                u64::from(BIPOP_REPORT_SCHEMA_VERSION),
+            )
+            .u64("dimension", 2)
+            .u64("total-budget", 20)
+            .u64("root-seed", 7)
+            .f64_bits("initial-sigma", 0.5)
+            .flag("target-present", true)
+            .f64_bits("target", -1.0)
+            .f64_bits("start-coordinate", 1.0)
+            .f64_bits("start-coordinate", -2.0)
+            .finish();
+        assert_ne!(reordered, base, "canonical field order is semantic");
+    }
+
+    #[test]
+    fn bipop_trace_identity_fields_move_independently() {
+        let root = test_root(&[1.0, -2.0], 0.5, 20, None, 7);
+        let rows = [
+            BipopEvaluationRow {
+                schema_version: BIPOP_EVALUATION_SCHEMA_VERSION,
+                restart: 0,
+                local_offset: 0,
+                objective: 5.0,
+            },
+            BipopEvaluationRow {
+                schema_version: BIPOP_EVALUATION_SCHEMA_VERSION,
+                restart: 0,
+                local_offset: 1,
+                objective: 4.0,
+            },
+        ];
+        let points = [1.0, -2.0, 0.5, -1.5];
+        let source = BipopTraceIdentitySource {
+            root_canonical_bytes: root.identity.canonical_bytes(),
+            dimension: 2,
+            rows: &rows,
+            points: &points,
+        };
+        let base = bipop_trace_identity(&source).expect("canonical trace identity");
+
+        let mut changed = source;
+        changed.root_canonical_bytes = b"different-root";
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        let one_dimensional_points = [1.0, 0.5];
+        changed = source;
+        changed.dimension = 1;
+        changed.points = &one_dimensional_points;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.rows = &rows[..1];
+        changed.points = &points[..2];
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        let mut changed_rows = rows.clone();
+        changed_rows[0].schema_version ^= 1;
+        changed = source;
+        changed.rows = &changed_rows;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed_rows = rows.clone();
+        changed_rows[0].restart = 1;
+        changed.rows = &changed_rows;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed_rows = rows.clone();
+        changed_rows[1].local_offset = 2;
+        changed.rows = &changed_rows;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed_rows = rows.clone();
+        changed_rows[0].objective = f64::from_bits(rows[0].objective.to_bits() ^ 1);
+        changed.rows = &changed_rows;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed_rows = rows.clone();
+        changed_rows.swap(0, 1);
+        changed.rows = &changed_rows;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        let mut changed_points = points;
+        changed_points[2] = f64::from_bits(changed_points[2].to_bits() ^ 1);
+        changed = source;
+        changed.points = &changed_points;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+        changed_points = points;
+        changed_points.swap(0, 2);
+        changed = source;
+        changed.points = &changed_points;
+        assert_ne!(bipop_trace_identity(&changed).unwrap(), base);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One source-level test moves every complete-study projection class.
+    fn bipop_study_identity_fields_move_independently() {
+        let mut objective = |point: &[f64]| point.iter().map(|value| value * value).sum::<f64>();
+        let report = try_bipop_cmaes(&mut objective, &[2.0, -1.0], 0.75, 20, None, 11)
+            .expect("study owner fixture admits");
+        assert!(
+            report.records.len() > 1,
+            "fixture needs two restart records"
+        );
+        let root_content = build_bipop_root_inputs(
+            &report.root.start,
+            report.root.sigma,
+            report.root.total_budget,
+            report.root.target,
+            report.root.seed,
+        )
+        .expect("recompute root identity");
+        let callback_content =
+            build_bipop_trace_identity(&report.root, &report.trace_rows, &report.trace_points)
+                .expect("recompute callback identity");
+        let source = BipopStudyIdentitySource {
+            report_schema_version: report.schema_version,
+            root: &report.root,
+            root_content_identity: &root_content.identity,
+            schedule: &report.schedule,
+            total_evals: report.total_evals,
+            records: &report.records,
+            best_restart: report.best_restart,
+            best: &report.best,
+            retained_trace_identity: report.trace_identity,
+            callback_content_identity: callback_content,
+        };
+        let base = bipop_study_identity(&source).expect("canonical study identity");
+        assert_eq!(base, report.study_identity);
+
+        let mut changed = source;
+        changed.report_schema_version ^= 1;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let alternative_root = test_root(&[2.0, -1.0], 0.75, 20, None, 12);
+        changed = source;
+        changed.root = &alternative_root;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.root_content_identity = &alternative_root.identity;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let mut schedule = report.schedule.clone();
+        schedule[0] += 1;
+        changed = source;
+        changed.schedule = &schedule;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.total_evals += 1;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let mut records = report.records.clone();
+        records[0].seed ^= 1;
+        changed = source;
+        changed.records = &records;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        changed = source;
+        changed.best_restart = (report.best_restart + 1) % report.records.len();
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let mut best = report.best.clone();
+        best.sigma = f64::from_bits(best.sigma.to_bits() ^ 1);
+        changed = source;
+        changed.best = &best;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let mut retained_trace = report.trace_identity;
+        retained_trace.digest[0] ^= 1;
+        changed = source;
+        changed.retained_trace_identity = retained_trace;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+        let mut recomputed_trace = callback_content;
+        recomputed_trace.digest[0] ^= 1;
+        changed = source;
+        changed.callback_content_identity = recomputed_trace;
+        assert_ne!(bipop_study_identity(&changed).unwrap(), base);
+    }
+
+    #[test]
+    fn bipop_identity_versions_and_domains_fail_closed() {
+        assert_eq!(BIPOP_ROOT_IDENTITY_SCHEMA_VERSION, 1);
+        assert!(BIPOP_ROOT_IDENTITY_KIND.ends_with("-v1"));
+        assert!(BIPOP_TRACE_IDENTITY_DOMAIN.ends_with(".v2"));
+        assert!(BIPOP_STUDY_IDENTITY_DOMAIN.ends_with(".v1"));
+
+        let make_report = || {
+            let mut objective =
+                |point: &[f64]| point.iter().map(|value| value * value).sum::<f64>();
+            try_bipop_cmaes(&mut objective, &[2.0, -1.0], 0.75, 20, None, 11)
+                .expect("version refusal fixture admits")
+        };
+        let mut report = make_report();
+        report.schema_version ^= 1;
+        assert_eq!(
+            report.validate_ledger().unwrap_err().invariant(),
+            "report-schema-version"
+        );
+
+        report = make_report();
+        report.root.identity = IdentityBuilder::new("fs-dfo-bipop-root-v2").finish();
+        assert_eq!(
+            report.validate_ledger().unwrap_err().invariant(),
+            "root-identity"
+        );
+
+        report = make_report();
+        report.trace_rows[0].schema_version ^= 1;
+        assert_eq!(
+            report.validate_ledger().unwrap_err().invariant(),
+            "trace-schema-version"
+        );
+
+        report = make_report();
+        report.trace_identity.schema_version ^= 1;
+        assert_eq!(
+            report.validate_ledger().unwrap_err().invariant(),
+            "trace-identity"
+        );
+
+        report = make_report();
+        report.study_identity.schema_version ^= 1;
+        assert!(matches!(
+            report.validate_study_identity(),
+            Err(BipopStudyAdmissionError::PayloadIdentityMismatch { .. })
+        ));
     }
 
     /// G0: both random domains count every semantic axis, accept exactly the

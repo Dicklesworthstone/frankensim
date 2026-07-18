@@ -66,6 +66,13 @@ the fs-opt problem IR is a wiring bead once that crate stabilizes
   projection, and every ordered restart/report bit. It distinguishes a stale
   payload from a valid payload that merely names a different externally retained
   study.
+- `BIPOP_ROOT_IDENTITY_SCHEMA_DECLARATION`,
+  `BIPOP_TRACE_IDENTITY_SCHEMA_DECLARATION`, and
+  `BIPOP_STUDY_IDENTITY_SCHEMA_DECLARATION` are the owner-local field,
+  dependency, mutation, transport, and version inventories for those three
+  production identities. Their source guards destructure every producer field;
+  their mutation lanes move the root preimage, ordered callback trace, and full
+  retained study projections independently.
 - `BipopReport::admit_study_identity(expected)` is the cheap callback-free
   identity plus structural-ledger gate. It deliberately does not reconstruct
   candidate generation, final CMA state, or objective semantics.
@@ -570,11 +577,12 @@ remain assertion-only and silent.
   `BipopReport`; `Cx` cancellation with request/drain/finalize, no-half-record
   prefix evidence, pause/resume/fork identity, and interval-sheaf/schedule
   certificates remain parent bead `7tv.23` obligations.
-- Root/trace/study identity owner declarations and generated identity-catalog
-  registration remain explicitly tracked by parent `7tv.23`. The existing
-  registry declaration format requires a full producer field/mutation inventory,
-  not a small domain-row addition; this tranche does not invent a partial
-  declaration or claim catalog admission.
+- Root/trace/study owner declarations and authority pins cover the existing
+  production encoders. Generated identity-catalog/coupling regeneration and
+  batch execution of their mutation lanes remain proof-pending under parent
+  `7tv.23`. The declarations do not add a signature, independent objective
+  oracle, whole-build identity, or proof beyond the callback-free and replay-
+  relative admission boundaries above.
 - The four `fs-dfo` aggregate rows attest only to their completed in-repo
   assertions at the recorded input roots. They do not promote the frozen hash
   measurement to a verdict or claim coverage of other seeds, external benchmark
