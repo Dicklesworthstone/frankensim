@@ -34,6 +34,8 @@ use super::{
 
 /// Bounded graph-bound datum features and ordered reference frames.
 pub mod datum_system;
+/// Typed mating-feature size envelopes and derived clearance state.
+pub mod fit_clearance;
 /// Typed surface-texture requirements and as-built observations.
 pub mod surface_texture;
 /// Exact positional binding from Machine-IR tolerance axes to an admitted

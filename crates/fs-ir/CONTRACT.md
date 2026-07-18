@@ -672,6 +672,48 @@ admitted derived-geometry boundary.
   between texture metrics, infer friction/wear/wetting/contact conductance, or
   transport attachments across lineage. Circular and radial lay tags remain
   nominal declarations interpreted only by their exact external coordinates.
+- `machine::manufacturing::fit_clearance` is the additive native mating-fit
+  seed. `MachineFitClearanceDraftV1::admit_against` binds one exact admitted
+  Machine graph to at most 4,096 semantic requirements over role-ordered
+  internal/external `ContactFeatureId` endpoints. Each endpoint carries an
+  explicit caller-declared body. Admission proves that the body and feature
+  both exist and share one subsystem owner independently at each endpoint; it
+  does not infer physical feature-to-body containment. Cross-subsystem pairs
+  are allowed and do not fabricate an `InterfaceBinding`.
+- A requirement binds a strictly positive unit-bearing basic size and an
+  ordered signed diametral-gap envelope. Source binary64 bits, submitted
+  metre/millimetre/micrometre/nanometre/inch unit, and deterministic binary64
+  coherent-SI metre bits are all identity-semantic. Signed zero is canonical.
+  The envelope derives its only compatible regime: nonnegative-to-positive is
+  `Clearance`, negative-to-nonpositive is `Interference`, and a negative-to-
+  positive span is `Transition`. Inverted bounds and the degenerate `[0, 0]`
+  envelope cannot be constructed, so caller text cannot contradict the
+  retained regime.
+- Standard/model interpretation, machine-readable semantic source, and
+  optional graphical presentation are distinct nominal artifact roles. A
+  presentation wrapper cannot occupy the semantic-source field. Admission
+  refuses empty and raw one-over inputs, duplicate requirement IDs, reuse of a
+  body or feature in both roles, unknown/cross-owner selectors, and duplicate
+  unordered feature pairs. Reversing a single pair is therefore an alias when
+  both declarations coexist, while endpoint role order remains identity-
+  semantic for a single declaration.
+- `MachineFitClearanceIdV1` binds the fit and FrankenScript IR schema versions,
+  exact Machine graph identity, canonical requirement IDs, both endpoint role/
+  body/feature identities and keys, basic-size and gap source/unit/SI bits,
+  derived regime, and every artifact coordinate. Caller requirement order is
+  non-semantic. `tests/machine_manufacturing_fit_clearance.rs` supplies G0/G3/G5
+  evidence for all three regime boundaries, unit and signed-zero
+  canonicalization, identity movement across selector/numeric/regime/artifact
+  roles, reversed-pair alias refusal, endpoint-specific ownership diagnostics,
+  exact-cap/N+1 preflight, and complete receipt replay.
+- This structural seed does not prove that a selected contact feature is a
+  cylinder, hole, shaft, feature of size, coaxial pair, or dimensionally
+  measured geometry. It does not decode ISO 286/ASME fit designations, establish
+  GD&T/MMC/LMC semantics, convert behavior tolerances or `fs-toleralloc` stacks,
+  estimate statistical clearance/reliability, execute assembly, compute press
+  force or contact mechanics, account for thermal/load/coating/lubrication/wear
+  effects, authenticate artifacts, perform inspection/pass-fail, integrate
+  gear backlash, or transport fit attachments across lineage.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
