@@ -1,18 +1,23 @@
 //! G5 study-scale replay for the production BIPOP-CMA path (7tv.21.22).
 //!
 //! The fixture captures every objective call and binds that trace together
-//! with every public `BipopReport`/`CmaReport` field. A test-local algebraic
-//! oracle independently checks objective semantics, reconstructs every restart
-//! boundary and BIPOP budget decision, verifies the declared restart/sample
-//! streams at their observable boundaries, and links the first stable global
-//! minimum to its exact winning run. A disclosed seeded mutation changes one
-//! returned coordinate bit. The unsealed edit is refused as a stale payload,
-//! the self-consistently resealed edit is refused both against the retained
-//! reference and by semantic admission, and the resulting red fs-obs evidence
-//! is independently reproducible. This is one finite deterministic study, not
-//! an optimizer-quality or performance claim.
+//! with the complete ordered public restart ledger, its named best restart,
+//! and every legacy `BipopReport`/nested `CmaReport` projection. A test-local
+//! algebraic oracle independently checks objective semantics. A separate
+//! trace-driven CMA shadow reconstructs every restart boundary, stream sample,
+//! budget decision, terminal reason, and report field before linking the first
+//! stable global minimum to the exact earliest winning restart. A disclosed
+//! seeded mutation changes one returned coordinate bit. The unsealed edit is
+//! refused as a stale payload, the self-consistently resealed edit is refused
+//! both against the retained reference and by semantic admission, and the
+//! resulting red fs-obs evidence is independently reproducible. This is one
+//! finite same-build, same-ISA deterministic study, not an optimizer-quality,
+//! refreshed cross-ISA, or performance claim.
 
-use fs_dfo::{BipopReport, bipop_cmaes};
+use fs_dfo::{
+    BIPOP_RESTART_SCHEMA_VERSION, BipopLane, BipopReport, BipopRestartRecord, CmaReport,
+    CmaStopReason, bipop_cmaes,
+};
 use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
 use fs_obs::{Emitter, Event, EventKind, Severity};
 use fs_rand::StreamKey;
@@ -41,7 +46,7 @@ const CMA_MEANINGFUL_IMPROVEMENT_RELATIVE: f64 = 1e-12;
 const CMA_STAGNATION_GENERATIONS: usize = 120;
 const OBJECTIVE_ORACLE_ROUNDOFF_SCALE: f64 = 64.0;
 const SEMANTIC_ORACLE_VERSION: &str =
-    "bipop-algebraic-objective-restart-stream-schedule-accounting-v2";
+    "bipop-algebraic-objective-trace-driven-cma-ledger-accounting-v3";
 
 // These are the logical stream coordinates and restart rule used by
 // `fs_dfo::cma`; recording them makes the private implementation choice
@@ -80,6 +85,13 @@ struct RestartSlice {
     lambda: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ReconstructedRestart {
+    slice: RestartSlice,
+    report: CmaReport,
+    stop_reason: CmaStopReason,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mutation {
     seed: u64,
@@ -100,6 +112,21 @@ struct SeededCorruption {
 
 fn usize_u64(value: usize) -> u64 {
     u64::try_from(value).expect("fixture cardinality fits u64")
+}
+
+fn lane_name(lane: BipopLane) -> &'static str {
+    match lane {
+        BipopLane::Large => "large",
+        BipopLane::Small => "small",
+    }
+}
+
+fn stop_reason_name(reason: CmaStopReason) -> &'static str {
+    match reason {
+        CmaStopReason::TargetReached => "target-reached",
+        CmaStopReason::BudgetExhausted => "budget-exhausted",
+        CmaStopReason::Stagnated => "stagnated",
+    }
 }
 
 fn shifted_rastrigin_callback(x: &[f64]) -> f64 {
@@ -143,7 +170,7 @@ fn expected_base_lambda() -> usize {
 }
 
 fn fixture_identity(seed: u64) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-dfo-bipop-study-fixture-v2")
+    let mut builder = IdentityBuilder::new("fs-dfo-bipop-study-fixture-v3")
         .str("suite", SUITE)
         .str("case", CASE)
         .str("red-case", RED_CASE)
@@ -199,7 +226,19 @@ fn fixture_identity(seed: u64) -> ReplayIdentity {
         )
         .str(
             "bipop-best-update-rule",
-            "strictly-lower-run-objective-only;first-stable-tie",
+            "f64-total-cmp-strictly-less;earliest-restart-wins-ties",
+        )
+        .u64(
+            "bipop-restart-record-schema-version",
+            u64::from(BIPOP_RESTART_SCHEMA_VERSION),
+        )
+        .str(
+            "bipop-restart-record-fields",
+            "schema-version;ordinal;lane;lambda;allocated-budget;seed;start;half-open-trace-interval;terminal-reason;complete-cma-report",
+        )
+        .str(
+            "bipop-legacy-projections",
+            "schedule=ordered-record-lambdas;total-evals=terminal-trace-offset;best=named-best-record-report",
         )
         .u64("large-run-cap-trigger", u64::from(LARGE_RUN_CAP_TRIGGER))
         .u64("cma-eigen-interval", usize_u64(CMA_EIGEN_INTERVAL))
@@ -241,6 +280,7 @@ fn fixture_identity(seed: u64) -> ReplayIdentity {
             "safe-rust;strict-fs-math;keyed-fs-rand;canonical-fs-obs",
         )
         .str("execution-context", "single-threaded-direct-test-no-Cx")
+        .str("determinism-scope", "same-build-same-ISA")
         .str("fs-dfo-version", fs_dfo::VERSION)
         .str("fs-la-version", fs_la::VERSION)
         .str("fs-math-version", fs_math::VERSION)
@@ -260,10 +300,12 @@ fn result_identity(
     report: &BipopReport,
     evaluations: &[Evaluation],
 ) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-dfo-bipop-study-result-v1")
+    let mut builder = IdentityBuilder::new("fs-dfo-bipop-study-result-v2")
         .child("fixture", fixture)
         .u64("total-evals", usize_u64(report.total_evals))
         .u64("schedule-length", usize_u64(report.schedule.len()))
+        .u64("restart-record-count", usize_u64(report.records().len()))
+        .u64("best-restart", usize_u64(report.best_restart()))
         .u64("best-x-length", usize_u64(report.best.x_best.len()))
         .f64_bits("best-f", report.best.f_best)
         .u64("best-run-evals", usize_u64(report.best.evals))
@@ -275,6 +317,48 @@ fn result_identity(
         builder = builder
             .u64("restart-index", usize_u64(restart))
             .u64("restart-lambda", usize_u64(lambda));
+    }
+    for (record_index, record) in report.records().iter().enumerate() {
+        builder = builder
+            .u64("record-index", usize_u64(record_index))
+            .u64("record-schema-version", u64::from(record.schema_version()))
+            .u64("record-ordinal", record.ordinal())
+            .str("record-lane", lane_name(record.lane()))
+            .u64("record-lambda", usize_u64(record.lambda()))
+            .u64(
+                "record-allocated-budget",
+                usize_u64(record.allocated_budget()),
+            )
+            .u64("record-seed", record.seed())
+            .u64("record-start-length", usize_u64(record.start().len()))
+            .u64("record-trace-start", usize_u64(record.trace_start()))
+            .u64("record-trace-end", usize_u64(record.trace_end()))
+            .str(
+                "record-terminal-reason",
+                stop_reason_name(record.stop_reason()),
+            )
+            .u64(
+                "record-report-x-length",
+                usize_u64(record.report().x_best.len()),
+            )
+            .f64_bits("record-report-best-f", record.report().f_best)
+            .u64("record-report-evals", usize_u64(record.report().evals))
+            .u64(
+                "record-report-generations",
+                usize_u64(record.report().generations),
+            )
+            .flag("record-report-converged", record.report().converged)
+            .f64_bits("record-report-sigma", record.report().sigma);
+        for (coordinate, &value) in record.start().iter().enumerate() {
+            builder = builder
+                .u64("record-start-coordinate-index", usize_u64(coordinate))
+                .f64_bits("record-start-coordinate", value);
+        }
+        for (coordinate, &value) in record.report().x_best.iter().enumerate() {
+            builder = builder
+                .u64("record-report-coordinate-index", usize_u64(coordinate))
+                .f64_bits("record-report-coordinate", value);
+        }
     }
     for (coordinate, &value) in report.best.x_best.iter().enumerate() {
         builder = builder
@@ -347,36 +431,393 @@ fn expected_restart_starts(input_seed: u64, restart_count: usize) -> Vec<Vec<f64
         .collect()
 }
 
-fn first_generation_matches(
-    run: &StudyRun,
-    restart: usize,
-    slice: RestartSlice,
-    start: &[f64],
-) -> bool {
-    let run_evals = slice.end - slice.start;
-    if run_evals < 1 + slice.lambda {
-        return true;
+fn report_mismatch(prefix: &str, actual: &CmaReport, expected: &CmaReport) -> Option<String> {
+    if actual.x_best.len() != expected.x_best.len() {
+        return Some(format!(
+            "{prefix}.x-length:{}!={}",
+            actual.x_best.len(),
+            expected.x_best.len()
+        ));
     }
-    let restart_offset = usize_u64(restart)
-        .checked_mul(RESTART_SEED_STRIDE)
-        .expect("fixture restart seed offset fits u64");
+    for (coordinate, (&actual, &expected)) in actual.x_best.iter().zip(&expected.x_best).enumerate()
+    {
+        if actual.to_bits() != expected.to_bits() {
+            return Some(format!(
+                "{prefix}.x[{coordinate}]:0x{:016x}!=0x{:016x}",
+                actual.to_bits(),
+                expected.to_bits()
+            ));
+        }
+    }
+    if actual.f_best.to_bits() != expected.f_best.to_bits() {
+        return Some(format!(
+            "{prefix}.f:0x{:016x}!=0x{:016x}",
+            actual.f_best.to_bits(),
+            expected.f_best.to_bits()
+        ));
+    }
+    if actual.evals != expected.evals {
+        return Some(format!(
+            "{prefix}.evals:{}!={}",
+            actual.evals, expected.evals
+        ));
+    }
+    if actual.generations != expected.generations {
+        return Some(format!(
+            "{prefix}.generations:{}!={}",
+            actual.generations, expected.generations
+        ));
+    }
+    if actual.converged != expected.converged {
+        return Some(format!(
+            "{prefix}.converged:{}!={}",
+            actual.converged, expected.converged
+        ));
+    }
+    if actual.sigma.to_bits() != expected.sigma.to_bits() {
+        return Some(format!(
+            "{prefix}.sigma:0x{:016x}!=0x{:016x}",
+            actual.sigma.to_bits(),
+            expected.sigma.to_bits()
+        ));
+    }
+    None
+}
+
+/// Reconstruct one CMA run from its declared root inputs and callback trace.
+///
+/// This deliberately does not call `cmaes`, `bipop_cmaes`, or the production
+/// ledger validator. It shares the declared deterministic math/eigensolver
+/// primitives, but independently advances the public algorithm equations and
+/// requires every generated candidate bit to occur at the exact trace slot.
+/// The fixture therefore claims a trace-driven shadow, not implementation-total
+/// independence from the production numerical substrate.
+#[allow(clippy::too_many_lines)]
+fn reconstruct_cma_from_trace(
+    evaluations: &[Evaluation],
+    start: &[f64],
+    lambda: usize,
+    allocated_budget: usize,
+    seed: u64,
+) -> Result<(CmaReport, CmaStopReason), String> {
+    let Some(initial) = evaluations.first() else {
+        return Err("empty-callback-trace".to_string());
+    };
+    if !same_point_bits(&initial.x, start) {
+        return Err("initial-callback-point-does-not-match-restart-start".to_string());
+    }
+    if start.len() != DIMENSION {
+        return Err(format!(
+            "restart-dimension:{}!=expected-{DIMENSION}",
+            start.len()
+        ));
+    }
+    if allocated_budget == 0 {
+        return Err("zero-local-budget-cannot-admit-initial-callback".to_string());
+    }
+
+    let n = start.len();
+    let lambda = lambda.max(4);
+    let mu = lambda / 2;
+    let raw: Vec<f64> = (0..mu)
+        .map(|index| {
+            fs_math::det::ln(f64::midpoint(lambda as f64, 1.0))
+                - fs_math::det::ln(index as f64 + 1.0)
+        })
+        .collect();
+    let weight_sum: f64 = raw.iter().sum();
+    let weights: Vec<f64> = raw.iter().map(|weight| weight / weight_sum).collect();
+    let mu_eff = 1.0 / weights.iter().map(|weight| weight * weight).sum::<f64>();
+    let n_f64 = n as f64;
+    let c_c = (4.0 + mu_eff / n_f64) / (n_f64 + 4.0 + 2.0 * mu_eff / n_f64);
+    let c_s = (mu_eff + 2.0) / (n_f64 + mu_eff + 5.0);
+    let c_1 = 2.0 / ((n_f64 + 1.3) * (n_f64 + 1.3) + mu_eff);
+    let c_mu = (1.0 - c_1)
+        .min(2.0 * (mu_eff - 2.0 + 1.0 / mu_eff) / ((n_f64 + 2.0) * (n_f64 + 2.0) + mu_eff));
+    let damping =
+        1.0 + 2.0 * (fs_math::det::sqrt((mu_eff - 1.0) / (n_f64 + 1.0)) - 1.0).max(0.0) + c_s;
+    let expected_normal_norm =
+        fs_math::det::sqrt(n_f64) * (1.0 - 1.0 / (4.0 * n_f64) + 1.0 / (21.0 * n_f64 * n_f64));
+
+    let mut mean = start.to_vec();
+    let mut sigma = SIGMA0;
+    let mut covariance = vec![0.0_f64; n * n];
+    for coordinate in 0..n {
+        covariance[coordinate * n + coordinate] = 1.0;
+    }
+    let mut covariance_path = vec![0.0_f64; n];
+    let mut sigma_path = vec![0.0_f64; n];
+    let mut eigenvectors = covariance.clone();
+    let mut eigenvalue_roots = vec![1.0_f64; n];
     let mut stream = StreamKey {
-        seed: run.input_seed.wrapping_add(restart_offset),
+        seed,
         kernel: CMA_STREAM_KERNEL,
         tile: CMA_SAMPLE_TILE,
     }
     .stream();
-    (0..slice.lambda).all(|candidate| {
-        let expected: Vec<f64> = start
-            .iter()
-            .map(|&mean| SIGMA0.mul_add(stream.next_normal(), mean))
-            .collect();
-        same_point_bits(&expected, &run.evaluations[slice.start + 1 + candidate].x)
-    })
+
+    let mut x_best = mean.clone();
+    let mut f_best = initial.value;
+    let mut evals = 1usize;
+    let mut generations = 0usize;
+    if f_best <= F_TARGET {
+        if evaluations.len() != 1 {
+            return Err(format!(
+                "target-reached-at-initial-callback-but-trace-has-{}-entries",
+                evaluations.len()
+            ));
+        }
+        return Ok((
+            CmaReport {
+                x_best,
+                f_best,
+                evals,
+                generations,
+                converged: true,
+                sigma,
+            },
+            CmaStopReason::TargetReached,
+        ));
+    }
+    let mut generations_since_improvement = 0usize;
+    let mut normal_samples = vec![vec![0.0_f64; n]; lambda];
+    let mut transformed_samples = vec![vec![0.0_f64; n]; lambda];
+    let mut fitness = vec![0.0_f64; lambda];
+
+    while evals + lambda <= allocated_budget {
+        generations += 1;
+        if generations % CMA_EIGEN_INTERVAL.max(1) == 1 || CMA_EIGEN_INTERVAL <= 1 {
+            for row in 0..n {
+                for column in row + 1..n {
+                    let average =
+                        f64::midpoint(covariance[row * n + column], covariance[column * n + row]);
+                    covariance[row * n + column] = average;
+                    covariance[column * n + row] = average;
+                }
+            }
+            let (eigenvalues, next_eigenvectors) = fs_la::eigen::jacobi_eigh(&covariance, n);
+            let maximum = eigenvalues
+                .last()
+                .copied()
+                .unwrap_or(1.0)
+                .max(f64::MIN_POSITIVE);
+            for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
+                eigenvalue_roots[index] = fs_math::det::sqrt(eigenvalue.max(1e-14 * maximum));
+            }
+            eigenvectors.copy_from_slice(&next_eigenvectors);
+        }
+
+        for (candidate, normal) in normal_samples.iter_mut().enumerate() {
+            for coordinate in normal.iter_mut() {
+                *coordinate = stream.next_normal();
+            }
+            let transformed = &mut transformed_samples[candidate];
+            for row in 0..n {
+                let mut accumulator = 0.0_f64;
+                for column in 0..n {
+                    accumulator = (eigenvectors[row * n + column] * eigenvalue_roots[column])
+                        .mul_add(normal[column], accumulator);
+                }
+                transformed[row] = accumulator;
+            }
+            let point: Vec<f64> = mean
+                .iter()
+                .zip(transformed.iter())
+                .map(|(location, displacement)| sigma.mul_add(*displacement, *location))
+                .collect();
+            let Some(observed) = evaluations.get(evals) else {
+                return Err(format!(
+                    "shadow-required-callback-{evals}-for-generation-{generations}"
+                ));
+            };
+            if !same_point_bits(&point, &observed.x) {
+                return Err(format!(
+                    "generation-{generations}-candidate-{candidate}-stream-point-mismatch"
+                ));
+            }
+            fitness[candidate] = observed.value;
+            evals += 1;
+            if fitness[candidate] < f_best {
+                if f_best - fitness[candidate]
+                    > CMA_MEANINGFUL_IMPROVEMENT_RELATIVE * (1.0 + f_best.abs())
+                {
+                    generations_since_improvement = 0;
+                }
+                f_best = fitness[candidate];
+                x_best = point;
+            }
+        }
+        generations_since_improvement += 1;
+        if f_best <= F_TARGET {
+            if evals != evaluations.len() {
+                return Err(format!(
+                    "target-terminal-offset-{evals}!=trace-length-{}",
+                    evaluations.len()
+                ));
+            }
+            return Ok((
+                CmaReport {
+                    x_best,
+                    f_best,
+                    evals,
+                    generations,
+                    converged: true,
+                    sigma,
+                },
+                CmaStopReason::TargetReached,
+            ));
+        }
+
+        let mut order: Vec<usize> = (0..lambda).collect();
+        order.sort_by(|&left, &right| {
+            fitness[left]
+                .total_cmp(&fitness[right])
+                .then(left.cmp(&right))
+        });
+        let mut weighted_step = vec![0.0_f64; n];
+        for (weight, &candidate) in weights.iter().zip(&order) {
+            for coordinate in 0..n {
+                weighted_step[coordinate] = weight.mul_add(
+                    transformed_samples[candidate][coordinate],
+                    weighted_step[coordinate],
+                );
+            }
+        }
+        for coordinate in 0..n {
+            mean[coordinate] = sigma.mul_add(weighted_step[coordinate], mean[coordinate]);
+        }
+
+        let mut inverse_root_step = vec![0.0_f64; n];
+        for row in 0..n {
+            let mut accumulator = 0.0_f64;
+            for column in 0..n {
+                accumulator =
+                    eigenvectors[column * n + row].mul_add(weighted_step[column], accumulator);
+            }
+            inverse_root_step[row] = accumulator / eigenvalue_roots[row];
+        }
+        let mut whitened_step = vec![0.0_f64; n];
+        for row in 0..n {
+            let mut accumulator = 0.0_f64;
+            for column in 0..n {
+                accumulator =
+                    eigenvectors[row * n + column].mul_add(inverse_root_step[column], accumulator);
+            }
+            whitened_step[row] = accumulator;
+        }
+        let sigma_path_scale = fs_math::det::sqrt(c_s * (2.0 - c_s) * mu_eff);
+        for coordinate in 0..n {
+            sigma_path[coordinate] = (1.0 - c_s).mul_add(
+                sigma_path[coordinate],
+                sigma_path_scale * whitened_step[coordinate],
+            );
+        }
+        let sigma_path_norm =
+            fs_math::det::sqrt(sigma_path.iter().map(|value| value * value).sum::<f64>());
+        sigma *=
+            fs_math::det::exp((c_s / damping) * (sigma_path_norm / expected_normal_norm - 1.0));
+        let spread = sigma
+            * eigenvalue_roots
+                .iter()
+                .fold(0.0_f64, |maximum, &root| maximum.max(root));
+        if spread < CMA_SPREAD_RELATIVE_LIMIT * SIGMA0
+            || generations_since_improvement > CMA_STAGNATION_GENERATIONS
+        {
+            if evals != evaluations.len() {
+                return Err(format!(
+                    "stagnation-terminal-offset-{evals}!=trace-length-{}",
+                    evaluations.len()
+                ));
+            }
+            return Ok((
+                CmaReport {
+                    x_best,
+                    f_best,
+                    evals,
+                    generations,
+                    converged: false,
+                    sigma,
+                },
+                CmaStopReason::Stagnated,
+            ));
+        }
+
+        let covariance_path_active = sigma_path_norm
+            / fs_math::det::sqrt(
+                1.0 - fs_math::det::powi(
+                    1.0 - c_s,
+                    2 * i32::try_from(generations.min(100_000))
+                        .expect("fixture generation count fits i32"),
+                ),
+            )
+            < (1.4 + 2.0 / (n_f64 + 1.0)) * expected_normal_norm;
+        let covariance_path_scale = fs_math::det::sqrt(c_c * (2.0 - c_c) * mu_eff);
+        for coordinate in 0..n {
+            let innovation = if covariance_path_active {
+                covariance_path_scale * weighted_step[coordinate]
+            } else {
+                0.0
+            };
+            covariance_path[coordinate] =
+                (1.0 - c_c).mul_add(covariance_path[coordinate], innovation);
+        }
+        let inactive_path_correction = if covariance_path_active {
+            0.0
+        } else {
+            c_c * (2.0 - c_c)
+        };
+        for row in 0..n {
+            for column in 0..n {
+                let mut rank_mu = 0.0_f64;
+                for (weight, &candidate) in weights.iter().zip(&order) {
+                    rank_mu = (weight * transformed_samples[candidate][row])
+                        .mul_add(transformed_samples[candidate][column], rank_mu);
+                }
+                let rank_one = covariance_path[row] * covariance_path[column];
+                covariance[row * n + column] = (1.0 - c_1 - c_mu).mul_add(
+                    covariance[row * n + column],
+                    c_1.mul_add(
+                        rank_one + inactive_path_correction * covariance[row * n + column],
+                        c_mu * rank_mu,
+                    ),
+                );
+            }
+        }
+    }
+
+    if evals != evaluations.len() {
+        return Err(format!(
+            "budget-terminal-offset-{evals}!=trace-length-{}",
+            evaluations.len()
+        ));
+    }
+    Ok((
+        CmaReport {
+            x_best,
+            f_best,
+            evals,
+            generations,
+            converged: false,
+            sigma,
+        },
+        CmaStopReason::BudgetExhausted,
+    ))
 }
 
-fn reconstruct_restart_slices(run: &StudyRun) -> Result<Vec<RestartSlice>, String> {
-    let expected_starts = expected_restart_starts(run.input_seed, run.report.schedule.len());
+#[allow(clippy::too_many_lines)] // Every public restart field is checked in schema order.
+fn reconstruct_restart_ledger(run: &StudyRun) -> Result<Vec<ReconstructedRestart>, String> {
+    let records = run.report.records();
+    if records.is_empty() {
+        return Err("restart-ledger-is-empty".to_string());
+    }
+    if run.report.schedule.len() != records.len() {
+        return Err(format!(
+            "legacy-schedule-length:{}!=record-count:{}",
+            run.report.schedule.len(),
+            records.len()
+        ));
+    }
+    let expected_starts = expected_restart_starts(run.input_seed, records.len());
     let mut boundaries = Vec::with_capacity(expected_starts.len());
     for (restart, expected) in expected_starts.iter().enumerate() {
         let matches: Vec<usize> = run
@@ -407,17 +848,22 @@ fn reconstruct_restart_slices(run: &StudyRun) -> Result<Vec<RestartSlice>, Strin
         ));
     }
 
-    let mut slices = Vec::with_capacity(boundaries.len());
+    let mut reconstructed = Vec::with_capacity(boundaries.len());
     let mut large_runs = 0u32;
     let mut small_budget_used = 0usize;
     let mut large_budget_used = 0usize;
     let base_lambda = expected_base_lambda();
-    for (restart, (&start, &lambda)) in boundaries.iter().zip(&run.report.schedule).enumerate() {
+    for (restart, (&start, record)) in boundaries.iter().zip(records).enumerate() {
         let end = boundaries
             .get(restart + 1)
             .copied()
             .unwrap_or(run.evaluations.len());
         let run_large = large_budget_used <= small_budget_used;
+        let expected_lane = if run_large {
+            BipopLane::Large
+        } else {
+            BipopLane::Small
+        };
         let expected_lambda = if run_large {
             let multiplier = 1usize.checked_shl(large_runs).ok_or_else(|| {
                 format!("restart[{restart}]-large-population-shift-overflow:{large_runs}")
@@ -428,9 +874,51 @@ fn reconstruct_restart_slices(run: &StudyRun) -> Result<Vec<RestartSlice>, Strin
         } else {
             base_lambda
         };
-        if lambda != expected_lambda {
+        let expected_ordinal =
+            u64::try_from(restart).map_err(|_| format!("restart[{restart}]-ordinal-overflow"))?;
+        let expected_seed = run
+            .input_seed
+            .wrapping_add(expected_ordinal.wrapping_mul(RESTART_SEED_STRIDE));
+        if record.schema_version() != BIPOP_RESTART_SCHEMA_VERSION {
             return Err(format!(
-                "schedule[{restart}]={lambda}!=reconstructed-{expected_lambda}"
+                "restart[{restart}]-schema-version:{}!={BIPOP_RESTART_SCHEMA_VERSION}",
+                record.schema_version()
+            ));
+        }
+        if record.ordinal() != expected_ordinal {
+            return Err(format!(
+                "restart[{restart}]-ordinal:{}!={expected_ordinal}",
+                record.ordinal()
+            ));
+        }
+        if record.lane() != expected_lane {
+            return Err(format!(
+                "restart[{restart}]-lane:{}!={}",
+                lane_name(record.lane()),
+                lane_name(expected_lane)
+            ));
+        }
+        if record.lambda() != expected_lambda {
+            return Err(format!(
+                "restart[{restart}]-lambda:{}!={expected_lambda}",
+                record.lambda()
+            ));
+        }
+        if run.report.schedule[restart] != expected_lambda {
+            return Err(format!(
+                "legacy-schedule[{restart}]={}!=reconstructed-{expected_lambda}",
+                run.report.schedule[restart]
+            ));
+        }
+        if record.seed() != expected_seed {
+            return Err(format!(
+                "restart[{restart}]-seed:0x{:016x}!=0x{expected_seed:016x}",
+                record.seed()
+            ));
+        }
+        if !same_point_bits(record.start(), &expected_starts[restart]) {
+            return Err(format!(
+                "restart[{restart}]-start-does-not-match-declared-restart-stream"
             ));
         }
         if start >= end {
@@ -438,36 +926,79 @@ fn reconstruct_restart_slices(run: &StudyRun) -> Result<Vec<RestartSlice>, Strin
                 "restart[{restart}]-empty-or-reversed-slice:{start}..{end}"
             ));
         }
+        if record.trace_start() != start {
+            return Err(format!(
+                "restart[{restart}]-trace-start:{}!={start}",
+                record.trace_start()
+            ));
+        }
+        if record.trace_end() != end {
+            return Err(format!(
+                "restart[{restart}]-trace-end:{}!={end}",
+                record.trace_end()
+            ));
+        }
         let run_evals = end - start;
         let remaining = TOTAL_BUDGET.checked_sub(start).ok_or_else(|| {
             format!("restart[{restart}]-start-{start}-exceeds-budget-{TOTAL_BUDGET}")
         })?;
-        let nominal_budget = lambda
+        let nominal_budget = expected_lambda
             .checked_mul(PER_RESTART_GENERATIONS)
             .ok_or_else(|| format!("restart[{restart}]-nominal-budget-overflow"))?;
         let admitted_budget = nominal_budget.min(remaining);
+        if record.allocated_budget() != admitted_budget {
+            return Err(format!(
+                "restart[{restart}]-allocated-budget:{}!={admitted_budget}",
+                record.allocated_budget()
+            ));
+        }
         if run_evals > admitted_budget {
             return Err(format!(
                 "restart[{restart}]-evals-{run_evals}>admitted-budget-{admitted_budget}"
             ));
         }
-        if (run_evals - 1) % lambda != 0 {
+        if (run_evals - 1) % expected_lambda != 0 {
             return Err(format!(
-                "restart[{restart}]-evals-{run_evals}-not-1-plus-whole-generations-of-{lambda}"
+                "restart[{restart}]-evals-{run_evals}-not-1-plus-whole-generations-of-{expected_lambda}"
             ));
         }
-        if admitted_budget >= 1 + lambda && run_evals < 1 + lambda {
+        if admitted_budget >= 1 + expected_lambda && run_evals < 1 + expected_lambda {
             return Err(format!(
                 "restart[{restart}]-omitted-admissible-first-generation"
             ));
         }
-        let slice = RestartSlice { start, end, lambda };
-        if !first_generation_matches(run, restart, slice, &expected_starts[restart]) {
+        let slice = RestartSlice {
+            start,
+            end,
+            lambda: expected_lambda,
+        };
+        let (expected_report, expected_stop_reason) = reconstruct_cma_from_trace(
+            &run.evaluations[start..end],
+            &expected_starts[restart],
+            expected_lambda,
+            admitted_budget,
+            expected_seed,
+        )
+        .map_err(|mismatch| format!("restart[{restart}]-{mismatch}"))?;
+        if let Some(mismatch) = report_mismatch(
+            &format!("restart[{restart}].report"),
+            record.report(),
+            &expected_report,
+        ) {
+            return Err(mismatch);
+        }
+        if record.stop_reason() != expected_stop_reason {
             return Err(format!(
-                "restart[{restart}]-first-generation-does-not-match-declared-stream"
+                "restart[{restart}]-terminal-reason:{}!={}",
+                stop_reason_name(record.stop_reason()),
+                stop_reason_name(expected_stop_reason)
             ));
         }
-        slices.push(slice);
+        reconstructed.push(ReconstructedRestart {
+            slice,
+            report: expected_report,
+            stop_reason: expected_stop_reason,
+        });
 
         if run_large {
             large_budget_used = large_budget_used
@@ -480,19 +1011,29 @@ fn reconstruct_restart_slices(run: &StudyRun) -> Result<Vec<RestartSlice>, Strin
                 .ok_or_else(|| format!("restart[{restart}]-small-budget-overflow"))?;
         }
         let has_next = restart + 1 < boundaries.len();
-        if has_next && (end >= TOTAL_BUDGET || large_runs > LARGE_RUN_CAP_TRIGGER) {
+        if has_next
+            && (end >= TOTAL_BUDGET
+                || large_runs > LARGE_RUN_CAP_TRIGGER
+                || record.report().converged)
+        {
             return Err(format!(
                 "restart[{restart}]-schedule-continued-after-terminal-condition"
             ));
         }
     }
-    if run.evaluations.len() < TOTAL_BUDGET && large_runs <= LARGE_RUN_CAP_TRIGGER {
+    let terminal_converged = reconstructed
+        .last()
+        .is_some_and(|restart| restart.stop_reason == CmaStopReason::TargetReached);
+    if run.evaluations.len() < TOTAL_BUDGET
+        && large_runs <= LARGE_RUN_CAP_TRIGGER
+        && !terminal_converged
+    {
         return Err(format!(
             "schedule-ended-before-budget-or-large-run-cap:evals={};large-runs={large_runs}",
             run.evaluations.len()
         ));
     }
-    Ok(slices)
+    Ok(reconstructed)
 }
 
 #[allow(clippy::too_many_lines)] // Complete trace and public-report accounting is the oracle.
@@ -510,63 +1051,19 @@ fn accounting_mismatch(run: &StudyRun) -> Option<String> {
             run.report.total_evals
         ));
     }
-    if run.report.schedule.len() < 2 {
+    if run.report.records().len() < 2 {
         return Some(format!(
-            "schedule-too-short:{};fixture-must-exercise-a-restart",
-            run.report.schedule.len()
+            "restart-ledger-too-short:{};fixture-must-exercise-a-restart",
+            run.report.records().len()
         ));
     }
-    if run.report.schedule.len() > run.report.total_evals {
+    if run.report.records().len() > run.report.total_evals {
         return Some(format!(
-            "schedule-length:{}>total-evals:{}",
-            run.report.schedule.len(),
+            "restart-record-count:{}>total-evals:{}",
+            run.report.records().len(),
             run.report.total_evals
         ));
     }
-    let restart_slices = match reconstruct_restart_slices(run) {
-        Ok(slices) => slices,
-        Err(mismatch) => return Some(mismatch),
-    };
-
-    let best = &run.report.best;
-    if best.x_best.len() != DIMENSION {
-        return Some(format!(
-            "best-point-dimension:{}!=expected-{DIMENSION}",
-            best.x_best.len()
-        ));
-    }
-    if best.x_best.iter().any(|value| !value.is_finite()) {
-        return Some(format!(
-            "best-point-non-finite:{:016x?}",
-            best.x_best
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>()
-        ));
-    }
-    if !best.f_best.is_finite() || best.f_best <= F_TARGET {
-        return Some(format!(
-            "best-objective-invalid:0x{:016x};target=0x{:016x}",
-            best.f_best.to_bits(),
-            F_TARGET.to_bits()
-        ));
-    }
-    if !(1..=run.report.total_evals).contains(&best.evals) {
-        return Some(format!(
-            "best-run-evals:{} not in 1..={}",
-            best.evals, run.report.total_evals
-        ));
-    }
-    if best.converged {
-        return Some("impossible-target-was-reported-converged".to_string());
-    }
-    if !best.sigma.is_finite() || best.sigma <= 0.0 {
-        return Some(format!(
-            "best-run-invalid-sigma:0x{:016x}",
-            best.sigma.to_bits()
-        ));
-    }
-
     let mut first_trace_best: Option<(usize, &Evaluation)> = None;
     for (evaluation_index, evaluation) in run.evaluations.iter().enumerate() {
         if evaluation.x.len() != DIMENSION {
@@ -601,10 +1098,56 @@ fn accounting_mismatch(run: &StudyRun) -> Option<String> {
                 tolerance.to_bits()
             ));
         }
-        if first_trace_best.is_none_or(|(_, current)| evaluation.value < current.value) {
+        if first_trace_best
+            .is_none_or(|(_, current)| evaluation.value.total_cmp(&current.value).is_lt())
+        {
             first_trace_best = Some((evaluation_index, evaluation));
         }
     }
+    let reconstructed = match reconstruct_restart_ledger(run) {
+        Ok(reconstructed) => reconstructed,
+        Err(mismatch) => return Some(mismatch),
+    };
+
+    let mut expected_best_restart = 0usize;
+    for restart in 1..reconstructed.len() {
+        if reconstructed[restart]
+            .report
+            .f_best
+            .total_cmp(&reconstructed[expected_best_restart].report.f_best)
+            .is_lt()
+        {
+            expected_best_restart = restart;
+        }
+    }
+    if run.report.best_restart() != expected_best_restart {
+        return Some(format!(
+            "best-restart:{}!=earliest-total-cmp-winner-{expected_best_restart}",
+            run.report.best_restart()
+        ));
+    }
+    let Some(named_best) = run.report.best_record() else {
+        return Some(format!(
+            "best-record-missing-at-index-{}",
+            run.report.best_restart()
+        ));
+    };
+    if let Some(mismatch) = report_mismatch(
+        "named-best-record",
+        named_best.report(),
+        &reconstructed[expected_best_restart].report,
+    ) {
+        return Some(mismatch);
+    }
+    if let Some(mismatch) = report_mismatch(
+        "legacy-best",
+        &run.report.best,
+        &reconstructed[expected_best_restart].report,
+    ) {
+        return Some(mismatch);
+    }
+
+    let best = &run.report.best;
     let (first_trace_best_index, first_trace_best) =
         first_trace_best.expect("positive total-eval accounting makes trace nonempty");
     if first_trace_best.value.to_bits() != best.f_best.to_bits() {
@@ -627,24 +1170,112 @@ fn accounting_mismatch(run: &StudyRun) -> Option<String> {
     if !same_point_bits(&first_trace_best.x, &best.x_best) {
         return Some("reported-best-is-not-the-first-stable-trace-minimum".to_string());
     }
-    let Some((winning_restart, winning_slice)) =
-        restart_slices.iter().enumerate().find(|(_, slice)| {
-            slice.start <= first_trace_best_index && first_trace_best_index < slice.end
-        })
-    else {
+    let Some((winning_restart, winning)) = reconstructed.iter().enumerate().find(|(_, restart)| {
+        restart.slice.start <= first_trace_best_index && first_trace_best_index < restart.slice.end
+    }) else {
         return Some(format!(
             "trace-minimum-index-{first_trace_best_index}-is-outside-restart-slices"
         ));
     };
-    let winning_run_evals = winning_slice.end - winning_slice.start;
-    let winning_generations = (winning_run_evals - 1) / winning_slice.lambda;
+    if winning_restart != expected_best_restart {
+        return Some(format!(
+            "trace-minimum-restart-{winning_restart}!=named-best-restart-{expected_best_restart}"
+        ));
+    }
+    let winning_run_evals = winning.slice.end - winning.slice.start;
+    let winning_generations = (winning_run_evals - 1) / winning.slice.lambda;
     if best.evals != winning_run_evals || best.generations != winning_generations {
         return Some(format!(
             "best-run-accounting:reported-evals-{}-generations-{}!=restart-{winning_restart}-evals-{winning_run_evals}-generations-{winning_generations}",
             best.evals, best.generations
         ));
     }
+    if let Err(error) = run.report.validate_ledger() {
+        return Some(format!(
+            "production-ledger-validator-refused:restart={:?};invariant={}",
+            error.restart(),
+            error.invariant()
+        ));
+    }
     None
+}
+
+fn restart_record_mismatch(
+    restart: usize,
+    left: &BipopRestartRecord,
+    right: &BipopRestartRecord,
+) -> Option<String> {
+    if left.schema_version() != right.schema_version() {
+        return Some(format!(
+            "record[{restart}].schema-version:{}!={}",
+            left.schema_version(),
+            right.schema_version()
+        ));
+    }
+    if left.ordinal() != right.ordinal() {
+        return Some(format!(
+            "record[{restart}].ordinal:{}!={}",
+            left.ordinal(),
+            right.ordinal()
+        ));
+    }
+    if left.lane() != right.lane() {
+        return Some(format!(
+            "record[{restart}].lane:{}!={}",
+            lane_name(left.lane()),
+            lane_name(right.lane())
+        ));
+    }
+    if left.lambda() != right.lambda() {
+        return Some(format!(
+            "record[{restart}].lambda:{}!={}",
+            left.lambda(),
+            right.lambda()
+        ));
+    }
+    if left.allocated_budget() != right.allocated_budget() {
+        return Some(format!(
+            "record[{restart}].allocated-budget:{}!={}",
+            left.allocated_budget(),
+            right.allocated_budget()
+        ));
+    }
+    if left.seed() != right.seed() {
+        return Some(format!(
+            "record[{restart}].seed:0x{:016x}!=0x{:016x}",
+            left.seed(),
+            right.seed()
+        ));
+    }
+    if !same_point_bits(left.start(), right.start()) {
+        return Some(format!("record[{restart}].start"));
+    }
+    if left.trace_start() != right.trace_start() {
+        return Some(format!(
+            "record[{restart}].trace-start:{}!={}",
+            left.trace_start(),
+            right.trace_start()
+        ));
+    }
+    if left.trace_end() != right.trace_end() {
+        return Some(format!(
+            "record[{restart}].trace-end:{}!={}",
+            left.trace_end(),
+            right.trace_end()
+        ));
+    }
+    if left.stop_reason() != right.stop_reason() {
+        return Some(format!(
+            "record[{restart}].terminal-reason:{}!={}",
+            stop_reason_name(left.stop_reason()),
+            stop_reason_name(right.stop_reason())
+        ));
+    }
+    report_mismatch(
+        &format!("record[{restart}].report"),
+        left.report(),
+        right.report(),
+    )
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive field-by-field public-state audit.
@@ -680,6 +1311,31 @@ fn first_public_mismatch(left: &StudyRun, right: &StudyRun) -> Option<String> {
     {
         if a != b {
             return Some(format!("schedule[{restart}]:{a}!={b}"));
+        }
+    }
+    if left.report.records().len() != right.report.records().len() {
+        return Some(format!(
+            "record-count:{}!={}",
+            left.report.records().len(),
+            right.report.records().len()
+        ));
+    }
+    if left.report.best_restart() != right.report.best_restart() {
+        return Some(format!(
+            "best-restart:{}!={}",
+            left.report.best_restart(),
+            right.report.best_restart()
+        ));
+    }
+    for (restart, (left, right)) in left
+        .report
+        .records()
+        .iter()
+        .zip(right.report.records())
+        .enumerate()
+    {
+        if let Some(mismatch) = restart_record_mismatch(restart, left, right) {
+            return Some(mismatch);
         }
     }
 
@@ -845,10 +1501,13 @@ fn emit_green_receipt(run: &StudyRun) {
                     "\"semantic_oracle\":\"{}\",\"units\":\"dimensionless\",",
                     "\"input_seed\":{},\"corruption_seed\":{},\"dimension\":{},",
                     "\"total_budget\":{},\"total_evals\":{},\"schedule\":{},",
+                    "\"restart_schema_version\":{},\"record_count\":{},",
+                    "\"best_restart\":{},\"ledger\":\"complete-ordered-public-records\",",
                     "\"best\":{{\"x_len\":{},\"f_bits\":\"0x{:016x}\",",
                     "\"evals\":{},\"generations\":{},\"converged\":{},",
                     "\"sigma_bits\":\"0x{:016x}\"}},\"trace_len\":{},",
-                    "\"stream_semantics_version\":{},\"versions\":{{",
+                    "\"stream_semantics_version\":{},",
+                    "\"determinism_scope\":\"same-build-same-ISA\",\"versions\":{{",
                     "\"fs_dfo\":\"{}\",\"fs_la\":\"{}\",\"fs_math\":\"{}\",",
                     "\"fs_rand\":\"{}\",\"fs_obs\":\"{}\"}},",
                     "\"no_claims\":[\"optimizer-quality\",\"all-objectives\",",
@@ -865,6 +1524,9 @@ fn emit_green_receipt(run: &StudyRun) {
                 TOTAL_BUDGET,
                 run.report.total_evals,
                 schedule_json(&run.report.schedule),
+                BIPOP_RESTART_SCHEMA_VERSION,
+                run.report.records().len(),
+                run.report.best_restart(),
                 run.report.best.x_best.len(),
                 run.report.best.f_best.to_bits(),
                 run.report.best.evals,
@@ -893,11 +1555,12 @@ fn emit_green_receipt(run: &StudyRun) {
 
 fn green_verdict_detail(run: &StudyRun) -> String {
     format!(
-        "fixture={}; result={}; total_evals={}; restarts={}; trace=bit-exact; public_report=fully-bound; semantic_oracle={SEMANTIC_ORACLE_VERSION}",
+        "fixture={}; result={}; total_evals={}; records={}; best_restart={}; trace=bit-exact; ordered_ledger=fully-bound; legacy_projections=exact; determinism=same-build-same-ISA; semantic_oracle={SEMANTIC_ORACLE_VERSION}",
         run.fixture.hex(),
         run.result.hex(),
         run.report.total_evals,
-        run.report.schedule.len()
+        run.report.records().len(),
+        run.report.best_restart()
     )
 }
 
@@ -1104,6 +1767,12 @@ fn assert_resealed_semantic_refusal(
     event: &Event,
     expected_mismatch_fragment: &str,
 ) {
+    let stale = validate_payload(&mutant)
+        .expect_err("an unsealed semantic mutation must fail payload admission");
+    assert!(
+        matches!(stale, AdmissionError::PayloadIdentityMismatch { .. }),
+        "semantic mutation must retain a valid fixture but stale the result: {stale:?}"
+    );
     mutant.result = result_identity(&mutant.fixture, &mutant.report, &mutant.evaluations);
     validate_payload(&mutant).expect("resealed semantic mutant must be identity-consistent");
     let panic = catch_unwind(|| {
@@ -1334,6 +2003,25 @@ fn bipop_full_study_replays_and_seeded_failure_is_refused() {
         .checked_mul(2)
         .expect("fixture schedule mutation fits usize");
     assert_resealed_semantic_refusal(schedule_mutant, &green_verdict, "schedule[0]");
+
+    let mut total_mutant = first.clone();
+    total_mutant.report.total_evals = total_mutant
+        .report
+        .total_evals
+        .checked_add(1)
+        .expect("fixture total-evaluation mutation fits usize");
+    assert_resealed_semantic_refusal(total_mutant, &green_verdict, "reported-total-evals");
+
+    // Public records are intentionally immutable, so mutate the complete
+    // ledger by substituting a separately generated report from a different
+    // causal seed while retaining the canonical fixture and callback trace.
+    // Identity admission must first see a stale payload; after correct
+    // resealing, independent semantics must reject the substituted ledger at
+    // its first incompatible record/boundary provenance fact.
+    let alternate_ledger = run_study(INPUT_SEED ^ 0x0100_0000_0000_0000);
+    let mut ledger_mutant = first.clone();
+    ledger_mutant.report = alternate_ledger.report;
+    assert_resealed_semantic_refusal(ledger_mutant, &green_verdict, "restart[");
 
     let mut causal_seed_mutant = first.clone();
     causal_seed_mutant.input_seed ^= 1;
