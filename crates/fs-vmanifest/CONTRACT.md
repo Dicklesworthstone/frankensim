@@ -3583,6 +3583,17 @@ projects 0 for `adjudicate` and 10 for `prove`. Timeout, budget exhaustion,
 cancellation, infrastructure failure, and integrity failure cannot project as
 green through a favorable terminal-axis mismatch.
 
+`LegacyClaimStateV0` and `LegacyCombinedEvidenceV0` are accepted only through
+`migrate_legacy_assessment_v0`. Its sealed, domain-separated
+`LegacyAssessmentMigration` preserves the exact old pair, copies only axes the
+old variant actually determined, and retains a canonically ordered loss set.
+Legacy `Partial` never becomes a favorable adjudication or an invented weaker
+claim; legacy `Unsupported` never guesses outside-domain versus missing
+capability. Missing method, grade, domain, support, completeness, integrity,
+and promotion facts remain absent and individually named. The migration
+receipt is therefore inspectable and replay-stable but never scientific or
+promotion authority by itself.
+
 ### Determinism and error model (Journey DSL)
 
 - Every identity uses fixed-order, length-framed fields and a scope-specific
@@ -3595,6 +3606,11 @@ green through a favorable terminal-axis mismatch.
   favorable promotion/outcome combinations fail closed with stable rule slugs.
 - Human and JSONL operation projections carry the same receipt digest and
   process code. They are projections, not independent adjudication sources.
+- Legacy migration receipts bind fixed numeric tags, recovered optional axes,
+  and the complete sorted loss set under
+  `org.frankensim.fs-vmanifest.legacy-assessment-migration.v1`. Equivalent old
+  input replays exactly; a changed old state or recovered/lost fact changes the
+  receipt identity.
 
 ### No-claim boundaries (Journey DSL)
 
@@ -3607,6 +3623,9 @@ green through a favorable terminal-axis mismatch.
 - The compact JSONL operation projection is not the full durable wire codec.
   Full fs-obs event projection, bounded redaction, old-state migration adapters,
   and no-mock public-command integration are separate follow-on obligations.
+  The v0 scientific-axis adapter implemented here does not decode an old wire
+  envelope, resolve its missing axes, or authorize promotion; broader legacy
+  receipt transport and independently receipted disambiguation remain open.
 - Phase transitions specify legal intent flow; runtime drain, pause, migration,
   resume, fork, and replay correctness require their own G4/G5 execution
   evidence.

@@ -6,9 +6,11 @@ use fs_vmanifest::journey::{
     ArtifactSandbox, AttemptReceipt, CampaignReceipt, ClaimAdjudication, ClaimRecord,
     DomainApplicability, EpistemicGrade, EvidenceCompleteness, EvidenceIntegrity, EvidenceMethod,
     EvidenceMethodSet, ExecutionDisposition, JobReceipt, JourneyCursor, JourneyDefaults,
-    JourneyManifest, JourneyPhase, OperationReceipt, OperationVerb, OperationalSupport,
-    ProcessCode, PromotionEffect, PublicSurfaceIdentity, ReceiptOutcome, RequestedPredicateOutcome,
-    ScientificAssessment, TypedSkip, WorkloadScale,
+    JourneyManifest, JourneyPhase, LEGACY_ASSESSMENT_MIGRATION_IDENTITY_DOMAIN,
+    LEGACY_ASSESSMENT_MIGRATION_SCHEMA_VERSION, LegacyAssessmentMigrationLoss, LegacyClaimStateV0,
+    LegacyCombinedEvidenceV0, OperationReceipt, OperationVerb, OperationalSupport, ProcessCode,
+    PromotionEffect, PublicSurfaceIdentity, ReceiptOutcome, RequestedPredicateOutcome,
+    ScientificAssessment, TypedSkip, WorkloadScale, migrate_legacy_assessment_v0,
 };
 use fs_vmanifest::v1::{
     ClaimId, ClaimKind, ClaimRelationReceipt, ClaimRevision, JourneyId, QuantifierVariance,
@@ -556,5 +558,147 @@ fn favorable_terminal_projection_mismatch_refuses() {
             .expect_err("timeout cannot project green")
             .rule(),
         "journey-outcome-inconsistent"
+    );
+}
+
+#[test]
+fn legacy_exact_claim_states_migrate_without_adjudication_laundering() {
+    let exact = [
+        (LegacyClaimStateV0::Pending, ClaimAdjudication::Pending),
+        (LegacyClaimStateV0::Supported, ClaimAdjudication::Supported),
+        (LegacyClaimStateV0::Failed, ClaimAdjudication::Failed),
+        (LegacyClaimStateV0::Refuted, ClaimAdjudication::Refuted),
+        (LegacyClaimStateV0::Unknown, ClaimAdjudication::Unknown),
+    ];
+    for (legacy, adjudication) in exact {
+        let migration =
+            migrate_legacy_assessment_v0(legacy, LegacyCombinedEvidenceV0::CompleteAndVerified);
+        assert_eq!(migration.legacy_claim_state(), legacy);
+        assert_eq!(migration.adjudication(), Some(adjudication));
+        assert!(!migration.is_authority_complete());
+        assert!(
+            migration
+                .losses()
+                .any(|loss| loss == LegacyAssessmentMigrationLoss::EvidenceMethodsMissing)
+        );
+    }
+}
+
+#[test]
+fn legacy_partial_and_unsupported_states_remain_typed_ambiguities() {
+    let partial = migrate_legacy_assessment_v0(
+        LegacyClaimStateV0::Partial,
+        LegacyCombinedEvidenceV0::Partial,
+    );
+    assert_eq!(partial.adjudication(), None);
+    assert_eq!(partial.completeness(), Some(EvidenceCompleteness::Partial));
+    assert_eq!(partial.integrity(), None);
+    assert!(
+        partial
+            .losses()
+            .any(|loss| { loss == LegacyAssessmentMigrationLoss::PartialClaimMeaningCollapsed })
+    );
+
+    let unsupported = migrate_legacy_assessment_v0(
+        LegacyClaimStateV0::Unsupported,
+        LegacyCombinedEvidenceV0::Verified,
+    );
+    assert_eq!(unsupported.adjudication(), None);
+    assert_eq!(unsupported.domain(), None);
+    assert_eq!(unsupported.support(), None);
+    assert_eq!(unsupported.completeness(), None);
+    assert_eq!(unsupported.integrity(), Some(EvidenceIntegrity::Verified));
+    assert!(
+        unsupported
+            .losses()
+            .any(|loss| { loss == LegacyAssessmentMigrationLoss::UnsupportedCauseCollapsed })
+    );
+    assert_ne!(partial.digest(), unsupported.digest());
+}
+
+#[test]
+fn legacy_combined_evidence_recovers_only_explicit_axes() {
+    let table = [
+        (
+            LegacyCombinedEvidenceV0::Absent,
+            Some(EvidenceCompleteness::None),
+            None,
+        ),
+        (
+            LegacyCombinedEvidenceV0::Partial,
+            Some(EvidenceCompleteness::Partial),
+            None,
+        ),
+        (
+            LegacyCombinedEvidenceV0::Complete,
+            Some(EvidenceCompleteness::Complete),
+            None,
+        ),
+        (
+            LegacyCombinedEvidenceV0::Verified,
+            None,
+            Some(EvidenceIntegrity::Verified),
+        ),
+        (
+            LegacyCombinedEvidenceV0::CompleteAndVerified,
+            Some(EvidenceCompleteness::Complete),
+            Some(EvidenceIntegrity::Verified),
+        ),
+        (
+            LegacyCombinedEvidenceV0::IntegrityFailed,
+            None,
+            Some(EvidenceIntegrity::Failed),
+        ),
+    ];
+    for (legacy, completeness, integrity) in table {
+        let first = migrate_legacy_assessment_v0(LegacyClaimStateV0::Supported, legacy);
+        let replay = migrate_legacy_assessment_v0(LegacyClaimStateV0::Supported, legacy);
+        assert_eq!(first.legacy_evidence(), legacy);
+        assert_eq!(first.completeness(), completeness);
+        assert_eq!(first.integrity(), integrity);
+        assert_eq!(first.methods(), None);
+        assert_eq!(first.grade(), None);
+        assert_eq!(first.promotion(), None);
+        assert_eq!(first, replay);
+        assert_eq!(first.digest(), replay.digest());
+        assert!(!first.is_authority_complete());
+    }
+}
+
+#[test]
+fn legacy_migration_identity_has_fixed_field_and_loss_order() {
+    let migration = migrate_legacy_assessment_v0(
+        LegacyClaimStateV0::Supported,
+        LegacyCombinedEvidenceV0::CompleteAndVerified,
+    );
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&LEGACY_ASSESSMENT_MIGRATION_SCHEMA_VERSION.to_be_bytes());
+    expected.extend_from_slice(&[
+        1, // Legacy Supported.
+        4, // Legacy CompleteAndVerified.
+        1, 1, // Recovered Supported adjudication.
+        0, // Methods absent.
+        0, // Grade absent.
+        0, // Domain absent.
+        0, // Operational support absent.
+        1, 0, // Recovered Complete evidence.
+        1, 0, // Recovered Verified integrity.
+        0, // Promotion effect absent.
+    ]);
+    expected.extend_from_slice(&5_u32.to_be_bytes());
+    expected.extend_from_slice(&[4, 5, 6, 7, 8]);
+    assert_eq!(
+        migration.digest(),
+        hash_domain(LEGACY_ASSESSMENT_MIGRATION_IDENTITY_DOMAIN, &expected)
+    );
+    assert_eq!(
+        migration.losses().collect::<Vec<_>>(),
+        vec![
+            LegacyAssessmentMigrationLoss::EvidenceMethodsMissing,
+            LegacyAssessmentMigrationLoss::EpistemicGradeMissing,
+            LegacyAssessmentMigrationLoss::DomainApplicabilityMissing,
+            LegacyAssessmentMigrationLoss::OperationalSupportMissing,
+            LegacyAssessmentMigrationLoss::PromotionEffectMissing,
+        ]
     );
 }

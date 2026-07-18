@@ -33,6 +33,11 @@ const OPERATION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-vmanifest.operation-re
 const ATTEMPT_RECEIPT_DOMAIN: &str = "org.frankensim.fs-vmanifest.attempt-receipt.v1";
 const JOB_RECEIPT_DOMAIN: &str = "org.frankensim.fs-vmanifest.job-receipt.v1";
 const CAMPAIGN_RECEIPT_DOMAIN: &str = "org.frankensim.fs-vmanifest.campaign-receipt.v1";
+/// Domain for the sealed v0-to-v1 scientific-axis migration receipt.
+pub const LEGACY_ASSESSMENT_MIGRATION_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-vmanifest.legacy-assessment-migration.v1";
+/// Schema version of the sealed v0-to-v1 scientific-axis migration receipt.
+pub const LEGACY_ASSESSMENT_MIGRATION_SCHEMA_VERSION: u32 = 1;
 const MAX_ID_BYTES: usize = 128;
 const MAX_TEXT_BYTES: usize = 4096;
 const MAX_REFERENCES: usize = 65_536;
@@ -875,6 +880,280 @@ impl ScientificAssessment {
     }
 }
 
+/// Collapsed scientific verdict stored by the legacy v0 journey schema.
+///
+/// `Partial` and `Unsupported` deliberately have no direct counterparts in
+/// [`ClaimAdjudication`]. The migration adapter retains them as unresolved
+/// loss instead of manufacturing a weaker claim or guessing whether support
+/// failed because of domain applicability or capability availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum LegacyClaimStateV0 {
+    /// No scientific adjudication had completed.
+    Pending = 0,
+    /// The legacy aggregate reported support.
+    Supported = 1,
+    /// The frozen acceptance predicate failed without a refutation claim.
+    Failed = 2,
+    /// The legacy aggregate reported a strength-matched refutation.
+    Refuted = 3,
+    /// Available information did not determine the claim.
+    Unknown = 4,
+    /// The old aggregate collapsed a weaker claim and/or partial evidence.
+    Partial = 5,
+    /// The old aggregate collapsed outside-domain and missing-capability causes.
+    Unsupported = 6,
+}
+
+/// Combined evidence state stored by the legacy v0 journey schema.
+///
+/// Separate completeness and integrity axes can be recovered only when the
+/// legacy variant explicitly carried that fact. Missing axes remain absent in
+/// the migration receipt and are listed in its loss set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum LegacyCombinedEvidenceV0 {
+    /// No required evidence was present; integrity was not recorded.
+    Absent = 0,
+    /// Some required evidence was present; integrity was not recorded.
+    Partial = 1,
+    /// All required evidence was present; integrity was not recorded.
+    Complete = 2,
+    /// Integrity was verified; completeness was not recorded.
+    Verified = 3,
+    /// Completeness and integrity were both explicitly affirmative.
+    CompleteAndVerified = 4,
+    /// Integrity failed; completeness was not recorded.
+    IntegrityFailed = 5,
+}
+
+/// Exact semantic information unavailable in a legacy migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum LegacyAssessmentMigrationLoss {
+    /// `Partial` did not distinguish a weaker claim from incomplete evidence.
+    PartialClaimMeaningCollapsed = 0,
+    /// `Unsupported` did not distinguish domain from capability support.
+    UnsupportedCauseCollapsed = 1,
+    /// The legacy evidence state did not determine completeness.
+    EvidenceCompletenessMissing = 2,
+    /// The legacy evidence state did not determine integrity.
+    EvidenceIntegrityMissing = 3,
+    /// The legacy aggregate did not identify evidence methods.
+    EvidenceMethodsMissing = 4,
+    /// The legacy aggregate did not retain an epistemic grade.
+    EpistemicGradeMissing = 5,
+    /// The legacy aggregate did not retain domain applicability separately.
+    DomainApplicabilityMissing = 6,
+    /// The legacy aggregate did not retain operational support separately.
+    OperationalSupportMissing = 7,
+    /// The legacy aggregate did not retain a promotion effect.
+    PromotionEffectMissing = 8,
+}
+
+/// Sealed, content-addressed report of a legacy assessment migration.
+///
+/// Optional v1 axes contain only facts exactly recoverable from v0. Every
+/// absent or collapsed fact is named in `losses`; consequently this receipt
+/// cannot itself be converted into [`ScientificAssessment`] or promotion
+/// authority. A higher layer must supply and receipt independent resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyAssessmentMigration {
+    legacy_claim_state: LegacyClaimStateV0,
+    legacy_evidence: LegacyCombinedEvidenceV0,
+    adjudication: Option<ClaimAdjudication>,
+    methods: Option<EvidenceMethodSet>,
+    grade: Option<EpistemicGrade>,
+    domain: Option<DomainApplicability>,
+    support: Option<OperationalSupport>,
+    completeness: Option<EvidenceCompleteness>,
+    integrity: Option<EvidenceIntegrity>,
+    promotion: Option<PromotionEffect>,
+    losses: BTreeSet<LegacyAssessmentMigrationLoss>,
+}
+
+impl LegacyAssessmentMigration {
+    /// Exact legacy claim state retained by the migration receipt.
+    #[must_use]
+    pub const fn legacy_claim_state(&self) -> LegacyClaimStateV0 {
+        self.legacy_claim_state
+    }
+
+    /// Exact legacy combined evidence state retained by the receipt.
+    #[must_use]
+    pub const fn legacy_evidence(&self) -> LegacyCombinedEvidenceV0 {
+        self.legacy_evidence
+    }
+
+    /// Exactly recoverable v1 adjudication, if the old state was not collapsed.
+    #[must_use]
+    pub const fn adjudication(&self) -> Option<ClaimAdjudication> {
+        self.adjudication
+    }
+
+    /// Exactly recoverable evidence methods; v0 did not carry them.
+    #[must_use]
+    pub fn methods(&self) -> Option<&EvidenceMethodSet> {
+        self.methods.as_ref()
+    }
+
+    /// Exactly recoverable epistemic grade; v0 did not carry it.
+    #[must_use]
+    pub const fn grade(&self) -> Option<EpistemicGrade> {
+        self.grade
+    }
+
+    /// Exactly recoverable domain applicability; v0 did not separate it.
+    #[must_use]
+    pub const fn domain(&self) -> Option<DomainApplicability> {
+        self.domain
+    }
+
+    /// Exactly recoverable operational support; v0 did not separate it.
+    #[must_use]
+    pub const fn support(&self) -> Option<OperationalSupport> {
+        self.support
+    }
+
+    /// Exactly recoverable evidence completeness.
+    #[must_use]
+    pub const fn completeness(&self) -> Option<EvidenceCompleteness> {
+        self.completeness
+    }
+
+    /// Exactly recoverable evidence integrity.
+    #[must_use]
+    pub const fn integrity(&self) -> Option<EvidenceIntegrity> {
+        self.integrity
+    }
+
+    /// Exactly recoverable promotion effect; v0 did not carry it.
+    #[must_use]
+    pub const fn promotion(&self) -> Option<PromotionEffect> {
+        self.promotion
+    }
+
+    /// Canonically ordered missing/collapsed semantic facts.
+    #[must_use]
+    pub fn losses(&self) -> impl Iterator<Item = LegacyAssessmentMigrationLoss> + '_ {
+        self.losses.iter().copied()
+    }
+
+    /// Whether every axis required for a v1 scientific assessment was retained.
+    #[must_use]
+    pub fn is_authority_complete(&self) -> bool {
+        self.adjudication.is_some()
+            && self
+                .methods
+                .as_ref()
+                .is_some_and(|methods| !methods.is_empty())
+            && self.grade.is_some()
+            && self.domain.is_some()
+            && self.support.is_some()
+            && self.completeness.is_some()
+            && self.integrity.is_some()
+            && self.promotion.is_some()
+            && self.losses.is_empty()
+    }
+
+    /// Domain-separated identity of the exact old states, recovered axes, and
+    /// complete loss set.
+    #[must_use]
+    pub fn digest(&self) -> ContentHash {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LEGACY_ASSESSMENT_MIGRATION_SCHEMA_VERSION.to_be_bytes());
+        bytes.push(self.legacy_claim_state as u8);
+        bytes.push(self.legacy_evidence as u8);
+        encode_optional_tag(&mut bytes, self.adjudication.map(|value| value as u8));
+        match &self.methods {
+            Some(methods) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&(methods.0.len() as u32).to_be_bytes());
+                for method in methods.iter() {
+                    bytes.push(method as u8);
+                }
+            }
+            None => bytes.push(0),
+        }
+        encode_optional_tag(&mut bytes, self.grade.map(|value| value as u8));
+        encode_optional_tag(&mut bytes, self.domain.map(|value| value as u8));
+        encode_optional_tag(&mut bytes, self.support.map(|value| value as u8));
+        encode_optional_tag(&mut bytes, self.completeness.map(|value| value as u8));
+        encode_optional_tag(&mut bytes, self.integrity.map(|value| value as u8));
+        encode_optional_tag(&mut bytes, self.promotion.map(|value| value as u8));
+        bytes.extend_from_slice(&(self.losses.len() as u32).to_be_bytes());
+        for loss in &self.losses {
+            bytes.push(*loss as u8);
+        }
+        hash_domain(LEGACY_ASSESSMENT_MIGRATION_IDENTITY_DOMAIN, &bytes)
+    }
+}
+
+/// Migrate the collapsed legacy v0 claim/evidence pair without guessing.
+///
+/// The returned sealed receipt preserves all exactly recoverable axes and
+/// lists every unavailable or ambiguous axis. In particular `Partial` never
+/// becomes a favorable adjudication and `Unsupported` never chooses between
+/// outside-domain and missing-capability.
+#[must_use]
+pub fn migrate_legacy_assessment_v0(
+    claim_state: LegacyClaimStateV0,
+    evidence: LegacyCombinedEvidenceV0,
+) -> LegacyAssessmentMigration {
+    let mut losses = BTreeSet::from([
+        LegacyAssessmentMigrationLoss::EvidenceMethodsMissing,
+        LegacyAssessmentMigrationLoss::EpistemicGradeMissing,
+        LegacyAssessmentMigrationLoss::DomainApplicabilityMissing,
+        LegacyAssessmentMigrationLoss::OperationalSupportMissing,
+        LegacyAssessmentMigrationLoss::PromotionEffectMissing,
+    ]);
+    let adjudication = match claim_state {
+        LegacyClaimStateV0::Pending => Some(ClaimAdjudication::Pending),
+        LegacyClaimStateV0::Supported => Some(ClaimAdjudication::Supported),
+        LegacyClaimStateV0::Failed => Some(ClaimAdjudication::Failed),
+        LegacyClaimStateV0::Refuted => Some(ClaimAdjudication::Refuted),
+        LegacyClaimStateV0::Unknown => Some(ClaimAdjudication::Unknown),
+        LegacyClaimStateV0::Partial => {
+            losses.insert(LegacyAssessmentMigrationLoss::PartialClaimMeaningCollapsed);
+            None
+        }
+        LegacyClaimStateV0::Unsupported => {
+            losses.insert(LegacyAssessmentMigrationLoss::UnsupportedCauseCollapsed);
+            None
+        }
+    };
+    let (completeness, integrity) = match evidence {
+        LegacyCombinedEvidenceV0::Absent => (Some(EvidenceCompleteness::None), None),
+        LegacyCombinedEvidenceV0::Partial => (Some(EvidenceCompleteness::Partial), None),
+        LegacyCombinedEvidenceV0::Complete => (Some(EvidenceCompleteness::Complete), None),
+        LegacyCombinedEvidenceV0::Verified => (None, Some(EvidenceIntegrity::Verified)),
+        LegacyCombinedEvidenceV0::CompleteAndVerified => (
+            Some(EvidenceCompleteness::Complete),
+            Some(EvidenceIntegrity::Verified),
+        ),
+        LegacyCombinedEvidenceV0::IntegrityFailed => (None, Some(EvidenceIntegrity::Failed)),
+    };
+    if completeness.is_none() {
+        losses.insert(LegacyAssessmentMigrationLoss::EvidenceCompletenessMissing);
+    }
+    if integrity.is_none() {
+        losses.insert(LegacyAssessmentMigrationLoss::EvidenceIntegrityMissing);
+    }
+    LegacyAssessmentMigration {
+        legacy_claim_state: claim_state,
+        legacy_evidence: evidence,
+        adjudication,
+        methods: None,
+        grade: None,
+        domain: None,
+        support: None,
+        completeness,
+        integrity,
+        promotion: None,
+        losses,
+    }
+}
+
 /// Retained conditional skip; never represented by a missing row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedSkip {
@@ -1365,6 +1644,16 @@ fn validate_skips(skips: &[TypedSkip]) -> Result<(), JourneyError> {
 fn encode_outcome(bytes: &mut Vec<u8>, outcome: ReceiptOutcome) {
     bytes.push(outcome.execution as u8);
     bytes.push(outcome.predicate as u8);
+}
+
+fn encode_optional_tag(bytes: &mut Vec<u8>, value: Option<u8>) {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            bytes.push(value);
+        }
+        None => bytes.push(0),
+    }
 }
 
 fn encode_optional_hash(bytes: &mut Vec<u8>, value: Option<ContentHash>) {
