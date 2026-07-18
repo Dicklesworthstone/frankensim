@@ -7,9 +7,10 @@ use fs_toleralloc::{
     AdmittedCorrelationModel, ClampDisposition, ColorRank, CorrelatedStackTerm, InteriorKnotOwner,
     MAX_EXACT_STRUCTURED_WEIGHT_V1, PiecewiseQuadraticLaw, QuadraticResponsePiece,
     StructuredEvaluationStage, StructuredKeyRole, StructuredLawId, StructuredLawIssue,
-    StructuredModelIdentity, StructuredNodeId, StructuredNodeSpec, StructuredNumericIssue,
-    StructuredPopulationModel, StructuredPropagationError, StructuredResource,
-    StructuredTopologyIssue, propagate_correlated_stack, propagate_structured_population,
+    StructuredModelIdentity, StructuredMomentQuantity, StructuredMomentScope, StructuredNodeId,
+    StructuredNodeSpec, StructuredNumericIssue, StructuredPopulationModel,
+    StructuredPropagationError, StructuredResource, StructuredTopologyIssue,
+    propagate_correlated_stack, propagate_structured_population,
 };
 
 fn nz(value: u64) -> NonZeroU64 {
@@ -465,6 +466,66 @@ fn structured_evaluation_refuses_overflow_and_underflow_without_a_partial_receip
             law: StructuredLawId(0),
             piece: 0,
             stage: StructuredEvaluationStage::QuadraticProduct,
+            issue: StructuredNumericIssue::Underflow,
+        })
+    );
+}
+
+#[test]
+fn structured_normalization_refuses_distinct_outputs_that_alias_to_one_subnormal() {
+    // Dividing by 2^512 maps 7*2^-564 and 9*2^-564 to 1.75 and 2.25
+    // minimum-subnormal units. Both round to the same nonzero binary64 value,
+    // even though the retained response outputs are distinct.
+    let scale = f64::from_bits(1_535_u64 << 52);
+    let unit = f64::from_bits(459_u64 << 52);
+    let first = 7.0 * unit;
+    let second = 9.0 * unit;
+    let first_normalized = first / scale;
+    let second_normalized = second / scale;
+    assert_ne!(first.to_bits(), second.to_bits());
+    assert_eq!(first_normalized.to_bits(), 2);
+    assert_eq!(second_normalized.to_bits(), 2);
+
+    let model = StructuredPopulationModel {
+        identity: StructuredModelIdentity::try_new(
+            "gear/normalized-subnormal-alias",
+            nz(1),
+            [0x58; 32],
+        )
+        .expect("fixture identity is canonical"),
+        nodes: vec![
+            branch("root", None),
+            leaf("first-tiny", 0, 1, first),
+            leaf("second-tiny", 0, 1, second),
+            leaf("scale-anchor", 0, 1, 2.0),
+        ],
+        laws: vec![PiecewiseQuadraticLaw {
+            key: "alias-law".into(),
+            lower_bound: first,
+            upper_bound: 2.0,
+            knots: vec![first, 1.0, 2.0],
+            interior_knot_owners: vec![InteriorKnotOwner::LowerPiece],
+            pieces: vec![
+                QuadraticResponsePiece {
+                    mode_key: "tiny".into(),
+                    a: 0.0,
+                    b: 1.0,
+                    c: 0.0,
+                },
+                QuadraticResponsePiece {
+                    mode_key: "scale".into(),
+                    a: 0.0,
+                    b: 0.0,
+                    c: scale,
+                },
+            ],
+        }],
+    };
+    assert_eq!(
+        propagate_structured_population(&model),
+        Err(StructuredPropagationError::InvalidMoment {
+            scope: StructuredMomentScope::Population,
+            quantity: StructuredMomentQuantity::NormalizedObservation,
             issue: StructuredNumericIssue::Underflow,
         })
     );

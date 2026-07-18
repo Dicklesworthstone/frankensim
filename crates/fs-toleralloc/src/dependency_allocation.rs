@@ -780,17 +780,40 @@ fn log_sum_exp(
             ScalarIssue::NonFinite,
         ));
     }
+    // Max shifting makes at least one contribution exactly 1.0. With more
+    // than one term, the exact scaled sum is therefore strictly greater than
+    // 1.0. Refuse if binary64 accumulation erases that entire positive tail:
+    // accepting 1.0 would silently reduce a multi-member/group expression to
+    // its single dominant term.
+    if terms.len() > 1 && scaled_sum == 1.0 {
+        return Err(invalid_derived(
+            GroupedDerivedQuantity::LogSumExpContribution,
+            None,
+            group,
+            ScalarIssue::Underflow,
+        ));
+    }
     let result = maximum + det::ln(scaled_sum);
-    if result.is_finite() {
-        Ok(result)
-    } else {
-        Err(invalid_derived(
+    if !result.is_finite() {
+        return Err(invalid_derived(
             quantity,
             None,
             group,
             ScalarIssue::NonFinite,
-        ))
+        ));
     }
+    // Even when the scaled tail survives accumulation, adding its logarithm
+    // back to a much larger maximum can round to that maximum. The exact LSE
+    // of multiple finite terms is strictly greater than its largest term.
+    if terms.len() > 1 && result <= maximum {
+        return Err(invalid_derived(
+            GroupedDerivedQuantity::LogSumExpContribution,
+            None,
+            group,
+            ScalarIssue::Underflow,
+        ));
+    }
+    Ok(result)
 }
 
 fn validate_model(
@@ -1127,6 +1150,18 @@ pub fn allocate_grouped(
             Some(id),
             dependency_variance_delta,
         )?;
+        // Every pair of strictly positive coherent loadings contributes the
+        // strictly positive cross term 2 a_i a_j. A multi-member group can
+        // therefore never have an exact zero coherent-minus-independent
+        // delta; zero here means binary64 subtraction erased the dependence.
+        if members.len() > 1 && dependency_variance_delta == 0.0 {
+            return Err(invalid_derived(
+                GroupedDerivedQuantity::DependencyVarianceDelta,
+                None,
+                Some(id),
+                ScalarIssue::Underflow,
+            ));
+        }
         let total_cost =
             compensated_sum(members.iter().map(|index| items[*index].cost_contribution));
         validate_positive_derived(
@@ -1192,6 +1227,14 @@ pub fn allocate_grouped(
         None,
         dependency_variance_delta,
     )?;
+    if group_features.iter().any(|members| members.len() > 1) && dependency_variance_delta == 0.0 {
+        return Err(invalid_derived(
+            GroupedDerivedQuantity::DependencyVarianceDelta,
+            None,
+            None,
+            ScalarIssue::Underflow,
+        ));
+    }
 
     let mut stationarity_terms = Vec::with_capacity(model.features.len());
     for (index, grouped) in model.features.iter().enumerate() {

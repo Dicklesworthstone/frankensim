@@ -8,7 +8,10 @@
 //! evidence for the supplied population, not a distributional or reliability
 //! claim.
 
-use std::{collections::BTreeMap, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    num::NonZeroU64,
+};
 
 /// Receipt/evaluation schema for this fixed-order structured lane.
 pub const STRUCTURED_PROPAGATION_SCHEMA_V1: u32 = 1;
@@ -1889,6 +1892,7 @@ pub fn propagate_structured_population(
 
     let mut normalized_outputs = Vec::with_capacity(leaves.len());
     let mut normalized_by_node = vec![None; model.nodes.len()];
+    let mut normalized_preimages = BTreeMap::new();
     for leaf in &leaves {
         let normalized = if scale == 0.0 {
             0.0
@@ -1910,6 +1914,25 @@ pub fn propagate_structured_population(
             });
         }
         let normalized = canonical_zero(normalized);
+        let normalized_bits = normalized.to_bits();
+        let output_bits = leaf.output.to_bits();
+        match normalized_preimages.entry(normalized_bits) {
+            Entry::Vacant(entry) => {
+                entry.insert(output_bits);
+            }
+            Entry::Occupied(entry) if *entry.get() != output_bits => {
+                // Distinct retained outputs must remain distinguishable after
+                // the common-scale transform. Otherwise a node or response
+                // mode could publish zero variance solely because division
+                // rounded two different observations to one binary64 value.
+                return Err(StructuredPropagationError::InvalidMoment {
+                    scope: StructuredMomentScope::Population,
+                    quantity: StructuredMomentQuantity::NormalizedObservation,
+                    issue: StructuredNumericIssue::Underflow,
+                });
+            }
+            Entry::Occupied(_) => {}
+        }
         normalized_by_node[leaf.node.index()] = Some(normalized);
         normalized_outputs.push(normalized);
     }

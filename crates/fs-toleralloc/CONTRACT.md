@@ -176,9 +176,14 @@ strictly convex optimum is
 The implementation evaluates this formula with deterministic max-shifted
 log-sum-exp, stable ordinal order, compensated public sums, and one common
 binary64 scale correction that preserves every KKT ratio while tightening the
-published budget residual. It refuses a vanished positive log-sum-exp term,
-nonrepresentable tolerance/loading/cost/variance, empty or oversized group and
-feature tables (128 each), empty groups, unstable or colliding names, invalid
+published budget residual. It refuses a vanished positive max-shifted
+log-sum-exp tail, including a nonzero tail lost only by final compensated-sum
+rounding or by reconstruction against the dominant log term, and refuses a
+zero coherent-minus-independent delta for any multi-member group or grouped
+model because its positive loading cross terms make the exact delta strictly
+positive. It also refuses nonrepresentable tolerance/loading/cost/variance,
+empty or oversized group and feature tables (128 each), empty groups, unstable
+or colliding names, invalid
 group references, and nonpositive/non-finite inputs. No iterative optimizer or
 callback is used.
 
@@ -245,7 +250,11 @@ identified finite population with these semantics:
   explicit with zero weight and absent moments.
 - Moment accumulation is deterministic and population-weighted (denominator
   `W`, never `W - 1`). Outputs are normalized by one global maximum magnitude;
-  child and mode contributions are accumulated in stable ordinal order with
+  that normalization is injectivity-checked over distinct retained binary64
+  outputs. If two distinct outputs round to the same normalized binary64 value
+  (including the same nonzero subnormal), evaluation refuses rather than
+  erasing their separation and publishing a false zero node or mode variance.
+  Child and mode contributions are accumulated in stable ordinal order with
   compensated sums, then rescaled with checked arithmetic. The root also
   retains an independently accumulated two-pass mean/variance and residuals
   against the hierarchical and mode decompositions.

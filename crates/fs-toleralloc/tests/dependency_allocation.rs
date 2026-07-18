@@ -423,4 +423,46 @@ fn grouped_allocation_refuses_bad_scalars_and_lost_log_contributions() {
             ..
         })
     ));
+
+    // The smaller shape term is positive and materially changes the exact
+    // coherent variance of the published loadings, but its 3/8-ULP increment
+    // cannot move the max-shifted sum away from 1.0. This must fail closed
+    // instead of minting a zero dependence delta and exact-looking residuals.
+    let tiny = 3.0 * f64::EPSILON / 8.0;
+    assert_eq!((1.0 + tiny).to_bits(), 1.0_f64.to_bits());
+    let coherent_cross_increment = 2.0 * tiny + tiny * tiny;
+    assert_eq!(
+        (1.0 + coherent_cross_increment).to_bits(),
+        1.0_f64.to_bits() + 1
+    );
+    let aliased_tail = GroupedDependenceModel {
+        identity: GroupedDependenceIdentity::try_new(
+            "gear/lost-positive-shape-tail",
+            nz(1),
+            [0x52; 32],
+        )
+        .expect("fixture identity is canonical"),
+        groups: vec![DependencyGroup {
+            key: "coherent-pair".into(),
+        }],
+        features: vec![
+            GroupedFeature {
+                feature: feature("dominant", 1.0, 1.0),
+                group: DependencyGroupId(0),
+            },
+            GroupedFeature {
+                feature: feature("positive-tail", tiny, tiny),
+                group: DependencyGroupId(0),
+            },
+        ],
+    };
+    assert_eq!(
+        allocate_grouped(&aliased_tail, 1.0, 1.0),
+        Err(GroupedAllocationError::InvalidDerived {
+            quantity: GroupedDerivedQuantity::LogSumExpContribution,
+            feature_index: None,
+            group: Some(DependencyGroupId(0)),
+            issue: ScalarIssue::Underflow,
+        })
+    );
 }
