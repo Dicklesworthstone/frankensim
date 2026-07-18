@@ -51,9 +51,9 @@ pub const BIPOP_ADMISSION_SCHEMA_VERSION: u32 = 3;
 /// Schema version for [`BipopRestartRecord`].
 pub const BIPOP_RESTART_SCHEMA_VERSION: u32 = 1;
 
-/// Schema version for the root inputs and callback trace retained by
-/// [`BipopReport`].
-pub const BIPOP_REPORT_SCHEMA_VERSION: u32 = 1;
+/// Schema version for the root, callback trace, restart ledger, and full-study
+/// identity retained by [`BipopReport`].
+pub const BIPOP_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Schema version for each borrowed [`BipopEvaluationRecord`].
 pub const BIPOP_EVALUATION_SCHEMA_VERSION: u32 = 1;
@@ -66,6 +66,12 @@ pub const BIPOP_TRACE_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 /// Domain prefix for the production BIPOP callback-trace BLAKE3.
 pub const BIPOP_TRACE_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-callback-trace.v1";
+
+/// Schema version for the complete production BIPOP study identity.
+pub const BIPOP_STUDY_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
+/// Domain prefix for the complete root, callback, and restart-ledger identity.
+pub const BIPOP_STUDY_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-full-study.v1";
 
 /// Sealed result of callback-free BIPOP input and arithmetic admission.
 ///
@@ -1217,6 +1223,11 @@ fn build_bipop_trace_identity(
     points: &[f64],
 ) -> Result<BipopTraceIdentity, BipopError> {
     let dimension = root.start.len();
+    if dimension == 0 {
+        return Err(BipopError::InternalInvariant {
+            what: "callback trace dimension must be positive",
+        });
+    }
     let encoded_dimension =
         u64::try_from(dimension).map_err(|_| BipopError::IdentityFieldOverflow {
             what: "trace dimension",
@@ -1486,6 +1497,387 @@ fn f64_slices_match_bits(left: &[f64], right: &[f64]) -> bool {
             .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
+/// Strong identity over one complete BIPOP result payload.
+///
+/// The digest composes the exact root-input preimage, the retained and
+/// independently recomputed callback-trace receipts, every compatibility
+/// projection, and every ordered restart-record bit. The two trace receipts
+/// are deliberately distinct fields: stale trace content and a stale retained
+/// trace receipt must both perturb the full-study identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BipopStudyIdentity {
+    schema_version: u32,
+    restarts: usize,
+    evaluations: usize,
+    digest: [u8; 32],
+}
+
+impl BipopStudyIdentity {
+    /// Full-study identity schema version.
+    #[must_use]
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Number of ordered restart records bound by the digest.
+    #[must_use]
+    pub fn restarts(&self) -> usize {
+        self.restarts
+    }
+
+    /// Number of ordered objective callbacks bound by the digest.
+    #[must_use]
+    pub fn evaluations(&self) -> usize {
+        self.evaluations
+    }
+
+    /// Raw 256-bit BLAKE3 digest.
+    #[must_use]
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
+impl core::fmt::Display for BipopStudyIdentity {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "v{}:r{}:e{}:",
+            self.schema_version, self.restarts, self.evaluations
+        )?;
+        for byte in self.digest {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Typed refusal from production full-study identity validation/admission.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BipopStudyAdmissionError {
+    /// The retained identity does not match the report payload currently held.
+    PayloadIdentityMismatch {
+        /// Identity retained in the report.
+        declared: BipopStudyIdentity,
+        /// Identity recomputed from the current report payload.
+        computed: BipopStudyIdentity,
+    },
+    /// An internally valid report names a different study than the caller's
+    /// separately retained reference.
+    ReferenceIdentityMismatch {
+        /// External study identity required by the caller.
+        expected: BipopStudyIdentity,
+        /// Internally valid identity carried by this report.
+        found: BipopStudyIdentity,
+    },
+    /// A native cardinality could not enter the fixed-width identity frame.
+    IdentityEncoding {
+        /// Stable field label.
+        field: &'static str,
+    },
+    /// The retained payload cannot form the canonical identity preimage.
+    PayloadInvalid {
+        /// Stable failed preimage invariant.
+        invariant: &'static str,
+    },
+    /// Structural or semantic ledger admission failed before reference matching.
+    Ledger {
+        /// First deterministic ledger refusal.
+        error: BipopLedgerError,
+    },
+}
+
+impl core::fmt::Display for BipopStudyAdmissionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PayloadIdentityMismatch { declared, computed } => write!(
+                formatter,
+                "BIPOP PayloadIdentityMismatch: declared {declared}, computed {computed}"
+            ),
+            Self::ReferenceIdentityMismatch { expected, found } => write!(
+                formatter,
+                "BIPOP ReferenceIdentityMismatch: expected {expected}, found {found}"
+            ),
+            Self::IdentityEncoding { field } => write!(
+                formatter,
+                "BIPOP study identity field `{field}` does not fit its canonical encoding"
+            ),
+            Self::PayloadInvalid { invariant } => write!(
+                formatter,
+                "BIPOP study identity payload violates `{invariant}`"
+            ),
+            Self::Ledger { error } => write!(formatter, "BIPOP study admission refused: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BipopStudyAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Ledger { error } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+fn study_identity_usize(value: usize, what: &'static str) -> Result<u64, BipopError> {
+    u64::try_from(value).map_err(|_| BipopError::IdentityFieldOverflow { what })
+}
+
+fn study_hash_field(
+    hasher: &mut Blake3,
+    label: &'static str,
+    value: &[u8],
+) -> Result<(), BipopError> {
+    let label_len = study_identity_usize(label.len(), "study field label length")?;
+    let value_len = study_identity_usize(value.len(), "study field value length")?;
+    hasher.update(&label_len.to_le_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update(&value_len.to_le_bytes());
+    hasher.update(value);
+    Ok(())
+}
+
+fn study_hash_u64(hasher: &mut Blake3, label: &'static str, value: u64) -> Result<(), BipopError> {
+    study_hash_field(hasher, label, &value.to_le_bytes())
+}
+
+fn study_hash_usize(
+    hasher: &mut Blake3,
+    label: &'static str,
+    value: usize,
+) -> Result<(), BipopError> {
+    study_hash_u64(hasher, label, study_identity_usize(value, label)?)
+}
+
+fn study_hash_u32(hasher: &mut Blake3, label: &'static str, value: u32) -> Result<(), BipopError> {
+    study_hash_field(hasher, label, &value.to_le_bytes())
+}
+
+fn study_hash_f64(hasher: &mut Blake3, label: &'static str, value: f64) -> Result<(), BipopError> {
+    study_hash_u64(hasher, label, value.to_bits())
+}
+
+fn study_hash_flag(
+    hasher: &mut Blake3,
+    label: &'static str,
+    value: bool,
+) -> Result<(), BipopError> {
+    study_hash_field(hasher, label, &[u8::from(value)])
+}
+
+fn bipop_lane_tag(lane: BipopLane) -> u8 {
+    match lane {
+        BipopLane::Large => 0,
+        BipopLane::Small => 1,
+    }
+}
+
+fn cma_stop_reason_tag(reason: CmaStopReason) -> u8 {
+    match reason {
+        CmaStopReason::TargetReached => 0,
+        CmaStopReason::BudgetExhausted => 1,
+        CmaStopReason::Stagnated => 2,
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn build_bipop_study_identity(
+    report_schema_version: u32,
+    root: &BipopRootInputs,
+    root_content_identity: &ReplayIdentity,
+    schedule: &[usize],
+    total_evals: usize,
+    records: &[BipopRestartRecord],
+    best_restart: usize,
+    best: &CmaReport,
+    retained_trace_identity: BipopTraceIdentity,
+    callback_content_identity: BipopTraceIdentity,
+) -> Result<BipopStudyIdentity, BipopError> {
+    let mut hasher = Blake3::new();
+    study_hash_field(
+        &mut hasher,
+        "domain",
+        BIPOP_STUDY_IDENTITY_DOMAIN.as_bytes(),
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "study-schema-version",
+        BIPOP_STUDY_IDENTITY_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(&mut hasher, "report-schema-version", report_schema_version)?;
+    study_hash_u32(
+        &mut hasher,
+        "admission-schema-version",
+        BIPOP_ADMISSION_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "restart-schema-version",
+        BIPOP_RESTART_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "evaluation-schema-version",
+        BIPOP_EVALUATION_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "trace-schema-version",
+        BIPOP_TRACE_IDENTITY_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "rand-stream-semantics-version",
+        fs_rand::STREAM_SEMANTICS_VERSION,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "jacobi-admission-schema-version",
+        fs_la::eigen::JACOBI_EIGH_ADMISSION_SCHEMA_VERSION,
+    )?;
+    study_hash_u32(&mut hasher, "cma-stream-kernel", K_CMA)?;
+    study_hash_u64(
+        &mut hasher,
+        "restart-seed-stride",
+        BIPOP_RESTART_SEED_STRIDE,
+    )?;
+    study_hash_u32(&mut hasher, "large-run-cap", BIPOP_LARGE_RUN_CAP)?;
+    study_hash_usize(
+        &mut hasher,
+        "generations-per-restart",
+        BIPOP_GENERATIONS_PER_RESTART,
+    )?;
+    study_hash_field(
+        &mut hasher,
+        "retained-root-canonical-bytes",
+        root.identity.canonical_bytes(),
+    )?;
+    study_hash_field(
+        &mut hasher,
+        "root-content-canonical-bytes",
+        root_content_identity.canonical_bytes(),
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "retained-trace-schema-version",
+        retained_trace_identity.schema_version,
+    )?;
+    study_hash_usize(
+        &mut hasher,
+        "retained-trace-rows",
+        retained_trace_identity.rows,
+    )?;
+    study_hash_usize(
+        &mut hasher,
+        "retained-trace-dimension",
+        retained_trace_identity.dimension,
+    )?;
+    study_hash_field(
+        &mut hasher,
+        "retained-trace-digest",
+        &retained_trace_identity.digest,
+    )?;
+    study_hash_u32(
+        &mut hasher,
+        "callback-content-schema-version",
+        callback_content_identity.schema_version,
+    )?;
+    study_hash_usize(
+        &mut hasher,
+        "callback-content-rows",
+        callback_content_identity.rows,
+    )?;
+    study_hash_usize(
+        &mut hasher,
+        "callback-content-dimension",
+        callback_content_identity.dimension,
+    )?;
+    study_hash_field(
+        &mut hasher,
+        "callback-content-digest",
+        &callback_content_identity.digest,
+    )?;
+    study_hash_usize(&mut hasher, "total-evals", total_evals)?;
+    study_hash_usize(&mut hasher, "schedule-length", schedule.len())?;
+    for (index, lambda) in schedule.iter().copied().enumerate() {
+        study_hash_usize(&mut hasher, "schedule-index", index)?;
+        study_hash_usize(&mut hasher, "schedule-lambda", lambda)?;
+    }
+    study_hash_usize(&mut hasher, "restart-record-count", records.len())?;
+    study_hash_usize(&mut hasher, "best-restart", best_restart)?;
+    study_hash_usize(&mut hasher, "best-x-length", best.x_best.len())?;
+    for (coordinate, value) in best.x_best.iter().copied().enumerate() {
+        study_hash_usize(&mut hasher, "best-coordinate-index", coordinate)?;
+        study_hash_f64(&mut hasher, "best-coordinate", value)?;
+    }
+    study_hash_f64(&mut hasher, "best-objective", best.f_best)?;
+    study_hash_usize(&mut hasher, "best-evaluations", best.evals)?;
+    study_hash_usize(&mut hasher, "best-generations", best.generations)?;
+    study_hash_flag(&mut hasher, "best-converged", best.converged)?;
+    study_hash_f64(&mut hasher, "best-sigma", best.sigma)?;
+
+    for (record_index, record) in records.iter().enumerate() {
+        study_hash_usize(&mut hasher, "record-index", record_index)?;
+        study_hash_u32(&mut hasher, "record-schema-version", record.schema_version)?;
+        study_hash_u64(&mut hasher, "record-ordinal", record.ordinal)?;
+        study_hash_field(&mut hasher, "record-lane", &[bipop_lane_tag(record.lane)])?;
+        study_hash_usize(&mut hasher, "record-lambda", record.lambda)?;
+        study_hash_usize(
+            &mut hasher,
+            "record-allocated-budget",
+            record.allocated_budget,
+        )?;
+        study_hash_u64(&mut hasher, "record-seed", record.seed)?;
+        study_hash_usize(&mut hasher, "record-start-length", record.start.len())?;
+        for (coordinate, value) in record.start.iter().copied().enumerate() {
+            study_hash_usize(&mut hasher, "record-start-coordinate-index", coordinate)?;
+            study_hash_f64(&mut hasher, "record-start-coordinate", value)?;
+        }
+        study_hash_usize(&mut hasher, "record-trace-start", record.trace_start)?;
+        study_hash_usize(&mut hasher, "record-trace-end", record.trace_end)?;
+        study_hash_field(
+            &mut hasher,
+            "record-stop-reason",
+            &[cma_stop_reason_tag(record.stop_reason)],
+        )?;
+        study_hash_usize(
+            &mut hasher,
+            "record-report-x-length",
+            record.report.x_best.len(),
+        )?;
+        for (coordinate, value) in record.report.x_best.iter().copied().enumerate() {
+            study_hash_usize(&mut hasher, "record-report-coordinate-index", coordinate)?;
+            study_hash_f64(&mut hasher, "record-report-coordinate", value)?;
+        }
+        study_hash_f64(&mut hasher, "record-report-objective", record.report.f_best)?;
+        study_hash_usize(
+            &mut hasher,
+            "record-report-evaluations",
+            record.report.evals,
+        )?;
+        study_hash_usize(
+            &mut hasher,
+            "record-report-generations",
+            record.report.generations,
+        )?;
+        study_hash_flag(
+            &mut hasher,
+            "record-report-converged",
+            record.report.converged,
+        )?;
+        study_hash_f64(&mut hasher, "record-report-sigma", record.report.sigma)?;
+    }
+
+    Ok(BipopStudyIdentity {
+        schema_version: BIPOP_STUDY_IDENTITY_SCHEMA_VERSION,
+        restarts: records.len(),
+        evaluations: total_evals,
+        digest: *hasher.finalize().as_bytes(),
+    })
+}
+
 /// BIPOP restart evidence.
 #[derive(Debug, Clone)]
 pub struct BipopReport {
@@ -1502,6 +1894,7 @@ pub struct BipopReport {
     trace_rows: Vec<BipopEvaluationRow>,
     trace_points: Vec<f64>,
     trace_identity: BipopTraceIdentity,
+    study_identity: BipopStudyIdentity,
 }
 
 impl BipopReport {
@@ -1576,13 +1969,103 @@ impl BipopReport {
         self.trace_identity
     }
 
+    /// Strong identity over the complete root, callback trace, and restart ledger.
+    #[must_use]
+    pub fn study_identity(&self) -> BipopStudyIdentity {
+        self.study_identity
+    }
+
+    fn computed_study_identity(&self) -> Result<BipopStudyIdentity, BipopError> {
+        let root_content = build_bipop_root_inputs(
+            &self.root.start,
+            self.root.sigma,
+            self.root.total_budget,
+            self.root.target,
+            self.root.seed,
+        )?;
+        let callback_content_identity =
+            build_bipop_trace_identity(&self.root, &self.trace_rows, &self.trace_points)?;
+        build_bipop_study_identity(
+            self.schema_version,
+            &self.root,
+            &root_content.identity,
+            &self.schedule,
+            self.total_evals,
+            &self.records,
+            self.best_restart,
+            &self.best,
+            self.trace_identity,
+            callback_content_identity,
+        )
+    }
+
+    /// Recompute and validate the retained full-study identity.
+    ///
+    /// This check distinguishes a stale payload from comparison against a
+    /// different external study. It does not replace [`Self::validate_ledger`],
+    /// which supplies the independent structural and semantic checks.
+    ///
+    /// # Errors
+    /// Returns [`BipopStudyAdmissionError::PayloadIdentityMismatch`] when the
+    /// current report bytes do not match their retained identity, or a payload
+    /// layout/encoding refusal when no canonical preimage can be formed.
+    pub fn validate_study_identity(&self) -> Result<(), BipopStudyAdmissionError> {
+        let computed = self
+            .computed_study_identity()
+            .map_err(|error| match error {
+                BipopError::IdentityFieldOverflow { what }
+                | BipopError::DimensionOverflow { what } => {
+                    BipopStudyAdmissionError::IdentityEncoding { field: what }
+                }
+                BipopError::InternalInvariant { what } => {
+                    BipopStudyAdmissionError::PayloadInvalid { invariant: what }
+                }
+                _ => BipopStudyAdmissionError::PayloadInvalid {
+                    invariant: "study identity reconstruction",
+                },
+            })?;
+        if computed == self.study_identity {
+            Ok(())
+        } else {
+            Err(BipopStudyAdmissionError::PayloadIdentityMismatch {
+                declared: self.study_identity,
+                computed,
+            })
+        }
+    }
+
+    /// Admit this report against one separately retained full-study identity.
+    ///
+    /// Validation order is intentional: stale payloads are classified before
+    /// semantic ledger failures, and an internally valid but different study is
+    /// classified only after both checks succeed.
+    ///
+    /// # Errors
+    /// Returns a typed payload, ledger, encoding, or reference mismatch.
+    pub fn admit_study_identity(
+        &self,
+        expected: BipopStudyIdentity,
+    ) -> Result<(), BipopStudyAdmissionError> {
+        self.validate_study_identity()?;
+        self.validate_ledger()
+            .map_err(|error| BipopStudyAdmissionError::Ledger { error })?;
+        if self.study_identity == expected {
+            Ok(())
+        } else {
+            Err(BipopStudyAdmissionError::ReferenceIdentityMismatch {
+                expected,
+                found: self.study_identity,
+            })
+        }
+    }
+
     /// Recheck the ordered ledger and every compatibility projection.
     ///
     /// This is a structural validator over retained evidence. It recomputes the
     /// canonical root identity, restart derivations, complete callback-trace
-    /// projection, and strong trace identity. A consumer asserting one specific
-    /// study must additionally compare [`BipopRootInputs::identity`] with its
-    /// separately retained expected root.
+    /// projection, strong trace identity, and complete study identity. A
+    /// consumer asserting one specific study should use
+    /// [`Self::admit_study_identity`] with its separately retained reference.
     ///
     /// # Errors
     /// Returns a [`BipopLedgerError`] naming the first deterministic invariant
@@ -1953,6 +2436,22 @@ impl BipopReport {
                 .map_err(|_| BipopLedgerError::global("trace-identity-encoding"))?;
         if self.trace_identity != expected_trace_identity {
             return Err(BipopLedgerError::global("trace-identity"));
+        }
+        let expected_study_identity = build_bipop_study_identity(
+            self.schema_version,
+            &self.root,
+            &expected_root.identity,
+            &self.schedule,
+            self.total_evals,
+            &self.records,
+            self.best_restart,
+            &self.best,
+            self.trace_identity,
+            expected_trace_identity,
+        )
+        .map_err(|_| BipopLedgerError::global("study-identity-encoding"))?;
+        if self.study_identity != expected_study_identity {
+            return Err(BipopLedgerError::global("study-identity"));
         }
         Ok(())
     }
@@ -2382,6 +2881,18 @@ fn run_admitted_bipop<F: FnMut(&[f64]) -> f64>(
     let schedule = records.iter().map(BipopRestartRecord::lambda).collect();
     let best = records[best_restart].report.clone();
     let trace_identity = build_bipop_trace_identity(&root, &trace_rows, &trace_points)?;
+    let study_identity = build_bipop_study_identity(
+        BIPOP_REPORT_SCHEMA_VERSION,
+        &root,
+        &root.identity,
+        &schedule,
+        total_evals,
+        &records,
+        best_restart,
+        &best,
+        trace_identity,
+        trace_identity,
+    )?;
     let report = BipopReport {
         best,
         schedule,
@@ -2393,6 +2904,7 @@ fn run_admitted_bipop<F: FnMut(&[f64]) -> f64>(
         trace_rows,
         trace_points,
         trace_identity,
+        study_identity,
     };
     report
         .validate_ledger()
@@ -2430,6 +2942,19 @@ mod tests {
         let trace_points = Vec::new();
         let trace_identity = build_bipop_trace_identity(&root, &trace_rows, &trace_points)
             .expect("empty test trace identity must be representable");
+        let study_identity = build_bipop_study_identity(
+            BIPOP_REPORT_SCHEMA_VERSION,
+            &root,
+            &root.identity,
+            &schedule,
+            total_evals,
+            &records,
+            best_restart,
+            &best,
+            trace_identity,
+            trace_identity,
+        )
+        .expect("test study identity must be representable");
         BipopReport {
             best,
             schedule,
@@ -2441,6 +2966,7 @@ mod tests {
             trace_rows,
             trace_points,
             trace_identity,
+            study_identity,
         }
     }
 
@@ -2457,6 +2983,9 @@ mod tests {
         report.trace_identity =
             build_bipop_trace_identity(&report.root, &report.trace_rows, &report.trace_points)
                 .expect("mutated test trace remains representable");
+        report.study_identity = report
+            .computed_study_identity()
+            .expect("mutated test study remains representable");
     }
 
     /// G0: both random domains count every semantic axis, accept exactly the
@@ -3026,6 +3555,117 @@ mod tests {
             .expect_err("resealed root seed mutation must refuse");
         assert_eq!(error.restart(), Some(0));
         assert_eq!(error.invariant(), "derived-seed");
+    }
+
+    /// G3/G5: a stale but structurally plausible ledger field is a payload
+    /// mismatch; resealing makes it a different reference identity; resealing a
+    /// semantically impossible field still reaches the independent ledger gate.
+    #[test]
+    fn study_identity_separates_stale_reference_and_semantic_mutations() {
+        let mut objective = |point: &[f64]| point.iter().map(|value| value * value).sum::<f64>();
+        let canonical = try_bipop_cmaes(&mut objective, &[2.0, -1.0], 0.75, 20, None, 11)
+            .expect("study identity mutation fixture admits");
+        assert!(
+            canonical.records.len() > 1,
+            "fixture needs a non-best restart"
+        );
+        let reference = canonical.study_identity;
+        let nonbest = if canonical.best_restart == 0 { 1 } else { 0 };
+        let assert_payload_mismatch = |report: &BipopReport| match report.validate_study_identity()
+        {
+            Err(BipopStudyAdmissionError::PayloadIdentityMismatch { declared, computed }) => {
+                assert_eq!(declared, reference);
+                assert_ne!(computed, reference);
+            }
+            other => panic!("expected payload identity mismatch, found {other:?}"),
+        };
+
+        let mut stale_root = canonical.clone();
+        stale_root.root.seed ^= 1;
+        assert_payload_mismatch(&stale_root);
+
+        let mut stale_trace_content = canonical.clone();
+        let noninitial_coordinate = stale_trace_content
+            .root
+            .start
+            .len()
+            .checked_add(1)
+            .expect("fixture coordinate offset fits");
+        stale_trace_content.trace_points[noninitial_coordinate] =
+            f64::from_bits(stale_trace_content.trace_points[noninitial_coordinate].to_bits() ^ 1);
+        assert_payload_mismatch(&stale_trace_content);
+
+        let mut stale_trace_receipt = canonical.clone();
+        stale_trace_receipt.trace_identity.digest[0] ^= 1;
+        assert_payload_mismatch(&stale_trace_receipt);
+
+        let mut stale_schedule = canonical.clone();
+        stale_schedule.schedule[0] = stale_schedule.schedule[0]
+            .checked_add(1)
+            .expect("fixture population fits");
+        assert_payload_mismatch(&stale_schedule);
+
+        let mut stale_best_projection = canonical.clone();
+        stale_best_projection.best.sigma = f64::from_bits(
+            stale_best_projection
+                .best
+                .sigma
+                .to_bits()
+                .checked_add(1)
+                .expect("finite fixture ULP"),
+        );
+        assert_payload_mismatch(&stale_best_projection);
+
+        let mut stale = canonical.clone();
+        let original_sigma = stale.records[nonbest].report.sigma;
+        stale.records[nonbest].report.sigma = f64::from_bits(
+            original_sigma
+                .to_bits()
+                .checked_add(1)
+                .expect("finite fixture ULP"),
+        );
+        let computed = stale
+            .computed_study_identity()
+            .expect("mutated payload remains identity-representable");
+        assert_eq!(
+            stale.validate_study_identity(),
+            Err(BipopStudyAdmissionError::PayloadIdentityMismatch {
+                declared: reference,
+                computed,
+            })
+        );
+        let error = stale
+            .validate_ledger()
+            .expect_err("stale full-study identity must fail the ledger gate");
+        assert_eq!(error.invariant(), "study-identity");
+
+        stale.study_identity = computed;
+        stale
+            .validate_ledger()
+            .expect("finite non-best diagnostic sigma has no independent replay oracle");
+        assert_eq!(
+            stale.admit_study_identity(reference),
+            Err(BipopStudyAdmissionError::ReferenceIdentityMismatch {
+                expected: reference,
+                found: computed,
+            })
+        );
+
+        let mut semantic_forgery = canonical;
+        semantic_forgery.records[0].seed ^= 1;
+        semantic_forgery.study_identity = semantic_forgery
+            .computed_study_identity()
+            .expect("semantic forgery remains identity-representable");
+        let error = semantic_forgery
+            .admit_study_identity(reference)
+            .expect_err("resealing cannot bypass derived-seed admission");
+        match error {
+            BipopStudyAdmissionError::Ledger { error } => {
+                assert_eq!(error.restart(), Some(0));
+                assert_eq!(error.invariant(), "derived-seed");
+            }
+            other => panic!("expected semantic ledger refusal, found {other:?}"),
+        }
     }
 
     /// G0: an overflowing hypothetical next generation is not evidence that a
