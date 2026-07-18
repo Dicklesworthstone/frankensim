@@ -46,17 +46,20 @@ fn g0_g3_antipodal_noncommuting_retractions_are_bit_identical() {
 fn g0_lexicographic_tie_planes_choose_positive_first_nonzero_axis() {
     let manifold = Manifold::So3;
     let zero_step = [0.0; 3];
-    let cases = [
-        ([0.0, -1.0, 0.0, -0.0], [0.0, 1.0, 0.0, 0.0]),
-        ([-0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 1.0, 0.0]),
-        ([0.0, -0.0, 0.0, -1.0], [0.0, 0.0, 0.0, 1.0]),
+    let canonical_representatives = [
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
     ];
 
-    for (base, expected) in cases {
-        let canonical = manifold
-            .retract(&base, &zero_step)
-            .expect("unit 180-degree quaternion");
-        assert_eq!(bits(&canonical), bits(&expected));
+    for expected in canonical_representatives {
+        let antipode = expected.map(|component| -component);
+        for base in [expected, antipode] {
+            let canonical = manifold
+                .retract(&base, &zero_step)
+                .expect("unit 180-degree quaternion");
+            assert_eq!(bits(&canonical), bits(&expected));
+        }
     }
 }
 

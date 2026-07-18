@@ -56,6 +56,12 @@ fn checked_layout_formulas_hold_at_the_u32_boundary() {
         u32::MAX - 1,
     );
     assert_layout(
+        Manifold::Stiefel { n: u32::MAX, p: 1 },
+        u32::MAX,
+        u32::MAX,
+        u32::MAX - 1,
+    );
+    assert_layout(
         Manifold::Stiefel {
             n: u32::from(u16::MAX),
             p: u32::from(u16::MAX),
