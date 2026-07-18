@@ -14,12 +14,15 @@ diagnostics and upper bounds remain in-house.
 
 - `Layer::new(weights, bias)` — a dense affine layer; `spectral_norm(&weights)`
   (power iteration on `WᵀW`); `spectral_normalize(layer, bound)` (scale so the
-  spectral norm equals `bound`).
+  certified spectral-norm upper bound is at most `bound`).
 - `MlpSdf::new(layers, bound)` — spectrally normalizes each layer to `bound` and
-  records the certified global Lipschitz constant `L = Π σᵢ` (tanh is
+  records the certified global Lipschitz constant `L = Π Uᵢ`, where each `Uᵢ`
+  is an outward-rounded spectral-norm upper bound (tanh is
   1-Lipschitz). `eval` (tanh hidden, linear output), `eval_grad` (finite
   differences), `eval_interval(lo, hi)` (IBP output enclosure), `lipschitz`,
-  `topology_hint`.
+  `input_dim`, `topology_hint`. The corresponding `try_eval`, `try_eval_grad`,
+  and `try_eval_interval` entry points return a structured
+  `InputDimensionError` instead of panicking at an untrusted boundary.
 - `safe_step_radius(value, lipschitz)` — `|value|/L`, the provably safe
   sphere-tracing step.
 - `TopologyHint::Unknown` — the only variant; topology is never inferred from
@@ -36,15 +39,24 @@ diagnostics and upper bounds remain in-house.
   `MLP_ACTIVATION_SEMANTICS=fs-rep-neural-det-tanh-v1`, rather than an
   ungoverned platform `tanh`. A degenerate input box may widen by the accumulated
   rounding budget but must contain the separately evaluated point.
-- `‖∇f(x)‖ ≤ L` everywhere.
+- Point, gradient, and both interval endpoint vectors must contain exactly
+  `input_dim()` coordinates. No evaluator truncates, pads, or otherwise
+  reinterprets a malformed vector; all four checks share one admission helper.
+- The analytic gradient of the continuous real MLP satisfies `‖∇f(x)‖ ≤ L`
+  everywhere. `eval_grad` is only a rounded central-finite-difference
+  diagnostic: its coordinate secants use different line segments and it has no
+  gradient-certificate authority.
 - A sphere-trace step of `safe_step_radius(f(x), L)` never tunnels: `f` cannot
   change sign within that radius.
 - `topology_hint` is always `Unknown` (honest — never claimed from the loss).
 
 ## Error model
 
-Layer construction and interval endpoint-length/input-dimension mismatches panic
-as structural misuse. A non-finite or inverted interval box returns
+Layer construction panics on structural misuse. The convenient `eval`,
+`eval_grad`, and `eval_interval` methods also panic on an input-dimension
+mismatch; their `try_*` counterparts return deterministic structured errors
+containing the evaluation surface plus expected and actual dimensions. A
+non-finite or inverted correctly dimensioned interval box returns
 `(-infinity, +infinity)` as the fail-closed enclosure.
 
 ## Determinism class
@@ -71,8 +83,11 @@ None.
 normalization to a bound; the Lipschitz certificate is never violated; IBP
 soundness, degenerate-point enclosure, malformed-box refusal, and deterministic
 endpoint replay; exact point-evaluator binding to the interval certifier's
-deterministic `tanh`; the gradient is bounded by L; a certified sphere-trace
-step never tunnels; topology honestly unknown; determinism.
+deterministic `tanh`; short, long, and empty vectors across point, gradient, and
+both interval endpoints with exact structured diagnostics; deterministic
+finite-difference diagnostics with an explicitly non-authoritative generic
+bound; a certified sphere-trace step never tunnels; topology honestly unknown;
+determinism.
 
 ## No-claim boundaries
 
@@ -82,7 +97,8 @@ step never tunnels; topology honestly unknown; determinism.
   autograd Jacobians) is the fuller deliverable, staged — this v0 does not train.
 - IBP is the interval evaluator; the tighter CROWN-class linear-relaxation bound
   propagation is a follow-on.
-- The gradient is finite-difference here; the analytic / FrankenTorch-autograd
-  gradient is the production path.
+- `eval_grad` is a finite-difference diagnostic, not a certificate. An analytic
+  AD gradient or interval-derivative enclosure bound to its arithmetic and
+  error model is required before derivative evidence may carry authority.
 - Watertightness and Hausdorff agreement vs the source chart come from the
   certificate machinery (fs-rep validity-certificates), never from this crate.

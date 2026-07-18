@@ -22,12 +22,61 @@
 
 use fs_ivl::Interval;
 use fs_math::det;
+use std::fmt;
 
 /// Version of the hidden-activation arithmetic shared by point evaluation and
 /// interval certification.
 pub const MLP_ACTIVATION_SEMANTICS_VERSION: u32 = 1;
 /// Stable name of the governed hidden-activation arithmetic.
 pub const MLP_ACTIVATION_SEMANTICS: &str = "fs-rep-neural-det-tanh-v1";
+
+/// Public evaluation surface on which an input-dimension mismatch occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationInput {
+    /// Point-value evaluation.
+    Point,
+    /// Finite-difference gradient evaluation.
+    Gradient,
+    /// Lower endpoint of an interval box.
+    IntervalLower,
+    /// Upper endpoint of an interval box.
+    IntervalUpper,
+}
+
+impl fmt::Display for EvaluationInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Point => "point",
+            Self::Gradient => "gradient",
+            Self::IntervalLower => "interval lower endpoint",
+            Self::IntervalUpper => "interval upper endpoint",
+        })
+    }
+}
+
+/// Structured refusal for a neural input whose coordinate count does not
+/// exactly match the chart's declared input dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputDimensionError {
+    /// Evaluation surface that rejected the input.
+    pub input: EvaluationInput,
+    /// Coordinate count declared by the first network layer.
+    pub expected: usize,
+    /// Coordinate count supplied by the caller.
+    pub actual: usize,
+}
+
+impl fmt::Display for InputDimensionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} input dimension mismatch: expected {}, got {}",
+            self.input, self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for InputDimensionError {}
 
 /// A dense affine layer (`out × in` weights + bias).
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +311,12 @@ impl MlpSdf {
         self.lipschitz
     }
 
+    /// Number of coordinates required by every point and interval query.
+    #[must_use]
+    pub fn input_dim(&self) -> usize {
+        self.layers[0].in_dim()
+    }
+
     /// The topology hint — honestly `Unknown` (never inferred from the fit).
     #[must_use]
     pub fn topology_hint(&self) -> TopologyHint {
@@ -269,8 +324,23 @@ impl MlpSdf {
     }
 
     /// Evaluate the implicit value `f(x)` (tanh between layers, linear output).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `x.len() != self.input_dim()`. Use [`Self::try_eval`] at an
+    /// untrusted boundary that needs a structured refusal.
     #[must_use]
     pub fn eval(&self, x: &[f64]) -> f64 {
+        self.try_eval(x).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible point evaluation with exact input-dimension admission.
+    pub fn try_eval(&self, x: &[f64]) -> Result<f64, InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::Point, x.len())?;
+        Ok(self.eval_admitted(x))
+    }
+
+    fn eval_admitted(&self, x: &[f64]) -> f64 {
         let mut a = x.to_vec();
         let last = self.layers.len() - 1;
         for (li, layer) in self.layers.iter().enumerate() {
@@ -288,19 +358,39 @@ impl MlpSdf {
         a[0]
     }
 
-    /// The gradient `∇f(x)` by central finite differences (its norm is `≤ L`).
+    /// A deterministic central-finite-difference gradient diagnostic.
+    ///
+    /// The analytic gradient of the continuous real MLP has norm at most the
+    /// certified Lipschitz constant `L`. This rounded diagnostic is not that
+    /// analytic gradient: its coordinates use distinct line segments, and its
+    /// evaluations carry floating-point error. It therefore conveys no
+    /// certificate authority. Use AD or interval-derivative evidence when a
+    /// gradient bound is load-bearing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `x.len() != self.input_dim()`. Use [`Self::try_eval_grad`]
+    /// at an untrusted boundary that needs a structured refusal.
     #[must_use]
     pub fn eval_grad(&self, x: &[f64]) -> Vec<f64> {
+        self.try_eval_grad(x)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible finite-difference diagnostic with exact input-dimension
+    /// admission and the same no-certificate boundary as [`Self::eval_grad`].
+    pub fn try_eval_grad(&self, x: &[f64]) -> Result<Vec<f64>, InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::Gradient, x.len())?;
         let h = 1e-6;
-        (0..x.len())
+        Ok((0..x.len())
             .map(|i| {
                 let mut xp = x.to_vec();
                 let mut xm = x.to_vec();
                 xp[i] += h;
                 xm[i] -= h;
-                (self.eval(&xp) - self.eval(&xm)) / (2.0 * h)
+                (self.eval_admitted(&xp) - self.eval_admitted(&xm)) / (2.0 * h)
             })
-            .collect()
+            .collect())
     }
 
     /// A GUARANTEED output enclosure of `f` over the input box `[lo, hi]`, by
@@ -309,18 +399,25 @@ impl MlpSdf {
     /// whole extended real line.
     #[must_use]
     pub fn eval_interval(&self, lo: &[f64], hi: &[f64]) -> (f64, f64) {
-        assert_eq!(lo.len(), hi.len(), "interval endpoint length mismatch");
-        assert_eq!(
-            lo.len(),
-            self.layers[0].in_dim(),
-            "interval input dimension mismatch"
-        );
+        self.try_eval_interval(lo, hi)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible interval evaluation with independent exact-dimension admission
+    /// for both endpoint vectors.
+    pub fn try_eval_interval(
+        &self,
+        lo: &[f64],
+        hi: &[f64],
+    ) -> Result<(f64, f64), InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::IntervalLower, lo.len())?;
+        self.validate_input_dim(EvaluationInput::IntervalUpper, hi.len())?;
         if lo
             .iter()
             .zip(hi)
             .any(|(&lo, &hi)| !lo.is_finite() || !hi.is_finite() || lo > hi)
         {
-            return (f64::NEG_INFINITY, f64::INFINITY);
+            return Ok((f64::NEG_INFINITY, f64::INFINITY));
         }
 
         let mut activations = lo
@@ -347,7 +444,24 @@ impl MlpSdf {
             }
             activations = next;
         }
-        (activations[0].lo(), activations[0].hi())
+        Ok((activations[0].lo(), activations[0].hi()))
+    }
+
+    fn validate_input_dim(
+        &self,
+        input: EvaluationInput,
+        actual: usize,
+    ) -> Result<(), InputDimensionError> {
+        let expected = self.input_dim();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(InputDimensionError {
+                input,
+                expected,
+                actual,
+            })
+        }
     }
 }
 

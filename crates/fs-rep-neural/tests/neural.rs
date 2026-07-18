@@ -6,8 +6,9 @@
 //! surface.
 
 use fs_rep_neural::{
-    Layer, MLP_ACTIVATION_SEMANTICS, MLP_ACTIVATION_SEMANTICS_VERSION, MlpSdf, TopologyHint,
-    safe_step_radius, spectral_norm, spectral_norm_upper_bound, spectral_normalize,
+    EvaluationInput, InputDimensionError, Layer, MLP_ACTIVATION_SEMANTICS,
+    MLP_ACTIVATION_SEMANTICS_VERSION, MlpSdf, TopologyHint, safe_step_radius, spectral_norm,
+    spectral_norm_upper_bound, spectral_normalize,
 };
 
 // A deterministic pseudo-random point stream in [-1, 1)^2 (no rand crate).
@@ -245,6 +246,71 @@ fn interval_bound_propagation_refuses_malformed_boxes() {
 }
 
 #[test]
+fn every_evaluator_requires_the_exact_declared_input_dimension() {
+    let net = sample_mlp();
+    assert_eq!(net.input_dim(), 2);
+
+    for (point, actual) in [(&[][..], 0), (&[0.0][..], 1), (&[0.0, 0.0, 7.0][..], 3)] {
+        assert_eq!(
+            net.try_eval(point),
+            Err(InputDimensionError {
+                input: EvaluationInput::Point,
+                expected: 2,
+                actual,
+            })
+        );
+        assert_eq!(
+            net.try_eval_grad(point),
+            Err(InputDimensionError {
+                input: EvaluationInput::Gradient,
+                expected: 2,
+                actual,
+            })
+        );
+        assert!(std::panic::catch_unwind(|| net.eval(point)).is_err());
+        assert!(std::panic::catch_unwind(|| net.eval_grad(point)).is_err());
+    }
+
+    assert_eq!(
+        net.try_eval_interval(&[0.0], &[0.0, 0.0]),
+        Err(InputDimensionError {
+            input: EvaluationInput::IntervalLower,
+            expected: 2,
+            actual: 1,
+        })
+    );
+    assert_eq!(
+        net.try_eval_interval(&[0.0, 0.0], &[0.0, 0.0, 0.0]),
+        Err(InputDimensionError {
+            input: EvaluationInput::IntervalUpper,
+            expected: 2,
+            actual: 3,
+        })
+    );
+
+    let point = [0.25, -0.5];
+    assert_eq!(
+        net.try_eval(&point).unwrap().to_bits(),
+        net.eval(&point).to_bits()
+    );
+    assert_eq!(net.try_eval_grad(&point).unwrap(), net.eval_grad(&point));
+    assert_eq!(
+        net.try_eval_interval(&point, &point).unwrap(),
+        net.eval_interval(&point, &point)
+    );
+
+    let diagnostic = InputDimensionError {
+        input: EvaluationInput::IntervalUpper,
+        expected: 2,
+        actual: 3,
+    };
+    assert_eq!(
+        diagnostic.to_string(),
+        "interval upper endpoint input dimension mismatch: expected 2, got 3"
+    );
+}
+
+#[test]
 fn interval_bound_propagation_is_bit_deterministic() {
     let net = sample_mlp();
     let lo = [-0.375, -0.625];
@@ -305,13 +371,26 @@ fn point_evaluation_uses_the_interval_certifiers_deterministic_tanh() {
 }
 
 #[test]
-fn the_gradient_is_bounded_by_the_lipschitz_constant() {
+fn finite_difference_gradient_is_a_bounded_deterministic_diagnostic() {
     let net = sample_mlp();
     let l = net.lipschitz();
     for p in points(200, 0xC0FFEE) {
         let g = net.eval_grad(&p);
+        let replay = net.eval_grad(&p);
+        assert_eq!(
+            g.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            replay.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        // Each centered coordinate secant is individually bounded by L in
+        // exact arithmetic. Their vector does not represent one common-point
+        // analytic gradient, so only the generic sqrt(d)*L diagnostic bound
+        // is checked here, with allowance for rounded point evaluations.
+        assert!(g.iter().all(|component| component.abs() <= l + 1e-4));
         let gnorm = (g[0] * g[0] + g[1] * g[1]).sqrt();
-        assert!(gnorm <= l + 1e-4, "‖∇f‖ = {gnorm} exceeds L = {l}");
+        assert!(
+            gnorm <= 2.0_f64.sqrt() * l + 2e-4,
+            "finite-difference diagnostic norm {gnorm} exceeds sqrt(d)*L for L={l}"
+        );
     }
 }
 
