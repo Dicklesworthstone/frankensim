@@ -713,7 +713,7 @@ pub enum ConError {
         /// Proof engine the caller invoked.
         attempted: ProofKind,
     },
-    /// The elastic solver's host/domain contract was not admitted.
+    /// The v1 constraint host/domain contract was not admitted.
     InvalidDomain(DomainError),
     /// Serialized text failed to parse.
     Parse {
@@ -747,16 +747,16 @@ impl core::fmt::Display for ConError {
                 f,
                 "cannot satisfy requested proof {requested:?} with the {attempted:?} prover"
             ),
-            ConError::InvalidDomain(error) => write!(f, "invalid elastic domain: {error}"),
+            ConError::InvalidDomain(error) => write!(f, "invalid constraint domain: {error}"),
             ConError::Parse { line, what } => write!(f, "parse error at line {line}: {what}"),
         }
     }
 }
 
-/// Allocation-free admission failures for an elastic-solve domain.
+/// Allocation-free admission failures for a v1 constraint host/domain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DomainError {
-    /// The v1 elastic solver requires exactly one host variable.
+    /// The v1 evaluator/elastic solver requires exactly one host variable.
     HostVariableCount {
         /// Number of variables declared by the host problem.
         got: usize,
@@ -771,11 +771,11 @@ pub enum DomainError {
         /// Raw dimension from the manifold descriptor.
         declared: u32,
     },
-    /// The caller supplied the wrong number of component ranges.
+    /// The caller supplied the wrong number of point/domain components.
     DimensionMismatch {
         /// Point dimension declared by the sole `Rn` variable.
         expected: usize,
-        /// Number of ranges supplied by the caller.
+        /// Number of point/domain components supplied by the caller.
         got: usize,
     },
     /// One component range failed interval admission.
@@ -817,7 +817,7 @@ impl core::fmt::Display for DomainError {
             ),
             DomainError::DimensionMismatch { expected, got } => write!(
                 f,
-                "received {got} component ranges; the Rn variable needs {expected}"
+                "received {got} point/domain components; the Rn variable needs {expected}"
             ),
             DomainError::InvalidRange {
                 axis,
@@ -1063,6 +1063,30 @@ pub(crate) fn scalar_at(problem: &Problem, node: NodeId, x: &[f64]) -> Result<f6
     v.scalar().ok_or(ConError::NotScalar { node: node.0 })
 }
 
+fn validate_evaluate_host(problem: &Problem, x: &[f64]) -> Result<usize, ConError> {
+    if problem.vars().len() != 1 {
+        return Err(ConError::InvalidDomain(DomainError::HostVariableCount {
+            got: problem.vars().len(),
+        }));
+    }
+    let variable = &problem.vars()[0];
+    let Manifold::Rn { dim } = variable.manifold else {
+        return Err(ConError::InvalidDomain(DomainError::HostVariableManifold {
+            got: variable.manifold,
+        }));
+    };
+    let expected = usize::try_from(dim).map_err(|_| {
+        ConError::InvalidDomain(DomainError::PointDimensionUnrepresentable { declared: dim })
+    })?;
+    if x.len() != expected {
+        return Err(ConError::InvalidDomain(DomainError::DimensionMismatch {
+            expected,
+            got: x.len(),
+        }));
+    }
+    Ok(expected)
+}
+
 /// Evaluate one constraint at a design point (single Rn-variable
 /// problems — the v1 host shape). `noise` supplies parameter draws for
 /// chance kinds (deterministic streams in tests).
@@ -1076,10 +1100,14 @@ pub fn evaluate(
     x: &[f64],
     noise: Option<&dyn Fn(u64) -> Vec<f64>>,
 ) -> Result<ConstraintEvidence, ConError> {
+    // The v1 evaluator's uncertainty model is raw Euclidean addition. Admit
+    // that exact host shape before graph evaluation or a chance-noise callback
+    // can observe work; manifold-aware perturbations belong to a successor.
+    let point_dim = validate_evaluate_host(problem, x)?;
     // Policy values are public fields and therefore untrusted. Admit them
     // before evaluating the expression so NaN tolerances and negative weights
     // cannot turn a real violation into a satisfied or rewarded result.
-    validate_spec_policy(spec, Some(x.len()))?;
+    validate_spec_policy(spec, Some(point_dim))?;
     let g = scalar_at(problem, spec.node, x)?;
     // fs-opt currently returns a typed EvalNonFinite refusal before this point.
     // Retain the finite guard as defense in depth for any future evaluator that

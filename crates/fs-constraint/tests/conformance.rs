@@ -19,6 +19,7 @@ use fs_constraint::{
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{AdmissionCaps, Manifold, NodeId, Problem, ProblemBuilder};
 use fs_qty::Dims;
+use std::cell::Cell;
 
 const FIXED_INPUT_SEED: u64 = 0;
 const EXECUTION_SEED: u64 = 0xC0C0;
@@ -324,6 +325,78 @@ fn fscon_003_chance_bound_decides() {
         ),
         FSCON_003_INPUT_SEED,
     );
+}
+
+/// G0: the public evaluator's v1 uncertainty model is Euclidean. Unsupported
+/// host shapes must refuse before either the graph or noise model observes
+/// work; manifold-aware chance perturbations are deliberately not inferred.
+#[test]
+fn evaluate_admits_the_single_rn_host_before_graph_or_noise_work() {
+    fn problem_with(manifolds: &[Manifold]) -> Problem {
+        let mut builder = ProblemBuilder::new();
+        for (index, manifold) in manifolds.iter().copied().enumerate() {
+            builder
+                .var(&format!("x{index}"), manifold, Dims::NONE)
+                .expect("valid host manifold fixture");
+        }
+        let objective = builder
+            .konst(0.0, Dims::NONE)
+            .expect("finite scalar objective");
+        builder
+            .objective(objective, fs_opt::Sense::Minimize, 1.0)
+            .expect("objective entry");
+        builder.finish()
+    }
+
+    // The forged node is a tripwire: reaching fs-opt graph evaluation would
+    // return Eval instead of the host-specific InvalidDomain below.
+    let spec = ConstraintSpec {
+        name: "host-admission".to_string(),
+        node: NodeId(u32::MAX),
+        kind: ConstraintKind::Chance {
+            level: 0.5,
+            estimator: ChanceEstimator::MonteCarlo {
+                samples: 1,
+                delta: 0.05,
+            },
+        },
+        active_tol: 0.0,
+    };
+    let noise_calls = Cell::new(0_usize);
+    let noise = |_sample: u64| {
+        noise_calls.set(noise_calls.get() + 1);
+        Vec::new()
+    };
+
+    for (manifold, point) in [
+        (Manifold::Sphere { ambient: 2 }, vec![1.0, 0.0]),
+        (Manifold::So3, vec![1.0, 0.0, 0.0, 0.0]),
+        (Manifold::Stiefel { n: 2, p: 1 }, vec![1.0, 0.0]),
+    ] {
+        let problem = problem_with(&[manifold]);
+        assert_eq!(
+            evaluate(&problem, &spec, &point, Some(&noise)).unwrap_err(),
+            ConError::InvalidDomain(DomainError::HostVariableManifold { got: manifold })
+        );
+        assert_eq!(noise_calls.get(), 0, "{manifold:?} invoked noise");
+    }
+
+    let multi = problem_with(&[Manifold::Rn { dim: 1 }, Manifold::Rn { dim: 1 }]);
+    assert_eq!(
+        evaluate(&multi, &spec, &[0.0, 0.0], Some(&noise)).unwrap_err(),
+        ConError::InvalidDomain(DomainError::HostVariableCount { got: 2 })
+    );
+    assert_eq!(noise_calls.get(), 0, "multi-variable host invoked noise");
+
+    let rn = problem_with(&[Manifold::Rn { dim: 2 }]);
+    assert_eq!(
+        evaluate(&rn, &spec, &[0.0], Some(&noise)).unwrap_err(),
+        ConError::InvalidDomain(DomainError::DimensionMismatch {
+            expected: 2,
+            got: 1,
+        })
+    );
+    assert_eq!(noise_calls.get(), 0, "short Rn point invoked noise");
 }
 
 /// fscon-004 — certification refusals + REAL interval proofs (and the

@@ -28,6 +28,12 @@ what the constraints MEAN.
   case where the raw empirical rate clears but the bound does not
   (the validity machinery is the feature). Certification kinds refuse
   "satisfied" pointwise REGARDLESS of how good `g(x)` looks.
+  The v1 host gate first requires exactly one `Rn` variable and an `x`
+  whose length equals that declared point dimension. Zero/multiple-variable
+  problems and Sphere, SO(3), or Stiefel hosts return typed `InvalidDomain`
+  before graph evaluation or a chance-noise callback can observe work.
+  Chance draws are additive Euclidean point-coordinate offsets only; this
+  boundary neither projects nor retracts draws for manifold variables.
   Public policy fields are admitted before graph evaluation: active-set
   tolerances, robust half-widths, and soft weights must be finite and
   non-negative; robust width count must equal point dimension; chance
@@ -146,6 +152,9 @@ what the constraints MEAN.
 9. Percent encoding is injective and writer/parser bytes are a fixed
    point. Invalid public evidence always loses positive claim authority
    with one stable reason rather than preserving a claim beside `null`.
+10. Direct evaluation admits its single-`Rn` host and exact point length
+    before graph/noise work. Unsupported product or manifold hosts cannot
+    turn ambient-coordinate chance draws into an accidental manifold claim.
 
 ## Error model
 
@@ -154,8 +163,8 @@ through), `NotProvable{why}` (an honest gap with escalation advice,
 not a failure), `BadParam`, `ProofKindMismatch`,
 `InvalidDomain(DomainError)`,
 `Parse{line, what}`. `DomainError` distinguishes host variable count and
-manifold, point-dimension representation, range-count mismatch, and an
-axis-specific `InvalidRange` reason. The interval engine's
+manifold, point-dimension representation, point/domain component-count
+mismatch, and an axis-specific `InvalidRange` reason. The interval engine's
 `IvalError` names each refusal reason, including the aggregate cap name,
 observed count, and enforced limit.
 
@@ -250,8 +259,9 @@ unchanged.
 - Repair generation covers bound relaxations and soft drops; material
   /topology switches (the patch's richer vocabulary) need fs-xform
   and fs-fab integration.
-- Host problems are single-Rn-variable v1; multi-variable and
-  manifold-variable domains generalize with the restoration solver.
+- Direct-evaluation and elastic-solver hosts are single-`Rn`-variable v1.
+  Their public boundaries enforce that no-claim explicitly; multi-variable
+  and manifold-variable domains generalize with the restoration solver.
 - Assertions and expectations reached before an aggregate verdict are
   ordinary Rust test diagnostics; an early abort cannot claim that a
   canonical aggregate conformance record was emitted.
