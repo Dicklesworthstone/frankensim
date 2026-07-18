@@ -28,9 +28,14 @@ const BIPOP_LARGE_RUN_CAP: u32 = 8;
 /// Local generation envelope assigned to one restart.
 const BIPOP_GENERATIONS_PER_RESTART: usize = 250;
 
-/// Sum of the nine population scales on the admitted large-run ladder:
-/// `2^0 + ... + 2^8 = 2^9 - 1`.
-const BIPOP_LARGE_RUN_SCALE_SUM: usize = (1usize << (BIPOP_LARGE_RUN_CAP as usize + 1)) - 1;
+/// Sum of the large-population scales that can finance a later small restart.
+/// Production terminates immediately after rung eight, so only rungs `0..=7`
+/// contribute: `2^0 + ... + 2^7 = 2^8 - 1`.
+const BIPOP_PRE_TERMINAL_LARGE_RUN_SCALE_SUM: usize = (1usize << BIPOP_LARGE_RUN_CAP as usize) - 1;
+
+/// A full `250*lambda` local cap admits the initial callback and at most 249
+/// complete populations: `1 + 249*lambda` callbacks in total.
+const BIPOP_FULL_ENVELOPE_GENERATIONS: usize = BIPOP_GENERATIONS_PER_RESTART - 1;
 
 /// One `(seed, kernel, tile)` Philox stream has exactly `2^64` distinct
 /// counter positions. Consuming all of them once is valid; requesting one more
@@ -39,7 +44,7 @@ const BIPOP_LARGE_RUN_SCALE_SUM: usize = (1usize << (BIPOP_LARGE_RUN_CAP as usiz
 const FS_RAND_STREAM_COUNTER_CARDINALITY: u128 = 1u128 << 64;
 
 /// Schema version for [`BipopAdmission`].
-pub const BIPOP_ADMISSION_SCHEMA_VERSION: u32 = 2;
+pub const BIPOP_ADMISSION_SCHEMA_VERSION: u32 = 3;
 
 /// Schema version for [`BipopRestartRecord`].
 pub const BIPOP_RESTART_SCHEMA_VERSION: u32 = 1;
@@ -48,12 +53,20 @@ pub const BIPOP_RESTART_SCHEMA_VERSION: u32 = 1;
 ///
 /// The restart bound combines two independent proofs. One objective evaluation
 /// is the minimum spend of a launched restart, so `total_budget - 1` is a
-/// budget bound. Independently, production admits nine large rungs (`0..=8`),
-/// each small restart spends at least one evaluation, and the small lane can
-/// launch only while its cumulative spend trails the large lane. Therefore the
-/// number of small restarts is bounded by the sum of the nine large local
-/// envelopes, `base_lambda * 250 * (2^9 - 1)`, and the largest ordinal is at
-/// most eight plus that count. Admission uses the minimum of both bounds.
+/// budget bound. Independently, production admits nine large rungs (`0..=8`)
+/// and terminates immediately after publishing rung eight. Only rungs `0..=7`
+/// can therefore finance later small restarts. A full local envelope on rung
+/// `r` spends at most `1 + 249*base_lambda*2^r` callbacks. Before the `j`th
+/// small restart can launch, its predecessor small spend still trails the
+/// cumulative large spend. While more than `base_lambda` aggregate callbacks
+/// remain, every continuing small restart completes at least one population
+/// and therefore spends at least `base_lambda + 1` callbacks. At most
+/// `ceil((8 + 249*base_lambda*(2^8-1))/(base_lambda+1))` such restarts can
+/// launch. Once no more than `base_lambda` callbacks remain, at most that many
+/// further launches are possible: every continuing launch spends at least one
+/// callback, while a zero-callback generated-start refusal terminates the run.
+/// Adding the eight preceding large ordinals gives the scheduler bound below.
+/// Admission uses the minimum of this theorem and the budget bound.
 ///
 /// The receipt also proves that neither the shared restart-perturbation stream
 /// nor any per-restart CMA stream can reuse a Philox counter coordinate. Holding
@@ -62,6 +75,8 @@ pub const BIPOP_RESTART_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BipopAdmission {
     schema_version: u32,
+    stream_semantics_version: u32,
+    jacobi_admission: Option<fs_la::eigen::JacobiEighAdmission>,
     dimension: usize,
     total_budget: usize,
     base_lambda: usize,
@@ -79,6 +94,21 @@ impl BipopAdmission {
     #[must_use]
     pub fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// fs-rand stream semantics whose exact two-block normal consumption is
+    /// assumed by both counter-range proofs.
+    #[must_use]
+    pub fn stream_semantics_version(&self) -> u32 {
+        self.stream_semantics_version
+    }
+
+    /// Exact fs-la dense-Jacobi capability receipt when the aggregate budget
+    /// can reach at least one complete CMA generation. Initial-evaluation-only
+    /// schedules return `None` because they never invoke that dependency.
+    #[must_use]
+    pub fn jacobi_admission(&self) -> Option<fs_la::eigen::JacobiEighAdmission> {
+        self.jacobi_admission
     }
 
     /// Decision-vector dimension admitted for every restart.
@@ -202,6 +232,11 @@ pub enum BipopError {
         /// was not representable.
         required_blocks: Option<u128>,
     },
+    /// The shared fs-la dense-Jacobi authority refused this decision dimension.
+    EigensolverAdmission {
+        /// Exact dependency refusal; no duplicated capability formula is used.
+        error: fs_la::eigen::JacobiEighAdmissionError,
+    },
     /// Checked scheduler accounting failed at a named restart boundary.
     ArithmeticOverflow {
         /// Restart ordinal being prepared or finalized.
@@ -321,6 +356,9 @@ impl core::fmt::Display for BipopError {
                     "BIPOP {stream} stream block count overflowed the u128 admission accumulator"
                 ),
             },
+            Self::EigensolverAdmission { error } => {
+                write!(formatter, "BIPOP eigensolver admission refused: {error}")
+            }
             Self::ArithmeticOverflow { restart, what } => write!(
                 formatter,
                 "BIPOP scheduler formula `{what}` overflowed at restart {restart}"
@@ -373,7 +411,14 @@ impl core::fmt::Display for BipopError {
     }
 }
 
-impl std::error::Error for BipopError {}
+impl std::error::Error for BipopError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EigensolverAdmission { error } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 fn checked_random_counter_blocks(
     stream: &'static str,
@@ -421,6 +466,47 @@ fn cma_stream_block_bound(
             max_generations as u128,
         ],
     )
+}
+
+fn checked_dense_matrix_allocation(max_matrix_entries: usize) -> Result<usize, BipopError> {
+    let bytes = max_matrix_entries
+        .checked_mul(core::mem::size_of::<f64>())
+        .ok_or(BipopError::DimensionOverflow {
+            what: "dense covariance bytes",
+        })?;
+    if bytes > isize::MAX as usize {
+        return Err(BipopError::DimensionOverflow {
+            what: "dense covariance address space",
+        });
+    }
+    Ok(bytes)
+}
+
+fn scheduler_max_restart_ordinal(
+    base_lambda: usize,
+    total_budget: usize,
+) -> Result<u64, BipopError> {
+    let preterminal_large_spend = (base_lambda as u128)
+        .checked_mul(BIPOP_FULL_ENVELOPE_GENERATIONS as u128)
+        .and_then(|spend| spend.checked_mul(BIPOP_PRE_TERMINAL_LARGE_RUN_SCALE_SUM as u128))
+        .and_then(|spend| spend.checked_add(u128::from(BIPOP_LARGE_RUN_CAP)))
+        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
+    let continuing_small_spend = (base_lambda as u128)
+        .checked_add(1)
+        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
+    let max_full_generation_small_count = preterminal_large_spend
+        .checked_add(continuing_small_spend - 1)
+        .map(|numerator| numerator / continuing_small_spend)
+        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
+    let max_small_restart_count = max_full_generation_small_count
+        .checked_add(base_lambda as u128)
+        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
+    let scheduler_max_restart_ordinal = u128::from(BIPOP_LARGE_RUN_CAP)
+        .checked_add(max_small_restart_count)
+        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
+    let budget_max_restart_ordinal = (total_budget - 1) as u128;
+    u64::try_from(budget_max_restart_ordinal.min(scheduler_max_restart_ordinal))
+        .map_err(|_| BipopError::RestartOrdinalOverflow { total_budget })
 }
 
 /// Validate BIPOP inputs and every conservative arithmetic/storage envelope
@@ -478,18 +564,16 @@ pub fn admit_bipop(
             .ok_or(BipopError::DimensionOverflow {
                 what: "base population",
             })?;
+    let jacobi_admission = if total_budget > base_lambda {
+        Some(
+            fs_la::eigen::admit_jacobi_eigh(dimension)
+                .map_err(|error| BipopError::EigensolverAdmission { error })?,
+        )
+    } else {
+        None
+    };
 
-    let max_large_lane_spend = (base_lambda as u128)
-        .checked_mul(BIPOP_GENERATIONS_PER_RESTART as u128)
-        .and_then(|spend| spend.checked_mul(BIPOP_LARGE_RUN_SCALE_SUM as u128))
-        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
-    let scheduler_max_restart_ordinal = u128::from(BIPOP_LARGE_RUN_CAP)
-        .checked_add(max_large_lane_spend)
-        .ok_or(BipopError::RestartOrdinalOverflow { total_budget })?;
-    let budget_max_restart_ordinal = (total_budget - 1) as u128;
-    let max_restart_ordinal_u128 = budget_max_restart_ordinal.min(scheduler_max_restart_ordinal);
-    let max_restart_ordinal = u64::try_from(max_restart_ordinal_u128)
-        .map_err(|_| BipopError::RestartOrdinalOverflow { total_budget })?;
+    let max_restart_ordinal = scheduler_max_restart_ordinal(base_lambda, total_budget)?;
     let seed_delta = max_restart_ordinal
         .checked_mul(BIPOP_RESTART_SEED_STRIDE)
         .ok_or(BipopError::SeedRangeOverflow {
@@ -533,11 +617,7 @@ pub fn admit_bipop(
             .ok_or(BipopError::DimensionOverflow {
                 what: "population coordinate entries",
             })?;
-    max_matrix_entries
-        .checked_mul(core::mem::size_of::<f64>())
-        .ok_or(BipopError::DimensionOverflow {
-            what: "dense covariance bytes",
-        })?;
+    checked_dense_matrix_allocation(max_matrix_entries)?;
     max_population_entries
         .checked_mul(core::mem::size_of::<f64>())
         .ok_or(BipopError::DimensionOverflow {
@@ -566,6 +646,8 @@ pub fn admit_bipop(
 
     Ok(BipopAdmission {
         schema_version: BIPOP_ADMISSION_SCHEMA_VERSION,
+        stream_semantics_version: fs_rand::STREAM_SEMANTICS_VERSION,
+        jacobi_admission,
         dimension,
         total_budget,
         base_lambda,
@@ -1101,6 +1183,7 @@ pub struct BipopReport {
     pub schedule: Vec<usize>,
     /// Compatibility projection of the terminal aggregate trace offset.
     pub total_evals: usize,
+    total_budget: usize,
     records: Vec<BipopRestartRecord>,
     best_restart: usize,
 }
@@ -1110,6 +1193,13 @@ impl BipopReport {
     #[must_use]
     pub fn records(&self) -> &[BipopRestartRecord] {
         &self.records
+    }
+
+    /// Admitted hard aggregate callback budget that governs every record's
+    /// local allocation and the ledger's terminal completeness.
+    #[must_use]
+    pub fn total_budget(&self) -> usize {
+        self.total_budget
     }
 
     /// Index of the earliest restart attaining the best objective under
@@ -1143,12 +1233,20 @@ impl BipopReport {
         if self.schedule.len() != self.records.len() {
             return Err(BipopLedgerError::global("schedule-length"));
         }
+        if self.total_budget == 0 {
+            return Err(BipopLedgerError::global("positive-total-budget"));
+        }
         let base_lambda = first.lambda;
         let base_seed = first.seed;
         let point_dim = first.start.len();
         if point_dim == 0 {
             return Err(BipopLedgerError::at(0, "positive-point-dimension"));
         }
+        let matrix_entries = point_dim
+            .checked_mul(point_dim)
+            .ok_or_else(|| BipopLedgerError::at(0, "dense-matrix-admission"))?;
+        checked_dense_matrix_allocation(matrix_entries)
+            .map_err(|_| BipopLedgerError::at(0, "dense-matrix-admission"))?;
         checked_random_counter_blocks(
             "restart-perturbation",
             &[2, point_dim as u128, (self.records.len() - 1) as u128],
@@ -1158,6 +1256,26 @@ impl BipopReport {
         if base_lambda != expected_base_lambda {
             return Err(BipopLedgerError::at(0, "base-population"));
         }
+        // Mirror callback-free admission, not merely the realized trace. An
+        // early target hit cannot retroactively authenticate a problem whose
+        // hard budget could have entered the refused Jacobi dependency.
+        if self.total_budget > expected_base_lambda {
+            fs_la::eigen::admit_jacobi_eigh(point_dim)
+                .map_err(|_| BipopLedgerError::at(0, "eigensolver-admission"))?;
+        }
+        let admitted_max_ordinal = scheduler_max_restart_ordinal(base_lambda, self.total_budget)
+            .map_err(|_| BipopLedgerError::global("restart-envelope"))?;
+        let last_ordinal = u64::try_from(self.records.len() - 1)
+            .map_err(|_| BipopLedgerError::global("restart-envelope"))?;
+        if last_ordinal > admitted_max_ordinal {
+            return Err(BipopLedgerError::global("restart-envelope"));
+        }
+        let admitted_seed_delta = admitted_max_ordinal
+            .checked_mul(BIPOP_RESTART_SEED_STRIDE)
+            .ok_or_else(|| BipopLedgerError::global("admission-seed-range"))?;
+        base_seed
+            .checked_add(admitted_seed_delta)
+            .ok_or_else(|| BipopLedgerError::global("admission-seed-range"))?;
         let mut cursor = 0usize;
         let mut large_budget_used = 0usize;
         let mut small_budget_used = 0usize;
@@ -1187,6 +1305,15 @@ impl BipopReport {
             }
             if record.start.len() != point_dim || record.report.x_best.len() != point_dim {
                 return Err(BipopLedgerError::at(index, "point-dimension"));
+            }
+            if record.start.iter().any(|value| !value.is_finite()) {
+                return Err(BipopLedgerError::at(index, "finite-start"));
+            }
+            if record.report.x_best.iter().any(|value| !value.is_finite()) {
+                return Err(BipopLedgerError::at(index, "finite-best-point"));
+            }
+            if !record.report.sigma.is_finite() || record.report.sigma.is_sign_negative() {
+                return Err(BipopLedgerError::at(index, "finite-nonnegative-sigma"));
             }
 
             let expected_lane = if large_budget_used <= small_budget_used {
@@ -1253,6 +1380,25 @@ impl BipopReport {
                     }
                 }
             }
+            if index + 1 < self.records.len() && record.report.converged {
+                return Err(BipopLedgerError::at(index, "continued-after-convergence"));
+            }
+            // Validate the report's intrinsic generation/terminal arithmetic
+            // first so an overflowing forged report cannot hide behind a second
+            // scheduler violation. Then bind the local cap to the production
+            // `lambda * 250` envelope used by the admission theorem.
+            let local_envelope = record
+                .lambda
+                .checked_mul(BIPOP_GENERATIONS_PER_RESTART)
+                .ok_or_else(|| BipopLedgerError::at(index, "local-budget-overflow"))?;
+            let remaining = self
+                .total_budget
+                .checked_sub(cursor)
+                .ok_or_else(|| BipopLedgerError::at(index, "aggregate-budget"))?;
+            let expected_allocated_budget = local_envelope.min(remaining);
+            if record.allocated_budget != expected_allocated_budget {
+                return Err(BipopLedgerError::at(index, "allocated-budget"));
+            }
             cma_stream_block_bound(point_dim, record.lambda, record.report.generations)
                 .map_err(|_| BipopLedgerError::at(index, "candidate-counter-range"))?;
 
@@ -1276,6 +1422,14 @@ impl BipopReport {
 
         if cursor != self.total_evals {
             return Err(BipopLedgerError::global("total-evaluations"));
+        }
+        let last = self
+            .records
+            .last()
+            .ok_or_else(|| BipopLedgerError::global("nonempty"))?;
+        if cursor < self.total_budget && !last.report.converged && large_runs <= BIPOP_LARGE_RUN_CAP
+        {
+            return Err(BipopLedgerError::global("nonterminal-prefix"));
         }
         let mut expected_best = 0usize;
         for index in 1..self.records.len() {
@@ -1645,6 +1799,7 @@ fn run_admitted_bipop<F: FnMut(&[f64]) -> f64>(
         best,
         schedule,
         total_evals,
+        total_budget,
         records,
         best_restart,
     };
@@ -1706,6 +1861,35 @@ mod tests {
         );
     }
 
+    /// G0: checked multiplication alone is not sufficient for a Rust `Vec`.
+    /// One dense covariance allocation must also fit the target's `isize`
+    /// address-difference domain before any objective callback is possible.
+    #[test]
+    fn dense_covariance_allocation_refuses_first_unaddressable_size() {
+        let element_bytes = core::mem::size_of::<f64>();
+        let max_entries = (isize::MAX as usize) / element_bytes;
+        let exact_bytes = checked_dense_matrix_allocation(max_entries)
+            .expect("the last whole f64 allocation below isize::MAX admits");
+        assert!(exact_bytes <= isize::MAX as usize);
+
+        let first_unaddressable = max_entries
+            .checked_add(1)
+            .expect("one entry beyond the f64 address-space boundary fits usize");
+        assert_eq!(
+            checked_dense_matrix_allocation(first_unaddressable),
+            Err(BipopError::DimensionOverflow {
+                what: "dense covariance address space",
+            })
+        );
+        assert_eq!(
+            checked_dense_matrix_allocation(usize::MAX),
+            Err(BipopError::DimensionOverflow {
+                what: "dense covariance bytes",
+            }),
+            "the checked byte-product branch is independently retained"
+        );
+    }
+
     /// G0/G4: the infallible direct-CMA compatibility surface remains a panic
     /// projection, but it shares the finite-query guard with fallible BIPOP and
     /// never exposes the overflowing candidate to user code. This retained seed
@@ -1741,60 +1925,93 @@ mod tests {
     #[test]
     fn ledger_refuses_any_record_after_ninth_large_run() {
         let base_lambda = 4usize;
+        let total_budget = 258_056usize;
         let mut records = Vec::new();
         let mut schedule = Vec::new();
-        let mut large_runs = 0u32;
+        let mut cursor = 0usize;
+        let mut push_record =
+            |lane: BipopLane, lambda: usize, allocated_budget: usize, generations: usize| {
+                let index = records.len();
+                let ordinal = u64::try_from(index).expect("fixture ordinal fits");
+                let evals = generations
+                    .checked_mul(lambda)
+                    .and_then(|samples| samples.checked_add(1))
+                    .expect("fixture evaluation count fits");
+                let trace_end = cursor
+                    .checked_add(evals)
+                    .expect("fixture trace offset fits");
+                let seed = ordinal
+                    .checked_mul(BIPOP_RESTART_SEED_STRIDE)
+                    .expect("fixture seed fits");
+                let report = CmaReport {
+                    x_best: vec![0.0],
+                    f_best: 0.0,
+                    evals,
+                    generations,
+                    converged: false,
+                    sigma: 1.0,
+                };
+                records.push(BipopRestartRecord {
+                    schema_version: BIPOP_RESTART_SCHEMA_VERSION,
+                    ordinal,
+                    lane,
+                    lambda,
+                    allocated_budget,
+                    seed,
+                    start: vec![0.0],
+                    trace_start: cursor,
+                    trace_end,
+                    stop_reason: CmaStopReason::Stagnated,
+                    report,
+                });
+                schedule.push(lambda);
+                cursor = trace_end;
+            };
 
-        // Alternating one-evaluation large/small records keeps both lane totals
-        // equal before each large launch. Index 16 is the ninth large run;
-        // index 17 is the forbidden post-cap small record.
-        for index in 0..18usize {
-            let lane = if index % 2 == 0 {
-                BipopLane::Large
-            } else {
-                BipopLane::Small
-            };
-            let lambda = match lane {
-                BipopLane::Large => {
-                    let lambda = base_lambda
-                        .checked_mul(1usize << large_runs)
-                        .expect("fixture population fits");
-                    large_runs += 1;
-                    lambda
-                }
-                BipopLane::Small => base_lambda,
-            };
-            let ordinal = u64::try_from(index).expect("fixture ordinal fits");
-            let seed = ordinal
-                .checked_mul(BIPOP_RESTART_SEED_STRIDE)
-                .expect("fixture seed fits");
-            let report = CmaReport {
-                x_best: vec![0.0],
-                f_best: 0.0,
-                evals: 1,
-                generations: 0,
-                converged: false,
-                sigma: 1.0,
-            };
-            records.push(BipopRestartRecord {
-                schema_version: BIPOP_RESTART_SCHEMA_VERSION,
-                ordinal,
-                lane,
-                lambda,
-                allocated_budget: 1,
-                seed,
-                start: vec![0.0],
-                trace_start: index,
-                trace_end: index + 1,
-                stop_reason: CmaStopReason::BudgetExhausted,
-                report,
-            });
-            schedule.push(lambda);
+        // Each first-eight large rung is paired with enough small-lane
+        // generations to make the cumulative spends exactly equal. Every
+        // allocated cap is the production local envelope under this large
+        // retained aggregate budget.
+        for large_run in 0..BIPOP_LARGE_RUN_CAP {
+            let scale = 1usize << large_run;
+            let large_lambda = base_lambda * scale;
+            push_record(
+                BipopLane::Large,
+                large_lambda,
+                large_lambda * BIPOP_GENERATIONS_PER_RESTART,
+                1,
+            );
+            push_record(
+                BipopLane::Small,
+                base_lambda,
+                base_lambda * BIPOP_GENERATIONS_PER_RESTART,
+                scale,
+            );
         }
+
+        // Rung eight consumes exactly the remaining aggregate allocation and
+        // is the ninth/terminal large run. The following locally plausible
+        // small record is forbidden before any of its fields can self-justify.
+        let final_large_lambda = base_lambda * (1usize << BIPOP_LARGE_RUN_CAP);
+        push_record(
+            BipopLane::Large,
+            final_large_lambda,
+            final_large_lambda * BIPOP_GENERATIONS_PER_RESTART,
+            1,
+        );
+        push_record(
+            BipopLane::Small,
+            base_lambda,
+            base_lambda * BIPOP_GENERATIONS_PER_RESTART,
+            1,
+        );
+        assert_eq!(records.len(), 18);
+        assert_eq!(cursor, 3_086);
         let report = BipopReport {
             best: records[0].report.clone(),
             schedule,
-            total_evals: records.len(),
+            total_evals: cursor,
+            total_budget,
             records,
             best_restart: 0,
         };
@@ -1804,6 +2021,215 @@ mod tests {
             .expect_err("post-cap history must fail closed");
         assert_eq!(error.restart(), Some(17));
         assert_eq!(error.invariant(), "large-run-cap");
+    }
+
+    /// G0/G3: a forged record cannot mint more large-lane spend than the
+    /// production `lambda * 250` envelope. Without this independent check, an
+    /// oversized first large record could justify arbitrarily many small
+    /// records and invalidate the scheduler theorem used by admission.
+    #[test]
+    fn ledger_refuses_allocated_budget_above_local_envelope() {
+        let lambda = 4usize;
+        let allocated_budget = lambda * BIPOP_GENERATIONS_PER_RESTART + 1;
+        let generations = (allocated_budget - 1) / lambda;
+        let run = CmaReport {
+            x_best: vec![0.0],
+            f_best: 0.0,
+            evals: allocated_budget,
+            generations,
+            converged: false,
+            sigma: 1.0,
+        };
+        let record = BipopRestartRecord {
+            schema_version: BIPOP_RESTART_SCHEMA_VERSION,
+            ordinal: 0,
+            lane: BipopLane::Large,
+            lambda,
+            allocated_budget,
+            seed: 0,
+            start: vec![0.0],
+            trace_start: 0,
+            trace_end: allocated_budget,
+            stop_reason: CmaStopReason::BudgetExhausted,
+            report: run.clone(),
+        };
+        let report = BipopReport {
+            best: run.clone(),
+            schedule: vec![lambda],
+            total_evals: allocated_budget,
+            total_budget: allocated_budget,
+            records: vec![record],
+            best_restart: 0,
+        };
+
+        let error = report
+            .validate_ledger()
+            .expect_err("an oversized local cap is not production-authentic");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "allocated-budget");
+    }
+
+    /// G0/G3: a prefix can be locally self-consistent yet impossible as a
+    /// terminal report under its retained aggregate budget. The validator must
+    /// not accept truncation merely because every surviving interval closes.
+    #[test]
+    fn ledger_refuses_nonterminal_prefix_under_retained_budget() {
+        let mut objective = |_point: &[f64]| 0.0;
+        let mut report = try_bipop_cmaes(&mut objective, &[0.0], 0.5, 20, None, 0)
+            .expect("production fixture admits");
+        assert!(report.records.len() > 1, "fixture must contain a suffix");
+        report.records.pop();
+        report.schedule.pop();
+        report.total_evals = report
+            .records
+            .last()
+            .expect("the truncated prefix remains nonempty")
+            .trace_end;
+
+        let error = report
+            .validate_ledger()
+            .expect_err("a nonterminal prefix is not a complete run");
+        assert_eq!(error.restart(), None);
+        assert_eq!(error.invariant(), "nonterminal-prefix");
+    }
+
+    /// G0/G3: target convergence is an immediate scheduler terminal. A later
+    /// record cannot be authenticated by giving that record another locally
+    /// plausible converged report and relying on the final-record check.
+    #[test]
+    fn ledger_refuses_any_record_after_target_convergence() {
+        let lambda = 4usize;
+        let total_budget = 1_001usize;
+        let run = CmaReport {
+            x_best: vec![0.0],
+            f_best: 0.0,
+            evals: 1,
+            generations: 0,
+            converged: true,
+            sigma: 1.0,
+        };
+        let make_record = |index: usize, lane: BipopLane| BipopRestartRecord {
+            schema_version: BIPOP_RESTART_SCHEMA_VERSION,
+            ordinal: u64::try_from(index).expect("fixture ordinal fits"),
+            lane,
+            lambda,
+            allocated_budget: 1_000,
+            seed: u64::try_from(index)
+                .expect("fixture ordinal fits")
+                .checked_mul(BIPOP_RESTART_SEED_STRIDE)
+                .expect("fixture seed fits"),
+            start: vec![0.0],
+            trace_start: index,
+            trace_end: index + 1,
+            stop_reason: CmaStopReason::TargetReached,
+            report: run.clone(),
+        };
+        let report = BipopReport {
+            best: run.clone(),
+            schedule: vec![lambda, lambda],
+            total_evals: 2,
+            total_budget,
+            records: vec![
+                make_record(0, BipopLane::Large),
+                make_record(1, BipopLane::Small),
+            ],
+            best_restart: 0,
+        };
+
+        let error = report
+            .validate_ledger()
+            .expect_err("production stops immediately at the first target hit");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "continued-after-convergence");
+    }
+
+    /// G0/G3: a lucky target hit on the initial callback cannot bypass the
+    /// dependency authority that preflight required because the admitted hard
+    /// budget could have entered a complete generation.
+    #[test]
+    fn ledger_early_target_cannot_bypass_reachable_jacobi_authority() {
+        let dimension = 4_096usize;
+        let lambda = 28usize;
+        let total_budget = 29usize;
+        let run = CmaReport {
+            x_best: vec![0.0; dimension],
+            f_best: 0.0,
+            evals: 1,
+            generations: 0,
+            converged: true,
+            sigma: 1.0,
+        };
+        let record = BipopRestartRecord {
+            schema_version: BIPOP_RESTART_SCHEMA_VERSION,
+            ordinal: 0,
+            lane: BipopLane::Large,
+            lambda,
+            allocated_budget: total_budget,
+            seed: 0,
+            start: vec![0.0; dimension],
+            trace_start: 0,
+            trace_end: 1,
+            stop_reason: CmaStopReason::TargetReached,
+            report: run.clone(),
+        };
+        let report = BipopReport {
+            best: run,
+            schedule: vec![lambda],
+            total_evals: 1,
+            total_budget,
+            records: vec![record],
+            best_restart: 0,
+        };
+
+        let error = report
+            .validate_ledger()
+            .expect_err("early convergence cannot weaken callback-free admission");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "eigensolver-admission");
+    }
+
+    /// G0/G3: retained decision points must preserve the finite-query guards
+    /// enforced by production. Objective outputs remain intentionally outside
+    /// this check.
+    #[test]
+    fn ledger_refuses_nonfinite_start_and_best_points() {
+        let make_report = || {
+            let mut objective = |_point: &[f64]| 0.0;
+            try_bipop_cmaes(&mut objective, &[0.0], 0.5, 1, None, 0)
+                .expect("one-callback fixture admits")
+        };
+
+        let mut bad_start = make_report();
+        bad_start.records[0].start[0] = f64::NAN;
+        let error = bad_start
+            .validate_ledger()
+            .expect_err("non-finite retained start must refuse");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "finite-start");
+
+        let mut bad_best = make_report();
+        bad_best.records[0].report.x_best[0] = f64::INFINITY;
+        let error = bad_best
+            .validate_ledger()
+            .expect_err("non-finite retained best point must refuse");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "finite-best-point");
+
+        let mut bad_sigma = make_report();
+        bad_sigma.records[0].report.sigma = f64::INFINITY;
+        let error = bad_sigma
+            .validate_ledger()
+            .expect_err("non-finite derived step size must refuse");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "finite-nonnegative-sigma");
+
+        let mut negative_sigma = make_report();
+        negative_sigma.records[0].report.sigma = -0.0;
+        let error = negative_sigma
+            .validate_ledger()
+            .expect_err("a forged negative-sign step size must refuse");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "finite-nonnegative-sigma");
     }
 
     /// G0: an overflowing hypothetical next generation is not evidence that a
@@ -1841,6 +2267,7 @@ mod tests {
             best: run,
             schedule: vec![lambda],
             total_evals: evals,
+            total_budget: usize::MAX,
             records: vec![record],
             best_restart: 0,
         };

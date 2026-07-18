@@ -14,6 +14,8 @@ use fs_dfo::{
     BIPOP_ADMISSION_SCHEMA_VERSION, BipopError, BipopReport, BipopRestartRecord, CmaReport,
     CmaStopReason, admit_bipop, bipop_cmaes, try_bipop_cmaes,
 };
+use fs_la::eigen::{JacobiEighAdmissionError, MAX_EIGEN_WORK_ELEMENTS};
+use fs_rand::{STREAM_SEMANTICS_VERSION, StreamKey};
 use std::cell::{Cell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -58,6 +60,7 @@ fn assert_bipop_bits(left: &BipopReport, right: &BipopReport) {
     assert_report_bits(&left.best, &right.best);
     assert_eq!(left.schedule, right.schedule);
     assert_eq!(left.total_evals, right.total_evals);
+    assert_eq!(left.total_budget(), right.total_budget());
     assert_eq!(left.best_restart(), right.best_restart());
     assert_eq!(left.records().len(), right.records().len());
     for (left, right) in left.records().iter().zip(right.records()) {
@@ -136,6 +139,32 @@ fn malformed_inputs_and_zero_budget_are_callback_free() {
     assert_eq!(calls.get(), 0, "no refused input may invoke the objective");
 }
 
+/// G0/G4: BIPOP consumes fs-la's typed Jacobi capability authority before the
+/// first callback. Dimension 4096 is representable and cheap to describe, but
+/// exceeds that kernel's aggregate-work cap by exactly one boundary step.
+#[test]
+fn dependency_capability_refusal_is_callback_free_and_exact() {
+    let calls = Cell::new(0usize);
+    let mut objective = |_point: &[f64]| {
+        calls.set(calls.get() + 1);
+        0.0
+    };
+    let x0 = vec![0.0; 4_096];
+    let error = try_bipop_cmaes(&mut objective, &x0, 0.5, 29, None, ROOT_SEED)
+        .expect_err("dimension 4096 exceeds the shared Jacobi authority");
+    assert_eq!(
+        error,
+        BipopError::EigensolverAdmission {
+            error: JacobiEighAdmissionError::WorkCapExceeded {
+                dimension: 4_096,
+                required_elements: 67_121_152,
+                cap_elements: MAX_EIGEN_WORK_ELEMENTS,
+            },
+        }
+    );
+    assert_eq!(calls.get(), 0, "dependency refusal must precede callbacks");
+}
+
 /// G0: admission exposes deterministic checked maxima and refuses the first
 /// root seed whose conservative second-restart coordinate would wrap.
 #[test]
@@ -143,8 +172,17 @@ fn admission_and_seed_boundary_are_exact() {
     let boundary_seed = u64::MAX - RESTART_SEED_STRIDE;
     let admitted = admit_bipop(&[2.0, -1.0], 0.75, 2, None, boundary_seed)
         .expect("the exact seed boundary admits");
-    assert_eq!(BIPOP_ADMISSION_SCHEMA_VERSION, 2);
+    assert_eq!(BIPOP_ADMISSION_SCHEMA_VERSION, 3);
     assert_eq!(admitted.schema_version(), BIPOP_ADMISSION_SCHEMA_VERSION);
+    assert_eq!(
+        admitted.stream_semantics_version(),
+        STREAM_SEMANTICS_VERSION
+    );
+    assert_eq!(
+        admitted.jacobi_admission(),
+        None,
+        "budget two cannot reach one base-population generation"
+    );
     assert_eq!(admitted.dimension(), 2);
     assert_eq!(admitted.total_budget(), 2);
     assert_eq!(admitted.base_lambda(), 6);
@@ -172,15 +210,45 @@ fn admission_and_seed_boundary_are_exact() {
     assert_eq!(one.max_large_lambda(), one.base_lambda());
 }
 
+/// G0: dependency receipts are reachability-sensitive. For dimension 4096 the
+/// final callback-only budget admits because no Jacobi call is possible; the
+/// first budget that can fund one complete base population refuses through the
+/// shared fs-la authority.
+#[test]
+fn jacobi_capability_is_required_at_the_first_reachable_generation() {
+    let x0 = vec![0.0; 4_096];
+    let callback_only = admit_bipop(&x0, 0.5, 28, None, ROOT_SEED)
+        .expect("base lambda 28 leaves no complete generation under budget 28");
+    assert_eq!(callback_only.base_lambda(), 28);
+    assert_eq!(callback_only.jacobi_admission(), None);
+
+    assert!(matches!(
+        admit_bipop(&x0, 0.5, 29, None, ROOT_SEED),
+        Err(BipopError::EigensolverAdmission {
+            error: JacobiEighAdmissionError::WorkCapExceeded {
+                dimension: 4_096,
+                ..
+            }
+        })
+    ));
+}
+
 /// G0: the scheduler theorem, rather than an unbounded `total_budget - 1`
-/// surrogate, controls seed and restart-stream admission. Nine large rungs
-/// contribute scale sum 511; small-run count cannot exceed that cumulative
-/// large envelope because each small run spends at least one callback.
+/// surrogate, controls seed and restart-stream admission. Rung eight terminates
+/// production and cannot finance a later small restart. Rungs zero through
+/// seven contribute scale sum 255, and a full `250*lambda` local cap spends at
+/// most `1 + 249*lambda` callbacks. Every continuing non-tail small run spends
+/// at least `base_lambda + 1`; only the final `base_lambda` aggregate callbacks
+/// can finance one-callback small tails.
 #[test]
 fn scheduler_bound_avoids_false_large_budget_refusal() {
     const BASE_LAMBDA: u64 = 6;
-    const LARGE_SCALE_SUM: u64 = 511;
-    const MAX_ORDINAL: u64 = 8 + BASE_LAMBDA * 250 * LARGE_SCALE_SUM;
+    const PRE_TERMINAL_LARGE_SCALE_SUM: u64 = 255;
+    const PRE_TERMINAL_LARGE_SPEND: u64 = 8 + BASE_LAMBDA * 249 * PRE_TERMINAL_LARGE_SCALE_SUM;
+    const CONTINUING_SMALL_SPEND: u64 = BASE_LAMBDA + 1;
+    const MAX_FULL_GENERATION_SMALL_RUNS: u64 =
+        PRE_TERMINAL_LARGE_SPEND.div_ceil(CONTINUING_SMALL_SPEND);
+    const MAX_ORDINAL: u64 = 8 + MAX_FULL_GENERATION_SMALL_RUNS + BASE_LAMBDA;
 
     let seed_delta = MAX_ORDINAL
         .checked_mul(RESTART_SEED_STRIDE)
@@ -190,6 +258,7 @@ fn scheduler_bound_avoids_false_large_budget_refusal() {
         .expect("scheduler-aware boundary must admit despite the enormous budget");
 
     assert_eq!(admitted.max_restart_ordinal(), MAX_ORDINAL);
+    assert_eq!(MAX_ORDINAL, 54_440);
     assert_eq!(admitted.max_large_lambda(), 1_536);
     assert_eq!(admitted.max_local_budget(), 384_000);
     assert_eq!(admitted.max_population_entries(), 3_072);
@@ -206,6 +275,30 @@ fn scheduler_bound_avoids_false_large_budget_refusal() {
             seed: boundary_seed + 1,
             max_restart_ordinal: MAX_ORDINAL,
         }
+    );
+}
+
+/// G0/G3: the admission theorem is coupled to fs-rand's live stream
+/// advancement, not only to a duplicated factor-of-two arithmetic KAT.
+#[test]
+fn admission_binds_live_normal_counter_consumption() {
+    let admitted = admit_bipop(&[1.0], 0.5, 5, None, ROOT_SEED).expect("fixture admits");
+    let mut stream = StreamKey {
+        seed: ROOT_SEED,
+        kernel: 0xD1F0,
+        tile: 0,
+    }
+    .stream();
+    assert_eq!(stream.index(), 0);
+    let _ = stream.next_normal();
+    assert_eq!(
+        stream.index(),
+        2,
+        "one strict normal must consume two blocks"
+    );
+    assert_eq!(
+        admitted.stream_semantics_version(),
+        STREAM_SEMANTICS_VERSION
     );
 }
 
@@ -228,6 +321,7 @@ fn one_callback_budget_is_exact_and_replayable() {
 
     assert_eq!(seen.borrow().as_slice(), &[x0.map(f64::to_bits).to_vec()]);
     assert_eq!(report.total_evals, 1);
+    assert_eq!(report.total_budget(), 1);
     assert_eq!(report.records().len(), 1);
     assert_eq!(report.best_restart(), 0);
     let record = &report.records()[0];
@@ -270,6 +364,38 @@ fn generated_nonfinite_candidate_is_contained_before_callback() {
             restart: 0,
             generation: 1,
             candidate: 0,
+            component: 0,
+            bits: f64::INFINITY.to_bits(),
+        }
+    );
+}
+
+/// G0/G4: the shared restart stream is a separate containment boundary from
+/// per-restart CMA sampling. A finite root can overflow its perturbed restart;
+/// that restart must be refused before its initial callback.
+#[test]
+fn generated_nonfinite_restart_start_is_contained_before_callback() {
+    let calls = Cell::new(0usize);
+    let mut objective = |point: &[f64]| {
+        assert!(point.iter().all(|value| value.is_finite()));
+        calls.set(calls.get() + 1);
+        0.0
+    };
+
+    let error = try_bipop_cmaes(
+        &mut objective,
+        &[f64::MAX],
+        f64::MAX,
+        2,
+        None,
+        0xB1_90_00_00,
+    )
+    .expect_err("the retained restart perturbation overflows");
+    assert_eq!(calls.get(), 1, "only restart zero may invoke the callback");
+    assert_eq!(
+        error,
+        BipopError::GeneratedStartNonFinite {
+            restart: 1,
             component: 0,
             bits: f64::INFINITY.to_bits(),
         }
