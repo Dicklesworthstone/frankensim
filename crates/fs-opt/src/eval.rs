@@ -16,6 +16,8 @@ use fs_exec::Cx;
 /// Squared-norm/dot tolerance for deciding whether a finite stored
 /// point is already on its declared manifold.
 const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
+/// Scale-free tolerance for validating a parameter vector as tangent.
+const MANIFOLD_TANGENCY_TOL: f64 = 64.0 * MANIFOLD_MEMBERSHIP_TOL;
 /// Candidates below this squared norm are numerically rank-deficient;
 /// normalizing them would fabricate a direction.
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
@@ -95,6 +97,23 @@ pub enum Value {
     S(f64),
     /// Vector.
     V(Vec<f64>),
+}
+
+/// One point on a manifold retraction curve and its optimizer-parameter
+/// velocity at that point.
+///
+/// `point` always has [`Manifold::point_dim`] entries and `velocity` always has
+/// [`Manifold::param_dim`] entries. For Rn, Sphere, and Stiefel the current
+/// parameter representation is ambient, so `velocity` is also the derivative
+/// of the stored point coordinates. SO(3) is deliberately different: its point
+/// is a four-coordinate quaternion while `velocity` is the constant
+/// three-coordinate right/body Lie velocity of the declared curve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetractionCurve {
+    /// Retraction output at the requested scalar curve parameter.
+    pub point: Vec<f64>,
+    /// Curve velocity in the manifold's optimizer-parameter representation.
+    pub velocity: Vec<f64>,
 }
 
 impl Value {
@@ -1094,6 +1113,572 @@ impl Manifold {
     {
         Self::validate_retraction_finite_with_checkpoint("retraction output", &output, checkpoint)?;
         self.validate_point_domain_with_checkpoint(&output, checkpoint)?;
+        Ok(output)
+    }
+
+    fn validate_operation_point(&self, point: &[f64]) -> Result<(), OptError> {
+        self.validate(&AdmissionCaps::default())?;
+        let point_dim = match self.point_dim() {
+            Some(point_dim) => point_dim,
+            None => {
+                return Err(OptError::ManifoldInvalid {
+                    what: try_owned_diagnostic(
+                        "manifold-ops/point-diagnostic",
+                        None,
+                        None,
+                        "manifold operation has no representable point dimension",
+                    )?,
+                });
+            }
+        };
+        if point.len() as u64 != u64::from(point_dim) {
+            return Err(OptError::RetractionLen {
+                input: "manifold operation point",
+                expected: point_dim,
+                got: point.len() as u64,
+            });
+        }
+        let mut checkpoint = || Ok(());
+        Self::validate_retraction_finite_with_checkpoint(
+            "manifold operation point",
+            point,
+            &mut checkpoint,
+        )?;
+        self.validate_point_domain_with_checkpoint(point, &mut checkpoint)
+    }
+
+    fn validate_parameter_payload(
+        &self,
+        input: &'static str,
+        parameter: &[f64],
+    ) -> Result<(), OptError> {
+        let param_dim = match self.param_dim() {
+            Some(param_dim) => param_dim,
+            None => {
+                return Err(OptError::ManifoldInvalid {
+                    what: try_owned_diagnostic(
+                        "manifold-ops/parameter-diagnostic",
+                        None,
+                        None,
+                        "manifold operation has no representable parameter dimension",
+                    )?,
+                });
+            }
+        };
+        if parameter.len() as u64 != u64::from(param_dim) {
+            return Err(OptError::RetractionLen {
+                input,
+                expected: param_dim,
+                got: parameter.len() as u64,
+            });
+        }
+        Self::validate_retraction_finite_with_checkpoint(input, parameter, &mut || Ok(()))
+    }
+
+    fn validate_ambient_payload(
+        &self,
+        input: &'static str,
+        ambient: &[f64],
+    ) -> Result<(), OptError> {
+        let point_dim = match self.point_dim() {
+            Some(point_dim) => point_dim,
+            None => {
+                return Err(OptError::ManifoldInvalid {
+                    what: try_owned_diagnostic(
+                        "manifold-ops/ambient-diagnostic",
+                        None,
+                        None,
+                        "manifold operation has no representable point dimension",
+                    )?,
+                });
+            }
+        };
+        if ambient.len() as u64 != u64::from(point_dim) {
+            return Err(OptError::RetractionLen {
+                input,
+                expected: point_dim,
+                got: ambient.len() as u64,
+            });
+        }
+        Self::validate_retraction_finite_with_checkpoint(input, ambient, &mut || Ok(()))
+    }
+
+    fn parameter_tangency_residual(&self, point: &[f64], parameter: &[f64]) -> f64 {
+        let scale = parameter
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            return 0.0;
+        }
+        match *self {
+            Manifold::Rn { .. } | Manifold::So3 => 0.0,
+            Manifold::Sphere { .. } => point
+                .iter()
+                .zip(parameter)
+                .map(|(coordinate, tangent)| coordinate * (tangent / scale))
+                .sum::<f64>()
+                .abs(),
+            Manifold::Stiefel { n, p } => {
+                let (n, p) = (n as usize, p as usize);
+                let mut residual = 0.0_f64;
+                for row in 0..p {
+                    for column in 0..p {
+                        let symmetric = (0..n)
+                            .map(|index| {
+                                point[row * n + index] * (parameter[column * n + index] / scale)
+                                    + (parameter[row * n + index] / scale)
+                                        * point[column * n + index]
+                            })
+                            .sum::<f64>();
+                        residual = residual.max(symmetric.abs());
+                    }
+                }
+                residual
+            }
+        }
+    }
+
+    /// Validate a vector in the current retraction-parameter representation as
+    /// tangent at `point`.
+    ///
+    /// Rn parameters and SO(3) right/body Lie coordinates are unconstrained.
+    /// Sphere parameters must be orthogonal to the stored point. Stiefel
+    /// ambient parameters must satisfy `X^T V + V^T X = 0` under the embedded
+    /// Frobenius metric.
+    ///
+    /// # Errors
+    /// Returns the typed manifold/retraction error family for malformed
+    /// descriptors, lengths, non-finite values, off-manifold points, or a
+    /// finite parameter vector outside the declared tangent space.
+    pub fn validate_parameter_tangent(
+        &self,
+        point: &[f64],
+        parameter: &[f64],
+    ) -> Result<(), OptError> {
+        self.validate_operation_point(point)?;
+        self.validate_parameter_payload("manifold tangent parameter", parameter)?;
+        let residual = self.parameter_tangency_residual(point, parameter);
+        if !residual.is_finite() || residual > MANIFOLD_TANGENCY_TOL {
+            return Err(self.domain_error(
+                "parameter vector must belong to the point tangent space",
+                None,
+                residual,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pull an ambient point-storage gradient back to the current retraction
+    /// parameterization.
+    ///
+    /// Rn is the identity. Sphere and Stiefel use embedded-metric tangent
+    /// projection. SO(3) applies the differential of the declared
+    /// right-composed quaternion exponential, producing three body-frame
+    /// components from a four-coordinate ambient quaternion gradient.
+    ///
+    /// # Errors
+    /// Returns the typed manifold/retraction error family for invalid points,
+    /// lengths, domains, non-finite inputs, or non-finite projected output.
+    #[must_use]
+    pub fn parameter_gradient(
+        &self,
+        point: &[f64],
+        ambient_gradient: &[f64],
+    ) -> Result<Vec<f64>, OptError> {
+        self.validate_operation_point(point)?;
+        self.validate_ambient_payload("ambient manifold gradient", ambient_gradient)?;
+        let mut output = try_vec_capacity(
+            "manifold-ops/parameter-gradient",
+            None,
+            None,
+            usize::try_from(self.param_dim().expect("validated parameter dimension"))
+                .expect("u32 parameter dimension fits usize"),
+        )?;
+        match *self {
+            Manifold::Rn { .. } => output.extend_from_slice(ambient_gradient),
+            Manifold::Sphere { .. } => {
+                let normal: f64 = point
+                    .iter()
+                    .zip(ambient_gradient)
+                    .map(|(coordinate, gradient)| coordinate * gradient)
+                    .sum();
+                for (coordinate, gradient) in point.iter().zip(ambient_gradient) {
+                    output.push((-normal).mul_add(*coordinate, *gradient));
+                }
+            }
+            Manifold::So3 => {
+                let [w, x, y, z] = [point[0], point[1], point[2], point[3]];
+                let [gw, gx, gy, gz] = [
+                    ambient_gradient[0],
+                    ambient_gradient[1],
+                    ambient_gradient[2],
+                    ambient_gradient[3],
+                ];
+                output.extend([
+                    0.5 * (-x * gw + w * gx + z * gy - y * gz),
+                    0.5 * (-y * gw - z * gx + w * gy + x * gz),
+                    0.5 * (-z * gw + y * gx - x * gy + w * gz),
+                ]);
+            }
+            Manifold::Stiefel { n, p } => {
+                let (n, p) = (n as usize, p as usize);
+                let mut gram =
+                    try_vec_capacity("manifold-ops/stiefel-gradient-gram", None, None, p * p)?;
+                for left in 0..p {
+                    for right in 0..p {
+                        gram.push(
+                            (0..n)
+                                .map(|row| {
+                                    point[left * n + row] * ambient_gradient[right * n + row]
+                                })
+                                .sum::<f64>(),
+                        );
+                    }
+                }
+                for column in 0..p {
+                    for row in 0..n {
+                        let correction: f64 = (0..p)
+                            .map(|basis| {
+                                let symmetric =
+                                    0.5 * (gram[basis * p + column] + gram[column * p + basis]);
+                                point[basis * n + row] * symmetric
+                            })
+                            .sum();
+                        output.push(ambient_gradient[column * n + row] - correction);
+                    }
+                }
+            }
+        }
+        Self::validate_retraction_finite_with_checkpoint(
+            "parameter gradient output",
+            &output,
+            &mut || Ok(()),
+        )?;
+        self.validate_parameter_tangent(point, &output)?;
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_lines)] // differentiated audit trail mirrors each QR phase
+    fn stiefel_qr_differential(
+        &self,
+        point: &[f64],
+        step: &[f64],
+        variation: &[f64],
+    ) -> Result<RetractionCurve, OptError> {
+        let Manifold::Stiefel { n, p } = *self else {
+            unreachable!("QR differential is Stiefel-only");
+        };
+        let (n, p) = (n as usize, p as usize);
+        let mut columns = try_vec_capacity("manifold-ops/stiefel-qr-columns", None, None, p)?;
+        let mut derivatives =
+            try_vec_capacity("manifold-ops/stiefel-qr-derivatives", None, None, p)?;
+        for column in 0..p {
+            let mut candidate = try_vec_capacity("manifold-ops/stiefel-qr-column", None, None, n)?;
+            let mut derivative =
+                try_vec_capacity("manifold-ops/stiefel-qr-derivative", None, None, n)?;
+            for row in 0..n {
+                candidate.push(point[column * n + row] + step[column * n + row]);
+                derivative.push(variation[column * n + row]);
+            }
+            columns.push(candidate);
+            derivatives.push(derivative);
+        }
+
+        for current_index in 0..p {
+            for prior_index in 0..current_index {
+                let projection: f64 = columns[current_index]
+                    .iter()
+                    .zip(&columns[prior_index])
+                    .map(|(current, prior)| current * prior)
+                    .sum();
+                let projection_velocity: f64 = derivatives[current_index]
+                    .iter()
+                    .zip(&columns[prior_index])
+                    .map(|(current, prior)| current * prior)
+                    .sum::<f64>()
+                    + columns[current_index]
+                        .iter()
+                        .zip(&derivatives[prior_index])
+                        .map(|(current, prior)| current * prior)
+                        .sum::<f64>();
+                let (prior_columns, current_columns) = columns.split_at_mut(current_index);
+                let prior = &prior_columns[prior_index];
+                let current = &mut current_columns[0];
+                let (prior_derivatives, current_derivatives) =
+                    derivatives.split_at_mut(current_index);
+                let prior_derivative = &prior_derivatives[prior_index];
+                let current_derivative = &mut current_derivatives[0];
+                for row in 0..n {
+                    current_derivative[row] -=
+                        projection_velocity * prior[row] + projection * prior_derivative[row];
+                    current[row] -= projection * prior[row];
+                }
+            }
+            let current = &mut columns[current_index];
+            let current_derivative = &mut derivatives[current_index];
+            let norm_sq: f64 = current.iter().map(|value| value * value).sum();
+            if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
+                return Err(self.domain_error(
+                    "candidate column is rank-deficient",
+                    Some((current_index as u32, current_index as u32)),
+                    norm_sq,
+                ));
+            }
+            let norm = norm_sq.sqrt();
+            let norm_velocity = current
+                .iter()
+                .zip(current_derivative.iter())
+                .map(|(candidate, derivative)| candidate * derivative)
+                .sum::<f64>()
+                / norm;
+            for row in 0..n {
+                let normalized = current[row] / norm;
+                current_derivative[row] =
+                    (current_derivative[row] - normalized * norm_velocity) / norm;
+                current[row] = normalized;
+            }
+        }
+
+        let storage = n * p;
+        let mut output = try_vec_capacity("manifold-ops/stiefel-qr-output", None, None, storage)?;
+        let mut velocity =
+            try_vec_capacity("manifold-ops/stiefel-qr-velocity", None, None, storage)?;
+        for column in 0..p {
+            output.extend_from_slice(&columns[column]);
+            velocity.extend_from_slice(&derivatives[column]);
+        }
+        Self::validate_retraction_finite_with_checkpoint(
+            "Stiefel curve output",
+            &output,
+            &mut || Ok(()),
+        )?;
+        Self::validate_retraction_finite_with_checkpoint(
+            "Stiefel curve velocity",
+            &velocity,
+            &mut || Ok(()),
+        )?;
+        Ok(RetractionCurve {
+            point: output,
+            velocity,
+        })
+    }
+
+    fn require_same_curve_point(
+        &self,
+        declared: &[f64],
+        reconstructed: &[f64],
+        rule: &'static str,
+    ) -> Result<(), OptError> {
+        if declared
+            .iter()
+            .zip(reconstructed)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+        {
+            return Ok(());
+        }
+        let mismatch = declared
+            .iter()
+            .zip(reconstructed)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        Err(self.domain_error(rule, None, mismatch))
+    }
+
+    /// Evaluate the authoritative retraction curve `R_point(alpha * direction)`
+    /// and its optimizer-parameter velocity at the landed point.
+    ///
+    /// The SO(3) branch returns the constant three-coordinate right/body Lie
+    /// velocity, distinct from the four-coordinate derivative of its stored
+    /// quaternion point. The Stiefel branch differentiates the same
+    /// deterministic modified-Gram-Schmidt QR program used by
+    /// [`Manifold::retract`].
+    ///
+    /// # Errors
+    /// Returns the typed manifold/retraction error family for invalid points,
+    /// parameter directions, scalar parameters, singular curves, or non-finite
+    /// outputs.
+    #[must_use]
+    #[allow(clippy::too_many_lines)] // one explicit velocity branch per manifold
+    pub fn retract_curve(
+        &self,
+        point: &[f64],
+        direction: &[f64],
+        alpha: f64,
+    ) -> Result<RetractionCurve, OptError> {
+        self.validate_operation_point(point)?;
+        self.validate_parameter_payload("retraction curve direction", direction)?;
+        if !alpha.is_finite() {
+            return Err(OptError::RetractionNonFinite {
+                input: "retraction curve alpha",
+                component: 0,
+                bits: alpha.to_bits(),
+            });
+        }
+        let mut step = try_vec_capacity(
+            "manifold-ops/retraction-curve-step",
+            None,
+            None,
+            direction.len(),
+        )?;
+        step.extend(direction.iter().map(|value| alpha * value));
+        Self::validate_retraction_finite_with_checkpoint(
+            "retraction curve step",
+            &step,
+            &mut || Ok(()),
+        )?;
+        let landed = self.retract(point, &step)?;
+        let velocity = match *self {
+            Manifold::Rn { .. } => try_clone_runtime_slice(
+                "manifold-ops/rn-curve-velocity",
+                direction,
+                &mut || Ok(()),
+            )?,
+            Manifold::Sphere { .. } => {
+                let mut moved = try_vec_capacity(
+                    "manifold-ops/sphere-curve-candidate",
+                    None,
+                    None,
+                    point.len(),
+                )?;
+                for (coordinate, increment) in point.iter().zip(&step) {
+                    // Preserve the public retraction's multiply-then-add
+                    // operation order: `step = alpha * direction`, followed
+                    // by `candidate = point + step`.
+                    moved.push(coordinate + increment);
+                }
+                let norm = moved.iter().map(|value| value * value).sum::<f64>().sqrt();
+                let radial: f64 = landed
+                    .iter()
+                    .zip(direction)
+                    .map(|(coordinate, tangent)| coordinate * tangent)
+                    .sum();
+                let mut velocity = try_vec_capacity(
+                    "manifold-ops/sphere-curve-velocity",
+                    None,
+                    None,
+                    direction.len(),
+                )?;
+                for (tangent, coordinate) in direction.iter().zip(&landed) {
+                    velocity.push(((-radial).mul_add(*coordinate, *tangent)) / norm);
+                }
+                velocity
+            }
+            Manifold::So3 => {
+                try_clone_runtime_slice("manifold-ops/so3-curve-velocity", direction, &mut || {
+                    Ok(())
+                })?
+            }
+            Manifold::Stiefel { .. } => {
+                let differentiated = self.stiefel_qr_differential(point, &step, direction)?;
+                self.require_same_curve_point(
+                    &landed,
+                    &differentiated.point,
+                    "differentiated QR point must match the authoritative retraction",
+                )?;
+                differentiated.velocity
+            }
+        };
+        Self::validate_retraction_finite_with_checkpoint(
+            "retraction curve velocity",
+            &velocity,
+            &mut || Ok(()),
+        )?;
+        Ok(RetractionCurve {
+            point: landed,
+            velocity,
+        })
+    }
+
+    /// Transport a tangent parameter vector along one authoritative retraction
+    /// step.
+    ///
+    /// Rn is the identity. Sphere uses shortest-geodesic isometric transport.
+    /// SO(3) keeps right/body components unchanged, an isometric trivialized
+    /// transport (not a Levi-Civita-parallel claim). Stiefel applies the
+    /// differential of the production QR retraction; it is a deterministic
+    /// tangent transport but no metric-isometry or superlinear-BFGS claim is
+    /// made.
+    ///
+    /// `to` must be the exact result of `self.retract(from, step)`, preventing
+    /// persisted or caller-spliced endpoints from silently changing transport
+    /// semantics. `step` follows the existing retraction-parameter contract:
+    /// Sphere and Stiefel accept ambient-coordinate increments, so callers that
+    /// need a textbook tangent-bundle curve must validate the step separately
+    /// with [`Manifold::validate_parameter_tangent`].
+    ///
+    /// # Errors
+    /// Returns the typed manifold/retraction error family for malformed points,
+    /// step/vector dimensions, non-finite inputs, non-tangent vectors,
+    /// antipodal Sphere endpoints, singular QR paths, or an incompatible
+    /// destination.
+    #[must_use]
+    pub fn transport_parameter(
+        &self,
+        from: &[f64],
+        step: &[f64],
+        to: &[f64],
+        vector: &[f64],
+    ) -> Result<Vec<f64>, OptError> {
+        self.validate_operation_point(from)?;
+        self.validate_operation_point(to)?;
+        self.validate_parameter_payload("transport retraction step", step)?;
+        self.validate_parameter_tangent(from, vector)?;
+        let expected_to = self.retract(from, step)?;
+        self.require_same_curve_point(
+            to,
+            &expected_to,
+            "transport destination must equal the authoritative retraction",
+        )?;
+        let output = match *self {
+            Manifold::Rn { .. } | Manifold::So3 => {
+                try_clone_runtime_slice("manifold-ops/trivialized-transport", vector, &mut || {
+                    Ok(())
+                })?
+            }
+            Manifold::Sphere { .. } => {
+                let denominator = 1.0
+                    + from
+                        .iter()
+                        .zip(to)
+                        .map(|(left, right)| left * right)
+                        .sum::<f64>();
+                if !denominator.is_finite() || denominator <= 64.0 * f64::EPSILON {
+                    return Err(self.domain_error(
+                        "Sphere transport is undefined at antipodal points",
+                        None,
+                        denominator,
+                    ));
+                }
+                let coefficient = vector
+                    .iter()
+                    .zip(to)
+                    .map(|(tangent, coordinate)| tangent * coordinate)
+                    .sum::<f64>()
+                    / denominator;
+                let mut transported =
+                    try_vec_capacity("manifold-ops/sphere-transport", None, None, vector.len())?;
+                for (value, (old, new)) in vector.iter().zip(from.iter().zip(to)) {
+                    transported.push((-coefficient).mul_add(old + new, *value));
+                }
+                transported
+            }
+            Manifold::Stiefel { .. } => {
+                let differentiated = self.stiefel_qr_differential(from, step, vector)?;
+                self.require_same_curve_point(
+                    to,
+                    &differentiated.point,
+                    "transport QR point must match the authoritative retraction",
+                )?;
+                differentiated.velocity
+            }
+        };
+        Self::validate_retraction_finite_with_checkpoint(
+            "transported parameter vector",
+            &output,
+            &mut || Ok(()),
+        )?;
+        self.validate_parameter_tangent(to, &output)?;
         Ok(output)
     }
 

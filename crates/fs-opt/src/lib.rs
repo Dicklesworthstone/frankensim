@@ -40,8 +40,8 @@ pub use admission::{
     ADMISSION_SCHEMA_VERSION, AdmissionCaps, AdmissionReport, AdmissionViolation, ProblemAdmission,
 };
 pub use eval::{
-    BindingFrame, DescentOptions, DescentReport, DescentStop, Value, descend_fn, descend_ir, eval,
-    eval_keyed,
+    BindingFrame, DescentOptions, DescentReport, DescentStop, RetractionCurve, Value, descend_fn,
+    descend_ir, eval, eval_keyed,
 };
 pub use guard::{
     DeltaPerturbationStep, Endpoint, EscalationKind, EscalationStep, GoodhartGuard, GuardFinding,
