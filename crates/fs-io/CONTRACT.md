@@ -45,8 +45,9 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   timestamps for byte determinism); GLB (glTF 2.0 binary container,
   f32 positions + u32 indices, chunk-accounted); legacy-ASCII VTK
   unstructured grid with optional scalar point field.
-- **Catalogs** (`catalog` module): CSV (RFC-4180 subset with quoted
-  fields and `""` escapes) and strict RFC 8259 JSON restricted to one
+- **Catalogs** (`catalog` module): CSV (strict RFC-4180 subset with quoted
+  fields and `""` escapes, but without embedded record separators) and strict
+  RFC 8259 JSON restricted to one
   array of flat objects with string/number values, validated against a
   sealed `Schema` admitted fallibly from `ColumnSpec`s (Text / bounded
   Number, required flags). Admission requires 1..=4096 columns by default,
@@ -60,7 +61,13 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   normalization; JSON retains exact decoded key spelling. Document
   column/member order is immaterial for the common canonical-name subset.
   Duplicate or empty CSV headers after normalization refuse before row-map
-  insertion. `CatalogProjectionLimits` supplies a shared validation-visit,
+  insertion. CSV parser v2 uses distinct unquoted, quoted, and after-closing-
+  quote states: a quote may open only an empty field, only comma or record end
+  may follow a closing quote, and every physical record (including empty or
+  whitespace-only records) is retained for schema validation rather than
+  silently skipped. LF and CRLF delimiters are equivalent. A line break before
+  a closing quote refuses as outside this bounded subset; this is not a full
+  RFC 4180 claim. `CatalogProjectionLimits` supplies a shared validation-visit,
   numeric-entry/key-byte, and logical-output envelope. `CatalogCsvLimits`
   composes it with input, row, per-record/aggregate-field, per-field, raw-header,
   and aggregate-decoded caps; `CatalogJsonLimits` composes the same projection
@@ -282,9 +289,10 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
 `SchemaDefinitionRefusal` is the separate typed pre-document refusal for empty,
 ambiguous, over-limit, or numerically invalid schema declarations. `IoError`:
 `Malformed { at, what }`, `Unsupported`, `ResourceBound`, `Schema { row,
-column, what }`. Catalog-JSON syntax errors use byte offsets; CSV resource
-refusals use record positions; common projection refusals name the operation
-dimension and declared limit. Catalog resource refusals remain deterministic.
+column, what }`. Catalog-JSON syntax errors and CSV lexical/parser-v2 structural
+errors use absolute input-byte offsets; CSV resource refusals use record
+positions; common projection refusals name the operation dimension and declared
+limit. Catalog resource refusals remain deterministic.
 Receipt-producing APIs use the same refusal variants and are success-only; the
 receipt's authority and no-claim fields are not substitutes for an error
 receipt.
@@ -397,7 +405,9 @@ companions, not canonical aggregate outcomes; the fuzz companion also retains
 the mutation-stream seed. Catalog module G0/G3/G5 unit matrices additionally cover
 schema count/name/aggregate-name boundaries; empty, trim-alias, and duplicate
 names; NaN, infinite, equal, inverted, and extreme finite bounds; stable and
-policy-sensitive schema identity; normalized duplicate CSV headers; optional
+policy-sensitive schema identity; strict CSV lexical states and first-offender
+offsets; preservation of empty/whitespace records; LF/CRLF parity; normalized
+duplicate CSV headers; optional
 and unknown-column parity across CSV/JSON; document-column permutation; bounded
 value-error witnesses; exact common CSV/JSON projection boundaries; every CSV
 input/row/field/header/decoded boundary; checked operation-overflow refusal;

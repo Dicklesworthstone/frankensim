@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 /// Version of the sealed catalog-schema admission contract.
 pub const CATALOG_SCHEMA_VERSION: &str = "fs-io/catalog-schema/v1";
 /// Version of the bounded CSV parser and projection semantics.
-pub const CATALOG_CSV_PARSER_VERSION: &str = "fs-io/catalog-csv/v1";
+pub const CATALOG_CSV_PARSER_VERSION: &str = "fs-io/catalog-csv/v2";
 /// Version of the strict bounded JSON parser and projection semantics.
 pub const CATALOG_JSON_PARSER_VERSION: &str = "fs-io/catalog-json/v1";
 /// Version of the catalog read receipt schema.
@@ -881,9 +881,18 @@ fn finish_csv_field(
     Ok(())
 }
 
-/// Split one bounded CSV record (RFC-4180 subset: quoted fields, `""` escapes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsvFieldState {
+    Unquoted,
+    Quoted,
+    AfterQuote,
+}
+
+/// Split one bounded CSV record (strict RFC-4180 subset: quoted fields and
+/// `""` escapes, but no embedded record separators).
 fn split_csv(
     line: &str,
+    record_start: usize,
     row: usize,
     limits: CatalogCsvLimits,
     counters: &mut CsvCounters,
@@ -892,35 +901,66 @@ fn split_csv(
     let mut fields = Vec::new();
     let mut cur = String::new();
     let mut chars = line.char_indices().peekable();
-    let mut quoted = false;
+    let mut state = CsvFieldState::Unquoted;
     let mut work_index = 0usize;
     while let Some((offset, c)) = chars.next() {
-        catalog_poll(cancellation, "catalog-csv-field-decode", work_index, offset)?;
+        let absolute_offset = record_start
+            .checked_add(offset)
+            .ok_or_else(|| operation_refusal("CSV", "record byte-offset arithmetic overflow"))?;
+        catalog_poll(
+            cancellation,
+            "catalog-csv-field-decode",
+            work_index,
+            absolute_offset,
+        )?;
         work_index += 1;
-        if quoted {
-            match c {
+        match state {
+            CsvFieldState::Quoted => match c {
                 '"' if chars.peek().is_some_and(|(_, next)| *next == '"') => {
                     push_csv_char(&mut cur, '"', row, limits)?;
                     chars.next();
                     work_index += 1;
                 }
-                '"' => quoted = false,
+                '"' => state = CsvFieldState::AfterQuote,
                 other => push_csv_char(&mut cur, other, row, limits)?,
-            }
-        } else {
-            match c {
-                '"' if cur.is_empty() => quoted = true,
+            },
+            CsvFieldState::Unquoted => match c {
+                '"' if cur.is_empty() => state = CsvFieldState::Quoted,
+                '"' => {
+                    return Err(IoError::Malformed {
+                        at: absolute_offset,
+                        what: format!("raw quote inside unquoted CSV field in record {row}"),
+                    });
+                }
                 ',' => {
-                    finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?
+                    finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?;
                 }
                 other => push_csv_char(&mut cur, other, row, limits)?,
-            }
+            },
+            CsvFieldState::AfterQuote => match c {
+                ',' => {
+                    finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?;
+                    state = CsvFieldState::Unquoted;
+                }
+                _ => {
+                    return Err(IoError::Malformed {
+                        at: absolute_offset,
+                        what: format!(
+                            "only a comma or record end may follow a closing CSV quote in record {row}"
+                        ),
+                    });
+                }
+            },
         }
     }
-    if quoted {
+    if state == CsvFieldState::Quoted {
         return Err(IoError::Malformed {
-            at: row,
-            what: "unterminated quoted CSV field".to_string(),
+            at: record_start.checked_add(line.len()).ok_or_else(|| {
+                operation_refusal("CSV", "record-end byte-offset arithmetic overflow")
+            })?,
+            what: format!(
+                "unterminated quoted CSV field in record {row}; embedded record separators are outside the admitted subset"
+            ),
         });
     }
     finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?;
@@ -945,11 +985,12 @@ impl<'a> CsvLines<'a> {
     fn next(
         &mut self,
         cancellation: Option<&dyn CatalogCancellation>,
-    ) -> Result<Option<(usize, &'a str)>, IoError> {
+    ) -> Result<Option<(usize, usize, &'a str)>, IoError> {
         if self.next_byte >= self.text.len() {
             return Ok(None);
         }
         let start = self.next_byte;
+        catalog_checkpoint(cancellation, "catalog-csv-record-boundary", start)?;
         let bytes = self.text.as_bytes();
         let mut end = bytes.len();
         let mut terminated = false;
@@ -971,32 +1012,7 @@ impl<'a> CsvLines<'a> {
         }
         let physical_line = self.physical_line;
         self.physical_line += 1;
-        Ok(Some((physical_line, &self.text[start..end])))
-    }
-
-    fn next_nonempty(
-        &mut self,
-        cancellation: Option<&dyn CatalogCancellation>,
-    ) -> Result<Option<(usize, &'a str)>, IoError> {
-        while let Some((line, text)) = self.next(cancellation)? {
-            let mut blank = true;
-            for (work_index, (offset, character)) in text.char_indices().enumerate() {
-                catalog_poll(
-                    cancellation,
-                    "catalog-csv-blank-line-scan",
-                    work_index,
-                    offset,
-                )?;
-                if !character.is_whitespace() {
-                    blank = false;
-                    break;
-                }
-            }
-            if !blank {
-                return Ok(Some((line, text)));
-            }
-        }
-        Ok(None)
+        Ok(Some((physical_line, start, &self.text[start..end])))
     }
 }
 
@@ -1767,14 +1783,20 @@ impl Schema {
         )?;
         let mut counters = CsvCounters::default();
         let mut lines = CsvLines::new(text);
-        let (_, header_line) = lines
-            .next_nonempty(cancellation)?
-            .ok_or(IoError::Malformed {
+        let (_, header_start, header_line) =
+            lines.next(cancellation)?.ok_or(IoError::Malformed {
                 at: 0,
                 what: "empty catalog".to_string(),
             })?;
         let header = normalize_csv_header(
-            split_csv(header_line, 0, limits, &mut counters, cancellation)?,
+            split_csv(
+                header_line,
+                header_start,
+                0,
+                limits,
+                &mut counters,
+                cancellation,
+            )?,
             cancellation,
         )?;
         for (index, spec) in self.columns.iter().enumerate() {
@@ -1822,16 +1844,23 @@ impl Schema {
         let mut numbers = Vec::new();
         let mut projection = ProjectionUse::new("CSV", limits.projection, 0)?;
         let mut data_row = 0usize;
-        while let Some((ln, line)) = lines.next_nonempty(cancellation)? {
+        while let Some((_physical_line, record_start, line)) = lines.next(cancellation)? {
             let row_no = data_row + 1; // 1-based, header excluded
             if data_row >= limits.max_rows {
                 return Err(csv_cap_refusal("row", limits.max_rows, row_no));
             }
             catalog_poll(cancellation, "catalog-csv-row", data_row, row_no)?;
-            let fields = split_csv(line, row_no, limits, &mut counters, cancellation)?;
+            let fields = split_csv(
+                line,
+                record_start,
+                row_no,
+                limits,
+                &mut counters,
+                cancellation,
+            )?;
             if fields.len() != header.len() {
                 return Err(IoError::Malformed {
-                    at: ln + 1,
+                    at: record_start,
                     what: format!(
                         "record has {} fields, header has {}",
                         fields.len(),
@@ -2926,6 +2955,65 @@ mod tests {
         assert_eq!(csv.rows[0]["extra"], "keep");
     }
 
+    /// G0/G3: parser v2 is an explicit three-state CSV grammar. It preserves
+    /// physical records, admits only delimiter/end after a closing quote, and
+    /// reports the first offending absolute input byte for lexical failures.
+    #[test]
+    fn g0_g3_csv_record_fsm_is_strict_and_record_preserving() {
+        let schema = Schema::admit(vec![text_column("id", false)])
+            .expect("valid one-column CSV grammar schema");
+        assert_eq!(CATALOG_CSV_PARSER_VERSION, "fs-io/catalog-csv/v2");
+
+        let quoted = schema
+            .parse_csv("id\n\"A,B\"\n\"A\"\"B\"\n")
+            .expect("quoted commas and doubled quotes remain supported");
+        assert_eq!(quoted.rows.len(), 2);
+        assert_eq!(quoted.rows[0]["id"], "A,B");
+        assert_eq!(quoted.rows[1]["id"], "A\"B");
+
+        let blank_records = schema
+            .parse_csv("id\n\n \t\n")
+            .expect("empty and whitespace records are data, not filtered lines");
+        assert_eq!(blank_records.rows.len(), 2);
+        assert_eq!(blank_records.rows[0]["id"], "");
+        assert_eq!(blank_records.rows[1]["id"], " \t");
+        assert_eq!(
+            schema.parse_csv("id\n\"\"\n").expect("quoted empty field"),
+            schema.parse_csv("id\n\n").expect("unquoted empty field"),
+            "valid quoted and unquoted empty spellings are equivalent"
+        );
+        assert_eq!(
+            schema.parse_csv("id\r\n\"A\"\r\n").expect("CRLF records"),
+            schema.parse_csv("id\nA\n").expect("LF records"),
+            "record-separator spelling does not change the catalog"
+        );
+
+        let malformed = [
+            ("id\n\"A\"junk\n", 6, "closing CSV quote"),
+            ("id\nA\"B\n", 4, "raw quote"),
+            ("id\n\"A\" \n", 6, "closing CSV quote"),
+            ("id\n\"A", 5, "unterminated quoted CSV field"),
+            ("id\n\"A\nB\"\n", 5, "embedded record separators"),
+        ];
+        for (input, expected_at, expected_what) in malformed {
+            match schema.parse_csv_with_receipt(input, CatalogInputIdentity::Unavailable) {
+                Err(IoError::Malformed { at, what }) => {
+                    assert_eq!(at, expected_at, "wrong first offender for {input:?}");
+                    assert!(
+                        what.contains(expected_what),
+                        "wrong lexical diagnosis for {input:?}: {what}"
+                    );
+                }
+                other => panic!("malformed CSV must publish no CatalogRead, got {other:?}"),
+            }
+        }
+
+        assert!(
+            schema.parse_csv("\nid\nA\n").is_err(),
+            "a leading empty physical record is an invalid empty header, not ignorable whitespace"
+        );
+    }
+
     /// G0: attacker-sized cell text cannot become an attacker-sized teaching
     /// error even before the shared CSV operation envelope lands.
     #[test]
@@ -3410,7 +3498,7 @@ mod tests {
 
         let csv_stages = [
             "catalog-csv-line-scan",
-            "catalog-csv-blank-line-scan",
+            "catalog-csv-record-boundary",
             "catalog-csv-field-decode",
             "catalog-csv-field-publication",
             "catalog-csv-header-index",
