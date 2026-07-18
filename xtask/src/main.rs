@@ -34,6 +34,7 @@
 mod bootstrap_provenance;
 mod claims;
 mod closures;
+pub mod constellation_admission;
 mod constellation_cleanliness;
 mod depgraph;
 mod identities;

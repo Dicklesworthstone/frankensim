@@ -30,6 +30,50 @@ workspace member, so it builds alone:
     cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
     cargo run --manifest-path tools/bootstrap/Cargo.toml -- --from <mirror-base>
 
+## Typed admission core (bead sj31i.50.1, first tranche)
+
+`xtask/src/constellation_admission.rs` is the zero-dependency, Rust-2021-compatible
+policy core shared by the workspace and standalone bootstrap binaries. Its
+versioned `AdmissionContext` makes the command class, offline or pinned-fetch
+authority, publication authority, Cx/cancellation/clock identities, deadline,
+work, memory, process, file, output, network, retry budgets, path capabilities,
+executable capabilities, and trust-anchor state explicit. Omitted values,
+booleans, positive budgets, ambient configuration, and `Option` presence cannot
+mint authority.
+
+The state machine distinguishes `Diagnostic`, `Unanchored`, `Admitted`,
+`Refused`, `Cancelled`, and `Indeterminate`. It transactionally refuses illegal
+phase changes and over-budget charges before mutating consumption or the event
+ledger. Monotonic clock observations cannot regress, explicit cancellation polls
+are bounded by the Cx declaration, and event capacity always reserves a path to
+an honest terminal record. Publication requires preflight, an exact stability
+recheck, explicit publication authority, evidence that work is quiescent, a
+second exact stability recheck with a conditional sink fence, single-use receipt
+authorization, then either successful finalization or an indeterminate failure
+record. Cancellation requires an identified liveness observation, request,
+identified deterministic drain, and identified explicit finalization; failed or
+uncertain cleanup is `Indeterminate`, never clean refusal or cancellation. Retry
+preserves the request identity and cumulative spend, advances a bounded attempt
+ordinal, binds a fresh attempt-scoped child Cx/cancellation source, and cannot
+reuse an indeterminate attempt's authority.
+
+Canonical binary records retain only schema/domain/version, opaque fixed-size
+identities, policy, budgets, and the complete deterministic transition history.
+State, consumption, attempt/Cx disposition, event ordering, terminal rule, and
+that rule's ranked closed remedies are replay-derived rather than trusted as
+independent fields. Records never retain paths, URLs, credentials, environment
+values, or runtime handles. Decoding replays the complete history and returns an
+inert `RecordedAdmission`; it cannot reconstruct a live machine or capability.
+The canonical audit envelope is bounded separately and does not spend the
+operation's external stdout/stderr/provenance output budget.
+
+This first tranche establishes the shared core, canonical receipt, and
+G0/G4/G5 transition tests. It does **not** yet claim that every existing
+bootstrap, shell, snapshot, verify-only, DSR, or RCH effect is gated by the new
+machine. Those adapters remain part of the open bead, and the existing entry
+points retain their documented behavior until each effect boundary is migrated
+without inventing authority.
+
 It reads `constellation.lock` through a 1 MiB bound and accepts only the
 canonical v2 grammar, exact identity domain and integer identity version, exact
 seven-library set, unique safe library identities, lowercase pinned heads,

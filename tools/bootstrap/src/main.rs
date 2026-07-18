@@ -40,6 +40,8 @@
 
 #[path = "../../../xtask/src/bootstrap_provenance.rs"]
 mod bootstrap_provenance;
+#[path = "../../../xtask/src/constellation_admission.rs"]
+pub mod constellation_admission;
 #[path = "../../../xtask/src/constellation_cleanliness.rs"]
 mod constellation_cleanliness;
 
