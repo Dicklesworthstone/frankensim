@@ -38,6 +38,8 @@ pub mod assembly;
 pub mod datum_system;
 /// Typed mating-feature size envelopes and derived clearance state.
 pub mod fit_clearance;
+/// Explicit applicability links between fit endpoints and GD&T controls.
+pub mod fit_gdt_crosswalk;
 /// Datum-backed flatness, parallelism, and perpendicularity controls.
 pub mod geometric_tolerance;
 /// Typed surface-texture requirements and as-built observations.

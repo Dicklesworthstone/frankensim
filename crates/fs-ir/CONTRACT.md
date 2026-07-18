@@ -777,6 +777,47 @@ admitted derived-geometry boundary.
   authenticate semantic or presentation artifacts, prove assembly or
   manufacturability, integrate gear/backlash behavior, or transport controls
   across lineage.
+- `machine::manufacturing::fit_gdt_crosswalk` is the additive applicability
+  bridge between the admitted fit and geometric-tolerance catalogs. Each
+  submitted row names one exact fit requirement, its `Internal` or `External`
+  endpoint role, and one exact geometric-tolerance control. Both catalogs must
+  bind the same Machine graph. The selected fit endpoint and control must name
+  the same caller-declared body; the admitted row retains that body, the fit
+  contact feature, the controlled surface patch, characteristic, zone width,
+  and optional datum frame without merging their distinct selector types.
+- Coverage is total over the admitted fit catalog: every fit requirement must
+  have exactly one internal and one external link. Raw input is capped at 8,192
+  links (two times the fit-catalog cap), caller order is non-semantic, duplicate
+  `(fit requirement, endpoint role)` rows refuse even when they name different
+  controls, and unknown fit/control IDs, graph mismatch, declared-body mismatch,
+  and missing roles return typed diagnostics. A geometric control may be reused
+  by multiple fit requirements because applicability is not ownership and one
+  admitted control can constrain a surface participating in multiple declared
+  fits.
+- `MachineFitGdtCrosswalkIdV1` binds the crosswalk and FrankenScript IR schema
+  versions, exact shared graph, complete fit-catalog identity, complete
+  geometric-tolerance-catalog identity, and every canonically ordered resolved
+  row. Resolved identity rows bind the requirement/control keys, endpoint role,
+  body/contact-feature/surface-patch identities, characteristic, source/unit/SI
+  zone-width bits, and optional datum-frame key. The receipt exposes the exact
+  upstream catalog identities and their complete canonical-preimage receipts,
+  resolved endpoint rows, and its own complete canonical-preimage receipt for
+  collision adjudication.
+- `tests/machine_manufacturing_fit_gdt_crosswalk.rs` supplies G0/G3/G5 evidence
+  for role-complete resolution, caller-order replay, exact field retention,
+  independent fit-catalog/geometric-catalog/link identity movement, graph/ID/
+  alias/body/coverage refusals, and the simultaneous exact 4,096-fit/8,192-link
+  boundary. The N+1 raw-link case refuses before sorting or duplicate analysis.
+- A crosswalk row is a caller assertion of applicability only. Same declared
+  body proves neither body containment nor geometric equivalence between the
+  contact feature and surface patch. The crosswalk does not establish that a
+  flatness/orientation control is relevant or sufficient for the fit; construct
+  axes, cylinders, tolerance zones, or datum simulations; allocate the signed
+  clearance envelope against zone widths; infer coaxiality/position/runout;
+  perform inspection or pass/fail; establish ASME/ISO/AP242 conformance; prove
+  assembly feasibility, contact behavior, interference freedom, or reliability;
+  authenticate catalog sources; integrate gear backlash; or transport links
+  across lineage.
 - `machine::manufacturing::assembly` is the additive native ordered-assembly
   seed. `MachineAssemblyDraftV1::admit_against` binds one exact admitted Machine
   graph, one explicit initially available body, and at most 4,096 operations
