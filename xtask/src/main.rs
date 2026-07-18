@@ -11,6 +11,7 @@
 //! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
 //! - `check-color-admission` — no new positive Color literals outside admission authorities (bead 6pf9).
 //! - `check-obs-events` — committed *.events.jsonl fixtures are schema-valid fs-obs lines (bead huq.16).
+//! - `check-casual-print` — core libraries cannot create untyped stdout/stderr truth paths (bead i94v.7.3.3).
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
@@ -2364,6 +2365,155 @@ fn check_citable_producers(root: &Path) -> Vec<Violation> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// No-casual-print policy (bead i94v.7.3.3). Process output is data: core
+// libraries return typed values/events while CLI binaries own presentation.
+// ---------------------------------------------------------------------------
+
+const CASUAL_PRINT_CHECK: &str = "casual-print";
+
+#[derive(Debug, Clone, Copy)]
+struct CasualPrintAllowance {
+    path: &'static str,
+    owner: &'static str,
+    reason: &'static str,
+}
+
+/// Pre-policy structured emitters. This is an exact owner-level ratchet, not
+/// permission for arbitrary printing anywhere in the listed file. New output
+/// paths must return typed records to a CLI/process runner instead.
+const CASUAL_PRINT_ALLOWLIST: &[CasualPrintAllowance] = &[
+    CasualPrintAllowance {
+        path: "crates/fs-casebook/src/lib.rs",
+        owner: "run",
+        reason: "legacy casebook JSONL harness emitter",
+    },
+    CasualPrintAllowance {
+        path: "crates/fs-propcheck/src/lib.rs",
+        owner: "check_structured",
+        reason: "legacy failing-counterexample JSONL harness emitter",
+    },
+    CasualPrintAllowance {
+        path: "crates/fs-vskeleton/src/lib.rs",
+        owner: "emit",
+        reason: "legacy fs-obs JSONL application adapter",
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CasualPrintOccurrence {
+    path: String,
+    owner: String,
+    macro_name: String,
+    line: usize,
+}
+
+fn is_core_library_source(path: &str) -> bool {
+    path.starts_with("crates/")
+        && path.contains("/src/")
+        && path.ends_with(".rs")
+        && !path.contains("/src/bin/")
+        && !path.ends_with("/src/main.rs")
+}
+
+fn scan_casual_print_source(
+    path: &str,
+    source: &str,
+) -> Result<Vec<CasualPrintOccurrence>, String> {
+    if !is_core_library_source(path) {
+        return Ok(Vec::new());
+    }
+
+    let literals = rust_string_literals(source)?;
+    let bytes = source.as_bytes();
+    let mut occurrences = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if !(bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_') {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            cursor += 1;
+        }
+        let token = &source[start..cursor];
+        if !matches!(token, "print" | "println" | "eprint" | "eprintln" | "dbg")
+            || !rust_offset_is_code(source, start, &literals)
+        {
+            continue;
+        }
+        let mut bang = cursor;
+        while bytes.get(bang).is_some_and(u8::is_ascii_whitespace) {
+            bang += 1;
+        }
+        if bytes.get(bang) != Some(&b'!') || cfg_test_only_literal(source, start)? {
+            continue;
+        }
+        let (owner, _) = enclosing_function(source, start);
+        occurrences.push(CasualPrintOccurrence {
+            path: path.to_string(),
+            owner,
+            macro_name: token.to_string(),
+            line: source[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1,
+        });
+    }
+    Ok(occurrences)
+}
+
+fn audit_casual_print_sources(sources: &BTreeMap<String, String>) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for (path, source) in sources {
+        let occurrences = match scan_casual_print_source(path, source) {
+            Ok(occurrences) => occurrences,
+            Err(error) => {
+                violations.push(Violation {
+                    check: CASUAL_PRINT_CHECK,
+                    crate_name: path.clone(),
+                    detail: format!("cannot exhaustively scan {path}: {error}"),
+                });
+                continue;
+            }
+        };
+        for occurrence in occurrences {
+            if let Some(allowance) = CASUAL_PRINT_ALLOWLIST.iter().find(|allowance| {
+                allowance.path == occurrence.path && allowance.owner == occurrence.owner
+            }) {
+                let _ = allowance.reason;
+                continue;
+            }
+            violations.push(Violation {
+                check: CASUAL_PRINT_CHECK,
+                crate_name: occurrence.path.clone(),
+                detail: format!(
+                    "{}:{}: {}! in fn {} creates an untyped process-output path; return a typed fs-obs event/record and let a CLI or process runner render it",
+                    occurrence.path, occurrence.line, occurrence.macro_name, occurrence.owner,
+                ),
+            });
+        }
+    }
+    violations
+}
+
+fn check_casual_print(root: &Path) -> Vec<Violation> {
+    match workspace_rust_sources(root) {
+        Ok(sources) => audit_casual_print_sources(&sources),
+        Err(detail) => vec![Violation {
+            check: CASUAL_PRINT_CHECK,
+            crate_name: "<repo>".to_string(),
+            detail,
+        }],
+    }
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -3627,6 +3777,7 @@ fn main() -> ExitCode {
         "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
         "check-color-admission" => (check_color_admission(&root), vec!["color-admission"]),
         "check-obs-events" => (check_obs_events(&root), vec!["obs-events"]),
+        "check-casual-print" => (check_casual_print(&root), vec![CASUAL_PRINT_CHECK]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-identities" => (
@@ -3650,6 +3801,7 @@ fn main() -> ExitCode {
             v.extend(check_libm(&root));
             v.extend(check_color_admission(&root));
             v.extend(check_obs_events(&root));
+            v.extend(check_casual_print(&root));
             v.extend(check_terminology(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
@@ -3670,6 +3822,7 @@ fn main() -> ExitCode {
                     "libm-determinism",
                     "color-admission",
                     "obs-events",
+                    CASUAL_PRINT_CHECK,
                     TERMINOLOGY_CHECK,
                     "golden-couplings",
                     "semantic-identities",
@@ -3683,7 +3836,8 @@ fn main() -> ExitCode {
         other => {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
-                 check-unsafe|check-powi|check-terminology|check-goldens|check-claims|check-closures|\
+                 check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
+                 check-goldens|check-claims|check-closures|\
                  check-identities|check-manifest-fixture|check-citable-producers|check-all|generate-identities|\
                  lock-constellation|check-constellation|depgraph-receipt|matdb-pack"
             );
@@ -3701,6 +3855,92 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn casual_print_scanner_rejects_each_untyped_macro_in_core_libraries() {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "pub fn leak() {\n",
+                "    print!(\"a\"); println!(\"b\");\n",
+                "    eprint!(\"c\"); eprintln!(\"d\"); dbg!(5);\n",
+                "}\n",
+            )
+            .to_string(),
+        );
+        let violations = audit_casual_print_sources(&sources);
+        assert_eq!(violations.len(), 5, "every casual output macro must fail");
+        for name in ["print!", "println!", "eprint!", "eprintln!", "dbg!"] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.detail.contains(name)),
+                "missing mutation witness for {name}: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn casual_print_scanner_ignores_tests_strings_and_cli_boundaries() {
+        let fixture = concat!(
+            "pub fn typed() { let _ = \"println!(not code)\"; }\n",
+            "#[cfg(test)] mod tests {\n",
+            "    #[test] fn diagnostic() { println!(\"test-only\"); }\n",
+            "}\n",
+        );
+        let sources = [
+            ("crates/fs-new/src/lib.rs", fixture),
+            (
+                "crates/fs-new/src/main.rs",
+                "fn main() { println!(\"cli\"); }",
+            ),
+            (
+                "crates/fs-new/src/bin/tool.rs",
+                "fn main() { eprintln!(\"cli diagnostic\"); }",
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+        assert!(
+            audit_casual_print_sources(&sources).is_empty(),
+            "test diagnostics, literal text, and CLI rendering are outside the core-library ban"
+        );
+    }
+
+    #[test]
+    fn casual_print_allowlist_is_exact_and_owner_scoped() {
+        assert_eq!(CASUAL_PRINT_ALLOWLIST.len(), 3);
+        let allowed = [
+            (
+                "crates/fs-casebook/src/lib.rs",
+                "pub fn run() { println!(\"legacy JSONL\"); }",
+            ),
+            (
+                "crates/fs-propcheck/src/lib.rs",
+                "pub fn check_structured() { println!(\"legacy failure\"); }",
+            ),
+            (
+                "crates/fs-vskeleton/src/lib.rs",
+                "fn emit() { eprintln!(\"legacy event\"); }",
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+        assert!(audit_casual_print_sources(&allowed).is_empty());
+
+        let escaped = [(
+            "crates/fs-casebook/src/lib.rs".to_string(),
+            "pub fn unrelated() { println!(\"new path\"); }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let violations = audit_casual_print_sources(&escaped);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].detail.contains("unrelated"));
+    }
+
     #[test]
     fn goldens_seeded_upstream_drift_points_at_the_coupling_row() {
         let root = std::env::temp_dir().join(format!("xtask-goldens-{}", std::process::id()));

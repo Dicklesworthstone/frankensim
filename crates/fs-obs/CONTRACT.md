@@ -91,6 +91,10 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   pointer constructor. Inline omission without that token remains explicit
   loss; process exit (including code zero) without a final typed receipt
   remains an observation gap.
+- `xtask check-casual-print` scans every core-library Rust source and rejects
+  `print!`, `println!`, `eprint!`, `eprintln!`, and `dbg!` outside test and CLI
+  boundaries. Its three pre-policy structured emitters are ratcheted by exact
+  path plus function owner; listing a file never exempts unrelated functions.
 - Share policy never infers sensitivity from payload text. Opaque bytes are
   revealed only when sensitivity, audience, privilege, license, export,
   retention, and request bounds all admit them. Credentials are never
@@ -203,10 +207,11 @@ privilege downgrade.
   must make their owner APIs fallible rather than wrapping it in `expect`.
 - `process` is the deterministic policy/state layer, not a pipe reader,
   artifact store, async executor, CLI renderer, or source print-macro scanner.
-  Those owners must project its decisions into canonical events and
-  independently authenticate committed artifacts. `DurableArtifactPointer`
-  records constructor-level admission; it cannot prove an external store
-  truthful by itself.
+  The repository scanner is `xtask check-casual-print`; runtime owners must
+  project process decisions into canonical events and independently
+  authenticate committed artifacts. `DurableArtifactPointer` records
+  constructor-level admission; it cannot prove an external store truthful by
+  itself.
 - `privacy` is a labeled-data policy core, not a secret detector, cryptographic
   implementation, access-control service, jurisdiction engine, or artifact
   scanner. External salted/keyed tokens remain caller assertions until an
