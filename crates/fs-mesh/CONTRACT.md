@@ -169,10 +169,12 @@ half-edge round-trips, closed-manifold audits).
 ## Error model
 
 `MeshError` teaching errors: `TooFewPoints`, `DegenerateInput` (exact
-all-coplanar detection, says to triangulate in 2D instead),
-`Cancelled`. Kernel internals hold invariants by construction (no
-flat tets: every created tet's apex is strictly visible); the audit
-exists so any regression is LOUD rather than silently non-Delaunay.
+all-coplanar detection, says to triangulate in 2D instead), `InvalidFinite`
+(preserves the rejected bits and refuses non-finite `crease_angle` or
+`smoothing` before remeshing work), and `Cancelled`. Kernel internals hold
+invariants by construction (no flat tets: every created tet's apex is strictly
+visible); the audit exists so any regression is LOUD rather than silently
+non-Delaunay.
 `AdaptivityError` refuses a source state reused as its own target, before/after
 QoI or source/target-state mismatch, contradictory action/effect declarations,
 an unbacked continuous-gradient claim, non-finite or negative accounting, and

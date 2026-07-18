@@ -540,7 +540,8 @@ impl Passes<'_> {
 /// compacted result and the op ledger.
 ///
 /// # Errors
-/// [`MeshError::Cancelled`] between passes.
+/// [`MeshError::InvalidFinite`] before processing when a floating-point
+/// control is non-finite; [`MeshError::Cancelled`] between passes.
 pub fn remesh(
     soup: &Soup,
     chart: Option<&dyn Chart>,
@@ -548,6 +549,17 @@ pub fn remesh(
     opts: RemeshOptions,
     cx: &Cx<'_>,
 ) -> Result<(Soup, RemeshStats), MeshError> {
+    for (field, value) in [
+        ("crease_angle", opts.crease_angle),
+        ("smoothing", opts.smoothing),
+    ] {
+        if !value.is_finite() {
+            return Err(MeshError::InvalidFinite {
+                field,
+                value_bits: value.to_bits(),
+            });
+        }
+    }
     let mut passes = Passes {
         positions: soup.positions.clone(),
         faces: soup.triangles.clone(),

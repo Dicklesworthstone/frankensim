@@ -41,6 +41,13 @@ pub enum MeshError {
     /// Every input point lies on one plane (or worse): 3D Delaunay is
     /// undefined — triangulate in 2D instead.
     DegenerateInput,
+    /// A floating-point meshing control was not finite.
+    InvalidFinite {
+        /// Stable control name.
+        field: &'static str,
+        /// Exact rejected floating-point representation.
+        value_bits: u64,
+    },
     /// Cooperative cancellation observed between insertions.
     Cancelled,
 }
@@ -56,6 +63,10 @@ impl core::fmt::Display for MeshError {
                 "all input points are coplanar (exact orient3d test): a 3D \
                  Delaunay tetrahedralization does not exist — use a 2D \
                  triangulation of the common plane instead"
+            ),
+            MeshError::InvalidFinite { field, value_bits } => write!(
+                f,
+                "{field} must be finite (rejected bits {value_bits:#018x})"
             ),
             MeshError::Cancelled => write!(f, "cancelled between insertions"),
         }

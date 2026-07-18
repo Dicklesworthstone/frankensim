@@ -655,6 +655,55 @@ fn tmesh_007_isotropic_sphere() {
     });
 }
 
+/// G0: non-finite policy controls refuse before they can corrupt mesh
+/// coordinates or silently disable crease classification.
+#[test]
+fn remesh_refuses_non_finite_controls_before_work() {
+    with_cx(|cx| {
+        const NAN_BITS: u64 = 0x7ff8_0000_0000_0042;
+        let soup = fs_rep_mesh::Soup {
+            positions: Vec::new(),
+            triangles: Vec::new(),
+        };
+        let metric = UniformMetric { target: 1.0 };
+        let invalid = [f64::from_bits(NAN_BITS), f64::INFINITY, f64::NEG_INFINITY];
+        for value in invalid {
+            let opts = RemeshOptions {
+                iterations: 0,
+                smoothing: value,
+                ..RemeshOptions::default()
+            };
+            let error = remesh(&soup, None, &metric, opts, cx)
+                .expect_err("non-finite smoothing must refuse");
+            assert_eq!(
+                error,
+                MeshError::InvalidFinite {
+                    field: "smoothing",
+                    value_bits: value.to_bits(),
+                }
+            );
+            assert!(error.to_string().contains("must be finite"));
+        }
+        for value in invalid {
+            let opts = RemeshOptions {
+                iterations: 0,
+                crease_angle: value,
+                ..RemeshOptions::default()
+            };
+            let error = remesh(&soup, None, &metric, opts, cx)
+                .expect_err("non-finite crease angle must refuse");
+            assert_eq!(
+                error,
+                MeshError::InvalidFinite {
+                    field: "crease_angle",
+                    value_bits: value.to_bits(),
+                }
+            );
+            assert!(error.to_string().contains("must be finite"));
+        }
+    });
+}
+
 /// tmesh-008 — the op-storm robustness battery: rounds of remeshing at
 /// randomized targets; after EVERY round the mesh passes half-edge
 /// invariants, closed-manifold audit, and Euler = 2.
