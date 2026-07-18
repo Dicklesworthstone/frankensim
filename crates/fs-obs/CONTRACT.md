@@ -218,12 +218,18 @@ privilege downgrade.
   independently authenticate committed artifacts. `DurableArtifactPointer`
   records constructor-level admission; it cannot prove an external store
   truthful by itself.
-- `check-casual-print` lexes workspace Rust source fail-closed, treats comments
-  as trivia, recognizes structurally attached exact `cfg(test)` item scopes,
-  rejects protected-macro renames, and ratchets each pre-policy emitter by one
-  unique function body plus exact normalized invocation tokens. It makes no
-  semantic claim about output hidden inside an external or generated macro
-  whose protected spelling is absent from workspace source.
+- `check-casual-print` lexes workspace Rust source fail-closed, including
+  Unicode identifiers/lifetimes and every cooked/raw UTF-8, byte, C-string, and
+  char boundary. Comments are trivia. Exact `cfg(test)` scopes and function
+  ownership carry authority only outside macro token inputs/bodies; protected
+  spellings inside macro tokens remain violations. The inventory excludes only
+  actual package Cargo build roots, follows production `#[path]` inclusions
+  transitively (including otherwise CLI-shaped `main.rs`/`src/bin` paths), and
+  ratchets each pre-policy emitter by one real unique function body plus the
+  ordered, fully-qualified normalized invocation tokens. Imports, declarations,
+  or renames involving protected macro names are refused. It makes no semantic
+  claim about output hidden inside an external or generated macro whose
+  protected spelling is absent from workspace source.
 - `privacy` is a labeled-data policy core, not a secret detector, cryptographic
   implementation, access-control service, jurisdiction engine, or artifact
   scanner. External salted/keyed tokens remain caller assertions until an

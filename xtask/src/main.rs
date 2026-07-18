@@ -51,10 +51,10 @@ use constellation_cleanliness::{
     sanitized_git_command, verify_two_complete_passes,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1552,21 +1552,19 @@ struct RustStringLiteral<'a> {
 }
 
 fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let first = *bytes.get(start + 1)?;
-    if first.is_ascii_alphabetic() || first == b'_' {
-        let mut after_ident = start + 2;
-        while bytes
-            .get(after_ident)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        {
-            after_ident += 1;
-        }
-        // `'a`/`'static`/labels are lifetimes, while `'a'` is a char.
-        if bytes.get(after_ident) != Some(&b'\'') {
-            return None;
-        }
+    let tail = core::str::from_utf8(bytes.get(start + 1..)?).ok()?;
+    let first = tail.chars().next()?;
+    if first != '\\' {
+        let close = start + 1 + first.len_utf8();
+        // A non-escaped Rust char contains exactly one Unicode scalar. If the
+        // next byte is not the closing quote, this apostrophe begins a lifetime
+        // or label (including Unicode XID spellings), not an opaque literal.
+        return (bytes.get(close) == Some(&b'\'')).then_some(close + 1);
     }
 
+    // Escaped chars have variable-width spellings (`\\xNN`, `\\u{...}`, and
+    // escaped quotes). Retain the existing fail-closed newline boundary while
+    // finding the first unescaped closing quote.
     let mut escaped = false;
     for (offset, byte) in bytes[start + 1..].iter().copied().enumerate() {
         let index = start + 1 + offset;
@@ -2329,7 +2327,11 @@ fn workspace_rust_sources(root: &Path) -> Result<BTreeMap<String, String>, Strin
                 .file_type()
                 .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
             if file_type.is_dir() {
-                if path.file_name().is_none_or(|name| name != "target") {
+                let cargo_build_root = path.file_name().is_some_and(|name| name == "target")
+                    && path
+                        .parent()
+                        .is_some_and(|parent| parent.join("Cargo.toml").is_file());
+                if !cargo_build_root {
                     stack.push(path);
                 }
             } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
@@ -2389,9 +2391,9 @@ const CASUAL_PRINT_ALLOWLIST: &[CasualPrintAllowance] = &[
         path: "crates/fs-casebook/src/lib.rs",
         owner: "run",
         invocation_anchors: &[
-            r#"println!("{}",disagreement.json_line())"#,
             r#"println!("{}",record.json_line())"#,
             r#"println!("{}",replay_record.json_line())"#,
+            r#"println!("{}",disagreement.json_line())"#,
         ],
         reason: "legacy casebook JSONL harness emitter",
     },
@@ -2417,6 +2419,7 @@ struct CasualPrintOccurrence {
     macro_name: String,
     invocation_anchor: String,
     alias_of: Option<String>,
+    in_macro_tokens: bool,
     line: usize,
 }
 
@@ -2446,6 +2449,147 @@ fn is_core_library_source(path: &str) -> bool {
         && path.ends_with(".rs")
         && !path.contains("/src/bin/")
         && !path.ends_with("/src/main.rs")
+}
+
+fn casual_path_literal(token: &str) -> Result<String, String> {
+    let bytes = token.as_bytes();
+    if token.starts_with('r')
+        && let Some((quote, hashes)) = raw_string_open(bytes, 0)
+    {
+        let close = bytes
+            .len()
+            .checked_sub(hashes + 1)
+            .ok_or_else(|| "truncated raw #[path] literal".to_string())?;
+        if bytes.get(close) != Some(&b'"') || !bytes[close + 1..].iter().all(|byte| *byte == b'#') {
+            return Err("malformed raw #[path] literal".to_string());
+        }
+        return Ok(token[quote + 1..close].to_string());
+    }
+    if bytes.first() != Some(&b'"') || bytes.last() != Some(&b'"') {
+        return Err("#[path] requires a cooked or raw UTF-8 string literal".to_string());
+    }
+
+    let mut output = String::new();
+    let mut characters = token[1..token.len() - 1].chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        let escaped = characters
+            .next()
+            .ok_or_else(|| "truncated escape in #[path] literal".to_string())?;
+        match escaped {
+            '\\' => output.push('\\'),
+            '"' => output.push('"'),
+            '\'' => output.push('\''),
+            'n' => output.push('\n'),
+            'r' => output.push('\r'),
+            't' => output.push('\t'),
+            '0' => output.push('\0'),
+            'x' => {
+                let high = characters
+                    .next()
+                    .and_then(|digit| digit.to_digit(16))
+                    .ok_or_else(|| "invalid \\x escape in #[path] literal".to_string())?;
+                let low = characters
+                    .next()
+                    .and_then(|digit| digit.to_digit(16))
+                    .ok_or_else(|| "invalid \\x escape in #[path] literal".to_string())?;
+                let value = high * 16 + low;
+                if value > 0x7f {
+                    return Err("non-ASCII \\x escape in #[path] literal".to_string());
+                }
+                output.push(char::from_u32(value).expect("ASCII escape is a scalar"));
+            }
+            'u' => {
+                if characters.next() != Some('{') {
+                    return Err("invalid \\u escape in #[path] literal".to_string());
+                }
+                let mut value = 0_u32;
+                let mut digits = 0_u8;
+                loop {
+                    let digit = characters
+                        .next()
+                        .ok_or_else(|| "unterminated \\u escape in #[path] literal".to_string())?;
+                    if digit == '}' {
+                        break;
+                    }
+                    let digit = digit
+                        .to_digit(16)
+                        .ok_or_else(|| "invalid \\u escape in #[path] literal".to_string())?;
+                    value = value
+                        .checked_mul(16)
+                        .and_then(|value| value.checked_add(digit))
+                        .ok_or_else(|| "overflowing \\u escape in #[path] literal".to_string())?;
+                    digits = digits.saturating_add(1);
+                    if digits > 6 {
+                        return Err("overlong \\u escape in #[path] literal".to_string());
+                    }
+                }
+                if digits == 0 {
+                    return Err("empty \\u escape in #[path] literal".to_string());
+                }
+                output.push(
+                    char::from_u32(value)
+                        .ok_or_else(|| "non-scalar \\u escape in #[path] literal".to_string())?,
+                );
+            }
+            _ => {
+                return Err(format!("unsupported escape \\{escaped} in #[path] literal"));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn casual_normalized_inclusion(source_path: &str, literal: &str) -> Result<String, String> {
+    let portable = literal.replace('\\', "/");
+    let joined = Path::new(source_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(portable);
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("#[path] `{literal}` escapes the workspace root"));
+                }
+            }
+            Component::Normal(component) => normalized.push(component),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("#[path] `{literal}` must be workspace-relative"));
+            }
+        }
+    }
+    Ok(normalized.display().to_string().replace('\\', "/"))
+}
+
+fn casual_identifier_start(character: char) -> bool {
+    character == '_'
+        || character.is_alphabetic()
+        // Unicode's Other_ID_Start set is part of XID_Start but is not
+        // uniformly covered by `char::is_alphabetic`. Keep the complete
+        // stable set explicit so valid Rust identifiers are not split.
+        || matches!(character, '\u{1885}' | '\u{1886}' | '\u{2118}' | '\u{212e}' | '\u{309b}' | '\u{309c}')
+}
+
+fn casual_identifier_continue(character: char) -> bool {
+    character == '_'
+        || character.is_alphanumeric()
+        // Rust uses Unicode XID_Continue. `std` does not expose that table, so
+        // conservatively retain non-ASCII continuation scalars (combining
+        // marks and join controls included) inside one token. ASCII Rust
+        // punctuation remains a hard token boundary.
+        || (!character.is_ascii() && !character.is_whitespace() && !character.is_control())
+}
+
+fn casual_token_is_identifier(token: &str) -> bool {
+    let mut characters = token.chars();
+    characters.next().is_some_and(casual_identifier_start)
+        && characters.all(casual_identifier_continue)
 }
 
 #[allow(clippy::too_many_lines)] // one fail-closed lexer keeps every trivia/string boundary aligned
@@ -2541,14 +2685,22 @@ fn casual_rust_tokens(source: &str) -> Result<Vec<CasualRustToken<'_>>, String> 
             cursor = end;
             continue;
         }
-        if bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_' {
+        let first = source[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains inside source");
+        if casual_identifier_start(first) {
             let start = cursor;
-            cursor += 1;
-            while bytes
-                .get(cursor)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
-                cursor += 1;
+            cursor += first.len_utf8();
+            while cursor < bytes.len() {
+                let character = source[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor remains inside source");
+                if !casual_identifier_continue(character) {
+                    break;
+                }
+                cursor += character.len_utf8();
             }
             tokens.push(CasualRustToken {
                 start,
@@ -2610,6 +2762,43 @@ fn casual_delimiter_pairs(tokens: &[CasualRustToken<'_>]) -> Result<Vec<Option<u
     Ok(pairs)
 }
 
+fn casual_token_in_spans(token_index: usize, spans: &[(usize, usize)]) -> bool {
+    spans
+        .iter()
+        .any(|(open, close)| *open <= token_index && token_index <= *close)
+}
+
+fn casual_macro_token_spans(
+    tokens: &[CasualRustToken<'_>],
+    pairs: &[Option<usize>],
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for (open, token) in tokens.iter().enumerate() {
+        if !matches!(token.text, "(" | "[" | "{") {
+            continue;
+        }
+        let invocation = open >= 2
+            && tokens[open - 1].text == "!"
+            && casual_token_is_identifier(tokens[open - 2].text);
+        let macro_rules_body = (open >= 3
+            && tokens[open - 3].text == "macro_rules"
+            && tokens[open - 2].text == "!"
+            && casual_token_is_identifier(tokens[open - 1].text))
+            || (open >= 5
+                && tokens[open - 5].text == "macro_rules"
+                && tokens[open - 4].text == "!"
+                && tokens[open - 3].text == "r"
+                && tokens[open - 2].text == "#"
+                && casual_token_is_identifier(tokens[open - 1].text));
+        if (invocation || macro_rules_body)
+            && let Some(close) = pairs[open]
+        {
+            spans.push((open, close));
+        }
+    }
+    spans
+}
+
 fn casual_cfg_test_attribute(
     tokens: &[CasualRustToken<'_>],
     pairs: &[Option<usize>],
@@ -2635,10 +2824,18 @@ fn casual_cfg_test_attribute(
 fn casual_cfg_test_spans(
     tokens: &[CasualRustToken<'_>],
     pairs: &[Option<usize>],
+    macro_token_spans: &[(usize, usize)],
 ) -> Result<(bool, Vec<(usize, usize)>), String> {
     let mut file_test_only = false;
     let mut spans = Vec::new();
     for index in 0..tokens.len() {
+        // Macro inputs and macro_rules bodies are token data, not structural
+        // Rust item/block syntax. A macro may discard or relocate an attribute,
+        // so neither outer nor inner cfg tokens inside these spans confer a
+        // test-only exemption on protected output spellings.
+        if casual_token_in_spans(index, macro_token_spans) {
+            continue;
+        }
         let Some((attribute_close, inner)) = casual_cfg_test_attribute(tokens, pairs, index) else {
             continue;
         };
@@ -2695,7 +2892,29 @@ fn casual_cfg_test_spans(
                 _ => cursor += 1,
             }
         };
-        spans.push((index, span_end));
+        // `cfg(test)` applies to the item, not merely to attributes which
+        // happen to follow it. Include every contiguous preceding outer
+        // attribute so `#[path = "main.rs"] #[cfg(test)] mod diagnostics;`
+        // cannot make the path attribute look production-reachable merely by
+        // reversing otherwise-equivalent attribute order.
+        let mut span_start = index;
+        while span_start >= 2 && tokens[span_start - 1].text == "]" {
+            let previous_close = span_start - 1;
+            let Some(previous_open) = pairs[previous_close] else {
+                break;
+            };
+            let Some(previous_hash) = previous_open.checked_sub(1) else {
+                break;
+            };
+            if tokens[previous_open].text != "["
+                || tokens[previous_hash].text != "#"
+                || casual_token_in_spans(previous_hash, macro_token_spans)
+            {
+                break;
+            }
+            span_start = previous_hash;
+        }
+        spans.push((span_start, span_end));
     }
     Ok((file_test_only, spans))
 }
@@ -2703,22 +2922,36 @@ fn casual_cfg_test_spans(
 fn casual_function_scopes(
     tokens: &[CasualRustToken<'_>],
     pairs: &[Option<usize>],
+    macro_token_spans: &[(usize, usize)],
 ) -> Vec<CasualFunctionScope> {
     let mut functions = Vec::new();
     for index in 0..tokens.len() {
-        if tokens[index].text != "fn"
-            || !tokens.get(index + 1).is_some_and(|token| {
-                token
-                    .text
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-            })
-        {
+        if casual_token_in_spans(index, macro_token_spans) || tokens[index].text != "fn" {
             continue;
         }
-        let mut cursor = index + 2;
+        let Some((name, mut cursor)) = tokens.get(index + 1).and_then(|token| {
+            if token.text == "r"
+                && tokens.get(index + 2).is_some_and(|token| token.text == "#")
+                && tokens
+                    .get(index + 3)
+                    .is_some_and(|token| casual_token_is_identifier(token.text))
+            {
+                Some((tokens[index + 3].text, index + 4))
+            } else {
+                casual_token_is_identifier(token.text).then_some((token.text, index + 2))
+            }
+        }) else {
+            continue;
+        };
         while let Some(token) = tokens.get(cursor) {
+            if let Some((_, close)) = macro_token_spans.iter().find(|(open, _)| *open == cursor) {
+                // A braced macro invocation in a return type or where-clause
+                // is token data, not the function body. Parenthesized and
+                // bracketed invocations were already skipped by delimiter
+                // pairing; handle the braced form explicitly as well.
+                cursor = close + 1;
+                continue;
+            }
             match token.text {
                 "(" | "[" => {
                     let Some(close) = pairs[cursor] else {
@@ -2731,7 +2964,7 @@ fn casual_function_scopes(
                         break;
                     };
                     functions.push(CasualFunctionScope {
-                        name: tokens[index + 1].text.to_string(),
+                        name: name.to_string(),
                         declaration_start: tokens[index].start,
                         open: cursor,
                         close,
@@ -2770,19 +3003,153 @@ fn casual_token_is_test_only(
             .any(|(start, end)| *start <= token_index && token_index <= *end)
 }
 
+fn casual_path_inclusions(path: &str, source: &str) -> Result<Vec<String>, String> {
+    let tokens = casual_rust_tokens(source)?;
+    let pairs = casual_delimiter_pairs(&tokens)?;
+    let macro_token_spans = casual_macro_token_spans(&tokens, &pairs);
+    let (file_test_only, test_spans) = casual_cfg_test_spans(&tokens, &pairs, &macro_token_spans)?;
+    let mut inclusions = Vec::new();
+    for index in 0..tokens.len() {
+        if casual_token_is_test_only(index, file_test_only, &test_spans)
+            || tokens[index].text != "#"
+            || tokens.get(index + 1).is_none_or(|token| token.text != "[")
+        {
+            continue;
+        }
+        let bracket = index + 1;
+        let Some(close) = pairs[bracket] else {
+            return Err(format!(
+                "unpaired attribute while discovering #[path] from {path}"
+            ));
+        };
+        if close != bracket + 4
+            || tokens[bracket + 1].text != "path"
+            || tokens[bracket + 2].text != "="
+        {
+            continue;
+        }
+        let literal = casual_path_literal(tokens[bracket + 3].text)
+            .map_err(|error| format!("cannot decode #[path] in {path}: {error}"))?;
+        inclusions.push(
+            casual_normalized_inclusion(path, &literal)
+                .map_err(|error| format!("cannot resolve #[path] in {path}: {error}"))?,
+        );
+    }
+    Ok(inclusions)
+}
+
+fn casual_explicit_core_sources(
+    sources: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>, String> {
+    let mut core = sources
+        .keys()
+        .filter(|path| is_core_library_source(path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut visited = BTreeSet::new();
+    loop {
+        let Some(path) = core.iter().find(|path| !visited.contains(*path)).cloned() else {
+            break;
+        };
+        visited.insert(path.clone());
+        let source = sources
+            .get(&path)
+            .expect("core source originates in the inventory");
+        for inclusion in casual_path_inclusions(&path, source)? {
+            if !sources.contains_key(&inclusion) {
+                return Err(format!(
+                    "core source {path} includes {inclusion} through #[path], but that target is absent from the Rust-source inventory"
+                ));
+            }
+            core.insert(inclusion);
+        }
+    }
+    Ok(core)
+}
+
 fn protected_print_macro(name: &str) -> bool {
     matches!(name, "print" | "println" | "eprint" | "eprintln" | "dbg")
 }
 
-fn scan_casual_print_source(path: &str, source: &str) -> Result<CasualPrintScan, String> {
-    if !is_core_library_source(path) {
+fn casual_raw_identifier_start(tokens: &[CasualRustToken<'_>], identifier: usize) -> usize {
+    if identifier >= 2 && tokens[identifier - 2].text == "r" && tokens[identifier - 1].text == "#" {
+        identifier - 2
+    } else {
+        identifier
+    }
+}
+
+fn casual_macro_path_start(tokens: &[CasualRustToken<'_>], identifier: usize) -> usize {
+    let mut start = casual_raw_identifier_start(tokens, identifier);
+    loop {
+        if start < 2 || tokens[start - 2].text != ":" || tokens[start - 1].text != ":" {
+            break;
+        }
+        let separator = start - 2;
+        if separator == 0 {
+            start = 0;
+            break;
+        }
+        let previous = separator - 1;
+        if !casual_token_is_identifier(tokens[previous].text) {
+            start = separator;
+            break;
+        }
+        start = casual_raw_identifier_start(tokens, previous);
+    }
+    start
+}
+
+fn casual_protected_name_binding(
+    tokens: &[CasualRustToken<'_>],
+    index: usize,
+) -> Option<&'static str> {
+    let name_start = casual_raw_identifier_start(tokens, index);
+    if name_start > 0 && tokens[name_start - 1].text == "as" {
+        return Some("import bound to protected name");
+    }
+    if tokens
+        .get(index + 1)
+        .is_some_and(|token| token.text == "as")
+    {
+        return Some("protected name renamed by import");
+    }
+    if name_start >= 2
+        && tokens[name_start - 2].text == "macro_rules"
+        && tokens[name_start - 1].text == "!"
+    {
+        return Some("local macro declaration uses protected name");
+    }
+    if name_start >= 1 && tokens[name_start - 1].text == "macro" {
+        return Some("local macro declaration uses protected name");
+    }
+
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        match tokens[cursor].text {
+            ";" => break,
+            "use" => return Some("import binds or resolves through protected name"),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn scan_casual_print_source(
+    path: &str,
+    source: &str,
+    explicitly_core: bool,
+) -> Result<CasualPrintScan, String> {
+    if !is_core_library_source(path) && !explicitly_core {
         return Ok(CasualPrintScan::default());
     }
 
     let tokens = casual_rust_tokens(source)?;
     let pairs = casual_delimiter_pairs(&tokens)?;
-    let (file_test_only, test_spans) = casual_cfg_test_spans(&tokens, &pairs)?;
-    let functions = casual_function_scopes(&tokens, &pairs);
+    let macro_token_spans = casual_macro_token_spans(&tokens, &pairs);
+    let (file_test_only, test_spans) = casual_cfg_test_spans(&tokens, &pairs, &macro_token_spans)?;
+    let functions = casual_function_scopes(&tokens, &pairs, &macro_token_spans);
     let mut occurrences = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         if casual_token_is_test_only(index, file_test_only, &test_spans) {
@@ -2790,18 +3157,18 @@ fn scan_casual_print_source(path: &str, source: &str) -> Result<CasualPrintScan,
         }
 
         if protected_print_macro(token.text)
-            && tokens.get(index + 1).is_some_and(|next| next.text == "as")
-            && let Some(alias) = tokens.get(index + 2)
+            && let Some(binding) = casual_protected_name_binding(&tokens, index)
         {
-            let (owner, owner_start) = casual_enclosing_function(&functions, index + 2);
+            let (owner, owner_start) = casual_enclosing_function(&functions, index);
             occurrences.push(CasualPrintOccurrence {
                 path: path.to_string(),
                 owner: owner.to_string(),
                 owner_start,
-                macro_name: alias.text.to_string(),
-                invocation_anchor: format!("use-alias:{}:{}", token.text, alias.text),
-                alias_of: Some(token.text.to_string()),
-                line: source[..alias.start]
+                macro_name: token.text.to_string(),
+                invocation_anchor: format!("protected-binding:{binding}:{}", token.text),
+                alias_of: Some(binding.to_string()),
+                in_macro_tokens: casual_token_in_spans(index, &macro_token_spans),
+                line: source[..token.start]
                     .bytes()
                     .filter(|byte| *byte == b'\n')
                     .count()
@@ -2826,7 +3193,8 @@ fn scan_casual_print_source(path: &str, source: &str) -> Result<CasualPrintScan,
         }
         let close = pairs[open]
             .ok_or_else(|| format!("protected macro {}! has an unpaired body", token.text))?;
-        let invocation_anchor = tokens[index..=close]
+        let invocation_start = casual_macro_path_start(&tokens, index);
+        let invocation_anchor = tokens[invocation_start..=close]
             .iter()
             .map(|candidate| candidate.text)
             .collect::<String>();
@@ -2838,6 +3206,7 @@ fn scan_casual_print_source(path: &str, source: &str) -> Result<CasualPrintScan,
             macro_name: token.text.to_string(),
             invocation_anchor,
             alias_of: None,
+            in_macro_tokens: casual_token_in_spans(index, &macro_token_spans),
             line: source[..token.start]
                 .bytes()
                 .filter(|byte| *byte == b'\n')
@@ -2860,18 +3229,30 @@ fn scan_casual_print_source(path: &str, source: &str) -> Result<CasualPrintScan,
 
 fn audit_casual_print_sources(sources: &BTreeMap<String, String>) -> Vec<Violation> {
     let mut violations = Vec::new();
+    let explicit_core_sources = match casual_explicit_core_sources(sources) {
+        Ok(sources) => sources,
+        Err(error) => {
+            violations.push(Violation {
+                check: CASUAL_PRINT_CHECK,
+                crate_name: "<repo>".to_string(),
+                detail: format!("cannot exhaustively resolve core #[path] sources: {error}"),
+            });
+            BTreeSet::new()
+        }
+    };
     for (path, source) in sources {
-        let scan = match scan_casual_print_source(path, source) {
-            Ok(scan) => scan,
-            Err(error) => {
-                violations.push(Violation {
-                    check: CASUAL_PRINT_CHECK,
-                    crate_name: path.clone(),
-                    detail: format!("cannot exhaustively scan {path}: {error}"),
-                });
-                continue;
-            }
-        };
+        let scan =
+            match scan_casual_print_source(path, source, explicit_core_sources.contains(path)) {
+                Ok(scan) => scan,
+                Err(error) => {
+                    violations.push(Violation {
+                        check: CASUAL_PRINT_CHECK,
+                        crate_name: path.clone(),
+                        detail: format!("cannot exhaustively scan {path}: {error}"),
+                    });
+                    continue;
+                }
+            };
         let CasualPrintScan {
             occurrences,
             function_starts,
@@ -2885,7 +3266,9 @@ fn audit_casual_print_sources(sources: &BTreeMap<String, String>) -> Vec<Violati
                 .iter()
                 .enumerate()
                 .filter(|(_, occurrence)| {
-                    occurrence.owner == allowance.owner && occurrence.alias_of.is_none()
+                    occurrence.owner == allowance.owner
+                        && occurrence.alias_of.is_none()
+                        && !occurrence.in_macro_tokens
                 })
                 .collect::<Vec<_>>();
             let mut owner_starts = function_starts
@@ -2894,13 +3277,11 @@ fn audit_casual_print_sources(sources: &BTreeMap<String, String>) -> Vec<Violati
                 .unwrap_or_default();
             owner_starts.sort_unstable();
             owner_starts.dedup();
-            let mut actual = candidates
+            let actual = candidates
                 .iter()
                 .map(|(_, occurrence)| occurrence.invocation_anchor.as_str())
                 .collect::<Vec<_>>();
-            actual.sort_unstable();
-            let mut expected = allowance.invocation_anchors.to_vec();
-            expected.sort_unstable();
+            let expected = allowance.invocation_anchors.to_vec();
             let candidates_belong_to_unique_owner = owner_starts.len() == 1
                 && candidates
                     .iter()
@@ -2927,9 +3308,14 @@ fn audit_casual_print_sources(sources: &BTreeMap<String, String>) -> Vec<Violati
             if allowed[index] {
                 continue;
             }
-            let detail = if let Some(protected) = occurrence.alias_of {
+            let detail = if let Some(binding) = occurrence.alias_of {
                 format!(
-                    "{}:{}: import alias {} for protected {protected}! can bypass the typed-output ratchet; core libraries may not rename protected output macros",
+                    "{}:{}: {binding} `{}` can change protected macro identity and bypass the typed-output ratchet; core libraries may not import, rename, or declare protected output names",
+                    occurrence.path, occurrence.line, occurrence.macro_name,
+                )
+            } else if occurrence.in_macro_tokens {
+                format!(
+                    "{}:{}: {}! is spelled inside macro token input/body, where attributes and apparent function owners are non-authoritative; return a typed fs-obs event/record outside macro generation",
                     occurrence.path, occurrence.line, occurrence.macro_name,
                 )
             } else {
@@ -4443,6 +4829,99 @@ mod tests {
     }
 
     #[test]
+    fn casual_print_scanner_denies_cfg_and_owner_authority_to_macro_tokens() {
+        let cfg_spoofs = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "macro_rules! strip_outer { (#[$meta:meta] $($body:tt)*) => { $($body)* }; }\n",
+                "macro_rules! strip_inner { ({ #![$meta:meta] $($body:tt)* }) => {{ $($body)* }}; }\n",
+                "pub fn first() { strip_outer!(#[cfg(test)] println!(\"outer production\")); }\n",
+                "pub fn second() { strip_inner!({ #![cfg(test)] eprintln!(\"inner production\"); }); }\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let cfg_violations = audit_casual_print_sources(&cfg_spoofs);
+        assert_eq!(cfg_violations.len(), 2, "{cfg_violations:?}");
+        assert!(
+            cfg_violations
+                .iter()
+                .all(|violation| violation.detail.contains("inside macro token input/body"))
+        );
+
+        let fake_owner = [(
+            "crates/fs-casebook/src/lib.rs".to_string(),
+            concat!(
+                "struct Row; impl Row { fn json_line(&self) -> &'static str { \"{}\" } }\n",
+                "macro_rules! relocate {\n",
+                "(fn $claimed:ident() { $($body:tt)* }) => {\n",
+                "pub fn leak() {\n",
+                "let record = Row; let replay_record = Row; let disagreement = Row;\n",
+                "$($body)*\n",
+                "}\n",
+                "};\n",
+                "}\n",
+                "relocate!(fn run() {\n",
+                "println!(\"{}\", record.json_line());\n",
+                "println!(\"{}\", replay_record.json_line());\n",
+                "println!(\"{}\", disagreement.json_line());\n",
+                "});\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let owner_violations = audit_casual_print_sources(&fake_owner);
+        assert!(
+            owner_violations
+                .iter()
+                .any(|violation| violation.detail.contains("expected exact invocations"))
+        );
+        assert_eq!(
+            owner_violations
+                .iter()
+                .filter(|violation| violation.detail.contains("inside macro token input/body"))
+                .count(),
+            3,
+            "macro-input `fn run` tokens cannot mint a real allowance owner: {owner_violations:?}"
+        );
+    }
+
+    #[test]
+    fn casual_print_scanner_keeps_unicode_lifetimes_and_identifiers_as_code() {
+        let sources = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            "pub fn ℘<'α>() { println!(\"hidden before repair\"); } const C: char = 'x';"
+                .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let violations = audit_casual_print_sources(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].detail.contains("println! in fn ℘"));
+
+        let literals = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "const A: &str = r#\"println!(raw)\"#;\n",
+                "const B: &[u8] = b\"eprintln!(bytes)\";\n",
+                "const C: &[u8] = br#\"dbg!(raw bytes)\"#;\n",
+                "const D: &core::ffi::CStr = c\"print!(c string)\";\n",
+                "const E: &core::ffi::CStr = cr#\"eprint!(raw c string)\"#;\n",
+                "const F: char = 'λ';\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(
+            audit_casual_print_sources(&literals).is_empty(),
+            "protected spellings inside every Rust string/char family remain opaque"
+        );
+    }
+
+    #[test]
     fn casual_print_allowlist_rejects_duplicate_owners_and_count_expansion() {
         let duplicate_owner = [(
             "crates/fs-casebook/src/lib.rs".to_string(),
@@ -4488,6 +4967,72 @@ mod tests {
     }
 
     #[test]
+    fn casual_print_allowlist_pins_order_qualification_and_protected_bindings() {
+        let reordered = [(
+            "crates/fs-casebook/src/lib.rs".to_string(),
+            concat!(
+                "fn run() {\n",
+                "println!(\"{}\", replay_record.json_line());\n",
+                "println!(\"{}\", record.json_line());\n",
+                "println!(\"{}\", disagreement.json_line());\n",
+                "}\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let reordered_violations = audit_casual_print_sources(&reordered);
+        assert!(
+            reordered_violations
+                .iter()
+                .any(|violation| violation.detail.contains("expected exact invocations"))
+        );
+
+        let qualified = [(
+            "crates/fs-propcheck/src/lib.rs".to_string(),
+            "fn check_structured() { evil::println!(\"{failure_row}\"); }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let qualified_violations = audit_casual_print_sources(&qualified);
+        assert!(
+            qualified_violations
+                .iter()
+                .any(|violation| violation.detail.contains("evil::println"))
+        );
+
+        let rebound = [(
+            "crates/fs-propcheck/src/lib.rs".to_string(),
+            concat!(
+                "use evil::emit as println;\n",
+                "fn check_structured() { println!(\"{failure_row}\"); }\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let rebound_violations = audit_casual_print_sources(&rebound);
+        assert!(
+            rebound_violations
+                .iter()
+                .any(|violation| violation.detail.contains("import bound to protected name"))
+        );
+
+        let raw_declaration = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            "macro_rules! r#println { () => {}; }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let raw_declaration_violations = audit_casual_print_sources(&raw_declaration);
+        assert!(raw_declaration_violations.iter().any(|violation| {
+            violation
+                .detail
+                .contains("local macro declaration uses protected name")
+        }));
+    }
+
+    #[test]
     fn casual_print_scanner_rejects_import_aliases_and_malformed_input() {
         let aliased = [(
             "crates/fs-new/src/lib.rs".to_string(),
@@ -4499,7 +5044,7 @@ mod tests {
         assert!(
             alias_violations.iter().any(|violation| violation
                 .detail
-                .contains("alias alias for protected println!")),
+                .contains("protected name renamed by import")),
             "protected macro aliases must fail closed: {alias_violations:?}"
         );
 
@@ -4516,6 +5061,82 @@ mod tests {
                 .detail
                 .contains("cannot exhaustively scan")
         );
+    }
+
+    #[test]
+    fn casual_print_inventory_scans_source_target_dirs_but_not_cargo_build_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "xtask-casual-print-inventory-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("crates/mini/src/target")).expect("source target dir");
+        std::fs::create_dir_all(root.join("crates/mini/target")).expect("Cargo target dir");
+        std::fs::create_dir_all(root.join("tools")).expect("tools root");
+        std::fs::create_dir_all(root.join("xtask")).expect("xtask root");
+        std::fs::write(
+            root.join("crates/mini/Cargo.toml"),
+            "[package]\nname='mini'\n",
+        )
+        .expect("mini manifest");
+        std::fs::write(
+            root.join("crates/mini/src/target/mod.rs"),
+            "pub fn leak() { println!(\"must be inventoried\"); }\n",
+        )
+        .expect("source target module");
+        std::fs::write(
+            root.join("crates/mini/target/generated.rs"),
+            "compile_error!(\"build output must not enter inventory\");\n",
+        )
+        .expect("build output fixture");
+
+        let sources = workspace_rust_sources(&root).expect("workspace inventory");
+        assert!(sources.contains_key("crates/mini/src/target/mod.rs"));
+        assert!(!sources.contains_key("crates/mini/target/generated.rs"));
+        assert_eq!(audit_casual_print_sources(&sources).len(), 1);
+    }
+
+    #[test]
+    fn casual_print_scanner_reclassifies_path_included_cli_sources() {
+        let included = [
+            (
+                "crates/fs-new/src/lib.rs",
+                concat!(
+                    "#[path = \"main.rs\"] mod embedded_main;\n",
+                    "#[path = r#\"bin/tool.rs\"#] mod embedded_bin;\n",
+                ),
+            ),
+            (
+                "crates/fs-new/src/main.rs",
+                "pub fn leak() { println!(\"library-reachable main\"); }",
+            ),
+            (
+                "crates/fs-new/src/bin/tool.rs",
+                "pub fn leak() { eprintln!(\"library-reachable bin\"); }",
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+        let included_violations = audit_casual_print_sources(&included);
+        assert_eq!(included_violations.len(), 2, "{included_violations:?}");
+
+        let test_only = [
+            (
+                "crates/fs-new/src/lib.rs",
+                concat!(
+                    "#[cfg(test)] #[path = \"main.rs\"] mod diagnostics_a;\n",
+                    "#[path = \"main.rs\"] #[cfg(test)] mod diagnostics_b;\n",
+                ),
+            ),
+            (
+                "crates/fs-new/src/main.rs",
+                "fn main() { println!(\"conventional CLI remains exempt\"); }",
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+        assert!(audit_casual_print_sources(&test_only).is_empty());
     }
 
     #[test]
