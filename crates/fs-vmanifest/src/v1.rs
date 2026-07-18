@@ -160,7 +160,7 @@ fn escape_json_string(value: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            '\u{0000}'..='\u{001f}' => {
+            '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{2028}' | '\u{2029}' => {
                 write!(&mut escaped, "\\u{:04x}", u32::from(ch))
                     .expect("writing to a String cannot fail");
             }
@@ -385,6 +385,16 @@ const fn relation_code(kind: RelationKind) -> u8 {
     }
 }
 
+const fn relation_name(kind: RelationKind) -> &'static str {
+    match kind {
+        RelationKind::Implication => "Implication",
+        RelationKind::Refinement => "Refinement",
+        RelationKind::Restriction => "Restriction",
+        RelationKind::Counterexample => "Counterexample",
+        RelationKind::CertifiedEquivalence => "CertifiedEquivalence",
+    }
+}
+
 /// How the quantifier structure varies across a relation edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -398,6 +408,22 @@ pub enum QuantifierVariance {
     Strengthened,
 }
 
+const fn variance_code(variance: QuantifierVariance) -> u8 {
+    match variance {
+        QuantifierVariance::Preserved => 1,
+        QuantifierVariance::Weakened => 2,
+        QuantifierVariance::Strengthened => 3,
+    }
+}
+
+const fn variance_name(variance: QuantifierVariance) -> &'static str {
+    match variance {
+        QuantifierVariance::Preserved => "Preserved",
+        QuantifierVariance::Weakened => "Weakened",
+        QuantifierVariance::Strengthened => "Strengthened",
+    }
+}
+
 /// One typed, checkable relation edge between exact claim revisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimRelationReceipt {
@@ -407,14 +433,17 @@ pub struct ClaimRelationReceipt {
     pub from: ClaimRevisionId,
     /// Target revision.
     pub to: ClaimRevisionId,
-    /// The proof/checker identity that certified this edge.
+    /// The proof/checker identity that certified this edge (1..=4096
+    /// UTF-8 bytes at admission).
     pub checker: String,
-    /// The trusted computing base the checker ran under.
+    /// The trusted computing base the checker ran under (1..=4096 UTF-8
+    /// bytes at admission).
     pub tcb: String,
     /// Quantifier variance across the edge.
     pub variance: QuantifierVariance,
     /// Domain relationship note (subdomain, identical, disjoint —
-    /// free text bound into the receipt identity).
+    /// nonempty free text bound into the receipt identity, capped at 4096
+    /// UTF-8 bytes at admission).
     pub domain_note: String,
     /// The relation-policy version this edge was admitted under.
     pub policy_version: u32,
@@ -439,15 +468,40 @@ impl ClaimRelationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedGraph {
     /// Every admitted revision id, ascending.
-    pub revisions: Vec<ClaimRevisionId>,
+    revisions: Vec<ClaimRevisionId>,
     /// Every admitted edge, canonically sorted.
-    pub edges: Vec<ClaimRelationReceipt>,
+    edges: Vec<ClaimRelationReceipt>,
     /// Certified-equivalence component representative per member
     /// (identity for revisions outside any component).
-    pub representative: BTreeMap<ClaimRevisionId, ClaimRevisionId>,
+    representatives: BTreeMap<ClaimRevisionId, ClaimRevisionId>,
 }
 
 impl NormalizedGraph {
+    /// Every admitted revision id in canonical ascending order.
+    #[must_use]
+    pub fn revisions(&self) -> &[ClaimRevisionId] {
+        &self.revisions
+    }
+
+    /// Every admitted relation receipt in its complete canonical order.
+    #[must_use]
+    pub fn edges(&self) -> &[ClaimRelationReceipt] {
+        &self.edges
+    }
+
+    /// The immutable representative map for certified-equivalence
+    /// components. Every admitted revision has exactly one entry.
+    #[must_use]
+    pub fn representatives(&self) -> &BTreeMap<ClaimRevisionId, ClaimRevisionId> {
+        &self.representatives
+    }
+
+    /// Return the canonical representative for an admitted revision.
+    #[must_use]
+    pub fn representative_of(&self, revision: &ClaimRevisionId) -> Option<ClaimRevisionId> {
+        self.representatives.get(revision).copied()
+    }
+
     /// The domain-separated digest of the normalized graph.
     #[must_use]
     pub fn digest(&self) -> ContentHash {
@@ -464,59 +518,99 @@ impl NormalizedGraph {
             bytes.extend_from_slice(e.to.as_bytes());
             push_field(&mut bytes, &e.checker);
             push_field(&mut bytes, &e.tcb);
-            bytes.push(match e.variance {
-                QuantifierVariance::Preserved => 1,
-                QuantifierVariance::Weakened => 2,
-                QuantifierVariance::Strengthened => 3,
-            });
+            bytes.push(variance_code(e.variance));
             push_field(&mut bytes, &e.domain_note);
             bytes.extend_from_slice(&e.policy_version.to_be_bytes());
         }
-        for (member, repr) in &self.representative {
+        for (member, repr) in &self.representatives {
             bytes.extend_from_slice(member.as_bytes());
             bytes.extend_from_slice(repr.as_bytes());
         }
         hash_domain(GRAPH_DOMAIN, &bytes)
     }
 
-    /// Human projection: one line per revision and edge, digest-stamped.
+    /// Human projection: one physical line per revision and edge. Every
+    /// digest-forming field is present; untrusted text is escaped so it
+    /// cannot forge a line or hide a field.
     #[must_use]
     pub fn render_human(&self) -> String {
+        let digest = self.digest().to_hex();
         let mut out = format!(
-            "VerificationManifest v1 graph — {} revisions, {} edges, digest {}\n",
+            "VerificationManifest schema_version={} graph revisions={} edges={} digest={} ordinal=0\n",
+            MANIFEST_V1_SCHEMA_VERSION,
             self.revisions.len(),
             self.edges.len(),
-            self.digest().to_hex()
+            digest
         );
-        for e in &self.edges {
+        for (index, revision) in self.revisions.iter().enumerate() {
+            let representative = self.representatives[revision];
             out.push_str(&format!(
-                "  {:?}: {} -> {} [{}]\n",
-                e.kind,
-                &e.from.to_hex()[..12],
-                &e.to.to_hex()[..12],
-                e.checker
+                "  revision schema_version={} graph_digest={} ordinal={} revision={} representative={}\n",
+                MANIFEST_V1_SCHEMA_VERSION,
+                digest,
+                index + 1,
+                revision.to_hex(),
+                representative.to_hex(),
+            ));
+        }
+        for (index, edge) in self.edges.iter().enumerate() {
+            out.push_str(&format!(
+                "  edge schema_version={} graph_digest={} ordinal={} kind={} from={} -> to={} checker=\"{}\" tcb=\"{}\" variance={} domain_note=\"{}\" policy_version={}\n",
+                MANIFEST_V1_SCHEMA_VERSION,
+                digest,
+                self.revisions.len() + index + 1,
+                relation_name(edge.kind),
+                edge.from.to_hex(),
+                edge.to.to_hex(),
+                escape_json_string(&edge.checker),
+                escape_json_string(&edge.tcb),
+                variance_name(edge.variance),
+                escape_json_string(&edge.domain_note),
+                edge.policy_version,
             ));
         }
         out
     }
 
-    /// JSON-lines projection, digest-stamped.
+    /// Strict JSON-lines projection. The header, every revision, and every
+    /// edge carry the schema version, graph digest, and a global canonical
+    /// ordinal. Revision records expose the representative map; edge records
+    /// expose every digest-forming receipt field.
     #[must_use]
     pub fn render_json_lines(&self) -> Vec<String> {
+        let digest = self.digest().to_hex();
         let mut out = vec![format!(
-            "{{\"vmanifest\":\"graph\",\"revisions\":{},\"edges\":{},\"digest\":\"{}\"}}",
+            "{{\"vmanifest\":\"graph\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":0,\"revisions\":{},\"edges\":{}}}",
+            MANIFEST_V1_SCHEMA_VERSION,
+            digest,
             self.revisions.len(),
             self.edges.len(),
-            self.digest().to_hex()
         )];
-        for e in &self.edges {
+        for (index, revision) in self.revisions.iter().enumerate() {
+            let representative = self.representatives[revision];
             out.push(format!(
-                "{{\"vmanifest\":\"edge\",\"kind\":\"{:?}\",\"from\":\"{}\",\"to\":\"{}\",\"checker\":\"{}\",\"policy\":{}}}",
-                e.kind,
-                e.from.to_hex(),
-                e.to.to_hex(),
-                escape_json_string(&e.checker),
-                e.policy_version
+                "{{\"vmanifest\":\"revision\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":{},\"revision\":\"{}\",\"representative\":\"{}\"}}",
+                MANIFEST_V1_SCHEMA_VERSION,
+                digest,
+                index + 1,
+                revision.to_hex(),
+                representative.to_hex(),
+            ));
+        }
+        for (index, edge) in self.edges.iter().enumerate() {
+            out.push(format!(
+                "{{\"vmanifest\":\"edge\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":{},\"kind\":\"{}\",\"from\":\"{}\",\"to\":\"{}\",\"checker\":\"{}\",\"tcb\":\"{}\",\"variance\":\"{}\",\"domain_note\":\"{}\",\"policy_version\":{}}}",
+                MANIFEST_V1_SCHEMA_VERSION,
+                digest,
+                self.revisions.len() + index + 1,
+                relation_name(edge.kind),
+                edge.from.to_hex(),
+                edge.to.to_hex(),
+                escape_json_string(&edge.checker),
+                escape_json_string(&edge.tcb),
+                variance_name(edge.variance),
+                escape_json_string(&edge.domain_note),
+                edge.policy_version,
             ));
         }
         out
@@ -526,11 +620,46 @@ impl NormalizedGraph {
     #[must_use]
     pub fn render_ledger_rows(&self) -> Vec<(String, String)> {
         let digest = self.digest().to_hex();
-        let mut rows = vec![("graph-digest".to_owned(), digest.clone())];
-        for e in &self.edges {
+        let mut rows = vec![(
+            "graph".to_owned(),
+            format!(
+                "schema_version={} ordinal=0 revisions={} edges={} graph_digest={}",
+                MANIFEST_V1_SCHEMA_VERSION,
+                self.revisions.len(),
+                self.edges.len(),
+                digest,
+            ),
+        )];
+        for (ordinal, revision) in self.revisions.iter().enumerate() {
             rows.push((
-                format!("edge/{:?}", e.kind),
-                format!("{}->{}@{}", e.from.to_hex(), e.to.to_hex(), digest),
+                "revision".to_owned(),
+                format!(
+                    "schema_version={} ordinal={} revision={} representative={} graph_digest={}",
+                    MANIFEST_V1_SCHEMA_VERSION,
+                    ordinal + 1,
+                    revision.to_hex(),
+                    self.representatives[revision].to_hex(),
+                    digest,
+                ),
+            ));
+        }
+        for (index, e) in self.edges.iter().enumerate() {
+            rows.push((
+                format!("edge/{}", relation_name(e.kind)),
+                format!(
+                    "schema_version={} ordinal={} kind={} from={} to={} checker=\"{}\" tcb=\"{}\" variance={} domain_note=\"{}\" policy_version={} graph_digest={}",
+                    MANIFEST_V1_SCHEMA_VERSION,
+                    self.revisions.len() + index + 1,
+                    relation_name(e.kind),
+                    e.from.to_hex(),
+                    e.to.to_hex(),
+                    escape_json_string(&e.checker),
+                    escape_json_string(&e.tcb),
+                    variance_name(e.variance),
+                    escape_json_string(&e.domain_note),
+                    e.policy_version,
+                    digest,
+                ),
             ));
         }
         rows
@@ -541,10 +670,11 @@ fn directed(kind: RelationKind) -> bool {
     !matches!(kind, RelationKind::CertifiedEquivalence)
 }
 
-/// Admit a claim graph: every endpoint must be a known revision; DIRECTED
-/// cycles refuse unless every cycle member is joined into one certified-
-/// equivalence component, which canonicalizes to its smallest member as
-/// representative without erasing anyone.
+/// Admit a claim graph: every endpoint must be a known revision and every
+/// semantic text field must satisfy its bound; exact duplicate receipts
+/// refuse. DIRECTED cycles refuse unless every cycle member is joined into
+/// one certified-equivalence component, which canonicalizes to its smallest
+/// member as representative without erasing anyone.
 pub fn admit_graph(
     revisions: &[ClaimRevision],
     receipts: &[ClaimRelationReceipt],
@@ -563,6 +693,7 @@ pub fn admit_graph(
     for receipt in receipts {
         bounded_text("checker", &receipt.checker)?;
         bounded_text("tcb", &receipt.tcb)?;
+        bounded_text("domain_note", &receipt.domain_note)?;
         for endpoint in [&receipt.from, &receipt.to] {
             if !ids.contains(endpoint) {
                 return Err(V1Error::new(
@@ -584,6 +715,29 @@ pub fn admit_graph(
         }
     }
 
+    // The canonical receipt order includes EVERY field later fed to the
+    // graph digest. Exact duplicate receipts refuse rather than silently
+    // changing cardinality or being presentation-order dependent.
+    let mut edges = receipts.to_vec();
+    edges.sort_by(|a, b| {
+        relation_code(a.kind)
+            .cmp(&relation_code(b.kind))
+            .then_with(|| a.from.cmp(&b.from))
+            .then_with(|| a.to.cmp(&b.to))
+            .then_with(|| a.checker.cmp(&b.checker))
+            .then_with(|| a.tcb.cmp(&b.tcb))
+            .then_with(|| variance_code(a.variance).cmp(&variance_code(b.variance)))
+            .then_with(|| a.domain_note.cmp(&b.domain_note))
+            .then_with(|| a.policy_version.cmp(&b.policy_version))
+    });
+    if edges.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(V1Error::new(
+            "v1-duplicate-relation",
+            "an exact relation receipt was supplied more than once",
+        )
+        .with_fix("deduplicate the receipt input; repetition grants no additional authority"));
+    }
+
     // Union-find over certified-equivalence edges.
     let id_list: Vec<ClaimRevisionId> = ids.iter().copied().collect();
     let index: BTreeMap<ClaimRevisionId, usize> =
@@ -597,7 +751,7 @@ pub fn admit_graph(
         }
         i
     }
-    for receipt in receipts {
+    for receipt in &edges {
         if receipt.kind == RelationKind::CertifiedEquivalence {
             let a = find(&mut parent, index[&receipt.from]);
             let b = find(&mut parent, index[&receipt.to]);
@@ -613,7 +767,7 @@ pub fn admit_graph(
     // Directed-cycle check on the QUOTIENT graph (equivalence components
     // collapsed to representatives): any remaining directed cycle refuses.
     let mut adjacency: BTreeMap<ClaimRevisionId, BTreeSet<ClaimRevisionId>> = BTreeMap::new();
-    for receipt in receipts {
+    for receipt in &edges {
         if directed(receipt.kind) {
             let from = representative[&receipt.from];
             let to = representative[&receipt.to];
@@ -673,19 +827,10 @@ pub fn admit_graph(
         }
     }
 
-    let mut edges = receipts.to_vec();
-    edges.sort_by(|a, b| {
-        (relation_code(a.kind), a.from, a.to, &a.checker).cmp(&(
-            relation_code(b.kind),
-            b.from,
-            b.to,
-            &b.checker,
-        ))
-    });
     Ok(NormalizedGraph {
         revisions: id_list,
         edges,
-        representative,
+        representatives: representative,
     })
 }
 

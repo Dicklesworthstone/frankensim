@@ -543,7 +543,7 @@ impl ClaimRecord {
     /// Validate and normalize the exact relation graph.
     pub fn normalized_graph(&self) -> Result<NormalizedGraph, JourneyError> {
         let graph = admit_graph(&self.revisions, &self.relations)?;
-        if !graph.revisions.contains(&self.subject) {
+        if !graph.revisions().contains(&self.subject) {
             return Err(JourneyError::new(
                 "journey-claim-subject",
                 "claim subject is not one of the exact admitted revisions",

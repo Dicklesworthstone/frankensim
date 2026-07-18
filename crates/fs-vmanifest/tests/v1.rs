@@ -10,8 +10,8 @@
 
 use fs_vmanifest::v1::{
     ClaimId, ClaimKind, ClaimRelationReceipt, ClaimRevision, MANIFEST_RECORD_FIELDS,
-    QuantifierVariance, RelationKind, SourceAuthority, SourcePin, admit_graph, classify_migration,
-    resolve_authority,
+    MANIFEST_V1_SCHEMA_VERSION, QuantifierVariance, RelationKind, SourceAuthority, SourcePin,
+    admit_graph, classify_migration, resolve_authority,
 };
 use std::collections::BTreeSet;
 
@@ -216,10 +216,10 @@ fn directed_cycles_refuse_unless_certified_equivalent() {
     let ida = a.revision_id();
     let idb = b.revision_id();
     let representative = ida.min(idb);
-    assert_eq!(graph.representative[&ida], representative);
-    assert_eq!(graph.representative[&idb], representative);
+    assert_eq!(graph.representative_of(&ida), Some(representative));
+    assert_eq!(graph.representative_of(&idb), Some(representative));
     assert_eq!(
-        graph.revisions.len(),
+        graph.revisions().len(),
         2,
         "canonicalization never erases members"
     );
@@ -354,13 +354,21 @@ fn projections_are_semantic_views_of_one_digest() {
     let human = graph.render_human();
     let json = graph.render_json_lines();
     let ledger = graph.render_ledger_rows();
-    assert!(human.contains(&digest));
-    assert!(json[0].contains(&digest));
-    assert_eq!(ledger[0].1, digest);
-    // Same edge count in every projection (semantic parity, not
-    // byte-identity).
-    assert_eq!(json.len() - 1, 1);
-    assert_eq!(ledger.len() - 1, 1);
+    assert!(human.contains(digest.as_str()));
+    assert!(json.iter().all(|record| record.contains(digest.as_str())));
+    assert!(
+        ledger
+            .iter()
+            .all(|(_, payload)| payload.contains(digest.as_str()))
+    );
+    // Header + every revision + every edge exist in the machine
+    // projections. The human view likewise carries every revision and edge.
+    assert_eq!(
+        json.len(),
+        1 + graph.revisions().len() + graph.edges().len()
+    );
+    assert_eq!(ledger.len(), json.len());
+    assert_eq!(human.matches("  revision ").count(), 2);
     assert_eq!(human.matches("->").count(), 1);
     assert_ne!(
         human,
@@ -370,7 +378,236 @@ fn projections_are_semantic_views_of_one_digest() {
 }
 
 #[test]
-fn json_lines_escape_untrusted_checker_text() {
+fn json_lines_are_an_exact_complete_canonical_projection() {
+    let a = revision("claim/a", "a holds");
+    let b = revision("claim/b", "b holds");
+    let mut receipt = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Weakened,
+    );
+    receipt.checker = "checker\"\\v2".to_owned();
+    receipt.tcb = "rustc\nfs-blake3".to_owned();
+    receipt.domain_note = "strict\tdomain".to_owned();
+    receipt.policy_version = 17;
+    let from = receipt.from.to_hex();
+    let to = receipt.to.to_hex();
+    let mut revision_ids = [a.revision_id(), b.revision_id()];
+    revision_ids.sort();
+    let graph = admit_graph(&[a, b], &[receipt]).expect("graph admits");
+    let digest = graph.digest().to_hex();
+
+    let json = graph.render_json_lines();
+    let mut expected = vec![format!(
+        "{{\"vmanifest\":\"graph\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":0,\"revisions\":2,\"edges\":1}}",
+        MANIFEST_V1_SCHEMA_VERSION, digest,
+    )];
+    for (index, revision) in revision_ids.iter().enumerate() {
+        expected.push(format!(
+            "{{\"vmanifest\":\"revision\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":{},\"revision\":\"{}\",\"representative\":\"{}\"}}",
+            MANIFEST_V1_SCHEMA_VERSION,
+            digest,
+            index + 1,
+            revision.to_hex(),
+            revision.to_hex(),
+        ));
+    }
+    expected.push(format!(
+        "{{\"vmanifest\":\"edge\",\"schema_version\":{},\"graph_digest\":\"{}\",\"ordinal\":3,\"kind\":\"Implication\",\"from\":\"{}\",\"to\":\"{}\",\"checker\":\"checker\\\"\\\\v2\",\"tcb\":\"rustc\\nfs-blake3\",\"variance\":\"Weakened\",\"domain_note\":\"strict\\tdomain\",\"policy_version\":17}}",
+        MANIFEST_V1_SCHEMA_VERSION,
+        digest,
+        from,
+        to,
+    ));
+    assert_eq!(
+        json, expected,
+        "strict projection includes every normalized field in canonical order"
+    );
+
+    let human = graph.render_human();
+    for required in [
+        format!("schema_version={MANIFEST_V1_SCHEMA_VERSION}"),
+        format!("graph_digest={digest}"),
+        format!("revision={}", revision_ids[0].to_hex()),
+        format!("revision={}", revision_ids[1].to_hex()),
+        "kind=Implication".to_owned(),
+        format!("from={from}"),
+        format!("to={to}"),
+        "checker=\"checker\\\"\\\\v2\"".to_owned(),
+        "tcb=\"rustc\\nfs-blake3\"".to_owned(),
+        "variance=Weakened".to_owned(),
+        "domain_note=\"strict\\tdomain\"".to_owned(),
+        "policy_version=17".to_owned(),
+    ] {
+        assert!(
+            human.contains(required.as_str()),
+            "human projection omitted {required}"
+        );
+    }
+}
+
+fn assert_receipt_field_is_bound_and_canonical(
+    field: &str,
+    revisions: &[ClaimRevision],
+    left: ClaimRelationReceipt,
+    right: ClaimRelationReceipt,
+) {
+    let left_only = admit_graph(revisions, &[left.clone()]).expect("left receipt admits");
+    let right_only = admit_graph(revisions, &[right.clone()]).expect("right receipt admits");
+    assert_ne!(
+        left_only.digest(),
+        right_only.digest(),
+        "changing {field} must change graph identity"
+    );
+
+    let forward = admit_graph(revisions, &[left.clone(), right.clone()]).expect("pair admits");
+    let reverse = admit_graph(revisions, &[right, left]).expect("permuted pair admits");
+    assert_eq!(
+        forward.edges(),
+        reverse.edges(),
+        "{field} participates in the canonical total order"
+    );
+    assert_eq!(
+        forward.digest(),
+        reverse.digest(),
+        "receipt input order cannot change identity when {field} breaks the tie"
+    );
+    assert_eq!(forward.render_json_lines(), reverse.render_json_lines());
+}
+
+#[test]
+fn every_receipt_identity_field_is_bound_and_breaks_canonical_ties() {
+    let a = revision("claim/a", "a holds");
+    let b = revision("claim/b", "b holds");
+    let c = revision("claim/c", "c holds");
+    let revisions = [a.clone(), b.clone(), c.clone()];
+    let base = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Preserved,
+    );
+
+    let mut changed = base.clone();
+    changed.kind = RelationKind::Refinement;
+    assert_receipt_field_is_bound_and_canonical("kind", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.from = c.revision_id();
+    assert_receipt_field_is_bound_and_canonical("from", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.to = c.revision_id();
+    assert_receipt_field_is_bound_and_canonical("to", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.checker = "fs-checker/relation-v2".to_owned();
+    assert_receipt_field_is_bound_and_canonical("checker", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.tcb = "rustc+fs-blake3+fs-ivl".to_owned();
+    assert_receipt_field_is_bound_and_canonical("tcb", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.variance = QuantifierVariance::Weakened;
+    assert_receipt_field_is_bound_and_canonical("variance", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.domain_note = "strict subdomain".to_owned();
+    assert_receipt_field_is_bound_and_canonical("domain_note", &revisions, base.clone(), changed);
+
+    let mut changed = base.clone();
+    changed.policy_version = 2;
+    assert_receipt_field_is_bound_and_canonical("policy_version", &revisions, base, changed);
+}
+
+#[test]
+fn exact_duplicate_receipts_refuse_instead_of_changing_cardinality() {
+    let a = revision("claim/a", "a holds");
+    let b = revision("claim/b", "b holds");
+    let receipt = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Preserved,
+    );
+    let err = admit_graph(&[a, b], &[receipt.clone(), receipt]).expect_err("duplicate refuses");
+    assert_eq!(err.rule(), "v1-duplicate-relation");
+    assert!(err.ranked_fixes()[0].contains("deduplicate"));
+}
+
+#[test]
+fn all_receipt_text_fields_escape_every_c0_and_hostile_line_character() {
+    let a = revision("claim/a", "a holds");
+    let b = revision("claim/b", "b holds");
+    let mut hostile = "prefix\"\\".to_owned();
+    hostile.extend((0_u32..=31).map(|value| char::from_u32(value).expect("C0 scalar")));
+    hostile.push('\u{007f}');
+    hostile.push('\u{0085}');
+    hostile.push('\u{009f}');
+    hostile.push('\u{2028}');
+    hostile.push('\u{2029}');
+    hostile.push('é');
+    let escaped = concat!(
+        "prefix\\\"\\\\",
+        "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007",
+        "\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f",
+        "\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017",
+        "\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f",
+        "\\u007f\\u0085\\u009f\\u2028\\u2029é"
+    );
+
+    for field in ["checker", "tcb", "domain_note"] {
+        let mut receipt = edge(
+            RelationKind::Implication,
+            &a,
+            &b,
+            QuantifierVariance::Preserved,
+        );
+        match field {
+            "checker" => receipt.checker.clone_from(&hostile),
+            "tcb" => receipt.tcb.clone_from(&hostile),
+            "domain_note" => receipt.domain_note.clone_from(&hostile),
+            _ => unreachable!(),
+        }
+        let graph = admit_graph(&[a.clone(), b.clone()], &[receipt]).expect("hostile text admits");
+        let json = graph.render_json_lines();
+        assert!(
+            json.last()
+                .expect("edge record")
+                .contains(format!("\"{field}\":\"{escaped}\"").as_str()),
+            "{field} must use the exact JSON escaping policy"
+        );
+        assert!(json.iter().all(|line| {
+            !line
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        }));
+
+        let human = graph.render_human();
+        assert_eq!(
+            human.lines().count(),
+            1 + graph.revisions().len() + graph.edges().len()
+        );
+        assert!(human.contains(escaped));
+        assert!(human.lines().all(|line| {
+            !line
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        }));
+
+        assert!(graph.render_ledger_rows().iter().all(|(_, payload)| {
+            payload.lines().count() == 1
+                && !payload
+                    .chars()
+                    .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        }));
+    }
+}
+
+#[test]
+fn domain_note_is_admitted_under_the_same_text_bounds_as_checker_and_tcb() {
     let a = revision("claim/a", "a holds");
     let b = revision("claim/b", "b holds");
     let mut receipt = edge(
@@ -379,24 +616,32 @@ fn json_lines_escape_untrusted_checker_text() {
         &b,
         QuantifierVariance::Preserved,
     );
-    receipt.checker = "checker\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}é".to_owned();
-    let graph = admit_graph(&[a.clone(), b.clone()], &[receipt]).expect("graph admits");
+    receipt.domain_note.clear();
+    let err = admit_graph(&[a.clone(), b.clone()], &[receipt]).expect_err("empty domain note");
+    assert_eq!(err.rule(), "v1-field-bounds");
+    assert!(err.ranked_fixes()[0].contains("domain_note"));
 
-    let json = graph.render_json_lines();
-    assert_eq!(json.len(), 2, "one edge remains one JSON-lines record");
-    assert_eq!(
-        json[1],
-        format!(
-            "{{\"vmanifest\":\"edge\",\"kind\":\"Implication\",\"from\":\"{}\",\"to\":\"{}\",\"checker\":\"checker\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001fé\",\"policy\":1}}",
-            a.revision_id().to_hex(),
-            b.revision_id().to_hex()
-        )
+    let mut receipt = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Preserved,
     );
-    assert_eq!(json[1].lines().count(), 1);
+    receipt.domain_note = "x".repeat(4096);
     assert!(
-        json[1].chars().all(|ch| ch >= ' '),
-        "JSON-lines output must not contain literal control characters"
+        admit_graph(&[a.clone(), b.clone()], &[receipt]).is_ok(),
+        "the documented inclusive maximum admits"
     );
+
+    let mut receipt = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Preserved,
+    );
+    receipt.domain_note = "x".repeat(4097);
+    let err = admit_graph(&[a, b], &[receipt]).expect_err("oversized domain note");
+    assert_eq!(err.rule(), "v1-field-bounds");
 }
 
 #[test]

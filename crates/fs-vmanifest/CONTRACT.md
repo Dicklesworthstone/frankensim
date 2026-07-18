@@ -3341,13 +3341,22 @@ case/journey identities. `SourceAuthority` is a total lattice
 FrozenSnapshot); conflicts resolve upward by re-pinning, and
 equal-authority conflicts refuse with ranked fixes. Typed
 `ClaimRelationReceipt`s (implication, refinement, restriction,
-counterexample, certified equivalence) carry direction, checker/TCB,
-quantifier variance, and policy version; promotion never transfers along
+counterexample, certified equivalence) carry direction, nonempty checker/TCB
+and domain-note text capped at 4096 UTF-8 bytes each, quantifier variance, and
+policy version; promotion never
+transfers along
 counterexample or quantifier-strengthening edges; directed cycles refuse
 unless certified-equivalent, in which case the SCC canonicalizes to its
-smallest member without erasing members. `NormalizedGraph` digests are
-input-order invariant and the human/JSON/ledger renderings are tested
-semantic projections of that one digest. Migration is additive or
+smallest member without erasing members. Exact duplicate receipts refuse.
+`NormalizedGraph` construction is sealed behind admission and exposes only
+read-only canonical revisions, receipts, and representatives. Its total receipt
+order includes every digest-forming field, making its digest input-order
+invariant even for parallel edges sharing relation kind, endpoints, or checker.
+Human, strict JSON-lines, and ledger renderings project every normalized
+revision and receipt field from that one digest. JSON records carry schema
+version, graph digest, and a global canonical ordinal; human and ledger text
+escape hostile controls so semantic text cannot forge a physical record.
+Migration is additive or
 breaking-with-mandatory-lossy-report; the 22-row `MANIFEST_RECORD_FIELDS`
 registry declares units, cardinality, authority, default visibility, and
 migration semantics per field, in data.
