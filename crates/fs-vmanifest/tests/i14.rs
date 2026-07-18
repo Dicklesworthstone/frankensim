@@ -1041,7 +1041,7 @@ fn i14_seed_freezes_with_exact_claim_and_execution_authority() {
             "separate child raw root is telemetry-only",
             "independent child semantic-verification receipt identity is canonical",
             "Watchdog, tile-poll and heartbeat evidence likewise split canonical semantic roots from telemetry-only raw roots and independent semantic-verification receipt identities",
-            "before-item-zero and before/after-tile scheduler polls",
+            "scheduler polls before item 0 and immediately before and after every logical tile",
             "Local code validates only structural/internal consistency, caps, trigger arithmetic and failure reflection",
             "HELM/ledger authenticates the corresponding receipts; local code only validates structural binding and consistency",
             "typed infrastructure-onset witness binds source={WatchdogCoverage,TilePollCoverage,ExternalHeartbeatCoverage,DescendantDrain,SpawnAfterFrontierClosure,Supervisor,Authentication,DrainProtocol,PublicationProtocol}",
@@ -1826,6 +1826,7 @@ fn i14_terminal_cause_selector_is_scoped_bounded_causal_and_total() {
     let later_observed = I14CancellationRequestV1 {
         request_id: 9,
         logical_sequence: 40,
+        requested_monotonic_ns: 250,
         observation: Some(I14CancellationObservationV1 {
             logical_sequence: 50,
             monotonic_ns: 300,
@@ -3924,6 +3925,7 @@ fn i14_v2_terminal_authority_binds_first_boundary_card_and_lifecycle() {
                 completed: true,
                 ..boundary_1
             },
+            in_flight_children: 0,
             work_items_remaining: 0,
             ..records[1]
         },
@@ -3966,6 +3968,7 @@ fn i14_v2_terminal_authority_binds_first_boundary_card_and_lifecycle() {
                 completed: true,
                 ..boundary_1
             },
+            in_flight_children: 0,
             work_items_remaining: 0,
             last_watchdog_poll_monotonic_ns: 490_000_000,
             ..records[1]
@@ -6105,7 +6108,8 @@ fn i14_load_bearing_emc_physics_and_no_claim_clauses_are_pinned() {
     }));
 
     let adjoint = claim(&draft, "i14-fixed-regime-adjoint-closure");
-    assert!(adjoint.statement.contains("complex"));
+    assert!(adjoint.statement.contains("Complex states"));
+    assert!(adjoint.statement.contains("Wirtinger convention"));
     assert!(adjoint.statement.contains("fixed EMC rung"));
     assert!(adjoint.hypotheses.iter().any(|h| h.contains("event")));
     assert!(adjoint.no_claim.contains("topology derivative"));
@@ -6645,7 +6649,7 @@ fn i14_theorem_ratchets_are_ambitious_formal_and_falsifiable() {
         "discrete Green-Stokes identity",
         "maximally isotropic lossless Dirac relation",
         "nondegenerate ambient split-signature power pairing",
-        "causal dissipative",
+        "Causal dissipative",
         "higher-overlap",
         "zero unaccounted defect",
         "non-strict dominance",
