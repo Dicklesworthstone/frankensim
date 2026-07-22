@@ -1003,6 +1003,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-convection"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-conduction",
+ "fs-evidence",
+ "fs-exec",
+ "fs-math",
+ "fs-qty",
+]
+
+[[package]]
 name = "fs-couple"
 version = "0.0.1"
 dependencies = [

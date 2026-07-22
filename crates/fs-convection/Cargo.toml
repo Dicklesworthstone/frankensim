@@ -1,0 +1,24 @@
+[package]
+name = "fs-convection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Regime-bounded heat-transfer correlations with model cards, typed coefficients, and evidence-preserving refusals."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-conduction = { path = "../fs-conduction" }
+fs-evidence = { path = "../fs-evidence" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+
+[lints]
+workspace = true
