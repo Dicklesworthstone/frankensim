@@ -19,11 +19,15 @@ FrankenSim is an active Rust source workspace for deterministic geometry, certif
 
 The tree contains 136 `fs-*` crate directories: 135 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
-The inventory numbers in this README are derived from the current Git index,
-the root workspace manifest, and each crate's declared layer metadata by
-`cargo run -p xtask -- check-docs`. Untracked files in a developer's working
-tree are deliberately excluded; the layer row inventories declarations and is
-not, by itself, proof that every dependency edge is valid.
+The inventory numbers in this README are derived from the root workspace
+manifest, each crate's declared layer metadata, and the portable tracked-input
+registry in [`doc-facts-inventory.json`](doc-facts-inventory.json) by
+`cargo run -p xtask -- check-docs`. In a Git worktree the check requires that
+registry to match the current index exactly; an RCH or archive source snapshot
+without `.git` validates the same checked path set instead of counting arbitrary
+filesystem dirt. Untracked files are deliberately excluded. The layer row
+inventories declarations and is not, by itself, proof that every dependency
+edge is valid.
 
 <!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->
 | Derived repository fact | Value |
@@ -53,7 +57,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
-| Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; a FrankenSQLite-backed design ledger exists but is registered at L1 while known suite failures remain open |
+| Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
 | Tests | 509 tracked Rust files under crate `tests/` directories at the committed snapshot, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
@@ -67,10 +71,10 @@ are enforced from [`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md). As of
 
 | Level | Meaning | Registered capabilities | Current boundary |
 |-------|---------|-------------------------|------------------|
-| L1 | Experimental component | 4 | The maturity registry itself is implemented; steady thermal conduction is explicitly not built, the design ledger has known suite failures, and browser flagships have a recorded schema/build break |
-| L2 | Numerically verified | 10 | Evidence colour/packaging, chart conversion, topology certificates, sparse assembly, certified arithmetic, Krylov solves, adjoint verification, the point-vortex quality-diversity campaign, and claim-integrity governance cite independent tests |
+| L1 | Experimental component | 3 | The maturity registry itself is implemented; the design ledger has known suite failures, and browser flagships have a recorded schema/build break |
+| L2 | Numerically verified | 11 | Evidence colour/packaging, chart conversion, topology certificates, sparse assembly, certified arithmetic, Krylov solves, adjoint verification, the point-vortex quality-diversity campaign, claim-integrity governance, and steady thermal conduction cite independent tests |
 | L3 | Integrated workflow | 0 | No registered capability currently carries an admitted end-to-end integration claim |
-| L4 | Experimentally validated | 0 | No external validation corpus and validity-domain evidence are registered |
+| L4 | Experimentally validated | 0 | The V&V corpus registry also contains 19 reference-only Level-A thermal definitions/targets, a synthetic Level-B fixture, and a retained Level-C Martin-Moyce curve. No Level-A row binds a solver comparison or refinement ladder, and the experimental row lacks original raw data, metrology, replayable digitization lineage, resolved redistribution authority, and a defensible scalar envelope; every row is capped `Estimated`, so no L4 claim exists |
 | L5 | Supported product | 0 | No written support and migration policy exists |
 
 <!-- BEGIN GENERATED FRANKENSIM CAPABILITY MATRIX -->
@@ -88,7 +92,7 @@ are enforced from [`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md). As of
 | `numerics.certified-arithmetic` — Outward-rounded intervals and exact geometric predicates | L2 | `fs-ivl` | Containment under randomized expression trees is the independent oracle. Rigor is conditional on fs-math ULP budgets, per the crate's own no-claim section. |
 | `numerics.sparse-assembly` — Deterministic sparse assembly and cross-format SpMV | L2 | `fs-sparse` | Cross-format bitwise equality is an independent check, not only a golden: COO/CSR/BSR/SELL are separate implementations agreeing exactly. |
 | `solvers.krylov` — Resumable Krylov solves with typed residual provenance | L2 | `fs-solver` | SolveReport now carries a private ResidualClaim plus fail-closed Euclidean accessors (commit 8493ab35), so a driver holding only the report can distinguish recomputed-Euclidean, recursive-estimate and M-norm quantities; bead f85xj.2.24 is closed. Still L2, not L3: no admitted end-to-end lane exercises it, and the untyped rel_residual field remains readable pending a 3-crate slice named in the CONTRACT. |
-| `thermal.conduction-solve` — Steady conduction FEM solve on solids | L1 | `fs-feec`, `fs-solid` | The cooling vertical's core capability, bead f85xj.5.1, is NOT yet built -- the exterior-calculus and elasticity substrate it will sit on exists, the thermal solve does not. L1 is the honest level and the registry says so rather than crediting the substrate. |
+| `thermal.conduction-solve` — Steady conduction FEM solve on solids | L2 | `fs-conduction`, `fs-feec`, `fs-solid` | Built at bead f85xj.5.1 as crate fs-conduction (L3/FLUX). L2 is earned by INDEPENDENT oracles, not a golden: G1 MMS convergence orders hit theory inside the fs-mms OrderGate (L2 ~2.00, H1 ~0.99) and closed-form slab/source/Robin/cylinder/fin cases sit inside stated envelopes. The MMS ladders use a QUARTIC manufactured solution because P1 Galerkin on these Kuhn meshes reproduces exact solutions up to cubic at the nodes -- a quadratic ladder measures interpolation error and is independent of k, which is pinned by its own test so the degeneracy cannot be mistaken for strength. NOT L3: no e2e lane composes conduction with a downstream consumer. NOT L4: no external corpus exists (e04). Adjoint consistency is wired for the LINEAR case only and refuses a k(T) material rather than linearizing; a verified gradient is not a DWR estimate and bounds nothing. Determinism is bitwise same-ISA; the crate calls no platform transcendental, so cross-ISA is a G5 audit away and is NOT claimed. |
 | `wasm.browser-flagships` — Browser-facing reduced flagship campaigns | L1 | `fs-wasm` | Builds again as of the safe-step propagation (bead f85xj.2.39): the browser payload now carries an interval-derived certified sign margin at schema v2 instead of a nominal \|f\|/L quotient. Still L1: two campaign tests (grammarforge, sensorforge) are red from an earlier code-first slice, so no test evidence is cited yet. |
 <!-- END GENERATED FRANKENSIM CAPABILITY MATRIX -->
 
@@ -1301,7 +1305,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Randomized NLA golden sentinel | Resolved: `rand_nla_golden_hash` is deliberately recorded (`0xeef1_0550_7daf_c0d5`) and verified identical on arm64 and x86-64 in both debug and release, after fixing a build-mode-dependent `powi` fixture; the workspace-wide `powi` sweep is tracked in bead `frankensim-powi-build-mode-determinism-4xnt` |
 | Ascent golden sentinels | Resolved: both the trajectory and Pareto golden constants are frozen in the test sources (`0xb28d_3cf4_99e8_9071` and `0x301b_04df_db91_3965`); cross-ISA/profile authority still depends on retained admitted replay evidence rather than the constants alone |
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |
-| Production validation corpus | Not yet present; no capability may claim L4 experimental validation without an external corpus, stated validity domain, coverage, and quantified model-form discrepancy |
+| Production validation corpus | Not yet present. `fs-vvreg` now registers 19 Level-A thermal formula/order definitions, a synthetic Level-B fixture, and the retained Martin-Moyce 1952 Level-C digitized curve. The Level-A rows are reference-only or target-only and bind no thermal-kernel output or refinement ladder; the external Level-C row is derived-only and lacks original raw records, instrument/calibration/placement authority, acquisition conditions/date, replayable digitization lineage, resolved redistribution terms, and a defensible scalar acceptance envelope. Every row remains `Estimated` with numerical `NoClaim`; no capability may infer G1 completion or L4 from registration alone |
 | Performance claims | Must be backed by `fs-roofline`/ledger evidence; do not infer claims from architecture text alone |
 
 The long-form architecture reference remains in `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`, but this README describes the code that is already present in the repository.

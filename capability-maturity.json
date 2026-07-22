@@ -287,24 +287,45 @@
     {
       "id": "thermal.conduction-solve",
       "title": "Steady conduction FEM solve on solids",
-      "level": "L1",
+      "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
       "crates": [
+        "fs-conduction",
         "fs-feec",
         "fs-solid"
       ],
       "evidence": [
         {
           "kind": "contract",
-          "ref": "crates/fs-feec/CONTRACT.md"
+          "ref": "crates/fs-conduction/CONTRACT.md"
         },
         {
-          "kind": "contract",
-          "ref": "crates/fs-solid/CONTRACT.md"
+          "kind": "doc",
+          "ref": "crates/fs-conduction/MODEL_CARD.md"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-conduction/tests/mms.rs::mms_isotropic_dirichlet_orders"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-conduction/tests/mms.rs::mms_anisotropic_dirichlet_order"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-conduction/tests/analytic.rs::slab_dirichlet_dirichlet"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-conduction/tests/analytic.rs::slab_dirichlet_robin"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-conduction/tests/adjoint.rs::ift_gradient_matches_central_differences"
         }
       ],
-      "notes": "The cooling vertical's core capability, bead f85xj.5.1, is NOT yet built -- the exterior-calculus and elasticity substrate it will sit on exists, the thermal solve does not. L1 is the honest level and the registry says so rather than crediting the substrate."
+      "notes": "Built at bead f85xj.5.1 as crate fs-conduction (L3/FLUX). L2 is earned by INDEPENDENT oracles, not a golden: G1 MMS convergence orders hit theory inside the fs-mms OrderGate (L2 ~2.00, H1 ~0.99) and closed-form slab/source/Robin/cylinder/fin cases sit inside stated envelopes. The MMS ladders use a QUARTIC manufactured solution because P1 Galerkin on these Kuhn meshes reproduces exact solutions up to cubic at the nodes -- a quadratic ladder measures interpolation error and is independent of k, which is pinned by its own test so the degeneracy cannot be mistaken for strength. NOT L3: no e2e lane composes conduction with a downstream consumer. NOT L4: no external corpus exists (e04). Adjoint consistency is wired for the LINEAR case only and refuses a k(T) material rather than linearizing; a verified gradient is not a DWR estimate and bounds nothing. Determinism is bitwise same-ISA; the crate calls no platform transcendental, so cross-ISA is a G5 audit away and is NOT claimed."
     },
     {
       "id": "ledger.design-ledger",
