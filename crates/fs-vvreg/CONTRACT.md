@@ -7,10 +7,10 @@ refused until it is one.
 
 ## Purpose and layer
 
-Layer UTIL (versioned registry data + fail-closed citation and standards-source
-gates). Depends
-only on `fs-blake3` (domain-separated content identity) and `fs-evidence`
-(`ColorRank` for the citation color caps). A family name (TEAM, NAFEMS,
+Layer UTIL (versioned registry data + fail-closed citation, corpus-query, and
+standards-source gates). Depends on `fs-blake3` (domain-separated content
+identity), `fs-evidence` (`Evidence<T>` plus claim-color caps), and `fs-qty`
+(runtime dimensions for loaded measurement and context data). A family name (TEAM, NAFEMS,
 CFR, IFToMM, ECN) is NOT an executable benchmark: every G1/G2 entry needs
 exact version/edition, source, license, input-deck identity, oracle binding,
 QoIs, and acceptance envelopes before any solver claims against it.
@@ -101,6 +101,50 @@ body.
   currently available access, a nonzero derived-rule hash, and an explicit
   read/derived/reproduced state. Historical editions additionally require
   `RuleUsePolicy::HistoricalReplay`.
+- `corpus::DatasetDraft` / `admit_dataset` / `CorpusDataset` — the version-1
+  validation-dataset boundary. Fifteen top-level fields are mandatory and
+  missing fields return `CorpusError::MissingField { field: DatasetField }`:
+  id, title, immutable earliest-retained payload, sensor roster, geometry, acquisition
+  environment, partition, preprocessing lineage, final artifact,
+  context-of-use ranges, license/redistribution terms, acquisition provenance,
+  retention policy, acceptance-envelope records, and A-E evidence level.
+  Sensors bind raw channel and measurement dimensions. Instrument identity,
+  calibration, placement, geometry, acquisition environment/date, license, and
+  complete preprocessing lineage each distinguish `Available` from a reason-bearing
+  unavailable/unreplayable state. Those states are mandatory to record but
+  cap use at `Estimated`; they are never replaced with invented metadata.
+  Measurement uncertainty is bounded, covariance-diagonal, or explicit
+  `Unstated`; covariance carries squared `fs_qty::Dims`.
+- `corpus::CorpusRegistry::query` — seeded-registry-only evidence query. The
+  request names the exact declared training/calibration/validation partition
+  and supplies every context coordinate with matching dimensions and an
+  in-range finite value. Missing, duplicate, unknown, mismatched, and
+  out-of-range coordinates are distinct typed refusals. Success returns
+  `fs_evidence::Evidence<&CorpusDataset>` with a numerical `NoClaim`, unknown
+  statistical width, unbounded model-form discrepancy, and the declared
+  context box copied into model validity; the
+  dataset's separately exposed physical claim cap is `Validated` only for C/D/E
+  data with original raw retention, stated uncertainty, complete instrument,
+  calibration, placement, geometry, environment, acquisition-date, license,
+  replayable lineage, and pinned-envelope authority. Every explicit gap demotes
+  the cap to `Estimated`.
+- `corpus::CorpusDataset::{encode,decode,digest}` — bounded canonical `FSVVCRP`
+  version-1 binary round trip and domain-separated content identity. Decode
+  validates, canonicalizes, and byte-compares; noncanonical, future-version,
+  truncated, trailing, invalid-tag, and invalid-UTF-8 inputs refuse.
+- `corpus::CorpusRegistry::audit` / binary `corpus-audit` — deterministic
+  per-dataset mandatory/optional completeness table. Optional as-built geometry
+  and calibration-valid-through gaps, plus mandatory reason-bearing no-claim
+  states, produce structured `level=WARN` rows; validation defects produce
+  `level=ERROR` and a nonzero CLI exit.
+- `thermal_level_a::thermal_level_a_cases` — 19 frozen Level-A thermal
+  definitions backed by one retained TSV manifest: 12 analytic values across
+  planar/2-D/axisymmetric/spherical conduction, fin efficiency, a
+  lumped-capacitance limit, fully developed duct Nusselt limits, a parallel-
+  plate view factor, and series contact resistance; plus seven two-sided G1
+  targets spanning P1/P2 primal and adjoint order, mixed Neumann/Robin
+  boundaries, and anisotropic nonlinear conductivity. Each case declares
+  dimensions, formula semantics, context, and an acceptance rule.
 
 ## Invariants
 
@@ -164,6 +208,33 @@ body.
   length-framed into the row and manifest identities. Rule provenance binds the
   schema, manifest, source row, authenticated source hash, exact clause,
   derived-rule id/hash, reference state, use policy, and historical bit.
+- EARLIEST-RETAINED CORPUS BINDING: an admitted corpus row has a nonzero retained
+  payload digest and positive byte length. `OriginalRaw` is required for a
+  physical cap above `Estimated`; a `DerivedOnly` row must carry the reason the
+  original is unavailable. Complete preprocessing ordinals are contiguous from
+  zero, the first input equals the retained digest, every subsequent input
+  equals the preceding output, and `final_artifact` equals the last output. An
+  unreplayable historical lineage instead binds its retained input/output
+  hashes and states why replay is impossible. Retention policy must preserve
+  payloads and calibration evidence together.
+- DIMENSIONED UNCERTAINTY AND CONTEXT: sensor placement is finite length data,
+  bounded uncertainty matches the measured quantity dimensions, covariance
+  diagonal entries use the squared dimensions, acquisition uncertainties are
+  nonnegative and dimension-compatible, and context/envelope regimes are
+  finite, ordered, and nested. `Unstated` is explicit and admitted only as a
+  color demotion; absence of the uncertainty field is still a missing-field
+  refusal.
+- CORPUS AUTHORITY SEPARATION: caller-built registries can validate, serialize,
+  hash, and audit rows but cannot return evidence-bearing query results. The
+  workspace seed behind `corpus()` is the only query authority. It includes 19
+  Level-A thermal reference/target definitions, an explicitly synthetic
+  Level-B migration of `fs-benchmark` CHT query `cht-q3`, and the retained
+  Martin-Moyce 1952 digitized square-column curve as Level C. The Level-A rows
+  explicitly state that no solver receipt/refinement ladder is bound; the
+  Martin-Moyce row preserves its missing raw, instrument, calibration,
+  placement, environment, acquisition-date, license, replay, and scalar-
+  envelope authority as explicit gaps. Every row remains physically
+  `Estimated`, and every evidence query remains numerically `NoClaim`.
 
 ## Error model
 
@@ -181,9 +252,15 @@ canonicality refusals. Rule admission returns `RuleBindingError`, retaining the
 exact edition and expected/observed hashes where relevant. No partially
 admitted manifest or provenance object is published on error.
 
+Corpus admission and decoding return `CorpusError`; query failures return
+`CorpusQueryRefusal`. Both preserve the exact failing field or query boundary.
+No partially admitted dataset or successful evidence wrapper is returned on a
+refusal.
+
 ## Determinism class
 
-Fully deterministic: all seed data is `const`; serialization renders
+Fully deterministic: seed metadata and tracked fixture bytes are fixed inputs;
+serialization renders
 floats as bit tokens (never locale/formatting dependent); digests are
 domain-separated BLAKE3 over length-framed canonical bytes. Bitwise
 reproducible across runs, thread counts, and ISAs. Envelope-verdict JSON uses a
@@ -192,6 +269,13 @@ The standards manifest is likewise fully deterministic: input order is erased
 by exact-key sorting; its integer/framing encoding is fixed little-endian; row,
 manifest, and rule identities are domain-separated; and canonical decode
 re-encodes and byte-compares before admission.
+
+Corpus datasets sort sensor, environment, context, acceptance, and regime rows
+by stable keys; preprocessing sorts by ordinal and is then chain-validated.
+The versioned binary wire length-frames all strings and collections, stores
+floating-point values as exact IEEE-754 bits, and is byte-stable across runs,
+thread counts, and ISAs. Corpus registries sort by dataset id before hashing and
+audit rendering.
 
 ## Cancellation behavior
 
@@ -218,6 +302,14 @@ changes-per-record, bytes per string, and total canonical bytes. Default hard
 caps are 4,096 rows, 64 changes per row, 4,096 bytes per string, and 16 MiB per
 manifest. Construction sorts rows and validates the functional supersession
 graph in `O(n log n)`; exact lookup is `O(log n)`.
+
+Corpus admission/query/audit are synchronous and non-preemptible. Admission is
+bounded before allocation/traversal by 4,096 datasets, 4,096 sensors per
+dataset, 4,096 entries in every other collection, 4,096 UTF-8 bytes per string,
+and 16 MiB canonical bytes per dataset. Registry construction is
+`O(n log n)`; dataset admission sorts bounded collections; query is one binary
+dataset lookup plus linear bounded context matching; audit is linear in
+datasets plus admission cost.
 
 ## Unsafe boundary
 
@@ -263,6 +355,21 @@ protected-text leakage/redacted-JSON fixture; G5 every-field source identity
 mutation, rule-provenance mutation, canonical v1 round trip, frozen `FSMF`
 header, future-schema refusal, truncation/trailing-byte refusal, and
 semantic-but-unsorted wire rejection.
+
+`tests/corpus.rs`: G0 typed refusal for every mandatory top-level field;
+calibration, placement, bounded-uncertainty, covariance-dimension, retention,
+lineage, canonical-codec, tamper, and caller-authority probes; G3 input-order
+invariance for registry identity and explicit authority-gap demotion; exact
+partition plus missing/unknown/duplicate/dimension/out-of-range context
+refusals; retained synthetic and Martin-Moyce fixture hash binding; and
+deterministic audit rendering with warn-level optional and claim-authority gaps.
+
+`tests/thermal_level_a.rs`: G0 manifest/catalog identity and family coverage;
+independent recomputation of all 12 closed-form scalar values; exact retained-
+artifact binding; seeded query/no-claim checks over every context axis; and G1
+target coverage for two element degrees, Neumann/Robin boundaries, nonlinear
+anisotropy, and primal/adjoint order. These tests verify reference definitions
+and targets, not thermal-kernel convergence.
 
 ## No-claim boundaries
 
@@ -318,3 +425,39 @@ semantic-but-unsorted wire rejection.
 - Historical replay is provenance preservation, not standards support: a
   withdrawn or superseded edition remains historical even when its exact bytes
   are still pinned and accessible.
+- Corpus admission proves schema completeness, internal hash references,
+  dimension compatibility, lineage closure, and policy declarations. It does
+  not retrieve external artifacts, authenticate a lab, verify calibration
+  certificate signatures, establish population representativeness, prove a
+  solver result, or establish that an acceptance envelope is scientifically
+  appropriate.
+- A corpus query proves only that the seeded row was revalidated and that the
+  caller requested its exact partition inside its declared context. The
+  returned `Evidence<&CorpusDataset>` deliberately has numerical `NoClaim` and
+  cannot be certified. Its statistical and model-form components are likewise
+  unknown/unbounded rather than silently absent, while model validity retains
+  the dataset context box for conservative downstream intersection. The
+  dataset-level color is a maximum support cap, not a minted `Color` or a
+  validated prediction.
+- The seed CHT row is synthetic Level B and therefore physically `Estimated`.
+  Its CSV is an authored tabulation of a hard-coded query, not raw sensor data;
+  the stored `1.0 K` value is an acceptance tolerance, not measurement
+  uncertainty. Instrument, calibration, placement, geometry, environment,
+  acquisition-date, and replayable-export authority are explicitly unavailable
+  and emitted as WARN gaps. It is a worked schema migration, not external
+  validation.
+- The Martin-Moyce row binds the exact retained digitized JSONL bytes and the
+  live consumer path, not the lost experiment or digitization workflow. The
+  original raw records, instruments, calibration, placement, acquisition
+  environment/date, digitizer lineage, redistribution authority, and a
+  defensible scalar acceptance envelope are unavailable or unresolved. The
+  row is Level C by source family but remains physically `Estimated`, carries a
+  numerical `NoClaim`, and cannot establish L4 experimental validation.
+- The 19 Level-A thermal rows are reference definitions and theoretical order
+  targets. Their tests independently recompute closed-form scalars and enforce
+  the target matrix, but no row binds a thermal solver output, mesh/refinement
+  ladder, adjoint run, or machine fingerprint. P2 primal/adjoint rows and all
+  unimplemented domain families are intentionally target-only. Registration is
+  therefore not a G1 pass, not solution verification, and not evidence that a
+  thermal kernel exists; a consuming crate must retain its own comparison or
+  `fs-mms::OrderVerdict` receipt before making that claim.

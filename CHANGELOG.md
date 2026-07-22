@@ -60,6 +60,39 @@ workstream.
   — add the capability-maturity registry and governed promotion events that
   supply the README's current evidence boundary.
 
+### Post-checkpoint validation-corpus authority slice
+
+- Added a versioned, canonical `fs-vvreg` corpus schema covering retained
+  payload identity, sensors and uncertainty, geometry, environment, dataset
+  partition, preprocessing lineage, context of use, license, provenance,
+  retention, acceptance regimes, and A-E evidence levels.
+- Added exact-partition and dimensioned context query gates. Successful seeded
+  queries deliberately return numerical `NoClaim`; caller-built registries
+  cannot acquire query authority.
+- Registered two worked rows: an explicitly synthetic Level-B CHT fixture and
+  the existing Martin-Moyce 1952 digitized square-column curve as a Level-C
+  retained artifact.
+- Preserved the Martin-Moyce row's evidentiary gaps instead of fabricating
+  metadata: original raw records, instrument/calibration/placement authority,
+  acquisition environment/date, digitization replay, redistribution authority,
+  and a defensible scalar envelope are recorded as unavailable or unresolved.
+  Those gaps force the physical support cap to `Estimated`.
+- Added deterministic audit output that reports optional omissions and
+  reason-bearing claim-authority gaps as `WARN`, while structural defects remain
+  `ERROR` failures.
+- This registry slice does not establish a production validation corpus or an
+  L4 capability. It records what bytes and metadata exist, and makes the
+  no-claim boundary executable.
+- Added a retained Level-A thermal manifest with 19 versioned rows: 12
+  independently recomputed analytic references across conduction, fin,
+  transient, convection-limit, radiation, and contact families, plus seven G1
+  primal/adjoint order targets covering P1/P2, Neumann/Robin, and nonlinear
+  anisotropic cases.
+- Every Level-A row is explicitly reference-only or target-only. Registry
+  queries remain numerical `NoClaim`; no solver output, mesh/refinement ladder,
+  adjoint run, or machine fingerprint is bound yet, so registration is not
+  reported as a G1 pass.
+
 ## Version Timeline
 
 There are no git tags and no GitHub Releases as of

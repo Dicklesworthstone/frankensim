@@ -1,0 +1,2 @@
+schema_version,artifact_kind,query_id,quantity,reference_answer_si,unit,solver_tolerance_si,reference_cost_work_units,partition
+1,synthetic-query-reference,cht-q3,hotspot_thermal_margin,7.4,K,1.0,250.0,validation

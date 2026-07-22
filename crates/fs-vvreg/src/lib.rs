@@ -33,6 +33,13 @@ use std::sync::LazyLock;
 
 mod seed;
 
+/// Versioned, evidence-bearing validation datasets with fail-closed partition
+/// and context-of-use queries.
+pub mod corpus;
+
+/// Reference-only Level-A thermal analytic values and G1 order targets.
+pub mod thermal_level_a;
+
 /// Versioned standards-edition, source-lineage, and derived-rule manifest.
 pub mod standards;
 

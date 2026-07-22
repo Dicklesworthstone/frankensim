@@ -13,6 +13,7 @@ layer = "UTIL"
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
 
