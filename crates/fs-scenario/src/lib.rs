@@ -6,6 +6,10 @@
 //! conditions are where simulations quietly become invalid; this crate
 //! makes that class of mistake a structured, fixable refusal instead.
 //!
+//! Scenario objects name geometry through the [`entity`] module's persistent
+//! identities (`Assembly -> Part -> Region | Surface | Interface`) rather than
+//! through strings a rename can silently orphan.
+//!
 //! Layer: L3 (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,
 //! fs-rand, fs-cheb, fs-exec, fs-ga, fs-ivl, fs-motion, fs-math. The Design Ledger stores
 //! scenarios as canonical-IR artifacts — that integration lives ABOVE this layer
@@ -13,6 +17,7 @@
 
 pub mod bc;
 pub mod ensemble;
+pub mod entity;
 pub mod frame;
 pub mod ir;
 pub mod payload;
@@ -22,6 +27,16 @@ pub mod signal;
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 pub use ensemble::{
     DEFAULT_REALIZATION_BUDGET, Realization, RealizationBudget, SpectrumModel, StochasticEnsemble,
+};
+pub use entity::{
+    Binding, BindingRow, BindingTable, ContactSide, Correspondence, DEFAULT_ENTITY_BUDGET, Datum,
+    DatumFeature, DatumId, Entity, EntityBudget, EntityCatalog, EntityDeclaration, EntityError,
+    EntityId, EntityKind, EntityRef, EntityStatus, EvidenceTier, GeometryFingerprint,
+    IdentityReceipt, ImportOutcome, ImportRevision, ImportScope, ImportStep, ImportedEntity,
+    InterfacePair, InterfacePairing, KindExpectation, LegacyMigration, MatchBasis, NameLookup,
+    Placement, PlacementBasis, RebindEvent, ReferenceSite, Resolution, ResolutionFault, Tolerance,
+    ToleranceKind, ToleranceSource, migrate_legacy_scenario, scenario_reference_sites,
+    validate_bindings,
 };
 pub use frame::{
     Frame, FrameId, FrameMotion, FrameMotionKind, FrameMotionLoweringError, FrameTree,

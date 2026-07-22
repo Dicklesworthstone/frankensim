@@ -1,0 +1,334 @@
+# CONTRACT: fs-conduction
+
+> Bead `frankensim-extreal-program-f85xj.5.1`. The cooling vertical's core
+> physics capability: a steady heat-conduction solve on tetrahedral complexes.
+
+## Purpose and layer
+
+Assemble and solve the STEADY heat-conduction equation on `fs-feec` tet
+complexes, with anisotropic and temperature-dependent conductivity from
+`fs-matdb` cards whose query receipts travel with the solve. Layer: **L3**
+(FLUX).
+
+Strong form:
+
+```text
+  −∇·(k(T, x) ∇T) = f             in Ω
+                T = T_D           on Γ_D
+        (−k∇T)·n  = q_n           on Γ_N
+        (−k∇T)·n  = h (T − T_ref) on Γ_R
+```
+
+Weak form solved (find `T ∈ H¹` with `T = T_D` on `Γ_D`, for all
+`v ∈ H¹_{0,Γ_D}`):
+
+```text
+  ∫_Ω ∇v·k(T)∇T dV + ∫_{Γ_R} h v T dA
+      = ∫_Ω v f dV − ∫_{Γ_N} v q_n dA + ∫_{Γ_R} h v T_ref dA
+```
+
+Discretization: continuous P₁ Lagrange — the FEEC 0-form (Whitney vertex-hat)
+space. Element geometry (signed volumes, the constant barycentric gradients
+`∇λ_a`, the gradient Gram) comes from `fs_feec::element_geometry`; nothing here
+re-derives it. Assembly stages triplets into `fs_sparse::Coo`.
+
+### Sign conventions (declared once, applied everywhere)
+
+- `q = −k∇T` is the heat-flux vector, W/m².
+- `q_n = q·n` with `n` the OUTWARD unit normal: **positive `q_n` means heat
+  LEAVING the domain**. `fs-scenario`'s `Physics::Thermal / BcKind::Neumann`
+  row fixes the dimensions (W/m²) and not the sign, so this is this crate's
+  declaration.
+- `f` is a volumetric SOURCE, W/m³: positive adds heat.
+- `EnergyBalance::dirichlet_in_w` is heat ENTERING through Dirichlet rows.
+
+### Quadrature (the exactness claim, stated)
+
+| integral | rule | exact for |
+| --- | --- | --- |
+| `∫_e ∇λ_a·K∇λ_b dV` | `V · gᵀ_a K g_b` | any constant `K` on the element — the P₁ gradients are constant, so this is not a quadrature at all |
+| `∫_e λ_a f dV` | `Σ_b V(1+δ_ab)/20 · f_b` | `f` linear on the element (second-order otherwise) |
+| `∫_F λ_a q_n dA` | `Σ_b A(1+δ_ab)/12 · q_b` | `q_n` linear on the face |
+| `∫_F h λ_a λ_b dA` | `h̄_F · A(1+δ_ab)/12` | `h` constant on the face (second-order otherwise); `h̄_F` is the face mean |
+| `∫_F h λ_a T_ref dA` | `h̄_F · Σ_b A(1+δ_ab)/12 · T_ref,b` | `h` face-constant AND `T_ref` linear on the face |
+
+`K` is evaluated once per element at `T̄_e`, the element mean of the P₁
+iterate. For P₁ that mean is the EXACT element average of `T_h`, so for `k`
+linear in `T` the element integral `V·k(T̄_e)` equals `∫_e k(T_h) dV` exactly;
+for a curved `k(T)` it is the midpoint rule, second-order in the element
+diameter.
+
+## Public types and semantics
+
+| type | meaning |
+| --- | --- |
+| `ConductionMesh` | a tet complex with element geometry and its EXTRACTED boundary (faces incident to exactly one tet), each with area, outward normal, centroid |
+| `ScalarField` | uniform or per-vertex nodal data; the single carrier for every boundary value and source. There is no closure-valued field — a closure cannot be snapshotted or content-addressed |
+| `ThermalBc` | `Dirichlet{temperature}`, `Neumann{outward_flux}`, `Robin{htc, t_ref}` |
+| `ThermalBoundaryBuilder` / `ThermalBoundary` | a boundary PARTITION: regions may not overlap, leftovers refuse unless an adiabatic remainder is declared out loud |
+| `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them |
+| `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite |
+| `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
+| `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
+| `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |
+| `ConductivityDesign` | the IFT adjoint hook for the LINEAR case: `dJ/dρ` over per-element conductivity multipliers |
+| `ConductionError` | the total typed refusal set; `rule()` gives a stable slug |
+
+### `ThermalBc::from_scenario_row` — the Robin seam
+
+`fs-scenario`'s Robin row is `expectation(Physics::Thermal, BcKind::Robin) ==
+Value(HTC)`: the transfer coefficient ONLY. `BoundaryCondition` carries no
+companion `T_ref`. This crate therefore requires `T_ref` to be named at the
+lowering call — explicitly, or from `Environment::ambient_temperature`. That is
+the seam the E05 correlation rung plugs into: a correlation computes `h`, the
+reference temperature stays a declared property of the row, and the solve never
+guesses which ambient a coefficient was fitted against.
+
+Time signals, Chebyshev spatial profiles, and typed payloads are REFUSED at the
+lowering boundary — this crate is steady-only and consumes no time histories.
+
+### The nonlinear driver: globalization and stop rule, both declared
+
+Stop rule (`StopRule`), accepted when either clause holds:
+
+```text
+  ‖R(T)‖₂ ≤ residual_rtol · ‖b_f(T)‖₂ + residual_atol      (residual clause)
+  ‖ΔT‖∞  ≤ step_atol on the last accepted step             (step clause)
+```
+
+Exhausting `max_iterations` is `ConductionError::NotConverged`, never a quiet
+answer. The reason a run stopped is in `ConductionReport::stop_reason`.
+
+Globalization (`Nonlinearity`):
+
+- `FixedPoint { relaxation ω, max_backtracks }` — damped Picard,
+  `T ← T + ω(y − T)` with `A(T)y = b(T)`. `A(T)` is SPD, so this path runs
+  preconditioned CG.
+- `Newton { line_search }` — Armijo sufficient decrease on `‖R‖₂`:
+  accept when `‖R(T + αδ)‖ ≤ (1 − c α)‖R(T)‖`, shrink by `shrink` per
+  backtrack, at most `max_backtracks`. The Jacobian carries the
+  `(V/4) gᵀ_a K'(T̄_e) ∇T_h` term, which is NOT symmetric, so this path runs
+  FGMRES.
+
+Both share the **admissibility guard**: a trial iterate whose element mean
+leaves the material's sampled temperature span has no merit value at all, so it
+is rejected and the step shrunk. Extrapolating material data is never a fallback.
+
+Preconditioner: ILU(0) where the factorization exists, Jacobi where it breaks
+down. The choice is a pure function of the matrix, so a replay picks the same one.
+
+### Residual claims are re-measured, not relayed
+
+`fs-solver` reports CG's residual as a `ResidualClaim::RecursiveEstimate` — an
+estimate that drifts in the dangerous direction. This crate therefore RECOMPUTES
+`‖b − Ax‖₂/‖b‖₂` after every linear solve and gates on that recomputed number
+(`LinearSolveEvidence::true_relative_residual` / `converged_true`). The
+producing solver's own typed claim is carried verbatim in
+`LinearSolveEvidence::reported` so the two are never confused.
+
+## Invariants
+
+1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +
+   Robin operator is symmetric to `1e-12` relative and has a positive Rayleigh
+   quotient on the probed set. Evidence:
+   `tests/conformance.rs::assembled_operator_is_symmetric_and_positive_definite`.
+2. **Element nullspace.** Every element matrix annihilates the constant vector
+   (`Σ_b K^e_ab = 0`) — the discrete `∇·(K∇c) = 0`. Evidence:
+   `tests/conformance.rs::element_stiffness_rows_sum_to_zero`.
+3. **Elimination consistency.** The free rows of `A·T_full − b` are the reduced
+   system's residual, and prescribed vertices survive the solve bit-exactly.
+   Evidence: `tests/conformance.rs::dirichlet_elimination_matches_the_full_residual`.
+4. **Boundary partition.** Regions never overlap; leftover faces refuse unless
+   an adiabatic remainder is declared. At a vertex shared by two Dirichlet
+   regions the LOWEST declared region index wins — a deterministic tie-break,
+   not a traversal artefact.
+5. **Jacobian correctness.** The assembled Newton Jacobian agrees with central
+   differences of the residual to `1e-5` relative on a non-uniform iterate.
+   Evidence: `tests/conformance.rs::newton_jacobian_matches_central_differences`.
+6. **Material provenance is never invented.** `ConductivityModel::provenance()`
+   returns `MatdbReceipts` only when EVERY component came from an `fs-matdb`
+   query with a retained receipt; a declared constant says `Declared`.
+   Evidence: `tests/conformance.rs::matdb_receipts_travel_with_the_solve`,
+   `::declared_conductivity_never_claims_matdb_provenance`.
+7. **No implicit extrapolation.** Sampling outside a claim's validity refuses;
+   evaluating outside the sampled grid refuses. Evidence:
+   `tests/conformance.rs::material_queries_outside_validity_refuse`.
+8. **Energy balance.** `closure_w = source + dirichlet_in − neumann_out −
+   robin_out` equals `−Σ_{free} r_i` identically; on a converged solve it is
+   below `1e-9` relative. Evidence: `tests/conformance.rs::energy_balance_closes`.
+
+## Error model
+
+Every fallible path returns `ConductionError`, a total typed enum with a stable
+`rule()` slug, the offending quantity, and — where one exists — the fix. No
+panics cross the crate boundary: `fs-feec`'s degeneracy ASSERTION is pre-empted
+by a `DegenerateElement` refusal, and `ConductionMesh::new` validates sizes and
+finiteness before any kernel runs.
+
+Structurally impossible internal states are `expect`/`debug_assert` (e.g. the
+converged step caching its own assembled system); they are not reachable from
+any public input.
+
+Two refusals exist specifically to stop a plausible wrong answer:
+
+- `SingularPureNeumann` — with neither a Dirichlet nor a Robin row the steady
+  operator is singular up to a constant. A Krylov method would return something
+  that looks like a temperature field. This refuses instead.
+- `LinearSolveFailed` — raised on the RECOMPUTED Euclidean residual, not the
+  solver's recurrence estimate.
+
+## Determinism class
+
+**`DeterministicPerIsa`** — bit-identical across runs, worker counts, and build
+modes on ONE ISA. Cross-ISA bit-identity is NOT claimed.
+
+Why it is achievable, mechanism by mechanism:
+
+- Assembly stages into `fs_sparse::Coo`, whose canonicalization is a pure
+  function of the staged `(row, col, sequence, value)` tuples; element and face
+  loops traverse in canonical index order regardless of tile size, so tiling
+  cannot move a bit.
+- Every inner product and norm goes through `fs-solver`'s fixed-shape chunked
+  reduction (shape depends on length only, never on threads).
+- Preconditioner selection is a pure function of the matrix. Every Krylov method
+  starts from `x₀ = 0`. There is no RNG anywhere in this crate.
+- Conductivity tables are piecewise-linear with a declared tie-break (a
+  temperature landing exactly on an interior knot uses the segment to its
+  RIGHT), so `eval` and `derivative` agree on which piece is in force.
+- The library calls NO platform transcendental. Only `sqrt` (IEEE-754
+  correctly rounded, hence exempt) and, in `fixtures::annulus_sector`,
+  `fs_math::det::{sin, cos}`.
+
+Why the class is not stronger: the cross-ISA claim requires a G5 audit on both
+reference ISAs per `docs/DETERMINISM_CLASSES.md`, and none has been run for this
+crate. The code is already libm-free on its default path, so the promotion is a
+matter of running the audit, not of changing the arithmetic.
+
+Evidence at the claimed class: `tests/conformance.rs::replay_is_bitwise_identical`
+(same solve twice, bitwise) and `::snapshot_resume_reproduces_the_uninterrupted_trajectory`
+(pause → seal → restore → resume reproduces the straight run bitwise).
+
+## Cancellation behavior
+
+Element and boundary-face loops run in tiles of `ASSEMBLY_TILE` (512) and poll
+`Cx` at every tile boundary; the nonlinear driver polls once per iteration. A
+cancelled run returns `ConductionError::Cancelled { stage, at }` naming the
+stage (`"assemble-elements"`, `"assemble-boundary"`, `"assemble-jacobian"`,
+`"nonlinear-iteration"`) and the tile or iteration index that was about to run.
+
+Cancellation DRAINS: the partially staged `Coo` is dropped, and a cancelled
+iteration leaves `ConductionState` untouched — no half-applied update can
+survive. Evidence: `tests/conformance.rs::cancelled_assembly_is_a_structured_refusal`,
+`::cancellation_mid_iteration_drains_with_a_structured_refusal` (which asserts
+the state is unchanged).
+
+Resumability: `ConductionState` implements `fs_exec::solver::SolverState`
+(`TYPE_ID = 0xf5c0_4d75_c710_0001`, `SCHEMA_VERSION = 1`), so `snapshot()` seals
+into the versioned envelope and `restore()` validates magic, type id, schema
+version, length, and checksum BEFORE the payload decoder runs. A flipped byte,
+a truncation, and an append are all refused. Evidence:
+`tests/conformance.rs::snapshot_envelope_refuses_tampered_bytes`.
+
+## Unsafe boundary
+
+None. `unsafe_code` is denied workspace-wide and this crate registers no capsule.
+
+## Feature flags
+
+None. Everything here is `[S]` solid work on the default path.
+
+## Conformance tests
+
+- `tests/conformance.rs` — G0 algebraic laws, G4 cancellation drills, G5
+  determinism and snapshot round-trips, and the typed refusal surface (22 tests).
+- `tests/mms.rs` — the G1 battery: five manufactured-solution ladders gated by
+  `fs_mms::OrderGate`, plus the declared `MmsMatrix` whose gaps carry reasons.
+- `tests/analytic.rs` — slab (Dirichlet–Dirichlet), slab with a uniform source,
+  slab (Dirichlet–Robin), cylindrical shell, and a straight fin, each with a
+  declared envelope and a stated reason for its size.
+- `tests/adjoint.rs` — the linear IFT gradient against central differences
+  through `fs_adjoint::verify_gradient`.
+
+Every test prints a JSON-lines verdict carrying the numbers it asserted, so a
+failure reproduces from its log line alone.
+
+## No-claim boundaries
+
+**Physics scope.**
+
+- STEADY ONLY. There is no time derivative, no heat capacity, no transient
+  staging, and no initial condition. `ConductionState` is an ITERATION state,
+  not a time state.
+- NO RADIATION. No surface-to-ambient linearization, no gray-diffuse enclosure
+  exchange, no view factors.
+- NO CONVECTION PHYSICS. The Robin row is a convective BOUNDARY COUPLING: `h`
+  is an input. This crate computes no correlation, solves no boundary layer, and
+  has no fluid side. Conjugate coupling is a separate bead.
+- NO CONTACT RESISTANCE. Interfaces are perfectly conducting; a TIM/contact
+  model is a separate bead.
+- NO PHASE CHANGE, no latent heat, no moving boundaries.
+
+**Numerical scope.**
+
+- P₁ (FEEC 0-form) elements only, on body-fitted TET complexes. No higher-order
+  thermal elements, no hexes, no CutFEM frontend.
+- Flux recovery (`element_heat_flux`) is the natural element-wise-constant
+  `−K∇T_h`. It is one order lower than the temperature, it is NOT
+  flux-conserving, and NO superconvergence is claimed for it.
+- The energy balance checks the assembled operator against an independent
+  post-integration of the SAME boundary data. It catches a sign or scale error
+  in one of those two paths, not an error in the data itself.
+
+**Evidence scope — read this before quoting an order.**
+
+- The G1 orders are OBSERVED, not proven. Each gate says: on these meshes, for
+  these coefficients and data, the fitted log-log slope sits within
+  `fs_mms::ORDER_GATE_TOLERANCE` of the P₁ rate. Nothing is established about
+  other meshes, other coefficients, or non-smooth data.
+- **P₁ on these structured Kuhn meshes reproduces exact solutions up to CUBIC
+  at the nodes** (measured:
+  `tests/conformance.rs::polynomial_reproduction_at_the_nodes`). A ladder run on
+  a quadratic or cubic solution therefore measures the INTERPOLATION error
+  `‖T − I_h T‖`, which does not depend on `K` at all. The two Dirichlet ladders
+  use a QUARTIC solution for exactly this reason; the Neumann and Robin ladders
+  stay on lower-order solutions because those keep the BOUNDARY DATA exactly
+  representable in the P₁ trace space, which is what those cases test. Anyone
+  reading those two ladders as evidence about the interior operator is reading
+  more than is there.
+- A residual is not an error bound. This crate reports residuals, an energy
+  balance, and observed orders. It ships NO certified bound on `‖T − T_h‖` and
+  no goal-oriented (DWR) estimate. The `ConductionReport` deliberately has no
+  field that could be mistaken for one.
+- The fin case is a MODEL comparison against the 1-D fin equation, not a
+  discretization check. Its 2% envelope carries the fin model's own error; the
+  Biot number that bounds it is computed and printed by the test.
+- The cylindrical case's CONDUCTANCE envelope (0.5%) is dominated by GEOMETRY:
+  the annulus is meshed as a polygon, so the solved surface sits a chord sagitta
+  inside the true cylinder. Its L2 envelope (0.2% of the radial drop) is the
+  discretization claim, and it is checked to shrink like `h²`.
+- The adjoint hook covers the LINEAR case only, and refuses a
+  temperature-dependent material rather than silently linearizing. A verified
+  gradient establishes consistency between the assembled `∂R/∂T`, the analytic
+  pullback, and the primal solve — nothing about shape derivatives, mesh
+  sensitivity, or goal-oriented error.
+
+**Deferred, and why.**
+
+- **G5 golden replay.** This crate pins no golden hash. Every golden/replay hash
+  must have a row in `golden-couplings.json` (see below), which is outside this
+  bead's file boundary. The determinism evidence here is self-consistency
+  (replay and snapshot-resume bitwise), which is weaker than a registered
+  golden and is labelled as such.
+- **Cross-ISA determinism.** No G5 audit has been run on a second ISA, so the
+  class stays `DeterministicPerIsa`.
+- **Nonlinear adjoint.** Refused rather than approximated.
+- **Parallel assembly.** The assembly is single-threaded. The determinism
+  argument above states what a parallel implementation would have to preserve
+  (staging in canonical element order), but no parallel path exists to test.
+
+## Golden couplings (bead y4pt)
+
+This crate pins NO golden or replay hash, so it has no row in
+`golden-couplings.json`. Adding one is the precondition for a G5 golden-replay
+claim; until then the determinism evidence is the self-consistency lane
+described above.

@@ -939,6 +939,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-conduction"
+version = "0.0.1"
+dependencies = [
+ "fs-adjoint",
+ "fs-alloc",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-feec",
+ "fs-matdb",
+ "fs-math",
+ "fs-mms",
+ "fs-qty",
+ "fs-rep-mesh",
+ "fs-scenario",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-conform"
 version = "0.0.1"
 dependencies = [
@@ -2237,6 +2257,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-qty",
 ]
 
 [[package]]

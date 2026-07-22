@@ -1,0 +1,32 @@
+[package]
+name = "fs-conduction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Steady heat conduction on tet complexes: FEEC 0-form weak-form assembly, anisotropic and temperature-dependent k(T) from fs-matdb with retained query receipts, Dirichlet/Neumann/Robin thermal boundary rows, and declared-globalization nonlinear solves."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-adjoint = { path = "../fs-adjoint" }
+fs-exec = { path = "../fs-exec" }
+fs-feec = { path = "../fs-feec" }
+fs-math = { path = "../fs-math" }
+fs-matdb = { path = "../fs-matdb" }
+fs-qty = { path = "../fs-qty" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-scenario = { path = "../fs-scenario" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-mms = { path = "../fs-mms" }
+
+[lints]
+workspace = true

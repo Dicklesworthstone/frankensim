@@ -7,7 +7,8 @@ IR), and admission-time validity checks that catch the class of mistakes
 no solver can fix.
 
 Ambition tags: typed BCs/frames/signals/combos [S]; seeded ensembles
-(Dryden, Kanai–Tajimi, Carreau bands) [S]; canonical IR [S].
+(Dryden, Kanai–Tajimi, Carreau bands) [S]; canonical IR [S]; persistent entity
+identity with rebinding receipts [S].
 
 ## Purpose and layer
 
@@ -113,6 +114,48 @@ flagships.
   summed. Contact pairs are unordered; a repeated equal model is a duplicate
   and a repeated different model is a conflict, both with declaration-row
   provenance.
+- `entity` — persistent ENTITY IDENTITY: `Assembly -> (Assembly | Part)`,
+  `Part -> (Region | Surface)`, and `Interface` under the assembly or part that
+  contains both of its sides. `EntityId { kind, digest }` is derived by BLAKE3
+  over a length-prefixed, domain-separated preimage of the kind tag, the parent
+  identity (which transitively encodes the whole parent path), the declared
+  name, the optional `GeometryFingerprint`, and the optional `InterfacePair`.
+  `EntityDeclaration::identity` is pure — no catalog is consulted — so a caller
+  can compute an identity before declaring it. DISPLAY NAMES ARE NOT IN THE
+  PREIMAGE: `EntityCatalog::rename` moves the display name and appends a
+  `Rename` receipt while every binding stays on the same identity.
+  `InterfacePairing::Ordered` keeps declaration order (`applied_side` is the
+  side a one-sided treatment such as a TIM is applied to) and makes `(a, b)`
+  and `(b, a)` distinct identities; `Unordered` canonicalizes the pair into one
+  identity and `applied_side` returns `None` rather than defaulting to a side.
+  `EntityCatalog` stores entities in declaration order with a sorted identity
+  index, refuses a repeated declaration as `DuplicateDeclaration` and a
+  different declaration landing on a present digest as `IdentityCollision`,
+  and appends every identity event to a hash-chained `IdentityReceipt` log
+  (`receipt_root`, `verify_receipts`, per-receipt `verifies`).
+  `ImportRevision { label, event, scope, entities }` applies an import,
+  re-mesh, or revision migration ATOMICALLY: `Correspondence::Auto` matches on
+  geometry fingerprint first and declared name plus corresponding parent path
+  second, refuses a tie as `AmbiguousImportMatch` instead of taking a first
+  match, and `ImportScope::Complete { root }` retires active strict descendants
+  of `root` the revision omits (the root itself is never auto-retired) while
+  `ImportScope::Partial` leaves them untouched. `resolve` follows supersession
+  links under an explicit hop budget and reports the WEAKEST `EvidenceTier`
+  along the chain. `EntityRef`/`ReferenceSite`/`BindingTable` carry scenario
+  references BY IDENTITY, and `validate_bindings` resolves all of them into the
+  same `Violation { code, what, fix }` shape. `migrate_legacy_scenario` turns
+  every distinct region string into a declared-name `Surface` carrying the
+  legacy marker under one synthetic part; the marker is metadata, not identity,
+  so re-running the migration re-derives the same identities and appends no
+  receipts. `Datum`/`Tolerance`/`Placement` are typed declarations: datum
+  hierarchies are acyclic by construction (a datum's identity depends on the
+  identities it references), tolerance magnitudes must be finite positive
+  lengths, form controls forbid a datum frame while orientation/location
+  controls require one of at most `MAX_DATUM_FRAME_LEN` distinct datums, and a
+  placement names a scenario `FrameId` rather than introducing a parallel frame
+  system (its existence and uniqueness in the scenario's `FrameTree` are
+  checked by `validate_bindings`, not at declaration time, because the catalog
+  does not hold the scenario).
 - `ir::write_ir`/`ir::parse_ir` — canonical byte-stable, explicitly versioned
   s-expression encoding. v2 writes six-base `[m, kg, s, K, A, mol]` vectors;
   explicit v1 and historical unversioned five-vector forms decode by appending
@@ -261,6 +304,32 @@ flagships.
     context as borrowed formatters, so the green path does not allocate or copy
     identity names merely in case a finding is needed.
 
+13. **Identity is a pure function of the declaration preimage**: equal
+    `(kind, parent, declared name, fingerprint, interface pair)` tuples derive
+    equal `EntityId`s and nothing else does within the checked catalog. Every
+    variable-length component is length-prefixed, so no two distinct
+    declarations share a preimage by concatenation. Display names and the
+    legacy marker are excluded, which is exactly why a rename cannot orphan a
+    binding and why mechanical legacy migration is idempotent.
+14. **One successor per identity**: a superseded identity records exactly one
+    successor (`AmbiguousSupersession` otherwise), a superseded or retired
+    identity can never be redeclared or revived
+    (`InactiveIdentityRedeclared`), and resolution therefore walks a chain, not
+    a graph. Resolution reports the WEAKEST `EvidenceTier` on that chain: a
+    content-matched hop after an asserted hop still resolves as `Asserted`.
+15. **Revisions are atomic**: `apply_import` either applies every step with its
+    receipts or leaves the catalog exactly as it was; a refused revision
+    mutates nothing, including the receipt log.
+16. **The receipt log is an append-only hash chain**: receipt `i` has sequence
+    `i` and binds the previous root, so an interior edit, a reorder, or a
+    dropped receipt fails `verify_receipts`.
+17. **Referential integrity**: `validate_bindings` resolves EVERY binding and
+    enumerates every base-BC, case-BC, and contact-side site. Unresolved,
+    retired, over-deep, wrong-kind, duplicated, orphaned, unbound, and
+    string-ambiguous references are structured findings with fix hints; there
+    is no first-match fallback anywhere on the path from a reference to an
+    entity.
+
 ## Error model
 
 `ScenarioError`: `Dimensions { context, expected, got }`, `Frame`,
@@ -276,7 +345,26 @@ refusal, and cancellation with phase/completed/planned work. Admitted validation
 `Vec<Violation>` (code + what + fix) rather than failing fast — agents get the
 whole repair list at once.
 
+`EntityError` is the entity layer's typed refusal set (name shape, unknown or
+inactive parent, containment, interface pair shape/side/scope, duplicate
+declaration, digest collision, inactive-identity redeclaration, unknown entity,
+unknown or duplicate datum, datum-owner kind, placement-occurrence kind,
+ambiguous import match, ambiguous supersession, inactive predecessor,
+non-revision event, ambiguous or unknown declared name, capacity, allocation,
+hop budget). Every variant exposes a stable `code()`, a ranked `fix()`, and
+`into_violation()`, so an entity refusal enters the same diagnostic shape as
+the rest of the crate rather than a second one. `ResolutionFault`
+(`Dangling`, `Retired`, `DepthExceeded`, `KindMismatch`) is the resolution-time
+subset and carries the same `code`/`fix` pair.
+
 ## Determinism class
+
+**D0** for the entity layer: identity derivation, datum identity, and receipt
+digests are pure BLAKE3 over byte-exact preimages with no floating point, no
+hashing-order dependence (entities, receipts, datums, tolerances, placements,
+and bindings are all declaration-ordered `Vec`s with sorted lookup indexes),
+and no wall-clock or address-derived input. Two independent builds of the same
+model produce identical identities and identical receipt roots.
 
 **D0**: signal evaluation, frame poses (fs-ga + fs_math::det trig), and
 ensemble realizations (Philox + det trig, fixed draw/summation order) are
@@ -458,6 +546,46 @@ None.
   recurrence and proves the private finding buffer is not published.
 - A focused checkpoint-deduplication regression proves per-element polling and
   canonical `+0.0` retention when both signed-zero encodings occur.
+`tests/entity_identity.rs` (JSON verdicts, suite `fs-scenario/entity`):
+
+- **ec-001** the representative cooling stack (assembly, three parts, two
+  regions, seven surfaces, three interfaces, three datums, three tolerances,
+  two placements) is expressed by identity and resolves every one of its eight
+  reference sites; ordered interfaces name an applied side and the unordered
+  one refuses to.
+- **ec-002** six renames move display names only: every binding resolves to the
+  same identity with the same hop count and evidence tier, and the declared
+  names do not follow the display names.
+- **ec-003** a full CAD-rename re-import supersedes 16 identities — 13 bodies on
+  content-matched receipts and 3 interfaces on declared-path receipts — and
+  every binding still resolves, one hop away, onto an entity with the same
+  geometry fingerprint and kind but a different declared name.
+- **ec-004** re-applying the identical revision mints no identity, appends 16
+  `Unchanged` receipts, and leaves the rendered binding table byte-equal.
+- **ec-005** dangling, retired (via a `Complete` revision), caller-kind,
+  site-kind, orphan-site, duplicate-binding, unbound-site, and
+  ambiguous-declared-name references are all reported with nonempty fix hints.
+- **ec-006** a string-only scenario migrates mechanically: seven distinct
+  region strings become seven legacy-marked declared-name surfaces with no
+  invented fingerprints, re-running appends zero receipts, and a drifted region
+  string is caught as `entity-legacy-name-drift`.
+- **ec-007** datum hierarchy, tolerance dimensional typing, form/location datum
+  rules, datum-frame arity and repetition, empty tolerance sources, placement
+  round-trip through `FrameTree::world_pose`, and an undeclared placement frame.
+- **ec-008** the lifecycle: author from strings, import-bind onto real
+  geometry (path-matched), rename, re-mesh re-import, then validate — all eight
+  bindings still resolve, the re-meshed face through two hops, and a reserved
+  `Sensor` site binds through the same shape.
+- **ec-009** identity derivation, receipt roots, and site enumeration are
+  identical across two independent builds of the same model.
+- In-crate `entity::identity_tests` cover preimage injectivity and
+  length-prefixing, kind/parent/fingerprint sensitivity, interface ordering,
+  containment rules, duplicate-versus-collision refusals (the collision branch
+  is exercised by forcing a colliding row on both the declare and the import
+  path), datum-owner and placement-occurrence kind checks, rename receipts, chain
+  verification against field tampering/reordering/truncation, weakest-link
+  resolution, hop budgets, ambiguous automatic matching, revision atomicity,
+  and the declared-name ambiguity that motivates the whole module.
 - `tests/typed_bc.rs` locks all eight typed expectation rows, carrier/kind/
   six-base-dimension/frame refusals, heterogeneous characteristic admission,
   typed-total-flow refusal, exact compatibility semantics, typed payload
@@ -492,10 +620,73 @@ None.
   equations, orientation transforms, conservation checks, and solver support
   remain in their owning FLUX crates. New pairs still require an explicit
   `expectation` table row plus tests; there is no open-ended fallback.
+- **A content-derived identity proves byte equality of its preimage, and
+  nothing about the physical world**: equal `EntityId`s prove the two
+  declarations supplied the same kind, parent identity, declared name,
+  fingerprint, and pairing. They are NOT a claim that two revisions describe
+  the same physical part, that the entity exists in any geometry kernel, or
+  that anyone measured anything. A `GeometryFingerprint` is BLAKE3 over exactly
+  the bytes the importer chose to hash: this crate never parses, canonicalizes,
+  meshes, or inspects geometry. Equal fingerprints therefore prove equal
+  supplied bytes; UNEQUAL fingerprints prove nothing at all, because a
+  re-export of an unchanged part routinely produces different bytes. That
+  asymmetry is why `MatchBasis::proves_geometry_bytes_matched` is true only for
+  `GeometryFingerprint` and why a fingerprint mismatch falls back to the weaker
+  `DeclaredPath` tier rather than to "different part".
+- **"Collision-checked" is a fail-closed check, not a collision claim**: on an
+  identity hit the catalog compares the full stored declaration preimage and
+  refuses with `IdentityCollision` when it differs, so two distinct
+  declarations can never alias onto one entity. This is not a claim that
+  BLAKE3-256 collisions are impossible, and the crate does not search for them.
+- **A receipt records a claimed correspondence, not a witnessed operation**:
+  the chain proves the retained log is internally consistent and detects any
+  interior edit, reorder, or dropped entry, because the root is stored beside
+  it. Truncating the log AND the retained root together is only detectable
+  against a root pinned outside the catalog (the Design Ledger's job).
+  `MatchBasis::Asserted` records that a caller asserted a correspondence; this
+  crate verified nothing about it, and `EvidenceTier::Asserted` is the value
+  every downstream reader gets for such a chain — including chains whose other
+  hops are content-matched.
+- **Entity bindings are not in canonical IR**: `Scenario` still carries its
+  string `region`/`region_a`/`region_b` fields, and `write_ir`/`parse_ir`
+  remain byte-identical to their pre-entity behaviour. The `EntityCatalog` and
+  `BindingTable` are sibling values that a scenario is validated AGAINST; they
+  do not round-trip through scenario IR yet, so a scenario reconstructed from
+  canonical bytes alone has no bindings and `validate_bindings` will report
+  every site as `entity-unbound-site`. Persisting the catalog and bindings is
+  the versioned `.fsim` project schema's job (`frankensim-extreal-program-f85xj.6.1`).
+- **`Scenario::validate` does not run entity validation**: `validate_bindings`
+  is a separate explicit entry point. It does not participate in
+  `ValidationPlan`/`ValidationBudget` work accounting, polls no fs-exec `Cx`,
+  and is therefore not cancellation-correct. Entity admission has its own
+  explicit `EntityBudget` caps (entities, receipts, name bytes, supersession
+  hops, hierarchy depth, datums, tolerances, placements, bindings) and reserves
+  fallibly before every catalog mutation, but diagnostic vectors are not
+  byte-metered — the same gap the finding-capacity boundary below describes.
+- **Reserved reference sites are not existence-checked**: `ReferenceSite::Load`,
+  `MaterialBinding`, `Sensor`, and `Requirement` exist so the later scenario
+  objects reuse ONE diagnostic shape. This crate cannot enumerate those
+  collections, so their rows are not checked for existence and they are never
+  reported as unbound; only their entity references are resolved.
+- **Datums, tolerances, and placements are declarations, not evaluations**:
+  this crate checks structure, dimensions, datum-frame arity, and source
+  presence. It does not construct a datum reference frame geometrically,
+  perform tolerance stack-up, decide whether a part conforms, or evaluate a
+  drawing. `PlacementBasis::Nominal` names the frame that is DECLARED to carry
+  an occurrence's placement; the crate does not verify that the frame's
+  transform is where the part actually is, and there is deliberately no
+  as-built variant until the as-built layer lands.
+- **Legacy migration infers no structure**: a bare string carries no part
+  hierarchy and no geometry, so migration puts every migrated surface under one
+  synthetic legacy part with no fingerprint. It is a mechanical renaming of the
+  reference layer, not a reconstruction of the assembly.
 - **Region names are strings here**: binding to fs-geom `Region` objects
   (existence, patch-measure integration for velocity-inlet flux) happens
   in the consuming solver layer; net-flux checking covers DECLARED
-  mass-flow values, not velocity-profile surface integrals.
+  mass-flow values, not velocity-profile surface integrals. The `entity` module
+  gives those references a stable IDENTITY; it does not resolve them to
+  geometry, and an `EntityId` that resolves in the catalog says nothing about
+  whether a chart, mesh, or patch exists for it.
 - **Recorded ground-motion suites (PEER-class) are not bundled**: the
   `Table` signal is the container for imported records; curation of suites is
   data, not code, and lives with fs-uq.

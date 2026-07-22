@@ -140,6 +140,7 @@ members = [
     "crates/fs-flowcert-e2e",
     "crates/fs-vvreg",
     "crates/fs-vmanifest",
+    "crates/fs-conduction",
     "xtask",
 ]
 
