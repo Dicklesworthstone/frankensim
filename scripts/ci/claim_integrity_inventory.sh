@@ -130,6 +130,8 @@ if raw_closed.strip():
     seen = {str(i.get("id")) for i in issues}
     issues = issues + [i for i in closed_issues if str(i.get("id")) not in seen]
 
+SWEEP_SENTINEL = "Filed by the E02 claim-integrity audit sweep"
+
 SEVERITY_PRIORITY = {
     "severity:default-path": 0,
     "severity:gated": 1,
@@ -204,6 +206,25 @@ for issue in sorted(issues, key=lambda i: str(i.get("id", ""))):
             "is an open gating (P0 / severity:default-path) defect with no owner; "
             "assign it with `br update <id> --assignee <agent>`"
         )
+
+    # A finding without a reachable repro and a stated honest claim is not
+    # actionable: the fix bead needs a destination, and the gate's count must
+    # mean "verified exposure", not "someone's suspicion". Beads filed by the
+    # sweep are held to this; retro-tagged history predates the schema and is
+    # only warned about, since rewriting closed history is not the goal.
+    body = str(issue.get("description") or "")
+    swept = SWEEP_SENTINEL in body
+    missing_fields = [
+        name for name, marker in (("repro", "REPRO"), ("honest claim", "HONEST CLAIM"))
+        if marker not in body
+    ]
+    if missing_fields:
+        message = (
+            f"is missing required field(s) {missing_fields}; every defect must carry a "
+            "reachable repro and the honest claim the surface should make instead "
+            "(docs/CLAIM_INTEGRITY.md)"
+        )
+        (entry_failures if swept else entry_warnings).append(message)
 
     if is_open and severity is not None:
         expected = SEVERITY_PRIORITY[severity]

@@ -224,6 +224,11 @@ This table is the known-answer set, not the complete inventory. The complete
 live inventory is whatever `br list -l claim-integrity` returns; run
 `scripts/ci/claim_integrity_inventory.sh` for the checked report.
 
+The first full pass over the claim-emitting surfaces is recorded in
+[`docs/CLAIM_INTEGRITY_SWEEP_2026-07.md`](CLAIM_INTEGRITY_SWEEP_2026-07.md),
+including its per-surface verdicts, the surfaces it left **unaudited**, and an
+honest recall check against the known-answer set above.
+
 ## Enforcement
 
 - `cargo run -p xtask -- check-claims` (part of `check-all`) lints that this
