@@ -805,6 +805,8 @@ dependencies = [
 name = "fs-airflow"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
+ "fs-conduction",
  "fs-convection",
  "fs-evidence",
  "fs-ivl",
@@ -1349,6 +1351,7 @@ dependencies = [
  "fs-checker",
  "fs-ledger",
  "fs-package",
+ "fs-wedge",
 ]
 
 [[package]]

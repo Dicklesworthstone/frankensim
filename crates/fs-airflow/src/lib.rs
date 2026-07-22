@@ -6,6 +6,8 @@
 //! coefficients, and leakage remain model-form estimates; a numerical root
 //! certificate does not promote those physical uncertainties to an enclosure.
 
+pub mod qoi;
+
 use core::fmt;
 use fs_convection::CorrelationInputs;
 use fs_evidence::{

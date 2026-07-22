@@ -11,6 +11,8 @@ description = "Typed fan curves, uncertain loss networks, certified operating-po
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-conduction = { path = "../fs-conduction" }
 fs-convection = { path = "../fs-convection" }
 fs-evidence = { path = "../fs-evidence" }
 fs-ivl = { path = "../fs-ivl" }

@@ -4,14 +4,18 @@
 
 ## Purpose and layer
 
-`fs-airflow` is the L3 low-cost enclosure-airflow rung. It retains typed fan
+`fs-airflow` is the L3 low-cost enclosure-airflow rung and the dependency-safe
+consumer seam for the thermal vertical's decision-facing QoIs. It retains typed fan
 pressure/volume-flow data, validates monotone interpolation, applies bounded
 fan-law speed scaling, composes quadratic loss elements in series and parallel,
-requires an explicit leakage branch, and solves the fan/system operating point.
+requires an explicit leakage branch, solves the fan/system operating point, and
+combines that record with a steady `fs-conduction` solution without making either
+lower-layer solver depend on the other.
 
-Runtime dependencies are `fs-convection`, `fs-evidence`, `fs-ivl`, `fs-math`,
-`fs-qty`, and `fs-regime`. The result flows downward only as evidence-bearing
-typed quantities and as a Re/Pr handoff to the existing convection rung.
+Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
+`fs-evidence`, `fs-ivl`, `fs-math`, `fs-qty`, and `fs-regime`. Results flow
+outward as evidence-bearing typed quantities and as a Re/Pr handoff to the
+existing convection rung.
 
 ## Public types and semantics
 
@@ -31,6 +35,26 @@ typed quantities and as a Re/Pr handoff to the existing convection rung.
 - `OperatingPoint::correlation_handoff` converts one branch flow to typed mean
   velocity, computes Reynolds through role-tagged `fs-regime` dimensions, and
   produces `fs-convection::CorrelationInputs` without discarding evidence.
+- `qoi::extract_thermal_qois` consumes a `ConductionSolution`, its exact
+  `ConductionMesh`, an `OperatingPoint`, declared junction/surface regions, a
+  cited fan-efficiency interval, and a cited maximum-temperature requirement.
+  It emits the five E05.10 families: deterministic maximum junction
+  temperature, pressure drop, fan input power, surface mean/uniformity, and
+  thermal margin. An absent requirement refuses; there is no default limit.
+- Every emitted `ThermalQoi<T>` carries both the existing `Evidence<T>` view and
+  an `EngineeringUncertaintyBudget` with exactly one term for roundoff,
+  solver/algebraic, discretization, geometry, parameters, boundary conditions,
+  model form, and measurement. A missing propagation theorem/receipt is a
+  named `Unknown`, never `Negligible` or zero.
+- The operating-point pressure/flow envelope populates the conditional
+  boundary-condition term for pressure and power. The cited total-efficiency
+  interval populates the fan-power parameter term. Both remain accompanied by
+  an `Unknown` model-form term, so finite conditional bands cannot upgrade the
+  synthetic/quadratic airflow model to validated product authority.
+- Surface mean uses exact P1 triangle integration (`area * vertex mean`).
+  Spread is the selected surface-vertex range. The reported standard deviation
+  is the area-weighted dispersion of face means; it is explicitly not an exact
+  integral of the pointwise squared P1 field.
 
 ## Invariants
 
@@ -49,6 +73,18 @@ typed quantities and as a Re/Pr handoff to the existing convection rung.
    provenance hashes are order-stable and bind the complete fan curve, source,
    tolerance, fan-bank configuration, recursive network topology, loss data,
    and explicit leakage identity.
+8. Junction and surface declarations canonicalize index order and reject
+   duplicates. Equal junction maxima choose the lowest canonical vertex index.
+9. Every thermal QoI budget has exactly eight terms. Widening a valid upstream
+   pressure/flow or efficiency interval cannot shrink the corresponding
+   conditional term; changing a requirement or efficiency authority rebinds
+   the affected QoI identity even when the nominal scalar is unchanged. The
+   temperature-QoI identity binds canonical tetrahedral connectivity and every
+   physical vertex coordinate, so geometry-only changes also rebind it.
+10. Raw temperature extrema, surface summaries, and margin remain
+    `NumericalKind::NoClaim` until an admitted DWR/refinement-to-QoI map exists.
+    A conduction residual measured in watts is not converted into kelvin by
+    dimensional wishful thinking.
 
 ## Error model
 
@@ -89,6 +125,12 @@ None.
 - typed branch velocity/Reynolds handoff into `fs-convection`;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
+- G0 E05.10 fixture emitting all five QoI families and seven records (the
+  uniformity family has mean, spread, and face-mean standard deviation), each
+  with a complete eight-term budget and term-by-term provenance rendering;
+- deterministic region-order/tie-break equivalence, missing-requirement and
+  malformed-region refusals, G3 upstream-envelope widening monotonicity, and
+  source-only identity rebinding for fan power and margin.
 
 ## No-claim boundaries
 
@@ -107,3 +149,14 @@ None.
   startup remain outside this slice.
 - No retained manufacturer table, wind-tunnel corpus, CFD comparison, or
   experimental enclosure validation exists; there is no L4 or product claim.
+- The thermal QoI consumer does not close E05.10's external validation,
+  validity-intersection, DWR, mesh-refinement, sensor, or naked-scalar lint
+  obligations. It closes the E08.1 integration requirement that each QoI emit
+  the rich budget honestly; the broader E05.10 bead remains open.
+- The conditional pressure/flow and efficiency intervals are only as sound as
+  their caller-declared source envelopes and the stated quadratic model. The
+  always-explicit unknown model-form term prevents their interpretation as a
+  whole-product uncertainty bound.
+- Fan power means input power under the declared total efficiency,
+  `Delta p * Q / eta_total`. Motor/controller transients, reactive power,
+  acoustic power, and installation effects are outside this slice.
