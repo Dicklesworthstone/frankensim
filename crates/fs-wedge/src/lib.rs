@@ -21,8 +21,10 @@
 //! full CHT, SDF structural/topology assurance, and a narrower thermal-design-
 //! assurance candidate. Ratings remain separate from evidence authority, and
 //! both rating and weight flip sensitivities are recorded. The
-//! [`CycleTimeBaseline`] remains a separately identified placeholder until a
-//! customer measurement replaces it.
+//! [`CycleTimeBaseline`] is a per-step sourced envelope assembled under the
+//! dossier protocol in `data/cycle-time-baseline-dossier.md`; the retired flat
+//! placeholder survives only as [`RETIRED_PLACEHOLDER_BASELINE`], which the
+//! kill-criterion evaluation refuses with a typed error.
 
 /// The load-bearing negative doctrine of wedge selection.
 pub const WEDGE_DOCTRINE: &str = "Do not sell against peak single-physics fidelity anywhere; the wedge is a \
@@ -2350,13 +2352,195 @@ pub fn chosen_wedge() -> &'static Vertical {
         .expect("a rank-1 wedge")
 }
 
-/// The baseline that makes the cycle-time kill criterion measurable.
+/// The six incumbent workflow steps of the measured cycle-time baseline
+/// protocol, in fixed pipeline order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncumbentStep {
+    /// CAD import, cleanup, and defeaturing.
+    CadPreparation,
+    /// Grid/mesh generation for the thermal model.
+    Meshing,
+    /// Materials, boundary conditions, and power maps.
+    SolverSetup,
+    /// The solve itself (wall-clock; a running solve blocks the iteration).
+    Solve,
+    /// Result review and visualization.
+    PostProcessing,
+    /// Engineering report assembly.
+    ReportAssembly,
+}
+
+impl IncumbentStep {
+    /// Fixed pipeline order.
+    pub const ALL: [IncumbentStep; 6] = [
+        IncumbentStep::CadPreparation,
+        IncumbentStep::Meshing,
+        IncumbentStep::SolverSetup,
+        IncumbentStep::Solve,
+        IncumbentStep::PostProcessing,
+        IncumbentStep::ReportAssembly,
+    ];
+
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            IncumbentStep::CadPreparation => "cad-preparation",
+            IncumbentStep::Meshing => "meshing",
+            IncumbentStep::SolverSetup => "solver-setup",
+            IncumbentStep::Solve => "solve",
+            IncumbentStep::PostProcessing => "post-processing",
+            IncumbentStep::ReportAssembly => "report-assembly",
+        }
+    }
+}
+
+/// Authority class of one sourced duration figure, in descending authority.
+/// Vendor material never becomes load-bearing on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationSourceClass {
+    /// An incumbent-workflow run executed and timed by this project.
+    ExecutedIncumbentRun,
+    /// A government-lab time-and-motion study.
+    GovLabTimeStudy,
+    /// A peer-reviewed publication reporting its own timings.
+    PeerReviewedRun,
+    /// A practitioner survey (self-reported; sponsorship flagged in caveat).
+    PractitionerSurvey,
+    /// A vendor or vendor-channel case study (marketing bias flagged).
+    VendorCaseStudy,
+}
+
+impl DurationSourceClass {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            DurationSourceClass::ExecutedIncumbentRun => "executed-incumbent-run",
+            DurationSourceClass::GovLabTimeStudy => "gov-lab-time-study",
+            DurationSourceClass::PeerReviewedRun => "peer-reviewed-run",
+            DurationSourceClass::PractitionerSurvey => "practitioner-survey",
+            DurationSourceClass::VendorCaseStudy => "vendor-case-study",
+        }
+    }
+
+    /// May a step bound rest on this class alone?
+    #[must_use]
+    pub const fn is_load_bearing(self) -> bool {
+        !matches!(self, DurationSourceClass::VendorCaseStudy)
+    }
+}
+
+/// One published figure backing a step bound, with its verbatim quote and
+/// bias caveat. The figure is reproduced as published, never re-rounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcedFigure {
+    /// The figure exactly as published, with units.
+    pub figure: &'static str,
+    /// Verbatim sentence containing the figure.
+    pub quote: &'static str,
+    /// Author/organization, title, venue, year.
+    pub citation: &'static str,
+    /// URL verified reachable when the dossier was assembled.
+    pub url: &'static str,
+    /// Authority class.
+    pub class: DurationSourceClass,
+    /// Bias and applicability caveat.
+    pub caveat: &'static str,
+}
+
+impl SourcedFigure {
+    /// Is the provenance row structurally complete?
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        !self.figure.trim().is_empty()
+            && !self.quote.trim().is_empty()
+            && !self.citation.trim().is_empty()
+            && !self.url.trim().is_empty()
+            && !self.caveat.trim().is_empty()
+    }
+}
+
+/// The sourced duration envelope for one incumbent workflow step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BaselineStepEstimate {
+    /// Which step.
+    pub step: IncumbentStep,
+    /// Lower bound, engineer/wall hours (see the step's basis).
+    pub low_hours: f64,
+    /// Upper bound, hours.
+    pub high_hours: f64,
+    /// How the bounds were derived from the sources.
+    pub basis: &'static str,
+    /// The published figures behind the bounds.
+    pub sources: &'static [SourcedFigure],
+}
+
+impl BaselineStepEstimate {
+    /// Is the estimate structurally complete: finite positive bounds in
+    /// order, a stated basis, and at least one complete load-bearing source?
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.low_hours.is_finite()
+            && self.high_hours.is_finite()
+            && self.low_hours > 0.0
+            && self.high_hours >= self.low_hours
+            && !self.basis.trim().is_empty()
+            && !self.sources.is_empty()
+            && self.sources.iter().all(|source| source.is_complete())
+            && self
+                .sources
+                .iter()
+                .any(|source| source.class.is_load_bearing())
+    }
+}
+
+/// Where a baseline's numbers came from. Only non-placeholder records may
+/// enter the kill-criterion decision path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineProvenance {
+    /// A declared scoping figure with no protocol behind it. Refused.
+    Placeholder,
+    /// Assembled from published sources under the dossier protocol. This is
+    /// an ESTIMATED quantity: nobody on this project timed the incumbent run.
+    PublishedSourceDerived,
+    /// An incumbent-workflow run executed and timed by this project.
+    ExecutedRun,
+}
+
+impl BaselineProvenance {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            BaselineProvenance::Placeholder => "placeholder",
+            BaselineProvenance::PublishedSourceDerived => "published-source-derived",
+            BaselineProvenance::ExecutedRun => "executed-run",
+        }
+    }
+}
+
+/// The baseline that makes the cycle-time kill criterion measurable: a
+/// per-step sourced envelope, never a point value. Uncertainty is carried in
+/// the open, and the decision path refuses placeholders.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CycleTimeBaseline {
     /// Which vertical.
     pub vertical: &'static str,
-    /// Today's baseline design-cycle time (days) for the acknowledged loop.
-    pub baseline_days: f64,
+    /// When the record was assembled (dossier date).
+    pub assembled_on: &'static str,
+    /// The representative incumbent task the envelope describes.
+    pub representative_task: &'static str,
+    /// The admissibility protocol the record was assembled under.
+    pub protocol: &'static str,
+    /// The provenance dossier backing every figure.
+    pub dossier: EvidencePointer,
+    /// Where the numbers came from.
+    pub provenance: BaselineProvenance,
+    /// Per-step sourced envelopes.
+    pub steps: &'static [BaselineStepEstimate],
+    /// Explicit hours-to-working-day conversion.
+    pub hours_per_working_day: f64,
     /// The cycle-time reduction factor the kill criterion demands (`3.0`).
     pub target_reduction: f64,
     /// The window (quarters after GA) to hit it or re-select the wedge.
@@ -2364,18 +2548,542 @@ pub struct CycleTimeBaseline {
 }
 
 impl CycleTimeBaseline {
-    /// Does a measured cycle time meet the `>=target_reduction×` kill
-    /// criterion? (`baseline / measured >= target_reduction`.)
+    /// Sum of per-step lower bounds, hours.
     #[must_use]
-    pub fn meets_kill_criterion(&self, measured_days: f64) -> bool {
-        measured_days > 0.0 && self.baseline_days / measured_days >= self.target_reduction
+    pub fn low_hours(&self) -> f64 {
+        self.steps.iter().map(|step| step.low_hours).sum()
+    }
+
+    /// Sum of per-step upper bounds, hours.
+    #[must_use]
+    pub fn high_hours(&self) -> f64 {
+        self.steps.iter().map(|step| step.high_hours).sum()
+    }
+
+    /// Envelope lower bound in working days.
+    #[must_use]
+    pub fn baseline_days_low(&self) -> f64 {
+        self.low_hours() / self.hours_per_working_day
+    }
+
+    /// Envelope upper bound in working days.
+    #[must_use]
+    pub fn baseline_days_high(&self) -> f64 {
+        self.high_hours() / self.hours_per_working_day
+    }
+
+    /// Is the record structurally complete: one estimate per protocol step in
+    /// pipeline order, every estimate complete, a dossier pointer, and a
+    /// usable day conversion?
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.steps.len() == IncumbentStep::ALL.len()
+            && self
+                .steps
+                .iter()
+                .zip(IncumbentStep::ALL)
+                .all(|(estimate, step)| estimate.step == step)
+            && self.steps.iter().all(BaselineStepEstimate::is_complete)
+            && !self.vertical.trim().is_empty()
+            && !self.assembled_on.trim().is_empty()
+            && !self.representative_task.trim().is_empty()
+            && !self.protocol.trim().is_empty()
+            && self.dossier.is_complete()
+            && self.hours_per_working_day > 0.0
+            && self.hours_per_working_day.is_finite()
+    }
+
+    /// Render the complete audit derivation: record identity, per-step
+    /// breakdown, envelope, conversion, target, measured value, and the
+    /// verdict rule.
+    fn render_derivation(
+        &self,
+        measured_days: f64,
+        reduction_low: f64,
+        reduction_high: f64,
+        verdict: KillVerdict,
+    ) -> String {
+        use core::fmt::Write as _;
+        let mut derivation = String::new();
+        writeln!(
+            derivation,
+            "kill-criterion evaluation for `{}` (baseline assembled {}, provenance {}, dossier {} # {})",
+            self.vertical,
+            self.assembled_on,
+            self.provenance.label(),
+            self.dossier.reference,
+            self.dossier.locator,
+        )
+        .expect("write to String");
+        writeln!(
+            derivation,
+            "  representative task: {}",
+            self.representative_task
+        )
+        .expect("write to String");
+        for step in self.steps {
+            writeln!(
+                derivation,
+                "  step {:<16} {:>6.1}..{:>6.1} h  ({} sources) — {}",
+                step.step.label(),
+                step.low_hours,
+                step.high_hours,
+                step.sources.len(),
+                step.basis,
+            )
+            .expect("write to String");
+        }
+        writeln!(
+            derivation,
+            "  baseline envelope: {:.1}..{:.1} h = {:.2}..{:.2} working days at {:.0} h/day",
+            self.low_hours(),
+            self.high_hours(),
+            self.baseline_days_low(),
+            self.baseline_days_high(),
+            self.hours_per_working_day,
+        )
+        .expect("write to String");
+        writeln!(
+            derivation,
+            "  measured FrankenSim cycle time: {measured_days:.3} days",
+        )
+        .expect("write to String");
+        writeln!(
+            derivation,
+            "  implied reduction: {:.2}x..{:.2}x against target {:.1}x",
+            reduction_low, reduction_high, self.target_reduction,
+        )
+        .expect("write to String");
+        writeln!(
+            derivation,
+            "  verdict: {} (met only if the LOW bound clears the target; not-met only if the HIGH bound cannot)",
+            verdict.label(),
+        )
+        .expect("write to String");
+        derivation
+    }
+
+    /// Evaluate the `>= target_reduction x` kill criterion against a measured
+    /// FrankenSim cycle time, refusing placeholders and non-measurable
+    /// inputs, and returning the full derivation for audit.
+    ///
+    /// The verdict is conservative across the envelope: `Met` only when even
+    /// the LOW baseline bound clears the target; `NotMet` when even the HIGH
+    /// bound cannot; `Indeterminate` when the envelope straddles the target.
+    pub fn evaluate_kill_criterion(
+        &self,
+        measured_days: f64,
+    ) -> Result<KillCriterionEvaluation, KillCriterionError> {
+        if self.provenance == BaselineProvenance::Placeholder {
+            return Err(KillCriterionError::PlaceholderBaseline {
+                vertical: self.vertical,
+            });
+        }
+        if !self.is_complete() {
+            return Err(KillCriterionError::IncompleteBaseline {
+                vertical: self.vertical,
+            });
+        }
+        if !measured_days.is_finite() || measured_days <= 0.0 {
+            return Err(KillCriterionError::NonMeasurableCycleTime { measured_days });
+        }
+
+        let baseline_days_low = self.baseline_days_low();
+        let baseline_days_high = self.baseline_days_high();
+        let reduction_low = baseline_days_low / measured_days;
+        let reduction_high = baseline_days_high / measured_days;
+        let verdict = if reduction_low >= self.target_reduction {
+            KillVerdict::Met
+        } else if reduction_high < self.target_reduction {
+            KillVerdict::NotMet
+        } else {
+            KillVerdict::Indeterminate
+        };
+
+        let derivation =
+            self.render_derivation(measured_days, reduction_low, reduction_high, verdict);
+
+        Ok(KillCriterionEvaluation {
+            vertical: self.vertical,
+            assembled_on: self.assembled_on,
+            provenance: self.provenance,
+            baseline_days_low,
+            baseline_days_high,
+            target_reduction: self.target_reduction,
+            measured_days,
+            reduction_low,
+            reduction_high,
+            verdict,
+            derivation,
+        })
     }
 }
 
-/// The conjugate-heat-transfer cycle-time baseline (a week-long loop today).
+/// Typed refusals from the kill-criterion evaluation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KillCriterionError {
+    /// The baseline is a declared placeholder; the decision path refuses it.
+    PlaceholderBaseline {
+        /// Vertical whose placeholder was offered.
+        vertical: &'static str,
+    },
+    /// The baseline record is structurally incomplete.
+    IncompleteBaseline {
+        /// Vertical whose record is incomplete.
+        vertical: &'static str,
+    },
+    /// The measured cycle time is not a positive finite number of days.
+    NonMeasurableCycleTime {
+        /// The refused value.
+        measured_days: f64,
+    },
+}
+
+/// Conservative three-way kill-criterion verdict across the envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillVerdict {
+    /// Even the LOW baseline bound clears the target reduction.
+    Met,
+    /// Even the HIGH baseline bound cannot clear the target reduction.
+    NotMet,
+    /// The envelope straddles the target; marketing may not claim "met".
+    Indeterminate,
+}
+
+impl KillVerdict {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            KillVerdict::Met => "met",
+            KillVerdict::NotMet => "not-met",
+            KillVerdict::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// One audited kill-criterion evaluation, logging which baseline record was
+/// used and the full derivation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KillCriterionEvaluation {
+    /// Vertical evaluated.
+    pub vertical: &'static str,
+    /// Baseline record date used.
+    pub assembled_on: &'static str,
+    /// Baseline provenance used (never `Placeholder`).
+    pub provenance: BaselineProvenance,
+    /// Envelope lower bound, working days.
+    pub baseline_days_low: f64,
+    /// Envelope upper bound, working days.
+    pub baseline_days_high: f64,
+    /// Required reduction factor.
+    pub target_reduction: f64,
+    /// The measured FrankenSim cycle time, days.
+    pub measured_days: f64,
+    /// `baseline_days_low / measured_days` — the claim's worst case.
+    pub reduction_low: f64,
+    /// `baseline_days_high / measured_days`.
+    pub reduction_high: f64,
+    /// Conservative verdict.
+    pub verdict: KillVerdict,
+    /// Full printed derivation: record identity, per-step breakdown,
+    /// envelope, conversion, target, measured value, and verdict rule.
+    pub derivation: String,
+}
+
+/// The retired scoping placeholder (`baseline_days = 5.0`, declared without a
+/// protocol on 2026-07-07). Retained as data so the refusal path is proven
+/// against the genuine legacy object; unreachable in the decision path.
+pub const RETIRED_PLACEHOLDER_BASELINE: CycleTimeBaseline = CycleTimeBaseline {
+    vertical: "conjugate-heat-transfer",
+    assembled_on: "2026-07-07",
+    representative_task: "an unspecified week-long loop (the retired flat 5.0-working-day figure)",
+    protocol: "none: declared as a scoping placeholder without measurement or sources",
+    dossier: EvidencePointer {
+        kind: EvidenceKind::WorkspacePath,
+        reference: "crates/fs-wedge/src/lib.rs",
+        locator: "RETIRED_PLACEHOLDER_BASELINE",
+    },
+    provenance: BaselineProvenance::Placeholder,
+    steps: &[],
+    hours_per_working_day: 8.0,
+    target_reduction: 3.0,
+    kill_within_quarters: 2,
+};
+
+/// Dossier-backed measured cycle-time baseline for the cooling vertical:
+/// one first-pass design iteration of a representative electronics-cooling
+/// task (PCB + components + heat sink, forced convection / CHT) in a
+/// commercial incumbent tool, dirty CAD to engineering report.
+///
+/// This record is ESTIMATED (published-source-derived): its authority ends at
+/// the cited sources. It is NOT customer-pain evidence and must not upgrade
+/// the comparison's customer-pain factor; an executed incumbent run
+/// supersedes it under the dossier protocol.
 pub const CHT_BASELINE: CycleTimeBaseline = CycleTimeBaseline {
     vertical: "conjugate-heat-transfer",
-    baseline_days: 5.0,
+    assembled_on: "2026-07-22",
+    representative_task: "thermal analysis of an electronics assembly (PCB + components + heat \
+        sink, forced convection / conjugate heat transfer) taken from dirty CAD to an \
+        engineering report in a commercial tool, one first-pass design iteration",
+    protocol: "crates/fs-wedge/data/cycle-time-baseline-dossier.md section 1: six-step \
+        decomposition; sources admitted in descending authority (executed run, gov-lab or \
+        peer-reviewed time study, practitioner survey, vendor case with bias caveat); every \
+        figure carries citation, verbatim quote, URL, and bias class; bounds are ranges, \
+        never points; quarterly review alongside the ratification record",
+    dossier: EvidencePointer {
+        kind: EvidenceKind::WorkspacePath,
+        reference: "crates/fs-wedge/data/cycle-time-baseline-dossier.md",
+        locator: "fs-wedge-cycle-time-baseline-dossier-v1",
+    },
+    provenance: BaselineProvenance::PublishedSourceDerived,
+    steps: &[
+        BaselineStepEstimate {
+            step: IncumbentStep::CadPreparation,
+            low_hours: 1.0,
+            high_hours: 16.0,
+            basis: "floor: clean-CAD import plus minimal cleanup (survey fast quartile); \
+                ceiling: dirty assembly at two working days, consistent with the 30%-over-one-day \
+                model-build survey row while staying below defense-lab scale",
+            sources: &[
+                SourcedFigure {
+                    figure: "39% of thermal engineers spend >1 h importing CAD; 24% <10 min",
+                    quote: "39 percent spend over an hour importing CAD data, while 24 percent \
+                        claimed they can run the same task in under 10 minutes.",
+                    citation: "6SigmaET (Future Facilities), State of Thermal survey (n>170), \
+                        via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "vendor-run survey; self-reported; sample skews to the vendor's \
+                        contact list",
+                },
+                SourcedFigure {
+                    figure: "30% spend >1 day building models; 37% <1 h",
+                    quote: "only 37 percent of engineers spend less than an hour building their \
+                        models, while 30 percent spend more than a day.",
+                    citation: "6SigmaET State of Thermal survey via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "model build includes geometry idealization; same vendor-survey bias",
+                },
+                SourcedFigure {
+                    figure: "preprocessing = 38% of total simulation time",
+                    quote: "Preprocessing is the most time consuming part of the simulation \
+                        process, taking up 38% of total simulation time.",
+                    citation: "Tech-Clarity, Addressing the Bottlenecks of FEA Simulation \
+                        (n>160), 2016",
+                    url: "https://tech-clarity.com/simulation_bottlenecks/5467",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "all-FEA population, not thermal-specific; analyst research \
+                        typically vendor-sponsored",
+                },
+                SourcedFigure {
+                    figure: "defeaturing 48.8 h + decomposition 36.8 h initial engineer-hours \
+                        (heat-transfer problems)",
+                    quote: "Analysis Solid Model Creation/Edit 48.8; Geometry Decomposition 36.8 \
+                        (Table 5, heat-transfer column, engineering hours)",
+                    citation: "Hardwick, Clay, Boggs, Walsh, Larzelere, Altshuler, DART System \
+                        Analysis, SAND2005-4647, Sandia National Laboratories, 2005",
+                    url: "https://www.osti.gov/servlets/purl/876325",
+                    class: DurationSourceClass::GovLabTimeStudy,
+                    caveat: "defense-lab problem scale bounds context, not the representative \
+                        task; 2005; heat-transfer n=5 with high variance",
+                },
+            ],
+        },
+        BaselineStepEstimate {
+            step: IncumbentStep::Meshing,
+            low_hours: 0.5,
+            high_hours: 24.0,
+            basis: "floor: automated gridding in a CAD-embedded tool; ceiling: the 10%-over-one-\
+                day survey tail for electronics-scale models",
+            sources: &[
+                SourcedFigure {
+                    figure: "41% spend >1 h gridding; 10% >1 day",
+                    quote: "41 percent also said that they typically spend over an hour gridding \
+                        their designs, while 10 percent spend more than a day.",
+                    citation: "6SigmaET State of Thermal survey via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "vendor-run survey; meshing automation is the sponsor's key \
+                        differentiator",
+                },
+                SourcedFigure {
+                    figure: "1.9M-cell mesh in <3 h wall-clock (detailed package + test board)",
+                    quote: "1.9-million-cell mesh in less than three hours of computation on a \
+                        12-core Intel Xeon processor.",
+                    citation: "Thales Corporate Engineering / Flotherm XT case via ETS Solution \
+                        Asia (Siemens reseller)",
+                    url: "https://www.etssolution-asia.com/blog/simcenter-flotherm-accurate-simulations-for-electronics-thermal-design",
+                    class: DurationSourceClass::VendorCaseStudy,
+                    caveat: "vendor-channel case; favorable framing; one detailed package, not a \
+                        full assembly",
+                },
+                SourcedFigure {
+                    figure: "meshing 19.6 h + mesh manipulation 11.3 h initial engineer-hours \
+                        (heat transfer)",
+                    quote: "Meshing 19.62; Mesh Manipulation 11.30 (Table 5, heat-transfer \
+                        column, engineering hours)",
+                    citation: "Sandia SAND2005-4647 DART System Analysis, 2005",
+                    url: "https://www.osti.gov/servlets/purl/876325",
+                    class: DurationSourceClass::GovLabTimeStudy,
+                    caveat: "defense-lab scale; thermal is DART's own exception where meshing \
+                        does NOT dominate",
+                },
+            ],
+        },
+        BaselineStepEstimate {
+            step: IncumbentStep::SolverSetup,
+            low_hours: 0.5,
+            high_hours: 16.0,
+            basis: "floor: existing material/component libraries; ceiling: board-level power \
+                map and interface cards assembled by hand",
+            sources: &[
+                SourcedFigure {
+                    figure: "39% spend >1 h defining material properties",
+                    quote: "39 percent spend more than an hour defining properties",
+                    citation: "6SigmaET State of Thermal survey via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "vendor-run survey; self-reported",
+                },
+                SourcedFigure {
+                    figure: "23% spend >1 h on boundary conditions",
+                    quote: "23 percent must spend over an hour setting boundary conditions.",
+                    citation: "6SigmaET State of Thermal survey via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "vendor-run survey; self-reported",
+                },
+                SourcedFigure {
+                    figure: "parameter assignment 19.4 h; simulation-model assembly 55.4 h \
+                        (heat transfer, initial)",
+                    quote: "Model Parameter Assignment 19.40; Simulation Model Assembly 55.40 \
+                        (Table 5, heat-transfer column, engineering hours)",
+                    citation: "Sandia SAND2005-4647 DART System Analysis, 2005",
+                    url: "https://www.osti.gov/servlets/purl/876325",
+                    class: DurationSourceClass::GovLabTimeStudy,
+                    caveat: "defense-lab scale bounds context only",
+                },
+            ],
+        },
+        BaselineStepEstimate {
+            step: IncumbentStep::Solve,
+            low_hours: 0.5,
+            high_hours: 48.0,
+            basis: "floor: module-scale steady case on current hardware; ceiling: turbulence-\
+                model-heavy chassis CHT counted 1:1 into cycle time because a running solve \
+                blocks the iteration regardless of engineer attention",
+            sources: &[
+                SourcedFigure {
+                    figure: "66% spend up to a day or more per solve; 14% <30 min",
+                    quote: "66 percent of thermal engineers spend up to a day or more solving \
+                        their simulations—and yet 14 percent said that they can perform this \
+                        task in under 30 minutes.",
+                    citation: "6SigmaET State of Thermal survey via engineering.com, 2018",
+                    url: "https://www.engineering.com/70-of-engineers-left-out-in-the-cold-by-thermal-simulations/",
+                    class: DurationSourceClass::PractitionerSurvey,
+                    caveat: "vendor-run survey; 'up to a day or more' is loose phrasing",
+                },
+                SourcedFigure {
+                    figure: "<4.5 h to full convergence, 1.9M cells, 12-core Xeon, 10 GB RAM",
+                    quote: "The powerful solver needed less than 4.5 hours to reach full \
+                        convergence on the same processor using 10 Gb of memory.",
+                    citation: "Thales / Flotherm XT case via ETS Solution Asia",
+                    url: "https://www.etssolution-asia.com/blog/simcenter-flotherm-accurate-simulations-for-electronics-thermal-design",
+                    class: DurationSourceClass::VendorCaseStudy,
+                    caveat: "vendor-channel case; single detailed package plus board",
+                },
+                SourcedFigure {
+                    figure: "Icepak transient runs 730-4800 s (~12-80 min), 0.3-3M cells",
+                    quote: "Table 3 reports Ansys Icepak run times of 730-4800 s across \
+                        natural/forced-convection transient cases (Intel i7-10850H, 6 parallel \
+                        processes).",
+                    citation: "Padmanabhan (ZF), A Scalable Approach for Transient Thermal \
+                        Modeling of Automotive Power Electronics, SAE 2025-01-5073 (author \
+                        manuscript), 2025",
+                    url: "https://arxiv.org/pdf/2606.11226",
+                    class: DurationSourceClass::PeerReviewedRun,
+                    caveat: "module scale on laptop-class hardware",
+                },
+                SourcedFigure {
+                    figure: "data-hall CHT steady solve 0.44-5.95 h (32 to 1 cores), 10M cells",
+                    quote: "CFD model solving time: 5.95 h (1 core) ... 0.44 h (32 cores) \
+                        (Table 2, 6SigmaDCX, one production data hall).",
+                    citation: "Wang, Zhou, Dong, Wen, Tan, Chen, Wang, Zeng, Kalibre, ACM \
+                        BuildSys 2020",
+                    url: "https://arxiv.org/pdf/2001.10681",
+                    class: DurationSourceClass::PeerReviewedRun,
+                    caveat: "data-center scale, larger than the representative task",
+                },
+                SourcedFigure {
+                    figure: "RNG k-epsilon chassis CHT: two days of continuous runs (900k \
+                        cells, 2008 hardware)",
+                    quote: "Using the RNG k-e model, which is a two-equation model, doubles the \
+                        solution time. This corresponds to two days of continuous runs.",
+                    citation: "Ozturk, Tari, Forced Air Cooling of CPUs with Heat Sinks: a \
+                        Numerical Study, IEEE Trans. Components and Packaging Technologies \
+                        31(3), 2008",
+                    url: "https://users.metu.edu.tr/itari/OzturkTariIEEETCAPT2008.pdf",
+                    class: DurationSourceClass::PeerReviewedRun,
+                    caveat: "2008 workstation hardware; modern hosts are faster, retained as \
+                        the turbulence-model ceiling",
+                },
+            ],
+        },
+        BaselineStepEstimate {
+            step: IncumbentStep::PostProcessing,
+            low_hours: 1.0,
+            high_hours: 16.0,
+            basis: "floor: standard temperature-map review; ceiling: scaled down from the DART \
+                heat-transfer post-processing share (37% of engineer-time, the largest single \
+                step) to representative-task size",
+            sources: &[
+                SourcedFigure {
+                    figure: "post-processing 123.4 h initial / 245.3 h expected = 37% of \
+                        engineer-time for heat-transfer problems",
+                    quote: "Results Post-Processing 123.40 (Table 5); 245.3 h of a 659.2 h \
+                        total (Table 7); normalized 0.37 (Table 8) — the largest single \
+                        fraction for heat-transfer problems.",
+                    citation: "Sandia SAND2005-4647 DART System Analysis, 2005",
+                    url: "https://www.osti.gov/servlets/purl/876325",
+                    class: DurationSourceClass::GovLabTimeStudy,
+                    caveat: "defense-lab scale; strongest available signal that post-processing, \
+                        not meshing, dominates thermal analysis",
+                },
+                SourcedFigure {
+                    figure: "thermal-to-structural results handoff: half a day of manual \
+                        scripting per transfer",
+                    quote: "the manual baseline (MATLAB scripts, multiple engineers, about half \
+                        a day per transfer)",
+                    citation: "Siemens Mynaric case study",
+                    url: "https://resources.sw.siemens.com/en-US/case-study-mynaric/",
+                    class: DurationSourceClass::VendorCaseStudy,
+                    caveat: "vendor case; space thermal, not forced-convection PCB cooling",
+                },
+            ],
+        },
+        BaselineStepEstimate {
+            step: IncumbentStep::ReportAssembly,
+            low_hours: 1.0,
+            high_hours: 8.0,
+            basis: "weakest row: no independent electronics-specific figure exists (explicit \
+                evidence gap); bounds set from the DART post-processing share net of \
+                visualization review, flagged for the quarterly review",
+            sources: &[SourcedFigure {
+                figure: "report generation folded into DART post-processing step I \
+                        (123.4 h initial, heat transfer)",
+                quote: "Results Post-Processing ... explicitly includes 'generate reports' \
+                        in step I of the DART process model.",
+                citation: "Sandia SAND2005-4647 DART System Analysis, 2005",
+                url: "https://www.osti.gov/servlets/purl/876325",
+                class: DurationSourceClass::GovLabTimeStudy,
+                caveat: "report time is not separated from visualization in the primary; \
+                        this row is the envelope's weakest and says so",
+            }],
+        },
+    ],
+    hours_per_working_day: 8.0,
     target_reduction: 3.0,
     kill_within_quarters: 2,
 };
@@ -2543,6 +3251,22 @@ pub fn audit() -> WedgeAudit {
         gaps.push("cycle-time kill criterion is not the required 3x".to_string());
     }
 
+    let baseline_measured =
+        CHT_BASELINE.provenance != BaselineProvenance::Placeholder && CHT_BASELINE.is_complete();
+    if !baseline_measured {
+        gaps.push("the cycle-time baseline is not a complete measured record".to_string());
+    }
+
+    let placeholder_refused = matches!(
+        RETIRED_PLACEHOLDER_BASELINE.evaluate_kill_criterion(1.0),
+        Err(KillCriterionError::PlaceholderBaseline { .. })
+    );
+    if !placeholder_refused {
+        gaps.push(
+            "the retired placeholder baseline is not refused by the kill criterion".to_string(),
+        );
+    }
+
     let mut checks = vec![
         AuditCheck {
             name: "historic-scores-superseded",
@@ -2570,6 +3294,14 @@ pub fn audit() -> WedgeAudit {
         AuditCheck {
             name: "kill-criterion-measurable",
             passed: kill_criterion_measurable,
+        },
+        AuditCheck {
+            name: "cycle-time-baseline-measured",
+            passed: baseline_measured,
+        },
+        AuditCheck {
+            name: "placeholder-baseline-refused",
+            passed: placeholder_refused,
         },
     ]);
 
@@ -2725,11 +3457,46 @@ pub fn to_json() -> String {
         out.push_str("]}");
     }
 
+    out.push_str("],\"cycle_time_baseline\":");
+    write_baseline_json(&mut out);
+    out.push('}');
+    out
+}
+
+fn write_baseline_json(out: &mut String) {
+    use core::fmt::Write as _;
+    out.push_str("{\"vertical\":");
+    push_json_string(out, CHT_BASELINE.vertical);
+    out.push_str(",\"assembled_on\":");
+    push_json_string(out, CHT_BASELINE.assembled_on);
+    out.push_str(",\"provenance\":");
+    push_json_string(out, CHT_BASELINE.provenance.label());
+    out.push_str(",\"dossier\":");
+    push_json_string(out, CHT_BASELINE.dossier.reference);
     write!(
         out,
-        "],\"baseline_days\":{},\"target_reduction\":{}}}",
-        CHT_BASELINE.baseline_days, CHT_BASELINE.target_reduction
+        ",\"baseline_days_low\":{},\"baseline_days_high\":{},\"hours_per_working_day\":{},\"target_reduction\":{},\"kill_within_quarters\":{},\"steps\":[",
+        CHT_BASELINE.baseline_days_low(),
+        CHT_BASELINE.baseline_days_high(),
+        CHT_BASELINE.hours_per_working_day,
+        CHT_BASELINE.target_reduction,
+        CHT_BASELINE.kill_within_quarters
     )
     .expect("write to String");
-    out
+    for (step_index, step) in CHT_BASELINE.steps.iter().enumerate() {
+        if step_index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"step\":");
+        push_json_string(out, step.step.label());
+        write!(
+            out,
+            ",\"low_hours\":{},\"high_hours\":{},\"sources\":{}}}",
+            step.low_hours,
+            step.high_hours,
+            step.sources.len()
+        )
+        .expect("write to String");
+    }
+    out.push_str("]}");
 }

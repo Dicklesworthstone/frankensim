@@ -3,9 +3,10 @@
 //! evidence drift, candidate rankings, and the cycle-time kill criterion.
 
 use fs_wedge::{
-    CHT_BASELINE, ComparisonCandidate, DEFAULT_FACTOR_WEIGHTS, EvidenceKind, InputAxis,
-    Measurement, Readiness, STRONG_THRESHOLD, ScoreUse, ScoringError, ScoringFactor,
-    WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, comparison_candidates,
+    BaselineProvenance, CHT_BASELINE, ComparisonCandidate, DEFAULT_FACTOR_WEIGHTS, EvidenceKind,
+    IncumbentStep, InputAxis, KillCriterionError, KillVerdict, Measurement,
+    RETIRED_PLACEHOLDER_BASELINE, Readiness, STRONG_THRESHOLD, ScoreUse, ScoringError,
+    ScoringFactor, WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, comparison_candidates,
     default_recommendation, four_criteria, measured_inputs_for, measured_wedge_inputs,
     render_comparison_report, score_candidates, to_json, verticals,
 };
@@ -384,16 +385,43 @@ fn three_verticals_are_ranked_with_proposal_mappings() {
 }
 
 #[test]
-fn the_cycle_time_kill_criterion_is_measurable() {
-    assert!((CHT_BASELINE.baseline_days - 5.0).abs() < 1e-12);
+fn the_cycle_time_kill_criterion_is_measurable_and_conservative() {
     assert!((CHT_BASELINE.target_reduction - 3.0).abs() < 1e-12);
     assert_eq!(CHT_BASELINE.kill_within_quarters, 2);
-    // a 1.5-day cycle is a 3.33x reduction -> meets the criterion.
-    assert!(CHT_BASELINE.meets_kill_criterion(1.5));
-    // a 2-day cycle is only 2.5x -> does not.
-    assert!(!CHT_BASELINE.meets_kill_criterion(2.0));
-    // guard against divide-by-zero.
-    assert!(!CHT_BASELINE.meets_kill_criterion(0.0));
+
+    // Met: even the LOW bound (0.5625 days) clears 3x against 0.15 days.
+    let met = CHT_BASELINE
+        .evaluate_kill_criterion(0.15)
+        .expect("measurable");
+    assert_eq!(met.verdict, KillVerdict::Met);
+    assert!(met.reduction_low >= 3.0);
+
+    // NotMet: even the HIGH bound (16 days) cannot clear 3x against 6 days.
+    let not_met = CHT_BASELINE
+        .evaluate_kill_criterion(6.0)
+        .expect("measurable");
+    assert_eq!(not_met.verdict, KillVerdict::NotMet);
+    assert!(not_met.reduction_high < 3.0);
+
+    // Indeterminate: the envelope straddles the target against 2 days, so
+    // marketing may not claim "met".
+    let straddle = CHT_BASELINE
+        .evaluate_kill_criterion(2.0)
+        .expect("measurable");
+    assert_eq!(straddle.verdict, KillVerdict::Indeterminate);
+    assert!(straddle.reduction_low < 3.0 && straddle.reduction_high >= 3.0);
+
+    // Non-measurable cycle times are refused, not coerced.
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let refusal = CHT_BASELINE.evaluate_kill_criterion(bad);
+        assert!(
+            matches!(
+                refusal,
+                Err(KillCriterionError::NonMeasurableCycleTime { .. })
+            ),
+            "accepted non-measurable cycle time {bad}"
+        );
+    }
 }
 
 #[test]
@@ -410,7 +438,9 @@ fn the_audit_is_complete() {
     assert!(a.passed("ranks-complete"));
     assert!(a.passed("all-exercise-proposals"));
     assert!(a.passed("kill-criterion-measurable"));
-    assert_eq!(a.checks.len(), 10);
+    assert!(a.passed("cycle-time-baseline-measured"));
+    assert!(a.passed("placeholder-baseline-refused"));
+    assert_eq!(a.checks.len(), 12);
 }
 
 #[test]
@@ -441,4 +471,174 @@ fn json_is_well_formed_and_deterministic() {
     assert!(j.contains("NIST Additive Manufacturing Benchmark Test Series"));
     assert!(j.contains("\"target_reduction\":3"));
     assert_eq!(j.matches("\"rank\":").count(), 3);
+}
+
+#[test]
+fn the_measured_baseline_is_complete_and_published_source_derived() {
+    let baseline = CHT_BASELINE;
+    assert!(
+        baseline.is_complete(),
+        "measured baseline record incomplete"
+    );
+    assert_eq!(
+        baseline.provenance,
+        BaselineProvenance::PublishedSourceDerived
+    );
+    assert_eq!(baseline.steps.len(), IncumbentStep::ALL.len());
+    for (estimate, step) in baseline.steps.iter().zip(IncumbentStep::ALL) {
+        assert_eq!(estimate.step, step, "steps out of pipeline order");
+        assert!(
+            estimate
+                .sources
+                .iter()
+                .any(|source| source.class.is_load_bearing()),
+            "step {} rests on vendor material alone",
+            estimate.step.label()
+        );
+        for source in estimate.sources {
+            assert!(
+                source.is_complete(),
+                "incomplete source in {}",
+                estimate.step.label()
+            );
+            assert!(
+                source.url.starts_with("https://"),
+                "source URL is not https in {}",
+                estimate.step.label()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_baseline_dossier_exists_and_carries_its_marker() {
+    // The dossier is the replay handle for every figure in the record; the
+    // pointer must resolve against the tracked tree, exactly like the other
+    // workspace evidence-drift checks in this battery.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .ancestors()
+        .nth(2)
+        .expect("workspace root above crates/fs-wedge");
+    let dossier_path = repo_root.join(CHT_BASELINE.dossier.reference);
+    let dossier = std::fs::read_to_string(&dossier_path)
+        .unwrap_or_else(|error| panic!("unreadable dossier {}: {error}", dossier_path.display()));
+    assert!(
+        dossier.contains(CHT_BASELINE.dossier.locator),
+        "dossier lost its marker {}",
+        CHT_BASELINE.dossier.locator
+    );
+    // Every load-bearing URL in the record must appear in the dossier, so the
+    // Rust constants cannot drift away from the provenance document.
+    for step in CHT_BASELINE.steps {
+        for source in step.sources {
+            assert!(
+                dossier.contains(source.url),
+                "dossier does not cite {} (step {})",
+                source.url,
+                step.step.label()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_baseline_envelope_matches_the_dossier_derivation() {
+    // Dossier section 3: low 4.5 h, high 128 h; 8 h/working day.
+    let baseline = CHT_BASELINE;
+    assert!((baseline.low_hours() - 4.5).abs() < 1e-12);
+    assert!((baseline.high_hours() - 128.0).abs() < 1e-12);
+    assert!((baseline.baseline_days_low() - 0.5625).abs() < 1e-12);
+    assert!((baseline.baseline_days_high() - 16.0).abs() < 1e-12);
+    // The retired placeholder's flat figure lies inside the envelope; the
+    // range, not the point, is the citable object.
+    assert!(baseline.baseline_days_low() < 5.0 && 5.0 < baseline.baseline_days_high());
+}
+
+#[test]
+fn the_placeholder_baseline_is_refused_with_a_typed_error() {
+    let refusal = RETIRED_PLACEHOLDER_BASELINE.evaluate_kill_criterion(1.0);
+    assert_eq!(
+        refusal,
+        Err(KillCriterionError::PlaceholderBaseline {
+            vertical: "conjugate-heat-transfer",
+        })
+    );
+}
+
+#[test]
+fn the_kill_evaluation_prints_its_full_derivation() {
+    // The e2e auditability requirement: recompute the criterion from the
+    // stored record and log the complete derivation.
+    let evaluation = CHT_BASELINE
+        .evaluate_kill_criterion(2.0)
+        .expect("measurable");
+    let derivation = &evaluation.derivation;
+    println!("{derivation}");
+    // Record identity: which baseline record was used.
+    assert!(derivation.contains("conjugate-heat-transfer"));
+    assert!(derivation.contains("2026-07-22"));
+    assert!(derivation.contains("published-source-derived"));
+    assert!(derivation.contains("cycle-time-baseline-dossier.md"));
+    // Baseline breakdown: every step appears with its bounds.
+    for step in IncumbentStep::ALL {
+        assert!(
+            derivation.contains(step.label()),
+            "derivation omits step {}",
+            step.label()
+        );
+    }
+    // Envelope, conversion, target, measured value, verdict.
+    assert!(derivation.contains("0.56..16.00 working days"));
+    assert!(derivation.contains("8 h/day"));
+    assert!(derivation.contains("target 3.0x"));
+    assert!(derivation.contains("2.000 days"));
+    assert!(derivation.contains("verdict: indeterminate"));
+}
+
+#[test]
+fn the_manifest_round_trips_the_baseline_envelope() {
+    // The manifest renders the measured envelope; parse the numbers back out
+    // and compare them with the record so the two spellings cannot drift.
+    let json = to_json();
+    assert!(json.contains("\"cycle_time_baseline\":{"));
+    assert!(json.contains("\"provenance\":\"published-source-derived\""));
+    let extract = |key: &str| -> f64 {
+        let marker = format!("\"{key}\":");
+        let start = json
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {key}"))
+            + marker.len();
+        let rest = &json[start..];
+        let end = rest
+            .find([',', '}'])
+            .unwrap_or_else(|| panic!("unterminated {key}"));
+        rest[..end]
+            .parse::<f64>()
+            .unwrap_or_else(|error| panic!("unparsable {key}: {error}"))
+    };
+    assert_eq!(
+        extract("baseline_days_low").to_bits(),
+        CHT_BASELINE.baseline_days_low().to_bits()
+    );
+    assert_eq!(
+        extract("baseline_days_high").to_bits(),
+        CHT_BASELINE.baseline_days_high().to_bits()
+    );
+    assert_eq!(
+        extract("target_reduction").to_bits(),
+        CHT_BASELINE.target_reduction.to_bits()
+    );
+    assert_eq!(
+        extract("hours_per_working_day").to_bits(),
+        CHT_BASELINE.hours_per_working_day.to_bits()
+    );
+}
+
+#[test]
+fn the_audit_covers_the_measured_baseline_and_the_refusal_drill() {
+    let report = audit();
+    assert!(report.passed("cycle-time-baseline-measured"));
+    assert!(report.passed("placeholder-baseline-refused"));
+    assert!(report.passed("kill-criterion-measurable"));
 }
