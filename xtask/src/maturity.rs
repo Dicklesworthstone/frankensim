@@ -447,13 +447,23 @@ fn check_readme_summary_counts(readme: &str, entries: &[Entry]) -> Vec<Violation
             ));
         }
     }
-    for line in readme
+    let total_lines: Vec<&str> = readme
         .lines()
         .filter(|line| line.contains(" product-meaningful capabilities"))
-    {
+        .collect();
+    if total_lines.len() != 1 {
+        violations.push(violation(
+            "README.md",
+            format!(
+                "README capability summary must contain exactly one product-meaningful-capabilities total, found {}",
+                total_lines.len()
+            ),
+        ));
+    } else {
+        let line = total_lines[0];
         let marker = " product-meaningful capabilities";
         let Some(position) = line.find(marker) else {
-            continue;
+            return violations;
         };
         let digits: String = line[..position]
             .chars()
@@ -1114,6 +1124,16 @@ mod tests {
             "one stale summary count: {violations:?}"
         );
         assert!(violations[0].detail.contains("L2"));
+
+        let duplicated_total =
+            format!("{summary}it also registers 2 product-meaningful capabilities:\n");
+        let violations = check_readme_summary_counts(&duplicated_total, &entries);
+        assert_eq!(
+            violations.len(),
+            1,
+            "one duplicate-total defect: {violations:?}"
+        );
+        assert!(violations[0].detail.contains("exactly one"));
     }
 
     #[test]

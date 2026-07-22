@@ -41,18 +41,27 @@ workstream.
 - Replaced stale prose saying neural representations were absent and external
   validation was merely "in progress." The README now records that
   `fs-rep-neural` exists but has no registered maturity claim, while an external
-  validation corpus does not yet exist.
+  production validation corpus does not yet exist.
 - Qualified design-ledger and browser-flagship prose with their recorded L1
   status and known failing/build-broken boundaries instead of presenting crate
   presence as integrated capability proof.
+- Added generated README repository facts and a generated capability matrix,
+  both enforced by the named `xtask check-docs` gate and composed into
+  `xtask check-all`.
+- Added [`doc-facts-inventory.json`](doc-facts-inventory.json), a portable
+  tracked-input registry that is checked exactly against `git ls-files` in a
+  worktree and remains usable in RCH/archive snapshots where `.git` is
+  intentionally absent. This keeps untracked working-tree files out of public
+  counts without making remote verification depend on transferred Git internals.
 
 ### Active workstream
 
 - [`frankensim-extreal-program-f85xj.16.6`](https://github.com/Dicklesworthstone/frankensim/blob/55379baf41cf1d3584c87a81ae1dde20508a4c8f/.beads/issues.jsonl)
-  tracks the wider documentation-truth program. This README/changelog slice
-  repairs the visible narrative; generated facts and a seeded stale-count
-  failure wired into `xtask check-all` remain acceptance work before that Bead
-  can close.
+  tracks the wider documentation-truth program. The implementation now covers
+  the visible narrative, generated facts, the registry-backed capability
+  matrix, a seeded stale-count regression, and `xtask check-all` composition;
+  its final proof and tracker closeout are recorded on the Bead rather than
+  overstated here as a repository-wide green-suite claim.
 
 ### Representative commit
 

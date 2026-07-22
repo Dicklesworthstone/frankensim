@@ -24,9 +24,16 @@
 //! generation from evidence packages) belongs to huq.15.1; this lint is
 //! the repo-level drift stop until that exists.
 
-use crate::Violation;
-use std::collections::BTreeSet;
+use crate::depgraph::{JsonParser, JsonValue};
+use crate::{PolicyNote, Violation};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+const DOC_FACTS_BEGIN: &str = "<!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->";
+const DOC_FACTS_END: &str = "<!-- END GENERATED FRANKENSIM DOC FACTS -->";
+const DOC_FACTS_CHECK: &str = "doc-facts";
+const DOC_INVENTORY_FILE: &str = "doc-facts-inventory.json";
+const DOC_INVENTORY_SCHEMA: &str = "frankensim-doc-facts-inventory-v1";
 
 /// Normalize a hash token: strip `0x`, underscores, lowercase.
 fn norm_hash(tok: &str) -> String {
@@ -109,85 +116,568 @@ fn count_before(line: &str, pat: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
+#[cfg(test)]
 fn workspace_fs_member_count(manifest: &str) -> Option<usize> {
+    workspace_fs_members(manifest).map(|members| members.len())
+}
+
+fn workspace_fs_members(manifest: &str) -> Option<BTreeSet<String>> {
     let mut lines = manifest.lines();
     lines.find(|line| line.trim() == "members = [")?;
-    let mut count = 0usize;
+    let mut members = BTreeSet::new();
     for line in lines {
         let entry = line.trim();
         if entry == "]" {
-            return Some(count);
+            return Some(members);
         }
         let entry = entry.strip_suffix(',').unwrap_or(entry).trim();
         let entry = entry.strip_prefix('"')?.strip_suffix('"')?;
         if entry.starts_with("crates/fs-") {
-            count = count.checked_add(1)?;
+            members.insert(entry.to_string());
         }
     }
     None
 }
 
-fn tracked_file_count(root: &Path, pathspec: &str) -> Option<usize> {
+fn git_tracked_files(root: &Path, pathspec: &str) -> Result<Option<Vec<String>>, String> {
+    let repository = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|error| format!("cannot inspect Git worktree authority: {error}"))?;
+    if !repository.status.success() {
+        let stderr = String::from_utf8_lossy(&repository.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "git rev-parse failed while inspecting documentation inventory authority: {}",
+            stderr.trim()
+        ));
+    }
+    if String::from_utf8_lossy(&repository.stdout).trim() != "true" {
+        return Ok(None);
+    }
+
     let output = std::process::Command::new("git")
         .args(["-C"])
         .arg(root)
-        .args(["ls-files", "--", pathspec])
+        .args(["ls-files", "-z", "--", pathspec])
         .output()
-        .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count()
-    })
+        .map_err(|error| format!("cannot execute git ls-files for {pathspec:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed for {pathspec:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let relative = std::str::from_utf8(raw).map_err(|error| {
+            format!("git inventory for {pathspec:?} contains a non-UTF-8 path: {error}")
+        })?;
+        if relative.starts_with('/')
+            || Path::new(relative)
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "git inventory for {pathspec:?} contains non-portable path {relative:?}"
+            ));
+        }
+        if !seen.insert(relative.to_string()) {
+            return Err(format!(
+                "git inventory for {pathspec:?} repeats path {relative:?}"
+            ));
+        }
+        files.push(relative.to_string());
+    }
+    Ok(Some(files))
+}
+
+fn json_object(value: &JsonValue) -> Option<&BTreeMap<String, JsonValue>> {
+    match value {
+        JsonValue::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+fn json_array(value: &JsonValue) -> Option<&[JsonValue]> {
+    match value {
+        JsonValue::Array(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn json_text(value: &JsonValue) -> Option<&str> {
+    match value {
+        JsonValue::String(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn valid_inventory_path(group: &str, relative: &str) -> bool {
+    if relative.contains('\\') {
+        return false;
+    }
+    let parts = relative.split('/').collect::<Vec<_>>();
+    let crate_path = parts.first() == Some(&"crates")
+        && parts
+            .get(1)
+            .is_some_and(|name| name.starts_with("fs-") && name.len() > 3);
+    match group {
+        "manifests" => crate_path && parts.len() == 3 && parts[2] == "Cargo.toml",
+        "contracts" => crate_path && parts.len() == 3 && parts[2] == "CONTRACT.md",
+        "integration_tests" => {
+            crate_path
+                && parts.len() >= 4
+                && parts[2] == "tests"
+                && parts.last().is_some_and(|name| name.ends_with(".rs"))
+                && parts.last().is_some_and(|name| name.len() > 3)
+        }
+        _ => false,
+    }
+}
+
+fn inventory_paths(
+    root: &Path,
+    object: &BTreeMap<String, JsonValue>,
+    group: &str,
+) -> Result<Vec<String>, String> {
+    let values = object
+        .get(group)
+        .and_then(json_array)
+        .ok_or_else(|| format!("{DOC_INVENTORY_FILE} has no array field {group:?}"))?;
+    let mut paths = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let relative = json_text(value)
+            .ok_or_else(|| format!("{DOC_INVENTORY_FILE} {group}[{index}] is not a string"))?;
+        if !valid_inventory_path(group, relative) {
+            return Err(format!(
+                "{DOC_INVENTORY_FILE} {group}[{index}] has invalid path {relative:?}"
+            ));
+        }
+        let path = Path::new(relative);
+        if path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(format!(
+                "{DOC_INVENTORY_FILE} {group}[{index}] has non-portable path {relative:?}"
+            ));
+        }
+        if !root.join(path).is_file() {
+            return Err(format!(
+                "{DOC_INVENTORY_FILE} {group}[{index}] names missing or non-file path {relative:?}"
+            ));
+        }
+        if paths
+            .last()
+            .is_some_and(|previous| previous >= &relative.to_string())
+        {
+            return Err(format!(
+                "{DOC_INVENTORY_FILE} {group} must be strictly sorted with no duplicates; {relative:?} is out of order"
+            ));
+        }
+        paths.push(relative.to_string());
+    }
+    Ok(paths)
+}
+
+struct TrackedInventory {
+    manifests: Vec<String>,
+    contracts: Vec<String>,
+    integration_tests: Vec<String>,
+    git_index_verified: bool,
+}
+
+impl TrackedInventory {
+    fn read(root: &Path) -> Result<Self, String> {
+        let source = std::fs::read_to_string(root.join(DOC_INVENTORY_FILE))
+            .map_err(|error| format!("cannot read {DOC_INVENTORY_FILE}: {error}"))?;
+        let parsed = JsonParser::new(&source)
+            .finish()
+            .map_err(|error| format!("cannot parse {DOC_INVENTORY_FILE}: {error}"))?;
+        let object = json_object(&parsed)
+            .ok_or_else(|| format!("{DOC_INVENTORY_FILE} is not a JSON object"))?;
+        let expected_fields =
+            BTreeSet::from(["schema", "manifests", "contracts", "integration_tests"]);
+        let actual_fields = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        if actual_fields != expected_fields {
+            return Err(format!(
+                "{DOC_INVENTORY_FILE} fields are {actual_fields:?}, expected {expected_fields:?}"
+            ));
+        }
+        match object.get("schema").and_then(json_text) {
+            Some(DOC_INVENTORY_SCHEMA) => {}
+            Some(schema) => {
+                return Err(format!(
+                    "{DOC_INVENTORY_FILE} schema is {schema:?}, expected {DOC_INVENTORY_SCHEMA:?}"
+                ));
+            }
+            None => {
+                return Err(format!("{DOC_INVENTORY_FILE} has no string schema field"));
+            }
+        }
+
+        let manifests = inventory_paths(root, object, "manifests")?;
+        let contracts = inventory_paths(root, object, "contracts")?;
+        let integration_tests = inventory_paths(root, object, "integration_tests")?;
+        let groups = [
+            ("manifests", "crates/fs-*/Cargo.toml", &manifests),
+            ("contracts", "crates/fs-*/CONTRACT.md", &contracts),
+            (
+                "integration_tests",
+                "crates/fs-*/tests/*.rs",
+                &integration_tests,
+            ),
+        ];
+        let mut git_index_verified = true;
+        for (group, pathspec, recorded) in groups {
+            match git_tracked_files(root, pathspec)? {
+                Some(actual) if &actual == recorded => {}
+                Some(actual) => {
+                    let first_difference = actual
+                        .iter()
+                        .zip(recorded.iter())
+                        .position(|(left, right)| left != right)
+                        .unwrap_or_else(|| actual.len().min(recorded.len()));
+                    return Err(format!(
+                        "{DOC_INVENTORY_FILE} {group} is stale against the Git index at entry {first_difference}: recorded={} git={}",
+                        recorded.len(),
+                        actual.len()
+                    ));
+                }
+                None => git_index_verified = false,
+            }
+        }
+        Ok(Self {
+            manifests,
+            contracts,
+            integration_tests,
+            git_index_verified,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DocFacts {
+    native_workspace_crates: usize,
+    standalone_crates: Vec<String>,
+    crate_directories: usize,
+    contracts: usize,
+    tracked_integration_tests: usize,
+    layers: BTreeMap<&'static str, usize>,
+}
+
+impl DocFacts {
+    fn derive(root: &Path) -> Result<(Self, bool), String> {
+        let workspace_source = std::fs::read_to_string(root.join("Cargo.toml"))
+            .map_err(|error| format!("cannot read Cargo.toml: {error}"))?;
+        let native_members = workspace_fs_members(&workspace_source).ok_or_else(|| {
+            "cannot derive native fs-* workspace members from [workspace].members".to_string()
+        })?;
+
+        let inventory = TrackedInventory::read(root)?;
+        let manifest_paths = inventory
+            .manifests
+            .iter()
+            .map(|relative| root.join(relative))
+            .collect::<Vec<_>>();
+        if manifest_paths.is_empty() {
+            return Err("no fs-* crate manifests were found".to_string());
+        }
+
+        let mut standalone_crates = Vec::new();
+        let mut layers = BTreeMap::from([
+            ("UTIL", 0usize),
+            ("L0", 0),
+            ("L1", 0),
+            ("L2", 0),
+            ("L3", 0),
+            ("L4", 0),
+            ("L5", 0),
+            ("L6", 0),
+        ]);
+        for path in &manifest_paths {
+            let source = std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let manifest = crate::parse_manifest(path, &source)?;
+            let layer = manifest.layer.name();
+            let Some(count) = layers.get_mut(layer) else {
+                return Err(format!(
+                    "{} declares non-product layer {layer}; fs-* documentation inventory covers UTIL and L0-L6",
+                    path.display()
+                ));
+            };
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| "layer inventory count overflow".to_string())?;
+
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| format!("{} is outside workspace root", path.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let member = relative
+                .strip_suffix("/Cargo.toml")
+                .ok_or_else(|| format!("unexpected manifest path {relative}"))?;
+            if !native_members.contains(member) {
+                standalone_crates.push(manifest.name);
+            }
+        }
+        standalone_crates.sort();
+
+        let crate_directories = manifest_paths.len();
+        if native_members.len() + standalone_crates.len() != crate_directories {
+            return Err(format!(
+                "native ({}) plus standalone ({}) fs-* crates do not cover all {crate_directories} tracked manifests",
+                native_members.len(),
+                standalone_crates.len()
+            ));
+        }
+
+        let contracts = inventory.contracts.len();
+        let tracked_integration_tests = inventory.integration_tests.len();
+
+        Ok((
+            Self {
+                native_workspace_crates: native_members.len(),
+                standalone_crates,
+                crate_directories,
+                contracts,
+                tracked_integration_tests,
+                layers,
+            },
+            inventory.git_index_verified,
+        ))
+    }
+
+    fn render(&self) -> String {
+        let standalone = if self.standalone_crates.is_empty() {
+            "0".to_string()
+        } else {
+            format!(
+                "{} ({})",
+                self.standalone_crates.len(),
+                self.standalone_crates
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let layer_inventory = self
+            .layers_ordered()
+            .map(|(layer, count)| format!("`{layer}={count}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{DOC_FACTS_BEGIN}\n\
+| Derived repository fact | Value |\n\
+|-------------------------|-------|\n\
+| Native workspace `fs-*` crates | {} |\n\
+| Standalone `fs-*` workspaces | {standalone} |\n\
+| Tracked `fs-*` crate directories | {} |\n\
+| Tracked `CONTRACT.md` files | {} of {} |\n\
+| Tracked crate integration-test files | {} |\n\
+| `fs-*` layer inventory | {layer_inventory} |\n\
+{DOC_FACTS_END}",
+            self.native_workspace_crates,
+            self.crate_directories,
+            self.contracts,
+            self.crate_directories,
+            self.tracked_integration_tests,
+        )
+    }
+
+    fn layers_ordered(&self) -> impl Iterator<Item = (&'static str, usize)> + '_ {
+        ["UTIL", "L0", "L1", "L2", "L3", "L4", "L5", "L6"]
+            .into_iter()
+            .map(|layer| (layer, self.layers.get(layer).copied().unwrap_or(0)))
+    }
+}
+
+fn marked_block<'a>(source: &'a str, begin: &str, end: &str) -> Result<&'a str, String> {
+    let starts: Vec<usize> = source
+        .match_indices(begin)
+        .map(|(index, _)| index)
+        .collect();
+    let ends: Vec<usize> = source.match_indices(end).map(|(index, _)| index).collect();
+    if starts.len() != 1 || ends.len() != 1 {
+        return Err(format!(
+            "expected exactly one {begin:?} and one {end:?} marker, found {} and {}",
+            starts.len(),
+            ends.len()
+        ));
+    }
+    let start = starts[0];
+    let finish = ends[0]
+        .checked_add(end.len())
+        .ok_or_else(|| "generated-block end offset overflow".to_string())?;
+    if ends[0] <= start {
+        return Err(format!("{end:?} appears before {begin:?}"));
+    }
+    Ok(&source[start..finish])
+}
+
+fn check_doc_facts(readme: &str, facts: &DocFacts) -> Vec<Violation> {
+    let expected = facts.render();
+    match marked_block(readme, DOC_FACTS_BEGIN, DOC_FACTS_END) {
+        Ok(actual) if actual == expected => Vec::new(),
+        Ok(_) => vec![Violation {
+            check: DOC_FACTS_CHECK,
+            crate_name: "README.md".to_string(),
+            detail: format!(
+                "README generated repository-facts block is stale; replace it with the exact tree-derived block:\n{expected}"
+            ),
+        }],
+        Err(error) => vec![Violation {
+            check: DOC_FACTS_CHECK,
+            crate_name: "README.md".to_string(),
+            detail: format!("README generated repository-facts block is malformed: {error}"),
+        }],
+    }
+}
+
+pub struct DocsReport {
+    pub violations: Vec<Violation>,
+    pub decisions: Vec<PolicyNote>,
+}
+
+fn doc_note(source: &str, detail: String) -> PolicyNote {
+    PolicyNote {
+        check: DOC_FACTS_CHECK,
+        crate_name: source.to_string(),
+        verdict: "verified",
+        detail,
+    }
+}
+
+fn check_docs_with_facts(readme: &str, facts: &DocFacts) -> DocsReport {
+    let mut violations = check_inventory_counts(readme, facts);
+    let block_violations = check_doc_facts(readme, facts);
+    let block_clean = block_violations.is_empty();
+    violations.extend(block_violations);
+
+    let mut decisions = vec![
+        doc_note(
+            "Cargo.toml",
+            format!(
+                "native_workspace_fs_members={} source=[workspace].members",
+                facts.native_workspace_crates
+            ),
+        ),
+        doc_note(
+            "doc-facts-inventory.json:manifests",
+            format!(
+                "tracked_fs_crate_manifests={} standalone={} source=portable-checked-git-index",
+                facts.crate_directories,
+                facts.standalone_crates.join(",")
+            ),
+        ),
+        doc_note(
+            "doc-facts-inventory.json:contracts",
+            format!(
+                "tracked_contracts={} crate_manifests={}",
+                facts.contracts, facts.crate_directories
+            ),
+        ),
+        doc_note(
+            "doc-facts-inventory.json:integration_tests",
+            format!(
+                "tracked_integration_test_files={}",
+                facts.tracked_integration_tests
+            ),
+        ),
+        doc_note(
+            "crates/*/Cargo.toml:[package.metadata.frankensim].layer",
+            format!(
+                "declared_layer_inventory={} (metadata inventory, not dependency-validity proof)",
+                facts
+                    .layers_ordered()
+                    .map(|(layer, count)| format!("{layer}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ),
+    ];
+    if block_clean {
+        decisions.push(doc_note(
+            "README.md",
+            "generated repository-facts block exactly matches its tracked sources".to_string(),
+        ));
+    }
+    DocsReport {
+        violations,
+        decisions,
+    }
+}
+
+pub fn check_docs(root: &Path) -> DocsReport {
+    let readme = match std::fs::read_to_string(root.join("README.md")) {
+        Ok(readme) => readme,
+        Err(error) => {
+            return DocsReport {
+                violations: vec![Violation {
+                    check: DOC_FACTS_CHECK,
+                    crate_name: "README.md".to_string(),
+                    detail: format!("cannot read README.md: {error}"),
+                }],
+                decisions: Vec::new(),
+            };
+        }
+    };
+    match DocFacts::derive(root) {
+        Ok((facts, git_index_verified)) => {
+            let mut report = check_docs_with_facts(&readme, &facts);
+            report.decisions.insert(
+                0,
+                doc_note(
+                    DOC_INVENTORY_FILE,
+                    if git_index_verified {
+                        "portable tracked-file registry exactly matches git ls-files for all documentation fact inputs"
+                            .to_string()
+                    } else {
+                        "source-snapshot mode: .git is unavailable; portable tracked-file registry is schema-valid, strictly sorted, duplicate-free, and every recorded input exists (a Git worktree additionally verifies exact index equality)"
+                            .to_string()
+                    },
+                ),
+            );
+            report
+        }
+        Err(error) => DocsReport {
+            violations: vec![Violation {
+                check: DOC_FACTS_CHECK,
+                crate_name: "README.md".to_string(),
+                detail: format!("cannot derive generated documentation facts: {error}"),
+            }],
+            decisions: Vec::new(),
+        },
+    }
 }
 
 /// huq.18: README inventory counts (crate/contract/test-file numbers in
 /// the badges and the What-Exists table) must equal the tree's actual
 /// counts — counts are DERIVED, never hand-promoted, so drift turns the
 /// gate red instead of aging silently.
-fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
+fn check_inventory_counts(readme: &str, facts: &DocFacts) -> Vec<Violation> {
     let mut violations = Vec::new();
-    let crate_dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates")).map_or_else(
-        |_| Vec::new(),
-        |rd| rd.flatten().map(|e| e.path()).collect(),
-    );
-    let filesystem_crate_count = crate_dirs
-        .iter()
-        .filter(|p| p.join("Cargo.toml").is_file())
-        .count();
-    let filesystem_contract_count = crate_dirs
-        .iter()
-        .filter(|p| p.join("CONTRACT.md").is_file())
-        .count();
-    let filesystem_test_file_count: usize = crate_dirs
-        .iter()
-        .filter_map(|p| std::fs::read_dir(p.join("tests")).ok())
-        .flat_map(std::iter::Iterator::flatten)
-        .filter(|f| f.path().extension().is_some_and(|x| x == "rs"))
-        .count();
-    // Public inventory describes a clean clone. Untracked scratch probes must
-    // neither inflate README claims nor make the gate nondeterministic. The
-    // filesystem fallback keeps isolated non-git unit fixtures useful.
-    let crate_count =
-        tracked_file_count(root, "crates/*/Cargo.toml").unwrap_or(filesystem_crate_count);
-    let contract_count =
-        tracked_file_count(root, "crates/*/CONTRACT.md").unwrap_or(filesystem_contract_count);
-    let test_file_count =
-        tracked_file_count(root, "crates/*/tests/*.rs").unwrap_or(filesystem_test_file_count);
-    let workspace_crate_count = std::fs::read_to_string(root.join("Cargo.toml"))
-        .ok()
-        .and_then(|manifest| workspace_fs_member_count(&manifest));
-    if workspace_crate_count.is_none() {
-        violations.push(Violation {
-            check: "claim-state",
-            crate_name: "Cargo.toml".to_string(),
-            detail: "cannot derive native fs-* workspace-member count from [workspace].members"
-                .to_string(),
-        });
-    }
-    let workspace_crate_count = workspace_crate_count.unwrap_or(usize::MAX);
+    let crate_count = facts.crate_directories;
+    let contract_count = facts.contracts;
+    let test_file_count = facts.tracked_integration_tests;
+    let workspace_crate_count = facts.native_workspace_crates;
     let checks = [
+        (
+            "%20native%20fs--%2A%20crates",
+            workspace_crate_count,
+            "native fs-* workspace crates (badge)",
+        ),
         (
             "%20fs--%2A%20crates",
             workspace_crate_count,
@@ -216,6 +706,16 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
             test_file_count,
             "crate test files (badge)",
         ),
+        (
+            "%20tracked%20integration%20test%20files",
+            test_file_count,
+            "tracked integration-test files (badge)",
+        ),
+        (
+            " tracked Rust files under crate `tests/` directories",
+            test_file_count,
+            "tracked integration-test files",
+        ),
     ];
     for line in readme.lines() {
         for (pat, actual, what) in checks {
@@ -223,7 +723,7 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
                 && claimed != actual
             {
                 violations.push(Violation {
-                    check: "claim-state",
+                    check: DOC_FACTS_CHECK,
                     crate_name: "README.md".to_string(),
                     detail: format!(
                         "README claims {claimed} {what} but the tree has {actual} — counts \
@@ -248,7 +748,7 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
                 && (n != contract_count || m != crate_count)
             {
                 violations.push(Violation {
-                    check: "claim-state",
+                    check: DOC_FACTS_CHECK,
                     crate_name: "README.md".to_string(),
                     detail: format!(
                         "README contracts badge says {n} of {m} but the tree has \
@@ -266,7 +766,7 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
                 .collect();
             if numbers.len() >= 2 && numbers[numbers.len() - 2..] != [contract_count, crate_count] {
                 violations.push(Violation {
-                    check: "claim-state",
+                    check: DOC_FACTS_CHECK,
                     crate_name: "README.md".to_string(),
                     detail: format!(
                         "README contract inventory says {} of {} but the tree has \
@@ -436,17 +936,11 @@ fn check_claim_integrity_docs(root: &Path) -> Vec<Violation> {
 }
 
 /// README claim-state lint: see module docs for the three rules.
-pub fn check_claims(root: &Path) -> Vec<Violation> {
-    let mut violations = Vec::new();
-    let Ok(readme) = std::fs::read_to_string(root.join("README.md")) else {
-        violations.push(Violation {
-            check: "claim-state",
-            crate_name: "<repo>".to_string(),
-            detail: "README.md missing at workspace root".to_string(),
-        });
-        return violations;
-    };
-
+fn check_claims_from_readme(
+    root: &Path,
+    readme: &str,
+    mut violations: Vec<Violation>,
+) -> Vec<Violation> {
     // Corpus: all code text (sources + tests) for hash and fn lookups.
     let mut code_hashes: BTreeSet<String> = BTreeSet::new();
     let mut code_text = String::new();
@@ -457,10 +951,6 @@ pub fn check_claims(root: &Path) -> Vec<Violation> {
             code_text.push('\n');
         }
     }
-
-    // Rule 4 (huq.18): README inventory counts are derived, never
-    // hand-promoted.
-    violations.extend(check_inventory_counts(root, &readme));
 
     // Rule 5 (f85xj.2.1): the claim-integrity defect class stays defined and
     // its taxonomy stays documented where agents read conventions.
@@ -519,6 +1009,23 @@ pub fn check_claims(root: &Path) -> Vec<Violation> {
     violations
 }
 
+pub fn check_claim_language(root: &Path) -> Vec<Violation> {
+    let Ok(readme) = std::fs::read_to_string(root.join("README.md")) else {
+        return vec![Violation {
+            check: "claim-state",
+            crate_name: "<repo>".to_string(),
+            detail: "README.md missing at workspace root".to_string(),
+        }];
+    };
+    check_claims_from_readme(root, &readme, Vec::new())
+}
+
+pub fn check_claims(root: &Path) -> Vec<Violation> {
+    let mut violations = check_docs(root).violations;
+    violations.extend(check_claim_language(root));
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +1050,73 @@ members = [
 "#;
         assert_eq!(workspace_fs_member_count(manifest), Some(2));
         assert_eq!(workspace_fs_member_count("[workspace]\n"), None);
+    }
+
+    #[test]
+    fn generated_doc_facts_fail_on_one_seeded_stale_count() {
+        let facts = DocFacts {
+            native_workspace_crates: 2,
+            standalone_crates: vec!["fs-wasm".to_string()],
+            crate_directories: 3,
+            contracts: 3,
+            tracked_integration_tests: 2,
+            layers: BTreeMap::from([
+                ("UTIL", 0),
+                ("L0", 1),
+                ("L1", 1),
+                ("L2", 0),
+                ("L3", 0),
+                ("L4", 0),
+                ("L5", 0),
+                ("L6", 1),
+            ]),
+        };
+        let generated = facts.render();
+        assert!(
+            check_docs_with_facts(&generated, &facts)
+                .violations
+                .is_empty(),
+            "the exact generated block must pass"
+        );
+
+        let stale = generated.replacen(
+            "| Native workspace `fs-*` crates | 2 |",
+            "| Native workspace `fs-*` crates | 9 |",
+            1,
+        );
+        let violations = check_docs_with_facts(&stale, &facts).violations;
+        assert_eq!(
+            violations.len(),
+            1,
+            "one seeded stale count: {violations:?}"
+        );
+        assert!(violations[0].detail.contains("block is stale"));
+    }
+
+    #[test]
+    fn tracked_doc_inventory_is_portable_to_source_snapshots_without_dot_git() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask must live directly below the workspace root");
+        let inventory = TrackedInventory::read(root).expect("live inventory must validate");
+        assert!(!inventory.manifests.is_empty());
+        assert_eq!(inventory.manifests.len(), inventory.contracts.len());
+        assert!(!inventory.integration_tests.is_empty());
+
+        let (facts, git_index_verified) =
+            DocFacts::derive(root).expect("documentation facts must derive from the registry");
+        assert_eq!(facts.crate_directories, inventory.manifests.len());
+        assert_eq!(facts.contracts, inventory.contracts.len());
+        assert_eq!(
+            facts.tracked_integration_tests,
+            inventory.integration_tests.len()
+        );
+        if root.join(".git").is_dir() {
+            assert!(
+                git_index_verified,
+                "a real worktree must verify the portable registry against Git"
+            );
+        }
     }
 
     /// Build a minimal docs pair that satisfies the claim-integrity lint, so
@@ -691,24 +1265,48 @@ members = [
             "pub const G: u64 = 0x1111_2222_3333_4444;\n",
         );
         mk(
+            "crates/fs-real/Cargo.toml",
+            "[package]\nname = \"fs-real\"\n[package.metadata.frankensim]\nlayer = \"L0\"\n",
+        );
+        mk(
             "crates/fs-real/tests/battery.rs",
             "fn real_golden_hash() {}\n",
         );
+        let facts = DocFacts {
+            native_workspace_crates: 1,
+            standalone_crates: Vec::new(),
+            crate_directories: 1,
+            contracts: 0,
+            tracked_integration_tests: 1,
+            layers: BTreeMap::from([
+                ("UTIL", 0),
+                ("L0", 1),
+                ("L1", 0),
+                ("L2", 0),
+                ("L3", 0),
+                ("L4", 0),
+                ("L5", 0),
+                ("L6", 0),
+            ]),
+        };
+        let doc_facts = facts.render();
         // Seeded drift: stale hash, missing crate, missing sentinel fn.
         mk(
             "README.md",
-            concat!(
-                "Good: `fs-real` golden `0x1111_2222_3333_4444` via `real_golden_hash`.\n",
-                "Stale hash 0xaaaa_bbbb_cccc_dddd.\n",
-                "Gone crate `fs-vanished`.\n",
-                "Gone sentinel `ghost_golden_hash`.\n",
+            &format!(
+                "{doc_facts}\n\nGood: `fs-real` golden `0x1111_2222_3333_4444` via `real_golden_hash`.\n\
+                 Stale hash 0xaaaa_bbbb_cccc_dddd.\n\
+                 Gone crate `fs-vanished`.\n\
+                 Gone sentinel `ghost_golden_hash`.\n"
             ),
         );
         // Rule 5's docs are present and complete so this case still isolates
         // the three seeded README drifts; the claim-integrity lint has its own
         // mutation tests above.
         claim_integrity_fixture(&base);
-        let v = check_claims(&base);
+        let readme = std::fs::read_to_string(base.join("README.md")).unwrap();
+        let docs = check_docs_with_facts(&readme, &facts);
+        let v = check_claims_from_readme(&base, &readme, docs.violations);
         assert_eq!(v.len(), 3, "exactly the three seeded drifts: {v:?}");
         assert!(v.iter().any(|x| x.detail.contains("aaaabbbbccccdddd")));
         assert!(v.iter().any(|x| x.detail.contains("fs-vanished")));

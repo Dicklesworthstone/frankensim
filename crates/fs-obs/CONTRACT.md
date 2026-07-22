@@ -231,7 +231,9 @@ privilege downgrade.
   violations. Only the retained outer shell of an exact recognized attribute
   can establish `cfg(test)` or a direct module `path`.
 - The scanner inventories the repository-owned `crates/`, `tools/`, and
-  `xtask/` roots directly, refuses every symlink below them, and deliberately
+  `xtask/` roots directly, deterministically sorts every bounded directory
+  batch before processing, refuses every symlink it observes below those
+  roots, and deliberately
   scans nested directories named `target`; only the repository-level Cargo
   build root lies outside those owned roots. Inventory identity is lossless
   UTF-8 with `/` separators: non-UTF-8 components, Unix backslash-bearing
@@ -239,29 +241,46 @@ privilege downgrade.
   refuse rather than alias platform-dependent files. Source and manifest reads
   are size-checked and reader-bounded before allocation; directory, directory-
   entry, and package-manifest enumeration is capped before collection growth.
-  Package discovery independently walks only those three owned roots, proves
+  These checks are a deterministic inspection of a quiescent tree, not an
+  atomic filesystem snapshot: concurrent path replacement is unsupported, and
+  the scanner makes no stable-tree or all-times symlink-freedom claim across an
+  adversarial mutation race. Package discovery independently walks only those
+  three owned roots, proves
   canonical containment at each directory/manifest boundary, orders and
   deduplicates candidates deterministically, and assigns no magic exclusion to
   nested directories named `target`: if such a directory lives below an owned
   root, its source and package manifests remain policy authority. The scanner
-  does not
-  invoke or claim the full semantics of `cargo metadata`: it fail-closed parses
-  the repository's supported `[package]`, `package.autolib`, and `[lib].path`
-  subset, including Cargo-equivalent quoted and dotted TOML keys and bounded
-  single-line TOML basic-string escapes. A bounded quote/comment-aware lexical
-  preflight refuses real multiline basic or literal delimiters before physical
-  lines can be mistaken for table headers; escaped triple quotes inside an
-  ordinary single-line string remain supported. Unsupported escapes and inline
-  package/lib tables likewise refuse rather than disappear. Source count/bytes,
+  does not invoke or claim the full semantics of `cargo metadata`. One bounded
+  top-level TOML lexical pass tracks comments, ordinary and multiline strings,
+  nested arrays, inline tables, delimiter kind/depth, logical statements, and
+  physical source lines. Only a bracket header beginning a top-level statement
+  can change table authority; `[` text nested inside an array, inline table,
+  comment, or string cannot forge `[lib]`. The semantic subset fail-closed
+  parses `[package]`, `package.autolib`, `[lib].path`, direct or workspace-
+  inherited package edition, and dependency keys, including Cargo-equivalent
+  quoted/dotted keys and bounded basic-string escapes. Rust 2015, missing or
+  ambiguous edition authority, absent workspace edition for an inherited
+  package, unsupported editions, `std`/`core` dependency-key rebinding, invalid
+  delimiter state, and inline package/lib authority tables refuse rather than
+  disappear. Workspace inheritance is granted only to an explicit normalized
+  member not also listed in `workspace.exclude`; globbed or implicit membership
+  is unsupported for scanner authority. The resulting typed package context binds the exact library
+  target, package root, edition, workspace inheritance, and trusted `std`/`core`
+  extern roots to every graph edge. Source count/bytes,
   manifest bytes, per-source and aggregate tokens, reachability edges/nodes,
-  module depth/path bytes, macro hazards, occurrences, and diagnostics all have
-  deterministic exhaustion caps with actionable refusal records.
+  module depth/path bytes, TOML depth/statements, use declarations/nesting/
+  leaves/segments/bytes/edges/work, alias-propagation work, expansion points,
+  macro hazards, occurrences, and diagnostics all have deterministic exhaustion
+  caps with actionable refusal records.
 - From each admitted library root, ordinary `mod foo;`, direct `#[path]`, and
   production built-in `include!` edges with one bounded literal `.rs` path are
-  followed transitively, including otherwise CLI-shaped targets. Each included
-  source carries its own physical directory into nested ordinary-module
-  resolution; a sibling decoy beside the including file cannot replace the
-  module Rust resolves beside the included file. Lexically proven direct,
+  followed transitively, including otherwise CLI-shaped targets. Optional
+  built-in trailing-comma syntax (`include!("file.rs",)`) has the same edge.
+  Each included source and direct `#[path]` target carries its own physical
+  parent directory as the mod.rs-like base for nested ordinary-module
+  resolution; neither a sibling beside the including file nor a directory named
+  after the lexical `mod` alias can replace the module Rust compiles beside the
+  physical target. Lexically proven direct,
   recursively grouped, raw-identifier, and simple re-alias imports of
   `std::include`/`core::include` receive the same traversal. Custom imports named
   `include`, conflicting bindings, qualified alias calls, legacy `macro_use`,
@@ -281,11 +300,24 @@ privilege downgrade.
   leaves rooted in `crate`/`self`/`super` are accepted because they cannot alter
   the explicitly absolute compiler-provided `::std` path; mixed or external
   leaves refuse, while reachable protected declarations and invocations remain
-  independently scanned. The scanner makes no semantic claim about output
-  generated by external or generated macros when neither protected output nor
-  lexically established built-in-include provenance is present in inventoried
-  workspace source; source-visible include imports/aliases do not receive this
-  no-claim escape hatch.
+  independently scanned. Include imports and re-aliases are parsed by an
+  iterative bounded use-tree machine and a work-queued alias graph, rather than
+  recursive descent or repeated full fixed-point sweeps. Raw prefixes are
+  stripped before semantic comparison. Because this zero-dependency tool does
+  not yet embed rustc's pinned NFC/XID tables, every non-ASCII identifier that
+  can carry module, use, macro, attribute, include, or extern authority refuses;
+  composed/decomposed spellings can never split scanner identity from compiler
+  identity. Expansion-capable outer attributes and preceding item/macro
+  invocations create a scoped, position-aware `UnknownExpansion`; local macro
+  declarations taint only later matching include authority. That state and
+  crate-wide `macro_use`/extern-root integrity cross module edges. A literal
+  include following unknown generated authority refuses instead of following a
+  decoy, even when its surface spelling appears absolute. The scanner still
+  does not execute procedural/declarative expansion and therefore makes no
+  general semantic claim about process output synthesized by an external macro
+  when no protected spelling or source-reachability decision is present in the
+  inventoried source; such a claim requires a future compiler-pinned expansion
+  certificate rather than a lexical assertion.
 - `privacy` is a labeled-data policy core, not a secret detector, cryptographic
   implementation, access-control service, jurisdiction engine, or artifact
   scanner. External salted/keyed tokens remain caller assertions until an
