@@ -6,6 +6,21 @@ use fs_convection::{
 };
 use fs_evidence::{CertifyError, NumericalKind};
 use fs_qty::Length;
+use fs_vvreg::thermal_level_a::{
+    ThermalLevelAAcceptance, ThermalLevelACase, ThermalLevelAFamily, ThermalLevelAKind,
+    thermal_level_a_cases,
+};
+
+const LEVEL_A_CONVECTION_BINDINGS: [(&str, &str); 2] = [
+    (
+        "thermal-a-duct-nu-cwt",
+        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen",
+    ),
+    (
+        "thermal-a-duct-nu-chf",
+        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen",
+    ),
+];
 
 fn close(observed: f64, expected: f64, relative: f64) {
     let scale = expected.abs().max(1.0);
@@ -17,6 +32,53 @@ fn close(observed: f64, expected: f64, relative: f64) {
 
 fn duct_inputs() -> CorrelationInputs {
     CorrelationInputs::forced(1_000.0, 0.7).with_length_ratio(100.0)
+}
+
+fn level_a_convection_case(case_id: &str) -> &'static ThermalLevelACase {
+    let case = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == case_id)
+        .unwrap_or_else(|| panic!("missing Level-A case {case_id}"));
+    assert_eq!(case.family, ThermalLevelAFamily::ConvectionLimit);
+    assert_eq!(case.kind, ThermalLevelAKind::AnalyticReference);
+    assert_eq!(case.metric, "nusselt-number");
+    assert!(
+        LEVEL_A_CONVECTION_BINDINGS
+            .iter()
+            .any(|(id, _)| *id == case_id),
+        "{case_id} is not declared as an executing fs-convection binding"
+    );
+    let reynolds = case
+        .context
+        .iter()
+        .find(|axis| axis.name == "reynolds-number")
+        .unwrap_or_else(|| panic!("{case_id} must declare its Reynolds context"));
+    assert!(reynolds.lo <= 1_000.0 && 1_000.0 <= reynolds.hi);
+    case
+}
+
+fn assert_level_a_convection_limit(case_id: &str, observed: f64) {
+    let case = level_a_convection_case(case_id);
+    let ThermalLevelAAcceptance::Tolerance { atol, rtol } = case.acceptance else {
+        panic!("{case_id}: analytic Level-A row must carry a scalar tolerance");
+    };
+    let absolute_error = (observed - case.reference_value_si).abs();
+    let envelope = atol + rtol * case.reference_value_si.abs();
+    assert!(
+        absolute_error <= envelope,
+        "{case_id}: Nu={observed:.17e}, reference={:.17e}, error={absolute_error:.3e}, \
+         envelope={envelope:.3e}",
+        case.reference_value_si
+    );
+    assert_eq!(observed.to_bits(), case.reference_value_si.to_bits());
+    println!(
+        "{{\"suite\":\"fs-convection/level-a\",\"case_id\":\"{case_id}\",\
+         \"computed\":{observed:.17e},\"reference\":{:.17e},\
+         \"absolute_error\":{absolute_error:.17e},\"envelope\":{envelope:.17e},\
+         \"authority\":\"executed-formula-limit-not-registry-receipt\",\
+         \"verdict\":\"pass\"}}",
+        case.reference_value_si
+    );
 }
 
 #[test]
@@ -53,8 +115,8 @@ fn catalog_has_eleven_sourced_cards_and_no_unlabeled_discrepancy() {
 fn level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen() {
     let cwt = evaluate(CorrelationId::CircularDuctLaminarCwt, duct_inputs()).expect("CWT");
     let chf = evaluate(CorrelationId::CircularDuctLaminarChf, duct_inputs()).expect("CHF");
-    assert_eq!(cwt.evidence().value.to_bits(), 3.66f64.to_bits());
-    assert_eq!(chf.evidence().value.to_bits(), 4.36f64.to_bits());
+    assert_level_a_convection_limit("thermal-a-duct-nu-cwt", cwt.evidence().value);
+    assert_level_a_convection_limit("thermal-a-duct-nu-chf", chf.evidence().value);
 
     let square = CorrelationInputs::forced(1_000.0, 0.7)
         .with_length_ratio(100.0)
@@ -75,6 +137,27 @@ fn level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen() {
         3.610_224,
         2.0e-15,
     );
+}
+
+#[test]
+fn level_a_convection_binding_partition_is_complete() {
+    let catalog_ids = thermal_level_a_cases()
+        .iter()
+        .filter(|case| case.family == ThermalLevelAFamily::ConvectionLimit)
+        .map(|case| case.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let binding_ids = LEVEL_A_CONVECTION_BINDINGS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(binding_ids, catalog_ids);
+    assert_eq!(binding_ids.len(), 2);
+    for (id, test) in LEVEL_A_CONVECTION_BINDINGS {
+        assert!(
+            test.starts_with("tests/correlations.rs::"),
+            "{id}: executing test path must be stable"
+        );
+    }
 }
 
 #[test]

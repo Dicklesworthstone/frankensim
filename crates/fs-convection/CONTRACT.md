@@ -93,8 +93,9 @@ None.
 ## Conformance tests
 
 - catalog completeness, source presence, and shared-domain integrity;
-- Level-A 3.66/4.36 limiting values and rectangular square/parallel-plate
-  endpoints;
+- direct `fs-vvreg` execution bindings for both Level-A circular-duct limits,
+  with a complete two-row family partition, JSON comparison verdicts, and
+  rectangular square/parallel-plate endpoint checks;
 - per-formula frozen spot values;
 - inclusive boundary acceptance plus missing/outside/non-finite refusals;
 - G3 unit-rescaling invariance of the dimensioned `Nu k/L` conversion;
@@ -108,6 +109,9 @@ None.
 - Source citations identify formula authority; the repository does not yet
   retain licensed copies of every source table or a cross-code validation
   dataset for these correlations.
+- The two Level-A duct limits are resolved from `fs-vvreg` while the tests
+  execute, but no comparison receipt or machine fingerprint is persisted into
+  the corpus. This is a test-time binding, not a registry authority promotion.
 - `EngineeringAllowance` is a declared design band, not a statistical
   confidence interval and not L4 experimental validation.
 - The formula arithmetic is an `Estimate`, not an outward-rounded numerical

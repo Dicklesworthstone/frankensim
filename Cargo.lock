@@ -1027,6 +1027,7 @@ dependencies = [
  "fs-exec",
  "fs-math",
  "fs-qty",
+ "fs-vvreg",
 ]
 
 [[package]]

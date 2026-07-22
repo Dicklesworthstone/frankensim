@@ -129,6 +129,28 @@ workstream.
   `29943194691043348`. Cargo execution took 193.346 seconds after the
   dependency transfer; the run produced no `fs-conduction` warning.
 
+### Post-checkpoint Level-A convection execution crosswalk
+
+- Bound the two `fs-vvreg` `ConvectionLimit` rows directly into the executing
+  `fs-convection` circular-duct limiting-case test. The 3.66 constant-wall-
+  temperature and 4.36 constant-heat-flux results now use the registry values,
+  context, metric, and tolerance instead of duplicate local reference literals.
+- Added a complete two-row family partition check and JSON comparison verdicts
+  carrying the computed value, reference, absolute error, envelope, and
+  `executed-formula-limit-not-registry-receipt` authority label.
+- Raised aggregate Level-A execution coverage from 9/19 to 11/19. Eight gaps
+  remain: spherical conduction, lumped transient conduction, radiation,
+  contact resistance, P2 primal, combined anisotropic-nonlinear MMS, and the
+  P1/P2 adjoint-order ladders. No retained comparison receipt or machine
+  fingerprint is added, so registry authority remains `NoClaim`/`Estimated`.
+- Remote proof passed all 11 `fs-convection` targets tests with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test -p fs-convection --all-targets` on worker `vmi1149989`, job
+  `j-29943194691043354`. The shared HEAD advanced from `d8c2c422` to
+  `877790ab` during the lane without touching these owned files, so this is a
+  passing dirty-worktree proof, not a same-HEAD receipt.
+
 ### Post-checkpoint convection-correlation rung
 
 - Added `fs-convection`, an L3 library with 11 Nusselt relations spanning
