@@ -573,9 +573,12 @@ an explicit claim with the right evidence color, provenance, and budget context.
 The important design rule is **no laundering**: composing a `Verified` value with
 an `Estimated` value cannot produce a stronger result. That shows up in the
 evidence wrappers, the robust/fragility tooling, and the end-to-end smoke
-campaigns. For example, `fs-thrust-e2e` can place verified bands around
-full-fidelity point-vortex runs that conserve impulse, while surrogate-served
-elites remain estimated. The campaign-level rank is the weakest elite color, not
+campaigns. For example, `fs-thrust-e2e` screens full-fidelity point-vortex runs
+by impulse conservation and reports every drift as estimated — the conservation
+residual discriminates, but it bounds nothing about drift, so it earns no
+interval certificate — while surrogate-served
+elites remain estimated for a second, independent reason (they are
+extrapolations). The campaign-level rank is the weakest elite color, not
 the most flattering one.
 
 ## Representative Vertical Slices

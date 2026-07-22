@@ -4,9 +4,21 @@ Bead `frankensim-extreal-program-f85xj.2.2`. One full recorded pass over the
 claim-emitting surfaces using the decision rules, gap shapes, and audit method
 in [`docs/CLAIM_INTEGRITY.md`](CLAIM_INTEGRITY.md).
 
-This is an **inventory**, not a repair. Nothing was fixed here (not even the
-doc-only findings) so the gate's open-P0 count stays an accurate measure of
-exposure rather than a number someone quietly worked down while filing it.
+This was an **inventory**, not a repair: nothing was fixed in the sweep itself
+(not even the doc-only findings) so the gate's open-P0 count stayed an accurate
+measure of exposure rather than a number someone quietly worked down while
+filing it.
+
+> **Burn-down status (2026-07-22).** The repair wave that followed closed **35**
+> of the 39 findings outright and left 2 partial and 2 deferred. The live
+> inventory is now 47 defects, **40 closed / 7 open**, every open one owned, and
+> `scripts/ci/claim_integrity_inventory.sh` exits 0. The per-surface verdict
+> tables below describe the state **as swept**; consult the beads for current
+> state. Still open: `.24` (fs-solver residual provenance — needs a cross-crate
+> slice through `fs-bem`), `.31` (the vessel half of the e-race audit — needs a
+> public race wrapper in `fs-vessel`), `.34` and `.39` (both blocked on files
+> carrying another agent's in-flight work), plus the pre-existing `0547u`,
+> `hukmw` and `2gs5h`.
 
 ## Result
 
