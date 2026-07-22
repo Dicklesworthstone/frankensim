@@ -8,6 +8,55 @@ use fs_time::{
     OperatorGeneralizedAlpha, OperatorImex2, SecondOrderState, first_order_galpha_step,
     galpha_step, imex2_step,
 };
+use fs_vvreg::thermal_level_a::{
+    ThermalLevelAAcceptance, ThermalLevelACase, ThermalLevelAFamily, ThermalLevelAKind,
+    thermal_level_a_cases,
+};
+
+const LEVEL_A_LUMPED_BINDINGS: [(&str, &str); 1] = [(
+    "thermal-a-lumped-transient",
+    "tests/operator_integrators.rs::first_order_generalized_alpha_dense_operator_order_and_agreement",
+)];
+const LUMPED_NUMERICAL_ENVELOPE: f64 = 5.0e-4;
+
+fn level_a_lumped_case() -> &'static ThermalLevelACase {
+    let catalog_ids = thermal_level_a_cases()
+        .iter()
+        .filter(|case| case.family == ThermalLevelAFamily::LumpedTransient)
+        .map(|case| case.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let binding_ids = LEVEL_A_LUMPED_BINDINGS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(binding_ids, catalog_ids);
+    assert_eq!(binding_ids.len(), 1);
+
+    let [(case_id, test_path)] = LEVEL_A_LUMPED_BINDINGS;
+    assert!(test_path.starts_with("tests/operator_integrators.rs::"));
+    let case = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == case_id)
+        .unwrap_or_else(|| panic!("missing Level-A case {case_id}"));
+    assert_eq!(case.family, ThermalLevelAFamily::LumpedTransient);
+    assert_eq!(case.kind, ThermalLevelAKind::AnalyticReference);
+    assert_eq!(case.metric, "normalized-temperature-excess");
+    let biot = case
+        .context
+        .iter()
+        .find(|axis| axis.name == "biot-number")
+        .unwrap_or_else(|| panic!("{case_id} must declare its Biot-number context"));
+    assert_eq!(biot.lo.to_bits(), 0.0f64.to_bits());
+    assert_eq!(biot.hi.to_bits(), 0.1f64.to_bits());
+    let normalized_time = case
+        .context
+        .iter()
+        .find(|axis| axis.name == "normalized-time")
+        .unwrap_or_else(|| panic!("{case_id} must declare normalized time"));
+    assert_eq!(normalized_time.lo.to_bits(), 1.0f64.to_bits());
+    assert_eq!(normalized_time.hi.to_bits(), 1.0f64.to_bits());
+    case
+}
 
 #[derive(Debug, Clone)]
 struct DenseOp {
@@ -216,7 +265,7 @@ fn structural_generalized_alpha_is_second_order_on_both_paths() {
     }
 }
 
-fn first_order_linear_error(h: f64, operator_path: bool) -> f64 {
+fn first_order_linear_endpoint(h: f64, operator_path: bool) -> f64 {
     let steps = (1.0 / h).round() as usize;
     if operator_path {
         let mass = DiagonalOp(vec![1.0]);
@@ -227,26 +276,53 @@ fn first_order_linear_error(h: f64, operator_path: bool) -> f64 {
         for _ in 0..steps {
             method.step(&mut state, &system, &[0.0]).unwrap();
         }
-        (state.u[0] - (-1.0f64).exp()).abs()
+        state.u[0]
     } else {
         let method = FirstOrderGeneralizedAlpha::new(&[1.0], &[1.0], 1, h, 0.6);
         let (mut u, mut rate) = (vec![1.0], vec![-1.0]);
         for _ in 0..steps {
             first_order_galpha_step(&method, &mut u, &mut rate, &[0.0]);
         }
-        (u[0] - (-1.0f64).exp()).abs()
+        u[0]
     }
 }
 
 #[test]
 fn first_order_generalized_alpha_dense_operator_order_and_agreement() {
+    let case = level_a_lumped_case();
+    let ThermalLevelAAcceptance::Tolerance { atol, rtol } = case.acceptance else {
+        panic!(
+            "{}: analytic Level-A row must carry a scalar tolerance",
+            case.id
+        );
+    };
+    let formula_reference = (-1.0f64).exp();
+    let catalog_envelope = atol + rtol * case.reference_value_si.abs();
+    assert!(
+        (formula_reference - case.reference_value_si).abs() <= catalog_envelope,
+        "{}: test-side exp(-1) does not reproduce the catalog reference",
+        case.id
+    );
+
     for operator_path in [false, true] {
-        let coarse = first_order_linear_error(0.1, operator_path);
-        let fine = first_order_linear_error(0.05, operator_path);
-        let order = (coarse / fine).log2();
+        let coarse_observed = first_order_linear_endpoint(0.1, operator_path);
+        let fine_observed = first_order_linear_endpoint(0.05, operator_path);
+        let coarse_error = (coarse_observed - case.reference_value_si).abs();
+        let fine_error = (fine_observed - case.reference_value_si).abs();
+        let order = (coarse_error / fine_error).log2();
         assert!(
             (order - 2.0).abs() < 0.35,
             "operator={operator_path} first-order-system order={order:.3}"
+        );
+        assert!(
+            fine_error < LUMPED_NUMERICAL_ENVELOPE,
+            "{}: operator={operator_path} observed={fine_observed:.17e} reference={:.17e} error={fine_error:.3e} exceeds the solver envelope {LUMPED_NUMERICAL_ENVELOPE:.3e}",
+            case.id,
+            case.reference_value_si
+        );
+        println!(
+            "{{\"suite\":\"fs-time/level-a\",\"case_id\":\"{}\",\"operator\":{},\"computed\":{fine_observed:.17e},\"reference\":{:.17e},\"absolute_error\":{fine_error:.17e},\"solver_envelope\":{LUMPED_NUMERICAL_ENVELOPE:.17e},\"formula_envelope\":{catalog_envelope:.17e},\"observed_order\":{order:.6},\"authority\":\"executed-normalized-ode-not-transient-conduction-receipt\",\"verdict\":\"pass\"}}",
+            case.id, operator_path, case.reference_value_si
         );
     }
 

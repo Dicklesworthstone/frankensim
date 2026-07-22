@@ -276,8 +276,9 @@ or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
 remain `Estimated`, and the nine rows not bound in this crate are still
-reference/target-only. Two of those nine Nusselt rows execute separately in
-`fs-convection`.
+reference/target-only here. Two of those nine Nusselt rows execute separately
+in `fs-convection`, and the normalized lumped-transient row executes through
+the first-order generalized-alpha paths in `fs-time`.
 
 ## No-claim boundaries
 

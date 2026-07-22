@@ -284,7 +284,9 @@ second-order structural convergence on prefactored dense and diagonal
 matrix-free `LinearOp`
 paths; dense/operator structural agreement plus bitwise split replay with
 Newton/Krylov telemetry; first-order-system order and dense/operator
-agreement plus bitwise split replay; nonlinear first-order self-convergence;
+agreement plus bitwise split replay; the normalized small-Biot lumped thermal
+decay at one time constant bound directly to the canonical `fs-vvreg` Level-A
+row; nonlinear first-order self-convergence;
 and ARS(2,2,2)
 dense/operator agreement, nonlinear logistic order, split replay, and both
 stage iteration counts.
@@ -355,6 +357,13 @@ per-relation and aggregate reset-target caps.
   records but does not independently certify that model consistency. The
   nonlinear `SecondOrderProblem`/`FirstOrderProblem` implementer likewise owns
   tangent consistency; this lane does not yet run an automatic JVP audit.
+- The Level-A lumped thermal binding exercises only the normalized scalar ODE
+  `d(theta/theta0)/d(t/tau) + theta/theta0 = 0` at `t/tau = 1` and checks the
+  catalog's declared `Bi <= 0.1` applicability context. It does not model heat
+  capacity, geometry, spatial gradients, or establish that an arbitrary body
+  is in the lumped regime. Its numerical envelope is distinct from the
+  catalog formula-reproduction tolerance, and no ladder or machine fingerprint
+  is persisted into `fs-vvreg`.
 - RE.Z1 validates only finite hybrid object semantics and content identity. It
   does not locate events, enclose accumulation times, prove transversality,
   prove compactness, establish finite separation, certify Zeno behavior, or

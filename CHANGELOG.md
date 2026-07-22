@@ -176,6 +176,34 @@ workstream.
   `22f2ab44` to `6a63d601` during the lane without touching these reserved
   files, so this is passing dirty-worktree evidence, not a same-HEAD receipt.
 
+### Post-checkpoint Level-A lumped-transient execution binding
+
+- Bound `thermal-a-lumped-transient` directly into `fs-time`'s existing dense
+  and operator-backed first-order generalized-alpha convergence test. The
+  executed model is the normalized scalar decay `u' + u = 0` at `t/tau = 1`;
+  the test checks both second-order paths against the canonical `exp(-1)`
+  reference and emits structured verdicts with separate formula and numerical
+  envelopes. At `h = 0.05`, the dense and operator paths both delivered
+  approximately `1.998043` observed order and `7.649e-5` absolute endpoint
+  error against a `5e-4` solver envelope.
+- Remote regression proof passed with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test" cargo test --locked -p fs-time --all-targets`
+  on worker `vmi1149989`: 44/44 tests passed (2 FrankenScipy oracle, 2
+  generalized-alpha probe, 11 hybrid, 5 operator-integrator, 8 SE(3), and 16
+  time-battery tests; the library target contained 0 tests). RCH reported
+  615.2 seconds total, including 342.169 seconds of sync, 203.191 seconds for
+  the remote command, and 2.819 seconds for artifact retrieval. Shared `HEAD`
+  moved from `ac4a1d252c4afb30a53003357c73c5eaec20cb13` to
+  `7458f7dea9d65e01a3f17188145c855006301afe` during the lane, so this is passing
+  dirty-worktree evidence, not a same-HEAD receipt.
+- Raised aggregate Level-A execution coverage from 12/19 to 13/19. Six gaps
+  remain: radiation, contact resistance, P2 primal, combined
+  anisotropic-nonlinear MMS, and the P1/P2 adjoint-order ladders. This is not a
+  spatial transient-conduction model and does not prove that an arbitrary body
+  satisfies the catalog's `Bi <= 0.1` lumped-regime condition. It adds no
+  retained comparison receipt or machine fingerprint; registry authority
+  remains `NoClaim`/`Estimated`.
+
 ### Post-checkpoint convection-correlation rung
 
 - Added `fs-convection`, an L3 library with 11 Nusselt relations spanning

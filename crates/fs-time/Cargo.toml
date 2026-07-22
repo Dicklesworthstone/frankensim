@@ -22,6 +22,7 @@ fs-solver = { path = "../fs-solver" }
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-casebook = { path = "../fs-casebook" }
+fs-vvreg = { path = "../fs-vvreg" }
 fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.1.0" }
 
 [features]
