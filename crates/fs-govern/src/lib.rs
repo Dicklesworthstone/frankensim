@@ -39,12 +39,17 @@
 //! deterministic allocation-candidate algebra lives in [`evidence_graph`].
 //! The graph binds the v2 authority-algebra version into node and snapshot
 //! identities without authenticating evidence or minting runtime authority.
+//! The fixed-size `[M]` research portfolio in [`moonshots`] specializes the
+//! same lane ledger with named falsifiers, effort/calendar caps, terminal
+//! displacement records, and a no-refill ceiling; live Beads and critical-path
+//! graph binding remain the repository adapter's responsibility.
 
 pub mod crates;
 pub mod doctrine;
 pub mod evidence_contract;
 pub mod evidence_graph;
 pub mod lanes;
+pub mod moonshots;
 pub mod program_risks;
 pub mod proposals;
 pub mod ratification;
@@ -60,6 +65,12 @@ pub use lanes::{
     IdempotencyKey, LANE_POLICY_VERSION, LaneCharter, LaneError, MAX_H2H_CANDIDATES,
     MAX_RETAINED_DECISION_BYTES, MAX_RETAINED_DECISIONS, MechanismId, PortfolioLedger,
     PortfolioPolicy, ProofLaneId, ResourceEnvelope, TerminalKind,
+};
+pub use moonshots::{
+    DisplacementRecord, MAX_MOONSHOT_FIELD_BYTES, MOONSHOT_DISPOSITION_IDENTITY_DOMAIN,
+    MOONSHOT_POLICY_VERSION, MOONSHOT_V1_INITIAL_CAP, MoonshotBudget, MoonshotDeclaration,
+    MoonshotDisposition, MoonshotError, MoonshotPortfolio, NamedFalsifier, QuarterlyReview,
+    ReplacementAdmission,
 };
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
 pub use ratification::{

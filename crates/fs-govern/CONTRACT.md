@@ -375,6 +375,53 @@ they are not implied by this solid graph core.
   metadata; the stored request, rather than an opaque digest alone, is
   sufficient for deterministic replay.
 
+## Moonshot portfolio (`moonshots` module, bead f85xj.16.3)
+
+- `MoonshotDeclaration` is the typed policy record for one `[M]` lane. Its
+  constructor requires a Bead id, independently falsifiable lane, named owner,
+  `NamedFalsifier` observation and decision rule, positive effort cap, real
+  calendar deadline, next review no later than that deadline, required review
+  evidence, a boring fallback derived from the falsifier's decision rule, and
+  a non-empty critical-path-disjointness boundary.
+  Text inputs are bounded by `MAX_MOONSHOT_FIELD_BYTES` before the underlying
+  `LaneCharter` and `MechanismId` are minted.
+- `MoonshotPortfolio::new` projects those declarations into the existing
+  four-axis `PortfolioLedger`. The v1 status-quo ceiling is the immutable six
+  active lanes captured by `MOONSHOT_V1_INITIAL_CAP`; the supplied cap must
+  equal the complete declaration count and may shrink but never exceed six.
+  The sum of admitted effort caps becomes the portfolio work envelope, while
+  each lane charges one reviewer and one falsification-capacity slot.
+- New work has no independent admission method. `ReplacementAdmission` names
+  exactly one active `DisplacementRecord` with the exact `completed`,
+  `falsified`, or `shelved-with-state` disposition, retained state/evidence
+  locator, and reason. `assess_replacement` consumes the portfolio, finalizes
+  the predecessor through `PortfolioLedger`, admits the successor, verifies
+  the active count stayed fixed, retains the exact domain disposition, and
+  permanently refuses revival of a terminal Bead. Consuming `self` prevents a
+  failed successor admission from exposing a partially released authority
+  value to the caller. `liquidate` uses the same consumed-value transaction
+  without a successor and decrements the wrapper cap permanently; later work
+  can still enter only by replacing another currently active lane, so the
+  released slot cannot be refilled.
+- `MOONSHOT_DISPOSITION_IDENTITY_DOMAIN` binds the exact domain disposition,
+  retained-state locator, reason, and displaced Bead into the finalization
+  evidence root. This preserves the completed-versus-shelved distinction even
+  though both conservatively map to the generic ledger's `Withdrawn` terminal
+  kind; falsification maps to `Refuted`.
+- The module is pure synchronous policy with no ambient clock, filesystem,
+  tracker, or dependency-graph access. `xtask check-moonshots` is the explicit
+  world adapter: it binds the immutable six-Bead baseline and disposition
+  history to live Beads labels/status/assignment and checks direct/transitive
+  reachability into `vertical-capability-graph.json`.
+- No-claim boundary: constructing or admitting a declaration proves only that
+  the governance fields are complete and resource-bounded. It does not prove
+  the disjointness prose, authenticate a Bead owner or artifact, evaluate the
+  falsifier, validate the science, or promote `[M]` work. Those remain live
+  graph, evidence, checker, and review responsibilities.
+- `tests/moonshots.rs` provides G0 construction/date/cap refusals, one-for-one
+  disposition retention, terminal anti-revival, effort-envelope refusal, and
+  cap-shrinking liquidation followed by replacement at the smaller cap.
+
 ## Crate registry (`crates` module)
 
 - `addendum_crates() -> &[AddendumCrate]` — the seven net-new crates the

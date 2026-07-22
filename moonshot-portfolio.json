@@ -1,0 +1,201 @@
+{
+  "schema": "frankensim-moonshot-portfolio-v1",
+  "policy_version": 1,
+  "policy_bead": "frankensim-extreal-program-f85xj.16.3",
+  "issue_authority": ".beads/issues.jsonl",
+  "critical_path_graph": "vertical-capability-graph.json",
+  "captured_at": "2026-07-22T21:56:15Z",
+  "moonshot_labels": [
+    "ambition:M",
+    "ambition-m",
+    "moonshot*"
+  ],
+  "active_status": "in_progress",
+  "status_quo_cap": 6,
+  "cap_rule": "The cap starts at the captured active count. A completion shrinks available WIP; a new moonshot is admitted only by displacing one active lane with a completed, falsified, or shelved-with-state disposition.",
+  "no_claim": "This file records governance declarations and a live issue-graph consistency check. It does not validate a moonshot, authenticate evidence, or promote any capability.",
+  "initial_active_beads": [
+    "frankensim-epic-ascent-7tv.22",
+    "frankensim-epic-bedrock-6ys.20",
+    "frankensim-leapfrog-2026-program-i94v.2.3.2.2",
+    "frankensim-leapfrog-2026-program-i94v.5.1.2.1",
+    "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
+    "frankensim-leapfrog-2026-program-i94v.5.4.1.2"
+  ],
+  "disposition_history": [],
+  "inventory_snapshot": {
+    "tagged_total": 508,
+    "active": 6,
+    "open_backlog": 482,
+    "closed_terminal": 20,
+    "inactive_rule": "Only in_progress is active WIP. Open moonshot Beads are unadmitted backlog; closed moonshot Beads are terminal history. Neither consumes a slot."
+  },
+  "active_lanes": [
+    {
+      "bead_id": "frankensim-epic-ascent-7tv.22",
+      "lane": "manifold-operation-atlas",
+      "owner": "EmeraldDog",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "manifold-overlap-cocycle",
+        "observation": "A registered overlap fixture passes its local retraction, transport, and metric checks but the transported witnesses disagree on the overlap or produce inequivalent resumed solver state.",
+        "decision_rule": "Any reproducible overlap disagreement shelves the global atlas theorem and retains only the locally verified manifold operations."
+      },
+      "budget": {
+        "effort_minutes": 2400,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "This research theorem ratchet may not be a blocking dependency of any Bead referenced by the EXTREAL capability graph; the established local manifold implementation remains the fallback.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "overlap-cocycle fixtures, independent residuals, and replay identities"
+      }
+    },
+    {
+      "bead_id": "frankensim-epic-bedrock-6ys.20",
+      "lane": "exact-cbc-acceleration",
+      "owner": "CloudyFinch",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "cbc-minimum-preservation",
+        "observation": "A symmetry, convolution, modular-reconstruction, or certificate shortcut selects a candidate different from exhaustive exact CBC or cannot verify the exact minimum within its declared bound.",
+        "decision_rule": "The shortcut is falsified and removed from the admitted path; exhaustive exact CBC remains the boring baseline."
+      },
+      "budget": {
+        "effort_minutes": 2400,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "Exact-CBC acceleration is optional research and may not block any EXTREAL capability Bead; the bounded exhaustive exact constructor is the fallback.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "matched exact minima, certificate-checker results, and bound-exhaustion cases"
+      }
+    },
+    {
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.2.3.2.2",
+      "lane": "integral-relative-topology",
+      "owner": "RubyLotus",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "unimodular-witness-or-physical-domain",
+        "observation": "An admitted fixture lacks an exact unimodular witness, changes its integer periods under relabeling or refinement, or uses abstract torsion as evidence for an unrealizable three-dimensional material topology.",
+        "decision_rule": "The affected theorem scope is falsified and demoted to the independently verified algebra-kernel subset."
+      },
+      "budget": {
+        "effort_minutes": 2160,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "Integral relative-topology research is outside the Cooling 0.1 critical path and may not block a referenced capability Bead.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "exact normal forms, unimodular witnesses, and physical-realizability separation"
+      }
+    },
+    {
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.1.2.1",
+      "lane": "relative-differential-characters",
+      "owner": "EmeraldDog",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "relative-character-exactness",
+        "observation": "A finite registered microcase violates a declared kernel-image equality, degree convention, coefficient separation, or relative-boundary exactness claim.",
+        "decision_rule": "The failed theorem node is falsified; only weaker nodes whose executable exactness checks remain green survive."
+      },
+      "budget": {
+        "effort_minutes": 2400,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "Differential-character theorem work is an off-path ratchet and may not block any EXTREAL capability Bead.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "typed exact-sequence microcases, degree mutations, and independent cohomology checks"
+      }
+    },
+    {
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
+      "lane": "maslov-krein-evans-bridge",
+      "owner": "EmeraldDog",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "bridge-counterexample",
+        "observation": "A preregistered endpoint, degeneracy, neutral-signature, non-Fredholm, contour, or essential-spectrum case violates a claimed signed-count equality under the theorem node's own hypotheses.",
+        "decision_rule": "That theorem node is falsified and the implication lattice falls back to the strongest surviving restricted statement."
+      },
+      "budget": {
+        "effort_minutes": 2400,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "The spectral-flow bridge is theorem research outside the product path and may not block an EXTREAL capability Bead.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "theorem-statement review, registered convention mutations, and retained counterexamples"
+      }
+    },
+    {
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.4.1.2",
+      "lane": "derived-geometry-evidence-variance",
+      "owner": "CopperOx",
+      "admission_kind": "legacy-baseline",
+      "falsifier": {
+        "id": "false-equivalence-or-strengthening",
+        "observation": "A registered map presented as an equivalence lacks a constructive inverse, breaks composition or identity, reverses evidence variance, or strengthens proof authority after a lossy mapping.",
+        "decision_rule": "The equivalence or variance claim is falsified and the map is retained only as its weaker typed morphism or correspondence."
+      },
+      "budget": {
+        "effort_minutes": 2400,
+        "calendar_deadline": "2026-10-01"
+      },
+      "critical_path_disjointness": "Derived-geometry categorical machinery is off the EXTREAL product path and may not block any referenced capability Bead.",
+      "quarterly_review": {
+        "next_review": "2026-10-01",
+        "status": "scheduled",
+        "required_evidence": "constructive equivalence witnesses, variance mutations, and authority anti-strengthening checks"
+      }
+    }
+  ],
+  "admission_rehearsal": {
+    "kind": "hypothetical-only",
+    "candidate": {
+      "bead_id": "frankensim-epic-bedrock-6ys.5.1",
+      "lane": "canonical-rank-deficient-tsqr",
+      "owner": "governance-rehearsal",
+      "admission_kind": "replacement",
+      "falsifier": {
+        "id": "rank-deficient-tree-invariance",
+        "observation": "A preregistered rank-deficient fixture yields a different canonical rank profile, R factor, or null-space gauge under two admitted deterministic TSQR tree regroupings, or the independent checker cannot certify the separation hypotheses.",
+        "decision_rule": "Do not admit global canonicality; retain deterministic TSQR plus a typed ambiguity or no-claim result and preserve the counterexample."
+      },
+      "budget": {
+        "effort_minutes": 120,
+        "calendar_deadline": "2026-08-01"
+      },
+      "critical_path_disjointness": "The open rank-deficient TSQR theorem Bead has no direct or transitive blocking path into the EXTREAL graph and receives no product-path capacity.",
+      "quarterly_review": {
+        "next_review": "2026-08-01",
+        "status": "rehearsal",
+        "required_evidence": "rank-deficient regrouping fixtures, independent gauge checks, and typed ambiguity cases"
+      }
+    },
+    "displaces": {
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
+      "disposition": "shelved-with-state",
+      "state_artifact": "bead:frankensim-leapfrog-2026-program-i94v.5.2.11.1@2026-07-22T21:56:15Z",
+      "reason": "Rehearsal only: preserve the theorem statement, 14-test bridge battery, and pending independent theorem review before releasing its slot."
+    },
+    "expected_verdict": "admissible-replacement",
+    "transcript": [
+      "candidate declaration complete: yes",
+      "named active displacement: yes",
+      "terminal disposition with retained state: yes",
+      "effort and calendar caps: yes",
+      "named falsifier: yes",
+      "critical-path blocking reachability: none",
+      "active count after replacement: 6 of 6"
+    ]
+  }
+}

@@ -204,6 +204,57 @@ shape with data hash `5ba7d5d6e7f40830`, 178 scoped issues, 68 actionable, and
 `vertical-capability-graph.json`; those counts are historical observations,
 not promises about the live graph.
 
+## Moonshot portfolio and displacement rule (bead f85xj.16.3)
+
+`moonshot-portfolio.json` is the checked declaration layer for `[M]` work;
+Beads remains authoritative for labels, status, and dependency edges. A Bead
+carrying `ambition:M`, `ambition-m`, or a `moonshot*` label consumes WIP only
+while its status is `in_progress`. Open entries are unadmitted backlog, not
+quietly active research. Closed entries are terminal history.
+
+`fs_govern::MoonshotPortfolio` is the typed policy core. It projects every
+declaration into the existing proof-lane ledger, exposes only consumed-value
+`liquidate` and one-for-one replacement transitions, retains exact terminal
+dispositions, and prevents terminal Bead revival. The xtask command is the
+explicit live-world adapter around that pure state machine.
+
+The initial live sweep found 508 tagged Beads: 6 active, 482 open backlog, and
+20 closed. The immutable v1 baseline names those six active Beads, so editing
+the current snapshot cannot manufacture a seventh slot or erase history. The
+status-quo cap is therefore six. Completion or shelving without a replacement
+adds a `liquidate` history row and reduces both active WIP and the declared cap
+in the same update; it cannot leave a refillable slot. Every later admission
+adds a `replace` row that displaces one named active lane and records one of
+three terminal dispositions:
+
+- `completed`, with its retained state/evidence locator;
+- `falsified`, with the counterevidence locator;
+- `shelved-with-state`, with enough state to resume only through a future
+  displacement decision.
+
+Every active declaration names its owner, falsifier observation and decision
+rule, effort cap, calendar deadline, next quarterly falsifier review, evidence
+required at that review, and an explicit no-critical-path-capacity statement.
+The latter is not trusted as prose: `cargo run -p xtask -- check-moonshots`
+reads blocking edges from `.beads/issues.jsonl`, derives the product-path set
+from `vertical-capability-graph.json`, and rejects direct or transitive
+moonshot reachability into that set. `check-all` includes the same audit.
+
+At each quarterly falsifier review, evaluate the named observation against
+retained evidence. A hit closes or shelves the mechanism under its registered
+decision rule; an absent or inconclusive test does not count as survival and
+does not widen the budget. Changes to the active inventory must update the
+checked snapshot, declaration, and disposition history in the same change as
+the Beads status. A terminal Bead cannot be replayed as a later replacement.
+
+The v1 file retains one hypothetical-only admission rehearsal. It takes the
+real open rank-deficient TSQR theorem Bead from the unadmitted backlog, names
+the active spectral-bridge lane it would displace, preserves that lane as
+`shelved-with-state`, and records the seven admission decisions. The expected
+result is an admissible replacement at six-of-six active slots. The rehearsal
+changes no Bead state and grants no scientific or product authority; it
+exercises the policy shape and live dependency graph only.
+
 ## Compiler checks
 
 After substantive changes:
