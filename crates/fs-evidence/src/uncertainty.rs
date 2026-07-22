@@ -65,6 +65,8 @@ pub enum UncertaintyRule {
     /// A numerical-only update named a non-numerical source or omitted one of
     /// the three numerical sources.
     NumericalUpdate,
+    /// A requirement, plausibility bound, or flip-analysis input was invalid.
+    RequirementAssessment,
     /// A collection or transport exceeded its declared bound.
     CollectionBudget,
     /// The transport schema version is unknown.
@@ -84,6 +86,7 @@ impl UncertaintyRule {
             Self::CovarianceMatrix => "uncertainty-covariance-matrix",
             Self::IncompatibleBudget => "uncertainty-incompatible-budget",
             Self::NumericalUpdate => "uncertainty-numerical-update",
+            Self::RequirementAssessment => "uncertainty-requirement-assessment",
             Self::CollectionBudget => "uncertainty-collection-budget",
             Self::SchemaVersion => "uncertainty-schema-version",
         }
@@ -683,6 +686,344 @@ pub enum DominantEngineeringTerm {
     },
 }
 
+/// Direction of a scalar engineering requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequirementRelation {
+    /// The quantity must remain below the stated limit.
+    AtMost,
+    /// The quantity must remain above the stated limit.
+    AtLeast,
+}
+
+/// One sourced scalar requirement evaluated against an uncertainty budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScalarRequirement {
+    id: BoundedId,
+    qoi: BoundedId,
+    unit: BoundedId,
+    relation: RequirementRelation,
+    limit_bits: u64,
+    provenance: UncertaintyArtifactRef,
+}
+
+impl ScalarRequirement {
+    /// Admit a finite scalar requirement with an explicit source artifact.
+    pub fn try_new(
+        id: &str,
+        qoi: &str,
+        unit: &str,
+        relation: RequirementRelation,
+        limit: f64,
+        provenance: UncertaintyArtifactRef,
+    ) -> Result<Self, UncertaintyError> {
+        if !limit.is_finite() {
+            return refuse(
+                UncertaintyRule::RequirementAssessment,
+                "requirement limit must be finite",
+            );
+        }
+        let admit_id = |label: &'static str, value: &str| {
+            BoundedId::new(value).map_err(|error| {
+                UncertaintyError::new(
+                    UncertaintyRule::RequirementAssessment,
+                    format!("invalid requirement {label}: {error}"),
+                )
+            })
+        };
+        Ok(Self {
+            id: admit_id("id", id)?,
+            qoi: admit_id("qoi", qoi)?,
+            unit: admit_id("unit", unit)?,
+            relation,
+            limit_bits: limit.to_bits(),
+            provenance,
+        })
+    }
+
+    /// Stable requirement identity.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    /// Quantity of interest governed by this requirement.
+    #[must_use]
+    pub fn qoi(&self) -> &str {
+        self.qoi.as_str()
+    }
+
+    /// Unit shared with the governed uncertainty budget.
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        self.unit.as_str()
+    }
+
+    /// Requirement direction.
+    #[must_use]
+    pub const fn relation(&self) -> RequirementRelation {
+        self.relation
+    }
+
+    /// Finite requirement limit.
+    #[must_use]
+    pub fn limit(&self) -> f64 {
+        f64::from_bits(self.limit_bits)
+    }
+
+    /// Source artifact for the exact requirement.
+    #[must_use]
+    pub const fn provenance(&self) -> &UncertaintyArtifactRef {
+        &self.provenance
+    }
+}
+
+/// A sourced symmetric plausibility bound for an otherwise unknown term.
+///
+/// The budget term remains [`TermValue::Unknown`]: this record says only that
+/// a decision audit may bound its absolute effect by `maximum_abs_effect`.
+/// It does not promote the term to an interval certificate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnknownPlausibilityBound {
+    kind: EngineeringUncertaintyKind,
+    maximum_abs_effect: f64,
+    provenance: UncertaintyArtifactRef,
+}
+
+impl UnknownPlausibilityBound {
+    /// Admit a finite non-negative plausibility half-width and its authority.
+    pub fn try_new(
+        kind: EngineeringUncertaintyKind,
+        maximum_abs_effect: f64,
+        provenance: UncertaintyArtifactRef,
+    ) -> Result<Self, UncertaintyError> {
+        if !non_negative_finite(maximum_abs_effect) {
+            return refuse(
+                UncertaintyRule::RequirementAssessment,
+                format!(
+                    "{} plausibility bound must be finite, non-negative, and not negative zero",
+                    kind.name()
+                ),
+            );
+        }
+        Ok(Self {
+            kind,
+            maximum_abs_effect,
+            provenance,
+        })
+    }
+
+    /// Unknown source constrained by this declaration.
+    #[must_use]
+    pub const fn kind(&self) -> EngineeringUncertaintyKind {
+        self.kind
+    }
+
+    /// Maximum absolute effect in the budget unit.
+    #[must_use]
+    pub const fn maximum_abs_effect(&self) -> f64 {
+        self.maximum_abs_effect
+    }
+
+    /// Authority for the plausibility declaration.
+    #[must_use]
+    pub const fn provenance(&self) -> &UncertaintyArtifactRef {
+        &self.provenance
+    }
+}
+
+/// Whether one flipping source had a sourced finite plausibility bound.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlipBound {
+    /// No finite plausibility authority was supplied.
+    Unbounded,
+    /// A sourced symmetric absolute-effect ceiling was supplied.
+    Bounded(UnknownPlausibilityBound),
+}
+
+/// One unknown source that can participate in changing the verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlippingUnknown {
+    kind: EngineeringUncertaintyKind,
+    reason: String,
+    required_magnitude: f64,
+    bound: FlipBound,
+    suggested_action: crate::action::ActionKind,
+}
+
+impl FlippingUnknown {
+    /// Uncertainty source that can change the verdict.
+    #[must_use]
+    pub const fn kind(&self) -> EngineeringUncertaintyKind {
+        self.kind
+    }
+
+    /// Original named evidence gap from the budget.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Smallest additional absolute effect needed from this source when every
+    /// other bounded unknown is allowed to move adversarially.
+    #[must_use]
+    pub const fn required_magnitude(&self) -> f64 {
+        self.required_magnitude
+    }
+
+    /// Finite plausibility authority, or an explicit unbounded state.
+    #[must_use]
+    pub const fn bound(&self) -> &FlipBound {
+        &self.bound
+    }
+
+    /// Default evidence-action class for resolving this source. Cost-aware
+    /// ranking remains an L4 `fs-voi` responsibility.
+    #[must_use]
+    pub const fn suggested_action(&self) -> crate::action::ActionKind {
+        self.suggested_action
+    }
+}
+
+/// Tri-state requirement result. An indeterminate result is a first-class
+/// outcome and never aliases compliance or non-compliance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComplianceVerdict {
+    /// The complete admitted effect envelope remains strictly inside the
+    /// requirement, with a positive residual margin.
+    Compliant {
+        /// Conservative distance from the worst admitted case to the limit.
+        margin: f64,
+        /// Identity of the exact eight-term budget.
+        budget: ContentHash,
+        /// Exact sourced requirement evaluated.
+        requirement: ScalarRequirement,
+    },
+    /// The complete admitted effect envelope remains strictly outside the
+    /// requirement, with a positive residual shortfall.
+    NonCompliant {
+        /// Conservative distance from the best admitted case to the limit.
+        shortfall: f64,
+        /// Identity of the exact eight-term budget.
+        budget: ContentHash,
+        /// Exact sourced requirement evaluated.
+        requirement: ScalarRequirement,
+    },
+    /// The known band touches/straddles the limit or one or more unknowns can
+    /// change the baseline verdict.
+    Indeterminate {
+        /// Outward-rounded lower endpoint from fully specified terms only.
+        known_lower: f64,
+        /// Outward-rounded upper endpoint from fully specified terms only.
+        known_upper: f64,
+        /// Unknown sources that can participate in a verdict flip.
+        flipping_unknowns: Vec<FlippingUnknown>,
+        /// Identity of the exact eight-term budget.
+        budget: ContentHash,
+        /// Exact sourced requirement evaluated.
+        requirement: ScalarRequirement,
+    },
+}
+
+impl ComplianceVerdict {
+    /// Exact sourced requirement consumed by this verdict.
+    #[must_use]
+    pub const fn requirement(&self) -> &ScalarRequirement {
+        match self {
+            Self::Compliant { requirement, .. }
+            | Self::NonCompliant { requirement, .. }
+            | Self::Indeterminate { requirement, .. } => requirement,
+        }
+    }
+
+    /// Identity of the exact uncertainty budget consumed by this verdict.
+    #[must_use]
+    pub const fn budget(&self) -> ContentHash {
+        match self {
+            Self::Compliant { budget, .. }
+            | Self::NonCompliant { budget, .. }
+            | Self::Indeterminate { budget, .. } => *budget,
+        }
+    }
+
+    /// Unknown sources whose admitted effects can change the verdict.
+    /// Binary verdicts have no flipping unknowns.
+    #[must_use]
+    pub fn flipping_unknowns(&self) -> &[FlippingUnknown] {
+        match self {
+            Self::Indeterminate {
+                flipping_unknowns, ..
+            } => flipping_unknowns,
+            Self::Compliant { .. } | Self::NonCompliant { .. } => &[],
+        }
+    }
+
+    /// Deterministic reviewer-facing audit trail. This rendering is an
+    /// explanation, not a separate scientific authority.
+    #[must_use]
+    pub fn render_report(&self) -> String {
+        let requirement = self.requirement();
+        let relation = match requirement.relation() {
+            RequirementRelation::AtMost => "at-most",
+            RequirementRelation::AtLeast => "at-least",
+        };
+        let mut output = format!(
+            "requirement={} qoi={} unit={} relation={} limit={} requirement-provenance={}@{} budget={}\n",
+            requirement.id(),
+            requirement.qoi(),
+            requirement.unit(),
+            relation,
+            requirement.limit(),
+            requirement.provenance().role(),
+            requirement.provenance().digest(),
+            self.budget()
+        );
+        match self {
+            Self::Compliant { margin, .. } => {
+                let _ = writeln!(output, "verdict=compliant residual-margin={margin}");
+            }
+            Self::NonCompliant { shortfall, .. } => {
+                let _ = writeln!(
+                    output,
+                    "verdict=non-compliant residual-shortfall={shortfall}"
+                );
+            }
+            Self::Indeterminate {
+                known_lower,
+                known_upper,
+                flipping_unknowns,
+                ..
+            } => {
+                let _ = writeln!(
+                    output,
+                    "verdict=indeterminate known-band=[{known_lower},{known_upper}] flipping-unknowns={}",
+                    flipping_unknowns.len()
+                );
+                for unknown in flipping_unknowns {
+                    let bound = match unknown.bound() {
+                        FlipBound::Unbounded => "unbounded".to_string(),
+                        FlipBound::Bounded(bound) => format!(
+                            "bounded:{}:{}@{}",
+                            bound.maximum_abs_effect(),
+                            bound.provenance().role(),
+                            bound.provenance().digest()
+                        ),
+                    };
+                    let _ = writeln!(
+                        output,
+                        "- unknown={} reason={} required-to-flip={} plausibility={} suggested-action={}",
+                        unknown.kind().name(),
+                        unknown.reason(),
+                        unknown.required_magnitude(),
+                        bound,
+                        action_kind_name(unknown.suggested_action())
+                    );
+                }
+            }
+        }
+        output
+    }
+}
+
 /// Audit-preserving projection into the legacy three-slice API.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LegacyUncertaintyProjection {
@@ -871,6 +1212,68 @@ impl EngineeringUncertaintyBudget {
                 unknown_terms,
             }
         }
+    }
+
+    /// Evaluate a sourced scalar requirement without treating an unknown term
+    /// as zero.
+    ///
+    /// Fully specified terms first form an outward-rounded band around
+    /// `nominal`. Unknown terms are unbounded unless the caller supplies a
+    /// matching [`UnknownPlausibilityBound`]. Finite plausibility bounds are
+    /// summed conservatively because independence is not assumed. Touching the
+    /// requirement limit is always [`ComplianceVerdict::Indeterminate`]; only
+    /// a strictly positive residual margin or shortfall produces a binary
+    /// verdict.
+    pub fn assess_requirement(
+        &self,
+        nominal: f64,
+        requirement: &ScalarRequirement,
+        plausibility_bounds: &[UnknownPlausibilityBound],
+    ) -> Result<ComplianceVerdict, UncertaintyError> {
+        let bounds_by_kind =
+            validate_requirement_inputs(self, nominal, requirement, plausibility_bounds)?;
+        let (known_lower, known_upper) = known_requirement_band(self, nominal);
+        let baseline = requirement_baseline(requirement, known_lower, known_upper);
+        let bounded_sum = bounds_by_kind
+            .values()
+            .fold(0.0, |sum, bound| add_up(sum, bound.maximum_abs_effect));
+        let has_unbounded = self.terms.iter().any(|term| {
+            matches!(term.value, TermValue::Unknown { .. })
+                && !bounds_by_kind.contains_key(&term.kind)
+        });
+
+        if let Some((compliant, distance)) = baseline
+            && !has_unbounded
+            && bounded_sum < distance
+        {
+            let residual = sub_down(distance, bounded_sum);
+            return Ok(if compliant {
+                ComplianceVerdict::Compliant {
+                    margin: residual,
+                    budget: self.content_id(),
+                    requirement: requirement.clone(),
+                }
+            } else {
+                ComplianceVerdict::NonCompliant {
+                    shortfall: residual,
+                    budget: self.content_id(),
+                    requirement: requirement.clone(),
+                }
+            });
+        }
+
+        let baseline_distance = baseline.map_or(0.0, |(_, distance)| distance);
+        Ok(ComplianceVerdict::Indeterminate {
+            known_lower,
+            known_upper,
+            flipping_unknowns: requirement_flipping_unknowns(
+                self,
+                &bounds_by_kind,
+                baseline_distance,
+            ),
+            budget: self.content_id(),
+            requirement: requirement.clone(),
+        })
     }
 
     /// Deterministic dominant source. Unknown sources refuse finite ranking;
@@ -1360,6 +1763,173 @@ fn next_up(value: f64) -> f64 {
     }
     let bits = value.to_bits();
     f64::from_bits(if value >= 0.0 { bits + 1 } else { bits - 1 })
+}
+
+fn next_down(value: f64) -> f64 {
+    -next_up(-value)
+}
+
+fn sub_down(left: f64, right: f64) -> f64 {
+    if right == 0.0 {
+        left
+    } else {
+        next_down(left - right)
+    }
+}
+
+fn validate_requirement_inputs(
+    budget: &EngineeringUncertaintyBudget,
+    nominal: f64,
+    requirement: &ScalarRequirement,
+    plausibility_bounds: &[UnknownPlausibilityBound],
+) -> Result<BTreeMap<EngineeringUncertaintyKind, UnknownPlausibilityBound>, UncertaintyError> {
+    if !nominal.is_finite() {
+        return refuse(
+            UncertaintyRule::RequirementAssessment,
+            "requirement assessment nominal must be finite",
+        );
+    }
+    if budget.qoi() != requirement.qoi() || budget.unit() != requirement.unit() {
+        return refuse(
+            UncertaintyRule::RequirementAssessment,
+            format!(
+                "requirement {} governs {} [{}], but budget is {} [{}]",
+                requirement.id(),
+                requirement.qoi(),
+                requirement.unit(),
+                budget.qoi(),
+                budget.unit()
+            ),
+        );
+    }
+
+    let mut bounds_by_kind = BTreeMap::new();
+    for bound in plausibility_bounds {
+        if !matches!(budget.term(bound.kind).value, TermValue::Unknown { .. }) {
+            return refuse(
+                UncertaintyRule::RequirementAssessment,
+                format!(
+                    "{} has a plausibility bound but its budget term is not Unknown",
+                    bound.kind.name()
+                ),
+            );
+        }
+        if bounds_by_kind.insert(bound.kind, bound.clone()).is_some() {
+            return refuse(
+                UncertaintyRule::RequirementAssessment,
+                format!("duplicate {} plausibility bound", bound.kind.name()),
+            );
+        }
+    }
+    Ok(bounds_by_kind)
+}
+
+fn known_requirement_band(budget: &EngineeringUncertaintyBudget, nominal: f64) -> (f64, f64) {
+    let half_width = match budget.total() {
+        BudgetTotal::Bounded {
+            conservative_half_width,
+        }
+        | BudgetTotal::Unknown {
+            known_conservative_half_width: conservative_half_width,
+            ..
+        } => conservative_half_width,
+        BudgetTotal::Unbounded { .. } => f64::INFINITY,
+    };
+    if half_width.is_finite() {
+        (sub_down(nominal, half_width), add_up(nominal, half_width))
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    }
+}
+
+fn requirement_baseline(
+    requirement: &ScalarRequirement,
+    known_lower: f64,
+    known_upper: f64,
+) -> Option<(bool, f64)> {
+    let limit = requirement.limit();
+    match requirement.relation() {
+        RequirementRelation::AtMost if known_upper < limit => {
+            Some((true, sub_down(limit, known_upper)))
+        }
+        RequirementRelation::AtMost if known_lower > limit => {
+            Some((false, sub_down(known_lower, limit)))
+        }
+        RequirementRelation::AtLeast if known_lower > limit => {
+            Some((true, sub_down(known_lower, limit)))
+        }
+        RequirementRelation::AtLeast if known_upper < limit => {
+            Some((false, sub_down(limit, known_upper)))
+        }
+        RequirementRelation::AtMost | RequirementRelation::AtLeast => None,
+    }
+}
+
+fn requirement_flipping_unknowns(
+    budget: &EngineeringUncertaintyBudget,
+    bounds_by_kind: &BTreeMap<EngineeringUncertaintyKind, UnknownPlausibilityBound>,
+    baseline_distance: f64,
+) -> Vec<FlippingUnknown> {
+    budget
+        .terms
+        .iter()
+        .filter_map(|term| {
+            let TermValue::Unknown { reason } = &term.value else {
+                return None;
+            };
+            let bound = bounds_by_kind.get(&term.kind).cloned();
+            let other_bounded = bounds_by_kind
+                .iter()
+                .filter(|(other, _)| **other != term.kind)
+                .fold(0.0, |sum, (_, other)| add_up(sum, other.maximum_abs_effect));
+            let required_magnitude = if baseline_distance > other_bounded {
+                sub_down(baseline_distance, other_bounded)
+            } else {
+                0.0
+            };
+            bound
+                .as_ref()
+                .is_none_or(|bound| bound.maximum_abs_effect >= required_magnitude)
+                .then(|| FlippingUnknown {
+                    kind: term.kind,
+                    reason: reason.clone(),
+                    required_magnitude,
+                    bound: bound.map_or(FlipBound::Unbounded, FlipBound::Bounded),
+                    suggested_action: suggested_resolution_action(term.kind),
+                })
+        })
+        .collect()
+}
+
+const fn suggested_resolution_action(
+    kind: EngineeringUncertaintyKind,
+) -> crate::action::ActionKind {
+    match kind {
+        EngineeringUncertaintyKind::Roundoff | EngineeringUncertaintyKind::SolverAlgebraic => {
+            crate::action::ActionKind::SolverTolerance
+        }
+        EngineeringUncertaintyKind::Discretization => crate::action::ActionKind::MeshRefinement,
+        EngineeringUncertaintyKind::Geometry => crate::action::ActionKind::RepresentationEscalation,
+        EngineeringUncertaintyKind::Parameters => crate::action::ActionKind::MaterialCouponTest,
+        EngineeringUncertaintyKind::BoundaryConditions
+        | EngineeringUncertaintyKind::Measurement => crate::action::ActionKind::SensorCampaign,
+        EngineeringUncertaintyKind::ModelForm => crate::action::ActionKind::Falsification,
+    }
+}
+
+const fn action_kind_name(kind: crate::action::ActionKind) -> &'static str {
+    match kind {
+        crate::action::ActionKind::SolverTolerance => "solver-tolerance",
+        crate::action::ActionKind::MeshRefinement => "mesh-refinement",
+        crate::action::ActionKind::TimeRefinement => "time-refinement",
+        crate::action::ActionKind::RepresentationEscalation => "representation-escalation",
+        crate::action::ActionKind::UqSamples => "uq-samples",
+        crate::action::ActionKind::MaterialCouponTest => "material-coupon-test",
+        crate::action::ActionKind::SensorCampaign => "sensor-campaign",
+        crate::action::ActionKind::Falsification => "falsification",
+        crate::action::ActionKind::StandardsObligation => "standards-obligation",
+        crate::action::ActionKind::Refusal => "refusal",
+    }
 }
 
 fn add_up(left: f64, right: f64) -> f64 {

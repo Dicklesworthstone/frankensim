@@ -2,9 +2,10 @@
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::uncertainty::{
-    BudgetTotal, CovarianceBlock, DistributionTerm, DominantEngineeringTerm,
+    BudgetTotal, ComplianceVerdict, CovarianceBlock, DistributionTerm, DominantEngineeringTerm,
     EngineeringUncertaintyBudget, EngineeringUncertaintyKind, EngineeringUncertaintyTerm,
-    EnsembleTerm, NumericalUncertaintyUpdate, TermValue, UncertaintyArtifactRef, UncertaintyRule,
+    EnsembleTerm, FlipBound, NumericalUncertaintyUpdate, RequirementRelation, ScalarRequirement,
+    TermValue, UncertaintyArtifactRef, UncertaintyRule, UnknownPlausibilityBound,
 };
 
 fn digest(label: &str) -> ContentHash {
@@ -48,6 +49,18 @@ fn replace_term(
 fn budget(terms: Vec<EngineeringUncertaintyTerm>) -> EngineeringUncertaintyBudget {
     EngineeringUncertaintyBudget::try_new("temperature:max", "kelvin", terms)
         .expect("valid complete budget")
+}
+
+fn maximum_temperature_requirement() -> ScalarRequirement {
+    ScalarRequirement::try_new(
+        "junction-temperature-limit",
+        "temperature:max",
+        "kelvin",
+        RequirementRelation::AtMost,
+        100.0,
+        artifact("requirement:thermal-safety"),
+    )
+    .expect("valid sourced requirement")
 }
 
 #[test]
@@ -497,4 +510,205 @@ fn finite_overflow_never_masquerades_as_a_bounded_total() {
         composed.term(EngineeringUncertaintyKind::Roundoff).value(),
         TermValue::Unknown { .. }
     ));
+}
+
+#[test]
+fn requirement_verdicts_cover_compliant_noncompliant_and_known_overlap() {
+    let requirement = maximum_temperature_requirement();
+    let known = budget(negligible_terms());
+
+    let ComplianceVerdict::Compliant { margin, .. } = known
+        .assess_requirement(90.0, &requirement, &[])
+        .expect("finite inputs admit")
+    else {
+        panic!("90 K must remain below the 100 K fixture limit");
+    };
+    assert!(margin > 9.0 && margin <= 10.0);
+
+    let ComplianceVerdict::NonCompliant { shortfall, .. } = known
+        .assess_requirement(110.0, &requirement, &[])
+        .expect("finite inputs admit")
+    else {
+        panic!("110 K must remain above the 100 K fixture limit");
+    };
+    assert!(shortfall > 9.0 && shortfall <= 10.0);
+
+    let mut overlap_terms = negligible_terms();
+    replace_term(
+        &mut overlap_terms,
+        EngineeringUncertaintyKind::SolverAlgebraic,
+        TermValue::interval(0.0, 2.0).expect("solver interval"),
+    );
+    assert!(matches!(
+        budget(overlap_terms)
+            .assess_requirement(98.0, &requirement, &[])
+            .expect("finite inputs admit"),
+        ComplianceVerdict::Indeterminate {
+            flipping_unknowns,
+            ..
+        } if flipping_unknowns.is_empty()
+    ));
+}
+
+#[test]
+fn unknown_contact_resistance_names_the_flip_and_evidence_action() {
+    let mut terms = negligible_terms();
+    replace_term(
+        &mut terms,
+        EngineeringUncertaintyKind::SolverAlgebraic,
+        TermValue::interval(0.0, 2.0).expect("solver interval"),
+    );
+    replace_term(
+        &mut terms,
+        EngineeringUncertaintyKind::BoundaryConditions,
+        TermValue::unknown("interface=tim-a contact resistance has no retained measurement")
+            .expect("named gap"),
+    );
+    let budget = budget(terms);
+    let requirement = maximum_temperature_requirement();
+    let verdict = budget
+        .assess_requirement(90.0, &requirement, &[])
+        .expect("unbounded unknown is a typed result, not an error");
+    let ComplianceVerdict::Indeterminate {
+        flipping_unknowns, ..
+    } = &verdict
+    else {
+        panic!("unbounded contact resistance must block a binary verdict");
+    };
+    assert_eq!(flipping_unknowns.len(), 1);
+    let contact = &flipping_unknowns[0];
+    assert_eq!(
+        contact.kind(),
+        EngineeringUncertaintyKind::BoundaryConditions
+    );
+    assert!(contact.reason().contains("interface=tim-a"));
+    assert!(contact.required_magnitude() > 7.0);
+    assert!(matches!(contact.bound(), FlipBound::Unbounded));
+    assert_eq!(
+        contact.suggested_action(),
+        fs_evidence::action::ActionKind::SensorCampaign
+    );
+
+    let report = verdict.render_report();
+    assert!(report.contains("verdict=indeterminate"));
+    assert!(report.contains("interface=tim-a"));
+    assert!(report.contains("suggested-action=sensor-campaign"));
+    assert_eq!(report, verdict.render_report());
+}
+
+#[test]
+fn sourced_plausibility_below_margin_decides_but_touching_refuses() {
+    let mut terms = negligible_terms();
+    replace_term(
+        &mut terms,
+        EngineeringUncertaintyKind::Parameters,
+        TermValue::unknown("tim lot variation lacks a distribution").expect("named gap"),
+    );
+    let budget = budget(terms);
+    let requirement = maximum_temperature_requirement();
+
+    let small = UnknownPlausibilityBound::try_new(
+        EngineeringUncertaintyKind::Parameters,
+        4.0,
+        artifact("plausibility:tim-datasheet"),
+    )
+    .expect("sourced finite bound");
+    let ComplianceVerdict::Compliant { margin, .. } = budget
+        .assess_requirement(90.0, &requirement, &[small])
+        .expect("bounded unknown admits")
+    else {
+        panic!("4 K cannot consume a roughly 10 K margin");
+    };
+    assert!(margin > 5.0 && margin < 6.1);
+
+    let unbounded = budget
+        .assess_requirement(90.0, &requirement, &[])
+        .expect("unbounded is a result");
+    let ComplianceVerdict::Indeterminate {
+        flipping_unknowns, ..
+    } = unbounded
+    else {
+        panic!("missing plausibility authority must remain indeterminate");
+    };
+    let exact_flip = flipping_unknowns[0].required_magnitude();
+    let touching = UnknownPlausibilityBound::try_new(
+        EngineeringUncertaintyKind::Parameters,
+        exact_flip,
+        artifact("plausibility:touching-boundary"),
+    )
+    .expect("finite boundary fixture");
+    assert!(matches!(
+        budget
+            .assess_requirement(90.0, &requirement, &[touching])
+            .expect("boundary fixture admits"),
+        ComplianceVerdict::Indeterminate { .. }
+    ));
+}
+
+#[test]
+fn plausibility_authority_cannot_be_attached_to_the_wrong_term() {
+    let known = budget(negligible_terms());
+    let wrong = UnknownPlausibilityBound::try_new(
+        EngineeringUncertaintyKind::ModelForm,
+        1.0,
+        artifact("plausibility:wrong-term"),
+    )
+    .expect("record is structurally valid before budget matching");
+    let error = known
+        .assess_requirement(90.0, &maximum_temperature_requirement(), &[wrong])
+        .expect_err("a known term cannot receive an out-of-band plausibility claim");
+    assert_eq!(error.rule(), UncertaintyRule::RequirementAssessment);
+    assert!(error.detail().contains("not Unknown"));
+
+    let mismatched = ScalarRequirement::try_new(
+        "pressure-limit",
+        "pressure-drop",
+        "pascal",
+        RequirementRelation::AtMost,
+        100.0,
+        artifact("requirement:pressure"),
+    )
+    .expect("valid but unrelated requirement");
+    let error = known
+        .assess_requirement(90.0, &mismatched, &[])
+        .expect_err("qoi and unit mismatches refuse");
+    assert_eq!(error.rule(), UncertaintyRule::RequirementAssessment);
+}
+
+#[test]
+fn replacing_a_bounded_unknown_with_evidence_never_weakens_compliance() {
+    let requirement = maximum_temperature_requirement();
+    for half_width in [0.0, 0.5, 2.0, 8.0] {
+        let mut unknown_terms = negligible_terms();
+        replace_term(
+            &mut unknown_terms,
+            EngineeringUncertaintyKind::Measurement,
+            TermValue::unknown("sensor population shape is unresolved").expect("named gap"),
+        );
+        let bound = UnknownPlausibilityBound::try_new(
+            EngineeringUncertaintyKind::Measurement,
+            half_width,
+            artifact("plausibility:sensor-spec"),
+        )
+        .expect("finite plausibility");
+        assert!(matches!(
+            budget(unknown_terms)
+                .assess_requirement(80.0, &requirement, &[bound])
+                .expect("bounded-unknown assessment"),
+            ComplianceVerdict::Compliant { .. }
+        ));
+
+        let mut resolved_terms = negligible_terms();
+        replace_term(
+            &mut resolved_terms,
+            EngineeringUncertaintyKind::Measurement,
+            TermValue::interval(0.0, half_width).expect("resolved interval"),
+        );
+        assert!(matches!(
+            budget(resolved_terms)
+                .assess_requirement(80.0, &requirement, &[])
+                .expect("resolved assessment"),
+            ComplianceVerdict::Compliant { .. }
+        ));
+    }
 }

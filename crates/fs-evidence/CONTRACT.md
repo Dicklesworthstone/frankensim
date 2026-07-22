@@ -73,6 +73,22 @@ telemetry/legacy correlation.
   separated BLAKE3 digest is the ledger/package identity. `render_report`
   emits one deterministic line per source with both term provenance and any
   distribution, ensemble, or covariance replay authority.
+- `uncertainty::ScalarRequirement` +
+  `EngineeringUncertaintyBudget::assess_requirement` — a sourced scalar
+  upper- or lower-limit audit over the eight-term budget. Fully specified
+  terms form one outward-rounded absolute band. An `Unknown` term is unbounded
+  unless a separate `UnknownPlausibilityBound` names that exact source, a
+  finite symmetric maximum effect, and its own provenance; supplying such a
+  record never changes the budget term out of `Unknown`. Finite plausibility
+  effects add linearly because no independence is inferred. The result is the
+  typed tri-state `ComplianceVerdict::{Compliant, NonCompliant,
+  Indeterminate}`. Binary outcomes require a strictly positive residual
+  margin/shortfall after every admitted effect. A known band or plausibility
+  envelope that exactly touches the limit deterministically returns
+  `Indeterminate`. Each flipping unknown retains its named gap, the minimum
+  effect it must contribute when the other bounded unknowns move
+  adversarially, its finite/unbounded state, and an evidence-action class;
+  `render_report` emits the complete deterministic reviewer trail.
 - `ModelCard` (name, version, ambition tag, assumptions, validity, known
   failures, calibration provenance, discrepancy band) and `ModelRegistry`
   — `register_solver` REFUSES without a registered card (the lint).
@@ -1022,6 +1038,20 @@ physical validation, process-standard conformance, or decision fitness.
   E05.10 thermal QoIs) attach real receipts, missing sources must be `Unknown`
   with a named reason. A `Negligible` term is an explicit producer assertion
   with a justification, not a proof of physical zero.
+- A plausibility bound is decision-policy data, not a scientific uncertainty
+  certificate. It must carry a separate artifact authority, applies only to a
+  matching `Unknown` source, and is consumed only for the named requirement
+  audit. The evaluator refuses QoI/unit mismatches, duplicate bounds, bounds
+  attached to already-known terms, non-finite nominals/limits, and malformed
+  magnitudes. Omitting a bound means unbounded; it never means zero. Multiple
+  bounded unknowns are allowed to move together, so individually small terms
+  cannot hide a jointly flipping envelope.
+- `FlippingUnknown::suggested_action` is a source-to-action taxonomy default,
+  not a cheapest-action claim. Cost, lead-time, feasibility, and
+  decision-value ranking belong to `fs-voi`/HELM; the follow-on integration
+  must preserve an unpriced recommendation when no comparable cost model
+  exists. The tri-state result itself remains valid without that optional L4
+  ranking.
 - Statistical composition is CONSERVATIVE-WEAKEST v1 (half-widths add,
   confidences min, mixed kinds keep the width-bearing certificate);
   proper e-value arithmetic (products under independence, e-BH) is
