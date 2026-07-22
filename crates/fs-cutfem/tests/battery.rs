@@ -723,6 +723,30 @@ fn cut_007b_ghost_free_aggregation_accepts_graded_interface_band() {
     let solution = space
         .solve(&|_, _| 0.0, &exact)
         .expect("graded aggregation patch solves");
+    assert!(matches!(
+        solution.residual_claim(),
+        fs_solver::ResidualClaim::TrueEuclidean(value)
+            if value.to_bits() == solution.rel_residual.to_bits()
+    ));
+    assert_eq!(
+        solution.euclidean_rel_residual().map(f64::to_bits),
+        Some(solution.rel_residual.to_bits())
+    );
+    let (matrix, rhs) = space.assemble(&|_, _| 0.0, &exact);
+    let mut applied = vec![0.0; rhs.len()];
+    matrix.spmv(&solution.free, &mut applied);
+    let residual = rhs
+        .iter()
+        .zip(applied)
+        .map(|(b, ax)| b - ax)
+        .collect::<Vec<_>>();
+    let independently_recomputed =
+        fs_solver::norm2(&residual) / fs_solver::norm2(&rhs).max(f64::MIN_POSITIVE);
+    assert_eq!(
+        solution.rel_residual.to_bits(),
+        independently_recomputed.to_bits(),
+        "the public residual claim must be the explicit b - Ax recomputation"
+    );
     let nodal_errors: Vec<f64> = solution
         .nodal
         .iter()

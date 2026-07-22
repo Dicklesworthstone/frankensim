@@ -27,8 +27,9 @@ use crate::agg::{self, AggPolicy};
 use crate::grid::{CellKey, NodeKey, Quadtree};
 use crate::quad::{CutRules, cut_cell_rules, tensor_gauss};
 use crate::sdf::CutSdf;
-use fs_solver::krylov::CgState;
-use fs_solver::op::CsrOp;
+use fs_solver::krylov::{CgState, ResidualClaim};
+use fs_solver::norm2;
+use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::precond::Precond;
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
@@ -143,8 +144,42 @@ pub struct Solution {
     pub nodal: BTreeMap<NodeKey, f64>,
     /// CG iterations.
     pub iters: usize,
-    /// Final relative residual.
+    /// Final recomputed Euclidean relative residual.
     pub rel_residual: f64,
+    residual_claim: ResidualClaim,
+}
+
+impl Solution {
+    /// Typed provenance for [`Self::rel_residual`].
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        self.residual_claim
+    }
+
+    /// The recomputed Euclidean relative residual.
+    ///
+    /// This accessor is fail-closed so downstream certificate code cannot
+    /// silently accept a future recurrence- or preconditioner-norm estimate.
+    #[must_use]
+    pub fn euclidean_rel_residual(&self) -> Option<f64> {
+        self.residual_claim.euclidean()
+    }
+}
+
+pub(crate) fn recomputed_euclidean_residual_claim<A: LinearOp>(
+    operator: &A,
+    x: &[f64],
+    rhs: &[f64],
+) -> ResidualClaim {
+    let mut applied = vec![0.0; rhs.len()];
+    operator.apply(x, &mut applied);
+    let residual = rhs
+        .iter()
+        .zip(applied)
+        .map(|(b, ax)| b - ax)
+        .collect::<Vec<_>>();
+    let denominator = norm2(rhs).max(f64::MIN_POSITIVE);
+    ResidualClaim::TrueEuclidean(norm2(&residual) / denominator)
 }
 
 /// One canonical scalar-sample outcome from [`Space::sample_scalar`].
@@ -591,7 +626,10 @@ impl<'g> Space<'g> {
             self.params.solver_tol,
             self.params.solver_max_iters,
         );
-        let rr = st.rel_residual();
+        let residual_claim = recomputed_euclidean_residual_claim(&op, &st.x, &b);
+        let rr = residual_claim
+            .euclidean()
+            .expect("the CutFEM solve stores an explicitly recomputed Euclidean residual");
         if !rr.is_finite() || rr > 1e-8 {
             return Err(CutFemError::SolveNotConverged {
                 iters: st.iters,
@@ -604,6 +642,7 @@ impl<'g> Space<'g> {
             nodal,
             iters: st.iters,
             rel_residual: rr,
+            residual_claim,
         })
     }
 

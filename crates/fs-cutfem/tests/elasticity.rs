@@ -1135,6 +1135,15 @@ fn cte_005_graded_componentwise_patch_reconstructs_midpoints_and_replays() {
         .expect("graded affine solve");
     let (l2, h1) = cut.l2_h1_error(&solution, &graded_affine, &graded_affine_gradient);
     assert!(solution.rel_residual <= 1.1e-13);
+    assert!(matches!(
+        solution.residual_claim(),
+        fs_solver::ResidualClaim::TrueEuclidean(value)
+            if value.to_bits() == solution.rel_residual.to_bits()
+    ));
+    assert_eq!(
+        solution.euclidean_rel_residual().map(f64::to_bits),
+        Some(solution.rel_residual.to_bits())
+    );
     assert!(l2 < 3e-8, "graded affine L2 error {l2:e}");
     assert!(h1 < 3e-7, "graded affine H1 error {h1:e}");
 }

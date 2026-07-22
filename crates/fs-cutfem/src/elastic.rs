@@ -15,12 +15,12 @@
 //! literal legacy scatter path so their operator and topology bits do not move.
 
 use crate::CutFemError;
-use crate::fem::{JacobiPrecond, q1};
+use crate::fem::{JacobiPrecond, q1, recomputed_euclidean_residual_claim};
 use crate::grid::{CellKey, FaceDirection, NodeKey, Quadtree, SharedFacePatch};
 use crate::quad::{CutRules, cut_cell_rules, tensor_gauss};
 use crate::sdf::CutSdf;
 use fs_material::IsotropicElastic;
-use fs_solver::krylov::CgState;
+use fs_solver::krylov::{CgState, ResidualClaim};
 use fs_solver::op::LinearOp;
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
@@ -442,11 +442,27 @@ pub struct CutElasticitySolution {
     dropped_cut_cells: usize,
     /// CG iterations.
     pub iters: usize,
-    /// Final relative residual.
+    /// Final recomputed Euclidean relative residual.
     pub rel_residual: f64,
+    residual_claim: ResidualClaim,
 }
 
 impl CutElasticitySolution {
+    /// Typed provenance for [`Self::rel_residual`].
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        self.residual_claim
+    }
+
+    /// The recomputed Euclidean relative residual.
+    ///
+    /// This accessor refuses any future non-Euclidean residual claim rather
+    /// than letting a recurrence estimate enter a certificate as a bound.
+    #[must_use]
+    pub fn euclidean_rel_residual(&self) -> Option<f64> {
+        self.residual_claim.euclidean()
+    }
+
     /// Displacement coefficients, two components per algebraic terminal node.
     /// Zero-clamped DOFs remain present as unit-identity rows; hanging values
     /// are available through [`Self::nodal`].
@@ -1201,16 +1217,21 @@ impl CutElasticity<'_> {
         let operator = self.assemble_impl(f, g, boundary_traction)?;
         let preconditioner = JacobiPrecond::new(operator.matrix());
         let mut state = CgState::new(&operator, &preconditioner, operator.rhs());
-        let report = state.run(
+        let _ = state.run(
             &operator,
             &preconditioner,
             self.solver_tol,
             self.solver_max_iters,
         );
-        if !report.converged {
+        let residual_claim =
+            recomputed_euclidean_residual_claim(&operator, &state.x, operator.rhs());
+        let rel_residual = residual_claim
+            .euclidean()
+            .expect("the elasticity solve stores an explicitly recomputed Euclidean residual");
+        if !rel_residual.is_finite() || rel_residual >= self.solver_tol {
             return Err(CutFemError::SolveNotConverged {
-                iters: report.iters,
-                rel_residual: report.rel_residual,
+                iters: state.iters,
+                rel_residual,
             });
         }
         let nodal = operator.nodal_values(&state.x);
@@ -1223,8 +1244,9 @@ impl CutElasticity<'_> {
             ghost_faces: operator.ghost_faces,
             compliance,
             dropped_cut_cells: operator.dropped_cut_cells,
-            iters: report.iters,
-            rel_residual: report.rel_residual,
+            iters: state.iters,
+            rel_residual,
+            residual_claim,
         })
     }
 

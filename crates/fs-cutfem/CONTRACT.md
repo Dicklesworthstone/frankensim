@@ -102,7 +102,11 @@ same certified cuts; its constitutive parameters come from
   exact-symmetric seam. `CutElasticitySolution` carries coefficients,
   nodal values, active cells, the retained cut rules and canonical ghost
   faces, algebraic compliance, dropped-cut count, CG iterations, and final
-  relative residual. On a graded tree, `node_ids()` contains only algebraic
+  residual as a typed `ResidualClaim::TrueEuclidean`, recomputed by an explicit
+  `b - Ax` operator application after CG rather than copied from CG's recursive
+  estimate. The legacy public magnitude and the fail-closed
+  `euclidean_rel_residual()` accessor are derived from that same claim. On a
+  graded tree, `node_ids()` contains only algebraic
   terminal blocks while `nodal_values()` and solved fields reconstruct all
   active hanging nodes. A requested hanging-node clamp refuses unless every
   terminal in its trace is clamped; clamping a terminal alone is valid. Its
@@ -228,7 +232,8 @@ Q1 field-evaluation, terminal transform, or incompatible hanging-clamp
 requests also refuse),
 `AggregationNoAnchor` (no well-cut anchor within 4 BFS rings),
 `ConstraintCycle` (corrupted constraint graph), `SolveNotConverged`
-(configured residual gate missed; carries iterations and residual).
+(configured residual gate missed; carries iterations and the recomputed
+Euclidean residual).
 Quadrature and classification never silently degrade: scalar
 conservative-Cut and dropped-cell counts are surfaced in `BuildStats`;
 the vector operator and solution surface their dropped-cut count.
@@ -298,7 +303,9 @@ full-edge refusal, and aligned legacy/typed operator-bit equivalence; cte-005
 graded vector reduction, including an independent mixed-level Nitsche
 matrix/RHS oracle, body-load reduction, terminal outer-traction conservation,
 solution reconstruction, deterministic replay, and malformed-constraint
-refusals.
+refusals. The scalar graded-aggregation and vector graded-patch cases also pin
+typed true-Euclidean residual provenance; the scalar case independently
+recomputes `b - Ax` and requires bit-identical public evidence.
 `tests/graded_elasticity.rs`: cte-006 fixed-pattern mixed-level MMS with
 three-level fitted L2/H1 slopes; cte-007 uniform-versus-graded affine physical
 field and compliance equivalence plus bit-identical graded replay.
