@@ -5986,9 +5986,18 @@ impl Ledger {
 
     /// Upsert a named record in one of the Rev S extension tables.
     ///
+    /// An evidence record that an immutable v17 semantic binding has frozen
+    /// is byte-retained: an exact re-put of the same body is a legal
+    /// response-loss retry, and any other body is refused. The binding is a
+    /// durable claim that these exact bytes were independently reverified
+    /// against a migration receipt, so overwriting them would leave that row
+    /// asserting a provenance the record no longer has.
+    ///
     /// # Errors
-    /// [`LedgerError::Invalid`] for empty name / malformed JSON; engine
-    /// errors otherwise.
+    /// [`LedgerError::Invalid`] for empty name / malformed JSON, or for a
+    /// body that would reinterpret bound evidence;
+    /// [`LedgerError::Corrupt`] when a bound evidence record is missing or
+    /// malformed; engine errors otherwise.
     pub fn put_extension(
         &self,
         table: ExtensionTable,
@@ -6002,20 +6011,99 @@ impl Ledger {
             });
         }
         self.require_json("body", body_json, false)?;
-        self.conn
-            .prepare(&format!(
-                "INSERT INTO {}(name, body, created_at) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(name) DO UPDATE SET body = excluded.body",
-                table.table_name()
-            ))
-            .map_err(|e| sql_err("extension upsert prepare", &e))?
-            .execute_with_params(&[
-                text_param(name),
-                text_param(body_json),
-                SqliteValue::Integer(now_wall_ns()),
-            ])
-            .map_err(|e| sql_err("extension upsert", &e))?;
-        Ok(())
+        let owns_txn = !self.in_transaction();
+        if owns_txn {
+            self.begin()?;
+        }
+        let result = (|| -> Result<(), LedgerError> {
+            self.refuse_bound_evidence_reinterpretation(table, name, body_json)?;
+            self.conn
+                .prepare(&format!(
+                    "INSERT INTO {}(name, body, created_at) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(name) DO UPDATE SET body = excluded.body",
+                    table.table_name()
+                ))
+                .map_err(|e| sql_err("extension upsert prepare", &e))?
+                .execute_with_params(&[
+                    text_param(name),
+                    text_param(body_json),
+                    SqliteValue::Integer(now_wall_ns()),
+                ])
+                .map_err(|e| sql_err("extension upsert", &e))?;
+            Ok(())
+        })();
+        match (result, owns_txn) {
+            (Ok(()), true) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+                Ok(())
+            }
+            (Ok(()), false) => Ok(()),
+            (Err(error), true) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+            (Err(error), false) => Err(error),
+        }
+    }
+
+    /// Refuse an extension write that would reinterpret an evidence body a
+    /// v17 semantic binding froze.
+    ///
+    /// Schema v17 installs `trg_evidence_semantic_binding_guard_source_update`
+    /// for exactly this, and that trigger is the guard for plain
+    /// `UPDATE`/`DELETE` spellings. It is NOT sufficient on this crate's own
+    /// write path: [`Ledger::put_extension`] writes through
+    /// `INSERT .. ON CONFLICT .. DO UPDATE`, and FrankenSQLite fires the
+    /// table's INSERT triggers — never its UPDATE triggers — on the conflict
+    /// branch of an upsert (SQLite fires the UPDATE triggers there, and
+    /// aborts). Enforcing the same predicate in Rust makes the refusal
+    /// independent of which engine-side trigger class runs.
+    fn refuse_bound_evidence_reinterpretation(
+        &self,
+        table: ExtensionTable,
+        name: &str,
+        body_json: &str,
+    ) -> Result<(), LedgerError> {
+        if table != ExtensionTable::Evidence {
+            return Ok(());
+        }
+        let bound = self
+            .conn
+            .query_with_params(
+                "SELECT 1 FROM evidence_semantic_bindings WHERE evidence_name = ?1 LIMIT 1",
+                &[text_param(name)],
+            )
+            .map_err(|e| sql_err("bound evidence guard", &e))?;
+        if bound.is_empty() {
+            return Ok(());
+        }
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT body FROM evidence WHERE name = ?1",
+                &[text_param(name)],
+            )
+            .map_err(|e| sql_err("bound evidence guard fetch", &e))?;
+        let Some(SqliteValue::Text(retained)) = rows.first().and_then(|row| row.get(0)) else {
+            return Err(LedgerError::Corrupt {
+                hash_hex: hash_bytes(name.as_bytes()).to_hex(),
+                detail: "bound evidence record is missing or not text".to_string(),
+            });
+        };
+        if retained.as_str().as_bytes() == body_json.as_bytes() {
+            return Ok(());
+        }
+        Err(LedgerError::Invalid {
+            field: "body".to_string(),
+            problem: format!(
+                "evidence record {name:?} is frozen by an exact semantic binding; \
+                 an identical re-put is legal but a different body would silently \
+                 reinterpret bound bytes"
+            ),
+        })
     }
 
     /// Fetch a named extension record's JSON body, if present.
