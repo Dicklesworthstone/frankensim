@@ -1,0 +1,38 @@
+[package]
+name = "frankensim-high-precision-oracle"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Isolated MPFR comparison lane for fs-math ULP budgets and fs-ivl enclosures."
+
+# This is deliberately a nested workspace, not a member of the FrankenSim
+# production workspace. Rug/MPFR is an external development oracle and must
+# never enter the runtime dependency graph checked by xtask.
+[workspace]
+
+[dependencies]
+fs-ivl = { path = "../../crates/fs-ivl" }
+fs-math = { path = "../../crates/fs-math" }
+rug = { version = "=1.30.0", default-features = false, features = ["float", "std"] }
+
+[[bin]]
+name = "frankensim-high-precision-oracle"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+unreadable_literal = "allow"
+doc_markdown = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"

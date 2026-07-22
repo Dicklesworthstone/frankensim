@@ -272,7 +272,21 @@ quality lane executes it without a separate GitHub workflow.
 `scripts/ci/quality_lanes.sh` is a REQUIRED DSR check. It derives every
 test, bench, binary, and example target with `required-features` from locked
 Cargo metadata and checks/runs each target with its declared features and
-`--locked`. The standalone
+`--locked`.
+
+The same sealed run includes the development-only high-precision oracle at
+`tools/oracle`. That nested workspace is outside the production Cargo graph
+and pins Rug/MPFR in its own reviewed lockfile. Four fail-closed rows check its
+formatting, strict Clippy surface, comparison-plumbing tests, and deterministic
+audit. The audit evaluates 4,096 generated samples per family at 256-bit
+precision, reports per-function ULP histograms and argmax inputs, and exits
+nonzero if an `fs-math` declared budget is exceeded or an `fs-ivl` enclosure
+misses an MPFR point value. A passing finite sample is external agreement
+evidence for that exact source snapshot and sample family; it is not an
+exhaustive binary64 proof, run authentication, or fresh cross-ISA evidence.
+Missing oracle manifest or lockfile is a named failure.
+
+The standalone
 `crates/fs-wasm` workspace has three required obligations:
 
 1. Native tests against its tracked lock.
@@ -286,8 +300,9 @@ a collision-proof run directory under `target/quality-lanes/` containing full
 per-lane logs, an isolated wasm-pack output, `verdicts.jsonl`, and
 `inventory.json`; it also owns a separate Cargo target directory. Override paths
 are normalized to absolute paths before any nested-workspace command runs. The
-inventory SHA-256 hashes canonical input file CONTENTS (manifests, locks, contracts, Rust
-sources/tests, CI scripts, and the derived gated-target list), not merely
+inventory SHA-256 hashes canonical input file CONTENTS (manifests, locks,
+contracts, Rust sources/tests, the isolated oracle source and lock, CI scripts,
+and the derived gated-target list), not merely
 filenames. The same composite
 root + clean-constellation snapshot used by the x86 lane must match before and
 after the run.

@@ -5,7 +5,9 @@
 #   1. FEATURE MATRIX: every test/bench/bin/example with required-features,
 #      DERIVED from `cargo metadata` (never a hand-kept list): adding or
 #      removing a gated target changes the lane set automatically.
-#   2. FS-WASM STANDALONE: the nested fs-wasm workspace (native unit
+#   2. HIGH-PRECISION ORACLE: the isolated tools/oracle workspace checks
+#      fs-math ULP budgets and fs-ivl enclosures against MPFR at >=200 bits.
+#   3. FS-WASM STANDALONE: the nested fs-wasm workspace (native unit
 #      tests; the browser build itself stays a wasm-pack lane).
 #
 # Every lane writes its COMPLETE log and a provisional JSONL verdict to a
@@ -232,6 +234,70 @@ while IFS=$'\t' read -r pkg kind target feats; do
   fi
 done < "$LANES_FILE"
 
+# ---- External high-precision oracle (isolated development workspace) ----
+ORACLE_MANIFEST="tools/oracle/Cargo.toml"
+ORACLE_LOCK="tools/oracle/Cargo.lock"
+ORACLE_TARGET_DIR="$QUALITY_TARGET_DIR/high-precision-oracle"
+ORACLE_SAMPLES=4096
+ORACLE_PRECISION_BITS=256
+ORACLE_FMT_LOG="$LOG_DIR/high-precision-oracle-fmt.log"
+ORACLE_CLIPPY_LOG="$LOG_DIR/high-precision-oracle-clippy.log"
+ORACLE_TEST_LOG="$LOG_DIR/high-precision-oracle-tests.log"
+ORACLE_AUDIT_LOG="$LOG_DIR/high-precision-oracle-audit.jsonl"
+
+if [[ -f "$ORACLE_MANIFEST" && -f "$ORACLE_LOCK" ]]; then
+  if cargo fmt --manifest-path "$ORACLE_MANIFEST" --check >"$ORACLE_FMT_LOG" 2>&1; then
+    row "high-precision-oracle-fmt" "pass" "isolated oracle formatting" "$ORACLE_FMT_LOG"
+  else
+    row "high-precision-oracle-fmt" "fail" \
+      "isolated oracle formatting failed" "$ORACLE_FMT_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$ORACLE_TARGET_DIR" \
+      cargo clippy --locked --manifest-path "$ORACLE_MANIFEST" --all-targets \
+        -- -D warnings >"$ORACLE_CLIPPY_LOG" 2>&1; then
+    row "high-precision-oracle-clippy" "pass" \
+      "isolated oracle strict clippy" "$ORACLE_CLIPPY_LOG"
+  else
+    row "high-precision-oracle-clippy" "fail" \
+      "isolated oracle strict clippy failed" "$ORACLE_CLIPPY_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$ORACLE_TARGET_DIR" \
+      cargo test --locked --manifest-path "$ORACLE_MANIFEST" \
+        >"$ORACLE_TEST_LOG" 2>&1; then
+    row "high-precision-oracle-tests" "pass" \
+      "isolated oracle comparison-plumbing tests" "$ORACLE_TEST_LOG"
+  else
+    row "high-precision-oracle-tests" "fail" \
+      "isolated oracle comparison-plumbing tests failed" "$ORACLE_TEST_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$ORACLE_TARGET_DIR" \
+      cargo run --quiet --locked --manifest-path "$ORACLE_MANIFEST" -- \
+        --samples "$ORACLE_SAMPLES" --precision-bits "$ORACLE_PRECISION_BITS" \
+        >"$ORACLE_AUDIT_LOG" 2>&1; then
+    row "high-precision-oracle-audit" "pass" \
+      "MPFR precision_bits=$ORACLE_PRECISION_BITS samples_per_family=$ORACLE_SAMPLES" \
+      "$ORACLE_AUDIT_LOG"
+  else
+    row "high-precision-oracle-audit" "fail" \
+      "MPFR comparison found a budget or enclosure violation" "$ORACLE_AUDIT_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+else
+  ORACLE_MISSING="required isolated oracle manifest or reviewed lock is missing"
+  for oracle_lane in fmt clippy tests audit; do
+    oracle_log="$LOG_DIR/high-precision-oracle-${oracle_lane}.log"
+    printf '%s\n' "$ORACLE_MISSING" >"$oracle_log"
+    row "high-precision-oracle-${oracle_lane}" "fail" "$ORACLE_MISSING" "$oracle_log"
+    FAILURES=$((FAILURES + 1))
+  done
+fi
+
 # ---- fs-wasm standalone workspace (native tests) ----
 WASM_MANIFEST="crates/fs-wasm/Cargo.toml"
 WASM_LOCK="crates/fs-wasm/Cargo.lock"
@@ -327,6 +393,8 @@ root = pathlib.Path(".")
 patterns = (
     ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
     "constellation.lock", "scripts/ci/*.sh", "xtask/src/**/*.rs",
+    "tools/oracle/Cargo.toml", "tools/oracle/Cargo.lock",
+    "tools/oracle/README.md", "tools/oracle/src/**/*.rs",
     "crates/*/Cargo.toml", "crates/*/Cargo.lock", "crates/*/.cargo/*.toml",
     "crates/*/CONTRACT.md", "crates/*/build.rs",
     "crates/*/src/**/*.rs", "crates/*/tests/**/*.rs", "crates/*/benches/**/*.rs",
@@ -404,7 +472,7 @@ if [[ "$SNAPSHOT_AFTER" == "$SNAPSHOT_BEFORE" \
 fi
 
 python3 - "$HEAD_SHA" "$DIRTY" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
-  "$CONSTELLATION_LOCK_HASH" "$((LANE_COUNT + 3))" "$FAILURES" "$LOG_DIR" <<'PY' | tee -a "$VERDICTS"
+  "$CONSTELLATION_LOCK_HASH" "$((LANE_COUNT + 7))" "$FAILURES" "$LOG_DIR" <<'PY' | tee -a "$VERDICTS"
 import json
 import sys
 
