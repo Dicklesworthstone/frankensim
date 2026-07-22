@@ -121,6 +121,13 @@ workstream.
   the catalog's formula-reproduction tolerances, no ladder or machine
   fingerprint is persisted, and `fs-vvreg` queries remain numerical
   `NoClaim` with physical support capped at `Estimated`.
+- Proved the bound battery remotely at stable HEAD `bff2be3f` with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test -p fs-conduction --all-targets`: 39/39 tests passed (2 adjoint,
+  7 analytic, 22 conformance, 8 MMS) on `vmi1227854`, RCH job
+  `29943194691043348`. Cargo execution took 193.346 seconds after the
+  dependency transfer; the run produced no `fs-conduction` warning.
 
 ### Post-checkpoint convection-correlation rung
 
