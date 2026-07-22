@@ -460,6 +460,35 @@ they are not implied by this solid graph core.
   dependency, contract-clause, evidence, and persistence semantics and must use
   these validators instead of hand-maintaining a dashboard.
 
+## Vertical ratification (`ratification` module, bead f85xj.1.4)
+
+- `VERTICAL_RATIFICATION_V1` is the program's one ratified vertical decision
+  record: chosen vertical (`thermal-design-assurance`), runner-up and retained
+  minority report, the recorded scoring totals and inventory pin they rest on,
+  the kill criterion bound to the measured cycle-time baseline, three named
+  mechanically-evaluable `Falsifier`s, the next review date, honored
+  principles, and the downstream beads gated on the record id.
+- The record is fail-closed. `ratified_vertical()` re-validates before
+  handing the record out: required fields non-empty, falsifiers present and
+  complete, kill parameters equal to `fs_wedge::CHT_BASELINE`'s
+  (`RatificationError::KillCriterionUnbound` otherwise), the baseline's
+  provenance non-placeholder and its record complete
+  (`BaselineNotMeasured`), and the scoring table recomputed via
+  `fs_wedge::default_recommendation()` with any disagreement refused as
+  `ScoringDrift` (recommendation, runner-up, totals, and the inventory
+  revision on every comparison candidate). `ratification_json()` renders
+  every record in `decision_records()` fail-closed and deterministically.
+- The conclusion is mirrored in `fs-wedge` (`RATIFIED_VERTICAL`,
+  `RATIFICATION_RECORD_ID`) and cross-checked by this crate's battery so the
+  two crates cannot fork the story. `fs-govern` therefore carries a
+  UTIL-to-UTIL path dependency on the dependency-free `fs-wedge`.
+- No-claim boundary: ratification is a COMMERCIAL decision record over the
+  measured comparison. It confers no technical maturity, does not upgrade any
+  capability level, and does not validate the thermal market thesis — the
+  customer-pain factor remains a declared assumption until interviews or
+  workflow traces exist. A failed quarterly falsifier forces re-selection of
+  the wedge, not a change to the platform architecture.
+
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
 - `principles() -> &[Principle]` — the eight design principles P1–P8 (id, name,
