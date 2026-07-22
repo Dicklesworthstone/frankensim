@@ -62,6 +62,27 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   4000-sample exponent sweep 2²¹..2¹⁰⁰⁰ against the platform-libm oracle,
   0 ULP on the published worst-case double 6381956970095103·2⁷⁹⁷ (reduced
   |r| = 4.7e-19). Odd/even symmetry BITWISE at every landmark.
+- External high-precision audit status (bead
+  `frankensim-extreal-program-f85xj.3.1`): the isolated `tools/oracle`
+  development lane compares production results with correctly rounded,
+  256-bit MPFR references. Its deterministic 4,096-generated-sample run per
+  family, plus fixed edges, passed 327,049 observations with zero failures.
+  Every declared ULP budget has the following explicit status:
+
+  | Budget | External-audit status |
+  | --- | --- |
+  | `exp` 3, `expm1` 3, `ln` 3 | Externally audited by the MPFR lane. |
+  | `sin` 3 / large-argument 4, `cos` 3 / large-argument 4 | Externally audited by the MPFR lane over deterministic finite-bit inputs and fixed edges. |
+  | `tanh` 5, `sqrt` 0 | Externally audited by the MPFR lane. |
+  | `tan` 8, `atan2` 5 | Externally audited by the MPFR lane; `atan` 4 is not externally audited by this lane. |
+  | `erf` 6 | Externally audited by the MPFR lane; `erfc` 10 is not externally audited by this lane. |
+  | `pow` = 3·(|y·ln x|+1)+5 | Externally audited by the MPFR lane over its disclosed positive-base generated families and fixed signed-integer edges. |
+  | `powi` measured ≤ 2, `asin`/`acos` 6, `hypot` 2 | Not externally audited by this lane; only the platform-comparison and internal evidence described above applies. |
+
+  This is finite-sample evidence, not an exhaustive proof over all binary64
+  inputs. It makes no external-audit claim for `atan`, `erfc`, `powi`, `asin`,
+  `acos`, or `hypot`, and it does not replace the retained cross-ISA
+  determinism evidence.
 - `payne`: SELF-VERIFYING constants — the 2/π limbs are hardcoded AND
   regenerated at test time by an all-integer Machin bignum (π = 16·atan(1/5)
   − 4·atan(1/239) in u64-limb fixed point, binary long division for 2/π);
@@ -169,6 +190,11 @@ central package-proof pending.
   before fs-math's subnormal-preserving cutoff; the Casebook does not erase or
   adjudicate that declared policy difference. Observed FrankenScipy output
   digests are same-run diagnostics, not cross-ISA goldens.
+- The isolated MPFR lane's external-audit labels apply only to the disclosed
+  4,096-sample deterministic families and fixed edges. They do not prove the
+  budgets exhaustively over binary64, authenticate the surrounding run, or
+  extend external coverage to `atan`, `erfc`, `powi`, `asin`, `acos`, or
+  `hypot`.
 - The nightly ULP-ledger re-measurement lane: the budget-vs-measured tests
   ship here and run in every suite; wiring them into a dedicated nightly
   regression lane belongs to the CI/CD bead family (huq.4 closed; the perf-CI

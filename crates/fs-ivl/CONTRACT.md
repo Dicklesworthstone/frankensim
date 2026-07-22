@@ -6,9 +6,11 @@ affine (noise-symbol) forms. This crate defines what "certified" means
 system-wide: every operation's postcondition is ENCLOSURE — the result
 contains the true image of the inputs. Layer: **L1**. Depends only on
 fs-math (strict functions, declared budgets, nudging primitives; the
-high-precision oracle rungs `eft`/`dd` live THERE at L0, single
+in-house `eft`/`dd` reference machinery lives THERE at L0 as a single
 implementation shared with fs-la — recorded relocation, beads
-6ys.8/6ys.12).
+6ys.8/6ys.12). The independent high-precision development oracle is the
+isolated, non-production `tools/oracle` MPFR harness; it is not part of this
+crate's dependency graph.
 
 ## Public types and semantics
 - `INTERVAL_SEMANTICS_VERSION = 1` — package-version-independent identity for
@@ -22,7 +24,7 @@ implementation shared with fs-la — recorded relocation, beads
 - Directed rounding: computed endpoints are nudged outward via
   fs-math `next_up`/`next_down` — basic ops 1 ULP (rigorous: IEEE
   correctly-rounded ops err ≤ ½ ULP), elementary functions by fs-math's
-  DECLARED constants directly (exp/expm1/ln/sin/cos 3, tanh 5, sqrt 1 after
+  DECLARED constants directly (exp/ln/sin/cos 3, tanh 5, sqrt 1 after
   the exact hardware sqrt), with no mirrored budget literals in the interval
   implementation. NO global rounding-mode state anywhere (thread-safe,
   SIMD-mixing-safe, grep-lintable). When a basic operation on two finite
@@ -121,6 +123,13 @@ implementation shared with fs-la — recorded relocation, beads
    kπ (cos) include ±1 exactly.
 4. Enclosures never claim outside function ranges (sin/cos ⊆ [−1,1],
    tanh ⊆ [−1,1], exp ≥ 0, sqrt ≥ 0).
+5. **Independent finite audit (G0)**: the isolated `tools/oracle` lane checks
+   add/sub/mul/div, negation, absolute value, hull, intersection, certified
+   width, and `exp`/`ln`/`sqrt`/`sin`/`cos`/`tanh` enclosures against exact-f64
+   inputs evaluated by 256-bit MPFR. Its deterministic 4,096-generated-sample
+   run per family passed as part of a 327,049-observation report with zero
+   failures. The lane is development-only and absent from the production
+   workspace dependency graph.
 
 ## Error model
 Domain violations that admit NO enclosure panic with structured messages:
@@ -231,8 +240,11 @@ rejections. Reimplementations must pass the golden-hash case bit-for-bit.
 
 ## No-claim boundaries
 - **Rigor is conditional on fs-math's declared ULP budgets** (empirically
-  enforced there): if a budget were violated, elementary enclosures could
-  under-cover by the violation amount. Basic-op enclosures are
+  enforced there and independently sampled by the isolated MPFR lane for the
+  elementary functions used here): if a budget were violated, elementary
+  enclosures could under-cover by the violation amount. The external run is a
+  deterministic finite family, not an exhaustive proof over every binary64
+  input or every interior point of every interval. Basic-op enclosures are
   unconditionally rigorous.
 - `TaylorModel1` is univariate and fixed-order; multivariate Taylor models and
   sparse polynomial bases are not implemented. Public construction and
