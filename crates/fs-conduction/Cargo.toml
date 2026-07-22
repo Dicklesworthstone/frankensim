@@ -27,6 +27,7 @@ fs-alloc = { path = "../fs-alloc" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-mms = { path = "../fs-mms" }
+fs-vvreg = { path = "../fs-vvreg" }
 
 [lints]
 workspace = true

@@ -39,12 +39,56 @@ use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::{
     ConductionProblem, InitialGuess, LinearConfig, Nonlinearity, SolveConfig, StopRule, solve,
 };
-use fs_mms::{Coverage, LadderSide, MmsMatrix, MmsMatrixRow, OrderGate, RefinementLadder};
+use fs_mms::{
+    Coverage, LadderSide, MmsMatrix, MmsMatrixRow, ORDER_GATE_TOLERANCE, OrderGate,
+    RefinementLadder,
+};
+use fs_vvreg::thermal_level_a::{
+    ThermalLevelAAcceptance, ThermalLevelAKind, thermal_level_a_cases,
+};
 use support::{FaceLinearQuadratic, FullQuadratic, Quartic, h1_error, l2_error, with_cx};
 
 const GRIDS: [usize; 4] = [4, 6, 8, 10];
 const ISOTROPIC_K: f64 = 2.5;
 const ANISOTROPIC_K: [[f64; 3]; 3] = [[3.0, 0.5, 0.25], [0.5, 2.0, 0.75], [0.25, 0.75, 1.5]];
+
+const LEVEL_A_MMS_BINDINGS: [(&str, Option<&str>, &str); 7] = [
+    (
+        "thermal-a-mms-p1-dirichlet",
+        Some("tests/mms.rs::mms_isotropic_dirichlet_orders"),
+        "the P1 isotropic Dirichlet L2 ladder executes the catalog order gate",
+    ),
+    (
+        "thermal-a-mms-p2-dirichlet",
+        None,
+        "fs-conduction implements P1 elements only",
+    ),
+    (
+        "thermal-a-mms-p1-anisotropic-nonlinear",
+        None,
+        "the battery has separate anisotropic-constant and isotropic-k(T) ladders, not the catalog's combined case",
+    ),
+    (
+        "thermal-a-mms-p1-neumann",
+        Some("tests/mms.rs::mms_mixed_neumann_order"),
+        "the P1 mixed-Neumann L2 ladder executes the catalog order gate",
+    ),
+    (
+        "thermal-a-mms-p1-robin",
+        Some("tests/mms.rs::mms_robin_order"),
+        "the P1 Robin L2 ladder executes the catalog order gate",
+    ),
+    (
+        "thermal-a-mms-p1-adjoint",
+        None,
+        "the adjoint test checks finite-difference consistency but retains no dual convergence ladder",
+    ),
+    (
+        "thermal-a-mms-p2-adjoint",
+        None,
+        "fs-conduction implements neither P2 elements nor a dual convergence ladder",
+    ),
+];
 
 fn linear_config() -> SolveConfig {
     SolveConfig {
@@ -87,6 +131,36 @@ fn report(case: &str, side: LadderSide, theoretical: f64, hs: &[f64], errors: &[
         }
         Err(e) => panic!("{case}: order gate refused: {e}\n  h = {hs:?}\n  err = {errors:?}"),
     }
+}
+
+fn report_level_a(case_id: &str, case: &str, side: LadderSide, hs: &[f64], errors: &[f64]) {
+    let target = thermal_level_a_cases()
+        .iter()
+        .find(|target| target.id == case_id)
+        .unwrap_or_else(|| panic!("missing Level-A target {case_id}"));
+    assert_eq!(target.kind, ThermalLevelAKind::ManufacturedTarget);
+    assert!(
+        LEVEL_A_MMS_BINDINGS
+            .iter()
+            .any(|(id, test, _)| *id == case_id && test.is_some()),
+        "{case_id} is not declared as an executing fs-conduction binding"
+    );
+    let ThermalLevelAAcceptance::OrderGate {
+        theoretical,
+        tolerance,
+    } = target.acceptance
+    else {
+        panic!("{case_id}: Level-A MMS row must carry an order gate");
+    };
+    assert_eq!(target.reference_value_si.to_bits(), theoretical.to_bits());
+    assert_eq!(tolerance.to_bits(), ORDER_GATE_TOLERANCE.to_bits());
+    report(case, side, theoretical, hs, errors);
+    println!(
+        "{{\"suite\":\"fs-conduction/mms\",\"level_a_case_id\":\"{case_id}\",\
+         \"runtime_case\":\"{}\",\"verdict\":\"pass\",\
+         \"authority\":\"executed-ladder-not-retained-registry-receipt\"}}",
+        support::json_escape(case)
+    );
 }
 
 // ---------------------------------------------------------------- case 1
@@ -138,10 +212,10 @@ fn mms_isotropic_dirichlet_orders() {
         l2.push(e2);
         h1.push(e1);
     }
-    report(
+    report_level_a(
+        "thermal-a-mms-p1-dirichlet",
         "conduction/mms/isotropic-dirichlet/l2",
         LadderSide::Primal,
-        2.0,
         &hs,
         &l2,
     );
@@ -268,10 +342,10 @@ fn mms_mixed_neumann_order() {
         hs.push(1.0 / n as f64);
         l2.push(run_mixed_neumann(n));
     }
-    report(
+    report_level_a(
+        "thermal-a-mms-p1-neumann",
         "conduction/mms/mixed-neumann/l2",
         LadderSide::Primal,
-        2.0,
         &hs,
         &l2,
     );
@@ -337,7 +411,13 @@ fn mms_robin_order() {
         hs.push(1.0 / n as f64);
         l2.push(run_robin(n));
     }
-    report("conduction/mms/robin/l2", LadderSide::Primal, 2.0, &hs, &l2);
+    report_level_a(
+        "thermal-a-mms-p1-robin",
+        "conduction/mms/robin/l2",
+        LadderSide::Primal,
+        &hs,
+        &l2,
+    );
 }
 
 // ---------------------------------------------------------------- case 5
@@ -439,6 +519,39 @@ fn mms_nonlinear_conductivity_order() {
 }
 
 // ----------------------------------------------------------- the matrix
+
+#[test]
+fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
+    let catalog_ids = thermal_level_a_cases()
+        .iter()
+        .filter(|case| case.kind == ThermalLevelAKind::ManufacturedTarget)
+        .map(|case| case.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let binding_ids = LEVEL_A_MMS_BINDINGS
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(binding_ids, catalog_ids);
+    assert_eq!(
+        LEVEL_A_MMS_BINDINGS
+            .iter()
+            .filter(|(_, test, _)| test.is_some())
+            .count(),
+        3
+    );
+    for (id, test, basis) in LEVEL_A_MMS_BINDINGS {
+        assert!(
+            !basis.is_empty(),
+            "{id} must state its binding or gap basis"
+        );
+        if let Some(test) = test {
+            assert!(
+                test.starts_with("tests/mms.rs::"),
+                "{id}: executing test path must be stable"
+            );
+        }
+    }
+}
 
 /// The declared battery matrix: coverage in data, gaps visible with a
 /// reason. `fs-mms` exists so a coverage hole is lintable rather than

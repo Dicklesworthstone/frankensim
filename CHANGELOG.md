@@ -102,6 +102,26 @@ workstream.
   adjoint run, or machine fingerprint is bound yet, so registration is not
   reported as a G1 pass.
 
+### Post-checkpoint Level-A execution crosswalk
+
+- Bound six canonical Level-A analytic rows directly into the executing
+  `fs-conduction` fixtures: two slab fluxes, uniform-source center rise,
+  rectangular affine temperature, cylindrical-shell conductance, and `mL=1`
+  adiabatic-tip fin efficiency.
+- Bound three canonical P1 MMS rows directly into their executing L2 ladders:
+  isotropic Dirichlet, mixed Neumann, and Robin. The tests now take the
+  theoretical slope and order-gate tolerance from `fs-vvreg` instead of
+  repeating those target values locally.
+- Added complete analytic and MMS crosswalks. The ten unexecuted rows retain
+  specific gaps: missing spherical/transient/radiation/contact physics,
+  convection ownership, P2 elements, a combined anisotropic nonlinear case,
+  and dual-order ladders.
+- Kept authority boundaries explicit. These are test-time execution bindings,
+  not retained corpus receipts; solver/model envelopes remain separate from
+  the catalog's formula-reproduction tolerances, no ladder or machine
+  fingerprint is persisted, and `fs-vvreg` queries remain numerical
+  `NoClaim` with physical support capped at `Estimated`.
+
 ### Post-checkpoint convection-correlation rung
 
 - Added `fs-convection`, an L3 library with 11 Nusselt relations spanning

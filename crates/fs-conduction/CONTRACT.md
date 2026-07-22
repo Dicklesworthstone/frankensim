@@ -242,15 +242,38 @@ None. Everything here is `[S]` solid work on the default path.
 - `tests/conformance.rs` — G0 algebraic laws, G4 cancellation drills, G5
   determinism and snapshot round-trips, and the typed refusal surface (22 tests).
 - `tests/mms.rs` — the G1 battery: five manufactured-solution ladders gated by
-  `fs_mms::OrderGate`, plus the declared `MmsMatrix` whose gaps carry reasons.
+  `fs_mms::OrderGate`, plus the declared `MmsMatrix` and a complete
+  `fs-vvreg` Level-A target crosswalk whose gaps carry reasons.
 - `tests/analytic.rs` — slab (Dirichlet–Dirichlet), slab with a uniform source,
-  slab (Dirichlet–Robin), cylindrical shell, and a straight fin, each with a
-  declared envelope and a stated reason for its size.
+  slab (Dirichlet–Robin), a rectangular affine patch, cylindrical shell, and
+  an adiabatic-tip straight fin, each with a declared envelope and a stated
+  reason for its size; a complete Level-A analytic crosswalk keeps unsupported
+  rows visible.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`.
 
-Every test prints a JSON-lines verdict carrying the numbers it asserted, so a
-failure reproduces from its log line alone.
+Every analytic comparison and MMS gate prints a JSON-lines verdict carrying
+the numbers it asserted, so a failure reproduces from its log line alone.
+
+### Level-A registry binding is executable, not retained authority
+
+The analytic and MMS tests dev-depend on `fs-vvreg` and resolve canonical
+Level-A case rows at runtime. Six analytic cases use the catalog parameters and
+reference values directly: the two slab fluxes, uniform-source center rise,
+rectangular affine probe, cylindrical-shell conductance, and `mL=1` fin
+efficiency. Three P1 L2 ladders take their theoretical order and two-sided gate
+from the catalog: isotropic Dirichlet, mixed Neumann, and Robin. Both test files
+carry a complete crosswalk over their respective catalog partition, so adding,
+removing, or silently renaming a Level-A row fails the battery and every absent
+binding retains a reason.
+
+This is a **test-time execution binding**, not a corpus receipt. The catalog's
+`1e-12` analytic tolerance establishes reproduction of the closed-form
+definition; it is not substituted for this solver's geometry, discretization,
+or model envelopes. The test verdicts label that distinction explicitly, and
+no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
+the registry query remains numerical `NoClaim`, all Level-A physical caps
+remain `Estimated`, and the ten unbound rows are still reference/target-only.
 
 ## No-claim boundaries
 

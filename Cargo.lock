@@ -968,6 +968,7 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
+ "fs-vvreg",
 ]
 
 [[package]]
