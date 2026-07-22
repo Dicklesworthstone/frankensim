@@ -2352,6 +2352,18 @@ pub fn chosen_wedge() -> &'static Vertical {
         .expect("a rank-1 wedge")
 }
 
+/// The RATIFIED vertical, mirrored from the fs-govern decision record named
+/// by [`RATIFICATION_RECORD_ID`]. Distinct from [`chosen_wedge`], which
+/// replays the plan's historical rank-1 ("conjugate-heat-transfer"): the
+/// ratified outcome is the measured comparison's rank-1 compromise, selected
+/// by the data. fs-govern's ratification battery cross-checks this mirror
+/// against the record and the recomputed comparison, so drift fails tests
+/// there rather than silently forking the story here.
+pub const RATIFIED_VERTICAL: &str = "thermal-design-assurance";
+
+/// The fs-govern decision-record id downstream beads cite.
+pub const RATIFICATION_RECORD_ID: &str = "frankensim-vertical-ratification-v1";
+
 /// The six incumbent workflow steps of the measured cycle-time baseline
 /// protocol, in fixed pipeline order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

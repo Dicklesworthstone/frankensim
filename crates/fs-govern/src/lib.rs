@@ -47,6 +47,7 @@ pub mod evidence_graph;
 pub mod lanes;
 pub mod program_risks;
 pub mod proposals;
+pub mod ratification;
 pub mod traceability;
 pub mod traceability_fs;
 pub mod traceability_join;
@@ -61,6 +62,10 @@ pub use lanes::{
     PortfolioPolicy, ProofLaneId, ResourceEnvelope, TerminalKind,
 };
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
+pub use ratification::{
+    Falsifier, RatificationError, RecordedTotal, VERTICAL_RATIFICATION_V1, VerticalRatification,
+    decision_records, ratification_json, ratified_vertical,
+};
 pub use traceability::{
     BoundTraceabilityLedger, MAX_PROOF_OBLIGATION_OWNERS, MAX_REQUIREMENT_PO_LINKS,
     MAX_REQUIREMENT_ROWS, MAX_TRACEABILITY_FIELD_BYTES, MAX_TRACEABILITY_SOURCE_LOCATOR_BYTES,

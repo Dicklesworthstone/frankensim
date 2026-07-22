@@ -12,6 +12,7 @@ layer = "UTIL"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-wedge = { path = "../fs-wedge" }
 
 [dev-dependencies]
 fs-checker = { path = "../fs-checker" }
