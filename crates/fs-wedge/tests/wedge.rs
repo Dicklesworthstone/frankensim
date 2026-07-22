@@ -1,15 +1,16 @@
 //! Battery for go-to-market wedge selection (addendum Proposal 7). Verifies
-//! the chosen beachhead, the four-criteria scoring, the named second/third
-//! verticals with their proposal-exercise mapping, the measurable cycle-time
-//! kill criterion, the audit, and the negative doctrine.
+//! historical-score supersession, evidence-complete measured inputs, workspace
+//! evidence drift, candidate rankings, and the cycle-time kill criterion.
 
 use fs_wedge::{
-    CHT_BASELINE, STRONG_THRESHOLD, WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge,
-    four_criteria, to_json, verticals,
+    CHT_BASELINE, EvidenceKind, InputAxis, Measurement, Readiness, STRONG_THRESHOLD, ScoreUse,
+    WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, four_criteria, measured_inputs_for,
+    measured_wedge_inputs, to_json, verticals,
 };
+use std::path::Path;
 
 #[test]
-fn the_beachhead_is_conjugate_heat_transfer() {
+fn the_historical_beachhead_is_conjugate_heat_transfer() {
     let w = chosen_wedge();
     assert_eq!(w.name, "conjugate-heat-transfer");
     assert_eq!(w.rank, 1);
@@ -19,17 +20,173 @@ fn the_beachhead_is_conjugate_heat_transfer() {
 }
 
 #[test]
-fn the_chosen_wedge_is_strong_on_all_four_criteria() {
+fn historical_scores_are_preserved_but_superseded_for_decisions() {
     let w = chosen_wedge();
+    assert_eq!(w.score_use, ScoreUse::SupersededForDecisionUse);
     for c in four_criteria() {
+        // Replay retains the plan's values; the decision API refuses them.
         assert!(
             w.score(c) >= STRONG_THRESHOLD,
-            "{} weak on {}",
+            "historical {} score changed on {}",
             w.name,
             c.label()
         );
+        assert_eq!(w.decision_score(c), None);
     }
     assert!(w.weakest_criterion_score() >= STRONG_THRESHOLD);
+    assert!(
+        verticals()
+            .iter()
+            .all(|vertical| !vertical.score_use.permits_decision())
+    );
+}
+
+#[test]
+fn every_candidate_has_complete_measured_inputs_on_all_four_axes() {
+    let inputs = measured_wedge_inputs();
+    assert_eq!(inputs.len(), verticals().len());
+    for vertical in verticals() {
+        let measured = measured_inputs_for(vertical.name)
+            .unwrap_or_else(|| panic!("missing measured inputs for {}", vertical.name));
+        assert!(measured.is_complete(), "incomplete: {}", measured.vertical);
+        assert!(!measured.kernels.is_empty());
+        assert!(!measured.validation_data.is_empty());
+        assert!(!measured.cad_burden.is_empty());
+        assert!(!measured.compute_cost.is_empty());
+        for measurement in measured.measurements() {
+            assert!(measurement.is_complete(), "{measurement:?}");
+            assert!(!measurement.evidence.is_empty());
+            assert!(
+                measurement
+                    .evidence
+                    .iter()
+                    .all(|pointer| pointer.is_complete())
+            );
+        }
+    }
+}
+
+#[test]
+fn absent_inputs_cannot_carry_strong_scores() {
+    for inputs in measured_wedge_inputs() {
+        for measurement in inputs.measurements() {
+            assert!(
+                measurement.score <= measurement.readiness.score_ceiling(),
+                "{} has score {} above {:?} ceiling {}",
+                inputs.vertical,
+                measurement.score,
+                measurement.readiness,
+                measurement.readiness.score_ceiling()
+            );
+            if measurement.readiness == Readiness::Absent {
+                assert!(
+                    measurement.score < STRONG_THRESHOLD,
+                    "absent {} input scored {}",
+                    inputs.vertical,
+                    measurement.score
+                );
+            }
+        }
+    }
+}
+
+fn check_workspace_measurement(
+    root: &Path,
+    vertical: &str,
+    axis: InputAxis,
+    label: &str,
+    measurement: Measurement,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for pointer in measurement
+        .evidence
+        .iter()
+        .filter(|pointer| pointer.kind == EvidenceKind::WorkspacePath)
+    {
+        let path = root.join(pointer.reference);
+        let result = std::fs::read_to_string(&path);
+        let (passed, detail) = match result {
+            Ok(contents) if contents.contains(pointer.locator) => {
+                (true, "marker-found".to_string())
+            }
+            Ok(_) => (false, format!("missing marker {:?}", pointer.locator)),
+            Err(error) => (false, format!("read failed: {error}")),
+        };
+        eprintln!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            if passed { "PASS" } else { "FAIL" },
+            vertical,
+            axis.label(),
+            label,
+            pointer.reference,
+            detail
+        );
+        if !passed {
+            failures.push(format!(
+                "{} {} {}: {} ({detail})",
+                vertical,
+                axis.label(),
+                label,
+                pointer.reference
+            ));
+        }
+    }
+    failures
+}
+
+#[test]
+fn workspace_evidence_paths_and_markers_have_not_drifted() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest
+        .parent()
+        .and_then(Path::parent)
+        .expect("fs-wedge lives at <workspace>/crates/fs-wedge");
+    let mut failures = Vec::new();
+
+    eprintln!("RESULT\tVERTICAL\tAXIS\tENTRY\tPATH\tDETAIL");
+    for inputs in measured_wedge_inputs() {
+        for entry in inputs.kernels {
+            failures.extend(check_workspace_measurement(
+                root,
+                inputs.vertical,
+                InputAxis::KernelReadiness,
+                entry.capability,
+                entry.measurement,
+            ));
+        }
+        for entry in inputs.validation_data {
+            failures.extend(check_workspace_measurement(
+                root,
+                inputs.vertical,
+                InputAxis::ValidationDataAccess,
+                entry.dataset,
+                entry.measurement,
+            ));
+        }
+        for entry in inputs.cad_burden {
+            failures.extend(check_workspace_measurement(
+                root,
+                inputs.vertical,
+                InputAxis::CadBurden,
+                entry.required_geometry,
+                entry.measurement,
+            ));
+        }
+        for entry in inputs.compute_cost {
+            failures.extend(check_workspace_measurement(
+                root,
+                inputs.vertical,
+                InputAxis::ComputeCost,
+                entry.rung,
+                entry.measurement,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "evidence drift:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -73,11 +230,13 @@ fn the_cycle_time_kill_criterion_is_measurable() {
 fn the_audit_is_complete() {
     let a = audit();
     assert!(a.ok(), "gaps: {:?}", a.gaps);
-    assert!(a.passed("chosen-strong-on-all"));
+    assert!(a.passed("historic-scores-superseded"));
+    assert!(a.passed("measured-inputs-complete"));
+    assert!(a.passed("no-absent-strong-scores"));
     assert!(a.passed("ranks-complete"));
     assert!(a.passed("all-exercise-proposals"));
     assert!(a.passed("kill-criterion-measurable"));
-    assert_eq!(a.checks.len(), 4);
+    assert_eq!(a.checks.len(), 6);
 }
 
 #[test]
@@ -102,6 +261,10 @@ fn json_is_well_formed_and_deterministic() {
     assert_eq!(j, to_json());
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains("conjugate-heat-transfer"));
+    assert!(j.contains("\"score_use\":\"superseded-for-decision-use\""));
+    assert!(j.contains("\"measured_inputs\":"));
+    assert!(j.contains("\"validation_data\":"));
+    assert!(j.contains("NIST Additive Manufacturing Benchmark Test Series"));
     assert!(j.contains("\"target_reduction\":3"));
     assert_eq!(j.matches("\"rank\":").count(), 3);
 }
