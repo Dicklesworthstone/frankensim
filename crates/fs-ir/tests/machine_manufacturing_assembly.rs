@@ -5,7 +5,7 @@ use core::num::NonZeroU64;
 use std::collections::BTreeSet;
 
 use fs_blake3::identity::{ContentId, StrongIdentity};
-use fs_blake3::{ContentHash, derive_key_hasher};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_ir::IR_VERSION;
 use fs_ir::machine::manufacturing::ManufacturingArtifactRefV1;
 use fs_ir::machine::manufacturing::assembly::{
@@ -530,7 +530,7 @@ fn oracle_schema_id_v2() -> [u8; 32] {
         oracle_append_bytes_v2(&mut descriptor, name.as_bytes());
         descriptor.extend_from_slice(&[*wire_tag, ORACLE_REQUIRED_PRESENCE_TAG_V1, 0]);
     }
-    let mut hasher = derive_key_hasher("org.frankensim.fs-blake3.schema-id.v1");
+    let mut hasher = DomainHasher::new("org.frankensim.fs-blake3.schema-id.v1");
     hasher.update(&descriptor);
     *hasher.finalize().as_bytes()
 }
@@ -584,7 +584,7 @@ fn oracle_frame_v2(
 }
 
 fn oracle_identity_from_frame_v2(frame: &[u8]) -> MachineAssemblyIdV2 {
-    let mut hasher = derive_key_hasher("org.frankensim.fs-blake3.canonical-identity-frame.v1");
+    let mut hasher = DomainHasher::new("org.frankensim.fs-blake3.canonical-identity-frame.v1");
     hasher.update(frame);
     MachineAssemblyIdV2::parse_slice(hasher.finalize().as_bytes())
         .expect("a BLAKE3 digest is a typed assembly identity")
@@ -1545,13 +1545,13 @@ fn mas2_007_coownership_does_not_fabricate_containment_authority() {
         matches!(
             error,
             MachineAssemblyAdmissionErrorV2::ParticipantOwnerMismatch {
-                occurrence,
-                body,
-                feature,
+                ref occurrence,
+                ref body,
+                ref feature,
                 ..
-            } if occurrence == occurrence_id_v2("occurrence/cross-owner")
-                && body == body_v2("body/base-a")
-                && feature == feature_v2("contact/other/main")
+            } if *occurrence == occurrence_id_v2("occurrence/cross-owner")
+                && *body == body_v2("body/base-a")
+                && *feature == feature_v2("contact/other/main")
         ),
         "cross-owner refusal must retain occurrence, body, and feature; got {error:?}"
     );
@@ -2256,13 +2256,13 @@ fn mas2_012_atomic_chronology_refuses_unavailable_unused_and_duplicate_links() {
         matches!(
             error,
             MachineAssemblyAdmissionErrorV2::ParticipantBodyUnavailable {
-                step,
-                occurrence,
-                body,
+                ref step,
+                ref occurrence,
+                ref body,
                 ..
-            } if step == step_id_v2("step/single")
-                && occurrence == occurrence_id_v2("occurrence/key")
-                && body == body_v2("body/key")
+            } if *step == step_id_v2("step/single")
+                && *occurrence == occurrence_id_v2("occurrence/key")
+                && *body == body_v2("body/key")
         ),
         "unavailable-body refusal must identify step, occurrence, and body; got {error:?}"
     );

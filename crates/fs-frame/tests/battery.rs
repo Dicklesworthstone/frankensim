@@ -636,7 +636,7 @@ fn frame_008_el_centro_record_and_response_diagnostic() {
     // The five-decimal OpenSees output defines a rounding envelope around the
     // external model's peak. It is pinned and linted, never applied to the
     // non-equivalent FrankenSim model.
-    let external_peak_m = 2.47158 * 0.0254;
+    let external_peak_m: f64 = 2.47158 * 0.0254;
     let external_lo_m = 2.471575 * 0.0254;
     let external_hi_m = 2.471585 * 0.0254;
     let external_drift_ratio = external_peak_m / (144.0 * 0.0254);

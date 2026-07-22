@@ -4734,6 +4734,7 @@ fn stream_identity_rows<I, C, T, L, W>(
     write_row: W,
 ) -> Result<CanonicalEncoder<I, C>, CausalIdentityError>
 where
+    I: StrongIdentity,
     C: CancellationProbe,
     L: FnMut(&T, &Cx<'_>) -> Result<usize, CanonicalError>,
     W: FnMut(&T, &Cx<'_>, &mut CausalIdentityRowWriter) -> Result<(), CanonicalError>,
@@ -4759,6 +4760,7 @@ fn stream_identity_rows_with_reserve<I, C, T, L, W, R>(
     mut reserve_row: R,
 ) -> Result<CanonicalEncoder<I, C>, CausalIdentityError>
 where
+    I: StrongIdentity,
     C: CancellationProbe,
     L: FnMut(&T, &Cx<'_>) -> Result<usize, CanonicalError>,
     W: FnMut(&T, &Cx<'_>, &mut CausalIdentityRowWriter) -> Result<(), CanonicalError>,
