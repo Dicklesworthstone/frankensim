@@ -252,10 +252,10 @@ None. Everything here is `[S]` solid work on the default path.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`.
 
-Stable evidence locator (historical wording): `Every test prints a JSON-lines
-verdict`. The precise current scope is narrower: every analytic comparison and
-MMS gate prints a JSON-lines verdict carrying the numbers it asserted, so a
-failure in those batteries reproduces from its log line alone.
+Stable evidence locator (historical wording): `Every test prints a JSON-lines verdict`.
+The precise current scope is narrower: every analytic comparison and MMS gate
+prints a JSON-lines verdict carrying the numbers it asserted, so a failure in
+those batteries reproduces from its log line alone.
 
 ### Level-A registry binding is executable, not retained authority
 
