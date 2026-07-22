@@ -10,6 +10,7 @@
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
 //! - `check-color-admission` — no new positive Color literals outside admission authorities (bead 6pf9).
+//! - `check-no-promotion` — numerical-only public APIs cannot mint validation authority (f85xj.8.2).
 //! - `check-obs-events` — committed *.events.jsonl fixtures are schema-valid fs-obs lines (bead huq.16).
 //! - `check-casual-print` — core libraries cannot create untyped stdout/stderr truth paths (bead i94v.7.3.3).
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
@@ -1207,6 +1208,204 @@ fn check_color_admission(root: &Path) -> Vec<Violation> {
         }
     }
     violations
+}
+
+// ---------------------------------------------------------------------------
+// No-promotion API heuristic (bead f85xj.8.2). This is intentionally a
+// reviewed tripwire rather than a proof: it catches the high-risk source shape
+// where a public claim-producing API consumes only numerical evidence and
+// constructs `Color::Validated` without an empirical/model-form authority
+// input. The type-level and package admission walls remain authoritative.
+// ---------------------------------------------------------------------------
+
+const NO_PROMOTION_CHECK: &str = "no-promotion";
+const NO_PROMOTION_NUMERICAL_MARKERS: &[&str] = &[
+    "NumericalCertificate",
+    "NumericalUncertaintyUpdate",
+    "residual",
+    "roundoff",
+    "solver_error",
+    "algebraic_error",
+    "discretization",
+];
+const NO_PROMOTION_AUTHORITY_MARKERS: &[&str] = &[
+    "AdmittedColor",
+    "AdmissionReceipt",
+    "AnchoredSource",
+    "Color",
+    "Dataset",
+    "Experiment",
+    "FidelityPair",
+    "ModelEvidence",
+    "Observation",
+    "Validated",
+];
+const NO_PROMOTION_CONCLUSION_MARKERS: &[&str] = &[
+    "AdmittedColor",
+    "Claim",
+    "Color",
+    "Evidence",
+    "ModelEvidence",
+];
+
+fn no_promotion_source_path(path: &str) -> bool {
+    path.starts_with("crates/") && path.contains("/src/") && path.ends_with(".rs")
+}
+
+fn source_line_number(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+fn rust_scope_end(source: &str, open: usize) -> Result<usize, String> {
+    for (relative, _) in source[open + 1..].match_indices('}') {
+        let close = open + 1 + relative;
+        if rust_scope_contains(source, open, close + 1)? {
+            continue;
+        }
+        return Ok(close + 1);
+    }
+    Err("unterminated public function while checking no-promotion policy".to_string())
+}
+
+fn code_contains_marker(
+    source: &str,
+    range: core::ops::Range<usize>,
+    marker: &str,
+    literals: &[RustStringLiteral<'_>],
+) -> bool {
+    source[range.clone()]
+        .match_indices(marker)
+        .any(|(relative, _)| rust_offset_is_code(source, range.start + relative, literals))
+}
+
+fn audit_no_promotion_sources(sources: &BTreeMap<String, String>) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for (path, source) in sources {
+        if !no_promotion_source_path(path) {
+            continue;
+        }
+        let Ok(literals) = rust_string_literals(source) else {
+            violations.push(Violation {
+                check: NO_PROMOTION_CHECK,
+                crate_name: path.clone(),
+                detail: format!("{path}: cannot lex Rust literals for no-promotion audit"),
+            });
+            continue;
+        };
+        let mut offset = 0usize;
+        let mut in_test_code = false;
+        for raw in source.split_inclusive('\n') {
+            if raw
+                .match_indices("#[cfg(test)]")
+                .any(|(relative, _)| rust_offset_is_code(source, offset + relative, &literals))
+            {
+                in_test_code = true;
+            }
+            if in_test_code {
+                offset += raw.len();
+                continue;
+            }
+            let trimmed = raw.trim_start();
+            let public = trimmed.starts_with("pub ") || trimmed.starts_with("pub(");
+            if !public || declared_function_name(raw).is_none() {
+                offset += raw.len();
+                continue;
+            }
+
+            // Public signatures in this workspace are compact. Bound the
+            // heuristic to 32 lines so a malformed/generated declaration
+            // cannot make the lint consume an unrelated module.
+            let mut signature_end = offset;
+            let mut terminator = None;
+            for signature_line in source[offset..].split_inclusive('\n').take(32) {
+                let code = strip_line_comments(signature_line);
+                if let Some(index) = code.find(['{', ';']) {
+                    signature_end += index;
+                    terminator = code.as_bytes().get(index).copied();
+                    break;
+                }
+                signature_end += signature_line.len();
+            }
+            if terminator != Some(b'{') {
+                offset += raw.len();
+                continue;
+            }
+            let signature = &source[offset..signature_end];
+            let Some(params_start) = signature.find('(') else {
+                offset += raw.len();
+                continue;
+            };
+            let Some(params_end) = signature.rfind(')') else {
+                offset += raw.len();
+                continue;
+            };
+            if params_end < params_start {
+                offset += raw.len();
+                continue;
+            }
+            let params = &signature[params_start + 1..params_end];
+            let result = &signature[params_end + 1..];
+            let numerical_only = NO_PROMOTION_NUMERICAL_MARKERS
+                .iter()
+                .any(|marker| params.contains(marker))
+                && !NO_PROMOTION_AUTHORITY_MARKERS
+                    .iter()
+                    .any(|marker| params.contains(marker));
+            let claim_producing = NO_PROMOTION_CONCLUSION_MARKERS
+                .iter()
+                .any(|marker| result.contains(marker));
+            if !numerical_only || !claim_producing {
+                offset += raw.len();
+                continue;
+            }
+
+            let open = signature_end;
+            let Ok(end) = rust_scope_end(source, open) else {
+                violations.push(Violation {
+                    check: NO_PROMOTION_CHECK,
+                    crate_name: path.clone(),
+                    detail: format!(
+                        "{path}:{}: cannot delimit numerical claim-producing API",
+                        source_line_number(source, offset)
+                    ),
+                });
+                offset += raw.len();
+                continue;
+            };
+            let reviewed = signature.contains("no-promotion-reviewed:")
+                || source[..offset]
+                    .lines()
+                    .next_back()
+                    .is_some_and(|line| line.contains("no-promotion-reviewed:"));
+            if !reviewed && code_contains_marker(source, open..end, "Color::Validated", &literals) {
+                violations.push(Violation {
+                    check: NO_PROMOTION_CHECK,
+                    crate_name: path.clone(),
+                    detail: format!(
+                        "{path}:{}: public claim-producing API constructs `Color::Validated` from purely numerical inputs; require an admitted model/experimental authority input or add `// no-promotion-reviewed: <reason>` after reviewing the full body",
+                        source_line_number(source, offset)
+                    ),
+                });
+            }
+            offset += raw.len();
+        }
+    }
+    violations
+}
+
+fn check_no_promotion(root: &Path) -> Vec<Violation> {
+    match workspace_rust_sources(root) {
+        Ok(sources) => audit_no_promotion_sources(&sources),
+        Err(detail) => vec![Violation {
+            check: NO_PROMOTION_CHECK,
+            crate_name: "<repo>".to_string(),
+            detail,
+        }],
+    }
 }
 
 /// check-obs-events (bead huq.16): every committed `*.events.jsonl` file must
@@ -8068,6 +8267,7 @@ fn main() -> ExitCode {
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
         "check-color-admission" => (check_color_admission(&root), vec!["color-admission"]),
+        "check-no-promotion" => (check_no_promotion(&root), vec![NO_PROMOTION_CHECK]),
         "check-obs-events" => (check_obs_events(&root), vec!["obs-events"]),
         "check-casual-print" => (check_casual_print(&root), vec![CASUAL_PRINT_CHECK]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
@@ -8125,6 +8325,7 @@ fn main() -> ExitCode {
             v.extend(check_powi(&root));
             v.extend(check_libm(&root));
             v.extend(check_color_admission(&root));
+            v.extend(check_no_promotion(&root));
             v.extend(check_obs_events(&root));
             v.extend(check_casual_print(&root));
             v.extend(check_terminology(&root));
@@ -8162,6 +8363,7 @@ fn main() -> ExitCode {
                     "powi-determinism",
                     "libm-determinism",
                     "color-admission",
+                    NO_PROMOTION_CHECK,
                     "obs-events",
                     CASUAL_PRINT_CHECK,
                     TERMINOLOGY_CHECK,
@@ -8186,7 +8388,7 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|\
-                 check-identities|check-manifest-fixture|check-constellation-assessment|check-citable-producers|\
+                 check-identities|check-manifest-fixture|check-constellation-assessment|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
             );
@@ -8204,6 +8406,59 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_promotion_scanner_refuses_numerical_only_validation_apis() {
+        let sources = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "const POLICY_TEXT: &str = \"#[cfg(test)] is not an executable attribute\";\n",
+                "pub fn promote(residual: f64, cert: &NumericalCertificate) -> Color {\n",
+                "    let _ = residual; let _ = cert;\n",
+                "    Color::Validated { regime: regime(), dataset: dataset() }\n",
+                "}\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let violations = audit_no_promotion_sources(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].check, NO_PROMOTION_CHECK);
+        assert!(violations[0].detail.contains("purely numerical inputs"));
+        assert!(violations[0].detail.contains("fs-new/src/lib.rs:2"));
+    }
+
+    #[test]
+    fn no_promotion_scanner_accepts_authority_inputs_and_ignores_trivia() {
+        let sources = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "pub fn anchored(cert: &NumericalCertificate, model: &ModelEvidence) -> Color {\n",
+                "    Color::Validated { regime: model.regime(), dataset: model.dataset() }\n",
+                "}\n",
+                "pub fn verified(cert: &NumericalCertificate) -> Color {\n",
+                "    let _ = \"Color::Validated\"; // Color::Validated is policy prose\n",
+                "    Color::Verified { lo: cert.lo, hi: cert.hi }\n",
+                "}\n",
+                "// no-promotion-reviewed: legacy bridge consumes an authenticated handle\n",
+                "pub fn reviewed(residual: f64) -> Claim {\n",
+                "    Claim::new(Color::Validated { regime: regime(), dataset: dataset() })\n",
+                "}\n",
+                "#[cfg(test)]\n",
+                "mod tests {\n",
+                "    pub fn fixture(residual: f64) -> Color { Color::Validated { regime: r(), dataset: d() } }\n",
+                "}\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(
+            audit_no_promotion_sources(&sources).is_empty(),
+            "authority-bearing, reviewed, trivia, and test-only shapes must remain legal"
+        );
+    }
+
     #[test]
     fn casual_print_scanner_rejects_each_untyped_macro_in_core_libraries() {
         let mut sources = BTreeMap::new();
