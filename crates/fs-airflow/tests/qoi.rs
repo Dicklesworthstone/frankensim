@@ -158,6 +158,9 @@ fn every_reference_qoi_emits_an_eight_term_budget_without_laundering_unknowns() 
         assert!(report.contains("provenance="));
     }
     assert!(qois.all_totals_are_honestly_unknown());
+    assert_eq!(qois.junction_maximum.qoi.uncertainty.unit(), "kelvin");
+    assert_eq!(qois.pressure_drop.uncertainty.unit(), "pascal");
+    assert_eq!(qois.fan_power.uncertainty.unit(), "watt");
 
     assert!(matches!(
         qois.pressure_drop

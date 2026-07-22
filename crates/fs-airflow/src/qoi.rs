@@ -353,7 +353,8 @@ pub fn extract_thermal_qois(
         &[solution_id],
         &region_identity(junction_region.name(), junction_region.vertices()),
     );
-    let maximum_budget = unknown_budget("thermal-junction-maximum", "K", maximum_identity, &[])?;
+    let maximum_budget =
+        unknown_budget("thermal-junction-maximum", "kelvin", maximum_identity, &[])?;
     let maximum_evidence =
         no_claim_temperature(maximum, temperature_model.clone(), maximum_identity);
     let junction_maximum = JunctionMaximum {
@@ -376,7 +377,7 @@ pub fn extract_thermal_qois(
                 temperature_model.clone(),
                 mean_identity,
             ),
-            uncertainty: unknown_budget("thermal-surface-mean", "K", mean_identity, &[])?,
+            uncertainty: unknown_budget("thermal-surface-mean", "kelvin", mean_identity, &[])?,
         },
         spread: ThermalQoi {
             evidence: no_claim_temperature(
@@ -384,7 +385,7 @@ pub fn extract_thermal_qois(
                 temperature_model.clone(),
                 spread_identity,
             ),
-            uncertainty: unknown_budget("thermal-surface-spread", "K", spread_identity, &[])?,
+            uncertainty: unknown_budget("thermal-surface-spread", "kelvin", spread_identity, &[])?,
         },
         face_mean_standard_deviation: ThermalQoi {
             evidence: no_claim_temperature(
@@ -392,7 +393,12 @@ pub fn extract_thermal_qois(
                 temperature_model.clone(),
                 std_identity,
             ),
-            uncertainty: unknown_budget("thermal-surface-face-mean-std", "K", std_identity, &[])?,
+            uncertainty: unknown_budget(
+                "thermal-surface-face-mean-std",
+                "kelvin",
+                std_identity,
+                &[],
+            )?,
         },
     };
 
@@ -408,7 +414,7 @@ pub fn extract_thermal_qois(
         evidence: operating_point.pressure.clone(),
         uncertainty: unknown_budget(
             "thermal-pressure-drop",
-            "Pa",
+            "pascal",
             pressure_identity,
             &[(
                 EngineeringUncertaintyKind::BoundaryConditions,
@@ -439,7 +445,7 @@ pub fn extract_thermal_qois(
             temperature_model,
             margin_identity,
         ),
-        uncertainty: unknown_budget("thermal-margin", "K", margin_identity, &[])?,
+        uncertainty: unknown_budget("thermal-margin", "kelvin", margin_identity, &[])?,
     };
 
     Ok(ThermalQoiSet {
@@ -521,7 +527,7 @@ fn fan_power_qoi(
     };
     let uncertainty = unknown_budget(
         "thermal-fan-input-power",
-        "W",
+        "watt",
         identity,
         &[
             (
