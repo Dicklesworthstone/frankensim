@@ -564,13 +564,21 @@ fn validate_clip(clip: Aabb) -> Result<(), SamplingDomainError> {
 /// Betti-number bounds `(lower, upper)` per dimension — the topology hint
 /// charts may advertise without proving (certificates are a later bead;
 /// `unknown()` is the honest default).
+///
+/// The numbers describe the SOLID REGION the chart presents, i.e. the set
+/// where the signed distance is negative — not its boundary surface. This
+/// is the convention `fs_topo::cubical::verify_topology` measures against
+/// (a ball is `(1, 0, 0)`, a solid torus `(1, 1, 0)`, a hollow ball
+/// `(1, 0, 1)`), so a hint and a measurement of the same chart are
+/// directly comparable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BettiBounds {
-    /// Connected components.
+    /// Connected components of the solid region.
     pub b0: (u32, u32),
-    /// Tunnels/handles.
+    /// Tunnels/handles of the solid region.
     pub b1: (u32, u32),
-    /// Enclosed voids.
+    /// Enclosed voids (cavities) INSIDE the solid region. A solid ball,
+    /// box or torus encloses none; only a hollow shell does.
     pub b2: (u32, u32),
 }
 

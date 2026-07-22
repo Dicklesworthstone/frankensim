@@ -513,11 +513,13 @@ without depending on solvers, geometry, or license gates. Its distinct
 Phase-0A release gate additionally requires injected signature and artifact
 verifiers, exact subject binding for declared falsifiers, and matching anchors;
 ordinary integrity checking does not authenticate a signature merely because
-text is present. Phase 0B promotes that structural/authentication spine into
-risk-matched exact-instance portfolio authority with coverage, sequential
-testing, adjudication, and revocation semantics. `fs-crosswalk` maps the same
-package concepts onto ASME V&V 10/20/40 and FAA/EASA
-certification-by-analysis vocabulary.
+text is present. Phase 0B is the PLANNED promotion of that spine into
+risk-matched exact-instance portfolio authority. Phase 0B-A lands the pure
+evidence-contract algebra in `fs-govern` as descriptive candidate data with no
+public minting path; authenticated receipts, current-head advancement,
+adjudication, and revocation are Phase 0B-B/0B-C scope and are not implemented.
+`fs-crosswalk` maps the same package concepts onto ASME V&V 10/20/40 and
+FAA/EASA certification-by-analysis vocabulary.
 
 That division matters: the expensive solver can produce evidence once, while a reviewer can later check the package structure and provenance without re-running the solver stack.
 
@@ -703,7 +705,7 @@ surfaces that show how the layers are meant to compose.
 | Surface | What exists now | Why it matters |
 |---------|-----------------|----------------|
 | `fs-wasm::flagships` | Tier V browser-facing `run_ornithoid`, `run_vessel`, and `run_frame` pipelines | The browser surface now exercises real reduced flagship workflows instead of only leaf numerical kernels |
-| `fs-mesh` v2/v3 | Conforming PLC recovery, non-convex facet triangulation, exact audits, measured 10-million-point perf lane, and a measured boundary-layer decision | Meshing claims now include recovery quality, determinism, and honest continuation notes for residual near-coplanar slivers |
+| `fs-mesh` v2/v3 | Conforming PLC recovery, non-convex facet triangulation, exact audits, an opt-in perf ladder (`--ignored`) measured at 10^4/10^5/10^6 points with a further opt-in 10^7 rung (`FS_MESH_PERF_FULL=1`, otherwise recorded as skipped), and a measured boundary-layer decision | Meshing claims now include recovery quality, determinism, and honest continuation notes for residual near-coplanar slivers |
 | `fs-sparse::CsrCompact` | Compact u32 column-index CSR, sharded deterministic SpMV, tiled deterministic parallel assembly, and NUMA first-touch helpers | Sparse performance work is framed as a bandwidth and page-placement problem without sacrificing bitwise equality |
 | `fs-rand` fast paths | Ziggurat normal fast path, bulk Philox fills, and dev-only stream statistics | Random performance can improve while the strict deterministic Box-Muller path remains the certification default |
 | `fs-fft` N-D transforms | c2r inverse plus 2D/3D separable pencil transforms | Downstream physics and visualization crates get a broader deterministic transform surface before SIMD/roofline optimization lands |

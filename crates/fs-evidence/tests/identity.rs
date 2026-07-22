@@ -211,12 +211,12 @@ fn manual_discrepancy_band_receipt(band: DiscrepancyBand) -> DiscrepancyBandRece
         .expect("discrepancy-band schema")
         .u64(
             Field::new(0, "mean-rel-ieee754-bits"),
-            band.mean_rel.to_bits(),
+            band.mean_observed_rel.to_bits(),
         )
         .expect("mean discrepancy")
         .u64(
             Field::new(1, "max-rel-ieee754-bits"),
-            band.max_rel.to_bits(),
+            band.max_observed_rel.to_bits(),
         )
         .expect("maximum discrepancy")
         .finish()
@@ -647,7 +647,7 @@ fn manual_decision_assessment_receipt(
     };
     let mut status_payload = [0_u8; 4];
     let (status_tag, status_payload_len) = match status {
-        DecisionStatus::DecisionGrade => (1, 0),
+        DecisionStatus::DecisionGrade { .. } => (1, 0),
         DecisionStatus::NotDecisionGrade { dominant, .. } => {
             status_payload.copy_from_slice(&source_tag(dominant).to_le_bytes());
             (2, status_payload.len())
@@ -1520,12 +1520,12 @@ fn fidelity_pair_and_discrepancy_band_identities_replay_and_retain_inputs() {
 
     for band in [
         DiscrepancyBand {
-            mean_rel: 0.1,
-            max_rel: 0.25,
+            mean_observed_rel: 0.1,
+            max_observed_rel: 0.25,
         },
         DiscrepancyBand {
-            mean_rel: f64::INFINITY,
-            max_rel: f64::INFINITY,
+            mean_observed_rel: f64::INFINITY,
+            max_observed_rel: f64::INFINITY,
         },
     ] {
         let first = identify_discrepancy_band_v1(band, LIMITS, || false)
@@ -1682,14 +1682,14 @@ fn fidelity_pair_identity_binds_every_field_and_refuses_malformed_observations()
 #[test]
 fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
     let base_band = DiscrepancyBand {
-        mean_rel: 0.1,
-        max_rel: 0.25,
+        mean_observed_rel: 0.1,
+        max_observed_rel: 0.25,
     };
     let base = identify_discrepancy_band_v1(base_band, LIMITS, || false)
         .expect("baseline discrepancy band");
     let mean = identify_discrepancy_band_v1(
         DiscrepancyBand {
-            mean_rel: 0.1_f64.next_up(),
+            mean_observed_rel: 0.1_f64.next_up(),
             ..base_band
         },
         LIMITS,
@@ -1698,7 +1698,7 @@ fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
     .expect("mutated mean");
     let maximum = identify_discrepancy_band_v1(
         DiscrepancyBand {
-            max_rel: 0.25_f64.next_up(),
+            max_observed_rel: 0.25_f64.next_up(),
             ..base_band
         },
         LIMITS,
@@ -1710,8 +1710,8 @@ fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
 
     let positive_zero = identify_discrepancy_band_v1(
         DiscrepancyBand {
-            mean_rel: 0.0,
-            max_rel: 0.0,
+            mean_observed_rel: 0.0,
+            max_observed_rel: 0.0,
         },
         LIMITS,
         || false,
@@ -1719,8 +1719,8 @@ fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
     .expect("positive-zero band");
     let negative_zero = identify_discrepancy_band_v1(
         DiscrepancyBand {
-            mean_rel: -0.0,
-            max_rel: 0.0,
+            mean_observed_rel: -0.0,
+            max_observed_rel: 0.0,
         },
         LIMITS,
         || false,
@@ -1729,8 +1729,8 @@ fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
     assert_ne!(positive_zero.id(), negative_zero.id());
     identify_discrepancy_band_v1(
         DiscrepancyBand {
-            mean_rel: 1.0,
-            max_rel: f64::INFINITY,
+            mean_observed_rel: 1.0,
+            max_observed_rel: f64::INFINITY,
         },
         LIMITS,
         || false,
@@ -1740,48 +1740,48 @@ fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
     let invalid = [
         (
             DiscrepancyBand {
-                mean_rel: f64::NAN,
-                max_rel: 1.0,
+                mean_observed_rel: f64::NAN,
+                max_observed_rel: 1.0,
             },
-            "mean_rel",
+            "mean_observed_rel",
             f64::NAN,
             "value must not be NaN",
         ),
         (
             DiscrepancyBand {
-                mean_rel: 0.0,
-                max_rel: f64::NAN,
+                mean_observed_rel: 0.0,
+                max_observed_rel: f64::NAN,
             },
-            "max_rel",
+            "max_observed_rel",
             f64::NAN,
             "value must not be NaN",
         ),
         (
             DiscrepancyBand {
-                mean_rel: -1.0,
-                max_rel: 1.0,
+                mean_observed_rel: -1.0,
+                max_observed_rel: 1.0,
             },
-            "mean_rel",
+            "mean_observed_rel",
             -1.0,
             "value must be non-negative",
         ),
         (
             DiscrepancyBand {
-                mean_rel: 0.0,
-                max_rel: -1.0,
+                mean_observed_rel: 0.0,
+                max_observed_rel: -1.0,
             },
-            "max_rel",
+            "max_observed_rel",
             -1.0,
             "value must be non-negative",
         ),
         (
             DiscrepancyBand {
-                mean_rel: 0.5,
-                max_rel: 0.25,
+                mean_observed_rel: 0.5,
+                max_observed_rel: 0.25,
             },
-            "mean_rel",
+            "mean_observed_rel",
             0.5,
-            "mean_rel must not exceed max_rel",
+            "mean_observed_rel must not exceed max_observed_rel",
         ),
     ];
     for (band, expected_field, expected_value, expected_reason) in invalid {
@@ -1926,8 +1926,8 @@ fn fidelity_pair_and_discrepancy_band_identities_enforce_resources_and_cancellat
     ));
 
     let band = DiscrepancyBand {
-        mean_rel: 0.1,
-        max_rel: 0.25,
+        mean_observed_rel: 0.1,
+        max_observed_rel: 0.25,
     };
     let band_baseline =
         identify_discrepancy_band_v1(band, LIMITS, || false).expect("baseline discrepancy band");
@@ -2428,7 +2428,7 @@ fn certified_f64_decision_assessment_replays_and_covers_every_advice_lane() {
         );
         assert_eq!(first.advice(), expected_advice);
         match (first.status(), expected_dominant) {
-            (DecisionStatus::DecisionGrade, None) => {}
+            (DecisionStatus::DecisionGrade { .. }, None) => {}
             (DecisionStatus::NotDecisionGrade { dominant, detail }, Some(expected_dominant)) => {
                 assert_eq!(*dominant, expected_dominant);
                 assert!(!detail.is_empty());
@@ -2536,11 +2536,11 @@ fn certified_f64_decision_assessment_binds_child_threshold_and_derived_state() {
     let negative_zero = identified_decision_assessment(grade.clone(), -0.0);
     assert!(matches!(
         positive_zero.status(),
-        DecisionStatus::DecisionGrade
+        DecisionStatus::DecisionGrade { .. }
     ));
     assert!(matches!(
         negative_zero.status(),
-        DecisionStatus::DecisionGrade
+        DecisionStatus::DecisionGrade { .. }
     ));
     assert_ne!(positive_zero.id(), negative_zero.id());
 

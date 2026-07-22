@@ -13,8 +13,20 @@ pub trait LinearOp {
     /// y = A·x.
     fn apply(&self, x: &[f64], y: &mut [f64]);
     /// y = Aᵀ·x. The default forwards to `apply` — CORRECT ONLY for
-    /// symmetric operators; nonsymmetric implementations must
-    /// override (the transposed-solve battery catches violations).
+    /// symmetric operators; nonsymmetric implementations MUST override.
+    ///
+    /// NOT CHECKED. This crate has no symmetry probe: nothing at compile
+    /// time or run time detects a nonsymmetric operator that inherited
+    /// this default. The transposed-solve battery pins the crate's own
+    /// adapters (`CsrOp::general`, which materializes a real transpose,
+    /// and one nonsymmetric fs-opdsl fixture that does override); it
+    /// cannot cover a client operator it never sees. An implementor who
+    /// inherits the default on a nonsymmetric operator gets a transposed
+    /// solve of A instead of Aᵀ that converges normally, and the
+    /// reported residual is measured against the operator supplied —
+    /// not against its transpose — so a small residual is no evidence
+    /// that the adjoint system was the one solved. Verify with an
+    /// explicit ⟨Av, w⟩ = ⟨v, Aᵀw⟩ probe before relying on it.
     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
         self.apply(x, y);
     }

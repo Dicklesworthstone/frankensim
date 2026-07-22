@@ -1,5 +1,8 @@
-//! fs-thrust-e2e — CertQD-Thrust: certified quality-diversity discovery of
+//! fs-thrust-e2e — CertQD-Thrust: SCREENED quality-diversity discovery of
 //! self-propelling point-vortex thrusters. Layer: L6 (HELM orchestration).
+//!
+//! "Cert" names the discipline, not the claim: every drift this crate publishes
+//! is `Estimated`. Nothing here is interval-certified — see [`screen_full_drift`].
 //!
 //! # The campaign (the raison d'être, exercised end to end)
 //!
@@ -14,19 +17,25 @@
 //!   (the vortex mean position drifts) while its linear impulse is conserved.
 //!   The two dipoles interact nonlinearly — the drift is NOT analytic and must
 //!   be simulated (RK4 desingularized Biot–Savart).
-//! - **Certificates** ([`fs_evidence`]): a point-vortex system conserves the
-//!   exact LINEAR IMPULSE `I = (Σ Γᵢ yᵢ, −Σ Γᵢ xᵢ)`. A simulation is trustworthy
-//!   iff it conserved that invariant to tolerance — so a converged full sim
-//!   earns a `Verified` drift band whose width is the conservation slack, while
-//!   a chaotic/near-singular run that leaked impulse is honestly `Estimated`.
-//!   Certificates over vibes, applied to a chaotic N-body integration.
+//! - **Screening** ([`fs_evidence`]): a point-vortex system conserves the exact
+//!   LINEAR IMPULSE `I = (Σ Γᵢ yᵢ, −Σ Γᵢ xᵢ)`. A full sim that leaked impulse is
+//!   not trustworthy, so the campaign SCREENS on that residual — and reports the
+//!   screen for exactly what it is. Conservation of `I` bounds nothing about the
+//!   mean-`x` drift (for a zero-total-circulation quadrupole the drift is not
+//!   even a component of `I`), and [`fs_vpm::simulate`] is unchecked RK4 with no
+//!   step-size control, so NO drift here is `Verified`: every drift is
+//!   `Estimated`, and the screened ones carry their impulse residual as the
+//!   estimator's dispersion. A residual is a diagnostic, not an enclosure (bead
+//!   `frankensim-extreal-program-f85xj.2.30`).
 //! - **Fidelity management** ([`fs_surrogate`]): a cheap SHORT-horizon sim is a
 //!   surrogate for the expensive FULL-horizon sim. A split-conformal band is
 //!   calibrated on (short vs full) residuals; then `certify_or_escalate` uses the
-//!   short estimate only for designs inside the calibrated validity domain when
-//!   the band is decision-relevant, and ESCALATES to a full sim otherwise. The
-//!   campaign spends far fewer integration steps than an all-high-fidelity sweep
-//!   at equal answer quality.
+//!   short estimate only for designs inside the calibration set's PER-AXIS
+//!   support — every gene the calibration pinned or varied, not just the two
+//!   descriptor axes — when the band is decision-relevant, and ESCALATES to a
+//!   full sim otherwise. Whether that saves integration steps is arithmetic, not
+//!   a promise: the served designs must repay the paired calibration sims (see
+//!   [`CampaignReport::steps_spent`]).
 //! - **Illumination** ([`fs_archive`]): a MAP-Elites archive over (circulation
 //!   budget × device length) keeps the best-translating configuration in every
 //!   behavioral niche — the diverse Pareto atlas, not a single optimum.
@@ -40,7 +49,7 @@
 use std::collections::BTreeMap;
 
 use fs_archive::MapElites;
-use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+use fs_evidence::{Color, ColorRank};
 use fs_report::LabNotebook;
 use fs_surrogate::{Decision, certify_or_escalate, conformal_band};
 use fs_vpm::{VortexParticle, simulate};
@@ -124,12 +133,52 @@ pub fn simulate_thrust(design: &Design, steps: usize, dt: f64, core: f64) -> Sim
     }
 }
 
-/// Color a FULL-sim drift: `Verified` (a band from the conservation slack) when
-/// the impulse invariant held to `tol_rel` of its scale, else honest `Estimated`.
-/// Every numeric claim input is revalidated here because [`SimResult`] is
-/// publicly constructible and the campaign tolerance is public policy state.
+/// One full-fidelity sim's conservation-screen verdict and the honest color it
+/// earns.
+#[derive(Debug, Clone, PartialEq)]
+struct ScreenedDrift {
+    /// The impulse-conservation screen passed (a DIAGNOSTIC on `I`, never an
+    /// error bound on drift).
+    screened: bool,
+    /// The drift's evidence color. Always `Estimated`: see [`screen_full_drift`].
+    color: Color,
+    /// `drift ± impulse_error` for a screened sim — the residual band, reported
+    /// so the campaign can hull it. NOT an enclosure of the true drift.
+    band: Option<(f64, f64)>,
+}
+
+/// Screen a FULL-sim drift on the linear-impulse residual and color it.
+///
+/// The screen is `‖I(T) − I(0)‖ / Σ|Γᵢ| ≤ tol_rel`. Passing it means the
+/// integration did not leak the invariant it is supposed to conserve — a
+/// necessary condition for trusting the run, and nothing more. It is NOT an
+/// error bound on `drift`:
+///
+/// - `drift` is the mean-`x` displacement, which for a zero-total-circulation
+///   quadrupole is not a component of `I` at all (and `I_y ≡ 0` at `t = 0`), so
+///   the residual constrains a different functional;
+/// - [`fs_vpm::simulate`] takes `steps` unchecked RK4 steps with no step-size
+///   control, no Richardson estimate, no interval arithmetic and no outward
+///   rounding, so no executable enclosure of `drift` exists to publish.
+///
+/// So a screened sim earns `Estimated{estimator: "vpm-full-impulse-conserving",
+/// dispersion: impulse_error}` — never `Verified`. Publishing a `Verified{lo,hi}`
+/// whose half-width was `impulse_error.max(1e-9)` claimed a ±1e-9 *certificate*
+/// on a value produced by unchecked RK4; the floor was chosen, not derived
+/// (bead `frankensim-extreal-program-f85xj.2.30`).
+///
+/// Every numeric input is revalidated here because [`SimResult`] is publicly
+/// constructible and the campaign tolerance is public policy state.
 #[must_use]
-fn full_color(res: &SimResult, impulse_scale: f64, tol_rel: f64) -> Color {
+fn screen_full_drift(res: &SimResult, impulse_scale: f64, tol_rel: f64) -> ScreenedDrift {
+    let malformed = ScreenedDrift {
+        screened: false,
+        color: Color::Estimated {
+            estimator: "vpm-full-invalid-screen-input".to_string(),
+            dispersion: f64::INFINITY,
+        },
+        band: None,
+    };
     if !res.drift.is_finite()
         || !res.impulse_error.is_finite()
         || res.impulse_error < 0.0
@@ -138,27 +187,30 @@ fn full_color(res: &SimResult, impulse_scale: f64, tol_rel: f64) -> Color {
         || !tol_rel.is_finite()
         || tol_rel < 0.0
     {
-        return Color::Estimated {
-            estimator: "vpm-full-invalid-certificate-input".to_string(),
-            dispersion: f64::INFINITY,
-        };
+        return malformed;
     }
     let rel = res.impulse_error / impulse_scale;
     if rel.is_finite() && rel <= tol_rel {
-        let band = res.impulse_error.max(1e-9);
-        let (lo, hi) = (res.drift - band, res.drift + band);
+        let (lo, hi) = (res.drift - res.impulse_error, res.drift + res.impulse_error);
         if !lo.is_finite() || !hi.is_finite() || lo > hi {
-            return Color::Estimated {
-                estimator: "vpm-full-invalid-certificate-input".to_string(),
-                dispersion: f64::INFINITY,
-            };
+            return malformed;
         }
-        // declared-color-ok: demo drift candidate from the local impulse-error band; admitted only at a consumer's authority boundary (6pf9)
-        Color::Verified { lo, hi }
+        ScreenedDrift {
+            screened: true,
+            color: Color::Estimated {
+                estimator: "vpm-full-impulse-conserving".to_string(),
+                dispersion: res.impulse_error,
+            },
+            band: Some((lo, hi)),
+        }
     } else {
-        Color::Estimated {
-            estimator: "vpm-full-nonconserving".to_string(),
-            dispersion: res.impulse_error,
+        ScreenedDrift {
+            screened: false,
+            color: Color::Estimated {
+                estimator: "vpm-full-nonconserving".to_string(),
+                dispersion: res.impulse_error,
+            },
+            band: None,
         }
     }
 }
@@ -230,14 +282,95 @@ pub fn design_grid() -> Vec<Design> {
 }
 
 // A SPARSE, central CALIBRATION sub-grid (8 designs): small enough that its
-// paired short+full sims are cheap overhead, yet spanning a useful budget/length
-// hull that becomes the surrogate's declared validity domain. Designs outside
-// that hull must escalate — no extrapolating a surrogate off its calibration.
+// paired short+full sims are cheap overhead, yet spanning a useful slab of the
+// design space that becomes the surrogate's declared validity domain. Designs
+// outside that slab must escalate — no extrapolating a surrogate off its
+// calibration.
 fn is_calibration(d: &Design) -> bool {
     ((d.gamma - 1.0).abs() < 1e-9 || (d.gamma - 1.4).abs() < 1e-9)
         && (d.d - 0.7).abs() < 1e-9
         && ((d.l - 0.6).abs() < 1e-9 || (d.l - 1.8).abs() < 1e-9)
         && ((d.ratio - 0.4).abs() < 1e-9 || (d.ratio - 1.0).abs() < 1e-9)
+}
+
+/// The calibration designs of the default sweep — the only designs whose
+/// short-vs-full residual the conformal band was ever fitted on.
+#[must_use]
+pub fn calibration_designs() -> Vec<Design> {
+    design_grid().into_iter().filter(is_calibration).collect()
+}
+
+/// The surrogate's DECLARED validity domain: the per-axis support of the
+/// calibration set.
+///
+/// Every axis is reported, including the ones the calibration set held FIXED.
+/// A fixed axis has a degenerate support (`lo == hi`), and that is the honest
+/// reading: the residuals carry no information about how the short-vs-full gap
+/// behaves when that gene moves. The transverse spacing `d` is the sharp case —
+/// a dipole self-advects at `~Γ/(2πd)`, so `d` is a first-order driver of the
+/// very drift the surrogate extrapolates, yet it is invisible to
+/// [`Design::descriptor`]. Testing only the 2-D descriptor hull served 63 of 84
+/// designs at spacings the calibration never saw, each handed the `d = 0.7`
+/// band as its uncertainty (bead `frankensim-extreal-program-f85xj.2.29`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationSupport {
+    /// `[min, max]` of `gamma` over the calibration set.
+    pub gamma: (f64, f64),
+    /// `[min, max]` of `d` over the calibration set (degenerate by design).
+    pub d: (f64, f64),
+    /// `[min, max]` of `l` over the calibration set.
+    pub l: (f64, f64),
+    /// `[min, max]` of `ratio` over the calibration set.
+    pub ratio: (f64, f64),
+    /// `[min, max]` of the circulation-budget descriptor.
+    pub budget: (f64, f64),
+}
+
+impl CalibrationSupport {
+    /// Is `design` inside the declared validity domain on EVERY axis?
+    ///
+    /// Non-finite genes and non-finite support bounds are rejected: [`Design`]
+    /// is publicly constructible, so this predicate revalidates rather than
+    /// trusting IEEE-754 comparisons against NaN.
+    #[must_use]
+    pub fn contains(&self, design: &Design) -> bool {
+        fn within(v: f64, (lo, hi): (f64, f64)) -> bool {
+            v.is_finite() && lo.is_finite() && hi.is_finite() && v >= lo && v <= hi
+        }
+        within(design.gamma, self.gamma)
+            && within(design.d, self.d)
+            && within(design.l, self.l)
+            && within(design.ratio, self.ratio)
+            && within(design.budget(), self.budget)
+    }
+}
+
+/// The per-axis support of the calibration set (the declared validity domain).
+///
+/// # Panics
+/// If the calibration sub-grid is empty — a programming error in
+/// [`design_grid`]/[`is_calibration`], not a reachable input.
+#[must_use]
+pub fn calibration_support() -> CalibrationSupport {
+    let designs = calibration_designs();
+    assert!(
+        !designs.is_empty(),
+        "the calibration sub-grid must be non-empty"
+    );
+    let axis = |f: fn(&Design) -> f64| -> (f64, f64) {
+        designs
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| {
+                (lo.min(f(d)), hi.max(f(d)))
+            })
+    };
+    CalibrationSupport {
+        gamma: axis(|d| d.gamma),
+        d: axis(|d| d.d),
+        l: axis(|d| d.l),
+        ratio: axis(|d| d.ratio),
+        budget: axis(Design::budget),
+    }
 }
 
 /// One filled niche of the illuminated archive (the QD atlas).
@@ -249,8 +382,13 @@ pub struct AtlasEntry {
     pub length: f64,
     /// The elite's drift (fitness).
     pub drift: f64,
-    /// Whether the elite's drift is impulse-conservation `Verified`.
-    pub verified: bool,
+    /// Whether the elite's full sim passed the impulse-conservation SCREEN.
+    /// A screened drift is still `Estimated` — the screen is a diagnostic on a
+    /// different functional, not an error bound on drift.
+    pub conservation_screened: bool,
+    /// The elite's evidence rank. Always [`ColorRank::Estimated`] here: this
+    /// campaign has no executable enclosure of drift to certify.
+    pub rank: ColorRank,
 }
 
 /// The full campaign report.
@@ -268,23 +406,34 @@ pub struct CampaignReport {
     pub best: Design,
     /// Best drift found.
     pub best_drift: f64,
-    /// Elites whose drift is `Verified` (impulse-conservation-certified).
-    pub verified_elites: usize,
-    /// Elites whose drift is `Estimated` (surrogate or non-conserving).
-    pub estimated_elites: usize,
+    /// Elites whose full sim PASSED the impulse-conservation screen. They are
+    /// still `Estimated`: passing the screen is a necessary condition for
+    /// trusting the integration, not a bound on the drift it produced.
+    pub conservation_screened_elites: usize,
+    /// Elites that did not pass the screen — surrogate-served, non-conserving,
+    /// or malformed.
+    pub unscreened_elites: usize,
     /// Designs served by a full-fidelity sim.
     pub full_sims: usize,
     /// Designs served by the short surrogate.
     pub short_sims: usize,
-    /// Integration steps actually spent.
+    /// Integration steps actually spent, INCLUDING the paired calibration sims.
+    /// Whether this beats [`CampaignReport::steps_all_full`] is arithmetic:
+    /// `short_sims·(full_steps − short_steps) > 8·(short_steps + full_steps)`
+    /// must hold for the served designs to repay the calibration overhead.
     pub steps_spent: usize,
     /// Steps an all-full-fidelity sweep would have cost.
     pub steps_all_full: usize,
     /// The calibrated conformal band half-width (short-vs-full residual).
     pub band_half_width: f64,
-    /// The certified drift ENVELOPE of the archive's Verified elites (via the
-    /// no-laundering `compose`/Hull) — `None` if no elite is Verified.
-    pub certified_envelope: Option<(f64, f64)>,
+    /// Hull of `drift ± impulse-conservation residual` over the elites that
+    /// passed the conservation screen — `None` if none did.
+    ///
+    /// NOT an error bound on drift, and not a certificate: it is the endpoint
+    /// hull of a set of residual-width bands around `Estimated` values. Read it
+    /// as "where the screened elites landed, and how much invariant each one
+    /// leaked", nothing stronger.
+    pub conservation_screened_drift_hull: Option<(f64, f64)>,
     /// The campaign-level claim rank (weakest elite color — no laundering).
     pub campaign_rank: ColorRank,
     /// The reproducible lab notebook (Markdown).
@@ -300,11 +449,11 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
     let designs = design_grid();
 
     // --- 1. Calibrate the two-fidelity surrogate on the central designs. ---
-    // Residuals = |short-horizon drift − full-horizon drift|; the descriptor
-    // hull of the calibration set is the surrogate's declared validity domain.
+    // Residuals = |short-horizon drift − full-horizon drift|; the PER-AXIS
+    // support of the calibration set is the surrogate's declared validity
+    // domain (every gene, not only the two descriptor axes).
+    let support = calibration_support();
     let mut residuals = Vec::new();
-    let (mut b_lo, mut b_hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut l_lo, mut l_hi) = (f64::INFINITY, f64::NEG_INFINITY);
     // The surrogate predicts full-horizon drift by LINEAR EXTRAPOLATION of the
     // cheap short-horizon drift (a translating cluster moves at ~constant speed);
     // the calibration residual captures the nonlinear dipole–dipole interaction
@@ -314,41 +463,39 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
         let short = simulate_thrust(d, budget.short_steps, budget.dt, budget.core);
         let full = simulate_thrust(d, budget.full_steps, budget.dt, budget.core);
         residuals.push(short.drift * extrapolate - full.drift);
-        let [bud, len] = d.descriptor();
-        b_lo = b_lo.min(bud);
-        b_hi = b_hi.max(bud);
-        l_lo = l_lo.min(len);
-        l_hi = l_hi.max(len);
     }
     let band = conformal_band(&residuals, budget.alpha);
-    let in_domain = |d: &Design| -> bool {
-        let [bud, len] = d.descriptor();
-        bud >= b_lo && bud <= b_hi && len >= l_lo && len <= l_hi
-    };
+    let (b_lo, b_hi) = support.budget;
+    let in_domain = |d: &Design| -> bool { support.contains(d) };
 
-    // --- 2. Illuminate: certify-or-escalate each design, color it, archive it. ---
+    // --- 2. Illuminate: certify-or-escalate each design, screen it, archive it. ---
     let mut archive = MapElites::new(
         vec![b_lo.min(1.0), 0.5],
         vec![b_hi.max(8.0), 2.8],
         vec![budget.bins, budget.bins],
     );
-    // Track each elite's color by its niche cell (for the certificate tally).
-    let mut cell_color: BTreeMap<Vec<usize>, Color> = BTreeMap::new();
+    // Track each elite's evidence by its niche cell (for the screen tally).
+    let mut cell_evidence: BTreeMap<Vec<usize>, ScreenedDrift> = BTreeMap::new();
     // The calibration paired sims are a real (small) campaign cost.
     let (mut full_sims, mut short_sims) = (0usize, 0usize);
     let mut steps_spent = residuals.len() * (budget.short_steps + budget.full_steps);
 
     for d in &designs {
-        let (drift, color) = match certify_or_escalate(&band, in_domain(d), budget.decision_tol) {
+        let (drift, evidence) = match certify_or_escalate(&band, in_domain(d), budget.decision_tol)
+        {
             Decision::UseSurrogate { band_half_width } => {
                 let short = simulate_thrust(d, budget.short_steps, budget.dt, budget.core);
                 short_sims += 1;
                 steps_spent += budget.short_steps;
                 (
                     short.drift * extrapolate,
-                    Color::Estimated {
-                        estimator: "vpm-short-surrogate".to_string(),
-                        dispersion: band_half_width,
+                    ScreenedDrift {
+                        screened: false,
+                        color: Color::Estimated {
+                            estimator: "vpm-short-surrogate".to_string(),
+                            dispersion: band_half_width,
+                        },
+                        band: None,
                     },
                 )
             }
@@ -356,46 +503,39 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
                 let full = simulate_thrust(d, budget.full_steps, budget.dt, budget.core);
                 full_sims += 1;
                 steps_spent += budget.full_steps;
-                let color = full_color(&full, d.budget(), budget.conserve_tol);
-                (full.drift, color)
+                (
+                    full.drift,
+                    screen_full_drift(&full, d.budget(), budget.conserve_tol),
+                )
             }
         };
         let cell = archive.cell_of(&d.descriptor());
         // A design is an elite iff it is the best drifter in its niche.
         let solution = vec![d.gamma, d.d, d.l, d.ratio];
         if archive.add(solution, d.descriptor().to_vec(), drift) {
-            cell_color.insert(cell, color);
+            cell_evidence.insert(cell, evidence);
         }
     }
 
-    // --- 3. Certificate tally + the no-laundering color algebra. ---
-    let verified_elites = cell_color
-        .values()
-        .filter(|c| c.rank() == ColorRank::Verified)
-        .count();
-    let estimated_elites = archive.num_elites() - verified_elites;
-    // The certified drift envelope: HULL-compose every Verified elite band. The
-    // composed rank can never outrank Verified (the no-laundering law).
-    let certified_envelope = {
-        let mut acc: Option<Color> = None;
-        for c in cell_color
-            .values()
-            .filter(|c| c.rank() == ColorRank::Verified)
-        {
-            acc = Some(match acc {
-                None => c.clone(),
-                Some(prev) => compose(&prev, c, IntervalOp::Hull),
-            });
-        }
-        match acc {
-            Some(Color::Verified { lo, hi }) => Some((lo, hi)),
-            _ => None,
-        }
-    };
+    // --- 3. Screen tally + the no-laundering color algebra. ---
+    let conservation_screened_elites = cell_evidence.values().filter(|e| e.screened).count();
+    let unscreened_elites = archive.num_elites() - conservation_screened_elites;
+    // The screened drift hull: the plain endpoint hull of every screened
+    // elite's residual band. This is NOT `compose`d as an interval certificate:
+    // the operands are Estimated, so there is no enclosure to hull and no
+    // certified rank to preserve. The hull is descriptive geometry over
+    // Estimated values, and it is labelled as such.
+    let conservation_screened_drift_hull = cell_evidence.values().filter_map(|e| e.band).fold(
+        None,
+        |acc: Option<(f64, f64)>, (lo, hi)| match acc {
+            None => Some((lo, hi)),
+            Some((a, b)) => Some((a.min(lo), b.max(hi))),
+        },
+    );
     // Campaign claim rank = the weakest elite color (min rank; no laundering).
-    let campaign_rank = cell_color
+    let campaign_rank = cell_evidence
         .values()
-        .map(fs_evidence::Color::rank)
+        .map(|e| e.color.rank())
         .min()
         .unwrap_or(ColorRank::Estimated);
 
@@ -417,17 +557,23 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
         env!("CARGO_PKG_VERSION"),
     );
     nb.prose(
-        "Certified quality-diversity discovery of self-propelling four-vortex thrusters: \
-         each design is simulated (fs-vpm), served by a two-fidelity certify-or-escalate \
-         surrogate (fs-surrogate), impulse-conservation-certified (fs-evidence), and \
-         illuminated into a MAP-Elites archive (fs-archive).",
+        "Quality-diversity discovery of self-propelling four-vortex thrusters: each design \
+         is simulated (fs-vpm), served by a two-fidelity certify-or-escalate surrogate \
+         (fs-surrogate) inside the calibration set's per-axis support, screened on the \
+         linear-impulse residual and colored Estimated (fs-evidence), and illuminated into \
+         a MAP-Elites archive (fs-archive). The impulse screen is a diagnostic, not a drift \
+         bound: no elite claims an interval certificate.",
     )
     .metric("designs_swept", designs.len() as f64, "designs")
     .metric("coverage", archive.coverage(), "fraction")
     .metric("qd_score", archive.qd_score(), "drift")
     .metric("best_drift", best_drift, "length")
-    .metric("verified_elites", verified_elites as f64, "count")
-    .metric("estimated_elites", estimated_elites as f64, "count")
+    .metric(
+        "conservation_screened_elites",
+        conservation_screened_elites as f64,
+        "count",
+    )
+    .metric("unscreened_elites", unscreened_elites as f64, "count")
     .metric("full_sims", full_sims as f64, "count")
     .metric("short_sims", short_sims as f64, "count")
     .metric("steps_spent", steps_spent as f64, "steps")
@@ -458,14 +604,13 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
         .elites()
         .map(|e| {
             let cell = archive.cell_of(&e.descriptor);
-            let verified = cell_color
-                .get(&cell)
-                .is_some_and(|c| c.rank() == ColorRank::Verified);
+            let evidence = cell_evidence.get(&cell);
             AtlasEntry {
                 budget: e.descriptor[0],
                 length: e.descriptor[1],
                 drift: e.fitness,
-                verified,
+                conservation_screened: evidence.is_some_and(|ev| ev.screened),
+                rank: evidence.map_or(ColorRank::Estimated, |ev| ev.color.rank()),
             }
         })
         .collect();
@@ -477,14 +622,14 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
         num_elites: archive.num_elites(),
         best: best_design,
         best_drift,
-        verified_elites,
-        estimated_elites,
+        conservation_screened_elites,
+        unscreened_elites,
         full_sims,
         short_sims,
         steps_spent,
         steps_all_full,
         band_half_width: band.half_width,
-        certified_envelope,
+        conservation_screened_drift_hull,
         campaign_rank,
         notebook_markdown: nb.render_markdown(),
         content_hash: nb.content_hash(),
@@ -492,26 +637,29 @@ pub fn run_campaign(budget: &CampaignBudget) -> CampaignReport {
 }
 
 #[cfg(test)]
-mod certificate_tests {
+mod screen_and_domain_tests {
     use super::*;
 
     fn assert_invalid_estimated(result: SimResult, impulse_scale: f64, tol_rel: f64) {
-        match full_color(&result, impulse_scale, tol_rel) {
+        let out = screen_full_drift(&result, impulse_scale, tol_rel);
+        assert!(!out.screened, "malformed input must not pass the screen");
+        assert_eq!(out.band, None, "malformed input must publish no band");
+        match out.color {
             Color::Estimated {
                 estimator,
                 dispersion,
             } => {
-                assert_eq!(estimator, "vpm-full-invalid-certificate-input");
+                assert_eq!(estimator, "vpm-full-invalid-screen-input");
                 assert_eq!(dispersion, f64::INFINITY);
             }
-            other => panic!("malformed certificate input must fail closed, got {other:?}"),
+            other => panic!("malformed screen input must fail closed, got {other:?}"),
         }
     }
 
     #[test]
-    fn full_color_rejects_malformed_numeric_policy_and_state() {
+    fn screen_rejects_malformed_numeric_policy_and_state() {
         // Exact old-code false-clear: IEEE-754 makes a huge finite ratio less
-        // than +infinity, so the comparison-only guard minted Verified.
+        // than +infinity, so the comparison-only guard passed the screen.
         assert_invalid_estimated(
             SimResult {
                 drift: 1.0,
@@ -569,27 +717,37 @@ mod certificate_tests {
     }
 
     #[test]
-    fn full_color_preserves_valid_inclusive_boundary_semantics() {
-        assert_eq!(
-            full_color(
-                &SimResult {
-                    drift: 2.0,
-                    impulse_error: 0.5,
-                },
-                1.0,
-                0.5,
-            ),
-            Color::Verified { lo: 1.5, hi: 2.5 }
+    fn screen_preserves_valid_inclusive_boundary_semantics() {
+        let pass = screen_full_drift(
+            &SimResult {
+                drift: 2.0,
+                impulse_error: 0.5,
+            },
+            1.0,
+            0.5,
         );
+        assert!(pass.screened, "the inclusive boundary must pass the screen");
+        assert_eq!(
+            pass.color,
+            Color::Estimated {
+                estimator: "vpm-full-impulse-conserving".to_string(),
+                dispersion: 0.5,
+            }
+        );
+        assert_eq!(pass.band, Some((1.5, 2.5)));
+
+        let leaked = screen_full_drift(
+            &SimResult {
+                drift: 2.0,
+                impulse_error: 1.0,
+            },
+            1.0,
+            0.5,
+        );
+        assert!(!leaked.screened);
+        assert_eq!(leaked.band, None);
         assert!(matches!(
-            full_color(
-                &SimResult {
-                    drift: 2.0,
-                    impulse_error: 1.0,
-                },
-                1.0,
-                0.5,
-            ),
+            leaked.color,
             Color::Estimated {
                 dispersion: 1.0,
                 ..
@@ -597,20 +755,142 @@ mod certificate_tests {
         ));
         // A tiny positive scale must still use the relative ratio; the prior
         // absolute-error fallback made this enormous relative error pass.
+        let tiny_scale = screen_full_drift(
+            &SimResult {
+                drift: 2.0,
+                impulse_error: 0.5,
+            },
+            1.0e-300,
+            0.5,
+        );
+        assert!(!tiny_scale.screened);
         assert!(matches!(
-            full_color(
-                &SimResult {
-                    drift: 2.0,
-                    impulse_error: 0.5,
-                },
-                1.0e-300,
-                0.5,
-            ),
+            tiny_scale.color,
             Color::Estimated {
                 dispersion: 0.5,
                 ..
             }
         ));
+    }
+
+    /// REGRESSION (bead `frankensim-extreal-program-f85xj.2.30`): an
+    /// impulse-conservation residual bounds nothing about drift, so passing the
+    /// screen must never mint an interval certificate. The witness is the
+    /// bead's own: a perfectly conserving run whose drift came out of 400
+    /// unchecked RK4 steps used to be published as `Verified{2.0 ± 1e-9}` — a
+    /// certified enclosure whose half-width was the `.max(1e-9)` FLOOR, i.e.
+    /// chosen by the code rather than derived from the integration.
+    #[test]
+    fn a_conserving_full_sim_is_estimated_never_verified() {
+        let out = screen_full_drift(
+            &SimResult {
+                drift: 2.0,
+                impulse_error: 0.0,
+            },
+            4.0,
+            5e-2,
+        );
+        assert!(out.screened, "a zero-residual run passes the screen");
+        assert_eq!(
+            out.color,
+            Color::Estimated {
+                estimator: "vpm-full-impulse-conserving".to_string(),
+                dispersion: 0.0,
+            },
+            "the screen is a diagnostic; it cannot mint Verified"
+        );
+        assert_eq!(out.color.rank(), ColorRank::Estimated);
+        // The reported band is exactly the residual — no invented floor.
+        assert_eq!(out.band, Some((2.0, 2.0)));
+    }
+
+    /// REGRESSION (bead `frankensim-extreal-program-f85xj.2.29`): the declared
+    /// validity domain must cover EVERY axis the calibration set pinned or
+    /// varied. The descriptor hull alone admitted 63 designs at transverse
+    /// spacings (`d ∈ {0.4, 1.0, 1.3}`) that no calibration residual ever saw.
+    #[test]
+    fn the_validity_domain_rejects_every_off_calibration_axis() {
+        let support = calibration_support();
+        assert_eq!(support.d, (0.7, 0.7), "the calibration set fixes d = 0.7");
+        assert_eq!(support.gamma, (1.0, 1.4));
+        assert_eq!(support.ratio, (0.4, 1.0));
+        assert_eq!(support.l, (0.6, 1.8));
+
+        // Every calibration design is in its own domain.
+        for design in calibration_designs() {
+            assert!(support.contains(&design), "calibration design {design:?}");
+        }
+
+        // The bead's reaching input: in the descriptor hull (budget 2.8 ∈
+        // [2.8, 5.6], length 0.6 ∈ [0.6, 1.8]) but off-calibration in d.
+        let off_axis = Design {
+            gamma: 1.0,
+            d: 0.4,
+            l: 0.6,
+            ratio: 0.4,
+        };
+        assert!((off_axis.budget() - 2.8).abs() < 1e-12);
+        assert!(
+            !support.contains(&off_axis),
+            "d = 0.4 was never calibrated and must escalate"
+        );
+
+        // …and the whole sweep agrees: nothing in the domain is off-calibration.
+        let admitted: Vec<Design> = design_grid()
+            .into_iter()
+            .filter(|d| support.contains(d))
+            .collect();
+        assert_eq!(admitted.len(), 18, "in-domain designs of the default sweep");
+        for design in &admitted {
+            assert!(
+                (design.d - 0.7).abs() < 1e-12,
+                "off-axis served: {design:?}"
+            );
+            assert!(design.gamma >= 1.0 && design.gamma <= 1.4);
+            assert!(design.ratio >= 0.4 && design.ratio <= 1.0);
+            assert!(design.l >= 0.6 && design.l <= 1.8);
+        }
+    }
+
+    /// A publicly constructed [`Design`] cannot smuggle a non-finite gene past
+    /// the domain test (the predicate revalidates instead of trusting NaN
+    /// comparisons).
+    #[test]
+    fn the_validity_domain_refuses_non_finite_genes() {
+        let support = calibration_support();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for design in [
+                Design {
+                    gamma: bad,
+                    d: 0.7,
+                    l: 0.6,
+                    ratio: 0.4,
+                },
+                Design {
+                    gamma: 1.0,
+                    d: bad,
+                    l: 0.6,
+                    ratio: 0.4,
+                },
+                Design {
+                    gamma: 1.0,
+                    d: 0.7,
+                    l: bad,
+                    ratio: 0.4,
+                },
+                Design {
+                    gamma: 1.0,
+                    d: 0.7,
+                    l: 0.6,
+                    ratio: bad,
+                },
+            ] {
+                assert!(
+                    !support.contains(&design),
+                    "{design:?} must not be admitted"
+                );
+            }
+        }
     }
 
     #[test]

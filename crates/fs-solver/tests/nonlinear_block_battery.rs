@@ -211,7 +211,7 @@ fn exact_block_schur_matches_monolithic_saddle_reference() {
     .expect("exact block LDU");
     for rhs in [[1.0, 2.0, 3.0], [-4.0, 0.5, 2.0], [0.0, 0.0, 1.0]] {
         let mut solution = [0.0; 3];
-        inverse.apply(&rhs, &mut solution);
+        Precond::apply(&inverse, &rhs, &mut solution);
         let mut reconstructed = [0.0; 3];
         LinearOp::apply(&saddle, &solution, &mut reconstructed);
         for (index, (actual, expected)) in reconstructed.iter().zip(rhs).enumerate() {

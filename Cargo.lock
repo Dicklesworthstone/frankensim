@@ -1165,6 +1165,7 @@ dependencies = [
  "fs-qty",
  "fs-race",
  "fs-scenario",
+ "fs-surrogate",
  "fs-vessel",
 ]
 
@@ -1529,7 +1530,6 @@ dependencies = [
 name = "fs-neuroshape-e2e"
 version = "0.0.1"
 dependencies = [
- "fs-evidence",
  "fs-rep-neural",
  "fs-viz",
 ]
@@ -1757,6 +1757,11 @@ dependencies = [
 [[package]]
 name = "fs-rep-neural"
 version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-ivl",
+ "fs-math",
+]
 
 [[package]]
 name = "fs-rep-nurbs"
@@ -2208,6 +2213,10 @@ version = "0.0.1"
 [[package]]
 name = "fs-vpm"
 version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-exec",
+]
 
 [[package]]
 name = "fs-vskeleton"

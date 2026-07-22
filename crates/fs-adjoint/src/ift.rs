@@ -31,6 +31,19 @@ pub struct AdjointReport {
 ///
 /// Returns (gradient, report). The adjoint system is solved with
 /// transposed GMRES sharing the operator's infrastructure.
+///
+/// Every returned component is the TOTAL derivative or the call fails:
+/// the explicit part and the pullback must have the same length. They
+/// used to be combined with `zip`, which truncates to the shorter, so a
+/// masked or sliced parameter-space pullback returned a vector of the
+/// expected length whose tail silently carried only ∂J/∂p with the
+/// adjoint term missing — and `AdjointReport::converged` still said
+/// true.
+///
+/// # Panics
+/// If `djdu` does not have the Jacobian's dimension, or the pullback
+/// length differs from a non-empty `djdp` (the crate's error model:
+/// impossible internal dimension failures are assertions).
 pub fn ift_gradient_matfree<A: LinearOp>(
     jacobian: &A,
     djdu: &[f64],
@@ -39,12 +52,23 @@ pub fn ift_gradient_matfree<A: LinearOp>(
     tol: f64,
     max_cycles: usize,
 ) -> (Vec<f64>, AdjointReport) {
+    assert_eq!(
+        djdu.len(),
+        jacobian.n(),
+        "adjoint right-hand side length must match the Jacobian dimension"
+    );
     let mut st = GmresState::new(djdu, 30);
     let rep = st.run(jacobian, djdu, tol, max_cycles, true);
     let pullback = drdp_t(&st.x);
     let mut g = if djdp.is_empty() {
         vec![0.0f64; pullback.len()]
     } else {
+        assert_eq!(
+            djdp.len(),
+            pullback.len(),
+            "parameter-space pullback length must match ∂J/∂p: a shorter pullback would leave \
+             the tail of the gradient uncorrected, a longer one would drop its own tail"
+        );
         djdp.to_vec()
     };
     for (gi, pi) in g.iter_mut().zip(&pullback) {

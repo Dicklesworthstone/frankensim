@@ -25,6 +25,8 @@
 //! trail; Jacobi-Chebyshev itself grew mildly with r — the x08j
 //! ladder gates the flat counts).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
 use crate::op::LinearOp;
 use fs_feec::TensorSpace;
 use fs_la::eigen::jacobi_eigh;
@@ -345,6 +347,15 @@ fn tensor3_last(
 
 /// Matrix-free p-multigrid V-cycle preconditioner for the Poisson
 /// operator on the unit-cube tensor spaces (homogeneous Dirichlet).
+///
+/// V-CYCLE FIXITY IS AN ASSUMPTION, NOT AN ESTABLISHED INVARIANT. Plain
+/// CG requires a FIXED symmetric preconditioner, and this one is fixed
+/// only while the r = 1 coarse level is solved near-exactly. That solve
+/// is REQUESTED at 1e-13 within a 2000-iteration cap; if it ever exits
+/// on the cap the V-cycle becomes an inexact, application-dependent
+/// operator. The receipts used to be discarded (`let _ = pcg(..)`), so
+/// nothing could say whether the assumption held. They are now retained:
+/// see [`PMultigrid::coarse_solves_converged`].
 pub struct PMultigrid {
     levels: Vec<Level>,
     coarse: Csr,
@@ -353,6 +364,12 @@ pub struct PMultigrid {
     coarse_slot: Vec<usize>,
     /// Chebyshev smoothing degree per pre/post sweep.
     pub smooth_degree: usize,
+    /// Coarse-solve evidence. `Precond::apply` takes `&self`, so the
+    /// receipts are accumulated through atomics rather than dropped.
+    coarse_solves: AtomicUsize,
+    coarse_all_converged: AtomicBool,
+    /// Worst coarse relative residual seen, as `f64::to_bits`.
+    worst_coarse_rel_residual: AtomicU64,
 }
 
 /// The 1D lattice injection from order rc into order rf (same mesh):
@@ -373,6 +390,72 @@ fn inject_1d(m: usize, rc: usize, rf: usize) -> Vec<usize> {
 }
 
 impl PMultigrid {
+    /// Fold one coarse-solve receipt into the retained evidence.
+    fn record_coarse_solve(&self, report: &fs_sparse::precond::PcgReport) {
+        self.coarse_solves.fetch_add(1, Ordering::Relaxed);
+        if !report.converged {
+            self.coarse_all_converged.store(false, Ordering::Relaxed);
+        }
+        let candidate = if report.rel_residual.is_finite() {
+            report.rel_residual
+        } else {
+            // A non-finite coarse residual is the worst possible outcome
+            // and must not be silently dropped by a `<` comparison.
+            f64::INFINITY
+        };
+        let mut current = self.worst_coarse_rel_residual.load(Ordering::Relaxed);
+        loop {
+            if f64::from_bits(current) >= candidate {
+                break;
+            }
+            match self.worst_coarse_rel_residual.compare_exchange_weak(
+                current,
+                candidate.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Whether EVERY r = 1 coarse solve performed so far met its 1e-13
+    /// request within the 2000-iteration cap.
+    ///
+    /// This is the evidence for the V-cycle's fixity assumption. `false`
+    /// means at least one application solved the coarse level only to
+    /// the cap, so the preconditioner varied between applications and a
+    /// plain-CG convergence claim built on it must be demoted. A driver
+    /// that never asks is asserting the invariant without evidence.
+    #[must_use]
+    pub fn coarse_solves_converged(&self) -> bool {
+        self.coarse_all_converged.load(Ordering::Relaxed)
+    }
+
+    /// Worst relative residual any coarse solve finished at (`0.0`
+    /// before the first application).
+    #[must_use]
+    pub fn worst_coarse_rel_residual(&self) -> f64 {
+        f64::from_bits(self.worst_coarse_rel_residual.load(Ordering::Relaxed))
+    }
+
+    /// How many coarse solves have run (V-cycles plus the smoother's
+    /// Pavarino coarse term).
+    #[must_use]
+    pub fn coarse_solves(&self) -> usize {
+        self.coarse_solves.load(Ordering::Relaxed)
+    }
+
+    /// Drop the retained coarse-solve evidence so a driver can scope it
+    /// to one outer solve.
+    pub fn reset_coarse_evidence(&self) {
+        self.coarse_solves.store(0, Ordering::Relaxed);
+        self.coarse_all_converged.store(true, Ordering::Relaxed);
+        self.worst_coarse_rel_residual
+            .store(0.0f64.to_bits(), Ordering::Relaxed);
+    }
+
     /// Build the hierarchy for order `r` on an m³ grid: orders halve
     /// down to 1 (e.g. 4 → 2 → 1); the r = 1 level is assembled
     /// (interior Kronecker CSR) and preconditioned with SA-AMG.
@@ -457,6 +540,9 @@ impl PMultigrid {
             coarse_interior: interior,
             coarse_slot: slot,
             smooth_degree,
+            coarse_solves: AtomicUsize::new(0),
+            coarse_all_converged: AtomicBool::new(true),
+            worst_coarse_rel_residual: AtomicU64::new(0.0f64.to_bits()),
         };
         // Measure the Chebyshev bound of the FULL smoother preconditioner
         // (Schwarz + coarse term) per smoothing level.
@@ -485,7 +571,9 @@ impl PMultigrid {
             rc[sl] = r[lv.space.gid(i * ord, j * ord, k * ord)];
         }
         let mut xi = vec![0.0f64; nred];
-        let _ = fs_sparse::precond::pcg(&self.coarse, &rc, &mut xi, &self.coarse_amg, 1e-13, 2000);
+        let coarse_report =
+            fs_sparse::precond::pcg(&self.coarse, &rc, &mut xi, &self.coarse_amg, 1e-13, 2000);
+        self.record_coarse_solve(&coarse_report);
         for (sl, &dof) in self.coarse_interior.iter().enumerate() {
             let k = dof % n1c;
             let j = (dof / n1c) % n1c;
@@ -619,9 +707,12 @@ impl PMultigrid {
             let mut xi = vec![0.0f64; nred];
             // Near-exact coarse solve: a loosely-solved coarse level
             // makes the V-cycle a VARYING preconditioner and breaks
-            // plain CG (observed as erratic residual histories).
-            let _ =
+            // plain CG (observed as erratic residual histories). The
+            // receipt is RETAINED, not discarded — it is the only
+            // evidence that the fixity assumption held on this run.
+            let coarse_report =
                 fs_sparse::precond::pcg(&self.coarse, &rhs, &mut xi, &self.coarse_amg, 1e-13, 2000);
+            self.record_coarse_solve(&coarse_report);
             for (s, &d) in xi.iter().zip(&self.coarse_interior) {
                 x[d] = *s;
             }

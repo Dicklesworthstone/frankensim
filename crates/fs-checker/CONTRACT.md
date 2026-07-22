@@ -80,8 +80,10 @@ versioned identity.
   source-certificate, anchoring-dataset, falsifier, derivation, and waiver
   capabilities in addition to the mandatory signature verifier. It requires at
   least one scientifically admitted finite `Verified` interval or authenticated
-  `Validated` claim. Ordered infinite `Verified` enclosures remain transportable
-  no-claim artifacts but cannot satisfy this minimum. After proving the expected
+  `Validated` claim. Half-infinite and whole-line `Verified` enclosures remain
+  transportable no-claim artifacts but cannot satisfy this minimum; degenerate
+  point-at-infinity intervals enclose no real value and no longer parse or
+  verify at all (bead frankensim-extreal-program-f85xj.2.6). After proving the expected
   content root, the gate performs bounded structural inspection and refuses
   conclusive declaration-shape blockers before any external capability runs.
 - `check_json_release_preflight(...)` — the non-admitting transport preflight.
@@ -210,8 +212,10 @@ The authority order is fixed and fail-closed:
   provenance and recomputed root, claim index/id/subject hash, statement,
   interval, producer, artifact hash, and optional portable witness. Waiver
   verification receives the package-owned authorization message and an explicit
-  date context. Anchored-source verification additionally binds the exact
-  validity regime, dataset identity, and parsed dataset hash.
+  date context. Anchored-source verification binds the exact validity regime,
+  dataset identity, and parsed dataset hash, but — unlike the
+  source-certificate request above — it does NOT receive the package root or
+  the claim subject hash.
 - Integrity, semantic, origin, and signature authority are separately visible
   and hash-bound. Semantic failure never invokes an external verifier; origin
   or signature refusal never erases a completed semantic transcript.
@@ -235,7 +239,11 @@ The authority order is fixed and fail-closed:
 - Verified and Validated claims never pass release admission without
   authenticated, content-addressed falsifier artifacts. Validated claims
   additionally require an exact matching canonical dataset anchor authenticated
-  against the complete typed subject.
+  against the anchor request. That request is NOT the complete package subject:
+  it omits the package root and the claim subject hash, so an anchor decision
+  is portable across packages sharing its fields. Package binding comes from
+  the root and policy fingerprint in the receipt (bead
+  frankensim-extreal-program-f85xj.2.13).
 - Oversized in-memory builders and expected-root mismatches are refused before
   every external verifier callback and before per-claim release diagnostics.
   Rejected oversized signature bytes are not retained; a bounded mismatched

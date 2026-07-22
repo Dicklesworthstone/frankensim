@@ -35,7 +35,11 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
 3. Fallible demo paths return `NaN`, empty vectors, or bounded fallback
    values rather than trapping across the WASM boundary. The vessel CVaR
    surface maps canonical `fs-robust` validation errors to `NaN` here instead
-   of reintroducing a panic-only risk implementation.
+   of reintroducing a panic-only risk implementation. A fallback must not be a
+   value the payload's own documented meaning would read as a successful
+   result: `dynamics::ga_motor_orbit` therefore folds a refused PGA sandwich
+   product to `(NaN, NaN, NaN)` rather than republishing the untransformed seed
+   point, which would be bit-indistinguishable from a genuine identity image.
 4. The nested workspace isolates browser-only dependencies from the
    native workspace dependency policy.
 5. TrussPath optimality uses the same `fs-truss-e2e` promotion gate as the
@@ -81,6 +85,23 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    origin is curvature corroboration only; without a zero-gradient certificate
    it is not a critical-point or minimum theorem. It and the sampled contour
    crossings cannot promote these fields to an exact count.
+10. FlowCert is the `fs-flowcert-e2e` campaign, not a browser-local
+    transcription of it. `campaigns::flowcert` calls `run_campaign`, so every
+    published headline — the MAP-Elites atlas statistics, `all_accurate`, and
+    the `map_color_rank` in slot `[7]` — is the report's own, and each point's
+    `accurate` bit is the campaign's `converged && profile_error <= tol`. A
+    point whose chunked steady-state march exhausts the step cap is published
+    as unresolved (`converged = 0`, `accurate = 0`), never as an accurate or
+    cleanly-inaccurate point, and it drops the map's color out of `Verified`.
+    The payload is `FLOWCERT_SCHEMA_VERSION = 2` in header slot `[8]`; version
+    1 was the fixed-step-budget layout with 8-value header and point blocks and
+    no way to express an unresolved point. Version 2 keeps every version-1
+    field at its old position within the header and within each point block,
+    appends `converged`/`steps_run` to each block, and adds `all_converged` at
+    `[9]`. Consumers must refuse an unrecognized `[8]` before reading any other
+    slot. Only the two spotlight velocity profiles are recomputed in this
+    crate, because the native `OperatingPoint` does not carry a profile; that
+    re-march is the same chunked loop and mints no claim.
 
 ## Error model
 
@@ -144,6 +165,16 @@ bound. Both cases pin schema version 1 in slot `[22]` and retain zero in the
 remaining reserved slot `[23]`. A decoder-shaped conformance fixture accepts
 only the exact version-1 bit pattern and refuses legacy zero, future version 2,
 fractional, non-finite, and truncated headers before reading topology evidence.
+FlowCert tests pin the whole payload field-for-field against
+`fs_flowcert_e2e::run_campaign` (including that slot `[7]` is the rank of the
+report's own `credibility_color` and slot `[8]` the schema version), assert that
+no point claims `accurate` while `converged` is 0, name the default-budget
+point whose profile error is inside tolerance but whose march never reaches
+steady state and require it to serialize as unresolved, check that the minimum
+step budget publishes nine unresolved points and a non-`Verified` map, and pin
+the spotlight re-march's `converged`/`steps_run` to the campaign's.
+A dynamics test builds a degenerate (non-versor) motor whose sandwich product is
+refused and requires the `(NaN, NaN, NaN)` fold rather than the seed point.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.

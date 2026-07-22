@@ -26,16 +26,88 @@ pub enum StallDiagnosis {
     Breakdown,
 }
 
+/// WHAT a reported relative residual is, and in which norm — the
+/// provenance `SolveReport::rel_residual` cannot carry on its own.
+///
+/// The five solvers in this crate do not all report the same quantity,
+/// so `converged == true` does not by itself mean
+/// `‖b − Ax‖₂/‖b‖₂ < tol`. Ask the producing state for its claim
+/// ([`CgState::residual_claim`] and siblings) before treating a report
+/// as a Euclidean correctness statement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResidualClaim {
+    /// `‖b − Ax‖₂/‖b‖₂`, recomputed from the current iterate by an
+    /// explicit operator application. The strongest claim: it is the
+    /// Euclidean relative residual, not an estimate of it.
+    /// (GMRES(m), FGMRES.)
+    TrueEuclidean(f64),
+    /// A recurrence's estimate of `‖b − Ax‖₂/‖b‖₂`, propagated rather
+    /// than recomputed (CG's updated `r`, MINRES's Givens `η`). Equal
+    /// to the true residual in exact arithmetic; in floating point it
+    /// DRIFTS, and the drift is one-sided in the dangerous direction —
+    /// the estimate keeps falling after the true residual stagnates.
+    RecursiveEstimate(f64),
+    /// A recurrence's estimate of the residual in the PRECONDITIONER's
+    /// M-norm, `‖r‖_M/‖b‖_M`, not the Euclidean norm (P-MINRES). For an
+    /// ill-conditioned M the two differ by orders of magnitude: with
+    /// `M = diag(1, 1e-12)`, `r = (0,1)` against `b = (1,0)` gives
+    /// `‖r‖_M/‖b‖_M = 1e-6` while `‖r‖₂/‖b‖₂ = 1`.
+    MNormEstimate(f64),
+}
+
+impl ResidualClaim {
+    /// The reported number, whatever it means.
+    #[must_use]
+    pub fn value(&self) -> f64 {
+        match self {
+            ResidualClaim::TrueEuclidean(v)
+            | ResidualClaim::RecursiveEstimate(v)
+            | ResidualClaim::MNormEstimate(v) => *v,
+        }
+    }
+
+    /// True only for a recomputed Euclidean relative residual.
+    #[must_use]
+    pub fn is_true_euclidean(&self) -> bool {
+        matches!(self, ResidualClaim::TrueEuclidean(_))
+    }
+
+    /// A stable one-line description for receipts and reports.
+    #[must_use]
+    pub fn provenance(&self) -> &'static str {
+        match self {
+            ResidualClaim::TrueEuclidean(_) => "recomputed Euclidean relative residual",
+            ResidualClaim::RecursiveEstimate(_) => {
+                "recursively propagated estimate of the Euclidean relative residual"
+            }
+            ResidualClaim::MNormEstimate(_) => {
+                "recurrence estimate of the relative residual in the preconditioner's M-norm"
+            }
+        }
+    }
+}
+
 /// Solve outcome with the full residual history (error transparency).
+///
+/// `rel_residual` is a bare number: its NORM and PROVENANCE depend on
+/// the producing solver (see [`ResidualClaim`]), and this type cannot
+/// carry them. A driver holding only a `SolveReport` therefore may not
+/// read `converged` as `‖b − Ax‖₂/‖b‖₂ < tol`; it may read it only as
+/// "the residual this solver reports met `tol`". Use the producing
+/// state's `residual_claim()` when the distinction matters.
 #[derive(Debug, Clone)]
 pub struct SolveReport {
     /// Iterations performed (cumulative across resumes).
     pub iters: usize,
-    /// Final relative residual ‖r‖/‖b‖.
+    /// Final relative residual as the producing solver measures it:
+    /// recomputed `‖b − Ax‖₂/‖b‖₂` for GMRES/FGMRES, the recursive
+    /// estimate of it for CG and MINRES, and the M-NORM estimate
+    /// `‖r‖_M/‖b‖_M` for P-MINRES. See [`ResidualClaim`].
     pub rel_residual: f64,
-    /// Tolerance met.
+    /// `rel_residual < tol` — the reported residual claim met the
+    /// tolerance. NOT, on its own, a Euclidean correctness statement.
     pub converged: bool,
-    /// ‖r‖/‖b‖ after each iteration.
+    /// `rel_residual` after each iteration, in the same measure.
     pub history: Vec<f64>,
     /// Present iff not converged.
     pub diagnosis: Option<StallDiagnosis>,
@@ -118,10 +190,19 @@ impl CgState {
         }
     }
 
-    /// Current relative residual.
+    /// Current relative residual ESTIMATE: `r` is the recursively
+    /// updated residual, never recomputed as `b − Ax`, so this drifts
+    /// from the true Euclidean residual as the iteration proceeds.
     #[must_use]
     pub fn rel_residual(&self) -> f64 {
         norm2(&self.r) / self.bnorm
+    }
+
+    /// The typed residual claim: CG reports a recursive ESTIMATE of the
+    /// Euclidean relative residual.
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        ResidualClaim::RecursiveEstimate(self.rel_residual())
     }
 
     /// Run until `tol` or `max_iters` ADDITIONAL iterations; call
@@ -223,6 +304,13 @@ impl MinresState {
         self.eta.abs() / self.bnorm
     }
 
+    /// The typed residual claim: MINRES reports a Givens-recurrence
+    /// ESTIMATE of the Euclidean relative residual.
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        ResidualClaim::RecursiveEstimate(self.rel_residual())
+    }
+
     /// Run until `tol` or `max_iters` additional iterations.
     pub fn run<A: LinearOp>(&mut self, a: &A, tol: f64, max_iters: usize) -> SolveReport {
         let n = a.n();
@@ -317,7 +405,15 @@ impl PminresState {
         let mut z = vec![0.0f64; n];
         m.apply(b, &mut z);
         let bz = dot(b, &z);
-        assert!(bz >= 0.0, "preconditioner must be SPD (b'Mb = {bz} < 0)");
+        // ⟨b, Mb⟩ == 0 on a NONZERO b means M is singular on the very
+        // vector the Lanczos basis starts from: β collapses to the
+        // smallest denormal, v = b/β overflows, and every subsequent
+        // claim is noise. Admitting it (the old `bz >= 0.0`) is
+        // fail-open exactly where positivity is lost.
+        assert!(
+            bz > 0.0 || b.iter().all(|value| *value == 0.0),
+            "preconditioner must be SPD: ⟨b, Mb⟩ = {bz} is not positive on a nonzero rhs"
+        );
         let beta = fs_math::det::sqrt(bz).max(f64::MIN_POSITIVE);
         let v: Vec<f64> = b.iter().map(|&bi| bi / beta).collect();
         for zi in &mut z {
@@ -342,16 +438,29 @@ impl PminresState {
         }
     }
 
-    /// Current relative residual estimate (M-norm).
+    /// Current relative residual estimate IN THE M-NORM
+    /// (`‖r‖_M/‖b‖_M`), not the Euclidean norm — for an ill-conditioned
+    /// preconditioner the two are unrelated in magnitude.
     #[must_use]
     pub fn rel_residual(&self) -> f64 {
         self.eta.abs() / self.bnorm
     }
 
+    /// The typed residual claim: P-MINRES reports an M-NORM estimate.
+    /// A driver that needs a Euclidean statement must recompute
+    /// `b − Ax` itself.
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        ResidualClaim::MNormEstimate(self.rel_residual())
+    }
+
     /// Run until `tol` or `max_iters` additional iterations.
     ///
     /// # Panics
-    /// If the preconditioner loses positivity mid-flight.
+    /// If the preconditioner loses positivity mid-flight — i.e. the next
+    /// Lanczos direction `p` is nonzero but `⟨p, Mp⟩` does not clear the
+    /// rounding floor of that inner product. That is a REFUSAL, not a
+    /// convergence: see the comment at the guard.
     pub fn run<A: LinearOp, P: Precond>(
         &mut self,
         a: &A,
@@ -374,13 +483,49 @@ impl PminresState {
             }
             m.apply(&p, &mut z_next);
             let vz = dot(&p, &z_next);
-            assert!(vz >= -1e-30, "preconditioner lost positivity: {vz}");
-            let beta_next = fs_math::det::sqrt(vz.max(0.0)).max(f64::MIN_POSITIVE);
+            // ⟨p, Mp⟩ is the SQUARED M-norm of the next Lanczos
+            // direction. Two very different states share `vz ≈ 0` and
+            // must not be conflated:
+            //
+            //   * p == 0 — Lanczos HAPPY breakdown. The Krylov space is
+            //     invariant, the final Givens step with β = 0 makes the
+            //     iterate the exact minimizer, and η → 0 is a true
+            //     residual claim.
+            //   * p != 0 with ⟨p, Mp⟩ at or below the rounding floor of
+            //     that inner product — M is NOT positive definite on p.
+            //
+            // The old guard (`vz >= -1e-30`) admitted the second case:
+            // β_next collapsed to the smallest denormal, s_k ≈ 0, η ≈ 0,
+            // and the next tolerance check reported `converged` with
+            // `rel_residual ≈ 1e-308` for an ARBITRARY iterate. A guard
+            // whose message is "preconditioner lost positivity" must not
+            // pass exactly where positivity is lost.
+            let p_norm = norm2(&p);
+            let happy_breakdown = p_norm == 0.0;
+            let beta_next = if happy_breakdown {
+                0.0
+            } else {
+                let rounding_floor = 4.0 * f64::EPSILON * p_norm * norm2(&z_next);
+                assert!(
+                    vz > rounding_floor,
+                    "preconditioner lost positivity: ⟨p, Mp⟩ = {vz} does not clear the rounding \
+                     floor {rounding_floor} at ‖p‖ = {p_norm}; M is not positive definite on the \
+                     Lanczos direction, so the M-norm residual estimate carries no claim"
+                );
+                fs_math::det::sqrt(vz).max(f64::MIN_POSITIVE)
+            };
             // Givens: identical bookkeeping to plain MINRES.
             let delta = self
                 .c_km1
                 .mul_add(alpha, -(self.c_km2 * self.s_km1 * self.beta));
             let rho1 = fs_math::det::sqrt(delta.mul_add(delta, beta_next * beta_next));
+            if rho1 == 0.0 {
+                // Degenerate step (α and β both zero): there is no
+                // rotation to apply and no residual claim to make. Stop
+                // without touching the iterate — an unresolved solve, not
+                // a converged one.
+                break;
+            }
             let rho2 = self
                 .s_km1
                 .mul_add(alpha, self.c_km2 * self.c_km1 * self.beta);
@@ -395,12 +540,6 @@ impl PminresState {
                 self.w_prev1[i] = w_k;
             }
             self.eta *= -s_k;
-            // Roll the Lanczos pair.
-            for i in 0..n {
-                self.v_prev[i] = self.v[i];
-                self.v[i] = p[i] / beta_next;
-                self.z[i] = z_next[i] / beta_next;
-            }
             self.beta = beta_next;
             self.c_km2 = self.c_km1;
             self.c_km1 = c_k;
@@ -408,6 +547,18 @@ impl PminresState {
             self.s_km1 = s_k;
             self.iters += 1;
             self.history.push(self.rel_residual());
+            if happy_breakdown {
+                // β_next = 0: the Lanczos pair cannot be rolled (there is
+                // no next direction), and the step just applied is the
+                // exact one. Stopping here keeps NaNs out of the state.
+                break;
+            }
+            // Roll the Lanczos pair.
+            for i in 0..n {
+                self.v_prev[i] = self.v[i];
+                self.v[i] = p[i] / beta_next;
+                self.z[i] = z_next[i] / beta_next;
+            }
         }
         report(self.iters, &self.history, self.rel_residual(), tol)
     }
@@ -449,10 +600,18 @@ impl GmresState {
         }
     }
 
-    /// Current relative residual (from the last completed cycle).
+    /// Current relative residual (from the last completed cycle) —
+    /// recomputed as `‖b − Ax‖₂/‖b‖₂`, not a recurrence estimate.
     #[must_use]
     pub fn rel_residual(&self) -> f64 {
         self.rel
+    }
+
+    /// The typed residual claim: GMRES recomputes the TRUE Euclidean
+    /// relative residual at every cycle end.
+    #[must_use]
+    pub fn residual_claim(&self) -> ResidualClaim {
+        ResidualClaim::TrueEuclidean(self.rel)
     }
 
     /// Run up to `max_cycles` ADDITIONAL restart cycles (transposed

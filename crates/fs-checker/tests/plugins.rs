@@ -308,9 +308,9 @@ fn both_families_reach_package_json_standalone_and_release_gates() {
             fixture.witness_hash
         );
 
-        let package = package(fixture, false);
-        let root = package_root(&package);
-        let semantic = fs_checker::plugins::verify_portable_semantics(&package);
+        let base_package = package(fixture, false);
+        let root = package_root(&base_package);
+        let semantic = fs_checker::plugins::verify_portable_semantics(&base_package);
         assert_eq!(semantic.status(), SemanticStatus::Verified);
         assert_eq!(semantic.package_root(), root);
         assert_eq!(semantic.registry_fingerprint().to_hex(), REGISTRY_HASH);
@@ -337,7 +337,7 @@ fn both_families_reach_package_json_standalone_and_release_gates() {
             Some(fixture.plugin_hash.to_string())
         );
 
-        let in_memory = check_with_capabilities(&package, Some(root), None, &capabilities());
+        let in_memory = check_with_capabilities(&base_package, Some(root), None, &capabilities());
         assert!(in_memory.passed(), "{:?}", in_memory.findings());
         assert_eq!(in_memory.integrity_status(), IntegrityStatus::Verified);
         assert_eq!(in_memory.semantic_status(), SemanticStatus::Verified);
@@ -345,7 +345,7 @@ fn both_families_reach_package_json_standalone_and_release_gates() {
         assert_eq!(in_memory.semantic_report(), &semantic);
         assert_eq!(
             check_json_with_capabilities(
-                &package_json(&package),
+                &package_json(&base_package),
                 Some(root),
                 None,
                 &capabilities(),

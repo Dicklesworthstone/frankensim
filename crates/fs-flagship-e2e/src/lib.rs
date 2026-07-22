@@ -12,13 +12,18 @@
 //!   and compares hashes — every stage here is deterministic, so hash
 //!   equality IS the gate (stochastic-labeled stages would gate on
 //!   envelopes instead).
-//! - CROSS-FLAGSHIP AUDITS: shared machinery must behave identically
-//!   across consumers — one canonical D2Q9 roll hash for the LBM core
-//!   the vessel and the ornithoid both ride, and one e-race consistency
-//!   audit across both flagships' racing conventions.
+//! - SHARED-CORE AUDITS: one canonical uniform-tau D2Q9 roll hash for
+//!   the collide/stream core the vessel and the ornithoid both ride
+//!   (its coverage is bounded — see [`lbm_core_roll_hash`]), and one
+//!   e-race audit that replays the race core and checks the ornithoid's
+//!   public screening wrapper against it under the ornithoid's own
+//!   declared span. `fs-vessel` exposes no public race wrapper — its
+//!   convention lives in its own battery — so NO cross-flagship
+//!   convention comparison is claimed here.
 //! - FAILURE DRILLS: cancellation storms, budget exhaustion,
 //!   ledger crash-recovery, model-form escalation — each with an
-//!   EXPECTED STRUCTURED OUTCOME, not a shrug.
+//!   EXPECTED STRUCTURED OUTCOME that is MEASURED, not a literal
+//!   written into the row.
 //! - FORENSIC LOGGING: every stage emits structured JSON rows
 //!   (metrics, certificates, race records, timings) sufficient to
 //!   diagnose failures from logs + ledger alone; the battery parses
@@ -156,10 +161,29 @@ pub fn notebook(artifacts: &[StageArtifact]) -> String {
     body
 }
 
-/// Canonical D2Q9 roll: the SHARED-CORE audit fixture. Both the vessel
-/// and the ornithoid ride fs-lbm; any behavioral change in the core
-/// surfaces HERE as one delta with one constant to bump (with
-/// justification), instead of two flagships drifting silently apart.
+/// A canonical UNIFORM-TAU D2Q9 BGK roll (periodic in `x`, wall-bounded
+/// in `y`) giving the vessel and ornithoid consumers ONE shared audit
+/// point for the collide/stream core, with one constant to bump (with
+/// justification) when that path moves.
+///
+/// COVERAGE, exactly: `Grid::uniform(24, 16, 0.6)` — one relaxation
+/// time, no external force, no rheology — with full-width `Wall` rows at
+/// `y = 0` and `y = ny-1`, 50 plain `grid.step()` calls, hashing
+/// `rho`/`ux`/`uy` at 6 probe cells. It therefore pins uniform-tau BGK
+/// collide + plain stream + top/bottom bounce-back on a periodic-x
+/// lattice, and NOTHING ELSE.
+///
+/// It does NOT cover: `Rheology` (the vessel's `run_pour` passes
+/// `Rheology::Newtonian`), `ContactModel`/free surface, interior
+/// rasterized-obstacle bounce-back (`fs_ornith::refine`), non-periodic-x
+/// with pinned inlet/outlet equilibrium columns, momentum-exchange or
+/// partial-saturation variants, or D3Q19. A change confined to those
+/// paths will not move this hash — the repo's own history is the
+/// counterexample: the `xo2k` migration of the fs-lbm rheology `powf`
+/// paths to `det::pow` changed shared machinery the vessel rides and
+/// `GOLDEN_LBM_CORE` did not move for it. Extending coverage means
+/// adding fixtures, not widening this sentence (bead
+/// `frankensim-extreal-program-f85xj.2.36`).
 #[must_use]
 pub fn lbm_core_roll_hash() -> u64 {
     use fs_lbm::{Cell, Grid, Q, equilibrium};

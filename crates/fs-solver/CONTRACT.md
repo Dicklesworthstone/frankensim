@@ -19,9 +19,22 @@ diagnoses, never timeout mysteries).
 
 - `LinearOp` — matrix-free operator trait: `n`, `apply`, and
   `apply_transpose` (defaulting to `apply` — correct ONLY for
-  symmetric operators; the transposed-solve battery catches
-  violations). `CsrOp::symmetric/general` adapts assembled matrices
-  (general materializes the transpose once, deterministically).
+  symmetric operators). `CsrOp::symmetric/general` adapts assembled
+  matrices (general materializes the transpose once,
+  deterministically).
+  **NO-CLAIM: the crate does not verify operator symmetry.** There is
+  no symmetry probe anywhere in fs-solver, so nothing detects a client
+  `LinearOp` that inherits the default `apply_transpose` on a
+  nonsymmetric operator. The transposed-solve battery pins the crate's
+  OWN adapters — `CsrOp::general` and one nonsymmetric fs-opdsl
+  convection–diffusion fixture that does override the method — and it
+  cannot cover operators it never sees. An implementor who inherits the
+  default on a nonsymmetric operator gets `GmresState::run(.., transposed
+  = true)` solving `A·λ = rhs` instead of `Aᵀ·λ = rhs`; it converges
+  normally and reports a small residual, but that residual is measured
+  against the operator supplied, not against its transpose, so it is no
+  evidence that the adjoint system was solved. Callers who need the
+  guarantee must run their own `⟨Av, w⟩ = ⟨v, Aᵀw⟩` probe.
 - `RectLinearOp` and `BlockOperator<N>` (`BlockOperator2` and
   `BlockOperator3` aliases) — dimension-checked rectangular block
   algebra with fixed-order primal and transpose application.
@@ -72,14 +85,37 @@ diagnoses, never timeout mysteries).
   Plateau = < 5% relative progress over the last 50-iteration window
   (calibrated: CG's recursive residual on inconsistent singular
   systems DIVERGES rather than plateauing — see `diag_probe.rs`).
+  **`rel_residual` is not one quantity, and `converged` is not a
+  Euclidean claim.** The field carries whatever the producing solver
+  measures, and `converged` means only "that measure met `tol`":
+  GMRES(m) and FGMRES recompute the true `‖b − Ax‖₂/‖b‖₂`; CG reports
+  the RECURSIVELY propagated residual (never recomputed as `b − Ax`,
+  so it drifts, and it drifts low); MINRES reports the Givens `|η|/‖b‖₂`
+  estimate; and P-MINRES reports `|η|/‖b‖_M` — an estimate in the
+  PRECONDITIONER's M-norm, which for an ill-conditioned SPD `M` is
+  unrelated in magnitude to the Euclidean residual (with
+  `M = diag(1, 1e-12)`, `r = (0,1)` against `b = (1,0)` gives
+  `‖r‖_M/‖b‖_M = 1e-6` while `‖r‖₂/‖b‖₂ = 1`). `ResidualClaim::
+  {TrueEuclidean, RecursiveEstimate, MNormEstimate}` names the three,
+  and every solver state exposes `residual_claim()`; a driver that
+  needs a Euclidean statement from CG/MINRES/P-MINRES must recompute
+  `b − Ax` itself. The provenance is NOT carried on `SolveReport`
+  itself — that struct is constructed by struct literal outside this
+  crate, so the field could not be added without breaking those
+  callers.
 - `PMultigrid` — matrix-free p-MG V-cycle as a `Precond`: order
   hierarchy r → r/2 → … → 1 over fs-feec `TensorSpace`s; prolongation
   is EXACT INJECTION (the hierarchical Lobatto basis nests, so the
   Galerkin coarse operator IS the coarse-order operator — nothing
   assembled except r = 1); the r = 1 coarse level is assembled
-  (interior Kronecker CSR) and solved near-exactly by
-  SA-AMG-preconditioned CG (a loosely-solved coarse level makes the
-  V-cycle a VARYING preconditioner and demonstrably breaks plain CG).
+  (interior Kronecker CSR) and solved by SA-AMG-preconditioned CG at a
+  REQUESTED 1e-13 within a 2000-iteration cap (a loosely-solved coarse
+  level makes the V-cycle a VARYING preconditioner and demonstrably
+  breaks plain CG). "Near-exact" is the request, not a proven property:
+  the receipt is retained on the preconditioner and readable through
+  `coarse_solves_converged()` / `worst_coarse_rel_residual()` /
+  `coarse_solves()`, and `reset_coarse_evidence()` scopes it to one
+  outer solve.
   SMOOTHING (bead x08j): Chebyshev (band [λmax/16, λmax], power-method
   λmax of the PRECONDITIONED operator) accelerating PU-symmetrized
   vertex-patch additive Schwarz (all dofs of the ≤ 8 elements around
@@ -133,8 +169,16 @@ diagnoses, never timeout mysteries).
   restart boundaries.
 - All inner products flow through the fixed-shape reduction — no
   thread- or tier-dependent bit patterns anywhere.
-- The V-cycle preconditioner is symmetric (identical pre/post
-  smoothing, Galerkin-consistent transfers, near-exact coarse).
+- The V-cycle preconditioner is symmetric by construction (identical
+  pre/post smoothing, Galerkin-consistent transfers). Its FIXITY —
+  the property plain CG actually needs — additionally requires the
+  r = 1 coarse solve to be near-exact, and that is REQUESTED (1e-13
+  within a 2000-iteration cap), not established: an application that
+  exits on the cap makes the V-cycle an inexact, application-dependent
+  operator. `PMultigrid::coarse_solves_converged()` (with
+  `worst_coarse_rel_residual()` and `coarse_solves()`) is the retained
+  receipt; a driver that does not consult it is asserting fixity
+  without evidence. No seeded fault currently makes the cap fire.
 - Transposed solves share every piece of primal infrastructure.
 - The G3 bounded-integer nonsymmetric fixture satisfies the exact linear
   adjoint/finite-difference identity through `CsrOp::apply` and

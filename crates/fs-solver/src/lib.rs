@@ -31,7 +31,9 @@ pub use block::{
     BlockError, BlockOperator, BlockOperator2, BlockOperator3, BlockSchur2,
     RealEquivalentComplexOp, RectLinearOp, SchurSolveSign, SquareBlock, ZeroBlock,
 };
-pub use krylov::{CgState, GmresState, MinresState, PminresState, SolveReport, StallDiagnosis};
+pub use krylov::{
+    CgState, GmresState, MinresState, PminresState, ResidualClaim, SolveReport, StallDiagnosis,
+};
 pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
 pub use nonlinear::{
     AdmittedLinearSolver, DefinitenessEvidence, FgmresState, FlexiblePreconditioner, Globalization,

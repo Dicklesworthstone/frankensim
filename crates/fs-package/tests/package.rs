@@ -1055,6 +1055,184 @@ fn derived_vacuous_verified_enclosure_remains_sound_and_explicitly_unbounded() {
         EvidencePackage::from_json(&package_json(&package)).expect("package parses"),
         package
     );
+
+    // The fixture above masked the mechanism: it asserted the Certificate row
+    // but never the VerifiedColor row (bead
+    // frankensim-extreal-program-f85xj.2.12). The vacuous derived enclosure
+    // must not make the rank row Covered either.
+    let verified_color = presence
+        .iter()
+        .find(|row| row.concept() == PackageConcept::VerifiedColor)
+        .expect("verified-colour concept is reported");
+    assert!(verified_color.present());
+    assert!(
+        verified_color.why().contains("2 informative of 3"),
+        "the vacuous derived enclosure must not be counted as informative: {}",
+        verified_color.why()
+    );
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.12 — `rank_presence`
+/// applied NO informativeness filter, so a claim explicitly asserting no bound
+/// (`[-inf, +inf]`, or an `Estimated` claim with `+inf` dispersion) made its
+/// standards row `Covered`. For the SAME standard the Certificate row reported
+/// `MappedButAbsent` off the finiteness filter one function away.
+#[test]
+fn claim_integrity_f85xj_2_12_vacuous_claims_do_not_establish_rank_coverage() {
+    use fs_crosswalk::{PackageConcept, Standard};
+    use fs_package::CoverageStatus;
+
+    let provenance = prov();
+    let unbounded = Claim::from_certificate(
+        "unbounded",
+        "an explicitly unbounded certificate",
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        "test-solver/cert",
+        fixture_source_hash(
+            &provenance,
+            0,
+            "unbounded",
+            "an explicitly unbounded certificate",
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            "test-solver/cert",
+        ),
+    );
+    let no_spread = Claim::estimated(
+        "no-spread",
+        "an estimate with no spread claim at all",
+        "estimator-a",
+        f64::INFINITY,
+    );
+    let package = EvidencePackage::new(provenance)
+        .with_claim(unbounded)
+        .with_claim(no_spread);
+    verify_package(&package).expect("an explicit no-bound package is structurally sound");
+
+    let presence = fs_package::package_presence_with(&package, &source_capabilities());
+    for concept in [
+        PackageConcept::VerifiedColor,
+        PackageConcept::EstimatedColor,
+        PackageConcept::Certificate,
+    ] {
+        let row = presence
+            .iter()
+            .find(|row| row.concept() == concept)
+            .expect("concept is reported");
+        assert!(
+            !row.present(),
+            "{concept:?} must not be present from a vacuous claim: {}",
+            row.why()
+        );
+    }
+    let verified_row = presence
+        .iter()
+        .find(|row| row.concept() == PackageConcept::VerifiedColor)
+        .expect("verified-colour concept is reported");
+    assert!(
+        verified_row.why().contains("0 informative of 1"),
+        "the rationale must carry both counts: {}",
+        verified_row.why()
+    );
+
+    let coverage =
+        fs_package::package_coverage_with(&package, Standard::AsmeVvV20, &source_capabilities());
+    for (concept, status, _why) in &coverage {
+        if matches!(concept, PackageConcept::VerifiedColor) {
+            assert_eq!(
+                *status,
+                CoverageStatus::MappedButAbsent,
+                "a vacuous Verified colour cannot evidence a certified numerical bound"
+            );
+        }
+    }
+
+    // A finite claim of the same rank still counts.
+    let finite = EvidencePackage::new(prov()).with_claim(source_claim(
+        &prov(),
+        0,
+        "bounded",
+        "a bounded certificate",
+        -1.0,
+        1.0,
+    ));
+    verify_package(&finite).expect("finite package verifies");
+    let finite_presence = fs_package::package_presence_with(&finite, &source_capabilities());
+    assert!(
+        finite_presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::VerifiedColor)
+            .expect("verified-colour concept is reported")
+            .present()
+    );
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.6 (fs-package mirror) —
+/// `[+inf, +inf]` satisfies `lo <= hi` yet encloses no real value. Before the
+/// fix `verify_with` returned Ok, `breakdown().verified == 1`, `render_pie`
+/// printed "verified 1 (100%)", and the claim round-tripped through
+/// `to_json`/`from_json`.
+#[test]
+fn claim_integrity_f85xj_2_6_package_refuses_the_point_at_infinity() {
+    let provenance = prov();
+    for infinity in [f64::INFINITY, f64::NEG_INFINITY] {
+        let claim = Claim::from_certificate(
+            "point-at-infinity",
+            "an overflowed computation",
+            infinity,
+            infinity,
+            "test-solver/cert",
+            fixture_source_hash(
+                &provenance,
+                0,
+                "point-at-infinity",
+                "an overflowed computation",
+                infinity,
+                infinity,
+                "test-solver/cert",
+            ),
+        );
+        let package = EvidencePackage::new(provenance.clone()).with_claim(claim);
+        assert!(
+            matches!(
+                verify_package(&package),
+                Err(PackageError::IncompleteVerifiedClaim { .. })
+            ),
+            "a point certificate at infinity must not verify"
+        );
+        // The serialized door refuses too — a rejected in-memory package cannot
+        // be smuggled back in as JSON.
+        let json = package_json(&package);
+        let parse_error = EvidencePackage::from_json(&json)
+            .expect_err("a point certificate at infinity must not parse");
+        assert!(parse_error.why.contains("infinity"), "{parse_error}");
+    }
+
+    // Half-infinite and whole-line enclosures remain sound but vacuous.
+    for (lo, hi) in [
+        (f64::NEG_INFINITY, 1.0),
+        (1.0, f64::INFINITY),
+        (f64::NEG_INFINITY, f64::INFINITY),
+    ] {
+        let sound = EvidencePackage::new(provenance.clone()).with_claim(Claim::from_certificate(
+            "vacuous",
+            "sound but vacuous",
+            lo,
+            hi,
+            "test-solver/cert",
+            fixture_source_hash(
+                &provenance,
+                0,
+                "vacuous",
+                "sound but vacuous",
+                lo,
+                hi,
+                "test-solver/cert",
+            ),
+        ));
+        verify_package(&sound).expect("ordered infinite endpoints remain admissible");
+    }
 }
 
 #[test]

@@ -880,3 +880,108 @@ fn exact_hvp_symmetry_fd_gap_and_tr_win() {
         &format!("sym {sym_rel:.1e}, FD gap {fd_err_best:.1e}..{fd_err_worst:.1e}"),
     );
 }
+
+// ---- Claim-integrity regressions (E02 sweep) --------------------------
+
+#[test]
+fn verification_gate_refuses_bit_insensitive_directions() {
+    // frankensim-extreal-program-f85xj.2.20. The silent-zero seam: a
+    // forward path that drops the parameter produces BOTH a zero
+    // cotangent and two bit-identical objective evaluations, so
+    // analytic = fd = 0 and the relative error is 0/scale = 0 — the
+    // PERFECT score. Before the fix this returned pass = true with
+    // max_rel_err = 0.0; the refusal preflight did not fire because the
+    // direction is finite, non-zero, and both perturbations move the
+    // stored coordinates.
+    let bit_insensitive = |_point: &[f64]| 7.0;
+    let verdict = verify_gradient(
+        &bit_insensitive,
+        &[1.0, 2.0],
+        &[0.0, 0.0],
+        &[vec![1.0, -1.0]],
+        1e-6,
+        1e-6,
+    );
+    assert_eq!(
+        verdict.pairs,
+        vec![(0.0, 0.0)],
+        "the no-signal pair must still be reported as diagnostics"
+    );
+    assert_eq!(
+        verdict.informative_directions, 0,
+        "a zero-vs-zero probe carries no signal"
+    );
+    assert_gradient_refused(&verdict);
+
+    // The gate must not over-refuse: one no-signal direction alongside a
+    // real one still passes, and the count says how much evidence there
+    // actually was.
+    let linear_in_first = |point: &[f64]| point[0];
+    let mixed = verify_gradient(
+        &linear_in_first,
+        &[1.0, 2.0],
+        &[1.0, 0.0],
+        &[vec![0.0, 1.0], vec![1.0, 0.0]],
+        1e-6,
+        1e-6,
+    );
+    assert!(mixed.pass, "a genuinely corroborated gradient still passes");
+    assert_eq!(
+        mixed.informative_directions, 1,
+        "only one of the two probes carried signal"
+    );
+
+    // And the silent-zero gradient is still CAUGHT on the informative
+    // direction rather than being excused by the no-signal one.
+    let zeroed = verify_gradient(
+        &linear_in_first,
+        &[1.0, 2.0],
+        &[0.0, 0.0],
+        &[vec![0.0, 1.0], vec![1.0, 0.0]],
+        1e-6,
+        1e-6,
+    );
+    assert!(!zeroed.pass, "a silent-zero gradient must not pass");
+    assert_eq!(zeroed.informative_directions, 1);
+}
+
+#[test]
+#[should_panic(expected = "parameter-space pullback length")]
+fn ift_gradient_refuses_a_truncated_pullback() {
+    // frankensim-extreal-program-f85xj.2.26. A masked/sliced pullback
+    // shorter than ∂J/∂p used to be zipped in silently: the returned
+    // vector had the expected length, its head carried the total
+    // derivative and its tail only the explicit partial, and the report
+    // still said converged.
+    let (_, k0, n) = poisson_pair(2);
+    let k_op = CsrOp::symmetric(k0);
+    let djdu = rand_vec(n, 70);
+    let djdp = vec![1.0f64; 4];
+    let _ = ift_gradient_matfree(
+        &k_op,
+        &djdu,
+        &djdp,
+        &|_lambda| vec![0.5f64; 2], // a 2-component pullback against a 4-component ∂J/∂p
+        1e-10,
+        50,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Hessian solve tolerance")]
+fn hessian_refuses_a_vacuous_solve_tolerance() {
+    // frankensim-extreal-program-f85xj.2.27. CG checks rel_residual < tol
+    // at the top of the loop with x = 0 and rel_residual = 1, so any
+    // tol > 1 breaks out at zero iterations and reports converged. All
+    // four inner solves then returned the zero vector and the function
+    // published exact zeros as the EXACT H·v, behind an
+    // assert!(rep.converged) that passed vacuously.
+    let (complex, positions) = kuhn_cube(2);
+    let nt = complex.tets.len();
+    let problem = DensityPoisson::new(&complex, &positions, vec![1.0; nt]);
+    let n = problem.n();
+    let b = rand_vec(n, 95);
+    let u_star = rand_vec(n, 96);
+    let v = rand_vec(nt, 97);
+    let _ = fs_adjoint::density_misfit_hvp(&problem, &b, &u_star, &v, 2.0);
+}

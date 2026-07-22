@@ -292,21 +292,56 @@ fn signature_presence(report: &PackageReport) -> (bool, String) {
     }
 }
 
+/// Is a claim of this rank INFORMATIVE — i.e. does it actually quantify
+/// anything?
+///
+/// Rank alone is a shape, not evidence. A `Verified` colour is only an ordered
+/// non-NaN interval, so `[-inf, +inf]` carries the rank while explicitly
+/// asserting NO bound; an `Estimated` colour with `+inf` dispersion is the
+/// crate's own encoding of "no spread claim". Counting either as coverage
+/// laundered an explicit no-bound into a standards row that a reader is
+/// entitled to read as a quantified bound (bead
+/// frankensim-extreal-program-f85xj.2.12). Mirrors the finiteness filter
+/// [`certificate_presence`] has always applied.
+fn rank_claim_is_informative(color: &Color) -> bool {
+    match color {
+        // declared-color-ok: pattern read (multi-line arm/guard/let-else); destructures rank, constructs nothing (6pf9)
+        Color::Verified { lo, hi } => lo.is_finite() && hi.is_finite(),
+        // declared-color-ok: pattern read (multi-line arm/guard/let-else); destructures rank, constructs nothing (6pf9)
+        Color::Estimated { dispersion, .. } => dispersion.is_finite(),
+        Color::Validated { .. } => true,
+    }
+}
+
 fn rank_presence(
     pkg: &EvidencePackage,
     report: &PackageReport,
     rank: ColorRank,
     description: &str,
 ) -> (bool, String) {
-    let count = pkg
+    let admitted: Vec<&Color> = pkg
         .claims
         .iter()
         .enumerate()
         .filter(|(index, claim)| is_scientific(report, *index) && claim.color.rank() == rank)
+        .map(|(_, claim)| &claim.color)
+        .collect();
+    let total = admitted.len();
+    let informative = admitted
+        .into_iter()
+        .filter(|color| rank_claim_is_informative(color))
         .count();
     (
-        count > 0,
-        format!("{count} admitted scientific {description} claim(s)"),
+        informative > 0,
+        if informative == total {
+            format!("{total} admitted scientific {description} claim(s)")
+        } else {
+            format!(
+                "{informative} informative of {total} admitted scientific {description} \
+                 claim(s); a vacuous claim of this rank quantifies nothing and does not \
+                 establish coverage"
+            )
+        },
     )
 }
 
@@ -320,7 +355,7 @@ fn certificate_presence(pkg: &EvidencePackage, report: &PackageReport) -> (bool,
                 && matches!(
                     &claim.color,
                     // declared-color-ok: pattern read (multi-line arm/guard/let-else); destructures rank, constructs nothing (6pf9)
-                    Color::Verified { lo, hi } if lo.is_finite() && hi.is_finite()
+                    Color::Verified { .. } if rank_claim_is_informative(&claim.color)
                 )
         })
         .count();

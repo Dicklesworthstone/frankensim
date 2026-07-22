@@ -161,6 +161,13 @@ pub fn lorenz_points(steps_in: usize, dt_in: f64, rho_in: f64) -> Vec<f64> {
 /// - then `steps * nPoints * 3` values, frame-major: for each frame `s`, for
 ///   each seed point `i`, its transformed `x,y,z`. Total `2 + steps*nPoints*3`.
 ///
+/// Every emitted triple is the image of the seed point under the accumulated
+/// motor, or `(NaN, NaN, NaN)` if that sandwich product was REFUSED
+/// ([`fs_ga::GaError::IdealPoint`], a zero-weight result). A refusal is never
+/// serialized as a coordinate: folding it to `NaN` is the crate-wide fallible-
+/// kernel ABI policy, and it keeps a refused transform distinguishable from a
+/// genuine identity image (which publishing the untransformed seed would not).
+///
 /// `nPoints` clamped to `[3,200]`, `steps` to `[1,240]`.
 pub fn ga_motor_orbit(npoints_in: usize, steps_in: usize) -> Vec<f64> {
     let npoints = npoints_in.clamp(3, 200);
@@ -192,20 +199,33 @@ pub fn ga_motor_orbit(npoints_in: usize, steps_in: usize) -> Vec<f64> {
     let mut acc = Motor::identity();
     for _s in 0..steps {
         for &pt in seed.iter() {
-            match acc.transform_point(pt) {
-                Ok(q) => {
-                    out.push(q.x);
-                    out.push(q.y);
-                    out.push(q.z);
-                }
-                Err(_) => {
-                    out.push(pt.x);
-                    out.push(pt.y);
-                    out.push(pt.z);
-                }
-            }
+            push_motor_image(&mut out, &acc, pt);
         }
         acc = acc.compose(&step_motor);
     }
     out
+}
+
+/// Push one motor image, folding a REFUSED sandwich product to `(NaN, NaN,
+/// NaN)`.
+///
+/// The seed coordinates are deliberately NOT the fallback: republishing the
+/// untransformed seed makes a refusal bit-indistinguishable from a genuine
+/// identity image, so the payload would assert "this is the motor's image of
+/// the seed" on a slot where no image was computed. `NaN` is this crate's
+/// documented fold for a fallible kernel result and is the honest wire value
+/// for "no image".
+pub(crate) fn push_motor_image(out: &mut Vec<f64>, motor: &Motor, pt: Point) {
+    match motor.transform_point(pt) {
+        Ok(q) => {
+            out.push(q.x);
+            out.push(q.y);
+            out.push(q.z);
+        }
+        Err(_) => {
+            out.push(f64::NAN);
+            out.push(f64::NAN);
+            out.push(f64::NAN);
+        }
+    }
 }

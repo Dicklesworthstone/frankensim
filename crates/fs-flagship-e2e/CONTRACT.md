@@ -70,9 +70,18 @@ and structured failure evidence.
   events rather than printing this utility shape directly.
 - `notebook(artifacts)` emits the deterministic lab-notebook body
   over stage hashes and metric bit patterns.
-- `lbm_core_roll_hash()` runs a canonical D2Q9 roll fixture so vessel
-  and ornithoid consumers share one public audit point for the LBM
-  core.
+- `lbm_core_roll_hash()` runs a canonical UNIFORM-TAU D2Q9 BGK roll
+  fixture (`Grid::uniform(24, 16, 0.6)`, periodic in `x`, full-width
+  walls at `y = 0` and `y = ny-1`, 50 plain `step()` calls, 6 probe
+  cells) so vessel and ornithoid consumers share one public audit point
+  for the collide/stream core. Its authority is exactly that path. It
+  does not cover `Rheology`, `ContactModel`/free surface, interior
+  rasterized-obstacle bounce-back, non-periodic inlet/outlet columns,
+  momentum-exchange or partial-saturation variants, or D3Q19; a change
+  confined to those paths will not move the hash. (The `xo2k` migration
+  of fs-lbm's rheology `powf` paths to `det::pow` is the repo's own
+  counterexample: shared machinery the vessel rides moved and
+  `GOLDEN_LBM_CORE` did not.)
 
 ## Invariants
 
@@ -83,13 +92,44 @@ and structured failure evidence.
    Vessel and ornith smoke companion events include the complete metric-bit
    notebook evidence so a future golden delta can be attributed field by
    field.
-3. Shared machinery changes should surface once in the shared audit,
-   not as silent drift across individual flagships.
+3. Shared-machinery changes surface once in a shared audit, within that
+   audit's stated coverage. Two audits exist and neither is a
+   cross-flagship convention comparison:
+   - the LBM roll hash covers the uniform-tau collide/stream path only
+     (see `lbm_core_roll_hash` above);
+   - fe2e-006 covers race-core replay determinism plus agreement between
+     `fs_ornith::screen_generation` — the one flagship consumer with a
+     public race wrapper — and the same core driven under the
+     ornithoid's declared span (1.52) and normalization ceiling (1.5).
+     `fs-vessel` exposes no public race wrapper (`robustify` runs no
+     race; its 200x convention lives in the vessel's own battery), so no
+     claim is made that the two flagships' conventions agree.
 4. Mid and full stages are wired with `#[ignore]` until their
    cadence and envelopes belong to the perf/CI lanes.
-5. Failure drills must produce expected structured outcomes:
-   cancellation storms, budget exhaustion, ledger crash recovery, and
-   model-form escalation.
+5. Failure drills must produce expected structured outcomes, and every
+   field a drill row publishes must be DERIVED FROM STATE THE DRILL
+   MOVED — never a literal written into the format string:
+   - cancellation storm: the race completes with a surviving winner
+     after mid-race kills;
+   - budget exhaustion: a real refinement counter funds
+     `LBM_REFINE_BUDGET = 1` LBM refinement, then the remaining 5 of 6
+     candidates DEGRADE to the surrogate + conformal path; funded and
+     degraded counts and the in-band count are all measured, and the
+     gate fails if nothing degrades or the funded lane cannot answer;
+   - ledger crash recovery: after a transaction is begun and dropped
+     without commit, the reopened ledger is READ BACK — the committed
+     artifact materializes byte-identical, the artifact written inside
+     the uncommitted transaction is absent, `events` holds exactly the
+     one committed row, and artifact integrity verifies clean.
+     `schema_version().is_ok()` is recorded but is not the gate: it
+     stays true both when a recovery loses the committed prefix and when
+     it replays the uncommitted transaction;
+   - model-form escalation: `fs_surrogate::certify_or_escalate` takes a
+     real decision on the FITTED band half-width — escalating at a
+     tolerance below it, serving the surrogate at a tolerance above it —
+     and the escalated query is then actually served by the funded LBM
+     lane. The count of conformal violations is reported as a measured
+     number, not as an escalation claim.
 
 ## Error model
 
@@ -131,15 +171,42 @@ than Cargo features.
 - **fe2e-003** frame smoke-stage hash replay.
 - **fe2e-004** marquee lane status recording; the suite records the
   owning lane status instead of pretending a disabled runner.
-- **fe2e-005** shared LBM D2Q9 roll hash for vessel/ornithoid shared
-  core behavior.
-- **fe2e-006** e-race consistency over identical normalized losses.
+- **fe2e-005** shared uniform-tau D2Q9 roll hash for the collide/stream
+  path both flagships ride (coverage bounded as stated above).
+- **fe2e-006** race-core replay determinism on a fixed normalized loss
+  table, plus `fs_ornith::screen_generation` agreement with the same
+  core under the ornithoid's declared span. No vessel claim.
 - **fe2e-007** failure drills for cancellation storms, budget
-  exhaustion, ledger crash recovery, and model-form escalation.
+  exhaustion, ledger crash recovery, and model-form escalation, with
+  every emitted outcome field measured.
 - **fe2e-008** forensic JSON row self-audit and bitwise notebook
   replay.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
+
+Four further tests are DRILL FALSIFIERS. They emit no aggregate and no
+forensic companion; they exist so a green drill cannot be a silent pass.
+Each seeds the fault its bead names and asserts the drill's own gate
+rejects it:
+
+- `fe2e_006_consumer_core_agreement_is_falsifiable` — a drifted
+  normalization ceiling or declared span must break consumer/core
+  agreement, while the pre-fix self-replay shape stays green under both
+  (bead `frankensim-extreal-program-f85xj.2.31`).
+- `fe2e_007_budget_drill_counts_real_degradation` — funding every
+  candidate must yield `degraded == 0` and fail the gate; a funded lane
+  that cannot answer must fail it too (bead `…2.32`).
+- `fe2e_007_ledger_drill_detects_a_broken_recovery` — a recovery that
+  discards the committed prefix and one that replays the uncommitted
+  transaction must both fail, and both are shown to leave
+  `schema_version().is_ok()` true (bead `…2.33`).
+- `fe2e_007_escalation_drill_takes_a_real_decision_and_spends_it` — the
+  escalated query must reach the funded lane exactly once, and a lane
+  that returns no answer must not be reported as served (bead `…2.32`).
+
+The falsifiers stub the high-fidelity lane so the ACCOUNTING can be
+falsified without paying for six LBM refinements; fe2e-007 itself spends
+the real refinements (one funded, one escalated).
 
 `tests/production_scale.rs` is the ignored scale battery for
 `frankensim-ei3b`. An explicit profile admits either an M4 or Threadripper host
@@ -226,24 +293,30 @@ success. Linux `VmHWM` and the macOS peak-RSS refusal keep the same semantics
 as the scalar rung; no quiet-host performance or attributed RSS-budget claim
 follows from them.
 
-The eight completed aggregates retain their existing case identities
-and emit canonical `ConformanceCase` records with Info/Error severity,
+The eight completed aggregates emit canonical `ConformanceCase` records
+with Info/Error severity,
 failure-record linting, JSONL validation, and print-before-terminal-
 assert ordering. Ten live forensic companions retain the prior identity
 pairs by mapping `stage` to the emitter scope and `kind` to the
 `Custom` name: `vessel-smoke/artifact`, `ornith-smoke/artifact`,
 `frame-smoke/artifact`, `marquee/status`, `erace-audit/race`, the four
 `drill/*` outcomes, and `notebook/emitted`. Their object payloads are
-validated before printing. The constructed-only `log_row` fixtures in
-fe2e-008 remain the escaping and utility-shape self-audit; they are not
-live suite rows.
+validated before printing. The fe2e-006 case identity is
+`fe2e-006-erace-core-and-ornith-consumer` (formerly
+`fe2e-006-erace-audit`): the old name described a cross-consumer
+comparison the case never performed. The constructed-only `log_row`
+fixtures in fe2e-008 remain the escaping and utility-shape self-audit;
+they are not live suite rows.
 
 Input-seed provenance follows the fixtures exactly. fe2e-001,
 fe2e-004, and fe2e-005 are fixed-input cases and use zero. fe2e-002
 uses `0xE2E` for both its generation LCG and screening call. fe2e-003
 uses ensemble input seed `90210`; the Cx stream seed `0xF1A6_5A1D` is
 recorded separately as execution provenance and is never presented as
-input randomness. fe2e-006 uses `0xAB` for both replayed race runs.
+input randomness. fe2e-006 uses `0xAB` for both replayed race runs and
+records `0xE2E` separately as `ornith_input_seed`, the seed of the
+generation its consumer/core agreement check screens; the aggregate case
+keeps `0xAB`.
 The composite fe2e-007 aggregate uses zero while its companions carry
 the cancellation seed `0x570`, the shared surrogate/model seed
 `0x0771`, and zero for the fixed ledger drill. The composite fe2e-008

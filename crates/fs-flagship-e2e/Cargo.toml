@@ -25,6 +25,10 @@ fs-vessel = { path = "../fs-vessel" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+# The certify-or-escalate policy the fe2e-007 model-form drill decides with
+# (already in the tree through fs-ornith's conformal band; named here so the
+# suite calls the real policy instead of re-deriving one).
+fs-surrogate = { path = "../fs-surrogate" }
 
 [lints]
 workspace = true

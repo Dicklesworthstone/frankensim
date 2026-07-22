@@ -426,3 +426,121 @@ fn sealed_fd_context_detects_mutation_and_cross_context_replay() {
         Err(GradientCertError::InvalidObjectiveIdentity { .. })
     ));
 }
+
+// ---- Claim-integrity regressions (E02 sweep) --------------------------
+
+#[test]
+fn gc_010_small_derivative_cannot_launder_a_zero_adjoint_through_the_merge_gate() {
+    // frankensim-extreal-program-f85xj.2.21. fd_falsifier's acceptance
+    // band used `base_tol * max(|dd|, |fd|, 1.0)` — the `.max(1.0)` is an
+    // ABSOLUTE floor unrelated to problem scale, so with the production
+    // constants (h = 1e-5, base_tol = 1e-7) every derivative below 1e-7
+    // accepted anything in [-1e-7, 1e-7]: a silently zero adjoint, and
+    // its exact sign flip, were both recorded as `consistent`, the
+    // sealed batch reported fd_all_consistent(), and merge_gate returned
+    // Ok. The band is now homogeneous in the derivative scale.
+    let tiny_slope = |x: &[f64]| 1e-9 * x[0];
+    let point = [1.0];
+
+    let silent_zero = fd_spot_checks(
+        "objective:tiny-slope",
+        &tiny_slope,
+        &point,
+        &[0.0],
+        4,
+        0x51e,
+    )
+    .expect("finite fixture");
+    assert!(
+        silent_zero
+            .verdicts()
+            .iter()
+            .all(|verdict| verdict.falsifiable && !verdict.consistent),
+        "a 4e-10-scale derivative is well above the noise floor and must be resolved: {:?}",
+        silent_zero.verdicts()
+    );
+    let zero_context = silent_zero.context_digest().to_string();
+    let zero_cert = certify(
+        &grade_ops(&["convert/restrict"], &BTreeSet::new()),
+        None,
+        Some(silent_zero),
+        None,
+    );
+    assert!(
+        !zero_cert.fd_all_consistent(),
+        "a silent-zero gradient must not report all-consistent FD checks"
+    );
+    let refusal = merge_gate(&zero_cert, &zero_context)
+        .expect_err("a silent-zero adjoint must block the merge gate");
+    assert!(
+        refusal.to_string().contains("transpose or sign bug"),
+        "teaches the cause: {refusal}"
+    );
+
+    // The sign flip is caught for the same reason.
+    let flipped = fd_spot_checks(
+        "objective:tiny-slope",
+        &tiny_slope,
+        &point,
+        &[-1e-9],
+        4,
+        0x51e,
+    )
+    .expect("finite fixture");
+    assert!(flipped.verdicts().iter().all(|v| !v.consistent));
+
+    // The CORRECT adjoint on the same tiny slope still merges: the fix
+    // tightens the band, it does not refuse small derivatives.
+    let honest = fd_spot_checks(
+        "objective:tiny-slope",
+        &tiny_slope,
+        &point,
+        &[1e-9],
+        4,
+        0x51e,
+    )
+    .expect("finite fixture");
+    let honest_context = honest.context_digest().to_string();
+    let honest_cert = certify(
+        &grade_ops(&["convert/restrict"], &BTreeSet::new()),
+        None,
+        Some(honest),
+        None,
+    );
+    assert!(honest_cert.fd_all_consistent());
+    merge_gate(&honest_cert, &honest_context).expect("the correct gradient merges");
+
+    // A bit-insensitive objective produces NO SIGNAL, which the gate
+    // refuses with that reason rather than treating |0 - 0| <= tol as
+    // agreement.
+    let constant = |_values: &[f64]| 7.0;
+    let vacuous = fd_spot_checks("objective:constant", &constant, &point, &[0.0], 4, 0x51e)
+        .expect("finite fixture");
+    assert!(
+        vacuous
+            .verdicts()
+            .iter()
+            .all(|verdict| !verdict.falsifiable),
+        "a constant objective cannot falsify anything: {:?}",
+        vacuous.verdicts()
+    );
+    let vacuous_context = vacuous.context_digest().to_string();
+    let vacuous_cert = certify(
+        &grade_ops(&["convert/restrict"], &BTreeSet::new()),
+        None,
+        Some(vacuous),
+        None,
+    );
+    let vacuous_refusal = merge_gate(&vacuous_cert, &vacuous_context)
+        .expect_err("no-signal evidence is not a passing check");
+    assert!(
+        vacuous_refusal.to_string().contains("NO SIGNAL"),
+        "the refusal must name the vacuity, not a sign bug: {vacuous_refusal}"
+    );
+    verdict(
+        "gc-010",
+        "the FD band is scale-relative: a zero or sign-flipped adjoint on a 1e-9 slope \
+         blocks the merge gate, the correct one merges, and a bit-insensitive probe is \
+         refused as no-signal",
+    );
+}

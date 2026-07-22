@@ -1089,7 +1089,7 @@ fn nsga3_spans_from_coefficients(fallback_span: &[f64], coefficients: &[f64]) ->
     }
     let mut span = Vec::with_capacity(fallback_span.len());
     for (fallback, coefficient) in fallback_span.iter().zip(coefficients) {
-        if !coefficient.is_finite() || coefficient <= 0.0 {
+        if !coefficient.is_finite() || *coefficient <= 0.0 {
             return None;
         }
         let intercept = fallback / coefficient;

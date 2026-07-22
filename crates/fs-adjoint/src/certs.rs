@@ -505,6 +505,8 @@ fn fd_context_digest(
         payload.extend_from_slice(&verdict.fd_coarse.to_bits().to_le_bytes());
         payload.extend_from_slice(&verdict.fd_fine.to_bits().to_le_bytes());
         payload.extend_from_slice(&verdict.tolerance.to_bits().to_le_bytes());
+        payload.extend_from_slice(&verdict.noise_floor.to_bits().to_le_bytes());
+        payload.push(u8::from(verdict.falsifiable));
         payload.push(u8::from(verdict.consistent));
     }
     fs_blake3::hash_domain(FD_CONTEXT_DOMAIN, &payload).to_string()
@@ -659,6 +661,7 @@ pub fn fd_spot_checks(
             ("coarse finite difference", verdict.fd_coarse),
             ("fine finite difference", verdict.fd_fine),
             ("finite-difference tolerance", verdict.tolerance),
+            ("finite-difference noise floor", verdict.noise_floor),
         ] {
             if !value.is_finite() {
                 return Err(GradientCertError::InvalidFdVerdict { direction, field });
@@ -734,6 +737,12 @@ fn fd_verdict_is_well_formed(verdict: &FdVerdict) -> bool {
         && verdict.fd_fine.is_finite()
         && verdict.tolerance.is_finite()
         && verdict.tolerance >= 0.0
+        && verdict.noise_floor.is_finite()
+        && verdict.noise_floor >= 0.0
+        // A verdict claiming agreement it could not have observed is
+        // malformed, not merely failing: `consistent` is only meaningful
+        // on a probe that could have falsified the adjoint.
+        && (verdict.falsifiable || !verdict.consistent)
 }
 
 fn context_digest_is_valid(digest: &str) -> bool {
@@ -867,6 +876,16 @@ pub fn merge_gate(
         .iter()
         .find(|verdict| !fd_verdict_is_well_formed(verdict) || !verdict.consistent)
     {
+        if fd_verdict_is_well_formed(bad) && !bad.falsifiable {
+            return Err(GateRefusal {
+                what: format!(
+                    "an FD spot check carried NO SIGNAL (adjoint dd {} and FD {} are both at or \
+                     below the difference-quotient noise floor {}): the probe cannot distinguish \
+                     a correct adjoint from a zero or sign-flipped one, so it is not evidence",
+                    bad.adjoint_dd, bad.fd_fine, bad.noise_floor
+                ),
+            });
+        }
         return Err(GateRefusal {
             what: format!(
                 "an FD spot check failed (adjoint dd {} vs FD {} beyond tolerance {}): a \

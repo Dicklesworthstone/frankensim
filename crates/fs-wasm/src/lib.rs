@@ -729,13 +729,48 @@ pub fn compensated_sum(count_in: usize, log10_big_in: i32) -> Vec<f64> {
 /*  The JavaScript boundary (wasm32 only)                                   */
 #[cfg(test)]
 mod tests {
-    use super::taylor_bound;
+    use super::dynamics::push_motor_image;
+    use super::{ga_motor_orbit, taylor_bound};
+    use fs_ga::{Motor, Pga, Point};
 
     #[test]
     fn taylor_bound_refuses_non_finite_inputs_without_trapping() {
         assert!(taylor_bound(f64::NAN, 1.0, 5).is_empty());
         assert!(taylor_bound(0.0, f64::INFINITY, 5).is_empty());
         assert_eq!(taylor_bound(0.0, 0.25, 5).len(), 7);
+    }
+
+    /// A refused motor sandwich must serialize as `NaN`, never as the
+    /// untransformed seed: the seed is finite and bit-indistinguishable from a
+    /// genuine identity image, so publishing it would assert "this is the
+    /// motor's image of the seed" on a slot where no image exists.
+    #[test]
+    fn refused_motor_image_folds_to_nan_not_the_untransformed_seed() {
+        // A zero even-subalgebra element is not a versor: the sandwich product
+        // has zero weight, so `transform_point` refuses with `IdealPoint`.
+        let degenerate = Motor(Pga::zero());
+        let seed = Point::new(1.35, 0.0, 0.25);
+        assert!(
+            degenerate.transform_point(seed).is_err(),
+            "the degenerate motor must refuse, or this test proves nothing"
+        );
+
+        let mut out = Vec::new();
+        push_motor_image(&mut out, &degenerate, seed);
+        assert_eq!(out.len(), 3, "one refused image is still one xyz slot");
+        assert!(
+            out.iter().all(|v| v.is_nan()),
+            "a refusal must not be published as a coordinate: {out:?}"
+        );
+
+        // The shipped screw motor is a proper rigid motion, so the demo itself
+        // publishes only finite coordinates — the fold changes nothing there.
+        let coil = ga_motor_orbit(16, 240);
+        assert_eq!(coil.len(), 2 + 240 * 16 * 3);
+        assert!(
+            coil[2..].iter().all(|v| v.is_finite()),
+            "the fixed screw motor never refuses"
+        );
     }
 }
 

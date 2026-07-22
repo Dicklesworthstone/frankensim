@@ -207,9 +207,15 @@ pub struct SampledSdf {
     /// Every axis is strictly increasing and includes the exact box endpoints.
     axis_nodes: [Vec<f64>; 3],
     values: Vec<f64>,
-    /// Reconstruction bound relative to the sampled source field. This is
-    /// useful even when the source makes no abstract-distance claim.
+    /// Reconstruction radius relative to the sampled source field. See
+    /// [`SampledSdf::nominal_field_bound`] for exactly what it bounds and
+    /// [`SampledSdf::nominal_field_bound_kind`] for its authority.
     nominal_field_bound: f64,
+    /// Authority of `nominal_field_bound`: `Enclosure` when the source
+    /// declared [`TraceStepClaim::ExactDistance`] (whose unit-Lipschitz
+    /// theorem is GLOBAL), `Estimate` otherwise — a maximum of per-node
+    /// LOCAL Lipschitz values does not bound the slope across a cell.
+    nominal_field_bound_kind: NumericalKind,
     /// Weakest source authority observed across the grid, after interpolation
     /// demotes `Exact` to `Enclosure`.
     abstract_distance_kind: NumericalKind,
@@ -239,20 +245,45 @@ impl SampledSdf {
         }
     }
 
-    /// Reconstruction error relative to the sampled source field.
-    ///
-    /// This is not abstract-distance authority. Use
-    /// [`Self::abstract_distance_bound`] and [`Self::abstract_distance_kind`]
-    /// before making a region-distance claim.
+    /// Alias for [`Self::nominal_field_bound`] — read that doc before
+    /// using the number. It is NOT unconditionally a bound, and it is not
+    /// abstract-distance authority: use [`Self::abstract_distance_bound`]
+    /// and [`Self::abstract_distance_kind`] before making a
+    /// region-distance claim.
     #[must_use]
     pub fn bound(&self) -> f64 {
         self.nominal_field_bound
     }
 
-    /// Reconstruction error relative to the sampled source field.
+    /// Reconstruction radius relative to the sampled source field:
+    /// `L·(largest cell diagonal)` plus an outward interpolation-roundoff
+    /// allowance, all outward-rounded.
+    ///
+    /// It is a RIGOROUS bound on `|eval(p) − source(p)|` over the sampling
+    /// box only when the source declared
+    /// [`TraceStepClaim::ExactDistance`], because that claim carries a
+    /// GLOBAL unit-Lipschitz theorem and the trilinear convex-combination
+    /// argument needs a Lipschitz bound valid across the whole cell.
+    ///
+    /// For every weaker source `L` is the maximum of the per-node
+    /// [`ChartSample::lipschitz`] values, which are certified LOCAL to
+    /// their query point with no stated radius. A slope spike strictly
+    /// between grid nodes is unresolved and CAN exceed this radius, so the
+    /// number is an ESTIMATE there. [`Self::nominal_field_bound_kind`]
+    /// reports which of the two it is; do not read the bare `f64` out of
+    /// that context.
     #[must_use]
     pub fn nominal_field_bound(&self) -> f64 {
         self.nominal_field_bound
+    }
+
+    /// Authority of [`Self::nominal_field_bound`]:
+    /// [`NumericalKind::Enclosure`] when the source declared
+    /// [`TraceStepClaim::ExactDistance`], [`NumericalKind::Estimate`]
+    /// otherwise.
+    #[must_use]
+    pub fn nominal_field_bound_kind(&self) -> NumericalKind {
+        self.nominal_field_bound_kind
     }
 
     /// Weakest abstract signed-distance authority carried by this chart.
@@ -624,6 +655,15 @@ impl<C: Chart> Convert<SampledSdf> for C {
             axis_nodes,
             values,
             nominal_field_bound,
+            // The reconstruction radius inherits the source's Lipschitz
+            // authority: only `ExactDistance` supplies a theorem that holds
+            // ACROSS a cell. A maximum over per-node local bounds does not,
+            // so it is published as an Estimate.
+            nominal_field_bound_kind: if exact_distance_source {
+                NumericalKind::Enclosure
+            } else {
+                NumericalKind::Estimate
+            },
             abstract_distance_kind,
             abstract_distance_bound,
             source_lipschitz: l_max,

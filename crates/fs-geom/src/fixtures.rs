@@ -148,8 +148,17 @@ impl Chart for SphereChart {
         }
     }
 
+    /// A `SphereChart` presents the SOLID BALL where its signed distance
+    /// is negative: one component, no tunnel, and NO enclosed void — a
+    /// ball has no cavity. (The bounding sphere SURFACE would be
+    /// `(1, 0, 1)`, but that is not the region charts present, and
+    /// `fs_topo::cubical::verify_topology` measures `(1, 0, 0)` here.)
     fn topology_hint(&self) -> BettiBounds {
-        BettiBounds::exact(1, 0, 1)
+        if self.radius.is_finite() && self.radius > 0.0 {
+            BettiBounds::exact(1, 0, 0)
+        } else {
+            BettiBounds::unknown()
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -224,9 +233,10 @@ impl Chart for BoxChart {
         }
     }
 
+    /// A solid box: one component, no tunnel, no enclosed void.
     fn topology_hint(&self) -> BettiBounds {
         if self.is_solid_box() {
-            BettiBounds::exact(1, 0, 1)
+            BettiBounds::exact(1, 0, 0)
         } else {
             BettiBounds::unknown()
         }
@@ -315,9 +325,12 @@ impl Chart for TorusChart {
         }
     }
 
+    /// A ring torus (`major > minor`) presents the SOLID torus: one
+    /// component, one tunnel through the hole, no enclosed void. Horn and
+    /// spindle parameters change the region and are not claimed.
     fn topology_hint(&self) -> BettiBounds {
         if self.is_exact_distance() {
-            BettiBounds::exact(1, 1, 1)
+            BettiBounds::exact(1, 1, 0)
         } else {
             BettiBounds::unknown()
         }

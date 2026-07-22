@@ -185,7 +185,7 @@ fn topo_001_manifold_zoo() {
     // Flipped patch → misoriented edges.
     let flipped = shapes::corrupt(clean.clone(), 0, 0, 4..5, None);
     let fc = manifold_certificate(&flipped, None);
-    let flip_ok = !fc.oriented
+    let flip_ok = !fc.consistently_oriented
         && fc
             .defects
             .iter()

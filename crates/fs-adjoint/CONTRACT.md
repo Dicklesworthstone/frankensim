@@ -17,7 +17,17 @@ solver without a passing gradient check cannot merge.
 - `ift_gradient_matfree(jacobian, ∂J/∂u, ∂J/∂p, (∂R/∂p)ᵀ·, tol, …)` —
   dJ/dp = ∂J/∂p − (∂R/∂p)ᵀλ with Jᵀλ = ∂J/∂u solved by fs-solver
   transposed GMRES; returns (gradient, `AdjointReport` with the
-  adjoint residual — the honesty check).
+  adjoint residual). Every component of the returned vector is the
+  TOTAL derivative or the call refuses: `∂J/∂p` and the pullback are
+  length-asserted against each other, because combining them with a
+  `zip` silently truncated to the shorter and returned a vector of the
+  expected length whose tail carried only the explicit partial.
+  NO-CLAIM on the adjoint residual: it is measured against the operator
+  the caller supplied through `LinearOp::apply_transpose`, so it is an
+  honesty check on the SOLVE, not on the transpose. fs-solver does not
+  verify symmetry, and a nonsymmetric Jacobian that inherits the
+  default `apply_transpose` yields a small residual for the wrong
+  system (see the fs-solver CONTRACT's `LinearOp` no-claim).
 - `DensityPoisson`/`DensityOp` — the density-parameterized Poisson
   family K(ρ) = Σ_t ρ_t·|V_t|·G_t (matrix-free per-cell apply) with
   `density_pullback(λ, u)[t] = λᵀK_t u` — the EXACT volumetric (SIMP)
@@ -51,9 +61,17 @@ solver without a passing gradient check cannot merge.
   positive-infinity error sentinel, and only the finite directional-pair prefix.
   Empty/all-zero directions and finite perturbations that round back to the
   unperturbed coordinate are likewise refused as vacuous evidence, matching the
-  certificate path's perturbation preflight. The gate itself is tested to REJECT
-  corrupted, non-finite, and vacuous evidence — a gate that cannot fail is not a
-  gate.
+  certificate path's perturbation preflight. A direction is only counted as
+  evidence when it carries SIGNAL — when `max(|analytic|, |fd|)` clears the
+  same `1e-12·‖direction‖∞` floor. A probe whose analytic and finite-difference
+  derivatives are BOTH at that floor (both exactly zero is the reachable case:
+  a forward path that drops the parameter produces a zero cotangent AND two
+  bit-identical objective values) scores a relative error of `0.0` — the
+  PERFECT score — whether the gradient is right or silently zero, so it is no
+  evidence at all. `GradientVerdict::informative_directions` reports the count,
+  and a verification with none of them fails closed with the `+∞` sentinel
+  instead of passing. The gate itself is tested to REJECT corrupted,
+  non-finite, and vacuous evidence — a gate that cannot fail is not a gate.
 
 - `transpose` module (addendum Proposal 1, bead bk0o.1; [F], behind
   the `ledger-transpose` feature until its Gauntlet tier + kill metric
@@ -63,10 +81,30 @@ solver without a passing gradient check cannot merge.
   the VJPs across seams in deterministic reverse order (bit-equal
   re-runs). A missing VJP or a declared op inside a differentiation
   path is a STRUCTURED, LOUD block — never a silent zero (the Goodhart
-  trap the review named). `check_transpose` is the ⟨Av,w⟩=⟨v,Aᵀw⟩ G0
-  battery; `fd_falsifier` is conditioning-aware (the FD self-error at
-  two step sizes widens the band so ill-conditioned seams don't fire
-  false hits). `CheckpointStore` is the content-addressed spill
+  trap the review named). VJP SHAPES ARE CHECKED, not assumed: arity
+  AND per-input cotangent length are asserted against the recorded
+  primals on every sweep (as is the seed against the output node), and
+  a violation panics — accumulation used to `zip`, which truncates to
+  the shorter and made a masked cotangent's dropped tail
+  indistinguishable from a genuine zero. `"leaf"` is a RESERVED op
+  name that terminates the sweep without a registry lookup, so
+  `Tape::apply` rejects it rather than letting an unregistered op end
+  the chain silently. `check_transpose` is the ⟨Av,w⟩=⟨v,Aᵀw⟩ G0
+  battery: it REFUSES zero probes and empty dimensions (both of which
+  returned the perfect score `0.0` from an experiment that never ran)
+  and returns the probe count and pairing scale alongside the absolute
+  residual so a caller's threshold can be relative. `fd_falsifier` is
+  conditioning-aware (the FD self-error at two step sizes widens the
+  band so ill-conditioned seams don't fire false hits) and its band is
+  HOMOGENEOUS in the derivative scale: `base_tol·max(|adjoint_dd|,
+  |fd_fine|, noise_floor) + 3·self_error`, where `noise_floor` is the
+  difference quotient's own rounding floor. The old absolute
+  `max(…, 1.0)` term made the band never tighter than `base_tol` in
+  absolute units, so every derivative below `base_tol` accepted `0` and
+  the exact sign flip. When both derivatives sit at or below the noise
+  floor the verdict is `falsifiable = false` — "no signal at this
+  step", NOT agreement — and `consistent` is false, which the merge
+  gate refuses with that reason. `CheckpointStore` is the content-addressed spill
   contract shared with Proposal 2's cache discipline: `spilled_adjoint`
   reproduces BIT-EQUAL gradients with and without spill (f64↔bytes
   round-trips are exact), verified against the real fs-ledger CAS via

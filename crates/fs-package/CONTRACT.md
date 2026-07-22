@@ -147,7 +147,11 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   (`regime.bounds()` non-empty) whose axis names are non-blank and whose bounds
   are finite and ordered, plus a non-blank anchoring `dataset`. A `Verified`
   claim must carry an ordered, non-NaN `[lo <= hi]` interval. Ordered infinite
-  endpoints are a sound but vacuous enclosure, not a decision-grade bound. An `Estimated` claim needs a
+  endpoints are a sound but vacuous enclosure, not a decision-grade bound —
+  EXCEPT the degenerate point-at-infinity intervals `[+inf, +inf]` and
+  `[-inf, -inf]`, which enclose no real value at all and are refused as
+  `IncompleteVerifiedClaim` at both the in-memory and JSON doors (bead
+  frankensim-extreal-program-f85xj.2.6). An `Estimated` claim needs a
   non-blank estimator identity and a non-negative, non-NaN dispersion.
   Positive infinity is preserved as the lower-layer algebra's explicit
   no-quantitative-spread-claim sentinel; it is distinct from finite subtotal
@@ -164,7 +168,15 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   dataset id AND content hash exactly equal the origin tuple, and whose dataset
   id equals the `Validated` color. An unrelated canonical hash does not count.
   Positive admission additionally requires an injected anchor verifier to
-  accept the complete typed subject; a matching hash is only an address. A
+  accept the anchor request; a matching hash is only an address. That request
+  carries `{package_provenance, claim_index, claim_id, statement, regime,
+  dataset_id, content_hash}` and does NOT bind the package root or the claim
+  subject hash, so an anchor decision is PORTABLE across packages that share
+  those fields (two packages with the same `Provenance` and the same
+  `Validated` claim at the same index but different sibling claims produce
+  byte-identical anchor requests). Package binding comes from the root and
+  policy fingerprint recorded in the receipt, not from the anchor subject
+  (bead frankensim-extreal-program-f85xj.2.13). A
   derived `Validated` claim must carry at least one exact dataset-id match, and
   every such matching anchor is authenticated independently. Derivation
   authority cannot substitute a new dataset hash. The invoked anchor-policy
@@ -242,7 +254,13 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   certificate, regime, falsifier, and dataset coverage use only scientifically
   admitted claims. `Certificate` requires admitted `Verified` evidence with
   finite endpoints (an all-estimated or solely vacuous-Verified package has
-  none). `ClaimOrigin` excludes Estimated declarations,
+  none). The `VerifiedColor` and `EstimatedColor` RANK rows apply the same
+  informativeness filter: a `Verified` claim needs two finite endpoints and an
+  `Estimated` claim needs a finite dispersion, because a claim that explicitly
+  asserts no bound quantifies nothing and cannot evidence a standard's
+  quantification requirement. Both rationales carry the informative and
+  admitted counts (bead frankensim-extreal-program-f85xj.2.12). `ClaimOrigin`
+  excludes Estimated declarations,
   waived claims, and waiver-dependent descendants. `Signature` requires
   release-purpose authentication but does not imply checker release admission.
   `WaiverAuthorization` remains an explicit administrative concept.
@@ -473,9 +491,11 @@ parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
 schema-v8 external-origin admission (inherited from v6) named above.
 Decode-encode is both
-semantically and textually stable (tested). Ordered infinite Verified endpoints
-are accepted as rigorous but vacuous enclosures; coverage and magnitude
-accounting treat them as unbounded, never as a finite decision-grade result.
+semantically and textually stable (tested). Half-infinite and whole-line
+Verified endpoints are accepted as rigorous but vacuous enclosures; coverage
+and magnitude accounting treat them as unbounded, never as a finite
+decision-grade result, and they never establish rank or certificate coverage.
+Degenerate point-at-infinity endpoints are refused outright.
 The magnitude budget
 attributes ERROR MAGNITUDES (verified interval widths, estimated
 dispersions) and counts validated claims as unquantified regional

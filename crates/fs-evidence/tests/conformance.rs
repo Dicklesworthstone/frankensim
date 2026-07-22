@@ -209,7 +209,7 @@ fn evd_003_worked_example_model_discrepancy_dominates() {
         DecisionStatus::NotDecisionGrade { dominant, detail } => {
             (*dominant == UncertaintySource::ModelForm, detail.clone())
         }
-        DecisionStatus::DecisionGrade => (false, "unexpectedly decision-grade".to_string()),
+        DecisionStatus::DecisionGrade { .. } => (false, "unexpectedly decision-grade".to_string()),
     };
     let advice_ok = drag.escalation_advice(0.05) == EscalationAdvice::EscalateModelFidelity;
     // The same numbers with a calibrated 2% closure ARE decision-grade —
@@ -226,7 +226,14 @@ fn evd_003_worked_example_model_discrepancy_dominates() {
     let better = drag
         .clone()
         .with_model(ModelEvidence::from_card(&better_card, &at));
-    let flips = matches!(better.assess(0.05), DecisionStatus::DecisionGrade);
+    // The rigorous enclosure backing this evidence is what earns the
+    // unqualified DecisionGrade tag (bead f85xj.2.9).
+    let flips = matches!(
+        better.assess(0.05),
+        DecisionStatus::DecisionGrade {
+            rigor: fs_evidence::NumericalKind::Enclosure
+        }
+    );
     let mut emitter = fs_obs::Emitter::new(SUITE, "evd-003/drag");
     let event = emitter.emit(
         fs_obs::Severity::Info,
@@ -265,9 +272,17 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
             }
         })
         .collect();
-    let model = DiscrepancyModel::fit(&pairs).expect("fit");
+    // The corpus supports interpolation only under a DECLARED fill distance
+    // (bead f85xj.2.7): a bounding box says nothing about its unvisited
+    // interior, so the assumption is explicit and travels in the evidence.
+    let model = DiscrepancyModel::fit(&pairs)
+        .expect("fit")
+        .with_declared_fill_distance(0.05)
+        .expect("declared normalized support radius");
     let band = model.query(&pt(&[("Re", 5e4)])).expect("in-domain");
-    let band_sane = band.mean_rel > 0.05 && band.max_rel < 0.12 && band.max_rel >= band.mean_rel;
+    let band_sane = band.mean_observed_rel > 0.05
+        && band.max_observed_rel < 0.12
+        && band.max_observed_rel >= band.mean_observed_rel;
     let err = model
         .query(&pt(&[("Re", 1e6)]))
         .expect_err("out-of-distribution must refuse");
@@ -279,15 +294,25 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
     let unexpected_dimension_blocked = model
         .evidence_at("panel-vs-les", &pt(&[("Re", 5e4), ("Mach", 0.08)]))
         .is_err();
+    // An undeclared model admits only exact training points.
+    let undeclared_blocked = DiscrepancyModel::fit(&pairs)
+        .expect("fit")
+        .evidence_at("panel-vs-les", &pt(&[("Re", 5e4)]))
+        .is_err();
     let simulated_model = model
         .evidence_at("panel-vs-les", &pt(&[("Re", 5e4)]))
-        .expect("in-domain discrepancy evidence");
-    let simulated_color =
-        fs_evidence::color_of(&NumericalCertificate::enclosure(0.9, 1.1), &simulated_model);
+        .expect("supported discrepancy evidence");
+    let numerical = NumericalCertificate::enclosure(0.9, 1.1);
+    let simulated_color = fs_evidence::color_of(&numerical, &simulated_model);
+    // The enclosure is charged its own relative half-width too (bead
+    // f85xj.2.5): a rigorous tag never SHRINKS the published spread.
+    let expected_dispersion =
+        band.max_observed_rel + numerical.rel_half_width(numerical.lo / 2.0 + numerical.hi / 2.0);
     let simulation_stays_estimated = matches!(
         simulated_color,
         fs_evidence::Color::Estimated { dispersion, .. }
-            if dispersion.to_bits() == band.max_rel.to_bits()
+            if dispersion.to_bits() == expected_dispersion.to_bits()
+                && dispersion > band.max_observed_rel
     );
     verdict(
         "evd-004",
@@ -295,12 +320,13 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
             && teaching
             && ood_blocked
             && unexpected_dimension_blocked
+            && undeclared_blocked
             && simulation_stays_estimated,
         &format!(
             "trained on 50 pairs (seed {SEED:#x}): in-domain band mean {:.3}/max {:.3}; \
              out-of-domain and unexpected-dimension queries refused; paired simulations remain \
              Estimated rather than impersonating an experimental anchor",
-            band.mean_rel, band.max_rel
+            band.mean_observed_rel, band.max_observed_rel
         ),
         SEED,
     );
@@ -1210,7 +1236,10 @@ fn evd_014_color_provenance_composition_is_bounded_without_laundering() {
         panic!("bounded model cards remain Estimated without an authenticated anchor")
     };
     assert!(dataset.len() <= MAX_COLOR_IDENTITY_BYTES);
-    assert_eq!(dispersion.to_bits(), 0.0_f64.to_bits());
+    // `enclosure(0.0, 1.0)` is a UNIT-wide band around a midpoint of 0.5, so it
+    // costs a relative half-width of 1.0. This used to be pinned bit-exactly at
+    // 0.0 because the rigorous tag bought a free pass (bead f85xj.2.5).
+    assert_eq!(dispersion.to_bits(), 1.0_f64.to_bits());
 
     let one_long_card = ModelEvidence {
         cards: vec![overlong],
@@ -1374,11 +1403,249 @@ fn evd_015b_malformed_color_payloads_fail_closed() {
         hi: f64::INFINITY,
     };
     validate_color_payload(&whole_line).expect("whole-line enclosure is sound but vacuous");
+    for half_infinite in [
+        Color::Verified {
+            lo: f64::NEG_INFINITY,
+            hi: 1.0,
+        },
+        Color::Verified {
+            lo: 1.0,
+            hi: f64::INFINITY,
+        },
+    ] {
+        validate_color_payload(&half_infinite).expect("half-infinite enclosures remain sound");
+    }
     verdict(
         "evd-015b",
         true,
         "malformed color payloads fail closed while the sound whole-line enclosure remains valid",
         FIXED_INPUT_SEED,
+    );
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.6 — `[+inf, +inf]` and
+/// `[-inf, -inf]` satisfy `lo <= hi` but enclose NO real value, so they are
+/// unsatisfiable certificates, not vacuous ones. Before the fix
+/// `color_of(&exact(inf), &none())` minted `Verified{inf, inf}`, which
+/// `validate_color_payload` accepted and the ledger write gate durably stored —
+/// while `Evidence::certified()` refused the very same input.
+#[test]
+fn claim_integrity_f85xj_2_6_verified_refuses_the_point_at_infinity() {
+    use fs_evidence::{ColorError, color_of, verified_from};
+
+    for infinity in [f64::INFINITY, f64::NEG_INFINITY] {
+        let degenerate = Color::Verified {
+            lo: infinity,
+            hi: infinity,
+        };
+        let error = validate_color_payload(&degenerate)
+            .expect_err("a point certificate at infinity encloses no real value");
+        assert!(error.to_string().contains("infinity"), "{error}");
+
+        // The colour door must not be weaker than the certification door.
+        assert!(matches!(
+            verified_from(&NumericalCertificate::exact(infinity)),
+            Err(ColorError::LaunderingRefused { .. })
+        ));
+        assert!(matches!(
+            verified_from(&NumericalCertificate::enclosure(infinity, infinity)),
+            Err(ColorError::LaunderingRefused { .. })
+        ));
+        assert!(matches!(
+            Evidence::exact(infinity, ProvenanceHash(0)).certified(),
+            Err(fs_evidence::CertifyError::ExactNotFinite { .. })
+        ));
+
+        // The public bridge degrades to an honest refusal, not a top-colour claim.
+        assert!(matches!(
+            color_of(
+                &NumericalCertificate::exact(infinity),
+                &ModelEvidence::none()
+            ),
+            Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+        ));
+
+        // Composition normalizes the malformed operand away instead of
+        // propagating it.
+        for op in [IntervalOp::Add, IntervalOp::Mul, IntervalOp::Hull] {
+            let composed = compose(&degenerate, &Color::Verified { lo: 1.0, hi: 2.0 }, op);
+            assert_eq!(composed.rank(), ColorRank::Estimated);
+        }
+    }
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.5 — an `Estimated`
+/// dispersion of `0.0` means zero spread. Before the fix a rigorous
+/// Exact/Enclosure numerical slice was charged a hard-coded `0.0`, so tagging
+/// the SAME bounds `Enclosure` instead of `Estimate` made the published spread
+/// SMALLER; and a `Verified{0.0, 1e6}` operand contributed `0.0` to a composed
+/// sum carrying 1e6 of absolute uncertainty.
+#[test]
+fn claim_integrity_f85xj_2_5_rigorous_operands_are_charged_their_own_width() {
+    use fs_evidence::color_of;
+
+    let carded = ModelEvidence {
+        cards: vec!["some-model".to_string()],
+        ..ModelEvidence::none()
+    };
+    let Color::Estimated {
+        dispersion: rigorous,
+        ..
+    } = color_of(&NumericalCertificate::enclosure(0.0, 1.0), &carded)
+    else {
+        panic!("carded evidence stays Estimated")
+    };
+    let Color::Estimated {
+        dispersion: non_rigorous,
+        ..
+    } = color_of(&NumericalCertificate::estimate(0.0, 1.0), &carded)
+    else {
+        panic!("carded evidence stays Estimated")
+    };
+    assert_eq!(
+        rigorous.to_bits(),
+        non_rigorous.to_bits(),
+        "the rigorous tag must not shrink the published spread"
+    );
+    assert_eq!(rigorous.to_bits(), 1.0_f64.to_bits());
+
+    // Only a genuinely zero-width certificate still publishes 0.0.
+    let Color::Estimated {
+        dispersion: exact, ..
+    } = color_of(&NumericalCertificate::exact(2.0), &carded)
+    else {
+        panic!("carded evidence stays Estimated")
+    };
+    assert_eq!(exact.to_bits(), 0.0_f64.to_bits());
+
+    // Composition charges the Verified operand its own relative half-width.
+    let estimated = Color::Estimated {
+        estimator: "estimator-a".to_string(),
+        dispersion: 0.0,
+    };
+    let wide = Color::Verified { lo: 0.0, hi: 1e6 };
+    let Color::Estimated {
+        dispersion: composed,
+        ..
+    } = compose(&estimated, &wide, IntervalOp::Add)
+    else {
+        panic!("anything composed with an estimate stays Estimated")
+    };
+    assert!(
+        composed > 0.0 && composed.is_finite(),
+        "a 1e6-wide certified operand cannot cost 0.0: {composed}"
+    );
+    assert_eq!(composed.to_bits(), 1.0_f64.to_bits());
+
+    // A Validated operand states a regime and a dataset but no width at all,
+    // so there is no defensible spread claim left.
+    let validated = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("x", 0.0, 1.0),
+        dataset: "dataset-a".to_string(),
+    };
+    let Color::Estimated {
+        dispersion: with_validated,
+        ..
+    } = compose(&estimated, &validated, IntervalOp::Add)
+    else {
+        panic!("anything composed with an estimate stays Estimated")
+    };
+    assert!(
+        with_validated.is_infinite(),
+        "a width-less Validated operand cannot be charged 0.0: {with_validated}"
+    );
+
+    // A zero-width Verified operand still costs nothing.
+    let Color::Estimated {
+        dispersion: with_point,
+        ..
+    } = compose(
+        &estimated,
+        &Color::Verified { lo: 3.0, hi: 3.0 },
+        IntervalOp::Add,
+    )
+    else {
+        panic!("anything composed with an estimate stays Estimated")
+    };
+    assert_eq!(with_point.to_bits(), 0.0_f64.to_bits());
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.8 — an e-value certifies
+/// a hypothesis test at a design level; it states nothing about the sampling
+/// width of the QoI. Before the fix its `rel_width` was `0.0`, so evidence
+/// carrying an unquantified stochastic component was decision-grade at a ZERO
+/// uncertainty budget with `NoneNeeded` advice.
+#[test]
+fn claim_integrity_f85xj_2_8_evalue_declares_an_unstated_statistical_width() {
+    let p = ProvenanceHash::of_bytes(b"e-value");
+    let evidence = Evidence::exact(1.0, p).with_statistical(StatisticalCertificate::EValue {
+        e: 1.0,
+        alpha: 0.05,
+    });
+    assert!(
+        evidence.breakdown().statistical_rel.is_infinite(),
+        "a declared but unquantified stochastic component is not zero width"
+    );
+    assert!(matches!(
+        evidence.assess(0.0),
+        DecisionStatus::NotDecisionGrade {
+            dominant: UncertaintySource::Statistical,
+            ..
+        }
+    ));
+    assert_eq!(
+        evidence.escalation_advice(0.0),
+        EscalationAdvice::GatherMoreSamples
+    );
+
+    // `None` legitimately contributes 0.0: it DECLARES there is no stochastic
+    // component.
+    let declared_none = Evidence::exact(1.0, p).with_statistical(StatisticalCertificate::None);
+    assert_eq!(
+        declared_none.breakdown().statistical_rel.to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+/// Regression, bead frankensim-extreal-program-f85xj.2.9 — `assess` compared a
+/// non-rigorous Estimate band against the threshold exactly as if it were a
+/// rigorous enclosure, so `escalation_advice` said `NoneNeeded` ("stop buying
+/// evidence") for evidence `certified()` refuses outright as `NotRigorous`.
+#[test]
+fn claim_integrity_f85xj_2_9_decision_grade_carries_its_numerical_rigor() {
+    use fs_evidence::NumericalKind;
+
+    let p = ProvenanceHash::of_bytes(b"rigor");
+    let mut estimated = Evidence::exact(1.0, p);
+    estimated.numerical = NumericalCertificate::estimate(0.99, 1.01);
+    assert!(matches!(
+        estimated.assess(0.05),
+        DecisionStatus::DecisionGrade {
+            rigor: NumericalKind::Estimate
+        }
+    ));
+    assert_eq!(
+        estimated.escalation_advice(0.05),
+        EscalationAdvice::RefineNumerics,
+        "a non-rigorous band inside the threshold is not finished evidence"
+    );
+    assert!(matches!(
+        estimated.clone().certified(),
+        Err(fs_evidence::CertifyError::NotRigorous { .. })
+    ));
+    assert!(estimated.assess(0.05).to_string().contains("NON-RIGOROUS"));
+
+    let mut rigorous = Evidence::exact(1.0, p);
+    rigorous.numerical = NumericalCertificate::enclosure(0.99, 1.01);
+    assert!(matches!(
+        rigorous.assess(0.05),
+        DecisionStatus::DecisionGrade {
+            rigor: NumericalKind::Enclosure
+        }
+    ));
+    assert_eq!(
+        rigorous.escalation_advice(0.05),
+        EscalationAdvice::NoneNeeded
     );
 }
 

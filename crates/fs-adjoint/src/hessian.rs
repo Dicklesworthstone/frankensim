@@ -1,7 +1,10 @@
-//! Second-order adjoints (adjoint-of-adjoint): EXACT Hessian-vector
-//! products through the implicit function theorem for the
-//! density-linear problem class K(ρ)u = b with quadratic misfit
-//! J = ½‖u − u*‖².
+//! Second-order adjoints (adjoint-of-adjoint): the EXACT Hessian-vector
+//! FORMULA through the implicit function theorem for the density-linear
+//! problem class K(ρ)u = b with quadratic misfit J = ½‖u − u*‖². Exact
+//! means no finite differencing and no dropped second-order term; the
+//! four linear solves that evaluate the formula are iterative, so the
+//! delivered accuracy is bounded by the tolerance they are run at (and
+//! that tolerance is validated, not trusted).
 //!
 //! The general IFT Hessian needs four linear solves per Hv (tangent,
 //! two second-derivative contractions, second adjoint). For this
@@ -29,12 +32,28 @@ fn solve(op: &DensityOp<'_, '_>, b: &[f64], tol: f64) -> Vec<f64> {
     st.x
 }
 
-/// Exact misfit Hessian-vector product for the density-Poisson
-/// family: given the base density `rho` (through `problem`), the
-/// right-hand side `b`, the target `u_star`, and a density-space
-/// direction `v`, returns H·v where H = ∇²_ρ J(ρ),
-/// J = ½‖u(ρ) − u*‖². Costs the primal + adjoint (recomputed here
-/// for a self-contained call) + TWO extra solves.
+/// Misfit Hessian-vector product for the density-Poisson family: given
+/// the base density `rho` (through `problem`), the right-hand side `b`,
+/// the target `u_star`, and a density-space direction `v`, returns H·v
+/// where H = ∇²_ρ J(ρ), J = ½‖u(ρ) − u*‖². Costs the primal + adjoint
+/// (recomputed here for a self-contained call) + TWO extra solves.
+///
+/// EXACT refers to the FORMULA, not the arithmetic: the second-order
+/// terms are the closed-form IFT contractions of a density-linear
+/// operator (no finite differencing anywhere), but the four linear
+/// solves that evaluate them are iterative, so the accuracy of the
+/// returned vector is bounded by the residual each solve achieved at
+/// `tol`.
+///
+/// # Panics
+/// If `tol` is not a usable relative-residual tolerance, or an inner
+/// solve fails to reach it. `tol` must satisfy `0 < tol < 1`: CG starts
+/// at x = 0 with a relative residual of exactly 1, so any `tol ≥ 1`
+/// exits before the first iteration and reports `converged = true` with
+/// x = 0. All four solves would then return zeros and this function
+/// would publish a silent-zero Hessian behind an assertion that passed
+/// vacuously — a converged flag the caller's own tolerance can make
+/// trivially true is not evidence.
 #[must_use]
 pub fn density_misfit_hvp(
     problem: &DensityPoisson<'_>,
@@ -43,6 +62,11 @@ pub fn density_misfit_hvp(
     v: &[f64],
     tol: f64,
 ) -> Vec<f64> {
+    assert!(
+        tol.is_finite() && tol > 0.0 && tol < 1.0,
+        "Hessian solve tolerance must satisfy 0 < tol < 1 (got {tol}): the initial relative \
+         residual is 1, so a looser tolerance admits the zero iterate as converged"
+    );
     let op = DensityOp::new(problem);
     // Base state and first-order adjoint.
     let u = solve(&op, b, tol);

@@ -352,16 +352,24 @@ pub enum StatisticalCertificate {
 }
 
 impl StatisticalCertificate {
-    /// Relative statistical band against a reference magnitude. E-values
-    /// contribute zero width (the decision they certify is already
-    /// anytime-valid); half-widths scale by the reference.
+    /// Relative statistical band against a reference magnitude.
+    ///
+    /// [`StatisticalCertificate::None`] contributes `0.0` because it DECLARES
+    /// there is no stochastic component. [`StatisticalCertificate::EValue`]
+    /// declares that there IS one: an e-value certifies a hypothesis test at a
+    /// design level and says nothing about the sampling width of the QoI, so
+    /// its width is UNSTATED and contributes `f64::INFINITY` — an unknown
+    /// width is never a silent zero (bead
+    /// frankensim-extreal-program-f85xj.2.8). Half-widths scale by the
+    /// reference.
     #[must_use]
     pub fn rel_width(&self, reference: f64) -> f64 {
         if self.validation_issue().is_some() {
             return f64::INFINITY;
         }
         match self {
-            StatisticalCertificate::None | StatisticalCertificate::EValue { .. } => 0.0,
+            StatisticalCertificate::None => 0.0,
+            StatisticalCertificate::EValue { .. } => f64::INFINITY,
             StatisticalCertificate::HalfWidth { half_width, .. } => {
                 if reference.is_finite() {
                     half_width / reference.abs().max(f64::MIN_POSITIVE)
@@ -658,8 +666,21 @@ impl UncertaintySource {
 /// Is the evidence good enough for the pending decision?
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecisionStatus {
-    /// Total relative band within the decision threshold.
-    DecisionGrade,
+    /// Total relative band within the decision threshold, tagged with the
+    /// RIGOR of the numerical slice that backs the total.
+    ///
+    /// Width alone is not a judgment about the quality of the band: a
+    /// non-rigorous [`NumericalKind::Estimate`] band and a rigorous
+    /// [`NumericalKind::Enclosure`] of the same width are not the same
+    /// evidence, and the same estimate is refused outright by
+    /// [`Evidence::certified`]. The tag keeps "within threshold under a
+    /// NON-RIGOROUS estimate" readable as something weaker than "within
+    /// threshold under a rigorous enclosure" (bead
+    /// frankensim-extreal-program-f85xj.2.9).
+    DecisionGrade {
+        /// The weakest numerical kind backing the total.
+        rigor: NumericalKind,
+    },
     /// Not decision-grade; says WHICH source dominates and why.
     NotDecisionGrade {
         /// The dominant uncertainty source.
@@ -727,9 +748,12 @@ impl UncertaintyBreakdown {
 /// Decision-aware escalation: what to spend money on next (the HELM hook).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationAdvice {
-    /// Already decision-grade.
+    /// Already decision-grade under a RIGOROUS numerical slice.
     NoneNeeded,
-    /// Numerical band dominates: refine mesh/tolerance.
+    /// Numerical evidence is the thing to buy next: the numerical band
+    /// dominates, or the total is inside the threshold only under a
+    /// non-rigorous estimate. Refine mesh/tolerance, or replace the reported
+    /// band with a rigorous enclosure.
     RefineNumerics,
     /// Statistical width dominates: gather more samples.
     GatherMoreSamples,
@@ -1141,13 +1165,19 @@ impl<T> Evidence<T> {
 
     /// Is this decision-grade at relative threshold `threshold_rel`?
     /// The teaching detail names the dominant source and the numbers.
+    ///
+    /// A pass is tagged with the rigor of the numerical slice backing it, so
+    /// the caller can tell a rigorous enclosure inside the threshold from a
+    /// non-rigorous estimate inside the threshold.
     #[must_use]
     pub fn assess(&self, threshold_rel: f64) -> DecisionStatus {
         let b = self.breakdown();
         let total_rel = b.total_rel();
         let valid_threshold = threshold_rel.is_finite() && threshold_rel >= 0.0;
         if valid_threshold && total_rel.is_finite() && total_rel <= threshold_rel {
-            return DecisionStatus::DecisionGrade;
+            return DecisionStatus::DecisionGrade {
+                rigor: self.numerical.kind,
+            };
         }
         let dominant = b.dominant();
         let suffix = if dominant == UncertaintySource::ModelForm {
@@ -1184,10 +1214,20 @@ impl<T> Evidence<T> {
 
     /// Decision-aware escalation advice at `threshold_rel` (the HELM
     /// governor hook).
+    ///
+    /// [`EscalationAdvice::NoneNeeded`] — "stop buying evidence" — is reserved
+    /// for a total inside the threshold backed by a RIGOROUS numerical slice.
+    /// A non-rigorous [`NumericalKind::Estimate`] inside the threshold is not
+    /// finished evidence, so it advises [`EscalationAdvice::RefineNumerics`]:
+    /// replace the reported band with a rigorous one (bead
+    /// frankensim-extreal-program-f85xj.2.9).
     #[must_use]
     pub fn escalation_advice(&self, threshold_rel: f64) -> EscalationAdvice {
         match self.assess(threshold_rel) {
-            DecisionStatus::DecisionGrade => EscalationAdvice::NoneNeeded,
+            DecisionStatus::DecisionGrade {
+                rigor: NumericalKind::Exact | NumericalKind::Enclosure,
+            } => EscalationAdvice::NoneNeeded,
+            DecisionStatus::DecisionGrade { .. } => EscalationAdvice::RefineNumerics,
             DecisionStatus::NotDecisionGrade { dominant, .. } => match dominant {
                 UncertaintySource::ModelForm => EscalationAdvice::EscalateModelFidelity,
                 UncertaintySource::Statistical => EscalationAdvice::GatherMoreSamples,
@@ -1324,7 +1364,14 @@ fn sensitivity_json(summary: &SensitivitySummary) -> String {
 impl fmt::Display for DecisionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DecisionStatus::DecisionGrade => write!(f, "decision-grade"),
+            DecisionStatus::DecisionGrade {
+                rigor: NumericalKind::Exact | NumericalKind::Enclosure,
+            } => write!(f, "decision-grade"),
+            DecisionStatus::DecisionGrade { rigor } => write!(
+                f,
+                "decision-grade only under a NON-RIGOROUS {} numerical band",
+                rigor.name()
+            ),
             DecisionStatus::NotDecisionGrade { detail, .. } => {
                 write!(f, "NOT decision-grade: {detail}")
             }

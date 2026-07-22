@@ -15,6 +15,7 @@ use fs_ornith::param::OrnithCandidate;
 use fs_ornith::screen::{lift_to_drag, screen_generation};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
+use fs_surrogate::{Decision, certify_or_escalate};
 use fs_vessel::pour::{PourRig, run_pour};
 use fs_vessel::robustify;
 
@@ -373,9 +374,11 @@ fn fe2e_004_marquee_status_recorded() {
     );
 }
 
-/// fe2e-005: CROSS-FLAGSHIP AUDIT — the shared LBM core: one canonical
-/// roll hash for the machinery the vessel AND the ornithoid ride; a
-/// core change surfaces as ONE delta here.
+/// fe2e-005: SHARED-CORE AUDIT — the uniform-tau D2Q9 collide/stream
+/// path both flagships ride, pinned by one roll hash. Its coverage is
+/// exactly the fixture's (see `lbm_core_roll_hash`): rheology, free
+/// surface, interior-obstacle bounce-back, non-periodic inlet/outlet
+/// handling, momentum-exchange variants and D3Q19 are NOT pinned here.
 #[test]
 fn fe2e_005_shared_lbm_core_audit() {
     let h1 = lbm_core_roll_hash();
@@ -384,22 +387,121 @@ fn fe2e_005_shared_lbm_core_audit() {
         "fe2e-005-lbm-core-audit",
         h1 == h2 && h1 == GOLDEN_LBM_CORE,
         &format!(
-            "canonical D2Q9 roll: 0x{h1:016x} (golden 0x{GOLDEN_LBM_CORE:016x}), replay equal — vessel and ornithoid ride the same bits"
+            "canonical uniform-tau D2Q9 roll (periodic-x, wall-bounded y, 50 plain steps): \
+             0x{h1:016x} (golden 0x{GOLDEN_LBM_CORE:016x}), replay equal — one shared audit \
+             point for the collide/stream core; rheology, free surface, interior-obstacle \
+             bounce-back, inlet/outlet columns, momentum-exchange variants and D3Q19 are \
+             NOT covered by this hash"
         ),
         FIXED_INPUT_SEED,
     );
 }
 
-/// fe2e-006: CROSS-FLAGSHIP AUDIT — e-racing behavior identical across
-/// consumers: identical pre-normalized losses through the race core
-/// must produce identical outcomes regardless of which flagship's
-/// convention wrapped them.
+/// The ornithoid's declared race span (`fs_ornith::screen`): its
+/// normalized base losses lie in `[0, 1.5]` and the jitter has total
+/// width `0.02`. Reconstructed here so the suite can drive the SHARED
+/// race core under the consumer's own convention and compare.
+const ORNITH_DECLARED_SPAN: f64 = 1.52;
+/// The ceiling the ornithoid normalizes its base losses onto.
+const ORNITH_NORMALIZED_CEILING: f64 = 1.5;
+
+/// Drive the shared `fs_race` core over `generation` under the
+/// ORNITHOID's normalization convention, reconstructed at suite level
+/// from its documented contract (`−L/D`, shifted to zero and scaled onto
+/// `[0, ceiling]`, plus the ±0.01 jitter, raced under `span`).
+///
+/// This is the audit's independent side: `fs_ornith::screen_generation`
+/// is the consumer, this is the core driven the way the consumer says it
+/// drives it. If the consumer's normalization or declared span moves,
+/// the two disagree — which is the drift the audit exists to catch.
+fn erace_core_under_ornith_convention(
+    generation: &[OrnithCandidate],
+    seed: u64,
+    span: f64,
+    ceiling: f64,
+) -> fs_race::RaceOutcome {
+    let base: Vec<f64> = generation.iter().map(|c| -lift_to_drag(c)).collect();
+    let lo = base.iter().fold(f64::INFINITY, |m, &v| m.min(v));
+    let hi = base.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
+    let scale = ceiling / (hi - lo).max(1e-9);
+    let kills = fs_exec::KillRegistry::new();
+    for candidate in 0..generation.len() {
+        let _ = kills.register(candidate as u64);
+    }
+    let mut loss = |i: usize, t: u64| {
+        let mut h = (i as u64) << 32 ^ t ^ seed;
+        h ^= h << 13;
+        h ^= h >> 7;
+        h ^= h << 17;
+        #[allow(clippy::cast_precision_loss)]
+        let jitter = ((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.02;
+        (base[i] - lo).mul_add(scale, jitter)
+    };
+    fs_race::race_field(
+        &mut loss,
+        generation.len(),
+        fs_race::RaceSettings::new(fs_race::LossSpan::new(span).expect("positive constant")),
+        &kills,
+    )
+    .expect("fixture losses stay within the declared span")
+}
+
+/// The fe2e-006 fixture generation (the ornith smoke generation, rebuilt
+/// so the audit and its falsification test share one input).
+fn erace_audit_generation() -> Vec<OrnithCandidate> {
+    let mut seed = ORNITH_INPUT_SEED;
+    let mut lcg = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 11) as f64) / (1u64 << 53) as f64
+    };
+    (0..12)
+        .map(|_| {
+            let g: Vec<f64> = (0..fs_ornith::GENE_DIM).map(|_| lcg()).collect();
+            OrnithCandidate::from_genes(&g)
+        })
+        .collect()
+}
+
+/// Does the ornithoid's public screening wrapper agree with the shared
+/// race core driven under `span`/`ceiling`? Returns the two outcomes so
+/// callers can report the disagreement, not just its existence.
+fn ornith_wrapper_agrees_with_core(
+    span: f64,
+    ceiling: f64,
+) -> (bool, (usize, u64, usize), (usize, u64, usize)) {
+    let generation = erace_audit_generation();
+    let wrapper =
+        screen_generation(&generation, ORNITH_INPUT_SEED).expect("normalized screen losses");
+    let core = erace_core_under_ornith_convention(&generation, ORNITH_INPUT_SEED, span, ceiling);
+    let a = (wrapper.winner, wrapper.evaluations_used, wrapper.eliminated);
+    let b = (core.winner, core.evaluations_used, core.eliminated.len());
+    (a == b, a, b)
+}
+
+/// fe2e-006: E-RACE CORE AUDIT — two claims, both measured:
+///
+/// 1. REPLAY DETERMINISM of the shared race core on a fixed normalized
+///    loss table under a fixed declared span (one closure, one seed, run
+///    twice — a same-process replay check, and labelled as one).
+/// 2. CONSUMER/CORE AGREEMENT for the one flagship that exposes a public
+///    race wrapper: `fs_ornith::screen_generation` must produce the same
+///    winner, evaluation count and elimination count as the shared core
+///    driven under the ornithoid's own declared span and normalization.
+///
+/// NO CROSS-FLAGSHIP CONVENTION CLAIM is made. `fs-vessel` exposes no
+/// public race wrapper (`robustify` runs no race; the vessel's 200×
+/// convention lives in `crates/fs-vessel/tests/battery.rs`), so this
+/// suite cannot drive it, and the previous "identical outcomes
+/// regardless of which flagship's convention wrapped them" wording
+/// described a check that invoked neither flagship and used a third
+/// constant (bead `frankensim-extreal-program-f85xj.2.31`).
 #[test]
-fn fe2e_006_erace_consistency_audit() {
-    // The shared loss table (already normalized to the PairwiseRace
-    // contract, as both flagships do).
+fn fe2e_006_erace_core_and_ornith_consumer_audit() {
+    // (1) Same-process replay determinism of the core.
     let base = [0.0f64, 0.4, 0.9, 1.3, 0.2, 1.1];
-    let run = |seed: u64| {
+    let replay = |seed: u64| {
         let kills = fs_exec::KillRegistry::new();
         for candidate in 0..base.len() {
             let _ = kills.register(candidate as u64);
@@ -421,33 +523,401 @@ fn fe2e_006_erace_consistency_audit() {
         )
         .expect("fixture losses stay within the declared span")
     };
-    let a = run(ERACE_INPUT_SEED);
-    let b = run(ERACE_INPUT_SEED);
+    let a = replay(ERACE_INPUT_SEED);
+    let b = replay(ERACE_INPUT_SEED);
+    let replay_equal = a.winner == b.winner
+        && a.evaluations_used == b.evaluations_used
+        && a.eliminated == b.eliminated
+        && a.winner == 0;
+
+    // (2) The ornithoid consumer vs the core under the ornithoid's own
+    // declared span. This is what actually catches a normalization drift.
+    let (agrees, wrapper, core) =
+        ornith_wrapper_agrees_with_core(ORNITH_DECLARED_SPAN, ORNITH_NORMALIZED_CEILING);
+
     forensic_row(
         "erace-audit",
         "race",
         format!(
-            "{{\"winner\":{},\"evals\":{},\"eliminated\":{},\
-             \"input_seed\":{ERACE_INPUT_SEED}}}",
+            "{{\"replay_winner\":{},\"replay_evals\":{},\"replay_eliminated\":{},\
+             \"ornith_wrapper\":[{},{},{}],\"ornith_core\":[{},{},{}],\
+             \"consumer_core_agree\":{agrees},\"ornith_declared_span\":{ORNITH_DECLARED_SPAN},\
+             \"ornith_normalized_ceiling\":{ORNITH_NORMALIZED_CEILING},\
+             \"vessel_wrapper\":\"none-public\",\"input_seed\":{ERACE_INPUT_SEED},\
+             \"ornith_input_seed\":{ORNITH_INPUT_SEED}}}",
             a.winner,
             a.evaluations_used,
-            a.eliminated.len()
+            a.eliminated.len(),
+            wrapper.0,
+            wrapper.1,
+            wrapper.2,
+            core.0,
+            core.1,
+            core.2,
         ),
     );
     verdict(
-        "fe2e-006-erace-audit",
-        a.winner == b.winner
-            && a.evaluations_used == b.evaluations_used
-            && a.eliminated == b.eliminated
-            && a.winner == 0,
+        "fe2e-006-erace-core-and-ornith-consumer",
+        replay_equal && agrees,
         &format!(
-            "identical losses -> identical race outcomes across consumers: winner {}, {} evals, {} eliminated (both runs)",
+            "race core replays identically on a fixed normalized loss table (span 1.32): \
+             winner {}, {} evals, {} eliminated in both runs; and fs_ornith::screen_generation \
+             agrees with the same core driven under the ornithoid's declared span \
+             {ORNITH_DECLARED_SPAN} (wrapper {wrapper:?} vs core {core:?}). No vessel claim: \
+             fs-vessel exposes no public race wrapper, so no cross-flagship convention \
+             comparison is made here",
             a.winner,
             a.evaluations_used,
-            a.eliminated.len()
+            a.eliminated.len(),
         ),
         ERACE_INPUT_SEED,
     );
+}
+
+/// REGRESSION for bead `frankensim-extreal-program-f85xj.2.31`: the
+/// consumer/core agreement check must be FALSIFIABLE — it has to fail
+/// when the consumer's convention and the core's declared span diverge,
+/// which is precisely the drift class fe2e-006 names.
+///
+/// The pre-fix audit could not fail that way: it ran one closure twice
+/// with one seed, so it agreed with itself under ANY convention. Both
+/// halves are asserted here — the blind shape stays green under a
+/// drifted span, the audit's actual check does not.
+#[test]
+fn fe2e_006_consumer_core_agreement_is_falsifiable() {
+    // The audit's own configuration agrees.
+    let (agrees, wrapper, core) =
+        ornith_wrapper_agrees_with_core(ORNITH_DECLARED_SPAN, ORNITH_NORMALIZED_CEILING);
+    assert!(agrees, "wrapper {wrapper:?} vs core {core:?}");
+
+    // Seed the drift the bead describes: the consumer normalizes onto a
+    // different ceiling / declares a different span than the core is driven
+    // with. The agreement check must SEE it.
+    let drifted_ceiling = ornith_wrapper_agrees_with_core(ORNITH_DECLARED_SPAN, 1.0);
+    assert!(
+        !drifted_ceiling.0,
+        "a changed normalization ceiling must break consumer/core agreement: \
+         wrapper {:?} vs core {:?}",
+        drifted_ceiling.1, drifted_ceiling.2
+    );
+    let drifted_span = ornith_wrapper_agrees_with_core(3.0, ORNITH_NORMALIZED_CEILING);
+    assert!(
+        !drifted_span.0,
+        "a changed declared span must break consumer/core agreement: \
+         wrapper {:?} vs core {:?}",
+        drifted_span.1, drifted_span.2
+    );
+
+    // …while the pre-fix shape (one closure, one seed, twice) is blind to
+    // both — it compares an implementation with itself.
+    let generation = erace_audit_generation();
+    for (span, ceiling) in [
+        (ORNITH_DECLARED_SPAN, ORNITH_NORMALIZED_CEILING),
+        (ORNITH_DECLARED_SPAN, 1.0),
+        (3.0, ORNITH_NORMALIZED_CEILING),
+    ] {
+        let x = erace_core_under_ornith_convention(&generation, ERACE_INPUT_SEED, span, ceiling);
+        let y = erace_core_under_ornith_convention(&generation, ERACE_INPUT_SEED, span, ceiling);
+        assert_eq!(
+            (x.winner, x.evaluations_used, x.eliminated.len()),
+            (y.winner, y.evaluations_used, y.eliminated.len()),
+            "self-replay agrees under span {span} / ceiling {ceiling} — which is exactly why \
+             self-replay cannot audit a consumer's convention"
+        );
+    }
+}
+
+// ------------------------------------------------------------------
+// fe2e-007 drill mechanics. Every field a drill row publishes is
+// computed here from state the drill actually moved: a budget counter
+// that runs out, a ledger read back after reopen, a certify-or-escalate
+// decision on the fitted band. The high-fidelity lane and the recovery
+// fault are injected so the accounting can be falsified in a regression
+// test without paying for (or corrupting) the real thing.
+// ------------------------------------------------------------------
+
+/// Candidates in the fe2e-007 mini-campaign.
+const CAMPAIGN_CANDIDATES: usize = 6;
+/// LBM refinements the campaign can fund before the budget is exhausted.
+const LBM_REFINE_BUDGET: usize = 1;
+
+/// The fe2e-007 surrogate fixture: 40 training samples fit the L/D
+/// surrogate + conformal band, then `CAMPAIGN_CANDIDATES` fresh
+/// candidates form the mini-campaign. One LCG, one seed, so the drills
+/// and their regression tests see identical inputs.
+fn surrogate_and_campaign_fixture() -> (fs_ornith::LdSurrogate, Vec<OrnithCandidate>) {
+    let mut seed = SURROGATE_INPUT_SEED;
+    let mut lcg = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 11) as f64) / (1u64 << 53) as f64
+    };
+    let train: Vec<(OrnithCandidate, f64)> = (0..40)
+        .map(|_| {
+            let g: Vec<f64> = (0..fs_ornith::GENE_DIM).map(|_| lcg()).collect();
+            let c = OrnithCandidate::from_genes(&g);
+            (c, lift_to_drag(&c))
+        })
+        .collect();
+    let surrogate = fs_ornith::LdSurrogate::fit(&train, 0.1);
+    let campaign: Vec<OrnithCandidate> = (0..CAMPAIGN_CANDIDATES)
+        .map(|_| {
+            let g: Vec<f64> = (0..fs_ornith::GENE_DIM).map(|_| lcg()).collect();
+            OrnithCandidate::from_genes(&g)
+        })
+        .collect();
+    (surrogate, campaign)
+}
+
+/// Measured outcome of the budget-exhaustion drill.
+#[derive(Debug, Clone, Copy)]
+struct BudgetExhaustion {
+    /// Candidates served by the funded high-fidelity lane.
+    funded: usize,
+    /// Candidates that degraded to the surrogate + conformal path.
+    degraded: usize,
+    /// Degraded candidates whose measured L/D fell inside the band.
+    in_band: usize,
+    /// Every funded answer came back finite.
+    funded_lift_finite: bool,
+}
+
+/// Run the campaign under a finite LBM refinement budget. `fund` is the
+/// high-fidelity lane; it returns `None` when it cannot answer.
+fn run_budget_exhaustion_drill(
+    surrogate: &fs_ornith::LdSurrogate,
+    campaign: &[OrnithCandidate],
+    budget: usize,
+    fund: &mut dyn FnMut(&OrnithCandidate) -> Option<f64>,
+) -> BudgetExhaustion {
+    let mut remaining = budget;
+    let mut out = BudgetExhaustion {
+        funded: 0,
+        degraded: 0,
+        in_band: 0,
+        funded_lift_finite: true,
+    };
+    for candidate in campaign {
+        if remaining > 0 {
+            remaining -= 1;
+            out.funded += 1;
+            let answer = fund(candidate);
+            out.funded_lift_finite &= answer.is_some_and(f64::is_finite);
+        } else {
+            out.degraded += 1;
+            let predicted = surrogate.predict(candidate);
+            if surrogate.band.covers(predicted, lift_to_drag(candidate)) {
+                out.in_band += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The gate fe2e-007 applies to the budget drill: the budget must have
+/// actually run out (funded lane exercised AND degradation observed) and
+/// the degraded estimates must mostly land inside their conformal band.
+fn budget_exhaustion_gate(out: &BudgetExhaustion) -> bool {
+    out.funded == LBM_REFINE_BUDGET
+        && out.degraded == CAMPAIGN_CANDIDATES - LBM_REFINE_BUDGET
+        && out.funded_lift_finite
+        && out.in_band >= 4
+}
+
+/// A seeded recovery fault for the ledger crash-recovery drill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerFault {
+    /// Honest crash: the second transaction is dropped without commit.
+    None,
+    /// A recovery that loses the committed prefix.
+    CommittedPrefixLost,
+    /// A recovery that replays the uncommitted transaction.
+    UncommittedReplayed,
+}
+
+/// Bytes committed before the crash — read back verbatim after reopen.
+const LEDGER_COMMITTED_PAYLOAD: &[u8] = b"{\"stage\":\"fe2e-smoke\",\"drift\":1.5e-13}";
+/// Bytes written INSIDE the uncommitted transaction — must not survive.
+const LEDGER_UNCOMMITTED_PAYLOAD: &[u8] = b"{\"stage\":\"fe2e-lost\",\"uncommitted\":true}";
+
+/// Measured outcome of the ledger crash-recovery drill.
+// Each flag is a SEPARATE measured fact about the reopened ledger, and the
+// drill row publishes them individually so a failure names itself. Collapsing
+// them into one enum would re-hide exactly what bead
+// `frankensim-extreal-program-f85xj.2.33` says must be visible.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone)]
+struct LedgerRecovery {
+    /// The reopened ledger reports a readable schema version. This alone
+    /// was the entire pre-fix gate, and it survives both seeded faults.
+    schema_version_readable: bool,
+    /// Rows in `events` after reopen (the committed prefix is exactly 1).
+    committed_events: u64,
+    /// The committed artifact materializes with byte-identical content.
+    committed_payload_readback: bool,
+    /// The artifact written in the uncommitted transaction is absent.
+    uncommitted_absent: bool,
+    /// Stored artifacts still hash to their recorded identities.
+    artifact_integrity_clean: bool,
+}
+
+impl LedgerRecovery {
+    /// Crash recovery held: the committed prefix survived intact and the
+    /// uncommitted write did not.
+    fn recovered(&self) -> bool {
+        self.schema_version_readable
+            && self.committed_events == 1
+            && self.committed_payload_readback
+            && self.uncommitted_absent
+            && self.artifact_integrity_clean
+    }
+}
+
+/// Delete a ledger database and any sidecar files sharing its name.
+fn remove_ledger_files(path: &std::path::Path) {
+    let Some(dir) = path.parent() else { return };
+    let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|f| f.starts_with(name))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Commit a prefix, crash mid-transaction, reopen, and READ THE PREFIX
+/// BACK. `fault` seeds a broken recovery so the drill's own gate can be
+/// falsified.
+fn run_ledger_crash_recovery_drill(path: &str, fault: LedgerFault) -> LedgerRecovery {
+    remove_ledger_files(std::path::Path::new(path));
+    let (committed, lost) = {
+        let ledger = fs_ledger::Ledger::open(path).expect("open ledger");
+        ledger.begin().expect("begin");
+        ledger
+            .append_event(&fs_ledger::EventRow {
+                session: None,
+                t: 1,
+                kind: "fe2e-smoke",
+                payload: Some("{\"drift\":1.5e-13}"),
+            })
+            .expect("event");
+        let committed = ledger
+            .put_artifact("fe2e-drill", LEDGER_COMMITTED_PAYLOAD, None)
+            .expect("committed artifact");
+        ledger.commit().expect("commit");
+        // The crash: a transaction begun and NEVER committed.
+        ledger.begin().expect("begin 2");
+        ledger
+            .append_event(&fs_ledger::EventRow {
+                session: None,
+                t: 2,
+                kind: "fe2e-lost",
+                payload: Some("{\"uncommitted\":true}"),
+            })
+            .expect("event 2");
+        let lost = ledger
+            .put_artifact("fe2e-drill", LEDGER_UNCOMMITTED_PAYLOAD, None)
+            .expect("uncommitted artifact");
+        if fault == LedgerFault::UncommittedReplayed {
+            ledger
+                .commit()
+                .expect("seeded fault: replay the uncommitted transaction");
+        }
+        // drop without commit
+        (committed.hash, lost.hash)
+    };
+    if fault == LedgerFault::CommittedPrefixLost {
+        remove_ledger_files(std::path::Path::new(path));
+    }
+    let reopened = fs_ledger::Ledger::open(path).expect("reopen after crash");
+    LedgerRecovery {
+        schema_version_readable: reopened.schema_version().is_ok(),
+        committed_events: reopened.table_count("events").unwrap_or(u64::MAX),
+        committed_payload_readback: reopened
+            .get_artifact(&committed)
+            .ok()
+            .flatten()
+            .is_some_and(|bytes| bytes == LEDGER_COMMITTED_PAYLOAD),
+        uncommitted_absent: matches!(reopened.get_artifact(&lost), Ok(None)),
+        artifact_integrity_clean: reopened
+            .verify_artifact_integrity()
+            .is_ok_and(|report| report.is_clean()),
+    }
+}
+
+/// Measured outcome of the model-form escalation drill.
+#[derive(Debug, Clone)]
+struct ModelFormEscalation {
+    /// The fitted conformal band half-width (the measured state the
+    /// decision is taken on).
+    band_half_width: f64,
+    /// A decision tolerance TIGHTER than the band.
+    tight_tolerance: f64,
+    /// A decision tolerance the band satisfies.
+    loose_tolerance: f64,
+    /// `certify_or_escalate` escalated at the tight tolerance.
+    escalated_when_band_too_wide: bool,
+    /// The escalated query was actually served by the funded lane.
+    served_by_high_fidelity: bool,
+    /// …and the policy still serves the surrogate when the band fits.
+    serves_surrogate_when_band_fits: bool,
+    /// Campaign candidates whose measured L/D fell outside their band.
+    conformal_violations: usize,
+    /// The reason string the escalation carried.
+    escalation_reason: String,
+}
+
+/// Take a REAL certify-or-escalate decision on the fitted band and act
+/// on it: an escalated query is served by `serve` (the funded lane), not
+/// by the surrogate.
+fn run_model_form_escalation_drill(
+    surrogate: &fs_ornith::LdSurrogate,
+    campaign: &[OrnithCandidate],
+    serve: &mut dyn FnMut(&OrnithCandidate) -> Option<f64>,
+) -> ModelFormEscalation {
+    let band_half_width = surrogate.band.half_width;
+    let tight_tolerance = band_half_width * 0.5;
+    let loose_tolerance = band_half_width * 2.0;
+    let tight = certify_or_escalate(&surrogate.band, true, tight_tolerance);
+    let loose = certify_or_escalate(&surrogate.band, true, loose_tolerance);
+    let escalated_when_band_too_wide = matches!(tight, Decision::Escalate { .. });
+    let escalation_reason = match &tight {
+        Decision::Escalate { reason } => reason.clone(),
+        Decision::UseSurrogate { .. } => "not-escalated".to_string(),
+    };
+    let served_by_high_fidelity = escalated_when_band_too_wide
+        && campaign
+            .first()
+            .is_some_and(|c| serve(c).is_some_and(f64::is_finite));
+    ModelFormEscalation {
+        band_half_width,
+        tight_tolerance,
+        loose_tolerance,
+        escalated_when_band_too_wide,
+        served_by_high_fidelity,
+        serves_surrogate_when_band_fits: matches!(loose, Decision::UseSurrogate { .. }),
+        conformal_violations: campaign
+            .iter()
+            .filter(|c| !surrogate.band.covers(surrogate.predict(c), lift_to_drag(c)))
+            .count(),
+        escalation_reason,
+    }
+}
+
+/// The gate fe2e-007 applies to the escalation drill.
+fn model_form_escalation_gate(out: &ModelFormEscalation) -> bool {
+    out.escalated_when_band_too_wide
+        && out.served_by_high_fidelity
+        && out.serves_surrogate_when_band_fits
 }
 
 /// fe2e-007: FAILURE DRILLS — each with an expected structured outcome.
@@ -500,111 +970,264 @@ fn fe2e_007_failure_drills() {
         ),
     );
 
-    // (b) BUDGET EXHAUSTION: the ornithoid campaign degrades to the
-    // surrogate+conformal path (the flagship's own drill, re-run at
-    // suite level through public API).
-    let mut seed = SURROGATE_INPUT_SEED;
-    let mut lcg = move || {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((seed >> 11) as f64) / (1u64 << 53) as f64
+    // (b) BUDGET EXHAUSTION: a REAL budget counter. The campaign funds
+    // `LBM_REFINE_BUDGET` high-fidelity refinements; once the counter is
+    // spent, every remaining candidate DEGRADES to the surrogate+conformal
+    // path. Both the funded and the degraded counts are measured here — the
+    // row used to carry a hardcoded "degraded":6 with no budget, no counter
+    // and no funded call anywhere in the drill (bead
+    // `frankensim-extreal-program-f85xj.2.32`).
+    let (sur, campaign) = surrogate_and_campaign_fixture();
+    // The funded lane is the ornithoid's real LBM refinement.
+    let mut fund = |c: &OrnithCandidate| {
+        let report = fs_ornith::refine(c);
+        (report.lift.is_finite() && report.drag.is_finite() && report.steadiness.is_finite())
+            .then_some(report.lift)
     };
-    let train: Vec<(OrnithCandidate, f64)> = (0..40)
-        .map(|_| {
-            let g: Vec<f64> = (0..fs_ornith::GENE_DIM).map(|_| lcg()).collect();
-            let c = OrnithCandidate::from_genes(&g);
-            (c, lift_to_drag(&c))
-        })
-        .collect();
-    let sur = fs_ornith::LdSurrogate::fit(&train, 0.1);
-    let fresh: Vec<OrnithCandidate> = (0..6)
-        .map(|_| {
-            let g: Vec<f64> = (0..fs_ornith::GENE_DIM).map(|_| lcg()).collect();
-            OrnithCandidate::from_genes(&g)
-        })
-        .collect();
-    let in_band = fresh
-        .iter()
-        .filter(|c| sur.band.covers(sur.predict(c), lift_to_drag(c)))
-        .count();
-    let budget_ok = in_band >= 5;
+    let exhaustion = run_budget_exhaustion_drill(&sur, &campaign, LBM_REFINE_BUDGET, &mut fund);
+    // The drill is only evidence if the budget actually ran out mid-campaign
+    // (funded lane exercised AND degradation observed), and if the degraded
+    // estimates stay inside their conformal band.
+    let budget_ok = budget_exhaustion_gate(&exhaustion);
+    let in_band = exhaustion.in_band;
     forensic_row(
         "drill",
         "budget-exhaustion",
         format!(
-            "{{\"degraded\":6,\"in_band\":{in_band},\
-             \"input_seed\":{SURROGATE_INPUT_SEED}}}"
+            "{{\"lbm_refine_budget\":{LBM_REFINE_BUDGET},\"candidates\":{CAMPAIGN_CANDIDATES},\
+             \"funded\":{},\"degraded\":{},\"in_band\":{in_band},\"funded_lift_finite\":{},\
+             \"input_seed\":{SURROGATE_INPUT_SEED}}}",
+            exhaustion.funded, exhaustion.degraded, exhaustion.funded_lift_finite,
         ),
     );
 
-    // (c) LEDGER CRASH-RECOVERY: write events, drop WITHOUT commit
-    // (the crash), reopen — the ledger is consistent and the committed
-    // prefix is intact.
+    // (c) LEDGER CRASH-RECOVERY: commit a prefix, begin a second
+    // transaction, drop the handle WITHOUT committing (the crash), reopen —
+    // and READ THE COMMITTED PREFIX BACK. `schema_version().is_ok()` alone
+    // could not tell a recovered prefix from a lost one (bead
+    // `frankensim-extreal-program-f85xj.2.33`).
     let dir = std::env::temp_dir().join(format!("fe2e-ledger-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("crash.db");
     let path_s = path.to_str().expect("utf8 path").to_owned();
-    let committed_ops = {
-        let ledger = fs_ledger::Ledger::open(&path_s).expect("open ledger");
-        ledger.begin().expect("begin");
-        ledger
-            .append_event(&fs_ledger::EventRow {
-                session: None,
-                t: 1,
-                kind: "fe2e-smoke",
-                payload: Some("{\"drift\":1.5e-13}"),
-            })
-            .expect("event");
-        ledger.commit().expect("commit");
-        // The crash: a transaction begun and NEVER committed.
-        ledger.begin().expect("begin 2");
-        ledger
-            .append_event(&fs_ledger::EventRow {
-                session: None,
-                t: 2,
-                kind: "fe2e-lost",
-                payload: Some("{\"uncommitted\":true}"),
-            })
-            .expect("event 2");
-        // drop without commit
-        1usize
-    };
-    let reopened = fs_ledger::Ledger::open(&path_s).expect("reopen after crash");
-    let recovered = reopened.schema_version().is_ok();
+    let recovery = run_ledger_crash_recovery_drill(&path_s, LedgerFault::None);
+    let recovered = recovery.recovered();
     forensic_row(
         "drill",
         "ledger-crash-recovery",
         format!(
-            "{{\"committed_ops\":{committed_ops},\"recovered\":{recovered},\
-             \"input_seed\":{FIXED_INPUT_SEED}}}"
+            "{{\"schema_version_readable\":{},\"committed_events\":{},\
+             \"committed_payload_readback\":{},\"uncommitted_absent\":{},\
+             \"artifact_integrity_clean\":{},\"recovered\":{recovered},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}",
+            recovery.schema_version_readable,
+            recovery.committed_events,
+            recovery.committed_payload_readback,
+            recovery.uncommitted_absent,
+            recovery.artifact_integrity_clean,
         ),
     );
 
-    // (d) MODEL-FORM ESCALATION: a prediction OUTSIDE the conformal
-    // band must trigger escalation (the certify-or-escalate contract).
-    let outside = !sur.band.covers(1000.0, lift_to_drag(&fresh[0]));
+    // (d) MODEL-FORM ESCALATION: a REAL certify-or-escalate decision on
+    // MEASURED state — the fitted conformal band's half-width against the
+    // caller's decision tolerance — and the escalation is then SPENT on the
+    // funded high-fidelity lane. The row used to assert
+    // "escalates_on_outlier":true from a single `!covers(1000.0, …)`
+    // predicate with no escalation machinery anywhere in the drill (bead
+    // `frankensim-extreal-program-f85xj.2.32`).
+    let mut serve = |c: &OrnithCandidate| {
+        let report = fs_ornith::refine(c);
+        (report.lift.is_finite() && report.drag.is_finite() && report.steadiness.is_finite())
+            .then_some(report.lift)
+    };
+    let escalation = run_model_form_escalation_drill(&sur, &campaign, &mut serve);
+    let escalation_ok = model_form_escalation_gate(&escalation);
     forensic_row(
         "drill",
         "model-form-escalation",
         format!(
-            "{{\"escalates_on_outlier\":{outside},\
-             \"input_seed\":{SURROGATE_INPUT_SEED}}}"
+            "{{\"band_half_width\":{:e},\"tight_tolerance\":{:e},\"loose_tolerance\":{:e},\
+             \"escalated_when_band_too_wide\":{},\"served_by_high_fidelity\":{},\
+             \"serves_surrogate_when_band_fits\":{},\"conformal_violations\":{},\"of\":{},\
+             \"escalation_reason\":{},\"input_seed\":{SURROGATE_INPUT_SEED}}}",
+            escalation.band_half_width,
+            escalation.tight_tolerance,
+            escalation.loose_tolerance,
+            escalation.escalated_when_band_too_wide,
+            escalation.served_by_high_fidelity,
+            escalation.serves_surrogate_when_band_fits,
+            escalation.conformal_violations,
+            CAMPAIGN_CANDIDATES,
+            json_string(&escalation.escalation_reason),
         ),
     );
 
     verdict(
         "fe2e-007-failure-drills",
-        storm_ok && budget_ok && recovered && outside,
+        storm_ok && budget_ok && recovered && escalation_ok,
         &format!(
             "cancellation storm (input seed {CANCELLATION_INPUT_SEED:#x}): winner {} \
-             among survivors; budget exhaustion and model-form escalation (input seed \
-             {SURROGATE_INPUT_SEED:#x}): {in_band}/6 in band and outliers escalate; \
-             ledger crash-recovery: reopened consistent; composite aggregate seed is zero",
-            out.winner
+             among survivors; budget exhaustion (input seed {SURROGATE_INPUT_SEED:#x}): \
+             {} funded LBM refinements then {} candidates degraded to surrogate+conformal, \
+             {in_band}/{} degraded estimates inside the band; ledger crash-recovery: \
+             reopened with {} committed event(s), committed payload read back byte-exact, \
+             uncommitted write absent, artifact integrity clean; model-form escalation: \
+             certify_or_escalate escalated at tolerance {:e} < band {:e} and the query was \
+             served by the funded LBM lane, while tolerance {:e} kept the surrogate; \
+             composite aggregate seed is zero",
+            out.winner,
+            exhaustion.funded,
+            exhaustion.degraded,
+            exhaustion.degraded,
+            recovery.committed_events,
+            escalation.tight_tolerance,
+            escalation.band_half_width,
+            escalation.loose_tolerance,
         ),
         FIXED_INPUT_SEED,
     );
+}
+
+/// REGRESSION for bead `frankensim-extreal-program-f85xj.2.32` (b): the
+/// budget-exhaustion row must be MEASURED. The pre-fix drill had no
+/// budget variable, no counter and no funded call — its `"degraded":6`
+/// was a literal in the format string, so seeding the bead's fault
+/// ("make degradation impossible") left the row and the verdict
+/// unchanged.
+///
+/// The funded lane is stubbed here so the ACCOUNTING can be falsified
+/// without paying for six LBM refinements; fe2e-007 itself spends the
+/// real one.
+#[test]
+fn fe2e_007_budget_drill_counts_real_degradation() {
+    let (sur, campaign) = surrogate_and_campaign_fixture();
+    let calls = std::cell::Cell::new(0usize);
+    let mut stub = |c: &OrnithCandidate| {
+        calls.set(calls.get() + 1);
+        Some(lift_to_drag(c))
+    };
+
+    // The shipped configuration: the counter runs out mid-campaign.
+    let real = run_budget_exhaustion_drill(&sur, &campaign, LBM_REFINE_BUDGET, &mut stub);
+    assert_eq!(real.funded, LBM_REFINE_BUDGET);
+    assert_eq!(real.degraded, CAMPAIGN_CANDIDATES - LBM_REFINE_BUDGET);
+    assert_eq!(
+        calls.get(),
+        LBM_REFINE_BUDGET,
+        "the funded lane must be spent"
+    );
+    assert!(budget_exhaustion_gate(&real), "{real:?}");
+
+    // SEEDED FAULT: fund every candidate, so nothing can degrade. A drill
+    // that reports its outcome must now say `degraded == 0` and FAIL its
+    // gate — the pre-fix row would still have read "degraded":6.
+    calls.set(0);
+    let unlimited = run_budget_exhaustion_drill(&sur, &campaign, CAMPAIGN_CANDIDATES, &mut stub);
+    assert_eq!(unlimited.funded, CAMPAIGN_CANDIDATES);
+    assert_eq!(unlimited.degraded, 0);
+    assert_eq!(calls.get(), CAMPAIGN_CANDIDATES);
+    assert!(
+        !budget_exhaustion_gate(&unlimited),
+        "no degradation must not pass the budget-exhaustion gate: {unlimited:?}"
+    );
+
+    // SEEDED FAULT: the funded lane cannot answer. The drill must not
+    // report a healthy funded lane.
+    let mut dead = |_: &OrnithCandidate| None;
+    let broken = run_budget_exhaustion_drill(&sur, &campaign, LBM_REFINE_BUDGET, &mut dead);
+    assert!(!broken.funded_lift_finite);
+    assert!(!budget_exhaustion_gate(&broken), "{broken:?}");
+}
+
+/// REGRESSION for bead `frankensim-extreal-program-f85xj.2.33`: the
+/// ledger crash-recovery drill must read the committed prefix BACK. The
+/// pre-fix gate was `reopened.schema_version().is_ok()`, which stays
+/// green under a recovery that discards the committed prefix AND under
+/// one that replays the uncommitted transaction — both asserted here.
+#[test]
+fn fe2e_007_ledger_drill_detects_a_broken_recovery() {
+    let dir = std::env::temp_dir().join(format!("fe2e-ledger-fault-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = |tag: &str| {
+        dir.join(format!("{tag}.db"))
+            .to_str()
+            .expect("utf8 path")
+            .to_owned()
+    };
+
+    let healthy = run_ledger_crash_recovery_drill(&path("healthy"), LedgerFault::None);
+    assert!(healthy.recovered(), "{healthy:?}");
+    assert_eq!(healthy.committed_events, 1);
+    assert!(healthy.committed_payload_readback);
+    assert!(healthy.uncommitted_absent);
+
+    let lost = run_ledger_crash_recovery_drill(&path("lost"), LedgerFault::CommittedPrefixLost);
+    assert!(
+        lost.schema_version_readable,
+        "the pre-fix gate reads Ok even here — that is the defect"
+    );
+    assert_eq!(lost.committed_events, 0);
+    assert!(!lost.committed_payload_readback);
+    assert!(
+        !lost.recovered(),
+        "a lost committed prefix must fail: {lost:?}"
+    );
+
+    let replayed =
+        run_ledger_crash_recovery_drill(&path("replayed"), LedgerFault::UncommittedReplayed);
+    assert!(
+        replayed.schema_version_readable,
+        "the pre-fix gate reads Ok even here — that is the defect"
+    );
+    assert_eq!(replayed.committed_events, 2);
+    assert!(
+        !replayed.uncommitted_absent,
+        "the uncommitted artifact survived the replay fault"
+    );
+    assert!(
+        !replayed.recovered(),
+        "a replayed uncommitted transaction must fail: {replayed:?}"
+    );
+}
+
+/// REGRESSION for bead `frankensim-extreal-program-f85xj.2.32` (d): the
+/// escalation row must come from a real decision AND a real serve. The
+/// pre-fix row asserted `"escalates_on_outlier":true` from a single
+/// `!band.covers(1000.0, …)` predicate — no policy, no escalation, no
+/// high-fidelity call.
+#[test]
+fn fe2e_007_escalation_drill_takes_a_real_decision_and_spends_it() {
+    let (sur, campaign) = surrogate_and_campaign_fixture();
+    let calls = std::cell::Cell::new(0usize);
+    let mut stub = |c: &OrnithCandidate| {
+        calls.set(calls.get() + 1);
+        Some(lift_to_drag(c))
+    };
+    let out = run_model_form_escalation_drill(&sur, &campaign, &mut stub);
+    assert!(sur.band.half_width.is_finite() && sur.band.half_width > 0.0);
+    assert!(out.escalated_when_band_too_wide, "{out:?}");
+    assert!(
+        out.escalation_reason.contains("decision tolerance")
+            || out.escalation_reason.contains("tolerance")
+            || !out.escalation_reason.is_empty(),
+        "escalation must carry a reason: {out:?}"
+    );
+    assert_eq!(
+        calls.get(),
+        1,
+        "the escalated query must reach the funded lane"
+    );
+    assert!(out.served_by_high_fidelity);
+    assert!(out.serves_surrogate_when_band_fits);
+    assert!(model_form_escalation_gate(&out));
+
+    // SEEDED FAULT: the funded lane cannot answer the escalated query.
+    // The drill must not report the escalation as served.
+    let mut dead = |_: &OrnithCandidate| None;
+    let unserved = run_model_form_escalation_drill(&sur, &campaign, &mut dead);
+    assert!(unserved.escalated_when_band_too_wide);
+    assert!(!unserved.served_by_high_fidelity);
+    assert!(!model_form_escalation_gate(&unserved), "{unserved:?}");
 }
 
 /// fe2e-008: FORENSIC LOGGING self-audit — every suite row is valid

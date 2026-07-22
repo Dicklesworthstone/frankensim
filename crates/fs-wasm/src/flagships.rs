@@ -668,9 +668,16 @@ fn canonical_cvar_or_nan(losses: &[f64], beta: f64) -> f64 {
 ///   - `[7]` `R` — render resolution (= 128)
 ///   - `[8]` `L` — CVaR lip samples (= 13)
 ///   - `[9]` `B` — fluid-band corners (= 9)
-///   - `[10]` `spectral_growth_minmax` — certified min-max at the input lip
-///     (real `growth_objective`, `n = 32`)
-///   - `[11]` `spectral_growth_offnom` — worst off-nominal growth at input lip
+///   - `[10]` `spectral_growth_minmax` — worst SAMPLED Orr–Sommerfeld growth
+///     rate at the input lip: the max over 4 film-Reynolds stations and the
+///     first 4 modes at the fixed wavenumber `α = 1.02056`, `n = 32`
+///     collocation (real `fs_vessel::stability::growth_objective`). A
+///     floating-point eigensolve, `Estimated`: not an enclosure, no outward
+///     rounding, no eigen-residual or collocation-convergence certificate, and
+///     NOT a maximum over `α` — so it is not a min-max over the wavenumber axis
+///     the name suggests.
+///   - `[11]` `spectral_growth_offnom` — worst off-nominal sampled growth at
+///     the input lip, on the same sampled (not enclosed) footing as `[10]`
 ///   - `[12]` `mass_ledger_residual` — worst pour mass-ledger drift
 ///   - `[13]` `poured_mass_neutral` — mass past the lip (Neutral contact)
 ///   - `[14]` `contact_poured_band` — |poured(Neutral) − poured(Wetting)|

@@ -24,7 +24,17 @@ use std::sync::Arc;
 
 /// One op's vector-Jacobian product: given the primal inputs it saw and
 /// the cotangent arriving at its output, produce the cotangents for
-/// each input (same arity, same lengths — checked by the sweep).
+/// each input.
+///
+/// SHAPE CONTRACT, enforced by [`Tape::transpose`]: the returned vector
+/// has the op's arity, and cotangent `i` has exactly the length of the
+/// recorded primal value of input `i`. Both are checked on every sweep
+/// and a violation PANICS — the accumulation used to `zip`, which
+/// truncates to the shorter vector and turns a masking/slicing bug into
+/// a partly-dropped gradient indistinguishable from a genuine zero
+/// cotangent (the silent-zero Goodhart trap this module exists to
+/// prevent). The seed cotangent handed to `transpose` is checked the
+/// same way against the output node's recorded value.
 pub trait Vjp: Send + Sync {
     /// Pull the output cotangent back through the op.
     fn vjp(&self, primal_inputs: &[&[f64]], out_cotangent: &[f64]) -> Vec<Vec<f64>>;
@@ -160,6 +170,11 @@ pub struct TapeNode {
     pub value: Vec<f64>,
 }
 
+/// The reserved op name marking a tape LEAF. [`Tape::transpose`] stops
+/// the sweep at these nodes without consulting the registry, so it may
+/// never name a real op (see [`Tape::apply`]).
+const LEAF_OP: &str = "leaf";
+
 /// The forward recording of a DAG execution.
 #[derive(Debug, Default)]
 pub struct Tape {
@@ -176,7 +191,7 @@ impl Tape {
     /// Record a LEAF (an input the caller wants gradients for).
     pub fn leaf(&mut self, value: Vec<f64>) -> usize {
         self.nodes.push(TapeNode {
-            op: "leaf".to_string(),
+            op: LEAF_OP.to_string(),
             inputs: Vec::new(),
             value,
         });
@@ -185,7 +200,19 @@ impl Tape {
 
     /// Record an op application (the value was computed by the caller's
     /// forward code — the tape only remembers structure + primals).
+    ///
+    /// # Panics
+    /// If `op` is the reserved leaf sentinel `"leaf"`: [`Tape::transpose`]
+    /// terminates the chain at any node whose op is that name WITHOUT a
+    /// registry lookup, so recording a real op under it would silently
+    /// drop the rest of the differentiation path instead of raising
+    /// [`TransposeError::MissingVjp`].
     pub fn apply(&mut self, op: &str, inputs: &[usize], value: Vec<f64>) -> usize {
+        assert_ne!(
+            op, LEAF_OP,
+            "'{LEAF_OP}' is the reserved leaf sentinel: an op recorded under it would terminate \
+             the transposed sweep silently instead of raising MissingVjp"
+        );
         self.nodes.push(TapeNode {
             op: op.to_string(),
             inputs: inputs.to_vec(),
@@ -207,12 +234,25 @@ impl Tape {
     /// # Errors
     /// [`TransposeError`] when any op on the path lacks a VJP or is
     /// declared non-differentiable — the gradient is blocked, loudly.
+    ///
+    /// # Panics
+    /// If `seed` does not have the length of the output node's recorded
+    /// value, or a registered VJP returns the wrong arity or a cotangent
+    /// whose length differs from its input's recorded primal. These are
+    /// shape-contract violations (see [`Vjp`]); accumulating them would
+    /// truncate to the shorter vector and publish a partly-dropped
+    /// gradient as if it were complete.
     pub fn transpose(
         &self,
         registry: &VjpRegistry,
         output: usize,
         seed: &[f64],
     ) -> Result<BTreeMap<usize, Vec<f64>>, TransposeError> {
+        assert_eq!(
+            seed.len(),
+            self.nodes[output].value.len(),
+            "seed cotangent length must match the output node's value"
+        );
         let mut cotangents: Vec<Option<Vec<f64>>> = vec![None; self.nodes.len()];
         cotangents[output] = Some(seed.to_vec());
         for id in (0..self.nodes.len()).rev() {
@@ -220,7 +260,7 @@ impl Tape {
                 continue;
             };
             let node = &self.nodes[id];
-            if node.op == "leaf" {
+            if node.op == LEAF_OP {
                 continue;
             }
             let entry = registry
@@ -253,7 +293,18 @@ impl Tape {
                 "op '{}' VJP arity",
                 node.op
             );
-            for (&src, ib) in node.inputs.iter().zip(input_bars) {
+            for (input, (&src, ib)) in node.inputs.iter().zip(input_bars).enumerate() {
+                // The LENGTH check the trait doc advertises. Without it the
+                // accumulation below zips against the shorter vector and a
+                // masked/sliced cotangent silently drops its tail — the
+                // dropped components are indistinguishable from genuine
+                // zeros in the returned map.
+                assert_eq!(
+                    ib.len(),
+                    self.nodes[src].value.len(),
+                    "op '{}' VJP cotangent length for input {input}",
+                    node.op
+                );
                 match &mut cotangents[src] {
                     Some(acc) => {
                         for (a, b) in acc.iter_mut().zip(&ib) {
@@ -266,7 +317,7 @@ impl Tape {
         }
         let mut grads = BTreeMap::new();
         for (id, node) in self.nodes.iter().enumerate() {
-            if node.op == "leaf"
+            if node.op == LEAF_OP
                 && let Some(g) = &cotangents[id]
             {
                 grads.insert(id, g.clone());
@@ -276,16 +327,118 @@ impl Tape {
     }
 }
 
+/// Why a transpose-consistency probe request carries no evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransposeProbeError {
+    /// Zero probes were requested. The fold is seeded at `0.0`, so the
+    /// call would return the STRONGEST possible score having evaluated
+    /// neither operator.
+    NoProbes,
+    /// An operator dimension is empty: `⟨Av, w⟩` and `⟨v, Aᵀw⟩` are then
+    /// both the empty sum for every probe and agree vacuously.
+    EmptyDimension {
+        /// Input dimension.
+        n_in: usize,
+        /// Output dimension.
+        n_out: usize,
+    },
+    /// An operator returned a wrong-length image; the inner products
+    /// would `zip`-truncate and compare a prefix.
+    ImageLength {
+        /// Probe index.
+        probe: usize,
+        /// `"apply"` or `"apply_transpose"`.
+        operator: &'static str,
+        /// Length the declared dimensions require.
+        expected: usize,
+        /// Length the operator returned.
+        got: usize,
+    },
+    /// An operator produced a non-finite image or inner product, so the
+    /// residual is not a number the caller can threshold.
+    NonFinite {
+        /// Probe index.
+        probe: usize,
+        /// `"apply"` or `"apply_transpose"`.
+        operator: &'static str,
+    },
+}
+
+impl std::fmt::Display for TransposeProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransposeProbeError::NoProbes => f.write_str(
+                "transpose-consistency check requires at least one probe: zero probes would \
+                 return the perfect residual 0.0 without evaluating either operator",
+            ),
+            TransposeProbeError::EmptyDimension { n_in, n_out } => write!(
+                f,
+                "transpose-consistency check requires non-empty dimensions (n_in = {n_in}, \
+                 n_out = {n_out}): empty sums agree vacuously"
+            ),
+            TransposeProbeError::ImageLength {
+                probe,
+                operator,
+                expected,
+                got,
+            } => write!(
+                f,
+                "probe {probe}: '{operator}' returned {got} components where {expected} were \
+                 declared; the inner product would compare a truncated prefix"
+            ),
+            TransposeProbeError::NonFinite { probe, operator } => write!(
+                f,
+                "probe {probe}: '{operator}' produced a non-finite value, so the transpose \
+                 residual is not a threshold-able number"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TransposeProbeError {}
+
+/// The evidence a transpose-consistency check actually produced.
+///
+/// `max_abs_residual` alone is not thresholdable: it is an ABSOLUTE
+/// quantity, so an operator whose entries are ~1e-20 scores ~1e-40
+/// however wrong its transpose is. The probe count and the pairing
+/// scale are reported so a caller's threshold can be relative.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransposeProbeReport {
+    /// Probes actually evaluated (always ≥ 1).
+    pub probes: usize,
+    /// `max |⟨Av, w⟩ − ⟨v, Aᵀw⟩|` over those probes.
+    pub max_abs_residual: f64,
+    /// `max(|⟨Av, w⟩|, |⟨v, Aᵀw⟩|)` over the same probes — what the
+    /// absolute residual must be read against.
+    pub scale: f64,
+    /// `max_abs_residual / scale`, or `+∞` when `scale` is `0.0` (both
+    /// pairings vanished on every probe, so the check discriminated
+    /// nothing).
+    pub rel_residual: f64,
+}
+
 /// Transpose-consistency check `max |⟨Av, w⟩ − ⟨v, Aᵀw⟩|` over seeded
 /// deterministic probes — the G0 suite every registered linear op runs.
-#[must_use]
+///
+/// # Errors
+/// [`TransposeProbeError`] when the request cannot produce evidence
+/// (no probes, an empty dimension) or an operator answers with a
+/// wrong-length or non-finite image. Refusing beats returning the
+/// perfect score `0.0` from an experiment that never ran.
 pub fn check_transpose(
     apply: &dyn Fn(&[f64]) -> Vec<f64>,
     apply_t: &dyn Fn(&[f64]) -> Vec<f64>,
     n_in: usize,
     n_out: usize,
     probes: usize,
-) -> f64 {
+) -> Result<TransposeProbeReport, TransposeProbeError> {
+    if probes == 0 {
+        return Err(TransposeProbeError::NoProbes);
+    }
+    if n_in == 0 || n_out == 0 {
+        return Err(TransposeProbeError::EmptyDimension { n_in, n_out });
+    }
     let mut state = 0x7ea5_e11e_u64;
     let mut lcg = move || {
         state = state
@@ -294,16 +447,56 @@ pub fn check_transpose(
         ((state >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     };
     let mut worst = 0.0f64;
-    for _ in 0..probes {
+    let mut scale = 0.0f64;
+    for probe in 0..probes {
         let v: Vec<f64> = (0..n_in).map(|_| lcg()).collect();
         let w: Vec<f64> = (0..n_out).map(|_| lcg()).collect();
         let av = apply(&v);
+        if av.len() != n_out {
+            return Err(TransposeProbeError::ImageLength {
+                probe,
+                operator: "apply",
+                expected: n_out,
+                got: av.len(),
+            });
+        }
         let atw = apply_t(&w);
+        if atw.len() != n_in {
+            return Err(TransposeProbeError::ImageLength {
+                probe,
+                operator: "apply_transpose",
+                expected: n_in,
+                got: atw.len(),
+            });
+        }
         let lhs: f64 = av.iter().zip(&w).map(|(a, b)| a * b).sum();
         let rhs: f64 = v.iter().zip(&atw).map(|(a, b)| a * b).sum();
+        if !lhs.is_finite() {
+            return Err(TransposeProbeError::NonFinite {
+                probe,
+                operator: "apply",
+            });
+        }
+        if !rhs.is_finite() {
+            return Err(TransposeProbeError::NonFinite {
+                probe,
+                operator: "apply_transpose",
+            });
+        }
         worst = worst.max((lhs - rhs).abs());
+        scale = scale.max(lhs.abs()).max(rhs.abs());
     }
-    worst
+    let rel_residual = if scale > 0.0 {
+        worst / scale
+    } else {
+        f64::INFINITY
+    };
+    Ok(TransposeProbeReport {
+        probes,
+        max_abs_residual: worst,
+        scale,
+        rel_residual,
+    })
 }
 
 /// The conditioning-aware FD falsifier verdict (review-round-3
@@ -319,7 +512,20 @@ pub struct FdVerdict {
     pub fd_fine: f64,
     /// The conditioning-scaled tolerance actually used.
     pub tolerance: f64,
-    /// True when the adjoint agrees within the scaled tolerance.
+    /// The central-difference ROUNDING floor at the fine step,
+    /// `ε·(|f(x+½hd)| + |f(x−½hd)|)/|h|`. A difference quotient cannot
+    /// resolve derivatives smaller than the cancellation noise of its
+    /// own numerator, so this is the smallest directional derivative
+    /// the experiment can see at this step.
+    pub noise_floor: f64,
+    /// Whether the experiment DISCRIMINATES: the larger of
+    /// `|adjoint_dd|` and `|fd_fine|` clears `noise_floor`. When false
+    /// the honest verdict is "no signal at this step" — every value in
+    /// the band, including `0.0` and the sign-flipped truth, satisfies
+    /// the comparison, so agreement would be vacuous.
+    pub falsifiable: bool,
+    /// True when the probe was falsifiable AND the adjoint agrees
+    /// within the scaled tolerance.
     pub consistent: bool,
 }
 
@@ -327,6 +533,14 @@ pub struct FdVerdict {
 /// differences with a conditioning-aware tolerance: the FD self-error
 /// |FD(h) − FD(h/2)| estimates how much the seam itself wobbles, and
 /// the acceptance band is `base_tol · scale + 3·self_error`.
+///
+/// `scale` is `max(|adjoint_dd|, |fd_fine|, noise_floor)` — homogeneous
+/// in the derivative being tested. It deliberately does NOT carry an
+/// absolute floor: a `max(…, 1.0)` term makes the band never tighter
+/// than `base_tol` in absolute units, so on any problem whose true
+/// directional derivative is smaller than `base_tol` every value in
+/// `[−base_tol, base_tol]` passes — including a silently zero adjoint
+/// and the exact sign flip the falsifier exists to catch.
 pub fn fd_falsifier(
     f: &dyn Fn(&[f64]) -> f64,
     x: &[f64],
@@ -338,19 +552,34 @@ pub fn fd_falsifier(
     let eval = |step: f64| {
         let xp: Vec<f64> = x.iter().zip(dir).map(|(a, d)| a + step * d).collect();
         let xm: Vec<f64> = x.iter().zip(dir).map(|(a, d)| a - step * d).collect();
-        (f(&xp) - f(&xm)) / (2.0 * step)
+        let f_plus = f(&xp);
+        let f_minus = f(&xm);
+        (
+            (f_plus - f_minus) / (2.0 * step),
+            f_plus.abs() + f_minus.abs(),
+        )
     };
-    let fd_coarse = eval(h);
-    let fd_fine = eval(h / 2.0);
+    let (fd_coarse, _) = eval(h);
+    let (fd_fine, magnitude) = eval(h / 2.0);
     let self_error = (fd_coarse - fd_fine).abs();
-    let scale = adjoint_dd.abs().max(fd_fine.abs()).max(1.0);
+    // The quotient's own rounding floor: the numerator carries roughly
+    // ε·(|f₊| + |f₋|) of absolute error and is divided by 2·(h/2) = h.
+    // The floor is homogeneous under the paired rescaling (d → s·d,
+    // h → h/s) that leaves the evaluation points fixed, exactly like the
+    // sibling gate's `1e-12·‖d‖∞`.
+    let noise_floor = f64::EPSILON * magnitude / h.abs();
+    let signal = adjoint_dd.abs().max(fd_fine.abs());
+    let falsifiable = signal > noise_floor;
+    let scale = signal.max(noise_floor);
     let tolerance = base_tol * scale + 3.0 * self_error;
     FdVerdict {
         adjoint_dd,
         fd_coarse,
         fd_fine,
         tolerance,
-        consistent: (adjoint_dd - fd_fine).abs() <= tolerance,
+        noise_floor,
+        falsifiable,
+        consistent: falsifiable && (adjoint_dd - fd_fine).abs() <= tolerance,
     }
 }
 

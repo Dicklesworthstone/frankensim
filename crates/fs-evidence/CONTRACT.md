@@ -28,6 +28,10 @@ telemetry/legacy correlation.
 - `StatisticalCertificate { None | EValue{e, alpha} | HalfWidth{...} }` —
   finite non-negative e-values and widths with levels/confidences strictly in
   `(0,1)`; statistical v1 composition is conservative-weakest (see no-claims).
+  `rel_width` is `0.0` only for `None`, which DECLARES there is no stochastic
+  component. `EValue` declares that there IS one and states nothing about the
+  sampling width of the QoI, so its width is UNSTATED and contributes
+  `+inf` — never a silent zero (bead frankensim-extreal-program-f85xj.2.8).
 - `ModelEvidence { cards, assumptions, validity, discrepancy_rel,
   in_domain }`; `ValidityDomain` — named-parameter boxes with
   intersection/containment; `SensitivitySummary` — d(qoi)/d(param)
@@ -39,15 +43,22 @@ telemetry/legacy correlation.
   `UncertaintyBreakdown` — per-source relative bands, first-order-sum
   total, dominant source with the declaration-order tie law (ModelForm
   first: ties escalate the model, the band cheap refinement cannot fix).
-  `escalation_advice` maps dominance to RefineNumerics /
-  GatherMoreSamples / EscalateModelFidelity (the HELM governor hook).
+  `DecisionGrade{rigor: NumericalKind}` carries the numerical kind backing the
+  total, so "inside the threshold under a NON-RIGOROUS estimate" is not the
+  same claim as "inside the threshold under a rigorous enclosure" (bead
+  frankensim-extreal-program-f85xj.2.9). `escalation_advice` maps dominance to
+  RefineNumerics / GatherMoreSamples / EscalateModelFidelity (the HELM
+  governor hook) and reserves `NoneNeeded` for the rigorous case; a
+  within-threshold non-rigorous band advises RefineNumerics.
 - `ModelCard` (name, version, ambition tag, assumptions, validity, known
   failures, calibration provenance, discrepancy band) and `ModelRegistry`
   — `register_solver` REFUSES without a registered card (the lint).
 - `DiscrepancyModel::fit(&[FidelityPair])` — observed parameter box +
-  mean/max relative discrepancy; `query`/`evidence_at` refuse
-  out-of-distribution points and any query whose key set differs from the exact
-  training schema, with the first missing, unexpected, non-finite, or
+  `DiscrepancyBand{mean_observed_rel, max_observed_rel}`, both SAMPLE
+  STATISTICS over the training pairs and neither a bound anywhere else;
+  `query`/`evidence_at` refuse points outside that box and any query whose key
+  set differs from the exact training schema, with the first missing,
+  unexpected, non-finite, or
   out-of-range parameter named (`OutOfDomain`).
 - `ModelBracket` — N plausible models; evidence = midrange value, an
   enclosure spanning every member, spread as the model band, and a
@@ -216,8 +227,9 @@ telemetry/legacy correlation.
   `DecisionStatus.detail` string is retained for callers but excluded from the
   root. Any semantic change to breakdown, summation, threshold comparison,
   dominant-source order, status, or advice must use a new algorithm/schema
-  version. Under algorithm v1, `StatisticalCertificate::None` and numeric
-  `EValue` currently contribute zero statistical width; this identity does not
+  version. Under algorithm v1, `StatisticalCertificate::None` contributes
+  zero statistical width and numeric `EValue` contributes an infinite
+  (UNSTATED) statistical width; this identity does not
   bind or prove a null, stopping rule, or anytime-valid construction. The
   receipt remains unanchored and is not decision-policy authority.
 - `identity` module (sj31i.52.2 model-card tranche) —
@@ -334,11 +346,20 @@ telemetry/legacy correlation.
    Estimate anywhere poisons `certified()` downstream (evd-006).
 3. No card, no solver: `ModelRegistry::register_solver` refuses unknown
    cards with teaching text (evd-002).
-4. Out-of-distribution discrepancy queries refuse with the violated
-   parameter named — never silent extrapolation. Query keys must equal the
-   training schema exactly, so an untrained physical dimension cannot be
-   supplied and silently ignored; non-finite training or query coordinates are
-   unusable, not a way to synthesize or enter a trained box (evd-004).
+4. Discrepancy queries outside the observed parameter box refuse with the
+   violated parameter named. Query keys must equal the training schema
+   exactly, so an untrained physical dimension cannot be supplied and silently
+   ignored; non-finite training or query coordinates are unusable, not a way to
+   synthesize or enter a trained box (evd-004). The box test is BOUNDING-BOX
+   membership, not an in-distribution test: the axis-aligned hull of the
+   training coordinates contains corners and interiors where no pair was ever
+   evaluated, and nothing in v1 establishes smoothness or sample density
+   between points. Reading the observed maximum as a band AT a query point is
+   therefore an interpolation assumption, and `evidence_at` refuses to mint
+   `in_domain` model evidence unless the query lies within a CALLER-DECLARED
+   fill distance of an actual training pair (default: exact training points
+   only). The declared radius and the measured distance travel in the emitted
+   assumptions (bead frankensim-extreal-program-f85xj.2.7).
 5. Dominance ties break in declaration order (ModelForm, Statistical,
    Numerical) — deterministic verdicts.
 6. Ledger rows and provenance chains are deterministic (repeat-identical).
@@ -391,8 +412,13 @@ telemetry/legacy correlation.
     NaN/inverted intervals, malformed identities and regimes, negative/NaN
     dispersion, and malformed evidence/model inputs (evd-015). Plain model
     evidence never self-promotes to `Validated`, including in-domain
-    two-fidelity discrepancy evidence (evd-004). Ordered infinite Verified
-    endpoints remain sound but vacuous enclosures.
+    two-fidelity discrepancy evidence (evd-004). Half-infinite (`[-inf, x]`,
+    `[x, +inf]`) and whole-line (`[-inf, +inf]`) Verified endpoints remain
+    sound but vacuous enclosures; the DEGENERATE point-at-infinity intervals
+    `[+inf, +inf]` and `[-inf, -inf]` are refused by both
+    `validate_color_payload` and `verified_from`, because they enclose no real
+    value at all — an overflowed computation is an unresolved state, not a
+    point certificate (bead frankensim-extreal-program-f85xj.2.6).
 12. `demotion_estimator_identity` is total over arbitrary strings and always
     emits a bounded identity accepted by `color_identity_reason`; invalid
     readable inputs are hash-compacted rather than interpolated. Malformed
@@ -892,8 +918,23 @@ physical validation, process-standard conformance, or decision fitness.
 - Verified-interval composition here covers outward-rounded Add/Mul and exact
   endpoint Hull; the full ledger operation algebra composes through fs-ivl
   when wired.
-- Estimated dispersion combines additively (conservative); calibrated
-  dispersion algebra joins the color-probes bead.
+- `IntervalOp::Hull` is the UNION of both operand intervals. It is an
+  enclosure of the result ONLY for operations whose value always lies between
+  its operands (min/max, selection, convex combination, envelope folds). It is
+  NOT a valid enclosure for difference, ratio, or any other operation that can
+  leave the operand hull — composing `[10, 10]` with `[-10, -10]` under a
+  subtraction yields `[-10, 10]`, which does not contain the true difference
+  `20`. `compose` cannot see which operation the caller meant, so it makes no
+  enclosure claim for `Hull`; those operations compose through fs-ivl (bead
+  frankensim-extreal-program-f85xj.2.11).
+- Estimated dispersion combines additively (conservative), charging EVERY
+  contributing slice its own relative half-width: a rigorous Exact/Enclosure
+  numerical slice and a `Verified` operand are charged their own width rather
+  than a free `0.0`, and a width-less `Validated` operand collapses the spread
+  claim to `+inf`. A published `dispersion == 0.0` therefore means genuinely
+  zero width, not "the operand was rigorous so it cost nothing" (bead
+  frankensim-extreal-program-f85xj.2.5). Calibrated dispersion algebra joins
+  the color-probes bead.
 - `ModelEvidence` carries model-form diagnostics, not experimental authority.
   Even an in-domain discrepancy model trained on paired simulations remains
   `Estimated`; this crate has no authenticated anchor type that can admit a new

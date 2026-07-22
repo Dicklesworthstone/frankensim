@@ -226,7 +226,10 @@ pub enum Color {
     Estimated {
         /// The estimator's identity.
         estimator: String,
-        /// The estimator's own dispersion (∞ = no spread claim).
+        /// The estimator's own dispersion: the relative spread charged by
+        /// EVERY contributing slice, rigorous or not (∞ = no spread claim).
+        /// `0.0` therefore means "genuinely zero width", not "the operand was
+        /// rigorous so it cost nothing".
         dispersion: f64,
     },
 }
@@ -244,8 +247,9 @@ pub enum ColorPayloadError {
         /// Stable reason.
         reason: &'static str,
     },
-    /// A Verified interval contains NaN or is inverted. Ordered infinities are
-    /// valid, possibly vacuous enclosures.
+    /// A Verified interval contains NaN, is inverted, or is a degenerate point
+    /// at infinity. Half-infinite (`[-inf, x]`, `[x, +inf]`) and whole-line
+    /// (`[-inf, +inf]`) endpoints remain valid, possibly vacuous enclosures.
     InvalidVerifiedInterval {
         /// Stable reason.
         reason: &'static str,
@@ -292,8 +296,12 @@ impl std::error::Error for ColorPayloadError {}
 
 /// Validate the shared structural invariant for one color payload.
 ///
-/// Ordered infinite Verified endpoints are allowed: `[-inf,+inf]` is a sound
-/// but vacuous enclosure. NaN and inverted intervals are never valid.
+/// Only the *ordered, non-degenerate* infinite Verified shapes are allowed:
+/// `[-inf, x]`, `[x, +inf]`, and `[-inf, +inf]` are sound but vacuous
+/// enclosures. NaN, inverted, and degenerate point-at-infinity intervals
+/// (`[+inf, +inf]`, `[-inf, -inf]`) are never valid: the latter enclose no
+/// real value at all, so admitting them mints an unsatisfiable certificate at
+/// the strongest colour (bead frankensim-extreal-program-f85xj.2.6).
 ///
 /// # Errors
 /// Returns the exact malformed field and stable reason.
@@ -307,6 +315,10 @@ pub fn validate_color_payload(color: &Color) -> Result<(), ColorPayloadError> {
             } else if lo > hi {
                 Err(ColorPayloadError::InvalidVerifiedInterval {
                     reason: "lower bound exceeds upper bound",
+                })
+            } else if lo.is_infinite() && lo.to_bits() == hi.to_bits() {
+                Err(ColorPayloadError::InvalidVerifiedInterval {
+                    reason: "degenerate point interval at infinity encloses no real value",
                 })
             } else {
                 Ok(())
@@ -579,7 +591,17 @@ pub enum IntervalOp {
     Add,
     /// Product: the four-corner hull.
     Mul,
-    /// Anything else: the conservative hull of both bounds.
+    /// The UNION of both operand intervals, `[min(lo), max(hi)]`.
+    ///
+    /// This is an enclosure of the result ONLY for operations whose value
+    /// always lies between its operands — min/max, selection, convex
+    /// combination, and envelope folds. It is **not** a valid enclosure for
+    /// difference, ratio, or any other operation that can leave the operand
+    /// hull: composing `[10, 10]` with `[-10, -10]` under a subtraction yields
+    /// `[-10, 10]`, which does NOT contain the true difference `20`. Compose
+    /// those through `fs-ivl` and colour the resulting certificate instead of
+    /// reaching for `Hull` as a generic fallback (bead
+    /// frankensim-extreal-program-f85xj.2.11).
     Hull,
 }
 
@@ -645,10 +667,22 @@ pub fn verified_from(cert: &NumericalCertificate) -> Result<Color, ColorError> {
             // or inverted (`lo > hi`) interval encloses NOTHING, so fail closed
             // rather than mint a false certificate from garbage bounds — e.g.
             // `exact(NaN)` or a hand-built inverted cert (bead wa8i E4).
-            // Infinite bounds are a valid (if loose) enclosure and pass.
+            // Half-infinite and whole-line bounds are a valid (if loose)
+            // enclosure and pass.
             if cert.lo.is_nan() || cert.hi.is_nan() || cert.lo > cert.hi {
                 return Err(ColorError::LaunderingRefused {
                     actual: "non-enclosure (NaN or inverted bounds)",
+                });
+            }
+            // `[+inf,+inf]` / `[-inf,-inf]` satisfy `lo <= hi` yet enclose NO
+            // real value: an overflowed computation is an UNRESOLVED state, not
+            // a point certificate at infinity. `Evidence::certified()` already
+            // refuses exactly this (`ExactNotFinite` / `NonFiniteBounds`), so
+            // the colour door must not be weaker than the certification door it
+            // mirrors (bead frankensim-extreal-program-f85xj.2.6).
+            if cert.lo.is_infinite() && cert.lo.to_bits() == cert.hi.to_bits() {
+                return Err(ColorError::LaunderingRefused {
+                    actual: "non-enclosure (degenerate point interval at infinity)",
                 });
             }
             Ok(Color::Verified {
@@ -713,16 +747,32 @@ pub fn color_of(numerical: &NumericalCertificate, model: &ModelEvidence) -> Colo
             dispersion: f64::INFINITY,
         };
     }
-    let numerical_dispersion = if numerical.kind == NumericalKind::Estimate {
-        let reference = numerical.lo / 2.0 + numerical.hi / 2.0;
-        numerical.rel_half_width(reference)
-    } else {
-        0.0
-    };
+    // Every usable numerical slice is charged its OWN relative half-width,
+    // rigorous or not. Charging Exact/Enclosure a flat 0.0 made the rigorous
+    // tag SHRINK the published spread — a wide certified enclosure would
+    // report dispersion 0.0, which is the perfect-agreement encoding bead
+    // frankensim-f5pr was filed for (bead
+    // frankensim-extreal-program-f85xj.2.5). Only a genuinely zero-width
+    // certificate (Exact, or lo == hi) still yields 0.0.
+    let numerical_dispersion = interval_dispersion(numerical.lo, numerical.hi);
     Color::Estimated {
         estimator,
         dispersion: model.discrepancy_rel + numerical_dispersion,
     }
+}
+
+/// The relative half-width an interval `[lo, hi]` contributes to a composed
+/// `Estimated` dispersion, against its own midpoint magnitude. `+inf` when no
+/// finite reference magnitude exists to relativize against — never a silent
+/// zero. Delegates to [`NumericalCertificate::rel_half_width`] so the colour
+/// algebra and the evidence breakdown agree on one definition of "width".
+fn interval_dispersion(lo: f64, hi: f64) -> f64 {
+    NumericalCertificate {
+        kind: NumericalKind::Enclosure,
+        lo,
+        hi,
+    }
+    .rel_half_width(lo / 2.0 + hi / 2.0)
 }
 
 fn normalize_composition_input(color: &Color) -> Color {
@@ -758,8 +808,12 @@ fn outward_round(lo: f64, hi: f64) -> (f64, f64) {
 /// The TOTAL, conservative pairwise composition: the result never OUTRANKS
 /// the weaker operand (no laundering). Malformed payloads and disjoint
 /// validated regimes may demote further. Verified bounds combine per `op`
-/// (outward-rounded to preserve enclosure), validated regimes INTERSECT (both
-/// anchors must hold), and estimated dispersions add (conservative).
+/// (`Add`/`Mul` are outward-rounded to preserve enclosure; `Hull` is exact
+/// endpoint selection and is an enclosure only for the between-the-operands
+/// operations named on [`IntervalOp::Hull`] — `compose` cannot check which
+/// operation the caller meant, so it does not certify enclosure for `Hull`),
+/// validated regimes INTERSECT (both anchors must hold), and estimated
+/// dispersions add (conservative), charging every operand its own width.
 #[must_use]
 pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
     let a = normalize_composition_input(a);
@@ -838,15 +892,29 @@ pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
                 dispersion,
             },
         ) => {
+            // A Verified/Validated operand is NOT a zero-width operand. A
+            // `Verified{0.0, 1e6}` carries 1e6 of absolute uncertainty, and a
+            // `Validated` colour states a regime and a dataset but no width at
+            // all. Charging either 0.0 published the sum as if the stronger
+            // operand agreed perfectly (bead
+            // frankensim-extreal-program-f85xj.2.5): a Verified operand is
+            // charged its own relative half-width, and a width-less Validated
+            // operand collapses the spread claim to `+inf` — the same "no
+            // defensible spread claim" encoding the disjoint-regime demotion
+            // above already uses.
             let (other_disp, composed_identity) = match other {
                 Color::Estimated {
                     estimator: e2,
                     dispersion: v,
                 } => (*v, composed_estimator_identity(estimator, e2)),
-                Color::Verified { .. } => (0.0, verified_estimator_identity(estimator)),
-                Color::Validated { dataset, .. } => {
-                    (0.0, validated_estimator_identity(estimator, dataset))
-                }
+                Color::Verified { lo, hi } => (
+                    interval_dispersion(*lo, *hi),
+                    verified_estimator_identity(estimator),
+                ),
+                Color::Validated { dataset, .. } => (
+                    f64::INFINITY,
+                    validated_estimator_identity(estimator, dataset),
+                ),
             };
             Color::Estimated {
                 estimator: composed_identity,

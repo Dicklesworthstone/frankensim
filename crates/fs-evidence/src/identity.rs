@@ -3269,31 +3269,39 @@ fn validate_discrepancy_band_v1(band: DiscrepancyBand) -> Result<(), Discrepancy
         bits: value.to_bits(),
         reason,
     };
-    if band.mean_rel.is_nan() {
-        return Err(invalid("mean_rel", band.mean_rel, "value must not be NaN"));
-    }
-    if band.max_rel.is_nan() {
-        return Err(invalid("max_rel", band.max_rel, "value must not be NaN"));
-    }
-    if band.mean_rel < 0.0 {
+    if band.mean_observed_rel.is_nan() {
         return Err(invalid(
-            "mean_rel",
-            band.mean_rel,
+            "mean_observed_rel",
+            band.mean_observed_rel,
+            "value must not be NaN",
+        ));
+    }
+    if band.max_observed_rel.is_nan() {
+        return Err(invalid(
+            "max_observed_rel",
+            band.max_observed_rel,
+            "value must not be NaN",
+        ));
+    }
+    if band.mean_observed_rel < 0.0 {
+        return Err(invalid(
+            "mean_observed_rel",
+            band.mean_observed_rel,
             "value must be non-negative",
         ));
     }
-    if band.max_rel < 0.0 {
+    if band.max_observed_rel < 0.0 {
         return Err(invalid(
-            "max_rel",
-            band.max_rel,
+            "max_observed_rel",
+            band.max_observed_rel,
             "value must be non-negative",
         ));
     }
-    if band.mean_rel > band.max_rel {
+    if band.mean_observed_rel > band.max_observed_rel {
         return Err(invalid(
-            "mean_rel",
-            band.mean_rel,
-            "mean_rel must not exceed max_rel",
+            "mean_observed_rel",
+            band.mean_observed_rel,
+            "mean_observed_rel must not exceed max_observed_rel",
         ));
     }
     Ok(())
@@ -3327,11 +3335,11 @@ where
     let receipt = CanonicalEncoder::<DiscrepancyBandIdV1, _>::new(limits, cancellation)?
         .u64(
             Field::new(0, "mean-rel-ieee754-bits"),
-            band.mean_rel.to_bits(),
+            band.mean_observed_rel.to_bits(),
         )?
         .u64(
             Field::new(1, "max-rel-ieee754-bits"),
-            band.max_rel.to_bits(),
+            band.max_observed_rel.to_bits(),
         )?
         .finish()?;
     Ok(IdentifiedDiscrepancyBandV1 { band, receipt })
@@ -4813,7 +4821,10 @@ where
     let advice = certified.escalation_advice(threshold_rel);
     let mut status_payload = [0_u8; 4];
     let (status_tag, status_payload_len) = match &status {
-        DecisionStatus::DecisionGrade => (1, 0),
+        // The rigor tag is a pure function of the bound certified child (whose
+        // numerical kind is already part of the child identity), so it adds no
+        // discriminating information to this frame.
+        DecisionStatus::DecisionGrade { .. } => (1, 0),
         DecisionStatus::NotDecisionGrade { dominant, .. } => {
             status_payload.copy_from_slice(
                 &decision_assessment_uncertainty_source_tag_v1(*dominant).to_le_bytes(),

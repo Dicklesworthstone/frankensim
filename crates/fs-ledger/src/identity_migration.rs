@@ -3531,6 +3531,7 @@ impl Ledger {
                  SET generation = generation WHERE singleton = 1",
             )
             .map_err(|error| sql_err("identity reconciliation source-generation lock", &error))
+            .map(|_| ())
     }
 
     /// Capture a persistable immutable-cohort cursor using the maximum shipped

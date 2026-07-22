@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use fs_adjoint::transpose::{
-    CheckpointStore, MemStore, Tape, TransposeError, Vjp, VjpRegistry, check_transpose,
-    fd_falsifier, spilled_adjoint,
+    CheckpointStore, MemStore, Tape, TransposeError, TransposeProbeError, Vjp, VjpRegistry,
+    check_transpose, fd_falsifier, spilled_adjoint,
 };
 use fs_adjoint::{HeatAdjoint, heat_initial_gradient};
 use fs_sparse::Coo;
@@ -239,17 +239,27 @@ fn tr_001_seam_crossing_gradient_vs_fd_falsifier() {
 #[test]
 fn tr_002_transpose_consistency_battery() {
     let restrict = Restrict { m: 12, n: 8 };
-    let worst = check_transpose(&|x| restrict.apply(x), &|y| restrict.apply_t(y), 8, 12, 24);
-    assert!(worst < 1e-12, "restriction transpose exact: {worst}");
+    let report = check_transpose(&|x| restrict.apply(x), &|y| restrict.apply_t(y), 8, 12, 24)
+        .expect("a well-posed probe request");
+    assert_eq!(report.probes, 24);
+    assert!(
+        report.max_abs_residual < 1e-12,
+        "restriction transpose exact: {report:?}"
+    );
+    assert!(
+        report.scale > 0.0 && report.rel_residual < 1e-12,
+        "the residual must also be small RELATIVE to the pairing scale: {report:?}"
+    );
     let solve = SpdSolve {
         diag: 4.0,
         off: -1.0,
         n: 12,
     };
-    let worst_s = check_transpose(&|x| solve.solve(x), &|y| solve.solve(y), 12, 12, 24);
+    let report_s = check_transpose(&|x| solve.solve(x), &|y| solve.solve(y), 12, 12, 24)
+        .expect("a well-posed probe request");
     assert!(
-        worst_s < 1e-10,
-        "symmetric solve is its own transpose to solver tolerance: {worst_s}"
+        report_s.max_abs_residual < 1e-10,
+        "symmetric solve is its own transpose to solver tolerance: {report_s:?}"
     );
     verdict(
         "tr-002",
@@ -264,7 +274,11 @@ fn tr_003_missing_and_declared_vjps_fail_loud() {
     // An op nobody registered lands mid-path.
     let mut tape = Tape::new();
     let leaf = tape.leaf(c.clone());
-    let v = vec![1.0; 8];
+    // The lift-proxy VJP produces a 12-component cotangent (its `g`), so
+    // the node it consumes must have 12 components: the sweep now CHECKS
+    // cotangent lengths against the recorded primals instead of zipping
+    // them into agreement.
+    let v = vec![1.0; 12];
     let n1 = tape.apply("mystery/op", &[leaf], v.clone());
     let out = tape.apply("functional/lift-proxy", &[n1], vec![1.0]);
     let reg = registry();
@@ -413,5 +427,179 @@ fn tr_004_cas_checkpoints_bit_equal_with_and_without_spill() {
         "tr-004",
         "checkpoints spilled through the real fs-ledger CAS reproduce BIT-EQUAL \
          gradients vs in-memory; agrees with the base revolve path to 1e-9",
+    );
+}
+
+// ---- Claim-integrity regressions (E02 sweep) --------------------------
+
+/// A VJP that returns a cotangent SHORTER than its input — the masking
+/// or slicing bug the shape contract exists to catch.
+struct TruncatingVjp {
+    keep: usize,
+}
+
+impl Vjp for TruncatingVjp {
+    fn vjp(&self, _primal: &[&[f64]], bar: &[f64]) -> Vec<Vec<f64>> {
+        vec![bar.iter().take(self.keep).copied().collect()]
+    }
+}
+
+#[test]
+#[should_panic(expected = "VJP cotangent length for input 0")]
+fn tr_005_truncated_cotangent_is_refused_not_zipped() {
+    // frankensim-extreal-program-f85xj.2.23. Only ARITY was asserted;
+    // individual cotangent lengths were never compared against the
+    // recorded primal, and accumulation used `zip`, which truncates to
+    // the shorter. A length-k cotangent was then presented as the
+    // length-n leaf gradient with the dropped tail indistinguishable
+    // from a genuine zero.
+    let mut reg = VjpRegistry::new();
+    reg.register("masking/op", Arc::new(TruncatingVjp { keep: 3 }));
+    let mut tape = Tape::new();
+    let leaf = tape.leaf(vec![1.0; 8]);
+    let out = tape.apply("masking/op", &[leaf], vec![1.0; 8]);
+    let _ = tape.transpose(&reg, out, &[1.0; 8]);
+}
+
+#[test]
+#[should_panic(expected = "seed cotangent length")]
+fn tr_006_short_seed_is_refused() {
+    // Same shape, on the caller's side of the seam.
+    let mut reg = VjpRegistry::new();
+    reg.register("masking/op", Arc::new(TruncatingVjp { keep: 8 }));
+    let mut tape = Tape::new();
+    let leaf = tape.leaf(vec![1.0; 8]);
+    let out = tape.apply("masking/op", &[leaf], vec![1.0; 8]);
+    let _ = tape.transpose(&reg, out, &[1.0; 3]);
+}
+
+#[test]
+#[should_panic(expected = "reserved leaf sentinel")]
+fn tr_007_reserved_leaf_op_name_is_refused() {
+    // The sweep skips any node whose op is "leaf" WITHOUT a registry
+    // lookup, so recording a real op under that name terminated the
+    // chain silently instead of raising MissingVjp.
+    let mut tape = Tape::new();
+    let leaf = tape.leaf(vec![1.0; 4]);
+    let _ = tape.apply("leaf", &[leaf], vec![1.0; 4]);
+}
+
+#[test]
+fn tr_008_transpose_probe_refuses_vacuous_requests() {
+    // frankensim-extreal-program-f85xj.2.22. Zero probes returned 0.0 —
+    // the STRONGEST possible score — having evaluated neither operator,
+    // and an empty dimension made both inner products empty sums.
+    let restrict = Restrict { m: 12, n: 8 };
+    let apply = |x: &[f64]| restrict.apply(x);
+    let apply_t = |y: &[f64]| restrict.apply_t(y);
+    assert_eq!(
+        check_transpose(&apply, &apply_t, 8, 12, 0),
+        Err(TransposeProbeError::NoProbes),
+        "zero probes must refuse, not score 0.0"
+    );
+    assert_eq!(
+        check_transpose(&|_x| Vec::new(), &|_y| Vec::new(), 0, 0, 4),
+        Err(TransposeProbeError::EmptyDimension { n_in: 0, n_out: 0 }),
+        "empty dimensions agree vacuously"
+    );
+    let short = check_transpose(&|_x| vec![0.0; 3], &apply_t, 8, 12, 4)
+        .expect_err("a wrong-length image must refuse");
+    assert!(
+        matches!(
+            short,
+            TransposeProbeError::ImageLength {
+                probe: 0,
+                operator: "apply",
+                expected: 12,
+                got: 3
+            }
+        ),
+        "{short:?}"
+    );
+    let nan_apply = |x: &[f64]| x.iter().map(|_| f64::NAN).collect::<Vec<f64>>();
+    let identity_t = |y: &[f64]| y.to_vec();
+    assert!(matches!(
+        check_transpose(&nan_apply, &identity_t, 8, 8, 4),
+        Err(TransposeProbeError::NonFinite {
+            probe: 0,
+            operator: "apply"
+        })
+    ));
+
+    // And the ABSOLUTE residual is no longer the whole story: a tiny
+    // operator with a badly wrong transpose scores ~1e-40 in absolute
+    // terms while its RELATIVE residual is O(1).
+    let tiny = |x: &[f64]| x.iter().map(|v| 1e-20 * v).collect::<Vec<f64>>();
+    let tiny_wrong_t = |y: &[f64]| y.iter().map(|v| -1e-20 * v).collect::<Vec<f64>>();
+    let report = check_transpose(&tiny, &tiny_wrong_t, 6, 6, 8).expect("well-posed");
+    assert!(
+        report.max_abs_residual < 1e-19,
+        "the absolute residual is vacuously small: {report:?}"
+    );
+    assert!(
+        report.rel_residual > 1.0,
+        "the relative residual exposes the sign-flipped transpose: {report:?}"
+    );
+    verdict(
+        "tr-008",
+        "the G0 probe refuses zero probes, empty dimensions, wrong-length and non-finite \
+         images, and reports a scale so thresholds can be relative",
+    );
+}
+
+#[test]
+fn tr_009_fd_falsifier_band_is_scale_relative() {
+    // frankensim-extreal-program-f85xj.2.21. With the production
+    // constants of certs::fd_spot_checks (h = 1e-5, base_tol = 1e-7),
+    // the old band was `base_tol * max(|dd|, |fd|, 1.0)` — an ABSOLUTE
+    // floor. On a derivative smaller than base_tol every value in
+    // [-base_tol, base_tol] passed, including 0 and the sign flip.
+    let tiny_slope = |x: &[f64]| 1e-9 * x[0];
+    let x = [1.0];
+    let dir = [0.4];
+
+    let silent_zero = fd_falsifier(&tiny_slope, &x, &dir, 0.0, 1e-5, 1e-7);
+    assert!(
+        silent_zero.falsifiable,
+        "4e-10 is far above the difference-quotient noise floor: {silent_zero:?}"
+    );
+    assert!(
+        !silent_zero.consistent,
+        "a zero adjoint must not agree with a nonzero FD derivative: {silent_zero:?}"
+    );
+
+    let sign_flipped = fd_falsifier(&tiny_slope, &x, &dir, -4e-10, 1e-5, 1e-7);
+    assert!(
+        !sign_flipped.consistent,
+        "an exact sign flip must be caught: {sign_flipped:?}"
+    );
+
+    let honest = fd_falsifier(&tiny_slope, &x, &dir, 4e-10, 1e-5, 1e-7);
+    assert!(
+        honest.consistent,
+        "the correct adjoint must still pass: {honest:?}"
+    );
+
+    // Control from the bead: at unit scale the verdict is unchanged.
+    let unit_slope = |x: &[f64]| 3.0 * x[0];
+    assert!(!fd_falsifier(&unit_slope, &x, &dir, 0.0, 1e-5, 1e-7).consistent);
+    assert!(fd_falsifier(&unit_slope, &x, &dir, 1.2, 1e-5, 1e-7).consistent);
+
+    // A bit-insensitive objective gives NO SIGNAL — which is not
+    // agreement, even though |0 - 0| <= tolerance holds trivially.
+    let constant = |_x: &[f64]| 7.0;
+    let no_signal = fd_falsifier(&constant, &x, &dir, 0.0, 1e-5, 1e-7);
+    assert!(
+        !no_signal.falsifiable,
+        "a constant objective cannot falsify anything: {no_signal:?}"
+    );
+    assert!(
+        !no_signal.consistent,
+        "no signal must not be reported as consistent: {no_signal:?}"
+    );
+    verdict(
+        "tr-009",
+        "the falsifier band is homogeneous in the derivative scale: zero and sign-flipped \
+         adjoints on a 1e-9 slope are caught, and a bit-insensitive probe reports no signal",
     );
 }

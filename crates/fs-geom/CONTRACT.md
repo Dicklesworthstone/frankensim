@@ -91,12 +91,20 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   `Certified` receipt, and returns a stage/count-attributed `Cancelled` refusal
   when its own `Cx` checkpoints observe cancellation.
 - `SampledSdf` — dense trilinear sampled-field target with a finite nominal
-  reconstruction bound kept distinct from authority relative to abstract
+  reconstruction radius kept distinct from authority relative to abstract
   region signed distance. It stores strictly increasing representable nodes on
-  each axis and locates/interpolates against those actual cells. Its rigorous
+  each axis and locates/interpolates against those actual cells. Its
   reconstruction radius is the outward product of `L` and the largest actual
   full-cell diagonal (valid for arbitrary convex trilinear weights), plus a
-  finite outward interpolation-roundoff allowance. It validates and outwardly
+  finite outward interpolation-roundoff allowance. That radius is a RIGOROUS
+  bound only when the source declared `TraceStepClaim::ExactDistance`, whose
+  unit-Lipschitz theorem is GLOBAL and therefore holds across a whole cell;
+  for every weaker source `L` is the maximum of per-node
+  `ChartSample::lipschitz` values, each certified LOCAL to its query with no
+  stated radius, so a sub-cell slope spike can exceed it.
+  `nominal_field_bound_kind()` publishes exactly that distinction
+  (`Enclosure` vs `Estimate`) alongside the number, and `bound()` is an alias
+  that inherits it. It validates and outwardly
   composes every sampled `ChartSample::error`: malformed claims and `NoClaim`
   fail closed, estimates stay estimates, rigorous source radii are added to
   reconstruction error, and interpolation never claims `Exact`. Even rigorous
@@ -111,7 +119,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   valid positive-radius `SphereChart`, finite strictly three-dimensional
   `BoxChart`, and valid ring `TorusChart` instances (unit
   Lipschitz, outward-rounded evaluation enclosures, `ExactDistance` trace claim,
-  known Betti numbers); degenerate/invalid boxes downgrade to `NoClaim` and unknown
+  known Betti numbers). `BettiBounds` describes the SOLID region where the
+  signed distance is negative, not its boundary surface, so the published
+  exact triples are ball `(1, 0, 0)`, box `(1, 0, 0)`, solid torus
+  `(1, 1, 0)` — none of these encloses a void. That is the convention
+  `fs_topo::cubical::verify_topology` measures and its conformance suite
+  pins (topo-003), so a hint and a measurement of the same chart are
+  directly comparable. Degenerate/invalid boxes and zero/negative-radius
+  spheres downgrade to `NoClaim` and unknown
   topology, while horn/spindle torus parameters downgrade to
   `LipschitzImplicit`, retain an abstract-distance `Estimate`, publish a
   separate outward trace-value enclosure, and report unknown topology.
@@ -1360,6 +1375,16 @@ claim those stronger G4/G5 results.
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   source theorem recorded during conversion. For weak sources the same formula
   is only estimate/no-claim evidence, never a rigorous enclosure.
+- `SampledSdf::nominal_field_bound()` / `bound()` is NOT a reconstruction
+  bound for a non-`ExactDistance` source. Sample-local Lipschitz maxima
+  parameterize an ESTIMATE there: the grid resolves nothing between nodes,
+  and a slope spike strictly inside a cell can exceed the radius. Read
+  `nominal_field_bound_kind()` with the number; a bare `f64` read out of
+  that context is a claim the converter did not make.
+- `BettiBounds` on a chart is a HINT the chart asserts about its own solid
+  region; nothing in this crate verifies it. `unknown()` is the honest
+  default and the only answer for parameters outside a fixture's valid
+  family.
 - The G3 refinement relation covers only the declared finite sphere/budget
   catalog and receipt monotonicity for this dense converter. It does not prove
   strict improvement, a convergence order, empirical field accuracy, adaptive

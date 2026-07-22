@@ -474,6 +474,13 @@ impl FgmresState {
         self.rel
     }
 
+    /// The typed residual claim: FGMRES recomputes the TRUE Euclidean
+    /// relative residual at every cycle end.
+    #[must_use]
+    pub fn residual_claim(&self) -> crate::krylov::ResidualClaim {
+        crate::krylov::ResidualClaim::TrueEuclidean(self.rel)
+    }
+
     /// Run up to `max_cycles` additional restart cycles.
     #[allow(clippy::too_many_lines)] // The Arnoldi/Givens cycle is one invariant.
     pub fn run<A: LinearOp, P: FlexiblePreconditioner>(

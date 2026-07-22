@@ -25,9 +25,11 @@
 //! needs a per-iteration trajectory / geometry, the campaign's `run_campaign`
 //! body is transcribed here using the same public APIs (and the campaign
 //! crate's public helpers) so results stay aligned with the native conformance
-//! tests. Those campaigns are: AnytimeBO, FlowCert, GrammarForge,
-//! and TrussPath. CampaignSchedule now exposes its visualization fields directly
-//! and is invoked through its canonical admitted API.
+//! tests. Those campaigns are: AnytimeBO, GrammarForge, and TrussPath.
+//! CampaignSchedule now exposes its visualization fields directly and is
+//! invoked through its canonical admitted API. FlowCert calls `run_campaign`
+//! outright — every claim it publishes is the report's — and re-marches only
+//! the two spotlight velocity profiles, which the report does not carry.
 
 use fs_archive::MapElites;
 use fs_bo::{Gp, Kernel, Matern, expected_improvement};
@@ -244,10 +246,17 @@ pub fn metamatcert(n: usize, points: usize, rmax: f64) -> Vec<f64> {
 
 /// **FlutterCert**: the added-mass flutter boundary `μ* = 2` PROVEN by a
 /// Lyapunov certificate (`fs_sos::lyapunov_certifies_stability`) and
-/// independently cross-checked by the symmetric-part spectral abscissa
-/// (`fs_spectral`); the two boundaries agreeing certifies the certifier. A
-/// partitioned coupled solve ([`fs_couple`]) shows naive staggering diverges
-/// early while Aitken relaxation reaches the boundary. Runs the real
+/// cross-checked against the necessary-AND-sufficient eigenvalue criterion —
+/// `A(μ)`'s ACTUAL eigenvalues `−1 ± √(μ−1)`, a genuinely different function of
+/// μ than the (merely sufficient) `P = I` Lyapunov condition. Index `[3]` is `1`
+/// only when both criteria witness the SAME adjacent stable-to-unstable bracket
+/// and classify every sample alike; two co-truncated stable maxima are not
+/// agreement. Separately, [`fs_spectral`] recomputes the symmetric-part
+/// abscissa, which IS the `P = I` Lyapunov condition (`−1 + μ/2 < 0`), so that
+/// agreement is an IMPLEMENTATION cross-check between two crates, not
+/// independent evidence, and it is not serialized here. A partitioned coupled
+/// solve ([`fs_couple`]) shows naive staggering diverges early while Aitken
+/// relaxation reaches the boundary. Runs the real
 /// `fs_flutter_e2e::run_campaign`.
 ///
 /// `lo`/`hi` — μ sweep bounds (clamped `lo ∈ 0.05..=2.9`,
@@ -256,17 +265,22 @@ pub fn metamatcert(n: usize, points: usize, rmax: f64) -> Vec<f64> {
 ///
 /// Output layout (length `9 + 5·S`, `S` = sample count):
 /// - `[0]` — `S`.
-/// - `[1]` — `lyapunov_boundary` (largest proven-stable μ; `NaN` if none).
-/// - `[2]` — `spectral_boundary` (largest μ the abscissa calls stable).
-/// - `[3]` — `boundaries_agree` (0/1).
+/// - `[1]` — `lyapunov_boundary` (largest sampled μ the Lyapunov proof
+///   certifies stable; a lower-side sample, not by itself a boundary location).
+/// - `[2]` — `eigen_boundary` (largest sampled μ the independent
+///   actual-eigenvalue criterion calls stable; likewise not a location).
+/// - `[3]` — `boundaries_agree` (0/1) — both criteria witnessed the same
+///   ordered stable-to-unstable bracket.
 /// - `[4]` — `naive_boundary` (largest μ the naive solve converged).
 /// - `[5]` — `aitken_boundary` (largest μ Aitken converged).
 /// - `[6]` — `aitken_beats_naive` (0/1).
 /// - `[7]` — `witness_mu` (`NaN` if none) — a μ where the proof holds, naive
 ///   fails, Aitken succeeds.
 /// - `[8]` — `witness_verified` (0/1).
-/// - then `S` blocks of 5: `[mu, lyapunov_stable, abscissa, naive_converged,
-///   aitken_converged]`.
+/// - then `S` blocks of 5: `[mu, lyapunov_stable, spectral_abscissa,
+///   naive_converged, aitken_converged]`, where `spectral_abscissa` is the
+///   largest real part of `A(μ)`'s actual eigenvalues (the independent
+///   criterion), NOT the `fs_spectral` symmetric-part value.
 pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
     let lo = lo.clamp(0.05, 2.9);
     let hi = hi.clamp(lo + 0.1, 3.0);
@@ -1578,74 +1592,118 @@ pub fn anytimebo(max_iters: usize, delta: f64, alpha: f64) -> Vec<f64> {
 /*  10 · FlowCert — fs-flowcert-e2e (fs-lbm × fs-archive)                    */
 /* ======================================================================= */
 
-/// One certified LBM operating point + its captured velocity profile.
-struct FlowPoint {
-    reynolds: f64,
-    ny: usize,
-    tau: f64,
-    viscosity: f64,
-    profile_error: f64,
-    accurate: bool,
-    regime_stable: bool,
+/// Wire-schema version of the [`flowcert`] payload. Version-aware consumers
+/// must refuse an unrecognized value in slot `[8]` before interpreting any
+/// other slot.
+///
+/// Version `1` (unversioned, historical) was a browser-local transcription that
+/// ran a FIXED step budget (`lbm.run(steps)`) with no convergence test: its
+/// `accurate` bit was `profile_error <= tol` on whatever transient the budget
+/// happened to produce, and its `map_color_rank` was recomputed in the browser
+/// rather than read from the campaign. Version `2` runs the native
+/// [`fs_flowcert_e2e::run_campaign`], so `accurate` is gated on `converged`,
+/// appends `converged`/`steps_run` to every point block (the payload can now
+/// express an unresolved point), and adds this version plus an `all_converged`
+/// bit to the header.
+pub const FLOWCERT_SCHEMA_VERSION: u32 = 2;
+
+/// The captured velocity profiles for one spotlight operating point, plus the
+/// convergence state of the march that produced them.
+struct FlowProfiles {
+    /// Numeric LBM profile at the end of the chunked steady-state march.
     numeric: Vec<f64>,
+    /// Analytic Poiseuille profile at the same lattice parameters.
     analytic: Vec<f64>,
+    /// Did the march reach steady state within `max_steps`? NOT serialized —
+    /// the published `converged` bit is the campaign's. This exists so
+    /// `flowcert_spotlight_march_matches_native` can pin the transcription.
+    #[cfg_attr(not(test), allow(dead_code))]
+    converged: bool,
+    /// Steps actually marched; same role as `converged`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    steps_run: usize,
 }
 
-/// Faithful transcription of `fs_flowcert_e2e::certify_point`, additionally
-/// capturing the numeric & analytic velocity profiles.
-fn flow_certify(reynolds: f64, ny: usize, u_lattice: f64, steps: usize, tol: f64) -> FlowPoint {
+/// Re-march ONE operating point with the same chunked steady-state loop as
+/// `fs_flowcert_e2e::certify_point`, capturing the numeric & analytic velocity
+/// profiles the native `OperatingPoint` does not carry.
+///
+/// The loop is a literal transcription of `certify_point`'s march — chunks of
+/// `2000` steps, stopping once the per-chunk relative change falls below `1e-4`,
+/// capped at `max_steps` — so `converged` / `steps_run` reproduce the published
+/// point's. `flowcert_spotlight_march_matches_native` pins that correspondence;
+/// nothing here mints a claim, the campaign's own `OperatingPoint` does.
+fn flow_profiles(reynolds: f64, ny: usize, u_lattice: f64, max_steps: usize) -> FlowProfiles {
     let plan = plan_scaling(reynolds, ny as f64, u_lattice);
     let nu = plan.viscosity;
     let tau = plan.tau;
     let gx = 8.0 * nu * u_lattice / (ny as f64).powi(2);
 
     let mut lbm = Lbm::channel(4, ny, tau, gx);
-    lbm.run(steps);
-    let profile = lbm.x_velocity_profile();
-
-    let mut peak = 0.0_f64;
-    let mut max_err = 0.0_f64;
-    let mut analytic = Vec::with_capacity(ny);
-    for (y, &u) in profile.iter().enumerate() {
-        let exact = poiseuille_analytic(gx, nu, ny, y);
-        peak = peak.max(exact.abs());
-        max_err = max_err.max((u - exact).abs());
-        analytic.push(exact);
+    let chunk = 2000usize;
+    let mut profile = lbm.x_velocity_profile();
+    let mut steps_run = 0usize;
+    let mut converged = false;
+    while steps_run < max_steps {
+        lbm.run(chunk);
+        steps_run += chunk;
+        let next = lbm.x_velocity_profile();
+        let (mut delta, mut scale) = (0.0_f64, 1e-12_f64);
+        for (a, b) in next.iter().zip(&profile) {
+            delta = delta.max((a - b).abs());
+            scale = scale.max(a.abs());
+        }
+        profile = next;
+        if delta / scale < 1e-4 {
+            converged = true;
+            break;
+        }
     }
-    let profile_error = if peak > 1e-12 {
-        max_err / peak
-    } else {
-        max_err
-    };
 
-    FlowPoint {
-        reynolds,
-        ny,
-        tau,
-        viscosity: nu,
-        profile_error,
-        accurate: profile_error <= tol,
-        regime_stable: plan.color().rank() == ColorRank::Verified,
+    let mut analytic = Vec::with_capacity(profile.len());
+    for y in 0..profile.len() {
+        analytic.push(poiseuille_analytic(gx, nu, ny, y));
+    }
+
+    FlowProfiles {
         numeric: profile,
         analytic,
+        converged,
+        steps_run,
     }
 }
 
 /// **FlowCert**: a certified credibility map for a lattice-Boltzmann channel
-/// flow. Each (Reynolds × resolution) operating point is run to steady state
-/// ([`fs_lbm`]) and compared to the ANALYTIC Poiseuille solution (a
-/// manufactured-solution accuracy certificate); the scaling planner flags the
-/// regime `Verified` only when comfortably stable. MAP-Elites ([`fs_archive`])
-/// illuminates the atlas. The `certify_point` body is transcribed here so the
-/// spotlight velocity profiles (numeric vs analytic) can be drawn. Fixed sweep
-/// `Re ∈ {20, 60, 120}`, `ny ∈ {16, 24, 32}` (9 points); low-Re credible,
-/// high-Re flagged.
+/// flow. The campaign itself is [`fs_flowcert_e2e::run_campaign`]: each
+/// (Reynolds × resolution) operating point is marched to STEADY STATE in chunks
+/// ([`fs_lbm`]), capped at `steps`, and compared to the ANALYTIC Poiseuille
+/// solution (a manufactured-solution accuracy certificate); the scaling planner
+/// flags the regime `Verified` only when comfortably stable, and MAP-Elites
+/// ([`fs_archive`]) illuminates the atlas. Every headline field below — the
+/// atlas statistics, `all_accurate`, and `map_color_rank` — is that report's,
+/// not a browser-local recomputation. The two spotlight profiles (numeric vs
+/// analytic) are re-marched here with the same chunked loop because the native
+/// `OperatingPoint` does not carry the velocity profile. Fixed sweep
+/// `Re ∈ {20, 60, 120}`, `ny ∈ {16, 24, 32}` (9 points): low-Re points sit in
+/// the comfortable-`τ` regime, high-Re points are regime-flagged.
 ///
-/// `steps` — LBM steps to steady state (clamped `500..=12000`, default 12000);
-/// `tol` — relative-error accuracy tolerance (clamped `1e-3..=0.5`, default
-/// 0.03).
+/// ACCURACY IS GATED ON CONVERGENCE: a point's `accurate` bit is
+/// `converged && profile_error <= tol`. A point whose march exhausts the step
+/// cap without reaching steady state is published as `converged = 0`,
+/// `accurate = 0` — unresolved, not accurate and not a clean miss — and any such
+/// point drops the whole map's color out of `Verified`. This sweep's diffusive
+/// transients are long relative to the admitted cap, so at the default
+/// `steps = 12000` only the coarsest low-Re points (`Re = 20`, `ny = 16` and
+/// `24`) actually reach steady state; the rest are honestly unresolved rather
+/// than silently accurate.
 ///
-/// Output layout (a flat array the viz slices; `P` = 9, `S` = 2 spotlights):
+/// `steps` — the step CAP for the steady-state march (clamped `500..=12000`,
+/// default 12000; the march advances in 2000-step chunks, so the smallest
+/// admitted cap still runs one chunk); `tol` — relative-error accuracy
+/// tolerance (clamped `1e-3..=0.5`, default 0.03).
+///
+/// Output layout, schema version [`FLOWCERT_SCHEMA_VERSION`] (a flat array the
+/// viz slices; `P` = 9, `S` = 2 spotlights):
 /// - `[0]` — `P`.
 /// - `[1]` — `coverage`.
 /// - `[2]` — `qd_score`.
@@ -1653,76 +1711,62 @@ fn flow_certify(reynolds: f64, ny: usize, u_lattice: f64, steps: usize, tol: f64
 /// - `[4]` — `best_error`.
 /// - `[5]` — `stable_fraction`.
 /// - `[6]` — `all_accurate` (0/1).
-/// - `[7]` — `map_color_rank` (2/1/0 — the credibility color).
-/// - then `P` blocks of 8: `[Re, ny, max_error, accurate, regime_stable,
-///   fully_credible, tau, viscosity]` (`fully_credible = accurate &&
-///   regime_stable`).
+/// - `[7]` — `map_color_rank` (2/1/0), the rank of the campaign's own
+///   `credibility_color`.
+/// - `[8]` — `schema_version` (currently `2`); consumers must refuse an
+///   unrecognized value before reading any other slot.
+/// - `[9]` — `all_converged` (0/1) — 0 means at least one point exhausted the
+///   step cap and the map is unresolved there.
+/// - then `P` blocks of 10: `[Re, ny, max_error, accurate, regime_stable,
+///   fully_credible, tau, viscosity, converged, steps_run]`
+///   (`accurate = converged && max_error <= tol`;
+///   `fully_credible = accurate && regime_stable`). Slots `[0..=7]` of each
+///   block keep their version-1 positions; `converged`/`steps_run` are appended.
 /// - then `S` (2); then each spotlight: `[Re, ny, then ny pairs of
 ///   (u_numeric, u_analytic)]` — spotlight 0 = (Re 20, ny 32) credible,
-///   spotlight 1 = (Re 120, ny 32) flagged.
+///   spotlight 1 = (Re 120, ny 32) flagged. A spotlight's own convergence state
+///   is the `converged` slot of its point block.
 pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
-    let steps = steps.clamp(500, 12_000);
+    let max_steps = steps.clamp(500, 12_000);
     let tol = tol.clamp(1e-3, 0.5);
     let u_lat = 0.05;
 
     let reynolds = [20.0f64, 60.0, 120.0];
     let resolutions = [16usize, 24, 32];
-    let re_lo = 20.0;
-    let re_hi = 120.0;
-    let ny_lo = 16.0;
-    let ny_hi = 32.0;
-    let mut archive = MapElites::new(
-        vec![re_lo - 1.0, ny_lo - 1.0],
-        vec![re_hi + 1.0, ny_hi + 1.0],
-        vec![3, 3],
-    );
 
-    let mut points: Vec<FlowPoint> = Vec::with_capacity(9);
-    let mut spot_a: Option<usize> = None; // (20, 32)
-    let mut spot_b: Option<usize> = None; // (120, 32)
-    for &re in &reynolds {
-        for &ny in &resolutions {
-            let p = flow_certify(re, ny, u_lat, steps, tol);
-            let fitness = 1.0 / (1.0 + p.profile_error);
-            if fitness.is_finite() && fitness >= 0.0 {
-                archive.add(vec![re, ny as f64], vec![re, ny as f64], fitness);
-            }
-            if (re - 20.0).abs() < 1e-9 && ny == 32 {
-                spot_a = Some(points.len());
-            }
-            if (re - 120.0).abs() < 1e-9 && ny == 32 {
-                spot_b = Some(points.len());
-            }
-            points.push(p);
+    // The campaign, not a transcription of it: `accurate` is gated on
+    // `converged` and `credibility_color` is minted inside fs-flowcert-e2e.
+    let report = fs_flowcert_e2e::run_campaign(&reynolds, &resolutions, max_steps, tol);
+    let points = &report.points;
+    let n = points.len();
+    let all_converged = points.iter().all(|p| p.converged);
+
+    // Spotlights: (Re 20, ny 32) credible and (Re 120, ny 32) flagged. Only the
+    // velocity profiles are recomputed; every published claim stays the
+    // campaign's.
+    let mut spots: Vec<(usize, FlowProfiles)> = Vec::with_capacity(2);
+    for (re, ny) in [(20.0f64, 32usize), (120.0f64, 32usize)] {
+        if let Some(i) = points
+            .iter()
+            .position(|p| (p.reynolds - re).abs() < 1e-9 && p.ny == ny)
+        {
+            spots.push((i, flow_profiles(re, ny, u_lat, max_steps)));
         }
     }
 
-    let n = points.len();
-    let all_accurate = points.iter().all(|p| p.accurate);
-    let stable_count = points.iter().filter(|p| p.regime_stable).count();
-    let stable_fraction = stable_count as f64 / n as f64;
-    let best_error = points
-        .iter()
-        .map(|p| p.profile_error)
-        .fold(f64::INFINITY, f64::min);
-    let map_rank = if all_accurate && stable_count == n {
-        2.0
-    } else {
-        0.0
-    };
-
-    let spots: Vec<usize> = [spot_a, spot_b].into_iter().flatten().collect();
-    let spot_len: usize = spots.iter().map(|&i| 2 + 2 * points[i].ny).sum();
-    let mut out = Vec::with_capacity(8 + 8 * n + 1 + spot_len);
+    let spot_len: usize = spots.iter().map(|(i, _)| 2 + 2 * points[*i].ny).sum();
+    let mut out = Vec::with_capacity(10 + 10 * n + 1 + spot_len);
     out.push(n as f64);
-    out.push(fon(archive.coverage()));
-    out.push(fon(archive.qd_score()));
-    out.push(archive.num_elites() as f64);
-    out.push(fon(best_error));
-    out.push(fon(stable_fraction));
-    out.push(if all_accurate { 1.0 } else { 0.0 });
-    out.push(map_rank);
-    for p in &points {
+    out.push(fon(report.coverage));
+    out.push(fon(report.qd_score));
+    out.push(report.num_niches as f64);
+    out.push(fon(report.best_error));
+    out.push(fon(report.stable_fraction));
+    out.push(if report.all_accurate { 1.0 } else { 0.0 });
+    out.push(rank_code(report.credibility_color.rank()));
+    out.push(f64::from(FLOWCERT_SCHEMA_VERSION));
+    out.push(if all_converged { 1.0 } else { 0.0 });
+    for p in points {
         let fully = p.accurate && p.regime_stable;
         out.push(p.reynolds);
         out.push(p.ny as f64);
@@ -1732,15 +1776,17 @@ pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
         out.push(if fully { 1.0 } else { 0.0 });
         out.push(fon(p.tau));
         out.push(fon(p.viscosity));
+        out.push(if p.converged { 1.0 } else { 0.0 });
+        out.push(p.steps_run as f64);
     }
     out.push(spots.len() as f64);
-    for &si in &spots {
-        let p = &points[si];
+    for (i, prof) in &spots {
+        let p = &points[*i];
         out.push(p.reynolds);
         out.push(p.ny as f64);
         for y in 0..p.ny {
-            out.push(fon(p.numeric.get(y).copied().unwrap_or(f64::NAN)));
-            out.push(fon(p.analytic.get(y).copied().unwrap_or(f64::NAN)));
+            out.push(fon(prof.numeric.get(y).copied().unwrap_or(f64::NAN)));
+            out.push(fon(prof.analytic.get(y).copied().unwrap_or(f64::NAN)));
         }
     }
     out
@@ -2075,22 +2121,182 @@ mod tests {
         assert!((8..=16).contains(&iters), "iters {iters}");
     }
 
+    /// FlowCert wire geometry: a 10-value header carrying the pinned schema
+    /// version, then 10-value point blocks.
+    const FLOWCERT_HEADER: usize = 10;
+    const FLOWCERT_BLOCK: usize = 10;
+
+    fn flowcert_block(v: &[f64], i: usize) -> &[f64] {
+        &v[FLOWCERT_HEADER + FLOWCERT_BLOCK * i..FLOWCERT_HEADER + FLOWCERT_BLOCK * (i + 1)]
+    }
+
     #[test]
     fn flowcert_defaults() {
         let v = flowcert(12_000, 0.03);
         assert_eq!(v[0], 9.0, "P");
-        // points row-major: Re=20 rows are 0,1,2 (fully_credible=1),
-        // Re=120 rows are 6,7,8 (fully_credible=0).
-        let block = |i: usize| &v[8 + 8 * i..8 + 8 * (i + 1)];
+        assert_eq!(v[8], f64::from(FLOWCERT_SCHEMA_VERSION), "schema version");
+        // points row-major: Re=20 rows are 0,1,2, Re=120 rows are 6,7,8.
         for i in 0..3 {
-            let b = block(i);
-            assert_eq!(b[0], 20.0, "Re=20 row");
-            assert_eq!(b[5], 1.0, "Re=20 fully_credible");
+            assert_eq!(flowcert_block(&v, i)[0], 20.0, "Re=20 row");
         }
         for i in 6..9 {
-            let b = block(i);
+            let b = flowcert_block(&v, i);
             assert_eq!(b[0], 120.0, "Re=120 row");
             assert_eq!(b[5], 0.0, "Re=120 flagged");
+        }
+        // Re=20 / ny=16 is the one point that both converges and matches the
+        // analytic profile within tolerance at the default budget.
+        let b = flowcert_block(&v, 0);
+        assert_eq!(b[1], 16.0, "Re=20 ny=16 row");
+        assert_eq!(b[8], 1.0, "converged");
+        assert_eq!(b[5], 1.0, "fully_credible");
+    }
+
+    /// The payload is the campaign's, field for field — including the map
+    /// color rank, which must be the rank of `FlowReport::credibility_color`
+    /// and not a browser-local recomputation.
+    #[test]
+    fn flowcert_payload_is_the_native_campaigns() {
+        let v = flowcert(12_000, 0.03);
+        let native =
+            fs_flowcert_e2e::run_campaign(&[20.0, 60.0, 120.0], &[16, 24, 32], 12_000, 0.03);
+
+        let n = native.points.len();
+        assert_eq!(v[0], n as f64, "P");
+        assert_eq!(v[1], native.coverage, "coverage");
+        assert_eq!(v[2], native.qd_score, "qd_score");
+        assert_eq!(v[3], native.num_niches as f64, "num_niches");
+        assert_eq!(v[4], native.best_error, "best_error");
+        assert_eq!(v[5], native.stable_fraction, "stable_fraction");
+        assert_eq!(
+            v[6],
+            f64::from(u8::from(native.all_accurate)),
+            "all_accurate"
+        );
+        assert_eq!(
+            v[7],
+            rank_code(native.credibility_color.rank()),
+            "map_color_rank must be the campaign's credibility color"
+        );
+        assert_eq!(v[8], f64::from(FLOWCERT_SCHEMA_VERSION), "schema version");
+        assert_eq!(
+            v[9],
+            f64::from(u8::from(native.points.iter().all(|p| p.converged))),
+            "all_converged"
+        );
+
+        for (i, p) in native.points.iter().enumerate() {
+            let b = flowcert_block(&v, i);
+            assert_eq!(b[0], p.reynolds, "point {i} Re");
+            assert_eq!(b[1], p.ny as f64, "point {i} ny");
+            assert_eq!(b[2], p.profile_error, "point {i} profile_error");
+            assert_eq!(b[3], f64::from(u8::from(p.accurate)), "point {i} accurate");
+            assert_eq!(
+                b[4],
+                f64::from(u8::from(p.regime_stable)),
+                "point {i} regime_stable"
+            );
+            assert_eq!(
+                b[5],
+                f64::from(u8::from(p.accurate && p.regime_stable)),
+                "point {i} fully_credible"
+            );
+            assert_eq!(b[6], p.tau, "point {i} tau");
+            assert_eq!(b[7], p.viscosity, "point {i} viscosity");
+            assert_eq!(
+                b[8],
+                f64::from(u8::from(p.converged)),
+                "point {i} converged"
+            );
+            assert_eq!(b[9], p.steps_run as f64, "point {i} steps_run");
+        }
+
+        let s_off = FLOWCERT_HEADER + FLOWCERT_BLOCK * n;
+        assert_eq!(v[s_off], 2.0, "two spotlights");
+        assert_eq!(v.len(), s_off + 1 + 2 * (2 + 2 * 32), "payload length");
+    }
+
+    /// Accuracy is gated on convergence. At the default budget the (Re 20,
+    /// ny 32) point's profile error is FAR inside tolerance yet its march never
+    /// reaches steady state, so it must be published as unresolved — the
+    /// fixed-step-budget payload reported `accurate = 1` and
+    /// `fully_credible = 1` for exactly this point.
+    #[test]
+    fn flowcert_gates_accuracy_on_convergence() {
+        let tol = 0.03;
+        let v = flowcert(12_000, tol);
+        let n = v[0] as usize;
+
+        for i in 0..n {
+            let b = flowcert_block(&v, i);
+            assert!(
+                b[3] == 0.0 || b[8] == 1.0,
+                "point {i} claims accurate={} on converged={}",
+                b[3],
+                b[8]
+            );
+        }
+
+        // Re=20, ny=32 — row 2 of the row-major sweep.
+        let b = flowcert_block(&v, 2);
+        assert_eq!(b[0], 20.0);
+        assert_eq!(b[1], 32.0);
+        assert!(
+            b[2] <= tol,
+            "the gap needs a point inside tolerance, error {}",
+            b[2]
+        );
+        assert_eq!(b[8], 0.0, "this point does not reach steady state by 12000");
+        assert_eq!(b[3], 0.0, "an unresolved point is not accurate");
+        assert_eq!(b[5], 0.0, "an unresolved point is not fully credible");
+        assert_eq!(
+            v[9], 0.0,
+            "all_converged is 0 while any point is unresolved"
+        );
+    }
+
+    /// The bead's repro: the minimum step budget with the maximum admitted
+    /// tolerance. Every point is unresolved, so nothing may be published as
+    /// accurate and the map cannot be `Verified`.
+    #[test]
+    fn flowcert_minimum_budget_publishes_unresolved_points() {
+        let v = flowcert(500, 0.5);
+        let n = v[0] as usize;
+        assert_eq!(n, 9);
+        for i in 0..n {
+            let b = flowcert_block(&v, i);
+            assert_eq!(b[8], 0.0, "point {i} converged at the minimum budget");
+            assert_eq!(b[3], 0.0, "point {i} accurate while unresolved");
+            assert_eq!(b[5], 0.0, "point {i} fully credible while unresolved");
+        }
+        assert_eq!(v[6], 0.0, "all_accurate");
+        assert_eq!(v[9], 0.0, "all_converged");
+        assert!(v[7] < 2.0, "an unresolved map cannot rank Verified");
+    }
+
+    /// The spotlight profiles are re-marched locally because the campaign does
+    /// not return them; that march must be the SAME chunked steady-state loop,
+    /// so its convergence state reproduces the published point's.
+    #[test]
+    fn flowcert_spotlight_march_matches_native() {
+        let max_steps = 12_000;
+        let native =
+            fs_flowcert_e2e::run_campaign(&[20.0, 60.0, 120.0], &[16, 24, 32], max_steps, 0.03);
+        for (re, ny) in [(20.0f64, 32usize), (120.0f64, 32usize)] {
+            let p = native
+                .points
+                .iter()
+                .find(|p| (p.reynolds - re).abs() < 1e-9 && p.ny == ny)
+                .expect("spotlight point");
+            let prof = flow_profiles(re, ny, 0.05, max_steps);
+            assert_eq!(prof.converged, p.converged, "converged at Re={re} ny={ny}");
+            assert_eq!(prof.steps_run, p.steps_run, "steps_run at Re={re} ny={ny}");
+            assert_eq!(prof.numeric.len(), ny, "numeric profile length");
+            assert_eq!(prof.analytic.len(), ny, "analytic profile length");
+            assert!(
+                prof.numeric.iter().all(|u| u.is_finite()),
+                "finite numeric profile"
+            );
         }
     }
 }

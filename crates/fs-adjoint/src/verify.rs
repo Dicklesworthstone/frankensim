@@ -12,6 +12,18 @@ pub struct GradientVerdict {
     pub max_rel_err: f64,
     /// Directional derivatives (analytic, finite-difference) pairs.
     pub pairs: Vec<(f64, f64)>,
+    /// How many probed directions carried SIGNAL — directions where the
+    /// larger of `|analytic|` and `|fd|` cleared the `1e-12·‖d‖∞` floor.
+    ///
+    /// A direction whose analytic and finite-difference derivatives are
+    /// BOTH at that floor (both exactly `0.0` is the common case) has
+    /// zero discriminating power: the comparison `|analytic − fd| /
+    /// scale` is `0/scale = 0` — a perfect score — whether the gradient
+    /// is right or silently zero. Such a probe is not weak evidence, it
+    /// is no evidence, so it cannot contribute to a passing verdict; a
+    /// verification with no informative direction fails closed with the
+    /// `+∞` sentinel and `informative_directions == 0`.
+    pub informative_directions: usize,
     /// Verdict at the supplied tolerance.
     pub pass: bool,
 }
@@ -20,6 +32,7 @@ fn fail_closed(pairs: Vec<(f64, f64)>) -> GradientVerdict {
     GradientVerdict {
         max_rel_err: f64::INFINITY,
         pairs,
+        informative_directions: 0,
         pass: false,
     }
 }
@@ -30,6 +43,14 @@ fn fail_closed(pairs: Vec<(f64, f64)>) -> GradientVerdict {
 /// the perturbation is not rescaled by the point or direction norm.
 /// The relative-error floor is `1e-12 * ‖d‖∞`, making that floor
 /// homogeneous under paired rescalings of `d` and the inverse `eps`.
+///
+/// The same floor decides whether a direction is INFORMATIVE. A probe
+/// whose analytic and finite-difference directional derivatives are
+/// both at or below it (the silent-zero seam: a broken forward path
+/// yields a zero cotangent AND two bit-identical objective values)
+/// scores a relative error of `0.0` no matter what the gradient is, so
+/// it is refused as vacuous evidence rather than counted as a pass —
+/// see [`GradientVerdict::informative_directions`].
 pub fn verify_gradient(
     j: &dyn Fn(&[f64]) -> f64,
     p: &[f64],
@@ -55,6 +76,7 @@ pub fn verify_gradient(
 
     let mut pairs = Vec::with_capacity(directions.len());
     let mut worst = 0.0f64;
+    let mut informative_directions = 0usize;
     for d in directions {
         if !d.iter().all(|value| value.is_finite()) || d.iter().all(|value| *value == 0.0) {
             return fail_closed(pairs);
@@ -110,7 +132,11 @@ pub fn verify_gradient(
             return fail_closed(pairs);
         }
         let scale_floor = 1e-12 * direction_magnitude;
-        let scale = analytic.abs().max(fd.abs()).max(scale_floor);
+        let signal = analytic.abs().max(fd.abs());
+        if signal > scale_floor {
+            informative_directions += 1;
+        }
+        let scale = signal.max(scale_floor);
         let error_numerator = (analytic - fd).abs();
         if !scale.is_finite() || !error_numerator.is_finite() {
             return fail_closed(pairs);
@@ -122,11 +148,24 @@ pub fn verify_gradient(
         worst = worst.max(relative_error);
         pairs.push((analytic, fd));
     }
-    let pass =
-        !pairs.is_empty() && pairs.len() == directions.len() && worst.is_finite() && worst < tol;
+    if informative_directions == 0 {
+        // Every probe was bit-insensitive: the objective did not move and
+        // the claimed gradient claims no movement either. The arithmetic
+        // would report `max_rel_err = 0.0` — the PERFECT score — from an
+        // experiment that cannot tell a correct gradient from a silently
+        // zero one. Refuse with the same +∞ sentinel used for corrupted
+        // evidence: a gate that cannot fail is not a gate.
+        return fail_closed(pairs);
+    }
+    let pass = !pairs.is_empty()
+        && pairs.len() == directions.len()
+        && informative_directions > 0
+        && worst.is_finite()
+        && worst < tol;
     GradientVerdict {
         max_rel_err: worst,
         pairs,
+        informative_directions,
         pass,
     }
 }
