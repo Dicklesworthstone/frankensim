@@ -3,9 +3,11 @@
 //! evidence drift, candidate rankings, and the cycle-time kill criterion.
 
 use fs_wedge::{
-    CHT_BASELINE, EvidenceKind, InputAxis, Measurement, Readiness, STRONG_THRESHOLD, ScoreUse,
-    WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, four_criteria, measured_inputs_for,
-    measured_wedge_inputs, to_json, verticals,
+    CHT_BASELINE, ComparisonCandidate, DEFAULT_FACTOR_WEIGHTS, EvidenceKind, InputAxis,
+    Measurement, Readiness, STRONG_THRESHOLD, ScoreUse, ScoringError, ScoringFactor,
+    WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, comparison_candidates,
+    default_recommendation, four_criteria, measured_inputs_for, measured_wedge_inputs,
+    render_comparison_report, score_candidates, to_json, verticals,
 };
 use std::path::Path;
 
@@ -93,7 +95,7 @@ fn absent_inputs_cannot_carry_strong_scores() {
 fn check_workspace_measurement(
     root: &Path,
     vertical: &str,
-    axis: InputAxis,
+    axis: &str,
     label: &str,
     measurement: Measurement,
 ) -> Vec<String> {
@@ -116,7 +118,7 @@ fn check_workspace_measurement(
             "{}\t{}\t{}\t{}\t{}\t{}",
             if passed { "PASS" } else { "FAIL" },
             vertical,
-            axis.label(),
+            axis,
             label,
             pointer.reference,
             detail
@@ -124,10 +126,7 @@ fn check_workspace_measurement(
         if !passed {
             failures.push(format!(
                 "{} {} {}: {} ({detail})",
-                vertical,
-                axis.label(),
-                label,
-                pointer.reference
+                vertical, axis, label, pointer.reference
             ));
         }
     }
@@ -149,7 +148,7 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
             failures.extend(check_workspace_measurement(
                 root,
                 inputs.vertical,
-                InputAxis::KernelReadiness,
+                InputAxis::KernelReadiness.label(),
                 entry.capability,
                 entry.measurement,
             ));
@@ -158,7 +157,7 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
             failures.extend(check_workspace_measurement(
                 root,
                 inputs.vertical,
-                InputAxis::ValidationDataAccess,
+                InputAxis::ValidationDataAccess.label(),
                 entry.dataset,
                 entry.measurement,
             ));
@@ -167,7 +166,7 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
             failures.extend(check_workspace_measurement(
                 root,
                 inputs.vertical,
-                InputAxis::CadBurden,
+                InputAxis::CadBurden.label(),
                 entry.required_geometry,
                 entry.measurement,
             ));
@@ -176,9 +175,20 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
             failures.extend(check_workspace_measurement(
                 root,
                 inputs.vertical,
-                InputAxis::ComputeCost,
+                InputAxis::ComputeCost.label(),
                 entry.rung,
                 entry.measurement,
+            ));
+        }
+    }
+    for candidate in comparison_candidates() {
+        for input in candidate.factors {
+            failures.extend(check_workspace_measurement(
+                root,
+                candidate.name,
+                input.factor.label(),
+                input.factor.label(),
+                input.measurement,
             ));
         }
     }
@@ -187,6 +197,153 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
         "evidence drift:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn explicit_comparison_is_evidence_complete_and_ranked() {
+    let candidates = comparison_candidates();
+    assert_eq!(candidates.len(), 3);
+    for candidate in candidates {
+        assert_eq!(candidate.factors.len(), ScoringFactor::ALL.len());
+        for factor in ScoringFactor::ALL {
+            let input = candidate
+                .factors
+                .iter()
+                .find(|input| input.factor == factor)
+                .expect("every comparison factor is present");
+            assert!(input.is_complete(), "{candidate:?} {input:?}");
+            assert!(!input.measurement.evidence.is_empty());
+        }
+    }
+
+    let record = default_recommendation().expect("default comparison is valid");
+    assert_eq!(record.recommended, "thermal-design-assurance");
+    assert_eq!(record.runner_up, "sdf-structural-topology-assurance");
+    assert!(record.minority_report.contains("lowest technical-risk"));
+    assert_eq!(record.ranked[0].weighted_total, 638);
+    assert_eq!(record.ranked[1].weighted_total, 623);
+    assert_eq!(record.ranked[2].weighted_total, 502);
+}
+
+#[test]
+fn scoring_refuses_bad_weights_and_is_weight_order_invariant() {
+    let baseline = score_candidates(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())
+        .expect("default scoring succeeds");
+    let mut reversed = DEFAULT_FACTOR_WEIGHTS;
+    reversed.reverse();
+    assert_eq!(
+        baseline,
+        score_candidates(&reversed, comparison_candidates()).expect("reordered weights succeed")
+    );
+
+    let mut wrong_sum = DEFAULT_FACTOR_WEIGHTS;
+    wrong_sum[0].weight += 1;
+    assert_eq!(
+        score_candidates(&wrong_sum, comparison_candidates()),
+        Err(ScoringError::WeightsNotNormalized { sum: 101 })
+    );
+
+    let mut duplicate = DEFAULT_FACTOR_WEIGHTS;
+    duplicate[0].factor = duplicate[1].factor;
+    assert_eq!(
+        score_candidates(&duplicate, comparison_candidates()),
+        Err(ScoringError::DuplicateWeight {
+            factor: ScoringFactor::KernelReadiness
+        })
+    );
+}
+
+#[test]
+fn every_factor_is_monotone_under_a_positive_weight() {
+    let source = comparison_candidates()[1];
+    let baseline = score_candidates(&DEFAULT_FACTOR_WEIGHTS, &[source])
+        .expect("one-candidate score succeeds")[0]
+        .weighted_total;
+    for factor in ScoringFactor::ALL {
+        let mut factors: [fs_wedge::FactorRating; 9] = source
+            .factors
+            .try_into()
+            .expect("comparison has exactly nine factors");
+        let input = factors
+            .iter_mut()
+            .find(|input| input.factor == factor)
+            .expect("factor exists");
+        input.rating += 1;
+        let improved = ComparisonCandidate {
+            factors: Box::leak(Box::new(factors)),
+            ..source
+        };
+        let improved_total = score_candidates(&DEFAULT_FACTOR_WEIGHTS, &[improved])
+            .expect("improved candidate remains valid")[0]
+            .weighted_total;
+        assert!(
+            improved_total > baseline,
+            "{} was not monotone",
+            factor.label()
+        );
+    }
+}
+
+#[test]
+fn candidate_permutation_and_tie_breaking_are_deterministic() {
+    let candidates = comparison_candidates();
+    let baseline = score_candidates(&DEFAULT_FACTOR_WEIGHTS, candidates).unwrap();
+    let permuted = [candidates[2], candidates[0], candidates[1]];
+    assert_eq!(
+        baseline,
+        score_candidates(&DEFAULT_FACTOR_WEIGHTS, &permuted).unwrap()
+    );
+
+    let alpha = ComparisonCandidate {
+        name: "alpha",
+        display: "Alpha",
+        ..candidates[0]
+    };
+    let beta = ComparisonCandidate {
+        name: "beta",
+        display: "Beta",
+        ..candidates[0]
+    };
+    let tied = score_candidates(&DEFAULT_FACTOR_WEIGHTS, &[beta, alpha]).unwrap();
+    assert_eq!(tied[0].candidate, "alpha");
+    assert_eq!(tied[0].weighted_total, tied[1].weighted_total);
+}
+
+#[test]
+fn sensitivity_tables_expose_flips_and_dominance() {
+    let record = default_recommendation().unwrap();
+    let expected = 2 * ScoringFactor::ALL.len();
+    assert_eq!(record.rating_sensitivities.len(), expected);
+    assert_eq!(record.weight_sensitivities.len(), expected);
+    assert!(record.rating_sensitivities.iter().any(|row| {
+        row.challenger == record.runner_up
+            && row.factor == ScoringFactor::KernelReadiness
+            && row.required_rating.is_some()
+    }));
+    assert!(record.weight_sensitivities.iter().any(|row| {
+        row.challenger == record.runner_up
+            && row.factor == ScoringFactor::KernelReadiness
+            && row.required_weight.is_some()
+    }));
+    assert!(record.rating_sensitivities.iter().all(|row| {
+        row.challenger != "full-electronics-cooling-cht" || row.required_rating.is_none()
+    }));
+    assert!(record.weight_sensitivities.iter().all(|row| {
+        row.challenger != "full-electronics-cooling-cht" || row.required_weight.is_none()
+    }));
+}
+
+#[test]
+fn verbose_comparison_report_is_deterministic() {
+    let first = render_comparison_report().expect("comparison report renders");
+    let second = render_comparison_report().expect("comparison report replays");
+    assert_eq!(first, second);
+    assert_eq!(first.matches("FACTOR\t").count(), 27);
+    assert_eq!(first.matches("RATING_FLIP\t").count(), 18);
+    assert_eq!(first.matches("WEIGHT_FLIP\t").count(), 18);
+    assert!(first.contains("RECOMMENDED\tthermal-design-assurance"));
+    assert!(first.contains("MINORITY_REPORT\tSDF structural assurance"));
+    eprintln!("{first}");
 }
 
 #[test]
@@ -233,10 +390,14 @@ fn the_audit_is_complete() {
     assert!(a.passed("historic-scores-superseded"));
     assert!(a.passed("measured-inputs-complete"));
     assert!(a.passed("no-absent-strong-scores"));
+    assert!(a.passed("comparison-inputs-complete"));
+    assert!(a.passed("default-weights-normalized"));
+    assert!(a.passed("comparison-ranking-complete"));
+    assert!(a.passed("comparison-sensitivity-complete"));
     assert!(a.passed("ranks-complete"));
     assert!(a.passed("all-exercise-proposals"));
     assert!(a.passed("kill-criterion-measurable"));
-    assert_eq!(a.checks.len(), 6);
+    assert_eq!(a.checks.len(), 10);
 }
 
 #[test]

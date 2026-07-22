@@ -318,6 +318,9 @@ pub enum MeasurementMethod {
     OfficialDatasetReview,
     /// Static operation-count or algorithmic-complexity analysis.
     StaticComplexityAnalysis,
+    /// Review of a declared planning assumption whose empirical measurement is
+    /// still pending. This method can record uncertainty; it cannot erase it.
+    DecisionAssumptionReview,
 }
 
 impl MeasurementMethod {
@@ -329,6 +332,7 @@ impl MeasurementMethod {
             MeasurementMethod::ContractBoundaryReview => "contract-boundary-review",
             MeasurementMethod::OfficialDatasetReview => "official-dataset-review",
             MeasurementMethod::StaticComplexityAnalysis => "static-complexity-analysis",
+            MeasurementMethod::DecisionAssumptionReview => "decision-assumption-review",
         }
     }
 }
@@ -543,15 +547,15 @@ const CHT_KERNELS: [KernelReadinessEntry; 6] = [
     KernelReadinessEntry {
         capability: "steady-conduction-fem",
         measurement: measured(
-            Readiness::Absent,
-            2,
+            Readiness::Present,
+            8,
             MeasurementMethod::WorkspaceInventory,
             &[evidence(
-                EvidenceKind::Bead,
-                "frankensim-extreal-program-f85xj.5.1",
-                "steady heat-conduction implementation is successor work, not shipped authority",
+                EvidenceKind::WorkspacePath,
+                "crates/fs-conduction/src/solve.rs",
+                "pub struct ConductionSolver",
             )],
-            "No tracked production crate owned steady conduction at this snapshot; an in-progress Bead is not decision-usable kernel evidence.",
+            "A tracked tetrahedral P1 steady-conduction solver now exists with anisotropic and temperature-dependent conductivity, typed boundary conditions, residual remeasurement, and energy-balance evidence; it is not a CHT coupling or flow solver.",
         ),
     },
     KernelReadinessEntry {
@@ -1068,6 +1072,1235 @@ pub fn measured_inputs_for(vertical: &str) -> Option<&'static MeasuredWedgeInput
         .find(|inputs| inputs.vertical == vertical)
 }
 
+/// One factor in the explicit wedge-comparison function.
+///
+/// Every factor is oriented so that a larger rating is better. In particular,
+/// `CadBurden`, `ComputeCost`, and `RegulatoryRisk` rate LOW burden/cost/risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScoringFactor {
+    /// Evidence that the workflow is costly or slow for a real customer.
+    CustomerPain,
+    /// Readiness of the required executable kernels and their seams.
+    KernelReadiness,
+    /// Practicality of constructing a discriminating validation program.
+    ValidationTractability,
+    /// Access to raw, reusable, uncertainty-bearing validation data.
+    DataAccess,
+    /// LOW native-geometry admission and preparation burden.
+    CadBurden,
+    /// SHORT path to a defensible customer decision.
+    TimeToDecision,
+    /// Product differentiation from certified composition and iteration.
+    Differentiation,
+    /// LOW compute burden at decision-useful fidelity.
+    ComputeCost,
+    /// LOW regulatory and certification friction for the beachhead.
+    RegulatoryRisk,
+}
+
+impl ScoringFactor {
+    /// Canonical factor order used by scoring, reports, and tie-breaking.
+    pub const ALL: [ScoringFactor; 9] = [
+        ScoringFactor::CustomerPain,
+        ScoringFactor::KernelReadiness,
+        ScoringFactor::ValidationTractability,
+        ScoringFactor::DataAccess,
+        ScoringFactor::CadBurden,
+        ScoringFactor::TimeToDecision,
+        ScoringFactor::Differentiation,
+        ScoringFactor::ComputeCost,
+        ScoringFactor::RegulatoryRisk,
+    ];
+
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            ScoringFactor::CustomerPain => "customer-pain",
+            ScoringFactor::KernelReadiness => "kernel-readiness",
+            ScoringFactor::ValidationTractability => "validation-tractability",
+            ScoringFactor::DataAccess => "data-access",
+            ScoringFactor::CadBurden => "low-cad-burden",
+            ScoringFactor::TimeToDecision => "short-time-to-decision",
+            ScoringFactor::Differentiation => "differentiation",
+            ScoringFactor::ComputeCost => "low-compute-cost",
+            ScoringFactor::RegulatoryRisk => "low-regulatory-risk",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            ScoringFactor::CustomerPain => 0,
+            ScoringFactor::KernelReadiness => 1,
+            ScoringFactor::ValidationTractability => 2,
+            ScoringFactor::DataAccess => 3,
+            ScoringFactor::CadBurden => 4,
+            ScoringFactor::TimeToDecision => 5,
+            ScoringFactor::Differentiation => 6,
+            ScoringFactor::ComputeCost => 7,
+            ScoringFactor::RegulatoryRisk => 8,
+        }
+    }
+}
+
+/// One normalized weight in the wedge-comparison function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactorWeight {
+    /// Factor being weighted.
+    pub factor: ScoringFactor,
+    /// Integer percentage points. All nine weights must sum to 100.
+    pub weight: u8,
+}
+
+/// Recorded default weights. Their sum is exactly 100.
+pub const DEFAULT_FACTOR_WEIGHTS: [FactorWeight; 9] = [
+    FactorWeight {
+        factor: ScoringFactor::CustomerPain,
+        weight: 15,
+    },
+    FactorWeight {
+        factor: ScoringFactor::KernelReadiness,
+        weight: 18,
+    },
+    FactorWeight {
+        factor: ScoringFactor::ValidationTractability,
+        weight: 12,
+    },
+    FactorWeight {
+        factor: ScoringFactor::DataAccess,
+        weight: 10,
+    },
+    FactorWeight {
+        factor: ScoringFactor::CadBurden,
+        weight: 10,
+    },
+    FactorWeight {
+        factor: ScoringFactor::TimeToDecision,
+        weight: 12,
+    },
+    FactorWeight {
+        factor: ScoringFactor::Differentiation,
+        weight: 10,
+    },
+    FactorWeight {
+        factor: ScoringFactor::ComputeCost,
+        weight: 8,
+    },
+    FactorWeight {
+        factor: ScoringFactor::RegulatoryRisk,
+        weight: 5,
+    },
+];
+
+/// A 0..=10 factor rating attached to the measurement that justifies it.
+///
+/// `rating` is the comparative decision input. `measurement.score` separately
+/// records the readiness/authority of the evidence, so an attractive but
+/// assumption-heavy factor cannot masquerade as a well-validated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactorRating {
+    /// Which factor this input supplies.
+    pub factor: ScoringFactor,
+    /// Comparative value, 0 (worst) through 10 (best).
+    pub rating: u8,
+    /// Measurement method, authority, finding, and replay pointers.
+    pub measurement: Measurement,
+    /// Why the evidence maps to this comparative rating.
+    pub rationale: &'static str,
+}
+
+impl FactorRating {
+    /// Is this a structurally valid, evidence-bearing decision input?
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        self.rating <= 10 && self.measurement.is_complete() && !self.rationale.trim().is_empty()
+    }
+}
+
+/// One candidate in the measured comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComparisonCandidate {
+    /// Stable candidate slug.
+    pub name: &'static str,
+    /// Human-readable candidate name.
+    pub display: &'static str,
+    /// Date on which the comparison inputs were reviewed.
+    pub measured_on: &'static str,
+    /// Git revision of the code inventory reviewed before this comparison.
+    pub inventory_revision: &'static str,
+    /// Exactly one measured input for every scoring factor.
+    pub factors: &'static [FactorRating],
+    /// Strongest case for this candidate if it finishes second.
+    pub minority_case: &'static str,
+}
+
+/// Refusals from the pure scoring and sensitivity routines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoringError {
+    /// The supplied weights do not sum to 100.
+    WeightsNotNormalized { sum: u16 },
+    /// A factor appears more than once in the weight vector.
+    DuplicateWeight { factor: ScoringFactor },
+    /// A factor is absent from the weight vector.
+    MissingWeight { factor: ScoringFactor },
+    /// No candidates were supplied.
+    NoCandidates,
+    /// Candidate slugs must be unique.
+    DuplicateCandidate { candidate: &'static str },
+    /// A candidate does not carry exactly one input for every factor.
+    IncompleteCandidate { candidate: &'static str },
+    /// A candidate repeats one factor.
+    DuplicateFactor {
+        candidate: &'static str,
+        factor: ScoringFactor,
+    },
+    /// A factor rating, rationale, or measurement is incomplete.
+    InvalidFactorInput {
+        candidate: &'static str,
+        factor: ScoringFactor,
+    },
+    /// A requested weight tilt does not increase the named factor.
+    InvalidWeightTilt {
+        factor: ScoringFactor,
+        requested: u8,
+    },
+}
+
+/// One scored row in deterministic rank order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateScore {
+    /// Candidate slug.
+    pub candidate: &'static str,
+    /// Weighted sum in integer points, in the closed range 0..=1000.
+    pub weighted_total: u16,
+}
+
+/// Minimum improvement to one challenger rating that would win the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RatingFlipSensitivity {
+    /// Candidate being tested against the baseline winner.
+    pub challenger: &'static str,
+    /// Single rating allowed to change.
+    pub factor: ScoringFactor,
+    /// Smallest winning rating, or `None` if 10 still cannot flip the result.
+    pub required_rating: Option<u8>,
+    /// Resulting challenger total at the required rating.
+    pub resulting_total: Option<u16>,
+}
+
+/// Minimum upward tilt of one factor weight that would win the ranking.
+///
+/// The boosted factor gets the recorded weight; all other factors are scaled
+/// proportionally back to a 100-point total with deterministic largest-
+/// remainder allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeightFlipSensitivity {
+    /// Candidate being tested against the baseline winner.
+    pub challenger: &'static str,
+    /// Single weight allowed to increase.
+    pub factor: ScoringFactor,
+    /// Smallest winning factor weight, or `None` if even 100 cannot flip it.
+    pub required_weight: Option<u8>,
+    /// Resulting challenger total under the tilted weights.
+    pub resulting_total: Option<u16>,
+}
+
+/// Complete ranked recommendation and its one-factor sensitivity tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedRecommendation {
+    /// Candidate scores in descending order, then slug order for exact ties.
+    pub ranked: Vec<CandidateScore>,
+    /// Rank-1 candidate.
+    pub recommended: &'static str,
+    /// Rank-2 candidate.
+    pub runner_up: &'static str,
+    /// The runner-up's retained strongest case.
+    pub minority_report: &'static str,
+    /// Rating-change sensitivity for every challenger/factor pair.
+    pub rating_sensitivities: Vec<RatingFlipSensitivity>,
+    /// Weight-change sensitivity for every challenger/factor pair.
+    pub weight_sensitivities: Vec<WeightFlipSensitivity>,
+}
+
+const fn factor_rating(
+    factor: ScoringFactor,
+    rating: u8,
+    measurement: Measurement,
+    rationale: &'static str,
+) -> FactorRating {
+    FactorRating {
+        factor,
+        rating,
+        measurement,
+        rationale,
+    }
+}
+
+const CHT_FULL_FACTORS: [FactorRating; 9] = [
+    factor_rating(
+        ScoringFactor::CustomerPain,
+        6,
+        measured(
+            Readiness::Absent,
+            1,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                    "iteration loop between thermal and mechanical/layout teams is the acknowledged pain",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.1.3",
+                    "measured cycle-time baseline protocol is still successor work",
+                ),
+            ],
+            "Customer pain is declared in the plan, but no retained interview, workflow trace, or measured cycle-time baseline exists yet.",
+        ),
+        "The hypothesized multi-tool cooling loop is plausible and specific, but the rating is deliberately middling until the baseline protocol produces observations.",
+    ),
+    factor_rating(
+        ScoringFactor::KernelReadiness,
+        5,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::WorkspaceInventory,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/src/solve.rs",
+                    "pub struct ConductionSolver",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-ladder/CONTRACT.md",
+                    "The ladder does not run solves",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.8",
+                    "low-Re forced-convection RANS remains gated on ratification",
+                ),
+            ],
+            "Steady anisotropic conduction is real, while correlation, fan-network, solid-fluid transfer, and RANS/LES authority remain incomplete.",
+        ),
+        "One load-bearing thermal kernel now exists, but full electronics CHT still depends on several absent seams and its most expensive flow rung.",
+    ),
+    factor_rating(
+        ScoringFactor::ValidationTractability,
+        5,
+        measured(
+            Readiness::Partial,
+            5,
+            MeasurementMethod::OfficialDatasetReview,
+            &[
+                evidence(
+                    EvidenceKind::OfficialSource,
+                    "https://www.sandia.gov/research/publications/details/experimental-validation-benchmark-data-for-cfd-of-transient-convection-from-2016-06-23/",
+                    "SAND2016-4201J boundary-condition and response data",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.4.4",
+                    "electronics-thermal Level-C acquisition is not complete",
+                ),
+            ],
+            "A convection benchmark is obtainable, but a complete electronics-package CHT validation chain and retained uncertainties are not pinned.",
+        ),
+        "The physics admits staged tests, but coupled geometry, material, interface, and airflow effects make the end-to-end validation program substantial.",
+    ),
+    factor_rating(
+        ScoringFactor::DataAccess,
+        6,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::OfficialDatasetReview,
+            &[evidence(
+                EvidenceKind::OfficialSource,
+                "https://www.sandia.gov/research/publications/details/experimental-validation-benchmark-data-for-cfd-of-transient-convection-from-2016-06-23/",
+                "publisher states boundary-condition and response data are downloadable",
+            )],
+            "Raw benchmark quantities are identified, but explicit reuse terms and direct electronics-package coverage remain unpinned.",
+        ),
+        "Public convection data prevent a zero, but the decision still lacks a versioned electronics-cooling corpus with explicit reuse terms.",
+    ),
+    factor_rating(
+        ScoringFactor::CadBurden,
+        3,
+        measured(
+            Readiness::Partial,
+            3,
+            MeasurementMethod::ContractBoundaryReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "crates/fs-io/CONTRACT.md",
+                "broader CAD/EXPRESS interpretation",
+            )],
+            "Native admission remains a strict faceted STEP subset without assemblies, material linkage, general B-rep/NURBS, or interface identity.",
+        ),
+        "A full enclosure CHT model is unusually sensitive to assembly, material-region, thin-interface, and passage semantics that native import does not retain.",
+    ),
+    factor_rating(
+        ScoringFactor::TimeToDecision,
+        3,
+        measured(
+            Readiness::Absent,
+            2,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.7",
+                    "real solid-conduction to airflow transfer remains successor work",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.8",
+                    "validated RANS rung remains successor work",
+                ),
+            ],
+            "No measured schedule exists; two decision-critical coupled-flow steps remain unimplemented.",
+        ),
+        "The full candidate carries the longest critical path because it requires both the low-fidelity thermal stack and a ratified higher-fidelity flow rung.",
+    ),
+    factor_rating(
+        ScoringFactor::Differentiation,
+        8,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                "The differentiation is composition, not physics",
+            )],
+            "Certified cross-tool composition is a declared product thesis; no customer comparison has measured willingness to pay for it.",
+        ),
+        "CHT strongly exercises the composition thesis, although the rating remains a product hypothesis rather than market evidence.",
+    ),
+    factor_rating(
+        ScoringFactor::ComputeCost,
+        2,
+        measured(
+            Readiness::Absent,
+            0,
+            MeasurementMethod::StaticComplexityAnalysis,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "crates/fs-ladder/CONTRACT.md",
+                "The ladder does not run solves",
+            )],
+            "The decisive coupled RANS/LES rung has no executable operator count, memory envelope, or wall-time evidence.",
+        ),
+        "The full candidate contains the largest unmeasured state and iteration envelope, so low compute cost cannot be credited prospectively.",
+    ),
+    factor_rating(
+        ScoringFactor::RegulatoryRisk,
+        8,
+        measured(
+            Readiness::Partial,
+            5,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                "regulatory friction is low",
+            )],
+            "The plan declares low friction for electronics cooling; no segment-specific legal or certification study is retained.",
+        ),
+        "The beachhead can target design assurance rather than safety-of-flight authority, but the score is an explicit planning assumption.",
+    ),
+];
+
+const SDF_STRUCTURAL_FACTORS: [FactorRating; 9] = [
+    factor_rating(
+        ScoringFactor::CustomerPain,
+        4,
+        measured(
+            Readiness::Absent,
+            1,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::Bead,
+                "frankensim-extreal-program-f85xj.1.2",
+                "candidate is motivated by technical depth, not a retained customer-pain measurement",
+            )],
+            "No retained interview, workflow trace, or cycle-time baseline establishes demand for SDF structural/topology assurance.",
+        ),
+        "The candidate has a credible engineering workflow but weaker market evidence than the declared thermal family.",
+    ),
+    factor_rating(
+        ScoringFactor::KernelReadiness,
+        8,
+        measured(
+            Readiness::Partial,
+            7,
+            MeasurementMethod::WorkspaceInventory,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-rep-sdf/CONTRACT.md",
+                    "Signed-distance-field charts",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-cutfem/CONTRACT.md",
+                    "vector Q1, plane-strain elasticity frontend",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-topopt/CONTRACT.md",
+                    "SIMP with the modern hygiene stack",
+                ),
+            ],
+            "SDF charts, 2-D CutFEM elasticity, density topology optimization, and verified gradients exist, but 3-D octree elasticity and production benchmark envelopes do not.",
+        ),
+        "This candidate aligns best with current integrated technical depth; the partial authority prevents its 2-D fixtures from being scored as a complete product kernel.",
+    ),
+    factor_rating(
+        ScoringFactor::ValidationTractability,
+        6,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::ContractBoundaryReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-cutfem/CONTRACT.md",
+                    "fixed three-level log-log Q1 convergence",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-topopt/CONTRACT.md",
+                    "FULL-CHAIN sensitivity vs FD",
+                ),
+            ],
+            "Manufactured convergence, adjoint checks, deterministic goldens, and optimization laws exist; an independent product-scale structural corpus does not.",
+        ),
+        "The internal falsification ladder is unusually mature, but external validation would still need a scoped benchmark and acceptance envelope.",
+    ),
+    factor_rating(
+        ScoringFactor::DataAccess,
+        4,
+        measured(
+            Readiness::Absent,
+            2,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::Bead,
+                "frankensim-extreal-program-f85xj.1.2",
+                "no versioned external structural/topology corpus is named by the comparison task",
+            )],
+            "The current evidence is generated internally; no raw, reusable, uncertainty-bearing customer or public corpus is pinned for this candidate.",
+        ),
+        "Canonical fixtures are easy to generate, but they do not substitute for accessible external validation data.",
+    ),
+    factor_rating(
+        ScoringFactor::CadBurden,
+        6,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::ContractBoundaryReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-rep-sdf/CONTRACT.md",
+                    "narrow-band level sets",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-io/CONTRACT.md",
+                    "strict native triangular faceted-resource",
+                ),
+            ],
+            "Native SDF design paths avoid some remeshing burden, but production CAD import still loses broad B-rep, assembly, and material semantics.",
+        ),
+        "SDF-native optimization lowers internal geometry burden relative to CHT assemblies, without pretending the external CAD bridge is complete.",
+    ),
+    factor_rating(
+        ScoringFactor::TimeToDecision,
+        7,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::WorkspaceInventory,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-topopt/CONTRACT.md",
+                    "whole runs replay bitwise",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-cutfem/CONTRACT.md",
+                    "3D octree instantiation",
+                ),
+            ],
+            "A deterministic 2-D decision loop exists now; expansion to production 3-D remains outside current authority.",
+        ),
+        "A narrow 2-D assurance product can be demonstrated quickly, though production relevance depends on resisting a premature 3-D claim.",
+    ),
+    factor_rating(
+        ScoringFactor::Differentiation,
+        9,
+        measured(
+            Readiness::Present,
+            8,
+            MeasurementMethod::ContractBoundaryReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                    "make differentiability a routing requirement",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-adjoint/CONTRACT.md",
+                    "density_pullback",
+                ),
+            ],
+            "The candidate directly combines SDF routing, CutFEM, topology optimization, and checked adjoint paths that are unusual as one typed workflow.",
+        ),
+        "This is the strongest architectural fit and the runner-up's central minority argument.",
+    ),
+    factor_rating(
+        ScoringFactor::ComputeCost,
+        6,
+        measured(
+            Readiness::Partial,
+            5,
+            MeasurementMethod::StaticComplexityAnalysis,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "crates/fs-topopt/CONTRACT.md",
+                "Per-iteration wall times are DEBUG-build measurements",
+            )],
+            "Deterministic fixture-scale loops exist, but production performance and 3-D memory envelopes are not certified.",
+        ),
+        "Existing sparse/adjoint structure supports a moderate rating, capped because debug fixture timing is not a product cost model.",
+    ),
+    factor_rating(
+        ScoringFactor::RegulatoryRisk,
+        5,
+        measured(
+            Readiness::Partial,
+            4,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::Bead,
+                "frankensim-extreal-program-f85xj.1.2",
+                "structural assurance segment and authority boundary are not yet ratified",
+            )],
+            "Regulatory exposure depends on the selected structural segment; no segment-specific assessment is retained.",
+        ),
+        "Structural decisions can approach certification-sensitive territory, so the comparison does not inherit electronics cooling's declared low-friction score.",
+    ),
+];
+
+const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
+    factor_rating(
+        ScoringFactor::CustomerPain,
+        6,
+        measured(
+            Readiness::Absent,
+            1,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                    "iteration loop between thermal and mechanical/layout teams is the acknowledged pain",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.1.3",
+                    "measured baseline is still pending",
+                ),
+            ],
+            "The thermal workflow pain remains a declared hypothesis pending the measured baseline protocol.",
+        ),
+        "The compromise addresses the same hypothesized customer loop as full CHT, without taking extra credit for unmeasured pain.",
+    ),
+    factor_rating(
+        ScoringFactor::KernelReadiness,
+        6,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::WorkspaceInventory,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/src/solve.rs",
+                    "pub struct ConductionSolver",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.3",
+                    "contact resistance remains successor work",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.4",
+                    "surface radiation remains successor work",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.5",
+                    "fan curve and flow network remain successor work",
+                ),
+            ],
+            "Steady conduction with anisotropy and nonlinear material data exists; contact, radiation, fan networks, and calibrated forced-convection correlations remain incomplete.",
+        ),
+        "The compromise starts from a real core and has a bounded missing-kernel list, while explicitly deferring RANS rather than claiming it.",
+    ),
+    factor_rating(
+        ScoringFactor::ValidationTractability,
+        7,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::OfficialDatasetReview,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/CONTRACT.md",
+                    "Every test prints a JSON-lines verdict",
+                ),
+                evidence(
+                    EvidenceKind::OfficialSource,
+                    "https://www.sandia.gov/research/publications/details/experimental-validation-benchmark-data-for-cfd-of-transient-convection-from-2016-06-23/",
+                    "uncertainty-qualified boundary conditions and response data",
+                ),
+            ],
+            "Analytic/manufactured conduction checks and a public convection benchmark support staged validation, but a retained electronics Level-C corpus is pending.",
+        ),
+        "Separating conduction, interfaces, radiation, and calibrated correlations makes falsification more tractable than validating a coupled RANS stack at once.",
+    ),
+    factor_rating(
+        ScoringFactor::DataAccess,
+        6,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::OfficialDatasetReview,
+            &[evidence(
+                EvidenceKind::OfficialSource,
+                "https://www.sandia.gov/research/publications/details/experimental-validation-benchmark-data-for-cfd-of-transient-convection-from-2016-06-23/",
+                "publisher states boundary-condition and response data are downloadable",
+            )],
+            "Public thermal data are identifiable, but a versioned electronics corpus and explicit dataset reuse terms remain to be pinned.",
+        ),
+        "The compromise can use the same accessible low-fidelity thermal evidence without waiting for a RANS validation corpus.",
+    ),
+    factor_rating(
+        ScoringFactor::CadBurden,
+        4,
+        measured(
+            Readiness::Partial,
+            3,
+            MeasurementMethod::ContractBoundaryReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "crates/fs-io/CONTRACT.md",
+                "broader CAD/EXPRESS interpretation",
+            )],
+            "Prepared faceted models can enter, but board stackups, assemblies, materials, thin interfaces, and units are not natively reconstructed.",
+        ),
+        "Deferring resolved airflow reduces passage-detail burden, but thermal regions and interfaces still require semantics beyond native import.",
+    ),
+    factor_rating(
+        ScoringFactor::TimeToDecision,
+        6,
+        measured(
+            Readiness::Partial,
+            5,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.2",
+                    "forced-convection correlation rung is in progress",
+                ),
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.5.8",
+                    "RANS is explicitly deferred by this candidate",
+                ),
+            ],
+            "No measured delivery schedule exists, but the candidate removes the gated RANS rung from its critical path.",
+        ),
+        "A bounded analytic/correlation stack should reach decisions sooner than full CHT, while remaining honest that four supporting kernels are unfinished.",
+    ),
+    factor_rating(
+        ScoringFactor::Differentiation,
+        8,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                "The differentiation is composition, not physics",
+            )],
+            "The product thesis is an evidence-preserving ladder across thermal models; market differentiation has not been independently measured.",
+        ),
+        "The candidate showcases the architecture's evidence and fidelity-ladder strengths without entering a single-physics RANS fidelity race.",
+    ),
+    factor_rating(
+        ScoringFactor::ComputeCost,
+        8,
+        measured(
+            Readiness::Partial,
+            6,
+            MeasurementMethod::StaticComplexityAnalysis,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/CONTRACT.md",
+                    "continuous P₁ Lagrange",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-ladder/CONTRACT.md",
+                    "The ladder does not run solves",
+                ),
+            ],
+            "The implemented sparse conduction core and planned algebraic/correlation rungs avoid a resolved-flow state, but no wall-time envelope is yet retained.",
+        ),
+        "Deferring RANS gives this candidate the smallest expected decision-useful state among the thermal options; the rating is not a performance claim.",
+    ),
+    factor_rating(
+        ScoringFactor::RegulatoryRisk,
+        8,
+        measured(
+            Readiness::Partial,
+            5,
+            MeasurementMethod::DecisionAssumptionReview,
+            &[evidence(
+                EvidenceKind::WorkspacePath,
+                "COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md",
+                "regulatory friction is low",
+            )],
+            "The plan declares low friction for electronics cooling; no segment-specific legal or certification study is retained.",
+        ),
+        "The assurance framing supports internal design decisions and evidence packaging without initially claiming safety-of-flight authority.",
+    ),
+];
+
+const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
+    ComparisonCandidate {
+        name: "full-electronics-cooling-cht",
+        display: "Full electronics-cooling CHT",
+        measured_on: "2026-07-22",
+        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        factors: &CHT_FULL_FACTORS,
+        minority_case: "Full CHT most completely exercises the original multi-tool coupling thesis and could become the strongest long-run moat. Its present score is held down by missing flow/coupling kernels, unmeasured compute, and a longer validation path—not by evidence that the market need is false.",
+    },
+    ComparisonCandidate {
+        name: "sdf-structural-topology-assurance",
+        display: "SDF structural/topology optimization assurance",
+        measured_on: "2026-07-22",
+        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        factors: &SDF_STRUCTURAL_FACTORS,
+        minority_case: "SDF structural assurance is the lowest technical-risk route to a differentiated demo: SDF charts, CutFEM elasticity, topology optimization, deterministic replay, and checked adjoints already compose. It should win if customer-pain evidence appears or if kernel readiness/CAD burden receive materially more weight; its current weakness is external market and validation-data evidence, plus honest 2-D scope.",
+    },
+    ComparisonCandidate {
+        name: "thermal-design-assurance",
+        display: "Thermal design assurance",
+        measured_on: "2026-07-22",
+        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        factors: &THERMAL_ASSURANCE_FACTORS,
+        minority_case: "Thermal design assurance preserves the declared thermal market thesis while limiting the first product to conduction, interfaces, radiation, fan/correlation rungs, and evidence-led decisions. Its remaining risk is that the customer-pain baseline and several supporting kernels are still pending.",
+    },
+];
+
+/// The three candidates in the explicit measured comparison.
+#[must_use]
+pub fn comparison_candidates() -> &'static [ComparisonCandidate] {
+    &COMPARISON_CANDIDATES
+}
+
+fn canonical_weight_values(weights: &[FactorWeight]) -> Result<[u8; 9], ScoringError> {
+    let mut values = [0_u8; 9];
+    let mut seen = [false; 9];
+    let mut sum = 0_u16;
+    for weight in weights {
+        let index = weight.factor.index();
+        if seen[index] {
+            return Err(ScoringError::DuplicateWeight {
+                factor: weight.factor,
+            });
+        }
+        seen[index] = true;
+        values[index] = weight.weight;
+        sum += u16::from(weight.weight);
+    }
+    if sum != 100 {
+        return Err(ScoringError::WeightsNotNormalized { sum });
+    }
+    for factor in ScoringFactor::ALL {
+        if !seen[factor.index()] {
+            return Err(ScoringError::MissingWeight { factor });
+        }
+    }
+    Ok(values)
+}
+
+fn validate_candidate(candidate: &ComparisonCandidate) -> Result<(), ScoringError> {
+    if candidate.name.trim().is_empty()
+        || candidate.display.trim().is_empty()
+        || candidate.measured_on.trim().is_empty()
+        || candidate.inventory_revision.trim().is_empty()
+        || candidate.minority_case.trim().is_empty()
+        || candidate.factors.len() != ScoringFactor::ALL.len()
+    {
+        return Err(ScoringError::IncompleteCandidate {
+            candidate: candidate.name,
+        });
+    }
+    let mut seen = [false; 9];
+    for input in candidate.factors {
+        let index = input.factor.index();
+        if seen[index] {
+            return Err(ScoringError::DuplicateFactor {
+                candidate: candidate.name,
+                factor: input.factor,
+            });
+        }
+        seen[index] = true;
+        if !input.is_complete() {
+            return Err(ScoringError::InvalidFactorInput {
+                candidate: candidate.name,
+                factor: input.factor,
+            });
+        }
+    }
+    if seen.iter().all(|present| *present) {
+        Ok(())
+    } else {
+        Err(ScoringError::IncompleteCandidate {
+            candidate: candidate.name,
+        })
+    }
+}
+
+/// Score and rank candidates with integer arithmetic.
+///
+/// Higher totals rank first. Exact ties are broken by ascending stable slug,
+/// making the result independent of candidate input order.
+pub fn score_candidates(
+    weights: &[FactorWeight],
+    candidates: &[ComparisonCandidate],
+) -> Result<Vec<CandidateScore>, ScoringError> {
+    let canonical = canonical_weight_values(weights)?;
+    if candidates.is_empty() {
+        return Err(ScoringError::NoCandidates);
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        validate_candidate(candidate)?;
+        if candidates[..index]
+            .iter()
+            .any(|prior| prior.name == candidate.name)
+        {
+            return Err(ScoringError::DuplicateCandidate {
+                candidate: candidate.name,
+            });
+        }
+    }
+
+    let mut scored = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let weighted_total = candidate.factors.iter().fold(0_u16, |total, input| {
+            total + u16::from(input.rating) * u16::from(canonical[input.factor.index()])
+        });
+        scored.push(CandidateScore {
+            candidate: candidate.name,
+            weighted_total,
+        });
+    }
+    scored.sort_by(|left, right| {
+        right
+            .weighted_total
+            .cmp(&left.weighted_total)
+            .then_with(|| left.candidate.cmp(right.candidate))
+    });
+    Ok(scored)
+}
+
+/// Increase one factor weight and deterministically renormalize all others.
+pub fn tilted_weights(
+    weights: &[FactorWeight],
+    factor: ScoringFactor,
+    requested: u8,
+) -> Result<[FactorWeight; 9], ScoringError> {
+    let original = canonical_weight_values(weights)?;
+    let factor_index = factor.index();
+    if requested <= original[factor_index] || requested > 100 {
+        return Err(ScoringError::InvalidWeightTilt { factor, requested });
+    }
+
+    let old_other_total = 100_u16 - u16::from(original[factor_index]);
+    let new_other_total = 100_u16 - u16::from(requested);
+    let mut values = [0_u8; 9];
+    let mut remainders = [0_u16; 9];
+    let mut awarded = [false; 9];
+    values[factor_index] = requested;
+    let mut allocated = 0_u16;
+    for other in ScoringFactor::ALL {
+        let index = other.index();
+        if index == factor_index {
+            continue;
+        }
+        let numerator = u16::from(original[index]) * new_other_total;
+        let quotient = numerator / old_other_total;
+        values[index] = u8::try_from(quotient).expect("renormalized weight is at most 100");
+        remainders[index] = numerator % old_other_total;
+        allocated += quotient;
+    }
+    let mut leftover = new_other_total - allocated;
+    while leftover > 0 {
+        let mut best_index = None;
+        for other in ScoringFactor::ALL {
+            let index = other.index();
+            if index == factor_index || awarded[index] {
+                continue;
+            }
+            if best_index.is_none_or(|best| remainders[index] > remainders[best]) {
+                best_index = Some(index);
+            }
+        }
+        let index = best_index.expect("at most eight largest-remainder awards");
+        values[index] += 1;
+        awarded[index] = true;
+        leftover -= 1;
+    }
+
+    Ok(ScoringFactor::ALL.map(|candidate_factor| FactorWeight {
+        factor: candidate_factor,
+        weight: values[candidate_factor.index()],
+    }))
+}
+
+fn rating_sensitivities(
+    weights: &[FactorWeight],
+    candidates: &[ComparisonCandidate],
+    baseline: &[CandidateScore],
+) -> Result<Vec<RatingFlipSensitivity>, ScoringError> {
+    let canonical = canonical_weight_values(weights)?;
+    let winner = baseline[0];
+    let mut rows = Vec::new();
+    for challenger in baseline.iter().skip(1) {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.name == challenger.candidate)
+            .expect("validated ranked candidate has source data");
+        for factor in ScoringFactor::ALL {
+            let input = candidate
+                .factors
+                .iter()
+                .find(|input| input.factor == factor)
+                .expect("validated candidate has every factor");
+            let mut required_rating = None;
+            let mut resulting_total = None;
+            for rating in input.rating.saturating_add(1)..=10 {
+                let total = challenger.weighted_total
+                    + u16::from(rating - input.rating) * u16::from(canonical[factor.index()]);
+                if total > winner.weighted_total
+                    || (total == winner.weighted_total && challenger.candidate < winner.candidate)
+                {
+                    required_rating = Some(rating);
+                    resulting_total = Some(total);
+                    break;
+                }
+            }
+            rows.push(RatingFlipSensitivity {
+                challenger: challenger.candidate,
+                factor,
+                required_rating,
+                resulting_total,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn weight_sensitivities(
+    weights: &[FactorWeight],
+    candidates: &[ComparisonCandidate],
+    baseline: &[CandidateScore],
+) -> Result<Vec<WeightFlipSensitivity>, ScoringError> {
+    let canonical = canonical_weight_values(weights)?;
+    let winner = baseline[0].candidate;
+    let mut rows = Vec::new();
+    for challenger in baseline.iter().skip(1) {
+        for factor in ScoringFactor::ALL {
+            let mut required_weight = None;
+            let mut resulting_total = None;
+            for requested in canonical[factor.index()].saturating_add(1)..=100 {
+                let tilted = tilted_weights(weights, factor, requested)?;
+                let ranking = score_candidates(&tilted, candidates)?;
+                if ranking[0].candidate == challenger.candidate {
+                    required_weight = Some(requested);
+                    resulting_total = ranking
+                        .iter()
+                        .find(|row| row.candidate == challenger.candidate)
+                        .map(|row| row.weighted_total);
+                    break;
+                }
+            }
+            rows.push(WeightFlipSensitivity {
+                challenger: challenger.candidate,
+                factor,
+                required_weight,
+                resulting_total,
+            });
+        }
+    }
+    debug_assert_eq!(baseline[0].candidate, winner);
+    Ok(rows)
+}
+
+/// Build the ranked recommendation, minority report, and complete sensitivity
+/// tables for supplied normalized weights.
+pub fn ranked_recommendation(
+    weights: &[FactorWeight],
+    candidates: &[ComparisonCandidate],
+) -> Result<RankedRecommendation, ScoringError> {
+    let ranked = score_candidates(weights, candidates)?;
+    if ranked.len() < 2 {
+        return Err(ScoringError::IncompleteCandidate {
+            candidate: ranked[0].candidate,
+        });
+    }
+    let recommended = ranked[0].candidate;
+    let runner_up = ranked[1].candidate;
+    let minority_report = candidates
+        .iter()
+        .find(|candidate| candidate.name == runner_up)
+        .expect("validated runner-up has source data")
+        .minority_case;
+    let rating_sensitivities = rating_sensitivities(weights, candidates, &ranked)?;
+    let weight_sensitivities = weight_sensitivities(weights, candidates, &ranked)?;
+    Ok(RankedRecommendation {
+        ranked,
+        recommended,
+        runner_up,
+        minority_report,
+        rating_sensitivities,
+        weight_sensitivities,
+    })
+}
+
+/// The default measured recommendation.
+pub fn default_recommendation() -> Result<RankedRecommendation, ScoringError> {
+    ranked_recommendation(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())
+}
+
+/// Render the full scoring table and both one-factor sensitivity tables as a
+/// deterministic, verbose report artifact.
+pub fn render_comparison_report() -> Result<String, ScoringError> {
+    use core::fmt::Write as _;
+    let recommendation = default_recommendation()?;
+    let weights = canonical_weight_values(&DEFAULT_FACTOR_WEIGHTS)?;
+    let mut out = String::from("FS-WEDGE-COMPARISON\tv1\n");
+    out.push_str("WEIGHTS\tfactor\tweight\n");
+    for factor in ScoringFactor::ALL {
+        writeln!(
+            out,
+            "WEIGHT\t{}\t{}",
+            factor.label(),
+            weights[factor.index()]
+        )
+        .expect("write to String");
+    }
+    for candidate in comparison_candidates() {
+        writeln!(
+            out,
+            "CANDIDATE\t{}\t{}\t{}\t{}",
+            candidate.name, candidate.display, candidate.measured_on, candidate.inventory_revision
+        )
+        .expect("write to String");
+        for input in candidate.factors {
+            let contribution = u16::from(input.rating) * u16::from(weights[input.factor.index()]);
+            writeln!(
+                out,
+                "FACTOR\t{}\t{}\trating={}\tweight={}\tcontribution={}\tauthority={}\tauthority_score={}\tmethod={}\trationale={}\tfinding={}",
+                candidate.name,
+                input.factor.label(),
+                input.rating,
+                weights[input.factor.index()],
+                contribution,
+                input.measurement.readiness.label(),
+                input.measurement.score,
+                input.measurement.method.label(),
+                input.rationale,
+                input.measurement.finding,
+            )
+            .expect("write to String");
+            for pointer in input.measurement.evidence {
+                writeln!(
+                    out,
+                    "EVIDENCE\t{}\t{}\t{}\t{}\t{}",
+                    candidate.name,
+                    input.factor.label(),
+                    pointer.kind.label(),
+                    pointer.reference,
+                    pointer.locator,
+                )
+                .expect("write to String");
+            }
+        }
+    }
+    for (index, row) in recommendation.ranked.iter().enumerate() {
+        writeln!(
+            out,
+            "RANK\t{}\t{}\t{}",
+            index + 1,
+            row.candidate,
+            row.weighted_total
+        )
+        .expect("write to String");
+    }
+    writeln!(out, "RECOMMENDED\t{}", recommendation.recommended).expect("write to String");
+    writeln!(out, "RUNNER_UP\t{}", recommendation.runner_up).expect("write to String");
+    writeln!(out, "MINORITY_REPORT\t{}", recommendation.minority_report).expect("write to String");
+    for row in &recommendation.rating_sensitivities {
+        writeln!(
+            out,
+            "RATING_FLIP\t{}\t{}\t{}\t{}",
+            row.challenger,
+            row.factor.label(),
+            row.required_rating
+                .map_or("none".to_string(), |value| value.to_string()),
+            row.resulting_total
+                .map_or("none".to_string(), |value| value.to_string()),
+        )
+        .expect("write to String");
+    }
+    for row in &recommendation.weight_sensitivities {
+        writeln!(
+            out,
+            "WEIGHT_FLIP\t{}\t{}\t{}\t{}",
+            row.challenger,
+            row.factor.label(),
+            row.required_weight
+                .map_or("none".to_string(), |value| value.to_string()),
+            row.resulting_total
+                .map_or("none".to_string(), |value| value.to_string()),
+        )
+        .expect("write to String");
+    }
+    Ok(out)
+}
+
 /// The ranked verticals.
 #[must_use]
 pub fn verticals() -> &'static [Vertical] {
@@ -1135,7 +2368,8 @@ pub struct AuditCheck {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WedgeAudit {
     /// Named checks for supersession, evidence completeness, score/status
-    /// consistency, rank/proposal shape, and the cycle-time criterion.
+    /// consistency, explicit comparison/ranking/sensitivity shape,
+    /// rank/proposal shape, and the cycle-time criterion.
     pub checks: Vec<AuditCheck>,
     /// Any gaps (human-readable).
     pub gaps: Vec<String>,
@@ -1162,9 +2396,10 @@ pub const STRONG_THRESHOLD: u8 = 8;
 /// Audit the wedge input ledger.
 ///
 /// Historical scores must be superseded, every candidate needs complete
-/// measurements on all four axes, absent inputs may not carry strong scores,
-/// ranks/proposal mappings must remain complete, and the kill-criterion shape
-/// must remain `>= 3×`.
+/// measurements on all four axes, absent inputs may not carry strong authority
+/// scores, the comparison must be complete and normalized, ranks/proposal
+/// mappings must remain complete, and the kill-criterion shape must remain
+/// `>= 3×`.
 #[must_use]
 pub fn audit() -> WedgeAudit {
     let mut gaps = Vec::new();
@@ -1188,11 +2423,59 @@ pub fn audit() -> WedgeAudit {
         inputs.measurements().all(|measurement| {
             measurement.readiness != Readiness::Absent || measurement.score < STRONG_THRESHOLD
         })
+    }) && COMPARISON_CANDIDATES.iter().all(|candidate| {
+        candidate.factors.iter().all(|input| {
+            input.measurement.readiness != Readiness::Absent
+                || input.measurement.score < STRONG_THRESHOLD
+        })
     });
     if !no_absent_strong_scores {
         gaps.push(format!(
             "an absent input carries a score at or above {STRONG_THRESHOLD}"
         ));
+    }
+
+    let comparison_inputs_complete = COMPARISON_CANDIDATES.len() == 3
+        && COMPARISON_CANDIDATES
+            .iter()
+            .all(|candidate| validate_candidate(candidate).is_ok());
+    if !comparison_inputs_complete {
+        gaps.push("the explicit comparison lacks a complete measured factor table".to_string());
+    }
+
+    let default_weights_normalized = canonical_weight_values(&DEFAULT_FACTOR_WEIGHTS).is_ok();
+    if !default_weights_normalized {
+        gaps.push("the default comparison weights do not normalize to 100".to_string());
+    }
+
+    let recommendation = default_recommendation();
+    let comparison_ranking_complete = recommendation.as_ref().is_ok_and(|record| {
+        record.ranked.len() == COMPARISON_CANDIDATES.len()
+            && record.recommended == "thermal-design-assurance"
+            && !record.runner_up.is_empty()
+            && !record.minority_report.is_empty()
+    });
+    if !comparison_ranking_complete {
+        gaps.push(
+            "the default explicit comparison does not produce its recorded ranking".to_string(),
+        );
+    }
+
+    let comparison_sensitivity_complete = recommendation.as_ref().is_ok_and(|record| {
+        let expected = (COMPARISON_CANDIDATES.len() - 1) * ScoringFactor::ALL.len();
+        record.rating_sensitivities.len() == expected
+            && record.weight_sensitivities.len() == expected
+            && record
+                .rating_sensitivities
+                .iter()
+                .any(|row| row.challenger == record.runner_up && row.required_rating.is_some())
+            && record
+                .weight_sensitivities
+                .iter()
+                .any(|row| row.challenger == record.runner_up && row.required_weight.is_some())
+    });
+    if !comparison_sensitivity_complete {
+        gaps.push("the comparison lacks complete one-factor flip sensitivities".to_string());
     }
 
     let mut ranks: Vec<u8> = VERTICALS.iter().map(|v| v.rank).collect();
@@ -1225,6 +2508,22 @@ pub fn audit() -> WedgeAudit {
             AuditCheck {
                 name: "no-absent-strong-scores",
                 passed: no_absent_strong_scores,
+            },
+            AuditCheck {
+                name: "comparison-inputs-complete",
+                passed: comparison_inputs_complete,
+            },
+            AuditCheck {
+                name: "default-weights-normalized",
+                passed: default_weights_normalized,
+            },
+            AuditCheck {
+                name: "comparison-ranking-complete",
+                passed: comparison_ranking_complete,
+            },
+            AuditCheck {
+                name: "comparison-sensitivity-complete",
+                passed: comparison_sensitivity_complete,
             },
             AuditCheck {
                 name: "ranks-complete",
