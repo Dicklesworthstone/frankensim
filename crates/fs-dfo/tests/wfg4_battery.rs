@@ -7,6 +7,7 @@
 //! quality gates, and bitwise replay result.  This is a dimensionless
 //! in-repository conformance fixture, not an external COCO/WFG campaign.
 
+use fs_dfo::wfg::{WfgProblem, WfgVariant};
 use fs_dfo::{Individual, NsgaParams, das_dennis, hypervolume, nsga3};
 use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
 use fs_obs::{Emitter, EventKind, Severity};
@@ -44,8 +45,9 @@ const EXPECTED_EVALUATIONS: usize = POPULATION * (GENERATIONS + 1);
 // Coarse conformance gates, deliberately separated from performance claims.
 // The quarter-scale mean-distance ceiling was calibrated from the first
 // pre-extension central run (0.23171459361058497 at the fixed
-// 36,892-evaluation budget). The v2, policy-bound campaign intentionally makes
-// no current headroom claim until central batch verification emits its metrics.
+// 36,892-evaluation budget). The v3, typed-problem- and policy-bound campaign
+// intentionally makes no current headroom claim until central batch verification
+// emits its metrics.
 const MAX_MEAN_DISTANCE: f64 = 0.25;
 const MAX_WORST_DISTANCE: f64 = 0.50;
 const MIN_DIRECTION_COVERAGE: f64 = 0.25;
@@ -326,11 +328,13 @@ fn first_front_mismatch(left: &[Individual], right: &[Individual]) -> Option<Str
     None
 }
 
-fn campaign_identity_with_normalization(
+fn campaign_identity_with_semantics(
     direction_count: usize,
+    problem: &ReplayIdentity,
     normalization: &ReplayIdentity,
 ) -> ReplayIdentity {
-    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v2")
+    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v3")
+        .child("problem-semantics", problem)
         .str("problem", "WFG4-normalized")
         .str("source", "Huband-et-al-EMO-2005-corrected-WFG-toolkit")
         .str(
@@ -411,9 +415,56 @@ fn campaign_identity_with_normalization(
         .finish()
 }
 
+fn problem_identity(
+    variant: WfgVariant,
+    objectives: usize,
+    position_parameters: usize,
+    distance_parameters: usize,
+) -> ReplayIdentity {
+    WfgProblem::new(
+        variant,
+        objectives,
+        position_parameters,
+        distance_parameters,
+    )
+    .expect("retained WFG campaign problem dimensions must be valid")
+    .replay_identity()
+}
+
+fn assert_bits_equal(actual: &[f64], expected: &[f64], field: &str) {
+    assert_eq!(actual.len(), expected.len(), "{field} length");
+    for (component, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(actual.to_bits(), expected.to_bits(), "{field}[{component}]");
+    }
+}
+
+fn assert_typed_problem_matches_fixture(problem: WfgProblem, input: &[f64]) {
+    let independent = evaluate_with_center(input, S_MULTI_CENTER);
+    let independent_transformed: Vec<f64> = input
+        .iter()
+        .map(|&value| s_multi_with_center(value, S_MULTI_CENTER))
+        .collect();
+    let independent_shape = concave_shape(&independent.reduced);
+    let typed = problem
+        .evaluate_normalized(input)
+        .expect("valid retained WFG4 fixture input");
+
+    assert_bits_equal(typed.transformed(), &independent_transformed, "transformed");
+    assert_bits_equal(typed.reduced(), &independent.reduced, "reduced");
+    assert_bits_equal(typed.positioned(), &independent.reduced, "positioned");
+    assert_bits_equal(typed.shape(), &independent_shape, "shape");
+    assert_bits_equal(typed.objectives(), &independent.objectives, "objectives");
+}
+
 fn campaign_identity(direction_count: usize) -> ReplayIdentity {
+    let problem = problem_identity(
+        WfgVariant::Wfg4,
+        OBJECTIVES,
+        POSITION_PARAMETERS,
+        DISTANCE_PARAMETERS,
+    );
     let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
-    campaign_identity_with_normalization(direction_count, &normalization)
+    campaign_identity_with_semantics(direction_count, &problem, &normalization)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -622,6 +673,12 @@ fn emit_receipt(
 
 #[test]
 fn wfg4_campaign_consumes_shared_normalization_policy_root() {
+    let problem = problem_identity(
+        WfgVariant::Wfg4,
+        OBJECTIVES,
+        POSITION_PARAMETERS,
+        DISTANCE_PARAMETERS,
+    );
     let policy = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
     let current = policy.replay_identity();
     let mut mutant_policy = policy;
@@ -630,14 +687,86 @@ fn wfg4_campaign_consumes_shared_normalization_policy_root() {
     assert_ne!(current.root(), mutant.root());
 
     let current_campaign =
-        campaign_identity_with_normalization(EXPECTED_REFERENCE_DIRECTIONS, &current);
+        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &problem, &current);
     let mutant_campaign =
-        campaign_identity_with_normalization(EXPECTED_REFERENCE_DIRECTIONS, &mutant);
+        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &problem, &mutant);
     assert_ne!(
         current_campaign.root(),
         mutant_campaign.root(),
         "the retained WFG4 campaign must bind the shared typed policy child"
     );
+}
+
+#[test]
+fn wfg4_campaign_consumes_typed_problem_semantics_root() {
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
+    let current = problem_identity(
+        WfgVariant::Wfg4,
+        OBJECTIVES,
+        POSITION_PARAMETERS,
+        DISTANCE_PARAMETERS,
+    );
+    let current_campaign =
+        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &current, &normalization);
+
+    let mutants = [
+        problem_identity(
+            WfgVariant::Wfg5,
+            OBJECTIVES,
+            POSITION_PARAMETERS,
+            DISTANCE_PARAMETERS,
+        ),
+        problem_identity(
+            WfgVariant::Wfg4,
+            OBJECTIVES + 2,
+            POSITION_PARAMETERS,
+            DISTANCE_PARAMETERS,
+        ),
+        problem_identity(
+            WfgVariant::Wfg4,
+            OBJECTIVES,
+            POSITION_PARAMETERS + 2,
+            DISTANCE_PARAMETERS,
+        ),
+        problem_identity(
+            WfgVariant::Wfg4,
+            OBJECTIVES,
+            POSITION_PARAMETERS,
+            DISTANCE_PARAMETERS + 2,
+        ),
+    ];
+
+    for mutant in mutants {
+        let mutant_campaign = campaign_identity_with_semantics(
+            EXPECTED_REFERENCE_DIRECTIONS,
+            &mutant,
+            &normalization,
+        );
+        assert_ne!(
+            current_campaign.root(),
+            mutant_campaign.root(),
+            "the retained WFG4 campaign must bind typed problem semantics"
+        );
+    }
+}
+
+#[test]
+fn typed_wfg4_problem_is_bitwise_equal_to_the_independent_campaign_fixture() {
+    let problem = WfgProblem::new(
+        WfgVariant::Wfg4,
+        OBJECTIVES,
+        POSITION_PARAMETERS,
+        DISTANCE_PARAMETERS,
+    )
+    .expect("retained WFG4 campaign dimensions");
+    assert_typed_problem_matches_fixture(problem, &[S_MULTI_CENTER; DIMENSION]);
+
+    for probe in 0..PROBE_COUNT {
+        let input: Vec<f64> = (0..DIMENSION)
+            .map(|index| ((index * 37 + probe * 19) % 101) as f64 / 100.0)
+            .collect();
+        assert_typed_problem_matches_fixture(problem, &input);
+    }
 }
 
 #[test]
