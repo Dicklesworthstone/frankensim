@@ -8,16 +8,21 @@
 
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
-[![Crates](https://img.shields.io/badge/workspace-126%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-127%20of%20127%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-276%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Crates](https://img.shields.io/badge/workspace-135%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
+[![Contracts](https://img.shields.io/badge/contracts-136%20of%20136%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-509%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
-FrankenSim is a working Rust workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
+FrankenSim is an active Rust source workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains 127 `fs-*` crate directories: 126 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains 136 `fs-*` crate directories: 135 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+
+The inventory numbers in this README are anchored to tracked files at
+[`main@55379ba`](https://github.com/Dicklesworthstone/frankensim/commit/55379baf41cf1d3584c87a81ae1dde20508a4c8f)
+on 2026-07-22. Untracked files in a developer's working tree are deliberately
+excluded.
 
 There is not yet a packaged end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
 
@@ -31,16 +36,50 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 126 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
-| Contracts | 127 of 127 `fs-*` crate directories have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 135 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
+| Contracts | 136 of 136 `fs-*` crate directories have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
-| Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
+| Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; a FrankenSQLite-backed design ledger exists but is registered at L1 while known suite failures remain open |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 276 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
+| Tests | 509 tracked Rust files under crate `tests/` directories at the committed snapshot, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+
+### Capability Maturity, Not Crate Count
+
+Crate presence is not evidence that a user-facing capability is integrated or
+validated. The authoritative snapshot is
+[`capability-maturity.json`](capability-maturity.json), whose level definitions
+are enforced from [`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md). As of
+2026-07-22 it registers 14 product-meaningful capabilities:
+
+| Level | Meaning | Registered capabilities | Current boundary |
+|-------|---------|-------------------------|------------------|
+| L1 | Experimental component | 4 | The maturity registry itself is implemented; steady thermal conduction is explicitly not built, the design ledger has known suite failures, and browser flagships have a recorded schema/build break |
+| L2 | Numerically verified | 10 | Evidence colour/packaging, chart conversion, topology certificates, sparse assembly, certified arithmetic, Krylov solves, adjoint verification, the point-vortex quality-diversity campaign, and claim-integrity governance cite independent tests |
+| L3 | Integrated workflow | 0 | No registered capability currently carries an admitted end-to-end integration claim |
+| L4 | Experimentally validated | 0 | No external validation corpus and validity-domain evidence are registered |
+| L5 | Supported product | 0 | No written support and migration policy exists |
+
+These levels apply to capabilities, not crates. A crate can contain multiple
+capabilities, and one capability can span several crates. The broad workspace
+and its e2e fixtures therefore must not be read as a product-maturity claim.
+The registry currently uses L1 as its lowest recordable tier, including entries
+whose notes say a capability is not built or is temporarily build-broken. For
+those entries, the note is the operative boundary; the L1 label is not evidence
+of a green build.
+The live distribution can be reproduced with:
+
+```bash
+jq -r '.capabilities | group_by(.level)[] | "\(.[0].level)\t\(length)"' capability-maturity.json
+```
 
 ### What You Can Use Today
+
+This table maps implemented source surfaces; it does not upgrade them beyond
+the capability level recorded above. Read the hosting crate's `CONTRACT.md` and
+the registry notes before treating a surface as verified, integrated, or
+validated.
 
 | Task | Implemented path |
 |------|------------------|
@@ -62,7 +101,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Keep objective uncertainty honest | `fs_robust` CVaR, weakest-input colors, robust optima, and colored fragility curves |
 | Apply design parameterizations and detect foldover | `fs_xform` FFD, RBF, velocity band, density, and composition types |
 | Encode image artifacts and apply deterministic film/denoising transforms | `fs_img` PNG/OpenEXR subset plumbing, film transforms, and bias-labeled denoising |
-| Record artifacts, operations, metrics, events, and tune rows | `fs_ledger` on FrankenSQLite |
+| Experiment with recording artifacts, operations, metrics, events, and tune rows | `fs_ledger` on FrankenSQLite; currently L1 with known failing tests tracked in Beads |
 | Package solver evidence for independent review | `fs_package`, `fs_checker`, and `fs_crosswalk` |
 | Check plugin conformance and restriction-map behavior | `fs_conform` restriction-map compatibility checks and diagnostics |
 | Keep the go-to-market wedge explicit | `fs_wedge` vertical ranking, proposal mapping, and cycle-time kill-criterion data |
@@ -707,7 +746,7 @@ surfaces that show how the layers are meant to compose.
 
 | Surface | What exists now | Why it matters |
 |---------|-----------------|----------------|
-| `fs-wasm::flagships` | Tier V browser-facing `run_ornithoid`, `run_vessel`, and `run_frame` pipelines | The browser surface now exercises real reduced flagship workflows instead of only leaf numerical kernels |
+| `fs-wasm::flagships` | Source for browser-facing `run_ornithoid`, `run_vessel`, and `run_frame` pipelines | The source composes reduced flagship workflows, but the capability registry holds browser flagships at L1 and records current schema drift that prevents an in-place build; the internal "Tier V" campaign label is not an L5 maturity claim |
 | `fs-mesh` v2/v3 | Conforming PLC recovery, non-convex facet triangulation, exact audits, an opt-in perf ladder (`--ignored`) measured at 10^4/10^5/10^6 points with a further opt-in 10^7 rung (`FS_MESH_PERF_FULL=1`, otherwise recorded as skipped), and a measured boundary-layer decision | Meshing claims now include recovery quality, determinism, and honest continuation notes for residual near-coplanar slivers |
 | `fs-sparse::CsrCompact` | Compact u32 column-index CSR, sharded deterministic SpMV, tiled deterministic parallel assembly, and NUMA first-touch helpers | Sparse performance work is framed as a bandwidth and page-placement problem without sacrificing bitwise equality |
 | `fs-rand` fast paths | Ziggurat normal fast path, bulk Philox fills, and dev-only stream statistics | Random performance can improve while the strict deterministic Box-Muller path remains the certification default |
@@ -718,6 +757,9 @@ That pattern is important: a new feature is not considered mature simply
 because the algorithm appears in code. It becomes useful when the contract names
 its determinism class, tests pin representative behavior, the no-claim boundary
 is explicit, and any performance claim is tied to a measured lane.
+
+The rows in this snapshot are implementation inventory. They do not supersede
+the registry: no capability is currently registered at L3, L4, or L5.
 
 ## Latest Implementation Deep Dives
 
@@ -1054,7 +1096,7 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The tree currently has 127 `CONTRACT.md` files for 127 `fs-*` crate directories.
+The tree currently has 136 `CONTRACT.md` files for 136 `fs-*` crate directories.
 The contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
@@ -1096,7 +1138,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 127 fs-* crates; selected entries shown below
+|-- crates/                            # 136 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers
@@ -1222,11 +1264,13 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | crates.io distribution | Not published |
 | GitHub Actions | Not authoritative for this repo; use DSR |
 | Full multiphysics solver suite | Not complete in the current workspace |
-| Neural representations | Not implemented as a first-class representation crate in the current workspace |
+| Neural representations | `fs-rep-neural` exists as a first-class crate, but its current work is experimental/in flight and has no registered capability-maturity claim |
+| Design ledger | `fs-ledger` exists, but the registry holds it at L1 while five known suite failures, including an evidence-binding guard, remain tracked |
+| Browser flagships | Source surfaces exist, but the registry holds the capability at L1 and records a current cross-crate schema/build break |
 | Randomized NLA golden sentinel | Resolved: `rand_nla_golden_hash` is deliberately recorded (`0xeef1_0550_7daf_c0d5`) and verified identical on arm64 and x86-64 in both debug and release, after fixing a build-mode-dependent `powi` fixture; the workspace-wide `powi` sweep is tracked in bead `frankensim-powi-build-mode-determinism-4xnt` |
 | Ascent golden sentinels | Resolved: both the trajectory and Pareto golden constants are frozen in the test sources (`0xb28d_3cf4_99e8_9071` and `0x301b_04df_db91_3965`); cross-ISA/profile authority still depends on retained admitted replay evidence rather than the constants alone |
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |
-| Production validation corpus | In progress through contracts, tests, ledger records, and roofline harnesses |
+| Production validation corpus | Not yet present; no capability may claim L4 experimental validation without an external corpus, stated validity domain, coverage, and quantified model-form discrepancy |
 | Performance claims | Must be backed by `fs-roofline`/ledger evidence; do not infer claims from architecture text alone |
 
 The long-form architecture reference remains in `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`, but this README describes the code that is already present in the repository.
@@ -1235,7 +1279,9 @@ The long-form architecture reference remains in `COMPREHENSIVE_PLAN_FOR_FRANKENS
 
 ### Is FrankenSim usable today?
 
-Yes, as a Rust source workspace and simulation-infrastructure library substrate. It is not yet a polished end-user simulator.
+Yes, as a Rust source workspace and simulation-infrastructure library substrate.
+It is not yet a polished end-user simulator, and the current maturity registry
+contains no L3 integrated-workflow, L4 validated, or L5 supported capability.
 
 ### What should I run first?
 

@@ -2,13 +2,63 @@
 
 This is a synthesized, agent-facing changelog for FrankenSim.
 
-Scope window: project inception on 2026-07-05 through
+Scope window: historical reconstruction from project inception on 2026-07-05 through
 [`main@291c7db`](https://github.com/Dicklesworthstone/frankensim/commit/291c7dbfdc6fd366f6ee55a6dbc39f137e05afd6)
 on 2026-07-10.
+
+The unreleased documentation entry below is intentionally narrower. It records
+the verified workspace and capability-maturity facts at
+[`main@55379ba`](https://github.com/Dicklesworthstone/frankensim/commit/55379baf41cf1d3584c87a81ae1dde20508a4c8f)
+on 2026-07-22; it is not a claim that all 1,676 intervening commits have already
+been reconstructed into capability waves here.
 
 This document was rebuilt from git history, tag/release metadata, the checked-in
 Beads tracker, and the committed README/contract surface at each endpoint. It
 is organized by landed capabilities rather than raw diff order.
+
+## Unreleased — Documentation Truth Refresh (2026-07-22)
+
+This small-scope update reconciles the public README with the current tree and
+the new machine-readable maturity registry. Its evidence sources are the root
+workspace manifest, the live `crates/` inventory, crate test and contract paths,
+[`capability-maturity.json`](capability-maturity.json),
+[`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md), and the checked-in Beads
+workstream.
+
+### Delivered documentation correction
+
+- Corrected the workspace inventory from 126 native `fs-*` members plus
+  standalone `fs-wasm` to 135 native members plus `fs-wasm`: 136 `fs-*` crate
+  directories in total.
+- Corrected contract coverage from 127/127 to 136/136 and the tracked crate
+  integration-test inventory from 276 to 509. The README now says explicitly that a
+  file count is not a green-suite claim.
+- Added the registry-backed capability boundary: 14 registered capabilities,
+  with 10 at L2 and 4 at L1; none is registered at L3, L4, or L5.
+- Documented the registry's current lowest-tier caveat: an L1 entry can still
+  carry an operative note that the capability is unbuilt or temporarily
+  build-broken, so the level label alone is not a green-build assertion.
+- Replaced stale prose saying neural representations were absent and external
+  validation was merely "in progress." The README now records that
+  `fs-rep-neural` exists but has no registered maturity claim, while an external
+  validation corpus does not yet exist.
+- Qualified design-ledger and browser-flagship prose with their recorded L1
+  status and known failing/build-broken boundaries instead of presenting crate
+  presence as integrated capability proof.
+
+### Active workstream
+
+- [`frankensim-extreal-program-f85xj.16.6`](https://github.com/Dicklesworthstone/frankensim/blob/55379baf41cf1d3584c87a81ae1dde20508a4c8f/.beads/issues.jsonl)
+  tracks the wider documentation-truth program. This README/changelog slice
+  repairs the visible narrative; generated facts and a seeded stale-count
+  failure wired into `xtask check-all` remain acceptance work before that Bead
+  can close.
+
+### Representative commit
+
+- [`55379ba`](https://github.com/Dicklesworthstone/frankensim/commit/55379baf41cf1d3584c87a81ae1dde20508a4c8f)
+  — add the capability-maturity registry and governed promotion events that
+  supply the README's current evidence boundary.
 
 ## Version Timeline
 
@@ -17,6 +67,7 @@ There are no git tags and no GitHub Releases as of
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
+| [`main@55379ba`](https://github.com/Dicklesworthstone/frankensim/commit/55379baf41cf1d3584c87a81ae1dde20508a4c8f) | Current factual checkpoint; not a full history reconstruction | 2026-07-22 | 2,675 commits; 136 `fs-*` crate directories, 136 contracts, 509 tracked crate integration-test files, and the first machine-readable 14-capability maturity registry. |
 | [`main@291c7db`](https://github.com/Dicklesworthstone/frankensim/commit/291c7dbfdc6fd366f6ee55a6dbc39f137e05afd6) | Public mainline snapshot | 2026-07-10 | 999 commits, refining the FEEC register-accumulator contractions into const-bound index loops while preserving their golden and pending both-ISA gate. |
 | [`main@2568c82`](https://github.com/Dicklesworthstone/frankensim/commit/2568c8262bf50789d20be528265b5c96d575fb1b) | Public mainline snapshot | 2026-07-10 | 998 commits, adding a measured NEON complex-transpose capsule, SLP-friendly FEEC contraction accumulators, and a standalone zero-dependency clean-machine constellation bootstrap. |
 | [`main@fb34ef6`](https://github.com/Dicklesworthstone/frankensim/commit/fb34ef6b6fb2b57f6c55e2ec8c4cc33653a958f8) | Public mainline snapshot | 2026-07-10 | 992 commits, adding governed historical roofline baselines, documenting why global x86 FMA contraction violates G5 determinism, and re-pinning FrankenNumpy past an unrepresentable case-colliding corpus revision. |
@@ -1258,7 +1309,9 @@ reasons to erase the landed standalone bootstrap and replay evidence.
 
 - No package or crate release has been tagged yet.
 - The canonical project state is `main`, not a versioned artifact; the latest
-  implementation and tracker snapshot covered here is
+  factual checkpoint covered here is
+  [`55379ba`](https://github.com/Dicklesworthstone/frankensim/commit/55379baf41cf1d3584c87a81ae1dde20508a4c8f),
+  while the complete capability-wave reconstruction currently ends at
   [`291c7db`](https://github.com/Dicklesworthstone/frankensim/commit/291c7dbfdc6fd366f6ee55a6dbc39f137e05afd6).
 - The repository is actively changing; use crate `CONTRACT.md` files and Beads
   close reasons for detailed no-claim boundaries.
