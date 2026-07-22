@@ -6079,13 +6079,39 @@ mod tests {
 
         // `ops.id` is an INTEGER PRIMARY KEY alias for SQLite's physical
         // rowid. UPDATE OF id triggers do not fire when a compatible writer
-        // spells the same mutation as `SET rowid = ...`, so exercise that
-        // spelling independently and require the value-aware UPDATE trigger
-        // to invalidate the captured cohort.
+        // spells the same mutation as `SET rowid = ...`, which is why the
+        // guard is a value-aware AFTER UPDATE trigger comparing OLD.id with
+        // NEW.id rather than an `UPDATE OF id` trigger.
+        //
+        // The alias spelling itself is not executable on FrankenSQLite: its
+        // UPDATE assignment-target resolver (`TableSchema::column_index`,
+        // crates/fsqlite-vdbe/src/codegen.rs) matches declared columns only
+        // and never the implicit `rowid`/`_rowid_`/`oid` alias of a rowid
+        // table, so the statement fails to compile with "no such column:
+        // rowid in table ops". Assert that refusal — it is a tripwire that
+        // turns red the moment the engine grows the alias, at which point
+        // the direct alias-spelled cohort assertion below can be restored —
+        // and assert that the refused statement mutated nothing.
         let before_rowid_alias_update = ledger.begin_identity_reconciliation().unwrap();
+        let alias_spelling = ledger.conn.execute("UPDATE ops SET rowid = 3 WHERE id = 2");
+        assert!(
+            alias_spelling.is_err(),
+            "FrankenSQLite is expected to refuse the rowid alias as an UPDATE \
+             target; if it now accepts it, restore the direct alias-spelled \
+             cohort assertion here"
+        );
+        assert_eq!(
+            ledger.identity_reconcile_source_generation().unwrap(),
+            before_rowid_alias_update.source_generation(),
+            "a statement the engine refused must not advance the generation"
+        );
+        // The value-aware trigger keys on the VALUE of `ops.id`, not on the
+        // spelling that moved it, so the executable spelling of the very same
+        // physical-key move must still advance the generation exactly once
+        // and fail the captured cursor closed.
         ledger
             .conn
-            .execute("UPDATE ops SET rowid = 3 WHERE id = 2")
+            .execute("UPDATE ops SET id = 3 WHERE id = 2")
             .unwrap();
         assert_eq!(
             ledger.identity_reconcile_source_generation().unwrap(),
@@ -6111,9 +6137,29 @@ mod tests {
             )
             .unwrap();
         let before_tune_rowid_update = ledger.begin_identity_reconciliation().unwrap();
+        // Same upstream gap on the cache table: `tune` is a rowid table whose
+        // PRIMARY KEY is not an INTEGER PRIMARY KEY alias, so real SQLite
+        // accepts `SET rowid = ...` there too and FrankenSQLite does not.
+        assert!(
+            ledger
+                .conn
+                .execute("UPDATE tune SET rowid = rowid + 10")
+                .is_err(),
+            "FrankenSQLite is expected to refuse the rowid alias as an UPDATE \
+             target; if it now accepts it, restore the direct alias-spelled \
+             cohort assertion here"
+        );
+        assert_eq!(
+            ledger.identity_reconcile_source_generation().unwrap(),
+            before_tune_rowid_update.source_generation(),
+            "a statement the engine refused must not advance the generation"
+        );
+        // The tune generation trigger is an unconditional AFTER UPDATE, so any
+        // executable row mutation — alias-spelled or not — must invalidate a
+        // captured cohort.
         ledger
             .conn
-            .execute("UPDATE tune SET rowid = rowid + 10")
+            .execute("UPDATE tune SET measured = '{\"moved\":1}'")
             .unwrap();
         assert!(matches!(
             ledger.reconcile_identity_sidecars_page_with_checkpoint(
