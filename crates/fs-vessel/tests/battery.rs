@@ -8,8 +8,13 @@
 use fs_lbm::freesurface::ContactModel;
 use fs_lbm::rheology::Rheology;
 use fs_vessel::pour::{PourRig, render_pour, run_pour};
+use fs_vessel::race::{ScreenError, race_base_losses, screen_lips, screening_losses};
 use fs_vessel::robust::{RobustError, cvar, empirical_cvar, robustify};
 use fs_vessel::stability::{VesselProfile, growth_objective};
+
+/// The battery's screening seed (the constant the inlined convention
+/// hashed with before the wrapper was extracted).
+const VESSEL_SCREEN_SEED: u64 = 0x7E55;
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -147,57 +152,83 @@ fn vsl_005_cvar_and_race() {
         ),
     );
     // e-raced screen: candidate lips race on the noisy validator
-    // proxy (growth + deterministic per-observation jitter).
+    // proxy (growth + deterministic per-observation jitter), through
+    // the crate's PUBLIC wrapper — the wrapper owns the vessel's
+    // declared LossSpan convention (losses scaled by SCREEN_SCALE,
+    // support = scaled fixture spread + jitter width), so an outside
+    // auditor can drive the same convention. It used to live only here
+    // in the test file, which is why the fs-flagship-e2e cross-consumer
+    // audit could not reach it (bead f85xj.2.31).
     let lips = [0.6f64, 1.0, 1.6, 2.2, 2.8];
-    let base: Vec<f64> = lips
-        .iter()
-        .map(|&l| growth_objective(&VesselProfile::carafe(l), 1.0, 1.0, 3, 3))
-        .collect();
-    let base_span = base.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-        - base.iter().copied().fold(f64::INFINITY, f64::min);
-    let kills = fs_exec::KillRegistry::new();
-    for candidate in 0..lips.len() {
-        let _ = kills.register(candidate as u64);
-    }
-    let mut loss = |i: usize, t: u64| {
-        let mut h = (i as u64) << 32 ^ t ^ 0x7E55;
-        h ^= h << 13;
-        h ^= h >> 7;
-        h ^= h << 17;
-        #[allow(clippy::cast_precision_loss)]
-        let jitter = ((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 1e-4;
-        // PairwiseRace's contract: losses PRE-NORMALIZED so pair
-        // differences land on [-1, 1] (growth gaps are ~1e-3; unscaled
-        // they starve the betting e-process — measured: 0 eliminations
-        // in 400 rounds).
-        (base[i] + jitter) * 200.0
-    };
-    let expected = base
+    let out = screen_lips(&lips, VESSEL_SCREEN_SEED).expect("fixture screen admits a verdict");
+    let expected = out
+        .losses
         .iter()
         .enumerate()
         .min_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i)
         .expect("nonempty");
-    let out = fs_race::race_field(
-        &mut loss,
-        lips.len(),
-        fs_race::RaceSettings::new(
-            fs_race::LossSpan::new(200.0 * (base_span + 1e-4)).expect("positive analytical span"),
-        ),
-        &kills,
-    )
-    .expect("fixture losses stay within the declared span");
     verdict(
         "vsl-005-e-raced-screen",
-        out.winner == expected && !out.eliminated.is_empty(),
+        out.winner == expected && out.eliminated > 0,
         &format!(
-            "race winner lip {} = deterministic argmin lip {} (the U-bottom design); {} dominated candidates eliminated ({} evals vs fixed-N {})",
+            "race winner lip {} = deterministic argmin lip {} (the U-bottom design); {} dominated candidates eliminated ({} evals vs fixed-N {}) under the vessel's DECLARED span {:.5}",
             lips[out.winner],
             lips[expected],
-            out.eliminated.len(),
+            out.eliminated,
             out.evaluations_used,
-            out.fixed_n_equivalent
+            out.fixed_n_equivalent,
+            out.declared_span,
         ),
+    );
+}
+
+/// vsl-005b: the extracted racing wrapper is EXACTLY the convention the
+/// battery used to inline — same declared span, same normalized losses,
+/// same verdict — and it refuses structurally rather than racing on
+/// evidence it cannot support.
+#[test]
+fn vsl_005_race_wrapper_owns_the_declared_convention() {
+    let lips = [0.6f64, 1.0, 1.6, 2.2, 2.8];
+    let base = screening_losses(&lips);
+    let base_span = base.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - base.iter().copied().fold(f64::INFINITY, f64::min);
+    let inline_span = 200.0 * (base_span + 1e-4);
+    let out = screen_lips(&lips, VESSEL_SCREEN_SEED).expect("fixture screen admits a verdict");
+    verdict(
+        "vsl-005-declared-span-is-data-derived",
+        out.declared_span.to_bits() == inline_span.to_bits()
+            && out
+                .losses
+                .iter()
+                .zip(&base)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+        &format!(
+            "wrapper declares span {:.6} = 200 x (fixture spread {base_span:.6} + jitter width 1e-4), bit-for-bit with the inlined convention",
+            out.declared_span
+        ),
+    );
+    // Driving the same table through the table-level entry point is the
+    // same race: this is the surface a cross-consumer audit uses.
+    let replay = race_base_losses(&base, VESSEL_SCREEN_SEED).expect("same table, same verdict");
+    verdict(
+        "vsl-005-table-entry-point-parity",
+        replay == out,
+        "race_base_losses over the screen's own table reproduces screen_lips exactly",
+    );
+    verdict(
+        "vsl-005-screen-refusal-drill",
+        matches!(
+            race_base_losses(&[1.0], VESSEL_SCREEN_SEED),
+            Err(ScreenError::TooFewCandidates { count: 1 })
+        ) && matches!(
+            race_base_losses(&[1.0, f64::NAN], VESSEL_SCREEN_SEED),
+            Err(ScreenError::NonFiniteLoss { candidate: 1, .. })
+        ) && matches!(
+            race_base_losses(&[-f64::MAX, f64::MAX], VESSEL_SCREEN_SEED),
+            Err(ScreenError::InvalidSpan { .. })
+        ),
+        "degenerate loss tables return structured refusals instead of a forged declared span",
     );
 }
 

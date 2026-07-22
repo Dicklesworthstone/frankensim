@@ -52,6 +52,35 @@ COMPOSITION with certificates at every joint.
   `robustify` generates its own fixed, finite fluid band and
   treats a canonical refusal there as an internal programmer-contract
   defect.
+- `race::screen_lips(lips, seed) -> Result<LipScreenReport, ScreenError>`
+  — the vessel's PUBLIC e-raced candidate screen: score each lip with
+  `growth_objective` at the nominal fluid (`SCREEN_RATE = 1.0`,
+  `SCREEN_VISCOSITY = 1.0`, `SCREEN_STATIONS = 3`, `SCREEN_MODES = 3`),
+  then race the table through `fs-race` under the vessel's DECLARED
+  convention. `race::race_base_losses(base, seed)` is the same race over
+  an EXPLICIT loss table, so an auditor outside this crate can drive the
+  vessel's convention over a table it did not generate.
+- **The vessel's declared racing convention**, owned here and nowhere
+  else: losses handed to the race are `SCREEN_SCALE x (base + jitter)`
+  with `SCREEN_SCALE = 200.0`; the jitter is a hashed counter of
+  `(candidate, round, seed)` with total width
+  `SCREEN_JITTER_WIDTH = 1e-4` in unscaled objective units; and the
+  declared paired-loss support is DATA-DERIVED,
+  `race::declared_span(base) = SCREEN_SCALE x (fixture spread +
+  SCREEN_JITTER_WIDTH)`. The equality of the span's slack term and the
+  jitter width is the SOUNDNESS of the declaration — a paired difference
+  of jitters cannot exceed `SCREEN_JITTER_WIDTH` — and drifting the two
+  apart is the failure mode the fs-flagship-e2e fe2e-006 audit exists to
+  catch. This convention was inlined in `tests/battery.rs` until bead
+  `frankensim-extreal-program-f85xj.2.31`; a convention that lives only
+  in a test cannot be audited by anyone else, which is why it moved.
+- `race::LipScreenReport { winner, eliminated, evaluations_used,
+  fixed_n_equivalent, losses, declared_span }` — the screen's evidence
+  row, carrying the declared span it actually raced under.
+- `race::ScreenError` — structured refusals: `TooFewCandidates`,
+  `NonFiniteLoss { candidate, value_bits }`, `InvalidSpan { span_bits }`,
+  and `Race(fs_race::RaceError)`. A loss table that cannot support a
+  declared span produces no verdict; it never produces a forged one.
 
 ## Invariants
 
@@ -67,11 +96,19 @@ COMPOSITION with certificates at every joint.
 5. `film_reynolds` floors at Re = 50 (a defensive guard; the shipped
    scale keeps the design range at Re ≈ 3200–6000 nominal, so the
    floor never binds).
+6. The e-raced screen's declared span is derived from the loss table it
+   races, and its slack term equals the jitter width, so every paired
+   difference the race observes lies inside the declared support. If it
+   cannot (non-finite loss, non-finite derived span), the screen returns
+   a `ScreenError` and no verdict.
 
 ## Error model
 
 Direct empirical-CVaR calls preserve `fs-robust`'s typed `RobustError`
-refusals. Fixture-scale orchestration errors panic (`expect`) — including
+refusals. The e-raced screen returns `race::ScreenError` (never a
+fabricated verdict) when the loss table cannot support a declared span
+or when the shared race core refuses. Fixture-scale orchestration errors
+panic (`expect`) — including
 an impossible rejection of the internally generated fluid-band losses,
 the eigensolver failing to converge, `Cheb1::build` failing on the smooth
 carafe, or render dimensions disagreeing with the outcome buffer. The
@@ -119,10 +156,19 @@ REPORTED):
   spread 11.09 (the family responds); all ledgers strict.
 - **vsl-005** robustification: robust lip 0.92 stays stable off-band
   (−0.00044) while the nominal lip 1.11 goes UNSTABLE off-band
-  (+0.00023) — the flagship claim, gated. The e-raced screen recovers
-  the deterministic argmin under jitter and eliminates all 4 dominated
-  lips in 76 evals vs fixed-N 2000. Invalid direct CVaR inputs return
-  exact structured refusals rather than panicking or reporting fake risk.
+  (+0.00023) — the flagship claim, gated. The e-raced screen, driven
+  through the public `race::screen_lips` wrapper, recovers the
+  deterministic argmin under jitter and eliminates all 4 dominated lips
+  in 136 evals vs fixed-N 2000 under declared span 1.49318. Invalid
+  direct CVaR inputs return exact structured refusals rather than
+  panicking or reporting fake risk.
+- **vsl-005b** (`vsl_005_race_wrapper_owns_the_declared_convention`) the
+  extracted wrapper IS the convention the battery used to inline: the
+  declared span matches `200 x (spread + 1e-4)` bit-for-bit, the base
+  loss table matches `screening_losses` bit-for-bit,
+  `race_base_losses` over that table reproduces `screen_lips` exactly,
+  and degenerate tables (one candidate, a NaN loss, an overflowing
+  spread) return structured refusals instead of a forged span.
 - **vsl-006** deliverable: bitwise render replay, transmittance range
   1.000.
 

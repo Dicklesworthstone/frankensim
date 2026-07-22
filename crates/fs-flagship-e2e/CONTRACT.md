@@ -93,17 +93,38 @@ and structured failure evidence.
    notebook evidence so a future golden delta can be attributed field by
    field.
 3. Shared-machinery changes surface once in a shared audit, within that
-   audit's stated coverage. Two audits exist and neither is a
-   cross-flagship convention comparison:
+   audit's stated coverage. Two audits exist:
    - the LBM roll hash covers the uniform-tau collide/stream path only
      (see `lbm_core_roll_hash` above);
-   - fe2e-006 covers race-core replay determinism plus agreement between
-     `fs_ornith::screen_generation` — the one flagship consumer with a
-     public race wrapper — and the same core driven under the
-     ornithoid's declared span (1.52) and normalization ceiling (1.5).
-     `fs-vessel` exposes no public race wrapper (`robustify` runs no
-     race; its 200x convention lives in the vessel's own battery), so no
-     claim is made that the two flagships' conventions agree.
+   - fe2e-006 is the CROSS-CONSUMER e-race audit. It covers (a) race-core
+     replay determinism on a fixed normalized loss table, (b) agreement
+     between each flagship's public screening wrapper and the same core
+     driven under that flagship's own declared convention —
+     `fs_ornith::screen_generation` at declared span 1.52 / ceiling 1.5,
+     and `fs_vessel::race::screen_lips` at scale 200 with the
+     data-derived support `200 x (fixture spread + jitter width)` — and
+     (c) ONE shared loss table (the ornithoid's own `-L/D` scores) raced
+     under BOTH declared conventions, gated on reaching the same
+     SELECTION: same winner, same elimination count.
+
+     What (c) does NOT claim is that the two conventions cost the same.
+     They do not: on the shared 12-candidate table the ornithoid's
+     convention spends 925 evaluations and the vessel's 859, because the
+     ornithoid normalizes onto a fixed ceiling with +/-0.01 jitter while
+     the vessel scales by 200 with a data-derived support and +/-5e-5
+     jitter. Both counts are emitted; `cross_consumer_evals_claimed_equal`
+     is a literal `false` in the row so the distinction cannot be lost by
+     re-reading. Equal winner plus equal elimination count pins the whole
+     survivor set only when the elimination is total (11 of 12 here);
+     that condition is emitted as `cross_consumer_survivor_set_pinned`
+     rather than assumed.
+
+     The vessel side became auditable only when its convention moved out
+     of `crates/fs-vessel/tests/battery.rs` into the `fs_vessel::race`
+     library surface (bead `frankensim-extreal-program-f85xj.2.31`): a
+     convention that exists only in a test cannot be driven by any other
+     crate, which is exactly how the original case could claim a
+     cross-flagship audit while invoking neither flagship.
 4. Mid and full stages are wired with `#[ignore]` until their
    cadence and envelopes belong to the perf/CI lanes.
 5. Failure drills must produce expected structured outcomes, and every
@@ -174,8 +195,11 @@ than Cargo features.
 - **fe2e-005** shared uniform-tau D2Q9 roll hash for the collide/stream
   path both flagships ride (coverage bounded as stated above).
 - **fe2e-006** race-core replay determinism on a fixed normalized loss
-  table, plus `fs_ornith::screen_generation` agreement with the same
-  core under the ornithoid's declared span. No vessel claim.
+  table; consumer/core agreement for BOTH public wrappers
+  (`fs_ornith::screen_generation` and `fs_vessel::race::screen_lips`)
+  each under its own declared convention; and cross-consumer SELECTION
+  agreement over one shared loss table. Evaluation counts across
+  conventions are reported, never equated.
 - **fe2e-007** failure drills for cancellation storms, budget
   exhaustion, ledger crash recovery, and model-form escalation, with
   every emitted outcome field measured.
@@ -184,15 +208,28 @@ than Cargo features.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
 
-Four further tests are DRILL FALSIFIERS. They emit no aggregate and no
+Six further tests are DRILL FALSIFIERS. They emit no aggregate and no
 forensic companion; they exist so a green drill cannot be a silent pass.
 Each seeds the fault its bead names and asserts the drill's own gate
 rejects it:
 
 - `fe2e_006_consumer_core_agreement_is_falsifiable` — a drifted
-  normalization ceiling or declared span must break consumer/core
-  agreement, while the pre-fix self-replay shape stays green under both
-  (bead `frankensim-extreal-program-f85xj.2.31`).
+  normalization ceiling or declared span must break the ORNITHOID's
+  consumer/core agreement, while the pre-fix self-replay shape stays
+  green under both (bead `frankensim-extreal-program-f85xj.2.31`).
+- `fe2e_006_vessel_consumer_core_agreement_is_falsifiable` — the same
+  for the VESSEL: drifting the declared support away from the jitter
+  width (slack 1e-3, 1e-2, 1e-1) must break agreement, and a validator
+  noisier than the declared support must produce a STRUCTURED
+  `RaceError::PairwiseInput` refusal rather than a verdict. It also
+  records the honest negative: a pure rescale (20x, 2000x) is an exact
+  invariance of the pairwise e-process, not a drift, so the audit
+  neither can nor should see it (bead `…2.31`).
+- `fe2e_006_cross_consumer_selection_is_falsifiable` — a drifted vessel
+  declared support (slack 10.0) must break cross-consumer SELECTION
+  agreement over the shared table; the test also asserts that the two
+  conventions' evaluation counts DIFFER, so the reported wording cannot
+  silently harden into an equality claim (bead `…2.31`).
 - `fe2e_007_budget_drill_counts_real_degradation` — funding every
   candidate must yield `degraded == 0` and fail the gate; a funded lane
   that cannot answer must fail it too (bead `…2.32`).
@@ -302,9 +339,18 @@ pairs by mapping `stage` to the emitter scope and `kind` to the
 `frame-smoke/artifact`, `marquee/status`, `erace-audit/race`, the four
 `drill/*` outcomes, and `notebook/emitted`. Their object payloads are
 validated before printing. The fe2e-006 case identity is
-`fe2e-006-erace-core-and-ornith-consumer` (formerly
-`fe2e-006-erace-audit`): the old name described a cross-consumer
-comparison the case never performed. The constructed-only `log_row`
+`fe2e-006-erace-cross-consumer` (formerly
+`fe2e-006-erace-core-and-ornith-consumer`, and before that
+`fe2e-006-erace-audit`). The lineage is the fix history: the original
+name described a cross-consumer comparison the case never performed;
+the second named exactly what it then covered — the core plus the one
+consumer that had a public wrapper; the current name is earned, because
+`fs-vessel` now publishes `race::screen_lips` and the case really does
+drive both consumers. The row no longer carries the interim
+`vessel_wrapper: "none-public"` marker; `vessel_wrapper`,
+`vessel_core`, `vessel_declared_span`, `shared_table_vessel` and
+`cross_consumer_selection_agree` carry measured values in its place.
+The constructed-only `log_row`
 fixtures in fe2e-008 remain the escaping and utility-shape self-audit;
 they are not live suite rows.
 
@@ -315,7 +361,10 @@ uses ensemble input seed `90210`; the Cx stream seed `0xF1A6_5A1D` is
 recorded separately as execution provenance and is never presented as
 input randomness. fe2e-006 uses `0xAB` for both replayed race runs and
 records `0xE2E` separately as `ornith_input_seed`, the seed of the
-generation its consumer/core agreement check screens; the aggregate case
+generation its ornithoid consumer/core agreement check screens and of
+the shared cross-consumer loss table, plus `0x7E55` as
+`vessel_input_seed`, the seed the vessel's screening jitter hashes with
+(the same constant its own vsl-005 battery uses); the aggregate case
 keeps `0xAB`.
 The composite fe2e-007 aggregate uses zero while its companions carry
 the cancellation seed `0x570`, the shared surrogate/model seed

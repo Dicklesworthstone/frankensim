@@ -446,6 +446,129 @@ fn erace_core_under_ornith_convention(
     .expect("fixture losses stay within the declared span")
 }
 
+/// The vessel's screening lip fixture (`fs-vessel` vsl-005), rebuilt
+/// here so the audit drives the vessel wrapper on its own home ground.
+const VESSEL_SCREEN_LIPS: [f64; 5] = [0.6, 1.0, 1.6, 2.2, 2.8];
+/// The seed the vessel's screening jitter hashes with.
+const VESSEL_SCREEN_SEED: u64 = 0x7E55;
+
+/// The VESSEL's declared racing convention, as three numbers the suite
+/// can perturb. `declared()` reads them off `fs-vessel`'s public
+/// constants, so a change in the library reaches this audit.
+#[derive(Debug, Clone, Copy)]
+struct VesselConvention {
+    /// Multiplier applied to `(base + jitter)` before racing.
+    scale: f64,
+    /// Total width of the per-observation validator jitter.
+    jitter_width: f64,
+    /// Slack folded into the declared support on top of the fixture
+    /// spread. The shipped convention sets this EQUAL to `jitter_width`
+    /// — that equality is the soundness of the declaration, and drifting
+    /// the two apart is the drift class this audit exists to catch.
+    span_slack: f64,
+}
+
+impl VesselConvention {
+    /// The convention `fs-vessel` actually ships.
+    fn declared() -> Self {
+        VesselConvention {
+            scale: fs_vessel::race::SCREEN_SCALE,
+            jitter_width: fs_vessel::race::SCREEN_JITTER_WIDTH,
+            span_slack: fs_vessel::race::SCREEN_JITTER_WIDTH,
+        }
+    }
+}
+
+/// Drive the shared `fs_race` core over `base` under the VESSEL's
+/// normalization convention, reconstructed at suite level from its
+/// documented contract (`SCREEN_SCALE × (base + jitter)`, raced under
+/// `SCREEN_SCALE × (fixture spread + jitter width)`).
+///
+/// The audit's independent side for the vessel, exactly as
+/// [`erace_core_under_ornith_convention`] is for the ornithoid.
+fn erace_core_under_vessel_convention(
+    base: &[f64],
+    seed: u64,
+    conv: VesselConvention,
+) -> Result<fs_race::RaceOutcome, fs_race::RaceError> {
+    let base_span = base.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - base.iter().copied().fold(f64::INFINITY, f64::min);
+    let kills = fs_exec::KillRegistry::new();
+    for candidate in 0..base.len() {
+        let _ = kills.register(candidate as u64);
+    }
+    let mut loss = |i: usize, t: u64| {
+        let mut h = (i as u64) << 32 ^ t ^ seed;
+        h ^= h << 13;
+        h ^= h >> 7;
+        h ^= h << 17;
+        #[allow(clippy::cast_precision_loss)]
+        let jitter = ((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * conv.jitter_width;
+        (base[i] + jitter) * conv.scale
+    };
+    fs_race::race_field(
+        &mut loss,
+        base.len(),
+        fs_race::RaceSettings::new(
+            fs_race::LossSpan::new(conv.scale * (base_span + conv.span_slack))
+                .expect("positive derived span"),
+        ),
+        &kills,
+    )
+}
+
+/// `(winner, evaluations_used, eliminated)` — the comparable part of a
+/// race outcome, whichever consumer produced it.
+type RaceTriple = (usize, u64, usize);
+
+/// Does the vessel's public screening wrapper agree with the shared
+/// race core driven under `conv`? Returns both triples so callers can
+/// report the disagreement, not just its existence.
+fn vessel_wrapper_agrees_with_core(
+    conv: VesselConvention,
+) -> (bool, RaceTriple, Result<RaceTriple, fs_race::RaceError>) {
+    let wrapper = fs_vessel::race::screen_lips(&VESSEL_SCREEN_LIPS, VESSEL_SCREEN_SEED)
+        .expect("the vessel lip fixture admits a verdict");
+    let a = (wrapper.winner, wrapper.evaluations_used, wrapper.eliminated);
+    let core = erace_core_under_vessel_convention(&wrapper.losses, VESSEL_SCREEN_SEED, conv)
+        .map(|out| (out.winner, out.evaluations_used, out.eliminated.len()));
+    (core.as_ref().is_ok_and(|b| &a == b), a, core)
+}
+
+/// BOTH consumers' declared conventions over ONE shared loss table.
+///
+/// The table is the ornithoid's OWN screening losses (`−L/D` per
+/// candidate), taken straight off `fs_ornith::screen_generation`'s
+/// report, so the two consumers provably race the same numbers. The
+/// ornithoid side is its public wrapper; the vessel side is driven
+/// under `conv` so a drift can be seeded — at `VesselConvention::declared()`
+/// this reproduces the shipped `fs_vessel::race::race_base_losses`
+/// wrapper bit-for-bit, which fe2e-006 asserts rather than assumes.
+fn shared_table_consumer_outcomes(
+    conv: VesselConvention,
+) -> (RaceTriple, Result<RaceTriple, fs_race::RaceError>) {
+    let generation = erace_audit_generation();
+    let ornith =
+        screen_generation(&generation, ORNITH_INPUT_SEED).expect("normalized screen losses");
+    let vessel = erace_core_under_vessel_convention(&ornith.losses, ORNITH_INPUT_SEED, conv)
+        .map(|out| (out.winner, out.evaluations_used, out.eliminated.len()));
+    (
+        (ornith.winner, ornith.evaluations_used, ornith.eliminated),
+        vessel,
+    )
+}
+
+/// The cross-consumer claim, stated precisely: over one shared loss
+/// table the two declared conventions must make the same SELECTION —
+/// same winner, same number of eliminated candidates. That pins the
+/// whole survivor set only when the elimination is TOTAL (n−1 of n),
+/// which the audit records as `cross_consumer_survivor_set_pinned`
+/// rather than assuming. Evaluation counts are convention-dependent and
+/// are NOT claimed equal; they are reported.
+fn selections_agree(a: RaceTriple, b: RaceTriple) -> bool {
+    a.0 == b.0 && a.2 == b.2
+}
+
 /// The fe2e-006 fixture generation (the ornith smoke generation, rebuilt
 /// so the audit and its falsification test share one input).
 fn erace_audit_generation() -> Vec<OrnithCandidate> {
@@ -480,25 +603,42 @@ fn ornith_wrapper_agrees_with_core(
     (a == b, a, b)
 }
 
-/// fe2e-006: E-RACE CORE AUDIT — two claims, both measured:
+/// fe2e-006: CROSS-CONSUMER E-RACE AUDIT — four claims, all measured:
 ///
 /// 1. REPLAY DETERMINISM of the shared race core on a fixed normalized
 ///    loss table under a fixed declared span (one closure, one seed, run
 ///    twice — a same-process replay check, and labelled as one).
-/// 2. CONSUMER/CORE AGREEMENT for the one flagship that exposes a public
-///    race wrapper: `fs_ornith::screen_generation` must produce the same
-///    winner, evaluation count and elimination count as the shared core
-///    driven under the ornithoid's own declared span and normalization.
+/// 2. CONSUMER/CORE AGREEMENT, ornithoid: `fs_ornith::screen_generation`
+///    must produce the same winner, evaluation count and elimination
+///    count as the shared core driven under the ornithoid's own declared
+///    span and normalization.
+/// 3. CONSUMER/CORE AGREEMENT, vessel: `fs_vessel::race::screen_lips`
+///    must likewise agree with the shared core driven under the VESSEL's
+///    declared convention (`SCREEN_SCALE × (base + jitter)`, support
+///    `SCREEN_SCALE × (spread + jitter width)`).
+/// 4. CROSS-CONSUMER SELECTION over ONE SHARED LOSS TABLE: both public
+///    wrappers race the ornithoid's own `−L/D` table, each under its own
+///    declared convention, and must reach the same SELECTION — same
+///    winner, same elimination count. Whether that also pins the whole
+///    survivor set (it does only when the elimination is total) is
+///    recorded, not assumed.
 ///
-/// NO CROSS-FLAGSHIP CONVENTION CLAIM is made. `fs-vessel` exposes no
-/// public race wrapper (`robustify` runs no race; the vessel's 200×
-/// convention lives in `crates/fs-vessel/tests/battery.rs`), so this
-/// suite cannot drive it, and the previous "identical outcomes
-/// regardless of which flagship's convention wrapped them" wording
-/// described a check that invoked neither flagship and used a third
-/// constant (bead `frankensim-extreal-program-f85xj.2.31`).
+/// What claim 4 does NOT assert: equal evaluation counts. The two
+/// conventions differ in noise-to-span ratio (the ornithoid normalizes
+/// onto a fixed ceiling with ±0.01 jitter; the vessel scales by 200 with
+/// a data-derived support and ±5e-5 jitter), so the SAME table costs a
+/// different number of observations under each. Those counts are
+/// measured and reported side by side, not equated — asserting they were
+/// equal would be the same overstatement this case was filed for
+/// (bead `frankensim-extreal-program-f85xj.2.31`).
+///
+/// The vessel's convention became auditable only when it moved out of
+/// `crates/fs-vessel/tests/battery.rs` into the `fs_vessel::race`
+/// library surface: a convention that exists only in a test cannot be
+/// driven by anyone else, which is exactly why the original case could
+/// claim a cross-flagship audit while invoking neither flagship.
 #[test]
-fn fe2e_006_erace_core_and_ornith_consumer_audit() {
+fn fe2e_006_erace_cross_consumer_audit() {
     // (1) Same-process replay determinism of the core.
     let base = [0.0f64, 0.4, 0.9, 1.3, 0.2, 1.1];
     let replay = |seed: u64| {
@@ -532,8 +672,40 @@ fn fe2e_006_erace_core_and_ornith_consumer_audit() {
 
     // (2) The ornithoid consumer vs the core under the ornithoid's own
     // declared span. This is what actually catches a normalization drift.
-    let (agrees, wrapper, core) =
+    let (ornith_agrees, ornith_wrapper, ornith_core) =
         ornith_wrapper_agrees_with_core(ORNITH_DECLARED_SPAN, ORNITH_NORMALIZED_CEILING);
+
+    // (3) The vessel consumer vs the core under the VESSEL's own declared
+    // convention — the half that did not exist until `fs_vessel::race`
+    // took ownership of the 200x normalization and its data-derived span.
+    let declared = VesselConvention::declared();
+    let (vessel_agrees, vessel_wrapper, vessel_core) = vessel_wrapper_agrees_with_core(declared);
+    let vessel_report = fs_vessel::race::screen_lips(&VESSEL_SCREEN_LIPS, VESSEL_SCREEN_SEED)
+        .expect("the vessel lip fixture admits a verdict");
+
+    // (4) CROSS-CONSUMER SELECTION over one shared loss table. The
+    // reconstruction used for the vessel side must be the shipped wrapper
+    // — asserted, not assumed — and then both conventions must select the
+    // same candidate and eliminate the same number of rivals.
+    let (shared_ornith, shared_vessel_core) = shared_table_consumer_outcomes(declared);
+    let shared_table = screen_generation(&erace_audit_generation(), ORNITH_INPUT_SEED)
+        .expect("normalized screen losses")
+        .losses;
+    let shared_vessel_wrapper = fs_vessel::race::race_base_losses(&shared_table, ORNITH_INPUT_SEED)
+        .expect("the shared loss table admits a vessel verdict");
+    let shared_vessel = (
+        shared_vessel_wrapper.winner,
+        shared_vessel_wrapper.evaluations_used,
+        shared_vessel_wrapper.eliminated,
+    );
+    let reconstruction_is_the_wrapper = shared_vessel_core.as_ref() == Ok(&shared_vessel);
+    let cross_agrees = selections_agree(shared_ornith, shared_vessel);
+    // Equal winner + equal elimination COUNT pins the whole survivor set
+    // only when the elimination is total (n-1 of n). Recorded, not
+    // assumed: with a partial field, agreeing counts would leave the
+    // survivor sets themselves unaudited.
+    let survivor_set_pinned =
+        shared_ornith.2 == shared_table.len() - 1 && shared_vessel.2 == shared_table.len() - 1;
 
     forensic_row(
         "erace-audit",
@@ -541,34 +713,86 @@ fn fe2e_006_erace_core_and_ornith_consumer_audit() {
         format!(
             "{{\"replay_winner\":{},\"replay_evals\":{},\"replay_eliminated\":{},\
              \"ornith_wrapper\":[{},{},{}],\"ornith_core\":[{},{},{}],\
-             \"consumer_core_agree\":{agrees},\"ornith_declared_span\":{ORNITH_DECLARED_SPAN},\
+             \"consumer_core_agree\":{ornith_agrees},\
+             \"ornith_declared_span\":{ORNITH_DECLARED_SPAN},\
              \"ornith_normalized_ceiling\":{ORNITH_NORMALIZED_CEILING},\
-             \"vessel_wrapper\":\"none-public\",\"input_seed\":{ERACE_INPUT_SEED},\
-             \"ornith_input_seed\":{ORNITH_INPUT_SEED}}}",
+             \"vessel_wrapper\":[{},{},{}],\"vessel_core\":{},\
+             \"vessel_consumer_core_agree\":{vessel_agrees},\
+             \"vessel_declared_scale\":{},\"vessel_declared_jitter_width\":{},\
+             \"vessel_declared_span\":{},\
+             \"shared_table_ornith\":[{},{},{}],\"shared_table_vessel\":[{},{},{}],\
+             \"shared_table_len\":{},\"vessel_reconstruction_is_wrapper\":\
+             {reconstruction_is_the_wrapper},\
+             \"cross_consumer_selection_agree\":{cross_agrees},\
+             \"cross_consumer_survivor_set_pinned\":{survivor_set_pinned},\
+             \"cross_consumer_evals_claimed_equal\":false,\
+             \"input_seed\":{ERACE_INPUT_SEED},\"ornith_input_seed\":{ORNITH_INPUT_SEED},\
+             \"vessel_input_seed\":{VESSEL_SCREEN_SEED}}}",
             a.winner,
             a.evaluations_used,
             a.eliminated.len(),
-            wrapper.0,
-            wrapper.1,
-            wrapper.2,
-            core.0,
-            core.1,
-            core.2,
+            ornith_wrapper.0,
+            ornith_wrapper.1,
+            ornith_wrapper.2,
+            ornith_core.0,
+            ornith_core.1,
+            ornith_core.2,
+            vessel_wrapper.0,
+            vessel_wrapper.1,
+            vessel_wrapper.2,
+            match &vessel_core {
+                Ok((w, e, el)) => format!("[{w},{e},{el}]"),
+                Err(err) => json_string(&format!("refused: {err}")),
+            },
+            declared.scale,
+            declared.jitter_width,
+            vessel_report.declared_span,
+            shared_ornith.0,
+            shared_ornith.1,
+            shared_ornith.2,
+            shared_vessel.0,
+            shared_vessel.1,
+            shared_vessel.2,
+            shared_table.len(),
         ),
     );
     verdict(
-        "fe2e-006-erace-core-and-ornith-consumer",
-        replay_equal && agrees,
+        "fe2e-006-erace-cross-consumer",
+        replay_equal
+            && ornith_agrees
+            && vessel_agrees
+            && reconstruction_is_the_wrapper
+            && cross_agrees,
         &format!(
             "race core replays identically on a fixed normalized loss table (span 1.32): \
-             winner {}, {} evals, {} eliminated in both runs; and fs_ornith::screen_generation \
-             agrees with the same core driven under the ornithoid's declared span \
-             {ORNITH_DECLARED_SPAN} (wrapper {wrapper:?} vs core {core:?}). No vessel claim: \
-             fs-vessel exposes no public race wrapper, so no cross-flagship convention \
-             comparison is made here",
+             winner {}, {} evals, {} eliminated in both runs. BOTH public consumers agree with \
+             the shared core under their OWN declared conventions: fs_ornith::screen_generation \
+             {ornith_wrapper:?} vs core {ornith_core:?} at span {ORNITH_DECLARED_SPAN}/ceiling \
+             {ORNITH_NORMALIZED_CEILING}; fs_vessel::race::screen_lips {vessel_wrapper:?} vs core \
+             {vessel_core:?} at scale {} / jitter width {} / declared span {:.5} (suite \
+             reconstruction reproduces the shipped wrapper: {reconstruction_is_the_wrapper}). \
+             CROSS-CONSUMER, one shared {}-candidate loss table (the ornithoid's own -L/D scores) \
+             raced under both conventions: ornith {shared_ornith:?} vs vessel {shared_vessel:?} \
+             -- selection {} (winner {} vs {}; {} vs {} eliminated of {}; elimination total on \
+             both sides, so the survivor set is pinned to the winner alone: \
+             {survivor_set_pinned}). Evaluation counts are convention-dependent and are NOT \
+             claimed equal: {} (ornith ceiling normalization, +-0.01 jitter) vs {} (vessel 200x \
+             scaling, data-derived support, +-5e-5 jitter)",
             a.winner,
             a.evaluations_used,
             a.eliminated.len(),
+            declared.scale,
+            declared.jitter_width,
+            vessel_report.declared_span,
+            shared_table.len(),
+            if cross_agrees { "AGREES" } else { "DIVERGES" },
+            shared_ornith.0,
+            shared_vessel.0,
+            shared_ornith.2,
+            shared_vessel.2,
+            shared_table.len(),
+            shared_ornith.1,
+            shared_vessel.1,
         ),
         ERACE_INPUT_SEED,
     );
@@ -625,6 +849,110 @@ fn fe2e_006_consumer_core_agreement_is_falsifiable() {
              self-replay cannot audit a consumer's convention"
         );
     }
+}
+
+/// REGRESSION for the VESSEL half of bead
+/// `frankensim-extreal-program-f85xj.2.31`: the vessel consumer/core
+/// agreement must be falsifiable by a drift in the vessel's own declared
+/// convention, and the suite-level reconstruction the falsifier perturbs
+/// must be the SHIPPED wrapper at the declared settings (otherwise the
+/// drills falsify a strawman).
+#[test]
+fn fe2e_006_vessel_consumer_core_agreement_is_falsifiable() {
+    let declared = VesselConvention::declared();
+    let (agrees, wrapper, core) = vessel_wrapper_agrees_with_core(declared);
+    assert!(agrees, "wrapper {wrapper:?} vs core {core:?}");
+
+    // The soundness of the vessel's declaration is `span_slack ==
+    // jitter_width`: the declared support is the fixture spread plus the
+    // full width a paired difference of jitters can reach. Drift the two
+    // apart and the e-process runs at a different scale — the agreement
+    // check must SEE it.
+    for slack in [1e-3f64, 1e-2, 1e-1] {
+        let drifted = vessel_wrapper_agrees_with_core(VesselConvention {
+            span_slack: slack,
+            ..declared
+        });
+        assert!(
+            !drifted.0,
+            "a declared support drifted to slack {slack} must break vessel consumer/core \
+             agreement: wrapper {:?} vs core {:?}",
+            drifted.1, drifted.2
+        );
+    }
+
+    // A noisier validator under the SAME declared support is the unsound
+    // direction: the race refuses (support breach), which is a
+    // disagreement the check also has to register rather than swallow.
+    let noisier = vessel_wrapper_agrees_with_core(VesselConvention {
+        jitter_width: 1e-2,
+        ..declared
+    });
+    assert!(
+        !noisier.0,
+        "a validator noisier than the declared support must break agreement: wrapper {:?} vs \
+         core {:?}",
+        noisier.1, noisier.2
+    );
+    assert!(
+        matches!(noisier.2, Err(fs_race::RaceError::PairwiseInput { .. })),
+        "the breach must be a STRUCTURED refusal, not a verdict: {:?}",
+        noisier.2
+    );
+
+    // Honest negative result, recorded so nobody reads it as blindness: a
+    // PURE RESCALE is not a drift this (or any) audit can see, because
+    // scaling every loss AND the declared support by the same factor is an
+    // exact invariance of the pairwise e-process. What the audit catches is
+    // a normalization/declared-support MISMATCH, not the multiplier.
+    for scale in [20.0f64, 2000.0] {
+        let rescaled = vessel_wrapper_agrees_with_core(VesselConvention { scale, ..declared });
+        assert!(
+            rescaled.0,
+            "a pure rescale to {scale} must be an exact invariance, not a drift: wrapper {:?} vs \
+             core {:?}",
+            rescaled.1, rescaled.2
+        );
+    }
+}
+
+/// REGRESSION: the CROSS-CONSUMER selection claim of fe2e-006 must fail
+/// when one consumer's normalization convention drifts. A cross-consumer
+/// audit that stays green under a drifted convention is the original
+/// defect wearing a new name.
+#[test]
+fn fe2e_006_cross_consumer_selection_is_falsifiable() {
+    let declared = VesselConvention::declared();
+    let (ornith, vessel) = shared_table_consumer_outcomes(declared);
+    let vessel = vessel.expect("the shared loss table admits a vessel verdict");
+    assert!(
+        selections_agree(ornith, vessel),
+        "ornith {ornith:?} vs vessel {vessel:?}"
+    );
+    // The honest limit of the claim, asserted so it cannot quietly become
+    // an equality: the two conventions pay DIFFERENT evaluation counts for
+    // the same table.
+    assert_ne!(
+        ornith.1, vessel.1,
+        "the two conventions are not cost-equivalent on this table; if they ever become so, the \
+         reported wording must change with the evidence"
+    );
+
+    // Drift the vessel's declared support away from its jitter width. At
+    // slack 10.0 the weakened e-process fails to eliminate one rival
+    // inside the round budget, so the two consumers no longer make the
+    // same selection — exactly the failure the audit claims to provide.
+    let drifted = shared_table_consumer_outcomes(VesselConvention {
+        span_slack: 10.0,
+        ..declared
+    })
+    .1
+    .expect("a looser support still yields a verdict");
+    assert!(
+        !selections_agree(ornith, drifted),
+        "a drifted vessel declared support must break cross-consumer selection agreement: \
+         ornith {ornith:?} vs drifted vessel {drifted:?}"
+    );
 }
 
 // ------------------------------------------------------------------

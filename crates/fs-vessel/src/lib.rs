@@ -12,7 +12,9 @@
 //! CONTACT-LINE BRACKET — the genuinely open problem handled by
 //! reporting a sensitivity band, never pretended certainty),
 //! ROBUSTIFICATION (CVaR over the fluid band, e-raced candidates
-//! through fs-race), and the DELIVERABLE (the pour rendered by
+//! through fs-race — the vessel's own declared racing convention is a
+//! PUBLIC surface in [`race`], not a test-file detail, so an outside
+//! auditor can drive it), and the DELIVERABLE (the pour rendered by
 //! fs-render's Woodcock tracker bound zero-copy to the simulation's
 //! own mass buffer — the marketing shot and the physics are the same
 //! bytes).
@@ -22,10 +24,15 @@
 //! calibration, the full Appendix C study-program runner.
 
 pub mod pour;
+pub mod race;
 pub mod robust;
 pub mod stability;
 
 pub use pour::{PourOutcome, PourRig, render_pour};
+pub use race::{
+    LipScreenReport, SCREEN_JITTER_WIDTH, SCREEN_SCALE, ScreenError, declared_span,
+    race_base_losses, screen_lips, screening_losses,
+};
 pub use robust::{RobustReport, robustify};
 pub use stability::{VesselProfile, growth_objective};
 

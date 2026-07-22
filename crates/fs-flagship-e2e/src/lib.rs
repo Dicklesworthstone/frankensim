@@ -15,11 +15,16 @@
 //! - SHARED-CORE AUDITS: one canonical uniform-tau D2Q9 roll hash for
 //!   the collide/stream core the vessel and the ornithoid both ride
 //!   (its coverage is bounded — see [`lbm_core_roll_hash`]), and one
-//!   e-race audit that replays the race core and checks the ornithoid's
-//!   public screening wrapper against it under the ornithoid's own
-//!   declared span. `fs-vessel` exposes no public race wrapper — its
-//!   convention lives in its own battery — so NO cross-flagship
-//!   convention comparison is claimed here.
+//!   CROSS-CONSUMER e-race audit that (a) replays the race core, (b)
+//!   checks EACH flagship's public screening wrapper —
+//!   `fs_ornith::screen::screen_generation` and
+//!   `fs_vessel::race::screen_lips` — against the core driven under
+//!   that flagship's own declared convention, and (c) races ONE shared
+//!   loss table under BOTH declared conventions and compares the
+//!   SELECTION they reach. What (c) does not claim: equal evaluation
+//!   counts. The conventions differ in noise-to-span ratio, so the same
+//!   table costs a different number of observations under each; both
+//!   counts are reported, neither is equated.
 //! - FAILURE DRILLS: cancellation storms, budget exhaustion,
 //!   ledger crash-recovery, model-form escalation — each with an
 //!   EXPECTED STRUCTURED OUTCOME that is MEASURED, not a literal
