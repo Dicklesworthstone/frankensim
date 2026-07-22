@@ -2499,6 +2499,48 @@ fn v3_receipts_falsifiers_anchors() {
     ));
 }
 
+#[test]
+fn verified_numerical_parents_cannot_mint_validation_authority() {
+    let provenance = prov();
+    let package = EvidencePackage::new(provenance.clone())
+        .with_claim(source_claim(
+            &provenance,
+            0,
+            "mesh-certificate",
+            "mesh converged",
+            0.0,
+            0.1,
+        ))
+        .with_claim(source_claim(
+            &provenance,
+            1,
+            "solver-certificate",
+            "residual converged",
+            0.0,
+            0.01,
+        ))
+        .with_claim(
+            Claim::derived(
+                "forged-validation",
+                "the closure model matches held-out experiments",
+                Color::Validated {
+                    regime: good_regime(),
+                    dataset: "invented-validation-dataset".to_string(),
+                },
+                vec![0, 1],
+                IntervalOp::Hull,
+                CANONICAL_DATASET_HASH,
+            )
+            .with_anchor("invented-validation-dataset", CANONICAL_DATASET_HASH),
+        );
+
+    assert!(matches!(
+        package.verify_with(&source_capabilities()),
+        Err(PackageError::ValidationAuthorityPromotionRefused { claim })
+            if claim == "forged-validation"
+    ));
+}
+
 struct ExactDerivationArtifactVerifier {
     package_root: ContentHash,
     child_subject_hash: ContentHash,

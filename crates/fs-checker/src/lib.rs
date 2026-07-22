@@ -1315,6 +1315,14 @@ fn describe(e: &PackageError) -> Finding {
                  claimed color — forged or stale derivation"
             ),
         },
+        PackageError::ValidationAuthorityPromotionRefused { claim } => Finding {
+            kind: "validation-authority-promotion-refused",
+            detail: format!(
+                "claim '{claim}': a derived Validated claim needs at least one Validated \
+                 parent carrying experimental/model-form authority; numerical Verified \
+                 parents and derivation artifacts cannot mint that authority"
+            ),
+        },
         PackageError::BadReceiptParent { claim, parent } => Finding {
             kind: "bad-receipt-parent",
             detail: format!(

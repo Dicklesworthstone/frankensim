@@ -1871,6 +1871,13 @@ pub enum PackageError {
         /// The claim id.
         claim: String,
     },
+    /// A derived `Validated` claim has no `Validated` parent. Numerical
+    /// certificates and derivation artifacts can transform an existing
+    /// validation anchor, but cannot create experimental/model-form authority.
+    ValidationAuthorityPromotionRefused {
+        /// The attempted derived claim.
+        claim: String,
+    },
     /// A receipt references a parent at or after the claim itself (the
     /// derivation DAG must point strictly backwards), or out of range.
     BadReceiptParent {
@@ -2806,6 +2813,7 @@ impl EvidencePackage {
                 });
             }
             let mut derived: Option<Color> = None;
+            let mut has_validated_parent = false;
             for &parent in &receipt.parents {
                 if parent >= index {
                     return Err(PackageError::BadReceiptParent {
@@ -2814,9 +2822,15 @@ impl EvidencePackage {
                     });
                 }
                 let parent_color = &self.claims[parent].color;
+                has_validated_parent |= matches!(parent_color, Color::Validated { .. });
                 derived = Some(match derived {
                     None => parent_color.clone(),
                     Some(current) => compose(&current, parent_color, receipt.op),
+                });
+            }
+            if matches!(claim.color, Color::Validated { .. }) && !has_validated_parent {
+                return Err(PackageError::ValidationAuthorityPromotionRefused {
+                    claim: claim.id.clone(),
                 });
             }
             if !matches!(derived, Some(ref color) if colors_bitwise_equal(color, &claim.color)) {

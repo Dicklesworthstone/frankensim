@@ -178,7 +178,13 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   policy fingerprint recorded in the receipt, not from the anchor subject
   (bead frankensim-extreal-program-f85xj.2.13). A
   derived `Validated` claim must carry at least one exact dataset-id match, and
-  every such matching anchor is authenticated independently. Derivation
+  must have at least one `Validated` parent. A fold containing only `Verified`
+  numerical parents refuses as `ValidationAuthorityPromotionRefused` before
+  any injected derivation or anchor callback can run: a proof artifact may
+  authenticate a derivation, but it cannot manufacture experimental or
+  model-form authority. Intersecting declared domains likewise supplies no
+  authority unless an admitted `Validated` parent already carries it. Every
+  such matching anchor is authenticated independently. Derivation
   authority cannot substitute a new dataset hash. The invoked anchor-policy
   fingerprint and root-bound anchor list participate in the receipt hash and
   release-admission context.

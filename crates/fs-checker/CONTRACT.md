@@ -244,6 +244,12 @@ The authority order is fixed and fail-closed:
   is portable across packages sharing its fields. Package binding comes from
   the root and policy fingerprint in the receipt (bead
   frankensim-extreal-program-f85xj.2.13).
+- A derived `Validated` declaration with no `Validated` parent fails before
+  capability dispatch and renders the stable
+  `validation-authority-promotion-refused` finding. Thus an accepting
+  derivation callback, a small numerical residual, a domain intersection, or
+  any number of `Verified` parents cannot mint model-form or experimental
+  validation authority through the standalone checker.
 - Oversized in-memory builders and expected-root mismatches are refused before
   every external verifier callback and before per-claim release diagnostics.
   Rejected oversized signature bytes are not retained; a bounded mismatched

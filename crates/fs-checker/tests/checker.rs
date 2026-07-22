@@ -203,6 +203,35 @@ fn an_incomplete_validated_claim_fails_the_check() {
 }
 
 #[test]
+fn numerical_only_validation_promotion_has_a_specific_checker_finding() {
+    let pkg = EvidencePackage::new(prov())
+        .with_claim(verified("mesh-bound"))
+        .with_claim(
+            Claim::derived(
+                "forged-validation",
+                "a small residual proves agreement with experiment",
+                Color::Validated {
+                    regime: good_regime(),
+                    dataset: "invented-validation-dataset".to_string(),
+                },
+                vec![0],
+                IntervalOp::Hull,
+                ARTIFACT_HASH,
+            )
+            .with_anchor("invented-validation-dataset", ARTIFACT_HASH),
+        );
+    let report = check(&pkg);
+    assert!(!report.passed());
+    assert_eq!(report.verdict(), Verdict::Fail);
+    assert_eq!(report.findings().len(), 1);
+    assert_eq!(
+        report.findings()[0].kind,
+        "validation-authority-promotion-refused"
+    );
+    assert!(report.findings()[0].detail.contains("cannot mint"));
+}
+
+#[test]
 fn a_semantically_empty_falsifier_record_fails_the_check() {
     let pkg =
         EvidencePackage::new(prov()).with_claim(verified("v").with_falsifier(FalsifierRecord {

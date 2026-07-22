@@ -109,6 +109,37 @@ repo's history:
   cancelled computation reported as a clean negative result (a "miss" rather
   than "unresolved"). (`frankensim-certified-query-raycast-qduf`.)
 
+### No-promotion doctrine: verification is not validation
+
+Numerical verification and empirical validation are independent evidence
+axes. A `Verified` enclosure may prove that the implementation solved the
+declared equations to a stated numerical bound. It does not prove that those
+equations, closures, material states, boundary conditions, or observation
+operators represent the physical system. Consequently:
+
+- no collection of numerical certificates may mint `Validated`;
+- tightening roundoff, algebraic, or discretization terms may not rewrite the
+  model-form or measurement terms of an engineering uncertainty budget;
+- intersecting declared validity domains proves only a smaller declared
+  domain, not agreement with data inside it; and
+- a derived `Validated` package claim needs an already-`Validated` parent and
+  an independently admitted dataset anchor. A derivation proof cannot replace
+  either source of authority.
+
+The canonical reviewer example is RANS. A RANS solve can have a bit-exact
+deterministic execution, a tiny nonlinear residual, a converged mesh ladder,
+and rigorous roundoff bounds. Those facts can make its *numerical solution of
+the selected RANS equations* `Verified`. The predicted pressure drop or heat
+transfer remains model-form `Estimated` until a named, independently retained
+experimental dataset supports that exact QoI, regime, geometry class, boundary
+condition interpretation, and comparison protocol. Smaller residuals do not
+tighten the turbulence-closure discrepancy band; new admitted fidelity pairs
+or experiments do.
+
+This is the no-promotion row that the E09 certificate-regime table must retain:
+proof of the discrete solve and evidence about physical adequacy compose, but
+neither axis substitutes for the other.
+
 ### Not a claim-integrity defect
 
 Precision matters as much as coverage; an inventory that absorbs every bug
