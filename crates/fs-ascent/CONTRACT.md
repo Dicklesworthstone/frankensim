@@ -19,7 +19,9 @@ so converged and stalled are distinguishable outcomes.
   direction after resume on nonconvex terrain). Checkpoint = clone;
   split runs bitwise-equal to straight runs.
 - `wolfe::strong_wolfe` — bracket + bisection zoom, deterministic
-  control flow, evaluation counts returned.
+  control flow, finite-input/output admission, and evaluation counts returned;
+  the internal budgeted entry point checks a hard cap before every expansion
+  and zoom callback.
 - `trust::trust_region_newton` — Steihaug-CG on the quadratic model
   with NEGATIVE-CURVATURE boundary steps (counted in the report),
   classical radius laws (¼/¾ thresholds); `hv_fd_of_gradients` is the
@@ -30,11 +32,16 @@ so converged and stalled are distinguishable outcomes.
   penalty schedule, multipliers returned, and a `KktResidual`
   certificate (stationarity, primal feasibility, inequality dual
   feasibility, complementarity) on every outcome.
-- `riemann::{tangent_project, retract, RiemannianLbfgs}` — the
-  manifold OPERATIONS for fs-opt's metadata (Rn/Sphere/So3;
-  Stiefel is metadata-only and panics loudly), plus Riemannian L-BFGS
-  with projection-based vector transport and Armijo curve search;
-  reports carry the worst manifold violation along the path.
+- `riemann::{tangent_project, retract, RiemannianLbfgs}` — checked
+  manifold operations for fs-opt metadata (Rn/Sphere and the legacy
+  embedded-S³ interpretation of So3; Stiefel is refused loudly), plus
+  Riemannian L-BFGS with scale-relative curvature admission, shortest-geodesic
+  isometric transport on Sphere/S³, and a retraction-aware deterministic
+  strong-Wolfe search. Reports carry componentwise and intrinsic L2 gradient
+  norms plus the worst manifold violation along the path. The legacy So3 and
+  Stiefel limitations are explicit no-claim boundaries below; certified
+  Lie-group/Stiefel execution requires their reconciliation with fs-opt's live
+  3-parameter quaternion-exponential and QR retractions.
 - `pareto::{weighted_sum_sweep, epsilon_constraint_sweep}` —
   gradient-based Pareto TRACING: warm-started L-BFGS continuation
   along a weight schedule (exact on convex fronts) and warm-started
@@ -105,8 +112,18 @@ so converged and stalled are distinguishable outcomes.
 - Cancellation is observed only at a complete Study boundary, never in a
   partially applied gradient/retract step. Repeated observation is
   mutation-free, and pause/resume must preserve the uninterrupted trajectory.
-- L-BFGS curvature pairs are admitted only with sᵀy above the
-  roundoff floor (SPD memory preserved on nonconvex problems).
+- L-BFGS curvature pairs are admitted only with finite, positive sᵀy above a
+  scale-relative roundoff floor (SPD memory preserved on nonconvex problems).
+- Riemannian curvature memory is transported after every accepted iterate,
+  whether or not the new pair is admissible. Transported pairs have curvature
+  and rho recomputed and are dropped if transport makes them invalid; zero
+  memory means exactly zero retained pairs.
+- Every evaluation-budget leaf is a hard resource ceiling for Riemannian line
+  search, including below `All`; budget exhaustion takes attribution priority
+  over simultaneous convergence so a `GradNorm` report proves strict
+  pre-budget convergence. Because construction has already retained one
+  objective callback, `run` rejects an absolute budget below the state's
+  existing evaluation count before performing more work.
 - Riemannian iterates remain ON the manifold to roundoff (the
   retraction is the constraint — no renormalization hacks; violation
   tracked and reported).
@@ -120,10 +137,16 @@ so converged and stalled are distinguishable outcomes.
 
 ## Error model
 
-Structured panics on dimension mismatches, non-finite callback data,
-non-positive or non-finite tolerances, non-descent directions handed
-to the line search, and metadata-only manifolds used in descent
-(modeling errors surfaced loudly). Pareto sweeps reject non-finite
+Structured panics on invalid manifold descriptors or starting points, exact
+dimension mismatches, non-finite callback/state data, singular retractions,
+negative or non-finite norm/stagnation tolerances, non-finite objective targets,
+zero stall windows, empty stop-rule composites, evaluation budgets that
+underwrite callbacks already retained by a resumable state, non-descent
+directions handed to the line search, and unsupported manifolds used in descent (modeling errors
+surfaced loudly before they can mint a certificate). Precision no-op trials
+and underflowed/non-finite slopes produce a reported Stall without accepting a
+new decision or curvature pair; evaluation and observed-violation accounting
+still advance. Pareto sweeps reject non-finite
 decisions/objective values/gradients, invalid weights or epsilons,
 non-positive tolerances, and gradient dimension mismatches at the API
 boundary. Nondominance filtering also refuses malformed public candidates,
@@ -185,56 +208,99 @@ dimensions.
 `tests/riemannian_study_replay.rs` (bead 7tv.21.23) is the retained G5
 study-scale receipt and seeded-failure self-test for the Riemannian L-BFGS
 family. It reuses the known-convergent seeded sphere/Rayleigh fixture, binds
-the logical RNG coordinates, complete symmetric objective matrix and derived
-start, engine/manifold configuration, every public optimizer-state field,
-complete objective history, and every public report field into a versioned
-canonical identity. An independent same-seed run must reproduce the whole
-receipt byte for byte. A deterministic mutation seed flips one finite mantissa
-bit in the returned decision; both repeated mutations must mint the same moved
-identity, and the test-local merge gate refuses that self-consistent but
-non-reference receipt. This proves one sphere fixture only, not all manifolds,
-persisted checkpoint transport, cancellation recovery, cross-ISA equality, or
-performance.
+the fixed input seed and logical RNG coordinates, complete symmetric objective
+matrix and regenerated start, engine/manifold configuration, every public
+optimizer-state field,
+complete objective history, every public report field, and an independently
+recomputed scale-normalized intrinsic Rayleigh residual into a versioned
+canonical identity. The run must stop by componentwise gradient below 1e-9
+strictly before its hard evaluation cap, with that terminal state equal to the
+final objective/gradient callback rather than any earlier visit. It reproduces
+the callback objective and tangent gradient at returned x, agrees with the
+Jacobi eigenvalue oracle, and keeps the intrinsic residual below 1e-10. Semantic
+admission rejects non-finite/off-manifold callback points before residual
+construction, negative-zero norm certificates, alternate input seeds, and
+oracle-valid post-terminal suffixes. A separately constructed same-seed run
+must reproduce the whole receipt byte for byte, and the canonical same-ISA
+reference identity is frozen so a deterministic trajectory regression cannot
+self-approve merely by changing both in-process runs. A deterministic mutation
+seed flips one finite mantissa bit in the returned decision; both repeated
+mutations must mint the same moved identity, and the test-local merge gate
+refuses that identity-consistent but non-reference receipt. This proves one
+sphere fixture on the declared same-build/same-ISA scope only, not all
+manifolds, persisted checkpoint transport, cancellation recovery, cross-ISA
+equality, or performance.
 
 `tests/trust_region_study_replay.rs` (bead 7tv.21.25) is the retained
 study-scale replay and seeded-failure self-test for trust-region Newton–Krylov.
 The production Steihaug driver solves the existing six-dimensional Rosenbrock
-fixture with an exact analytic Hessian-vector callback. Its versioned identity
-binds the fixed input seed, start and engine configuration, every objective
-callback point/value/gradient, every Hessian-vector point/direction/product,
-and every public `TrustRegionReport` field. Replay must be byte-identical,
-callback counts must equal the report accounting, and the trajectory must
-exercise negative-curvature handling. A deterministic mutation seed flips one
-finite returned-decision mantissa bit; stale and self-consistently resealed
-forms are both refused by the test-local merge gate. This proves one
-objective/Hessian pair only, not approximate-Hessian parity, all objectives,
-cancellation, checkpointing, cross-ISA equality, persistence, or performance.
+fixture with an exact analytic Hessian-vector callback; the fixture itself is
+non-random, so the event seed zero is explicitly a wire-schema sentinel rather
+than a fictitious optimizer input. Its versioned identity binds the start,
+complete trust/Steihaug policy, dependency and oracle versions, one global
+objective/Hessian callback ordinal, each outer-iteration and callback role,
+every callback input/output, every public `TrustRegionReport` field, and a
+causal mutation seed. The semantic admission gate independently recomputes
+Rosenbrock values, gradients, and Hessian-vector products, reconstructs every
+Steihaug step and termination (including boundary and nonpositive-curvature
+branches), then replays model and actual decrease, agreement ratio, radius
+update, accept/reject decision, final state, termination condition, and exact
+accounting. Replay must be byte-identical, and reported negative-curvature hits
+must equal independently located Steihaug-only witnesses. Deterministic red
+families cover returned state, callback evidence, configuration/accounting,
+global ordinals, roles and segments, curvature claims, directions, and a
+self-consistent acceptance flip; stale and correctly resealed corruptions fail
+through distinct typed gates. This proves one objective/Hessian pair only, not
+approximate-Hessian parity, all objectives, cancellation, checkpointing,
+cross-ISA equality, persistence, or performance.
 
 `tests/constrained_study_replay.rs` (bead 7tv.21.26) supplies retained
 study-scale replay and seeded-failure self-tests for all three constrained
 engines: augmented Lagrangian, log-barrier interior point, and active-set SQP.
 Each production engine solves the shared equality-plus-active-inequality KKT
-fixture. Its versioned receipt binds the fixed input seed, engine tolerance and
-iteration cap, exact ordered objective/constraint/Jacobian-transpose callback
-inputs and outputs, and every public result, multiplier, accounting, convergence,
-and four-component KKT field. Independent repeats must be byte-identical and
-must recover the analytic optimum with a positive active multiplier. An
-engine-keyed mutation seed flips one finite returned-decision mantissa bit;
-stale and self-consistently resealed variants are both refused. This is one
-small dense fixture, not all constrained problems, large-scale sparse behavior,
+fixture. Its versioned receipt binds engine tolerance and iteration cap, exact
+ordered objective/constraint/Jacobian-transpose callback inputs and outputs,
+and every public result, multiplier, accounting, convergence, and four-component
+KKT field. The fixture is non-random: event seed zero is a wire-schema sentinel,
+while disclosed mutation seeds causally choose only the within-lane coordinate
+or direction they actually mutate. The identity also
+binds the dimensionless formula/unit convention, independent-oracle versions,
+each engine's complete schedule and accounting semantics, all acceptance gates,
+and dependency versions. A separate analytic oracle recomputes objective,
+gradient, equality and inequality values/Jacobians, requires returned-point
+Jacobian-transpose callbacks at the exact reported multipliers, reconstructs
+the optimum and multipliers, and verifies finite nonnegative stationarity,
+feasibility, dual-feasibility, complementarity, raw-KKT, and scaled-KKT
+certificates. Exact callback-count reconstruction distinguishes the three
+engines' schedules and refuses impossible post-cap traces. Separate executions
+must be byte-identical. Ten deterministic red lanes corrupt the returned
+decision, returned-point callback values or Jacobian products, multipliers,
+raw/scaled KKT evidence, or schedule/configuration; stale, correctly resealed,
+and semantic-self-reference admission paths all fail closed. This is one small
+dense fixture, not all constrained problems, large-scale sparse behavior,
 cancellation, checkpointing, cross-ISA equality, persistence, or performance.
 
 `tests/pareto_study_replay.rs` (bead 7tv.21.27) is the retained study-scale
 replay and seeded-failure self-test for the two-objective Pareto tracing family.
 It runs production weighted-sum continuation across the convex quadratic front
 and production epsilon-constraint continuation across the concave
-Fonseca-Fleming front. The versioned receipt binds the fixed input seed, both
-schedules, starts and tolerance, every objective callback point/value/gradient,
-and every public decision, objective, scalar-gradient, optional KKT, and KKT
-component field. Independent execution must replay byte-identically while
-retaining the existing closed-form, coverage, and certificate gates. A
+Fonseca-Fleming front. This fixture has no stochastic input and therefore makes
+no fictitious input-seed claim. The versioned receipt binds both schedules,
+starts, dimensions, acceptance gates, oracle versions, and the causally used
+mutation seed; it also binds every objective callback point/value/gradient and
+every public decision, objective, scalar-gradient, optional KKT, and KKT
+component field. A separately constructed execution must replay byte-identically.
+The semantic oracle independently recomputes objective/gradient pairs, proves
+that every returned point was evaluated by both objectives in the exact
+phase-local order, checks schedule association and epsilon feasibility, and
+proves existence of a nonnegative one-row multiplier whose reconstructed
+stationarity, feasibility, dual-feasibility, and complementarity components
+match every finite nonnegative public KKT field. A
 deterministic mutation seed flips one finite epsilon-path decision mantissa bit;
-stale and self-consistently resealed forms are both refused. This proves the
+stale and identity-consistently resealed forms are both refused, as are resealed
+schedule, callback-order/coverage/value/gradient, objective, negative-certificate,
+and finite-positive certificate corruptions.
+This proves the
 two-objective tracing paths only, not tri-objective behavior, the full WFG
 transformation stack, cancellation, checkpointing, cross-ISA equality,
 persistence, or performance.
@@ -333,10 +399,13 @@ roots before a seeded `StormAssertion` is emitted.
   fsci's BFGS landed in DIFFERENT basins (both genuinely stationary;
   basin choice is not a parity criterion), and from another start the
   roles flipped.
-- Riemannian line search is Armijo (strong Wolfe on manifolds needs
-  transported-derivative bookkeeping — follow-up); Stiefel and
-  fixed-volume level sets are metadata-only until their consumer
-  beads supply retractions.
+- Riemannian strong Wolfe and isometric transport are certified only for Rn and
+  the normalized embedded sphere path used by Sphere/S³. `fs-opt` now has a
+  3-parameter quaternion-exponential So3 retraction and a QR Stiefel retraction,
+  while this older fs-ascent surface still treats So3 as four-dimensional S³
+  and refuses Stiefel. No certified So3/Stiefel optimizer or product-runner
+  claim is made until those parameter dimensions, tangent maps, transports,
+  curve derivatives, and typed admission paths are unified.
 - Multi-variable manifold products + the Problem-IR driver: RESOLVED
   (bead ijil, `runner` module). Remaining runner scope: reverse-mode
   IR gradients (the live IR is evaluation-only), L-BFGS/TR engines
