@@ -4,7 +4,8 @@
 //! When FrankenSim asserts "this design meets spec", the assertion travels as a
 //! transport-complete, CONTENT-ADDRESSED bundle: the color-typed claims, the raw
 //! certificate data behind each (carried in the [`fs_evidence::Color`]),
-//! provenance (code version + the constellation lockfile), and a Merkle root
+//! provenance (code version + the constellation lockfile + an optional exact
+//! structural source-manifest identity), and a Merkle root
 //! over the package identity so any tamper is detectable. A standalone,
 //! open-source CHECKER re-verifies the package WITHOUT re-running every solver.
 //! It is not self-authenticating: source, anchor, falsifier, derivation, waiver,
@@ -19,7 +20,8 @@
 //!
 //! The Merkle tree uses the in-house BLAKE3 content hash from [`fs_blake3`]
 //! (pure safe Rust, zero deps — Franken-compliant), with every leaf and node
-//! DOMAIN-SEPARATED under `fs-package:v8:…` tags, yielding a
+//! DOMAIN-SEPARATED under versioned `fs-package:v8:…` claim and
+//! `fs-package:v9:…` package tags, yielding a
 //! 32-byte [`ContentHash`] root; signature bytes are DETACHED and OPTIONAL, and
 //! become authenticated only through an injected purpose-bound policy.
 //! Everything is deterministic: the same package yields the same root and
@@ -97,27 +99,27 @@ pub const SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN: &str =
     "fs-package:v8:source-certificate-subject";
 
 /// Semantic version of the package Merkle-root identity.
-pub const PACKAGE_ROOT_IDENTITY_VERSION: u32 = 8;
+pub const PACKAGE_ROOT_IDENTITY_VERSION: u32 = 9;
 /// Exact header-leaf BLAKE3 domain that starts a package root.
-pub const PACKAGE_ROOT_IDENTITY_DOMAIN: &str = "fs-package:v8:header";
-const PACKAGE_NODE_IDENTITY_DOMAIN: &str = "fs-package:v8:node";
+pub const PACKAGE_ROOT_IDENTITY_DOMAIN: &str = "fs-package:v9:header";
+const PACKAGE_NODE_IDENTITY_DOMAIN: &str = "fs-package:v9:node";
 
 /// Semantic version of the exact waiver-authorization message bytes.
-pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION: u32 = 8;
+pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION: u32 = 9;
 /// Prefix/domain carried in every exact waiver-authorization message.
-pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v8:waiver-authorization";
-const AUTHORIZATION_CONTEXT_IDENTITY_DOMAIN: &str = "fs-package:v8:authorization-context";
+pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v9:waiver-authorization";
+const AUTHORIZATION_CONTEXT_IDENTITY_DOMAIN: &str = "fs-package:v9:authorization-context";
 
 /// Semantic version of a policy-bound package verification receipt.
-pub const VERIFICATION_RECEIPT_IDENTITY_VERSION: u32 = 8;
+pub const VERIFICATION_RECEIPT_IDENTITY_VERSION: u32 = 9;
 /// BLAKE3 derive-key domain for a policy-bound verification receipt.
-pub const VERIFICATION_RECEIPT_IDENTITY_DOMAIN: &str = "fs-package:v8:verification-receipt";
+pub const VERIFICATION_RECEIPT_IDENTITY_DOMAIN: &str = "fs-package:v9:verification-receipt";
 
 /// Semantic version of the pre-signature release-admission context.
-pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION: u32 = 8;
+pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION: u32 = 9;
 /// BLAKE3 derive-key domain for the pre-signature release-admission context.
 pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN: &str =
-    "fs-package:v8:release-admission-context";
+    "fs-package:v9:release-admission-context";
 
 /// Owner-local declaration consumed by `xtask check-identities`.
 #[allow(dead_code)]
@@ -249,8 +251,8 @@ pub const PACKAGE_ROOT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:package-root",
     "version_const=PACKAGE_ROOT_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:header",
+    "version=9",
+    "domain=fs-package:v9:header",
     "domain_const=PACKAGE_ROOT_IDENTITY_DOMAIN",
     "encoder=EvidencePackage::try_merkle_root",
     "encoder_helpers=EvidencePackage::merkle_root_with_schema,EvidencePackage::package_header,combine",
@@ -260,13 +262,13 @@ pub const PACKAGE_ROOT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "digest=blake3-derive-key-merkle-tree",
     "encoding=typed-binary",
     "sources=EvidencePackage,Provenance,PackageRootSchema",
-    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-root,Provenance.code_version:semantic,Provenance.constellation_lock:semantic,PackageRootSchema.header_domain:semantic,PackageRootSchema.node_domain:semantic,PackageRootSchema.carry_odd_node:semantic",
-    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>claim-count+ordered-claim-declaration-hashes,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock,PackageRootSchema.header_domain>header-domain,PackageRootSchema.node_domain>node-domain,PackageRootSchema.carry_odd_node>odd-node-carry-rule",
+    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-root,Provenance.code_version:semantic,Provenance.constellation_lock:semantic,Provenance.source_manifest_identity:semantic,PackageRootSchema.header_domain:semantic,PackageRootSchema.node_domain:semantic,PackageRootSchema.carry_odd_node:semantic",
+    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>claim-count+ordered-claim-declaration-hashes,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock,Provenance.source_manifest_identity>source-manifest-citation-presence+source-manifest-identity,PackageRootSchema.header_domain>header-domain,PackageRootSchema.node_domain>node-domain,PackageRootSchema.carry_odd_node>odd-node-carry-rule",
     "external_semantic_fields=identity-version",
-    "semantic_fields=identity-version,format-version,claim-count,ordered-claim-declaration-hashes,code-version,constellation-lock,header-domain,node-domain,odd-node-carry-rule",
+    "semantic_fields=identity-version,format-version,claim-count,ordered-claim-declaration-hashes,code-version,constellation-lock,source-manifest-citation-presence,source-manifest-identity,header-domain,node-domain,odd-node-carry-rule",
     "excluded_fields=none",
     "consumers=EvidencePackage::try_merkle_root,EvidencePackage::verify_structural_integrity,PackageReport::merkle_root,VerificationReceipt::package_root,package-json-merkle-root,fs-checker",
-    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,format-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,claim-count:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,ordered-claim-declaration-hashes:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,header-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,node-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,odd-node-carry-rule:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,format-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,claim-count:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,ordered-claim-declaration-hashes:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,source-manifest-citation-presence:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,source-manifest-identity:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,header-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,node-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,odd-node-carry-rule:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently",
     "nonsemantic_mutations=EvidencePackage.signature:crates/fs-package/tests/package.rs#a_signature_is_optional_and_detached",
     "field_guard=classify_package_root_identity_fields",
     "transport_guard=EvidencePackage::admit_retained_package_root",
@@ -280,8 +282,8 @@ pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:waiver-authorization-subject",
     "version_const=WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:waiver-authorization",
+    "version=9",
+    "domain=fs-package:v9:waiver-authorization",
     "domain_const=WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN",
     "encoder=EvidencePackage::waiver_message",
     "encoder_helpers=EvidencePackage::authorization_context,EvidencePackage::authorization_context_with_domain,EvidencePackage::waiver_message_with_context,EvidencePackage::waiver_message_with_context_and_domain",
@@ -291,13 +293,13 @@ pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "digest=none-exact-canonical-subject",
     "encoding=canonical-transport-exact-bits",
     "sources=EvidencePackage,Provenance",
-    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-authorization,Provenance.code_version:semantic,Provenance.constellation_lock:semantic",
-    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>ordered-authorization-claim-bytes+target-claim-body+waiver-id+expiry-day,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock",
+    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-authorization,Provenance.code_version:semantic,Provenance.constellation_lock:semantic,Provenance.source_manifest_identity:semantic",
+    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>ordered-authorization-claim-bytes+target-claim-body+waiver-id+expiry-day,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock,Provenance.source_manifest_identity>source-manifest-citation-presence+source-manifest-identity",
     "external_semantic_fields=identity-version,subject-domain,authorization-context-domain,target-claim-index",
-    "semantic_fields=identity-version,subject-domain,authorization-context-domain,target-claim-index,format-version,ordered-authorization-claim-bytes,target-claim-body,waiver-id,expiry-day,code-version,constellation-lock",
+    "semantic_fields=identity-version,subject-domain,authorization-context-domain,target-claim-index,format-version,ordered-authorization-claim-bytes,target-claim-body,waiver-id,expiry-day,code-version,constellation-lock,source-manifest-citation-presence,source-manifest-identity",
     "excluded_fields=all-waiver-mac-bytes:authorization-outputs-not-subject-input",
     "consumers=EvidencePackage::waiver_message,WaiverVerifier::verify,VerificationReceipt::waiver_registry",
-    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,subject-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,authorization-context-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-index:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,format-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,ordered-authorization-claim-bytes:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-body:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,waiver-id:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,expiry-day:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,subject-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,authorization-context-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-index:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,format-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,ordered-authorization-claim-bytes:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-body:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,waiver-id:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,expiry-day:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,source-manifest-citation-presence:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,source-manifest-identity:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently",
     "nonsemantic_mutations=EvidencePackage.signature:crates/fs-package/src/lib.rs#waiver_authorization_subject_exclusions_do_not_move_identity,all-waiver-mac-bytes:crates/fs-package/src/lib.rs#waiver_authorization_subject_exclusions_do_not_move_identity",
     "field_guard=classify_waiver_authorization_identity_fields",
     "transport_guard=EvidencePackage::admit_retained_waiver_authorization_subject",
@@ -311,8 +313,8 @@ pub const VERIFICATION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:verification-receipt",
     "version_const=VERIFICATION_RECEIPT_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:verification-receipt",
+    "version=9",
+    "domain=fs-package:v9:verification-receipt",
     "domain_const=VERIFICATION_RECEIPT_IDENTITY_DOMAIN",
     "encoder=VerificationReceipt::recomputed_hash",
     "encoder_helpers=verification_receipt_hash,verification_receipt_hash_with_domain",
@@ -342,8 +344,8 @@ pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:release-admission-context",
     "version_const=RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:release-admission-context",
+    "version=9",
+    "domain=fs-package:v9:release-admission-context",
     "domain_const=RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN",
     "encoder=VerificationReceipt::release_admission_context",
     "encoder_helpers=release_admission_context_hash,release_admission_context_hash_with_domain",
@@ -1130,6 +1132,9 @@ pub struct Provenance {
     pub code_version: String,
     /// The pinned dependency constellation (lockfile digest).
     pub constellation_lock: String,
+    /// Optional exact identity of the structural source manifest under which
+    /// this package was produced.
+    pub source_manifest_identity: Option<ContentHash>,
 }
 
 impl Provenance {
@@ -1142,7 +1147,25 @@ impl Provenance {
         Provenance {
             code_version: code_version.into(),
             constellation_lock: constellation_lock.into(),
+            source_manifest_identity: None,
         }
+    }
+
+    /// Bind this provenance to one exact structural source-manifest identity.
+    #[must_use]
+    pub const fn with_source_manifest_identity(
+        mut self,
+        source_manifest_identity: ContentHash,
+    ) -> Provenance {
+        self.source_manifest_identity = Some(source_manifest_identity);
+        self
+    }
+
+    /// Exact structural source-manifest identity, when the producer supplied
+    /// one. Absence is explicit and does not silently claim a source closure.
+    #[must_use]
+    pub const fn source_manifest_identity(&self) -> Option<ContentHash> {
+        self.source_manifest_identity
     }
 }
 
@@ -1188,6 +1211,7 @@ fn classify_package_root_identity_fields(
     let Provenance {
         code_version,
         constellation_lock,
+        source_manifest_identity,
     } = provenance_fields;
     let PackageRootSchema {
         header_domain,
@@ -1201,6 +1225,7 @@ fn classify_package_root_identity_fields(
         signature,
         code_version,
         constellation_lock,
+        source_manifest_identity,
         header_domain,
         node_domain,
         carry_odd_node,
@@ -1221,6 +1246,7 @@ fn classify_waiver_authorization_identity_fields(
     let Provenance {
         code_version,
         constellation_lock,
+        source_manifest_identity,
     } = provenance_fields;
     let _ = (
         format_version,
@@ -1229,6 +1255,7 @@ fn classify_waiver_authorization_identity_fields(
         signature,
         code_version,
         constellation_lock,
+        source_manifest_identity,
     );
 }
 
@@ -2069,22 +2096,24 @@ impl core::error::Error for PackageError {}
 /// verification receipts, transitive waiver admission, and waiver-separated
 /// magnitude accounting; v7 binds the color-algebra version into every
 /// composition receipt; v8 adds inline portable semantic witnesses and binds
-/// release signatures to an explicit semantic-checker context. Earlier
+/// release signatures to an explicit semantic-checker context; v9 adds an
+/// optional exact source-manifest citation to package provenance and binds its
+/// presence/value into package and authorization identities. Earlier
 /// transports are refused by version.
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
-const _: () = assert!(FORMAT_VERSION == SEMANTIC_WITNESS_IDENTITY_VERSION);
-const _: () = assert!(FORMAT_VERSION == CLAIM_DECLARATION_IDENTITY_VERSION);
-const _: () = assert!(FORMAT_VERSION == CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION);
-const _: () = assert!(FORMAT_VERSION == SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION);
 const _: () = assert!(FORMAT_VERSION == PACKAGE_ROOT_IDENTITY_VERSION);
 const _: () = assert!(FORMAT_VERSION == WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION);
 const _: () = assert!(FORMAT_VERSION == VERIFICATION_RECEIPT_IDENTITY_VERSION);
 const _: () = assert!(FORMAT_VERSION == RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION);
+const _: () = assert!(SEMANTIC_WITNESS_IDENTITY_VERSION == 8);
+const _: () = assert!(CLAIM_DECLARATION_IDENTITY_VERSION == 8);
+const _: () = assert!(CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION == 8);
+const _: () = assert!(SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION == 8);
 
 /// Domain-separated integrity digest for the independently distributed
 /// checker's gate-context receipt. This is integrity-only, not a signature.
-pub const CHECKER_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:checker-decision";
+pub const CHECKER_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v9:checker-decision";
 
 /// Hash one canonical checker-decision payload under the shared ABI domain.
 #[must_use]
@@ -2599,6 +2628,13 @@ impl EvidencePackage {
         );
         push_atom(&mut out, &self.provenance.code_version);
         push_atom(&mut out, &self.provenance.constellation_lock);
+        match self.provenance.source_manifest_identity {
+            Some(identity) => {
+                out.push_str("source-manifest:some|");
+                push_atom(&mut out, &identity.to_hex());
+            }
+            None => out.push_str("source-manifest:none|"),
+        }
         out
     }
 
@@ -3514,6 +3550,10 @@ impl EvidencePackage {
             "provenance.constellation_lock",
             &self.provenance.constellation_lock,
         )?;
+        add_transport_nodes(&mut nodes, 1)?;
+        if self.provenance.source_manifest_identity.is_some() {
+            add_transport_bytes(&mut bytes, 64)?;
+        }
         if let Some(signature) = &self.signature {
             add_transport_text(&mut bytes, "signature", signature)?;
         }
@@ -3663,8 +3703,9 @@ impl EvidencePackage {
     }
 
     /// Emit the package as deterministic, self-describing JSON —
-    /// schema v8: complete color payloads, algebra-versioned receipts, typed origins,
-    /// and portable semantic witnesses
+    /// schema v9: complete color payloads, algebra-versioned receipts, typed origins,
+    /// portable semantic witnesses, and an optional exact source-manifest
+    /// citation
     /// (floats as bit-exact hex),
     /// provenance, signature, the 64-hex BLAKE3 content root, and the
     /// magnitude budget. [`EvidencePackage::from_json`] round-trips this
@@ -3683,13 +3724,18 @@ impl EvidencePackage {
     fn to_json_unchecked(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::new();
+        let source_manifest_identity = self
+            .provenance
+            .source_manifest_identity
+            .map_or_else(|| "null".to_string(), |identity| format!("\"{identity}\""));
         let _ = write!(
             out,
-            "{{\"format_version\":{},\"merkle_root\":\"{}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\"}},\"signature\":",
+            "{{\"format_version\":{},\"merkle_root\":\"{}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\",\"source_manifest_identity\":{}}},\"signature\":",
             self.format_version,
             self.merkle_root_unchecked(),
             json_escape(&self.provenance.code_version),
             json_escape(&self.provenance.constellation_lock),
+            source_manifest_identity,
         );
         match &self.signature {
             Some(s) => {
@@ -4065,7 +4111,7 @@ fn verification_receipt_hash_with_domain(
 ) -> ContentHash {
     fn stable_usize(value: usize) -> [u8; 8] {
         u64::try_from(value)
-            .expect("schema-v8 transport bounds fit u64")
+            .expect("schema-v9 transport bounds fit u64")
             .to_le_bytes()
     }
 
@@ -4204,7 +4250,7 @@ fn json_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict schema-v8 parser: the package is a PROOF
+// Strict schema-v9 parser: the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
 // wrong types, bad hex, NaN/inverted certificates, a magnitude budget
 // that does not re-derive, or an embedded root that does not recompute
@@ -4545,7 +4591,7 @@ fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
     if let Some((k, _)) = fields.first() {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("unknown field {k:?} (schema v8 is closed — fail closed)"),
+            why: format!("unknown field {k:?} (schema v9 is closed — fail closed)"),
         });
     }
     Ok(())
@@ -4666,9 +4712,42 @@ fn parse_provenance(fields: &mut Vec<(String, Jv)>) -> Result<Provenance, ParseE
             take_field(&mut provenance, "constellation_lock", "provenance")?,
             "constellation_lock",
         )?,
+        source_manifest_identity: parse_optional_source_manifest_identity(take_field(
+            &mut provenance,
+            "source_manifest_identity",
+            "provenance",
+        )?)?,
     };
     no_leftovers(&provenance, "provenance")?;
     Ok(parsed)
+}
+
+fn parse_optional_source_manifest_identity(value: Jv) -> Result<Option<ContentHash>, ParseError> {
+    match value {
+        Jv::Null => Ok(None),
+        Jv::Str(raw) => {
+            let canonical = raw.len() == 64
+                && raw
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !canonical {
+                return Err(ParseError {
+                    what: "source_manifest_identity".to_string(),
+                    why: "expected null or exactly 64 lowercase hexadecimal characters".to_string(),
+                });
+            }
+            ContentHash::from_hex(&raw)
+                .map(Some)
+                .ok_or_else(|| ParseError {
+                    what: "source_manifest_identity".to_string(),
+                    why: "source-manifest identity is not a canonical content hash".to_string(),
+                })
+        }
+        other => Err(ParseError {
+            what: "source_manifest_identity".to_string(),
+            why: format!("expected a string or null, got {}", other.kind()),
+        }),
+    }
 }
 
 fn parse_signature(fields: &mut Vec<(String, Jv)>) -> Result<Option<String>, ParseError> {
@@ -4772,7 +4851,7 @@ fn verify_declarations(
     Ok(())
 }
 
-/// Parse the embedded content root: exactly 64 hex chars (schema v8).
+/// Parse the embedded content root: exactly 64 hex chars (schema v9).
 /// A 16-hex value is the legacy v3 FNV root and is named in the refusal.
 fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, ParseError> {
     let raw = match take_field(fields, "merkle_root", "package")? {
@@ -4792,7 +4871,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
         return Err(ParseError {
             what: "merkle_root".to_string(),
             why: match raw.len() {
-                16 => "a 16-hex root is the legacy v3 FNV content address; schema v8 requires \
+                16 => "a 16-hex root is the legacy v3 FNV content address; schema v9 requires \
                        the 64-hex lowercase BLAKE3 root"
                     .to_string(),
                 64 => "the 64-char root must use lowercase hexadecimal".to_string(),
@@ -4803,7 +4882,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
     ContentHash::from_hex(&raw).ok_or_else(|| ParseError {
         what: "merkle_root".to_string(),
         why: match raw.len() {
-            16 => "a 16-hex root is the legacy v3 FNV content address; schema v8 requires \
+            16 => "a 16-hex root is the legacy v3 FNV content address; schema v9 requires \
                    the 64-hex lowercase BLAKE3 root"
                 .to_string(),
             64 => "the 64-char root contains non-lowercase-hex characters".to_string(),
@@ -4813,7 +4892,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
 }
 
 impl EvidencePackage {
-    /// Parse the deterministic schema-v8 FrankenSim JSON profile structurally:
+    /// Parse the deterministic schema-v9 FrankenSim JSON profile structurally:
     /// every field
     /// mapped, unknown fields refused, floats reconstructed bit-exactly,
     /// the magnitude budget re-derived and compared, and the embedded
@@ -5399,8 +5478,15 @@ mod tests {
         let empty = EvidencePackage::new(Provenance::new("commit", "lock"));
         assert_eq!(
             empty.transport_usage().expect("bounded empty package").1,
-            13
+            14
         );
+        let cited = EvidencePackage::new(
+            Provenance::new("commit", "lock").with_source_manifest_identity(ContentHash([7; 32])),
+        );
+        let empty_usage = empty.transport_usage().expect("bounded empty package");
+        let cited_usage = cited.transport_usage().expect("bounded cited package");
+        assert_eq!(cited_usage.1, empty_usage.1);
+        assert_eq!(cited_usage.0, empty_usage.0 + 64);
 
         let estimated = EvidencePackage::new(Provenance::new("commit", "lock"))
             .with_claim(Claim::estimated("estimate", "bounded", "estimator", 1.0));
@@ -5409,7 +5495,7 @@ mod tests {
                 .transport_usage()
                 .expect("bounded estimated package")
                 .1,
-            27
+            28
         );
 
         let verified = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(
@@ -5427,7 +5513,7 @@ mod tests {
                 .transport_usage()
                 .expect("bounded certificate package")
                 .1,
-            28
+            29
         );
 
         let portable = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(
@@ -5445,7 +5531,7 @@ mod tests {
                 .transport_usage()
                 .expect("bounded portable package")
                 .1,
-            31
+            32
         );
     }
 
@@ -5853,19 +5939,62 @@ mod tests {
         let mut changed = package.clone();
         changed.provenance.constellation_lock.push('b');
         assert_hash_moves(hash, changed.merkle_root_unchecked(), "constellation-lock");
+        let manifest_a = ContentHash::from_hex(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("source manifest fixture");
+        let manifest_b = ContentHash::from_hex(
+            "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("alternate source manifest fixture");
+        let changed = EvidencePackage::new(
+            package
+                .provenance
+                .clone()
+                .with_source_manifest_identity(manifest_a),
+        )
+        .with_claim(package.claims[0].clone())
+        .with_claim(package.claims[1].clone());
+        assert_hash_moves(
+            hash,
+            changed.merkle_root_unchecked(),
+            "source-manifest-citation-presence",
+        );
+        let changed = EvidencePackage::new(
+            package
+                .provenance
+                .clone()
+                .with_source_manifest_identity(manifest_b),
+        )
+        .with_claim(package.claims[0].clone())
+        .with_claim(package.claims[1].clone());
+        let cited_hash = EvidencePackage::new(
+            package
+                .provenance
+                .clone()
+                .with_source_manifest_identity(manifest_a),
+        )
+        .with_claim(package.claims[0].clone())
+        .with_claim(package.claims[1].clone())
+        .merkle_root_unchecked();
+        assert_hash_moves(
+            cited_hash,
+            changed.merkle_root_unchecked(),
+            "source-manifest-identity",
+        );
 
         for (field, schema) in [
             (
                 "header-domain",
                 PackageRootSchema {
-                    header_domain: "fs-package:v8:alternate-header",
+                    header_domain: "fs-package:v9:alternate-header",
                     ..CURRENT_PACKAGE_ROOT_SCHEMA
                 },
             ),
             (
                 "node-domain",
                 PackageRootSchema {
-                    node_domain: "fs-package:v8:alternate-node",
+                    node_domain: "fs-package:v9:alternate-node",
                     ..CURRENT_PACKAGE_ROOT_SCHEMA
                 },
             ),
@@ -5917,7 +6046,7 @@ mod tests {
         let subject = waiver_subject_for(&package, 0);
 
         let alternate_context = package
-            .authorization_context_with_domain("fs-package:v8:alternate-authorization-context");
+            .authorization_context_with_domain("fs-package:v9:alternate-authorization-context");
         assert_ne!(
             subject,
             package
@@ -5930,7 +6059,7 @@ mod tests {
                 .waiver_message_with_context_and_domain(
                     0,
                     package.authorization_context(),
-                    "fs-package:v8:alternate-waiver-authorization",
+                    "fs-package:v9:alternate-waiver-authorization",
                 )
                 .expect("alternate subject domain")
         );
@@ -5968,6 +6097,19 @@ mod tests {
         let mut changed = package.clone();
         changed.provenance.constellation_lock.push('c');
         variants.push(("constellation-lock", changed));
+        let manifest_a = ContentHash::from_hex(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("source manifest fixture");
+        let manifest_b = ContentHash::from_hex(
+            "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("alternate source manifest fixture");
+        let mut changed = package.clone();
+        changed.provenance = changed.provenance.with_source_manifest_identity(manifest_a);
+        variants.push(("source-manifest-citation-presence", changed.clone()));
+        changed.provenance = changed.provenance.with_source_manifest_identity(manifest_b);
+        variants.push(("source-manifest-identity", changed));
         for (field, changed) in variants {
             assert_ne!(subject, waiver_subject_for(&changed, 0), "{field}");
         }

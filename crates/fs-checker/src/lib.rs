@@ -52,18 +52,18 @@ pub use fs_package::{
 };
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 6;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 7;
 
 /// The one evidence-package format understood by this checker protocol.
 ///
 /// Keep this as an explicit protocol literal rather than deriving it from
 /// `fs-package`: a package-format change must make this crate fail to compile
 /// until the independently distributed checker ABI is reviewed and versioned.
-pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 8;
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 9;
 const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
 
 /// Semantic version of the retained checker-decision digest.
-pub const CHECKER_DECISION_IDENTITY_VERSION: u32 = 8;
+pub const CHECKER_DECISION_IDENTITY_VERSION: u32 = 9;
 /// Exact derive-key domain used by `fs-package` for checker decisions.
 pub use fs_package::CHECKER_DECISION_IDENTITY_DOMAIN;
 const _: () = assert!(CHECKER_DECISION_IDENTITY_VERSION == CHECKER_SUPPORTED_PACKAGE_FORMAT);
@@ -74,8 +74,8 @@ pub const CHECKER_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-checker:decision-report",
     "version_const=CHECKER_DECISION_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:checker-decision",
+    "version=9",
+    "domain=fs-package:v9:checker-decision",
     "domain_const=crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN",
     "encoder=checker_report_hash",
     "encoder_helpers=checker_report_hash_with_protocol,checker_decision_atom,append_signature_identity,append_authenticated_signature_identity",
@@ -115,7 +115,7 @@ pub enum CheckPolicy {
     Integrity,
     /// Non-admitting release readiness inventory.
     ReleasePreflight,
-    /// Strong release admission under protocol v6.
+    /// Strong release admission under protocol v7.
     ReleaseAdmission,
 }
 
@@ -530,7 +530,7 @@ pub fn check_against_root(pkg: &EvidencePackage, expected_root: ContentHash) -> 
 }
 
 /// The full third-party entry point (bead qmao.6.1): parse the
-/// serialized package under the deterministic schema-v8 JSON profile (the parser itself
+/// serialized package under the deterministic schema-v9 JSON profile (the parser itself
 /// recomputes the content root and re-derives the magnitude budget
 /// from the parsed claims), then re-verify semantics, optionally
 /// against an expected root and a signature capability. A package that
@@ -1516,9 +1516,9 @@ mod tests {
         assert_eq!(CHECKER_SUPPORTED_PACKAGE_FORMAT, fs_package::FORMAT_VERSION);
         assert_eq!(
             CHECKER_DECISION_IDENTITY_DOMAIN,
-            "fs-package:v8:checker-decision"
+            "fs-package:v9:checker-decision"
         );
-        assert_eq!(CHECKER_PROTOCOL_VERSION, 6);
+        assert_eq!(CHECKER_PROTOCOL_VERSION, 7);
         assert_ne!(CHECKER_PROTOCOL_VERSION, CHECKER_DECISION_IDENTITY_VERSION);
 
         let report = report_fixture();

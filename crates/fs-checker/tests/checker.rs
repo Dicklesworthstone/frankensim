@@ -1997,8 +1997,8 @@ fn release_gate_rejects_derived_validated_anchor_substitution() {
 
 #[test]
 fn the_checker_advertises_its_protocol_version() {
-    assert_eq!(CHECKER_PROTOCOL_VERSION, 6);
-    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 8);
+    assert_eq!(CHECKER_PROTOCOL_VERSION, 7);
+    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 9);
     assert_eq!(
         fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT,
         fs_package::FORMAT_VERSION

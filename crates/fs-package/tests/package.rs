@@ -180,6 +180,10 @@ fn prov() -> Provenance {
     Provenance::new("commit-abc123", "lock-deadbeef")
 }
 
+fn source_manifest_identity() -> ContentHash {
+    ContentHash::from_hex(CANONICAL_DATASET_HASH).expect("canonical source-manifest identity")
+}
+
 fn source_claim(
     provenance: &Provenance,
     claim_index: usize,
@@ -1494,7 +1498,7 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
     assert_ne!(
         package_root(&build()).to_hex(),
         "b24099cc18450348797e0b8df231bdb2f6b70d4d780de53eb8324fc62d76cdf7",
-        "schema-v8 domains must rotate the schema-v7 package-root fixture"
+        "schema-v9 package domains must remain distinct from the schema-v7 fixture"
     );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
@@ -1517,9 +1521,65 @@ fn the_merkle_root_covers_reproducibility_provenance() {
         .with_claim(verified("c1"));
     let changed_lock = EvidencePackage::new(Provenance::new("commit-abc123", "lock-other"))
         .with_claim(verified("c1"));
+    let cited =
+        EvidencePackage::new(prov().with_source_manifest_identity(source_manifest_identity()))
+            .with_claim(verified("c1"));
 
     assert_ne!(package_root(&pkg), package_root(&changed_code));
     assert_ne!(package_root(&pkg), package_root(&changed_lock));
+    assert_ne!(package_root(&pkg), package_root(&cited));
+}
+
+#[test]
+fn source_manifest_citation_round_trips_and_is_tamper_evident() {
+    let identity = source_manifest_identity();
+    let uncited = EvidencePackage::new(prov()).with_claim(estimated("uncited"));
+    let cited = EvidencePackage::new(prov().with_source_manifest_identity(identity))
+        .with_claim(estimated("cited"));
+
+    assert_eq!(uncited.provenance.source_manifest_identity(), None);
+    assert_eq!(cited.provenance.source_manifest_identity(), Some(identity));
+
+    let uncited_json = package_json(&uncited);
+    assert!(
+        uncited_json.contains("\"source_manifest_identity\":null"),
+        "{uncited_json}"
+    );
+    assert_eq!(
+        EvidencePackage::from_json(&uncited_json).expect("uncited package round trips"),
+        uncited
+    );
+
+    let cited_json = package_json(&cited);
+    assert!(
+        cited_json.contains(&format!("\"source_manifest_identity\":\"{}\"", identity)),
+        "{cited_json}"
+    );
+    let reparsed = EvidencePackage::from_json(&cited_json).expect("cited package round trips");
+    assert_eq!(reparsed, cited);
+    assert_eq!(
+        package_json(&reparsed),
+        cited_json,
+        "decode/encode must preserve the exact citation bytes"
+    );
+
+    let tampered = cited_json.replacen(
+        CANONICAL_DATASET_HASH,
+        "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        1,
+    );
+    let error = EvidencePackage::from_json(&tampered)
+        .expect_err("citation substitution must move the root");
+    assert!(error.why.contains("does not recompute"), "{error}");
+
+    let missing = cited_json.replacen(
+        &format!(",\"source_manifest_identity\":\"{}\"", identity),
+        "",
+        1,
+    );
+    let error =
+        EvidencePackage::from_json(&missing).expect_err("schema-v9 citation field is closed");
+    assert!(error.why.contains("source_manifest_identity"), "{error}");
 }
 
 #[test]
@@ -1531,10 +1591,10 @@ fn an_unsupported_format_version_is_rejected() {
         Err(PackageError::UnsupportedFormat { found: 999 })
     ));
 
-    let json = package_json(&EvidencePackage::new(prov()).with_claim(estimated("stale-v7")));
-    let stale_v7 = json.replacen("\"format_version\":8", "\"format_version\":7", 1);
-    let error = EvidencePackage::from_json(&stale_v7).expect_err("schema v7 is refused");
-    assert!(error.why.contains("unsupported version 7"), "{error}");
+    let json = package_json(&EvidencePackage::new(prov()).with_claim(estimated("stale-v8")));
+    let stale_v8 = json.replacen("\"format_version\":9", "\"format_version\":8", 1);
+    let error = EvidencePackage::from_json(&stale_v8).expect_err("schema v8 is refused");
+    assert!(error.why.contains("unsupported version 8"), "{error}");
 }
 
 #[test]
@@ -2089,7 +2149,7 @@ fn json_is_deterministic_and_carries_the_root() {
     assert_eq!(j, package_json(&pkg));
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&package_root(&pkg).to_hex()));
-    assert!(j.contains("\"format_version\":8"), "schema v8");
+    assert!(j.contains("\"format_version\":9"), "schema v9");
     // v3 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
 }
@@ -2106,8 +2166,8 @@ fn schema_v6_magnitude_shape_is_closed_and_waiver_aware() {
         .expect_err("a v5-shaped magnitude budget must not parse as v6");
     assert!(error.why.contains("waived_unquantified"), "{error}");
 
-    let stale_v6 = missing_v6_field.replacen("\"format_version\":8", "\"format_version\":6", 1);
-    let error = EvidencePackage::from_json(&stale_v6).expect_err("schema v6 is not v8");
+    let stale_v6 = missing_v6_field.replacen("\"format_version\":9", "\"format_version\":6", 1);
+    let error = EvidencePackage::from_json(&stale_v6).expect_err("schema v6 is not v9");
     assert!(error.why.contains("unsupported version 6"), "{error}");
 }
 
@@ -2146,7 +2206,7 @@ fn v3_round_trip_and_fail_closed_walls() {
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
     assert_eq!(package_json(&back), json, "textual round trip");
-    let leading_zero = json.replacen("\"format_version\":8", "\"format_version\":08", 1);
+    let leading_zero = json.replacen("\"format_version\":9", "\"format_version\":09", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
         "non-JSON leading-zero integer refuses"
@@ -2814,7 +2874,7 @@ fn v4_blake3_root_refuses_legacy_transports() {
     assert!(json.contains(&format!("\"merkle_root\":\"{root}\"")));
 
     // A v3 transport is refused BY VERSION before any field is read.
-    let v4 = json.replacen("\"format_version\":8", "\"format_version\":4", 1);
+    let v4 = json.replacen("\"format_version\":9", "\"format_version\":4", 1);
     let err = EvidencePackage::from_json(&v4).expect_err("v4 refused");
     assert!(err.why.contains("unsupported version 4"), "{err}");
 

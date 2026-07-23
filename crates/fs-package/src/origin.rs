@@ -44,9 +44,9 @@ use fs_evidence::color_leaf_identity_reason;
 use crate::{ContentHash, Provenance, SemanticWitness};
 
 /// Semantic version of the typed detached-signature subject identity.
-pub const SIGNATURE_SUBJECT_IDENTITY_VERSION: u32 = 8;
+pub const SIGNATURE_SUBJECT_IDENTITY_VERSION: u32 = 9;
 /// Exact BLAKE3 domain for the typed detached-signature subject.
-pub const SIGNATURE_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v8:signature-subject";
+pub const SIGNATURE_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v9:signature-subject";
 const _: () = assert!(SIGNATURE_SUBJECT_IDENTITY_VERSION == crate::FORMAT_VERSION);
 
 /// Owner-local declaration consumed by `xtask check-identities`.
@@ -55,8 +55,8 @@ pub const SIGNATURE_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:signature-subject",
     "version_const=SIGNATURE_SUBJECT_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:signature-subject",
+    "version=9",
+    "domain=fs-package:v9:signature-subject",
     "domain_const=SIGNATURE_SUBJECT_IDENTITY_DOMAIN",
     "encoder=signature_subject_hash",
     "encoder_helpers=signature_subject_hash_with_domain,SignatureSubjectFields::from_inputs",
@@ -1062,7 +1062,7 @@ mod tests {
             baseline,
             signature_subject_hash_with_domain(
                 &fields,
-                "fs-package:v8:alternate-signature-subject"
+                "fs-package:v9:alternate-signature-subject"
             ),
             "digest-domain",
         );

@@ -21,14 +21,14 @@ use fs_crosswalk::{
 use fs_evidence::{Color, ColorRank};
 
 /// Semantic version of the receipt-bearing package-presence decision.
-pub const PRESENCE_DECISION_IDENTITY_VERSION: u32 = 8;
+pub const PRESENCE_DECISION_IDENTITY_VERSION: u32 = 9;
 /// Exact BLAKE3 domain for the package-presence decision.
-pub const PRESENCE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:presence-decision";
+pub const PRESENCE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v9:presence-decision";
 
 /// Semantic version of the receipt-bearing standards-coverage decision.
-pub const COVERAGE_DECISION_IDENTITY_VERSION: u32 = 8;
+pub const COVERAGE_DECISION_IDENTITY_VERSION: u32 = 9;
 /// Exact BLAKE3 domain for the standards-coverage decision.
-pub const COVERAGE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:coverage-decision";
+pub const COVERAGE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v9:coverage-decision";
 const _: () = assert!(PRESENCE_DECISION_IDENTITY_VERSION == crate::FORMAT_VERSION);
 const _: () = assert!(COVERAGE_DECISION_IDENTITY_VERSION == crate::FORMAT_VERSION);
 
@@ -38,8 +38,8 @@ pub const PRESENCE_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:presence-decision",
     "version_const=PRESENCE_DECISION_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:presence-decision",
+    "version=9",
+    "domain=fs-package:v9:presence-decision",
     "domain_const=PRESENCE_DECISION_IDENTITY_DOMAIN",
     "encoder=presence_report_hash",
     "encoder_helpers=presence_report_hash_with_domain,append_presence_atom,admit_decision_hash",
@@ -69,8 +69,8 @@ pub const COVERAGE_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-package:coverage-decision",
     "version_const=COVERAGE_DECISION_IDENTITY_VERSION",
-    "version=8",
-    "domain=fs-package:v8:coverage-decision",
+    "version=9",
+    "domain=fs-package:v9:coverage-decision",
     "domain_const=COVERAGE_DECISION_IDENTITY_DOMAIN",
     "encoder=coverage_report_hash",
     "encoder_helpers=coverage_report_hash_with_domain,CoverageDecisionRow::from_tuple",
@@ -908,7 +908,7 @@ mod identity_tests {
         let baseline = presence_report_hash(&report);
         assert_hash_moves(
             baseline,
-            presence_report_hash_with_domain(&report, "fs-package:v8:alternate-presence-decision"),
+            presence_report_hash_with_domain(&report, "fs-package:v9:alternate-presence-decision"),
             "digest-domain",
         );
 
@@ -945,7 +945,7 @@ mod identity_tests {
         );
 
         let mut changed = report;
-        changed.rows[0].why.push_str(" under schema v8");
+        changed.rows[0].why.push_str(" under schema v9");
         assert_hash_moves(
             baseline,
             presence_report_hash(&changed),
@@ -959,7 +959,7 @@ mod identity_tests {
         let baseline = coverage_report_hash(&report);
         assert_hash_moves(
             baseline,
-            coverage_report_hash_with_domain(&report, "fs-package:v8:alternate-coverage-decision"),
+            coverage_report_hash_with_domain(&report, "fs-package:v9:alternate-coverage-decision"),
             "digest-domain",
         );
 
@@ -1012,7 +1012,7 @@ mod identity_tests {
         );
 
         let mut changed = report;
-        changed.rows[0].2.push_str(" under schema v8");
+        changed.rows[0].2.push_str(" under schema v9");
         assert_hash_moves(
             baseline,
             coverage_report_hash(&changed),

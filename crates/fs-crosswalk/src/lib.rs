@@ -22,13 +22,13 @@
 //! for engineering use; they are not an official ASME/FAA/EASA determination.
 
 /// The crosswalk vocabulary version.
-pub const CROSSWALK_VERSION: u32 = 5;
+pub const CROSSWALK_VERSION: u32 = 6;
 
 /// Evidence-package schema whose concepts this crosswalk describes.
 ///
 /// Kept independent of `fs-package` to preserve the dependency direction;
 /// the package crate asserts this value against its own format constant.
-pub const SUPPORTED_PACKAGE_FORMAT: u32 = 8;
+pub const SUPPORTED_PACKAGE_FORMAT: u32 = 9;
 
 /// An evidence-package field/concept (the FrankenSim side of the map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,8 @@ pub enum PackageConcept {
     RegimeTag,
     /// The anchoring (experimental / reference) dataset.
     AnchoringDataset,
-    /// Provenance (code version + dependency lockfile).
+    /// Provenance (code version + dependency lockfile + optional exact
+    /// structural source-manifest identity).
     Provenance,
     /// The Merkle content-address root.
     MerkleRoot,
