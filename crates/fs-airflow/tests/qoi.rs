@@ -18,7 +18,7 @@ use fs_conduction::{
 use fs_evidence::uncertainty::{
     BudgetTotal, ENGINEERING_UNCERTAINTY_TERM_COUNT, EngineeringUncertaintyKind, TermValue,
 };
-use fs_evidence::{Ambition, ModelCard, NumericalKind, ValidityDomain};
+use fs_evidence::{ModelCard, NumericalKind};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 use fs_regime::{
     EnvelopeCoverage, OperatingPoint as RegimeOperatingPoint, OverrideAcknowledgement,
@@ -112,7 +112,7 @@ fn declarations(mesh: &ConductionMesh) -> (JunctionRegion, SurfaceRegion, FanPow
     (junction, surface, power)
 }
 
-fn extract_fixture_qois() -> fs_airflow::qoi::ThermalQoiSet {
+fn extract_fixture_run() -> (fs_airflow::qoi::ThermalQoiSet, fs_airflow::OperatingPoint) {
     let (mesh, solution) = mesh_and_solution();
     let operating = operating_point();
     let (junction, surface, power) = declarations(&mesh);
@@ -121,7 +121,7 @@ fn extract_fixture_qois() -> fs_airflow::qoi::ThermalQoiSet {
         source("component-datasheet-limit-v1"),
     )
     .expect("requirement");
-    extract_thermal_qois(
+    let qois = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
@@ -130,34 +130,33 @@ fn extract_fixture_qois() -> fs_airflow::qoi::ThermalQoiSet {
         &power,
         Some(&requirement),
     )
-    .expect("QoI extraction")
+    .expect("QoI extraction");
+    (qois, operating)
 }
 
-fn thermal_regime_card() -> ModelCard {
-    ModelCard::new(
-        "thermal-closure",
-        "1.0.0",
-        Ambition::Solid,
-        vec!["steady forced-convection closure".to_string()],
-        ValidityDomain::unconstrained().with("Re", 10.0, 100.0),
-        vec!["operation outside the retained Reynolds envelope".to_string()],
-        0.1,
-    )
+fn fan_regime_card() -> ModelCard {
+    fan_curve().model_card()
 }
 
-fn regime_point(id: &str, reynolds: f64) -> RegimeOperatingPoint {
+fn fan_regime_point(id: &str, flow_m3_s: f64) -> RegimeOperatingPoint {
     RegimeOperatingPoint {
         id: id.to_string(),
-        groups: BTreeMap::from([("Re".to_string(), reynolds)]),
+        groups: BTreeMap::from([
+            ("flow_m3_s".to_string(), flow_m3_s),
+            ("speed_ratio".to_string(), 1.0),
+        ]),
     }
 }
 
-fn card_uses(qois: &fs_airflow::qoi::ThermalQoiSet) -> Vec<ThermalQoiCardUse> {
+fn card_uses(
+    qois: &fs_airflow::qoi::ThermalQoiSet,
+    model_card: &ModelCard,
+) -> Vec<ThermalQoiCardUse> {
     qois.budgets()
         .into_iter()
         .map(|budget| ThermalQoiCardUse {
             qoi: budget.qoi().to_string(),
-            model_cards: vec!["thermal-closure".to_string()],
+            model_cards: vec![model_card.name.clone()],
             override_acknowledgement: None,
         })
         .collect()
@@ -238,16 +237,21 @@ fn every_reference_qoi_emits_an_eight_term_budget_without_laundering_unknowns() 
 
 #[test]
 fn final_audit_demotes_every_e05_10_qoi_and_rebinds_each_model_budget() {
-    let qois = extract_fixture_qois();
-    let mut uses = card_uses(&qois);
+    let (qois, operating) = extract_fixture_run();
+    let nominal_flow = operating.flow.value.value();
+    let card = fan_regime_card();
+    let mut uses = card_uses(&qois, &card);
     uses[0].override_acknowledgement = Some(OverrideAcknowledgement {
         actor: "thermal-reviewer".to_string(),
         reason: "retain estimate for redesign triage".to_string(),
     });
     let audited = qois
         .audit_operating_envelope(
-            &[thermal_regime_card()],
-            &[regime_point("nominal", 50.0), regime_point("hot", 125.0)],
+            &[card],
+            &[
+                fan_regime_point("nominal", nominal_flow),
+                fan_regime_point("high-flow", 0.13),
+            ],
             &uses,
         )
         .expect("complete card declarations admit the final audit");
@@ -256,10 +260,17 @@ fn final_audit_demotes_every_e05_10_qoi_and_rebinds_each_model_budget() {
     assert!(audited.audit.receipts.iter().all(|receipt| {
         receipt.coverage == EnvelopeCoverage::Partial
             && receipt.in_domain_points == ["nominal"]
-            && receipt.out_of_domain_points == ["hot"]
+            && receipt.out_of_domain_points == ["high-flow"]
             && receipt.model_cards.len() == 1
-            && receipt.model_cards[0].name == "thermal-closure"
-            && receipt.model_cards[0].version == "1.0.0"
+            && receipt.model_cards[0].name == "airflow.fan.qoi-fixture-fan"
+            && receipt.model_cards[0].version == "1"
+            && receipt.violations.len() == 1
+            && receipt.violations[0].point == "high-flow"
+            && receipt.violations[0].card == "airflow.fan.qoi-fixture-fan"
+            && receipt.violations[0].axis == "flow_m3_s"
+            && receipt.violations[0].observed == Some(0.13)
+            && receipt.violations[0].hi == 0.12
+            && receipt.violations[0].distance > 0.0
             && matches!(
                 receipt.effective_color,
                 fs_evidence::Color::Estimated { dispersion, .. }
@@ -295,13 +306,15 @@ fn final_audit_demotes_every_e05_10_qoi_and_rebinds_each_model_budget() {
 
 #[test]
 fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
-    let qois = extract_fixture_qois();
-    let uses = card_uses(&qois);
+    let (qois, operating) = extract_fixture_run();
+    let nominal_flow = operating.flow.value.value();
+    let card = fan_regime_card();
+    let uses = card_uses(&qois, &card);
     let baseline = qois.clone();
     let admitted = qois
         .audit_operating_envelope(
-            &[thermal_regime_card()],
-            &[regime_point("nominal", 50.0)],
+            &[card.clone()],
+            &[fan_regime_point("nominal", nominal_flow)],
             &uses,
         )
         .expect("in-domain final audit");
@@ -318,8 +331,8 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     missing.pop();
     assert!(matches!(
         baseline.clone().audit_operating_envelope(
-            &[thermal_regime_card()],
-            &[regime_point("nominal", 50.0)],
+            &[card.clone()],
+            &[fan_regime_point("nominal", nominal_flow)],
             &missing,
         ),
         Err(ThermalOutputAuditError::MissingCardUse { .. })
@@ -329,8 +342,8 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     duplicate.push(uses[0].clone());
     assert!(matches!(
         baseline.clone().audit_operating_envelope(
-            &[thermal_regime_card()],
-            &[regime_point("nominal", 50.0)],
+            &[card.clone()],
+            &[fan_regime_point("nominal", nominal_flow)],
             &duplicate,
         ),
         Err(ThermalOutputAuditError::DuplicateCardUse { .. })
@@ -339,13 +352,13 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     let mut foreign = uses;
     foreign.push(ThermalQoiCardUse {
         qoi: "foreign-qoi".to_string(),
-        model_cards: vec!["thermal-closure".to_string()],
+        model_cards: vec![card.name.clone()],
         override_acknowledgement: None,
     });
     assert!(matches!(
         baseline.audit_operating_envelope(
-            &[thermal_regime_card()],
-            &[regime_point("nominal", 50.0)],
+            &[card],
+            &[fan_regime_point("nominal", nominal_flow)],
             &foreign,
         ),
         Err(ThermalOutputAuditError::UnknownQoi { .. })

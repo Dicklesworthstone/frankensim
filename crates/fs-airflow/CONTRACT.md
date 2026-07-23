@@ -56,6 +56,9 @@ existing convection rung.
   leaves the QoI set byte-for-byte unchanged, while any partial/out-of-domain
   envelope makes the affected model-form term explicitly Unknown under the
   exact receipt identity. Overrides remain acknowledgements only.
+- `FanCurve::model_card` exposes the exact fan-law card already consumed by
+  airflow evidence so product admission can audit the retained base-curve flow
+  and speed-ratio axes without synthesizing a parallel card definition.
 - The operating-point pressure/flow envelope populates the conditional
   boundary-condition term for pressure and power. The cited total-efficiency
   interval populates the fan-power parameter term. Both remain accompanied by

@@ -237,7 +237,12 @@ impl FanCurve {
         output.expect("validated solver domain overlaps the fan curve")
     }
 
-    fn model_card(&self) -> ModelCard {
+    /// Shared model card used by final operating-envelope admission.
+    ///
+    /// Its flow axis is the per-fan base-curve flow before bank arrangement
+    /// and fan-law speed scaling; `speed_ratio` is the declared fan-law ratio.
+    #[must_use]
+    pub fn model_card(&self) -> ModelCard {
         let basis = match self.tolerance_basis {
             ToleranceBasis::ManufacturerDeclared => "manufacturer-declared pressure tolerance",
             ToleranceBasis::EngineeringAllowance => {
