@@ -15,22 +15,41 @@
 //! - Proposal 11's tolerance-band-extreme re-solves;
 //! - Proposal 3's discrepancy probes (adjacent-rung evaluation).
 //!
-//! Rungs are TOTALLY ORDERED per kernel (index 0 = coarsest/cheapest). The
-//! registry owns the rung DECLARATIONS and the adjacency/ordering; the actual
-//! numerical [`Transfer`] between two rungs is a pluggable trait object a
-//! consumer supplies (fs-feec transfer operators, a correlation model, …).
-//! One concrete demonstrator ships — [`Refine1d`], a 1D coarsen/refine-by-2
-//! whose `restrict ∘ prolongate = identity` makes the ladder immediately real
+//! The v2 substrate is [`FidelityGraph`]: model nodes plus context- and
+//! QoI-specific evidence edges whose cost, discrepancy, validity,
+//! informativeness, and transfer identities remain separate. Expensive does
+//! not mean authoritative. The original totally ordered [`Ladder`] remains a
+//! supported path-graph specialization; [`Ladder::into_fidelity_graph`] moves
+//! its concrete transfers onto exact graph edges without changing existing
+//! consumers.
+//!
+//! Numerical [`Transfer`] implementations stay pluggable (fs-feec transfer
+//! operators, a correlation model, …). One concrete demonstrator ships —
+//! [`Refine1d`], a 1D coarsen/refine-by-2 whose
+//! `restrict ∘ prolongate = identity` makes the substrate immediately real
 //! and its G0 approximation property testable.
 //!
-//! Determinism: rung resolution and transfer application are pure functions
-//! (no RNG, no I/O), so a replayed ladder walk reproduces bit-identical
-//! results — load-bearing because transfer outputs feed verified-color
-//! certificates.
+//! Determinism: canonical graph identity, contextual queries, rung resolution,
+//! and transfer application are pure functions (no RNG, no I/O). Every graph
+//! recommendation carries a replay explanation, including unresolved evidence
+//! and any operational tie-break between scientifically incomparable maxima.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+
+mod graph;
+
+pub use graph::{
+    Adequacy, ClosedInterval, ConsideredEdge, ContextClause, ContextPredicateSet, CostModelRef,
+    CostRelationRef, DiscrepancyModelRef, DiscrepancyReference, EdgeEvidenceResolver, EdgeId,
+    EmbeddedLadderGraph, FIDELITY_GRAPH_SCHEMA_VERSION, FidelityEdge, FidelityGraph,
+    FidelityGraphId, FidelityNode, GraphError, GraphTransfers, Informativeness, LadderDescriptor,
+    MAX_CANONICAL_BYTES, MAX_CONTEXT_CLAUSES, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_NAME_BYTES,
+    MAX_NOTE_BYTES, MAX_REGIME_AXES, ModelCardRef, ModelId, ModelRecommendation, QoiId,
+    QoiSelector, QueryContext, QueryEvidenceRef, QueryExplanation, QueryRefusal, RegimeAxis,
+    ResolvedEdgeEvidence, SelectionBasis, TransferRef, ValidityDomain,
+};
 
 /// A numerical transfer between two adjacent rungs. `prolongate` maps a
 /// coarse-rung state to the next finer rung; `restrict` maps a fine-rung
@@ -307,6 +326,17 @@ pub struct LadderRegistry {
 }
 
 impl LadderRegistry {
+    fn cht_ladder() -> Ladder {
+        Ladder::new(
+            "cht",
+            "correlation-Nu",
+            1.0,
+            "cheap bottom rung: forced-convection Nusselt correlation",
+        )
+        .then(Box::new(Refine1d), "RANS", 40.0, "steady RANS CFD")
+        .then(Box::new(Refine1d), "LES", 2000.0, "large-eddy simulation")
+    }
+
     /// An empty registry.
     #[must_use]
     pub fn new() -> LadderRegistry {
@@ -345,16 +375,17 @@ impl LadderRegistry {
     #[must_use]
     pub fn cht() -> LadderRegistry {
         let mut r = LadderRegistry::new();
-        let ladder = Ladder::new(
-            "cht",
-            "correlation-Nu",
-            1.0,
-            "cheap bottom rung: forced-convection Nusselt correlation",
-        )
-        .then(Box::new(Refine1d), "RANS", 40.0, "steady RANS CFD")
-        .then(Box::new(Refine1d), "LES", 2000.0, "large-eddy simulation");
-        r.register(ladder);
+        r.register(Self::cht_ladder());
         r
+    }
+
+    /// The CHT ladder migrated losslessly to the v2 graph model, including
+    /// its edge-keyed runtime transfers.
+    ///
+    /// # Errors
+    /// Refuses if the legacy declaration cannot satisfy graph invariants.
+    pub fn cht_graph() -> Result<EmbeddedLadderGraph, GraphError> {
+        Self::cht_ladder().into_fidelity_graph()
     }
 }
 
