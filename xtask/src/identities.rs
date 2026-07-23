@@ -10811,7 +10811,7 @@ impl Verifier for DenyAll {
                 "scripts/ci/quality_lanes.sh",
                 include_str!("../../scripts/ci/quality_lanes.sh"),
                 "emit_proof_seal",
-                "org.frankensim.ci.quality-proof-record.v1",
+                "org.frankensim.ci.quality-proof-record.v2",
             ),
             (
                 "scripts/ci/x86_cross_check.sh",
