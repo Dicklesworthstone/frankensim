@@ -33,6 +33,9 @@ use fs_ivl::Interval;
 /// Datum-priority (3-2-1) registration with per-datum residuals and the
 /// datum-versus-global diagnostic delta.
 pub mod datum;
+/// Registration pose covariance propagated into correlated cross-QoI
+/// geometry-budget terms.
+pub mod propagate;
 /// 3-D rigid/similarity Kabsch registration and calibrated 6-dof pose
 /// covariance.
 pub mod rigid3;

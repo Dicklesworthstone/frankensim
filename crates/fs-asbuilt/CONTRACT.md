@@ -18,7 +18,9 @@ semantics separate from the residual-RMS screen. The additive `rigid3` module
 provides closed-form 3-D Kabsch rigid and Umeyama similarity registration
 plus a calibrated 6-dof pose covariance; the additive `datum` module provides
 datum-priority (3-2-1) registration with per-datum residuals and a
-datum-versus-global diagnostic.
+datum-versus-global diagnostic. The additive `propagate` module carries the
+calibrated pose covariance into fs-evidence's eight-term engineering budget
+as correlated cross-QoI geometry terms.
 
 ## Public types and semantics
 
@@ -140,6 +142,29 @@ datum-versus-global diagnostic.
   translation delta against the embedded global Kabsch fit plus per-fiducial
   residual-norm deltas — the difference between global and datum results is
   itself a published diagnostic.
+- `propagate::{QoiSensitivity, QoiEvaluator, CoveragePolicy}` declare
+  first-order QoI pose sensitivities (in the calibrated covariance's exact
+  parameterization and centroid pivot), an optional true-map evaluator for
+  the linearization spot-check, and the caller's coverage policy (no default
+  factor: the half-width multiplier is declared engineering policy, not a
+  distributional claim).
+- `propagate::propagate_pose_covariance(registration, sensitivities,
+  coverage, evaluator, tolerance, unchecked_reason, &Cx)` emits one
+  content-addressed `GeometryPropagation` record: the full cross-QoI
+  covariance `G Sigma G^T`, per-QoI standard deviations, correlation
+  accessors, the registration model identity it consumed, and a
+  `PropagationMethod` stating exactly how the numbers were earned. With an
+  evaluator, twelve deterministic one-sigma sigma points probe the true map;
+  exceeding the declared tolerance downgrades the method to
+  `LinearizationRejected`. Without one, the caller's non-empty reason is
+  recorded as `LinearizedUnchecked`.
+- `propagate::GeometryPropagation::geometry_term(ordinal)` builds the
+  `Geometry` budget term for one QoI: a zero-mean `Distribution` with the
+  propagated deviation and declared coverage when the linearization stands,
+  and an `Unknown` with a named reason when it was rejected — a confidently
+  wrong half-width is unrepresentable at this API. Every term cites the
+  shared record identity as provenance and replay, which is how the cross-QoI
+  correlation structure travels with per-QoI budgets.
 
 ## Invariants
 
@@ -311,11 +336,12 @@ The calibrated registration and spatial assessment also take an explicit `Cx`,
 poll at bounded 256-point scan boundaries plus finalization, and publish no
 partial result after cancellation. They do not yet have affine `ChildBudget`
 entry points; this absence is a no-claim, not declared resource enforcement.
-The `rigid3` and `datum` entry points follow the same pattern: explicit `Cx`,
-256-point scan strides, a final publication checkpoint, structured
-`Cancelled { phase }` refusals with no partial output, and no affine
-`ChildBudget` forms yet (the same no-claim). The 3x3 SVD/eigendecomposition
-calls between checkpoints are constant-bounded work.
+The `rigid3`, `datum`, and `propagate` entry points follow the same pattern:
+explicit `Cx`, 256-point scan strides, a final publication checkpoint,
+structured `Cancelled { phase }` refusals with no partial output, and no
+affine `ChildBudget` forms yet (the same no-claim). The 3x3
+SVD/eigendecomposition and 6x6 factorization calls between checkpoints are
+constant-bounded work.
 
 ## Unsafe boundary
 
@@ -367,6 +393,15 @@ system/degeneracy/orientation refusals, the noisy scan-like e2e lane logging
 poses, covariances, per-datum residuals, and the delta diagnostic, G5 bitwise
 replay, and G4 structured cancellation.
 
+`tests/propagate.rs`: the analytic translation marginal on the axis
+configuration, exact +/-1 correlations for parallel/antiparallel gradients
+with bilinear covariance scaling, spot-check acceptance on an exactly linear
+map and rejection-with-downgrade on a strongly curved one, synthetic-truth
+sampling recovery of the propagated variance, typed declaration/evaluator
+refusals, G5 record-identity determinism and input sensitivity, G4
+structured cancellation, and the register → calibrate → propagate →
+eight-term-budget e2e lane logging the correlation structure.
+
 ## No-claim boundaries
 
 - Registration requires KNOWN correspondences in both the 2-D and 3-D
@@ -387,6 +422,13 @@ replay, and G4 structured cancellation.
   covariance; a calibrated datum-pose uncertainty (fitted features are not
   exact constraints) is future work, and the 2-D module's simultaneous
   decision machinery is not extended over the 3-D or datum poses here.
+- Geometry propagation is FIRST-ORDER only: when the sigma-point spot-check
+  rejects the linearization, this crate downgrades to an explicit unknown
+  instead of offering a sampling-based propagation — that machinery belongs
+  to the product UQ lane. The propagation record is a tamper-evident
+  identity, not authenticated authority; the scenario-side as-built
+  placement binding and the nominal-versus-as-built report rendering are the
+  product layers' integrations and are NOT provided here.
 - Registration is treated as an optimization whose global fit RMS diagnostic
   is propagated into advisory screens and the proposed regime. That residual
   is not transform covariance or a pointwise spatial uncertainty bound.
