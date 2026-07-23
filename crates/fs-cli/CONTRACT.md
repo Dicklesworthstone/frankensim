@@ -25,14 +25,18 @@ The v0 grammar is intentionally small:
 
 ```text
 frankensim [--json] validate <project.fsim|project.json>
+frankensim [--json] import <project> <source> <ledger.db> --unit <unit> --max-hole-edges <n>
+frankensim [--json] import <project> <source> <ledger.db> --unit <unit> --step-root <id> --target-h <spacing>
 frankensim [--json] solve <project.fsim|project.json>
 frankensim [--json] solve --resume <run-id>
 frankensim [--json] report <run-id>
 frankensim [--json] package <run-id>
 ```
 
-`--json` may appear once at any position. Unknown flags, missing operands, and
-extra operands are refused. Project inputs are capped at 16 MiB before parsing.
+`--json` may appear once at any position. Unknown flags, duplicate/missing
+operands, mixed mesh/STEP policies, non-integer repair/root values, and
+non-finite or non-positive STEP spacing are refused. Project inputs are capped
+at 16 MiB before parsing.
 `.fsim` selects the canonical s-expression spelling and `.json` the canonical
 JSON spelling; unknown extensions are refused rather than guessed.
 
@@ -55,13 +59,27 @@ a product claim.
 
 The library surface exposes `RawGeometryLibrary` and
 `import_project_geometry`. A raw-source library binds one caller path/label,
-byte payload, length unit, repair cap, and optional named face groups to the
-strong identity of an exact canonical project geometry row. Physical labels
-are provenance only: `.fsim` continues to identify imported receipt/content
-rows, never machine-local paths. The current checkpoint admits STL, OBJ, and
-PLY. Faceted STEP fails with `cli-import-format-unavailable` until the product
-surface carries an explicit root entity, length unit, and target sampling
-spacing. Import is not yet a v0 command-line verb.
+byte payload, length unit, repair or STEP root/sampling policy, and optional
+named face groups to the strong identity of an exact canonical project geometry
+row. Physical labels are provenance only: `.fsim` continues to identify
+imported receipt/content rows, never machine-local paths. STL, OBJ, and PLY use
+the quarantine/promote route. Strict triangular faceted STEP uses the
+caller-selected positive `FACETED_BREP` root, validated unit ID, and finite
+positive target spacing, then assigns on the exact repaired soup returned by
+the lower topology/SDF handoff. Its retained wrapper preserves the separate
+native decoder and tessellation-import receipts without merging their
+authority.
+
+The `import` command executes this path for the product reference shape: exactly
+one canonical project geometry row, one raw source file, and one SQLite ledger
+destination. Mesh callers must explicitly select a hole-repair cap; STEP
+callers must explicitly select root and spacing; both supply the source
+coordinate unit. Multi-source and named-group adapter construction remain on
+the library surface until a bounded source-manifest grammar is ratified.
+Project validation and bounded source-file reading finish before the ledger is
+opened; format admission and import refusals are then retained in that ledger.
+The command derives deterministic execution seed from the project and caps raw
+source bytes by both the import default and declared project memory budget.
 
 On success the library atomically retains:
 
@@ -110,7 +128,18 @@ Human prose may improve without changing a code or exit class.
 - Import refuses a caller-owned ledger transaction so its artifacts,
   extension rows, lineage, and terminal outcome commit or roll back together.
 - Every import operation freezes project-derived units, seed, budgets,
-  versions, and capabilities in the ledger Five Explicits.
+  versions, and capabilities in the ledger Five Explicits. Its frozen IR also
+  binds every import/assignment resource limit and, in project declaration
+  order, exact source-row identity, source unit, repair cap or STEP root and
+  target-spacing bits, and ordered named-group mappings. Caller path labels do
+  not enter semantic identity.
+- A STEP success retains both lower receipts and writes/assigns the exact
+  repaired soup whose counts and fingerprint appear in the import receipt.
+- Caller-supplied named-group face ordinals are never laundered across
+  face-removing repair. Duplicate/degenerate removal with non-empty groups
+  refuses until an adapter supplies an explicit remap or callers use geometric
+  selectors. Orientation-only repair, vertex compaction, and appended hole
+  faces preserve existing face ordinals.
 - Successful import never truncates assignment results: resolver/report count
   must equal the prepared geometry count.
 
@@ -140,17 +169,23 @@ No unsafe code. No feature flags. Runtime dependencies remain Franken-only.
 
 ## Conformance tests
 
-`tests/cli.rs` covers the grammar and all four v0 verbs, stable exit classes,
+`tests/cli.rs` covers the grammar and all five v0 verbs, stable exit classes,
 strict validation success, structural findings with fixes, noncanonical input
-refusal, JSON escaping/line discipline, and the exact producer-Bead refusal
-for each not-yet-integrated stage.
+refusal, JSON escaping/line discipline, import-policy conflict/numeric
+refusals, routing of both admitted import policy shapes into bounded project
+I/O, and the exact producer-Bead refusal for each not-yet-integrated stage.
 
 `tests/import.rs` supplies a closed reference tetrahedron and covers G0 retained
-lineage, repair of deterministic duplicate/degenerate STL facets, G3 changed
-source identity, open-mesh promotion refusal, mis-scaled unit refusal, dangling
-assignment refusal, G4 pre-cancellation with zero publication, and G5
-content-identity equivalence across independent ledgers. Every recorded case
-runs the ledger linter.
+lineage, repair of deterministic duplicate/degenerate STL facets, strict
+faceted-STEP decoding through topology/SDF handoff, separate nested receipts,
+and exact repaired-mesh retention. G3 covers changed source identity, open-mesh
+promotion refusal, mis-scaled unit refusal, dangling assignment refusal, and a
+clean/dirty re-tessellation pair with identical selector statistics. It also
+drills the fail-closed named-group behavior when repair removes faces. G4
+covers pre-cancellation with zero publication. G5 covers content-identity
+equivalence across independent ledgers and proves that changing exact STEP
+sampling bits moves the frozen operation IR and retained summary. Every
+recorded case runs the ledger linter.
 
 ## No-claim boundaries
 
@@ -163,9 +198,12 @@ runs the ledger linter.
   hook and caller path/label do not authenticate custody, physical/CAD
   sameness, continuum coverage, units, or topology beyond the retained
   lower-layer claims.
-- Importing STL/OBJ/PLY is not a faceted-STEP support claim. Named face groups
-  are caller-supplied labels on the promoted soup, not independently certified
-  CAD product-structure identity.
+- Faceted STEP support is limited to fs-io's pinned triangular root-reachable
+  resource subset and estimated SDF handoff. It is not full EXPRESS/AP
+  interpretation, representation/unit-context discovery, NURBS/surface
+  tessellation, component nesting, self-intersection certification, or
+  physical/CAD sameness. Named face groups are caller-supplied labels on the
+  promoted soup, not independently certified CAD product-structure identity.
 - The presence of solve/report/package in help and parsing is not an
   implementation claim. Until their named authorities land, execution fails
   before side effects.

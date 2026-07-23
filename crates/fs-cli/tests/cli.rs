@@ -149,6 +149,10 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     let help = run(args(&["--json", "help"]));
     assert_eq!(help.exit_code, exit::SUCCESS);
     assert!(help.stdout.contains("\"command\":\"help\""));
+    assert!(
+        help.stdout
+            .contains("import <project> <source> <ledger.db>")
+    );
 
     let duplicate = run(args(&["validate", "x.fsim", "--json", "--json"]));
     assert_eq!(duplicate.exit_code, exit::USAGE);
@@ -161,6 +165,38 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     let unknown_flag = run(args(&["validate", "--lenient"]));
     assert_eq!(unknown_flag.exit_code, exit::USAGE);
     assert!(unknown_flag.stderr.contains("cli-usage"));
+
+    let mixed_import_policy = run(args(&[
+        "import",
+        "project.fsim",
+        "mesh.stl",
+        "run.db",
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+        "--step-root",
+        "60",
+        "--target-h",
+        "1",
+    ]));
+    assert_eq!(mixed_import_policy.exit_code, exit::USAGE);
+    assert!(mixed_import_policy.stderr.contains("cli-import-usage"));
+
+    let invalid_spacing = run(args(&[
+        "import",
+        "project.fsim",
+        "mesh.step",
+        "run.db",
+        "--unit",
+        "m",
+        "--step-root",
+        "60",
+        "--target-h",
+        "NaN",
+    ]));
+    assert_eq!(invalid_spacing.exit_code, exit::USAGE);
+    assert!(invalid_spacing.stderr.contains("cli-import-argument"));
 }
 
 #[test]
@@ -196,4 +232,37 @@ fn g0_validate_path_refuses_unknown_extensions_before_reading() {
     assert_eq!(output.exit_code, exit::INPUT);
     assert!(output.stderr.contains("cli-input-format"));
     assert!(output.stderr.contains(".fsim or .json"));
+}
+
+#[test]
+fn g0_import_command_routes_valid_policy_to_bounded_project_io() {
+    for invocation in [
+        &[
+            "import",
+            "missing.fsim",
+            "mesh.stl",
+            "run.db",
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ][..],
+        &[
+            "import",
+            "missing.fsim",
+            "mesh.step",
+            "run.db",
+            "--unit",
+            "m",
+            "--step-root",
+            "60",
+            "--target-h",
+            "1",
+        ][..],
+    ] {
+        let output = run(args(invocation));
+        assert_eq!(output.exit_code, exit::INPUT);
+        assert!(output.stdout.contains("command=import"));
+        assert!(output.stderr.contains("cli-input-read"));
+    }
 }

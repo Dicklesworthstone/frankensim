@@ -15,13 +15,14 @@ name = "frankensim"
 path = "src/main.rs"
 
 [dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
 fs-ledger = { path = "../fs-ledger" }
 fs-project = { path = "../fs-project" }
 
 [dev-dependencies]
-fs-alloc = { path = "../fs-alloc" }
 fs-qty = { path = "../fs-qty" }
 
 [lints]

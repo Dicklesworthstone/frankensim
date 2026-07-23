@@ -10,8 +10,12 @@
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
+use fs_evidence::vv::UnitId;
 use fs_exec::Cx;
-use fs_io::{AssignmentLimits, NamedFaceGroup};
+use fs_io::{
+    AssignmentLimits, NamedFaceGroup, STEP_FACETED_DECODER_VERSION, STEP_IMPORT_SEMANTICS_VERSION,
+    StepFacetedImportRefusal,
+};
 use fs_ledger::{
     ContentHash, EdgeRole, ExtensionTable, FiveExplicits, Ledger, LedgerError, OpOutcome,
 };
@@ -23,6 +27,7 @@ use fs_project::{
 const IMPORT_IR_SCHEMA: &str = "frankensim.cli.geometry-import.v1";
 const IMPORT_SUMMARY_SCHEMA: &str = "frankensim.cli.geometry-import-receipt.v1";
 const IMPORT_REFUSAL_SCHEMA: &str = "frankensim.cli.geometry-import-refusal.v1";
+const STEP_IMPORT_RECEIPT_SCHEMA: &str = "frankensim.cli.faceted-step-import-receipt.v1";
 const IMPORT_NO_CLAIM: &str = "the ledger binds exact raw bytes, fs-io receipts, one promoted finite tessellation, and the project assignment report; the project row's legacy FNV hook and a caller-supplied source label do not authenticate custody, physical/CAD sameness, continuum coverage, units, or topology beyond the retained lower-layer claims";
 
 /// Explicit resource envelope for one project geometry-import attempt.
@@ -58,9 +63,22 @@ impl Default for GeometryImportLimits {
 struct RawGeometrySource {
     label: String,
     bytes: Vec<u8>,
-    length_unit: String,
-    max_hole_edges: usize,
-    named_groups: Vec<NamedFaceGroup>,
+    policy: RawGeometryPolicy,
+}
+
+#[derive(Debug)]
+enum RawGeometryPolicy {
+    Mesh {
+        length_unit: String,
+        max_hole_edges: usize,
+        named_groups: Vec<NamedFaceGroup>,
+    },
+    FacetedStep {
+        root_id: u64,
+        length_unit: String,
+        target_h: f64,
+        named_groups: Vec<NamedFaceGroup>,
+    },
 }
 
 /// Caller-owned raw geometry inputs keyed by exact canonical project rows.
@@ -100,9 +118,43 @@ impl RawGeometryLibrary {
                 RawGeometrySource {
                     label: label.into(),
                     bytes,
-                    length_unit: length_unit.into(),
-                    max_hole_edges,
-                    named_groups,
+                    policy: RawGeometryPolicy::Mesh {
+                        length_unit: length_unit.into(),
+                        max_hole_edges,
+                        named_groups,
+                    },
+                },
+            )
+            .is_some()
+    }
+
+    /// Bind one strict triangular faceted-STEP input to an exact project row.
+    ///
+    /// `root_id`, `length_unit`, and `target_h` are explicit replay policy.
+    /// The lower-layer decoder ignores STEP representation/unit context and
+    /// admits only its pinned root-reachable triangular resource subset.
+    pub fn insert_faceted_step(
+        &mut self,
+        artifact: &GeometryArtifact,
+        label: impl Into<String>,
+        bytes: Vec<u8>,
+        root_id: u64,
+        length_unit: impl Into<String>,
+        target_h: f64,
+        named_groups: Vec<NamedFaceGroup>,
+    ) -> bool {
+        self.sources
+            .insert(
+                geometry_source_identity(artifact),
+                RawGeometrySource {
+                    label: label.into(),
+                    bytes,
+                    policy: RawGeometryPolicy::FacetedStep {
+                        root_id,
+                        length_unit: length_unit.into(),
+                        target_h,
+                        named_groups,
+                    },
                 },
             )
             .is_some()
@@ -217,12 +269,12 @@ struct RefusalEvidence<'a> {
     promoted_mesh_bytes: Option<&'a [u8]>,
 }
 
-/// Replay every declared raw mesh through quarantine, promotion, persistent
+/// Replay every declared raw geometry source through quarantine, promotion, persistent
 /// assignment, and one atomic ledger operation.
 ///
-/// This checkpoint admits STL, OBJ, and PLY. The strict faceted-STEP route
-/// requires explicit root/spacing/unit policy not present in an imported
-/// `GeometryArtifact` row and therefore remains a separate fail-closed stage.
+/// This checkpoint admits STL, OBJ, PLY, and the strict triangular faceted-STEP
+/// subset. STEP callers must supply an explicit root, length unit, and sampling
+/// spacing; all caller policy is frozen into the ledger operation IR.
 ///
 /// # Errors
 ///
@@ -287,10 +339,22 @@ pub fn import_project_geometry(
             "supply exactly one raw source for every exact project geometry row and no extras",
         ));
     }
+    for artifact in geometry {
+        let source_identity = geometry_source_identity(artifact);
+        if !raw.sources.contains_key(&source_identity) {
+            return Err(refusal(
+                "cli-import-source-missing",
+                Some(&artifact.role),
+                format!("no raw source is bound to project geometry identity `{source_identity}`"),
+                "bind the physical file to this exact project geometry row",
+            ));
+        }
+    }
 
     let project_json = fs_project::print_json(project).map_err(project_codec_refusal)?;
     let canonical = fs_project::print_sexpr(project).map_err(project_codec_refusal)?;
     let project_hash = fs_project::canonical_hash(canonical.as_bytes());
+    let import_request_ir = import_ir(&project_json, geometry, raw, limits)?;
     let mut total_bytes = 0usize;
     let mut mesh_library = ImportedMeshLibrary::new();
     let mut prepared = Vec::with_capacity(geometry.len());
@@ -298,148 +362,57 @@ pub fn import_project_geometry(
     for artifact in geometry {
         checkpoint(cx, "cli-import-cancelled", "geometry-import-source")?;
         let source_identity = geometry_source_identity(artifact);
-        let source = raw.sources.get(&source_identity).ok_or_else(|| {
-            refusal(
+        let Some(source) = raw.sources.get(&source_identity) else {
+            return Err(refusal(
                 "cli-import-source-missing",
                 Some(&artifact.role),
                 format!("no raw source is bound to project geometry identity `{source_identity}`"),
                 "bind the physical file to this exact project geometry row",
-            )
-        })?;
+            ));
+        };
         validate_source_envelope(artifact, source, limits, &mut total_bytes)?;
 
-        let format: &'static str = match artifact.format.as_str() {
-            "stl" => "stl",
-            "obj" => "obj",
-            "ply" => "ply",
-            _ => {
-                let error = refusal(
-                    "cli-import-format-unavailable",
-                    Some(&artifact.role),
-                    format!(
-                        "format `{}` is not admitted by the mesh quarantine replay path",
-                        artifact.format
-                    ),
-                    "use stl, obj, or ply; faceted STEP needs an explicit root, length unit, and sampling-spacing policy",
-                );
-                return Err(record_or_ledger_refusal(
-                    ledger,
-                    project,
-                    &project_json,
-                    project_hash,
-                    artifact,
-                    source,
-                    None,
-                    error,
-                ));
-            }
-        };
-
-        let quarantined = match fs_io::quarantine::import_mesh(&source.bytes, format) {
-            Ok(quarantined) => quarantined,
-            Err(error) => {
-                let error = refusal(
-                    "cli-import-parse",
-                    Some(&artifact.role),
-                    error.to_string(),
-                    "repair or re-export the named raw file in the declared bounded format",
-                );
-                return Err(record_or_ledger_refusal(
-                    ledger,
-                    project,
-                    &project_json,
-                    project_hash,
-                    artifact,
-                    source,
-                    None,
-                    error,
-                ));
-            }
-        };
-
-        if quarantined.source_receipt.source_hash != artifact.source_hash {
-            let error = refusal(
-                "cli-import-source-hash-mismatch",
-                Some(&artifact.role),
-                format!(
-                    "raw source hashes to {:016x}, but the project receipt row pins {:016x}",
-                    quarantined.source_receipt.source_hash, artifact.source_hash
-                ),
-                "select the exact imported bytes named by the project or update the project through an explicit import/migration receipt",
-            );
-            return Err(record_or_ledger_refusal(
+        let input = match &source.policy {
+            RawGeometryPolicy::Mesh {
+                length_unit,
+                max_hole_edges,
+                named_groups,
+            } => prepare_mesh_source(
                 ledger,
                 project,
-                &project_json,
+                &import_request_ir,
                 project_hash,
                 artifact,
                 source,
-                None,
-                error,
-            ));
-        }
-        if quarantined.source_receipt.parser_version != artifact.parser_version {
-            let error = refusal(
-                "cli-import-parser-version-mismatch",
-                Some(&artifact.role),
-                format!(
-                    "the current fs-io parser is `{}`, but the project receipt row pins `{}`",
-                    quarantined.source_receipt.parser_version, artifact.parser_version
-                ),
-                "replay with the pinned parser constellation or explicitly migrate the import receipt",
-            );
-            return Err(record_or_ledger_refusal(
+                &source_identity,
+                length_unit,
+                *max_hole_edges,
+                named_groups,
+                &mut mesh_library,
+                cx,
+            )?,
+            RawGeometryPolicy::FacetedStep {
+                root_id,
+                length_unit,
+                target_h,
+                named_groups,
+            } => prepare_faceted_step_source(
                 ledger,
                 project,
-                &project_json,
+                &import_request_ir,
                 project_hash,
                 artifact,
                 source,
-                None,
-                error,
-            ));
-        }
-
-        checkpoint(cx, "cli-import-cancelled", "geometry-import-promotion")?;
-        let (promoted, receipt_json) = match fs_io::promote(quarantined, source.max_hole_edges) {
-            Ok(promoted) => promoted,
-            Err(promotion) => {
-                let error = refusal(
-                    "cli-import-promotion-refused",
-                    Some(&artifact.role),
-                    format!("blocking defects: {}", promotion.blocking.join(", ")),
-                    promotion.fixes.join("; "),
-                );
-                return Err(record_or_ledger_refusal(
-                    ledger,
-                    project,
-                    &project_json,
-                    project_hash,
-                    artifact,
-                    source,
-                    Some(&promotion.receipt_json),
-                    error,
-                ));
-            }
+                &source_identity,
+                *root_id,
+                length_unit,
+                *target_h,
+                named_groups,
+                &mut mesh_library,
+                cx,
+            )?,
         };
-        checkpoint(cx, "cli-import-cancelled", "geometry-import-post-promotion")?;
-
-        let soup = promoted.value;
-        let promoted_mesh_bytes = fs_io::ply::write_ply(&soup).into_bytes();
-        mesh_library.insert(
-            artifact,
-            soup,
-            source.length_unit.clone(),
-            source.named_groups.clone(),
-        );
-        prepared.push(PreparedImport {
-            role: artifact.role.clone(),
-            source_identity,
-            label: source.label.clone(),
-            raw_bytes: source.bytes.clone(),
-            receipt_json,
-            promoted_mesh_bytes,
-        });
+        prepared.push(input);
     }
 
     let resolution = resolve_geometry_assignments(project, &mesh_library, limits.assignment, cx);
@@ -464,7 +437,7 @@ pub fn import_project_geometry(
         return Err(record_prepared_or_ledger_refusal(
             ledger,
             project,
-            &project_json,
+            &import_request_ir,
             project_hash,
             &prepared,
             error,
@@ -484,7 +457,7 @@ pub fn import_project_geometry(
         return Err(record_prepared_or_ledger_refusal(
             ledger,
             project,
-            &project_json,
+            &import_request_ir,
             project_hash,
             &prepared,
             error,
@@ -494,11 +467,442 @@ pub fn import_project_geometry(
     persist_success(
         ledger,
         project,
-        &project_json,
+        &import_request_ir,
         project_hash,
         &prepared,
         &resolution,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_mesh_source(
+    ledger: &Ledger,
+    project: &ProjectSpec,
+    import_request_ir: &str,
+    project_hash: ContentHash,
+    artifact: &GeometryArtifact,
+    source: &RawGeometrySource,
+    source_identity: &str,
+    length_unit: &str,
+    max_hole_edges: usize,
+    named_groups: &[NamedFaceGroup],
+    mesh_library: &mut ImportedMeshLibrary,
+    cx: &Cx<'_>,
+) -> Result<PreparedImport, GeometryImportRefusal> {
+    let format: &'static str = match artifact.format.as_str() {
+        "stl" => "stl",
+        "obj" => "obj",
+        "ply" => "ply",
+        _ => {
+            let error = refusal(
+                "cli-import-policy-format-mismatch",
+                Some(&artifact.role),
+                format!(
+                    "mesh import policy cannot replay declared format `{}`",
+                    artifact.format
+                ),
+                "bind STL, OBJ, or PLY rows with insert_mesh; bind STEP rows with insert_faceted_step",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                None,
+                error,
+            ));
+        }
+    };
+
+    let quarantined = match fs_io::quarantine::import_mesh(&source.bytes, format) {
+        Ok(quarantined) => quarantined,
+        Err(error) => {
+            let error = refusal(
+                "cli-import-parse",
+                Some(&artifact.role),
+                error.to_string(),
+                "repair or re-export the named raw file in the declared bounded format",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                None,
+                error,
+            ));
+        }
+    };
+
+    if quarantined.source_receipt.source_hash != artifact.source_hash {
+        let error = refusal(
+            "cli-import-source-hash-mismatch",
+            Some(&artifact.role),
+            format!(
+                "raw source hashes to {:016x}, but the project receipt row pins {:016x}",
+                quarantined.source_receipt.source_hash, artifact.source_hash
+            ),
+            "select the exact imported bytes named by the project or update the project through an explicit import/migration receipt",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            None,
+            error,
+        ));
+    }
+    if quarantined.source_receipt.parser_version != artifact.parser_version {
+        let error = refusal(
+            "cli-import-parser-version-mismatch",
+            Some(&artifact.role),
+            format!(
+                "the current fs-io parser is `{}`, but the project receipt row pins `{}`",
+                quarantined.source_receipt.parser_version, artifact.parser_version
+            ),
+            "replay with the pinned parser constellation or explicitly migrate the import receipt",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            None,
+            error,
+        ));
+    }
+    let face_ordinals_will_move = !named_groups.is_empty()
+        && quarantined
+            .defects
+            .iter()
+            .any(|defect| matches!(defect.class, "duplicate-face" | "degenerate-face"));
+
+    checkpoint(cx, "cli-import-cancelled", "geometry-import-promotion")?;
+    let (promoted, receipt_json) = match fs_io::promote(quarantined, max_hole_edges) {
+        Ok(promoted) => promoted,
+        Err(promotion) => {
+            let error = refusal(
+                "cli-import-promotion-refused",
+                Some(&artifact.role),
+                format!("blocking defects: {}", promotion.blocking.join(", ")),
+                promotion.fixes.join("; "),
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                Some(&promotion.receipt_json),
+                error,
+            ));
+        }
+    };
+    checkpoint(cx, "cli-import-cancelled", "geometry-import-post-promotion")?;
+    if face_ordinals_will_move {
+        let error = refusal(
+            "cli-import-group-remap-unavailable",
+            Some(&artifact.role),
+            "promotion removed duplicate or degenerate faces, so pre-repair named-group ordinals no longer identify the promoted soup",
+            "re-export stable named groups against the promoted mesh, omit the groups and use geometric selectors, or supply an adapter with an explicit repair remap",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            Some(&receipt_json),
+            error,
+        ));
+    }
+
+    let soup = promoted.value;
+    let promoted_mesh_bytes = fs_io::ply::write_ply(&soup).into_bytes();
+    mesh_library.insert(
+        artifact,
+        soup,
+        length_unit.to_string(),
+        named_groups.to_vec(),
+    );
+    Ok(PreparedImport {
+        role: artifact.role.clone(),
+        source_identity: source_identity.to_string(),
+        label: source.label.clone(),
+        raw_bytes: source.bytes.clone(),
+        receipt_json,
+        promoted_mesh_bytes,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_faceted_step_source(
+    ledger: &Ledger,
+    project: &ProjectSpec,
+    import_request_ir: &str,
+    project_hash: ContentHash,
+    artifact: &GeometryArtifact,
+    source: &RawGeometrySource,
+    source_identity: &str,
+    root_id: u64,
+    length_unit: &str,
+    target_h: f64,
+    named_groups: &[NamedFaceGroup],
+    mesh_library: &mut ImportedMeshLibrary,
+    cx: &Cx<'_>,
+) -> Result<PreparedImport, GeometryImportRefusal> {
+    if artifact.format != "step" {
+        let error = refusal(
+            "cli-import-policy-format-mismatch",
+            Some(&artifact.role),
+            format!(
+                "faceted-STEP import policy cannot replay declared format `{}`",
+                artifact.format
+            ),
+            "declare format `step`, or bind mesh formats with insert_mesh",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            None,
+            error,
+        ));
+    }
+
+    let parsed = match fs_io::parse_step(&source.bytes) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let error = refusal(
+                "cli-import-step-parse",
+                Some(&artifact.role),
+                error.to_string(),
+                "repair or re-export the hostile Part-21 source within fs-io's explicit syntax limits",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                None,
+                error,
+            ));
+        }
+    };
+    if parsed.receipt().source_fingerprint() != artifact.source_hash {
+        let error = refusal(
+            "cli-import-source-hash-mismatch",
+            Some(&artifact.role),
+            format!(
+                "raw STEP source hashes to {:016x}, but the project receipt row pins {:016x}",
+                parsed.receipt().source_fingerprint(),
+                artifact.source_hash
+            ),
+            "select the exact Part-21 bytes named by the project or explicitly migrate the import receipt",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            None,
+            error,
+        ));
+    }
+    if artifact.parser_version != STEP_FACETED_DECODER_VERSION {
+        let error = refusal(
+            "cli-import-parser-version-mismatch",
+            Some(&artifact.role),
+            format!(
+                "the current strict faceted decoder is `{STEP_FACETED_DECODER_VERSION}`, but the project receipt row pins `{}`",
+                artifact.parser_version
+            ),
+            "replay with the pinned decoder constellation or explicitly migrate the import receipt",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            Some(&parsed.receipt().to_json()),
+            error,
+        ));
+    }
+
+    let unit = match UnitId::try_new(length_unit.to_string()) {
+        Ok(unit) => unit,
+        Err(error) => {
+            let refusal = refusal(
+                "cli-import-step-unit",
+                Some(&artifact.role),
+                format!("STEP length-unit identity was refused: {error}"),
+                "supply a bounded non-blank machine unit identity matching the project assignment",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                Some(&parsed.receipt().to_json()),
+                refusal,
+            ));
+        }
+    };
+    if root_id == 0 {
+        let error = refusal(
+            "cli-import-step-root",
+            Some(&artifact.role),
+            "faceted-STEP root instance ID must be positive",
+            "select the exact positive FACETED_BREP instance ID from the admitted Part-21 resource",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            Some(&parsed.receipt().to_json()),
+            error,
+        ));
+    }
+    if !target_h.is_finite() || target_h <= 0.0 {
+        let error = refusal(
+            "cli-import-step-spacing",
+            Some(&artifact.role),
+            format!("STEP sampling spacing must be finite and positive; got {target_h}"),
+            "supply a finite positive target_h expressed in the declared length unit",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            Some(&parsed.receipt().to_json()),
+            error,
+        ));
+    }
+
+    checkpoint(cx, "cli-import-cancelled", "geometry-import-step")?;
+    let outcome = match fs_io::import_faceted_brep(&parsed, root_id, unit, target_h, cx) {
+        Ok(outcome) => outcome,
+        Err(StepFacetedImportRefusal::Decode(error)) => {
+            let refusal = refusal(
+                "cli-import-step-decode",
+                Some(&artifact.role),
+                error.to_string(),
+                "select a supported root-reachable triangular FACETED_BREP closure and repair the named STEP relationship",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                Some(&parsed.receipt().to_json()),
+                refusal,
+            ));
+        }
+        Err(StepFacetedImportRefusal::Import {
+            decoder_receipt,
+            error,
+        }) => {
+            let receipt_json =
+                step_failure_receipt_json(&decoder_receipt.to_json(), &error.to_string());
+            let refusal = refusal(
+                "cli-import-step-promotion-refused",
+                Some(&artifact.role),
+                error.to_string(),
+                "repair the decoded root-reachable closure or adjust the finite positive sampling policy without weakening the retained no-claim boundary",
+            );
+            return Err(record_or_ledger_refusal(
+                ledger,
+                project,
+                import_request_ir,
+                project_hash,
+                artifact,
+                source,
+                Some(&receipt_json),
+                refusal,
+            ));
+        }
+    };
+    checkpoint(
+        cx,
+        "cli-import-cancelled",
+        "geometry-import-step-post-promotion",
+    )?;
+
+    let receipt_json = step_success_receipt_json(
+        &outcome.decoder_receipt().to_json(),
+        &outcome.import().receipt().to_json(),
+    );
+    if !named_groups.is_empty()
+        && outcome
+            .import()
+            .receipt()
+            .repairs()
+            .iter()
+            .any(|repair| repair.action == "removed")
+    {
+        let error = refusal(
+            "cli-import-group-remap-unavailable",
+            Some(&artifact.role),
+            "the STEP topology handoff removed faces, so decoder-ordinal named groups no longer identify the repaired soup",
+            "omit STEP named groups and use geometric selectors, or supply a format adapter with an explicit decoder-to-repaired face remap",
+        );
+        return Err(record_or_ledger_refusal(
+            ledger,
+            project,
+            import_request_ir,
+            project_hash,
+            artifact,
+            source,
+            Some(&receipt_json),
+            error,
+        ));
+    }
+    let soup = outcome.import().repaired_soup().clone();
+    let promoted_mesh_bytes = fs_io::ply::write_ply(&soup).into_bytes();
+    mesh_library.insert(
+        artifact,
+        soup,
+        length_unit.to_string(),
+        named_groups.to_vec(),
+    );
+    Ok(PreparedImport {
+        role: artifact.role.clone(),
+        source_identity: source_identity.to_string(),
+        label: source.label.clone(),
+        raw_bytes: source.bytes.clone(),
+        receipt_json,
+        promoted_mesh_bytes,
+    })
 }
 
 fn validate_limits(limits: GeometryImportLimits) -> Result<(), GeometryImportRefusal> {
@@ -568,18 +972,17 @@ fn validate_source_envelope(
 fn persist_success(
     ledger: &Ledger,
     project: &ProjectSpec,
-    project_json: &str,
+    import_request_ir: &str,
     project_hash: ContentHash,
     prepared: &[PreparedImport],
     resolution: &GeometryResolution,
 ) -> Result<GeometryImportRun, GeometryImportRefusal> {
     let (versions, budget, capability, seed) = explicits(project)?;
-    let ir = import_ir(project_json);
     ledger.begin().map_err(ledger_refusal)?;
     let result = (|| -> Result<GeometryImportRun, LedgerError> {
         let op = ledger.begin_op(
             None,
-            &ir,
+            import_request_ir,
             &FiveExplicits {
                 seed: &seed,
                 versions: &versions,
@@ -641,7 +1044,7 @@ fn persist_success(
 fn record_or_ledger_refusal(
     ledger: &Ledger,
     project: &ProjectSpec,
-    project_json: &str,
+    import_request_ir: &str,
     project_hash: ContentHash,
     artifact: &GeometryArtifact,
     source: &RawGeometrySource,
@@ -658,7 +1061,7 @@ fn record_or_ledger_refusal(
     match persist_refusal(
         ledger,
         project,
-        project_json,
+        import_request_ir,
         project_hash,
         &evidence,
         &error,
@@ -686,7 +1089,7 @@ fn record_or_ledger_refusal(
 fn record_prepared_or_ledger_refusal(
     ledger: &Ledger,
     project: &ProjectSpec,
-    project_json: &str,
+    import_request_ir: &str,
     project_hash: ContentHash,
     prepared: &[PreparedImport],
     mut error: GeometryImportRefusal,
@@ -703,7 +1106,7 @@ fn record_prepared_or_ledger_refusal(
     match persist_refusal(
         ledger,
         project,
-        project_json,
+        import_request_ir,
         project_hash,
         &evidence,
         &error,
@@ -731,19 +1134,18 @@ fn record_prepared_or_ledger_refusal(
 fn persist_refusal(
     ledger: &Ledger,
     project: &ProjectSpec,
-    project_json: &str,
+    import_request_ir: &str,
     project_hash: ContentHash,
     evidence: &[RefusalEvidence<'_>],
     error: &GeometryImportRefusal,
 ) -> Result<RecordedImportRefusal, GeometryImportRefusal> {
     let (versions, budget, capability, seed) = explicits(project)?;
     let diagnostic = refusal_json(error);
-    let ir = import_ir(project_json);
     ledger.begin().map_err(ledger_refusal)?;
     let result = (|| -> Result<RecordedImportRefusal, LedgerError> {
         let op = ledger.begin_op(
             None,
-            &ir,
+            import_request_ir,
             &FiveExplicits {
                 seed: &seed,
                 versions: &versions,
@@ -866,11 +1268,13 @@ fn explicits(
     })?;
 
     let versions = format!(
-        "{{\"schema\":{},\"constellation\":{},\"workspace\":{},\"fs_io\":{}}}",
+        "{{\"schema\":{},\"constellation\":{},\"workspace\":{},\"fs_io\":{},\"step_faceted_decoder\":{},\"step_import_semantics\":{}}}",
         versions.schema,
         json_string(&versions.constellation),
         json_string(&versions.workspace),
         json_string(fs_io::VERSION),
+        json_string(STEP_FACETED_DECODER_VERSION),
+        json_string(STEP_IMPORT_SEMANTICS_VERSION),
     );
     let budget = format!(
         "{{\"solve_time\":{},\"solve_time_dims\":{:?},\"memory_bytes\":{},\"accuracy_rel\":{}}}",
@@ -890,10 +1294,124 @@ fn explicits(
     Ok((versions, budget, capability, seeds.master.to_le_bytes()))
 }
 
-fn import_ir(project_json: &str) -> String {
-    format!(
-        "{{\"schema\":{},\"project\":{project_json}}}",
+fn import_ir(
+    project_json: &str,
+    geometry: &[GeometryArtifact],
+    raw: &RawGeometryLibrary,
+    limits: GeometryImportLimits,
+) -> Result<String, GeometryImportRefusal> {
+    let assignment = limits.assignment;
+    let mut out = format!(
+        "{{\"schema\":{},\"project\":{project_json},\"limits\":{{\
+         \"max_sources\":{},\"max_source_bytes\":{},\"max_total_source_bytes\":{},\
+         \"assignment\":{{\"max_mesh_vertices\":{},\"max_mesh_faces\":{},\
+         \"max_requests\":{},\"max_named_groups\":{},\"max_group_faces\":{},\
+         \"max_selected_faces\":{},\"max_predicate_tests\":{},\"max_label_bytes\":{}}}}},\
+         \"sources\":[",
         json_string(IMPORT_IR_SCHEMA),
+        limits.max_sources,
+        limits.max_source_bytes,
+        limits.max_total_source_bytes,
+        assignment.max_mesh_vertices,
+        assignment.max_mesh_faces,
+        assignment.max_requests,
+        assignment.max_named_groups,
+        assignment.max_group_faces,
+        assignment.max_selected_faces,
+        assignment.max_predicate_tests,
+        assignment.max_label_bytes,
+    );
+    for (index, artifact) in geometry.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let source_identity = geometry_source_identity(artifact);
+        let source = raw.sources.get(&source_identity).ok_or_else(|| {
+            refusal(
+                "cli-import-source-missing",
+                Some(&artifact.role),
+                format!("no raw source is bound to project geometry identity `{source_identity}`"),
+                "bind the physical file to this exact project geometry row",
+            )
+        })?;
+        let _ = write!(
+            out,
+            "{{\"source_identity\":{},\"policy\":",
+            json_string(&source_identity)
+        );
+        match &source.policy {
+            RawGeometryPolicy::Mesh {
+                length_unit,
+                max_hole_edges,
+                named_groups,
+            } => {
+                let _ = write!(
+                    out,
+                    "{{\"kind\":\"mesh\",\"length_unit\":{},\"max_hole_edges\":{},\"named_groups\":",
+                    json_string(length_unit),
+                    max_hole_edges,
+                );
+                push_named_groups_json(&mut out, named_groups);
+                out.push('}');
+            }
+            RawGeometryPolicy::FacetedStep {
+                root_id,
+                length_unit,
+                target_h,
+                named_groups,
+            } => {
+                let _ = write!(
+                    out,
+                    "{{\"kind\":\"faceted-step\",\"root_id\":{},\"length_unit\":{},\"target_h_bits\":{},\"named_groups\":",
+                    root_id,
+                    json_string(length_unit),
+                    json_string(&format!("{:016x}", target_h.to_bits())),
+                );
+                push_named_groups_json(&mut out, named_groups);
+                out.push('}');
+            }
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
+fn push_named_groups_json(out: &mut String, groups: &[NamedFaceGroup]) {
+    out.push('[');
+    for (group_index, group) in groups.iter().enumerate() {
+        if group_index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"name\":{},\"faces\":[", json_string(&group.name));
+        for (face_index, face) in group.faces.iter().enumerate() {
+            if face_index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{face}");
+        }
+        out.push_str("]}");
+    }
+    out.push(']');
+}
+
+fn step_success_receipt_json(decoder_receipt: &str, import_receipt: &str) -> String {
+    format!(
+        "{{\"schema\":{},\"status\":\"promoted\",\"decoder\":{decoder_receipt},\"tessellation_import\":{import_receipt},\
+         \"authority\":\"retained-lower-layer-receipts\",\
+         \"no_claim\":\"the wrapper composes retention only; each nested receipt retains its own authority and no-claim boundary\"}}",
+        json_string(STEP_IMPORT_RECEIPT_SCHEMA),
+    )
+}
+
+fn step_failure_receipt_json(decoder_receipt: &str, error: &str) -> String {
+    format!(
+        "{{\"schema\":{},\"status\":\"refused\",\"decoder\":{decoder_receipt},\
+         \"downstream_refusal\":{{\"message\":{}}},\
+         \"authority\":\"retained-decoder-receipt-and-diagnostic\",\
+         \"no_claim\":\"no promoted tessellation, assignment, SDF certificate, or physical/CAD sameness claim\"}}",
+        json_string(STEP_IMPORT_RECEIPT_SCHEMA),
+        json_string(error),
     )
 }
 
