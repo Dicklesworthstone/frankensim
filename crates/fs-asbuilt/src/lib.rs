@@ -30,6 +30,12 @@ use fs_evidence::color_leaf_identity_reason;
 pub use fs_evidence::{Color, ValidityDomain};
 use fs_ivl::Interval;
 
+/// Datum-priority (3-2-1) registration with per-datum residuals and the
+/// datum-versus-global diagnostic delta.
+pub mod datum;
+/// 3-D rigid/similarity Kabsch registration and calibrated 6-dof pose
+/// covariance.
+pub mod rigid3;
 /// Calibrated registration covariance, spatial propagation, simultaneous
 /// decision bounds, and authenticated evidence admission.
 pub mod uncertainty;

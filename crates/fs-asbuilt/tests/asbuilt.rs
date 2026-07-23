@@ -838,7 +838,7 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
     let manifest = include_str!("../Cargo.toml");
     let source = include_str!("../src/lib.rs");
 
-    for dependency in ["fs-blake3", "fs-evidence", "fs-exec", "fs-ivl"] {
+    for dependency in ["fs-blake3", "fs-evidence", "fs-exec", "fs-ivl", "fs-la"] {
         assert!(
             manifest.contains(&format!("{dependency} = {{ path =")),
             "contract lint fixture is stale: manifest no longer declares {dependency:?}"

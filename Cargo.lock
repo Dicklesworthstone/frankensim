@@ -838,6 +838,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-ivl",
+ "fs-la",
 ]
 
 [[package]]
@@ -1951,6 +1952,7 @@ name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-assimilate",
  "fs-blake3",
  "fs-cheb",
  "fs-exec",

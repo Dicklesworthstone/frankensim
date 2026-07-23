@@ -8,11 +8,17 @@ as-built candidate.
 
 Layer L2 (representation/geometry). Depends on `fs-evidence` (`Color` and
 `ValidityDomain`), `fs-exec` (explicit `Cx`, execution mode, and budgets),
-`fs-ivl` (outward-rounded observability enclosures), and the native `fs-blake3`
-content-identity primitive. The legacy scientific calculation is deterministic
-and uses a closed-form 2-D rigid fit (no SVD). The additive `uncertainty`
-module refits that transform under an explicit calibrated covariance model and
-keeps its stronger decision semantics separate from the residual-RMS screen.
+`fs-ivl` (outward-rounded observability enclosures), `fs-la` (the
+deterministic one-sided Jacobi SVD and symmetric eigendecomposition used by
+the 3-D modules), and the native `fs-blake3` content-identity primitive. The
+legacy scientific calculation is deterministic and uses a closed-form 2-D
+rigid fit (no SVD). The additive `uncertainty` module refits that transform
+under an explicit calibrated covariance model and keeps its stronger decision
+semantics separate from the residual-RMS screen. The additive `rigid3` module
+provides closed-form 3-D Kabsch rigid and Umeyama similarity registration
+plus a calibrated 6-dof pose covariance; the additive `datum` module provides
+datum-priority (3-2-1) registration with per-datum residuals and a
+datum-versus-global diagnostic.
 
 ## Public types and semantics
 
@@ -90,6 +96,50 @@ keeps its stronger decision semantics separate from the residual-RMS screen.
   verifier accepts the exact candidate/receipt under the receipt-bound policy;
   the default verifier denies everything. Authentication proves lineage, not
   physical validation or the calibration assumptions.
+- `rigid3::{Point3, Fiducial3}` mirror the 2-D primitives: finite-checked,
+  signed-zero-canonical, private fields with read-only accessors.
+- `rigid3::register3(&[Fiducial3], &fs_exec::Cx<'_>)` solves the closed-form
+  3-D Kabsch rigid fit (design → measured) through the deterministic Jacobi
+  SVD of the extent-normalized weighted cross-covariance. Right-handed
+  canonicalization of both singular frames makes the optimum exactly
+  `V * U^T` in every admitted case, including coplanar rank-2
+  cross-covariances. The result retains the rotation matrix, translation,
+  advisory residual RMS, and a `RegistrationCondition` payload with the
+  design/measured spectra, cross singular values, coplanarity flags, and a
+  reflection-preference diagnostic for mirrored data.
+- `rigid3::register3_similarity(&[Fiducial3], scale_tolerance, &Cx)` adds the
+  Umeyama scale. The scale is reported, never silent: `ScaleAssessment`
+  carries the estimate, a first-order standard error under an isotropic
+  homoscedastic residual model, the caller-declared tolerance (no default),
+  and a `UnitSuspicion` naming the nearest common unit-conversion ratio when
+  the estimate leaves the declared band.
+- `rigid3::{Covariance3, CrossFiducialModel3, MetrologyModel3}` declare
+  strictly positive-definite per-fiducial 3x3 covariance, independence or
+  explicit unknown dependence (which refuses), a bounded deterministic Huber
+  policy, and a structurally valid calibration identity.
+- `rigid3::estimate_calibrated_rigid3(fiducials, model, &Cx)` publishes the
+  scalar-weighted closed-form Kabsch estimate (base weights
+  `3 / trace(Sigma_i)`, deterministic Huber multipliers refreshed against
+  declared-covariance standardized residual norms, re-solving after every
+  refresh including the last) together with the full first-order sandwich
+  covariance of `(tx, ty, tz, rx, ry, rz)`, exact `3n - 6` degrees of
+  freedom, hat-block leverage traces summing to the parameter dimension,
+  outlier dispositions, and a domain-separated model identity. The rotation
+  block is a left rotation-vector perturbation about the weighted design
+  centroid image. For isotropic models the sandwich reduces exactly to the
+  generalized-least-squares covariance.
+- `datum::DatumSystem` declares the drawing-style datum hierarchy over
+  fiducial indices: A (plane, at least three targets), B (direction, at least
+  two), C (one point), pairwise disjoint.
+- `datum::register3_datum(&[Fiducial3], &DatumSystem, &Cx)` aligns A then B
+  then C, each constraint consuming only the degrees of freedom its priority
+  allows: B's out-of-plane information and C's non-axial components are
+  discarded by construction. It reports signed per-datum residuals
+  (out-of-plane for A, off-line for B, along-line for C), every fiducial's
+  residual norm, and a `DatumGlobalComparison` carrying the rotation/
+  translation delta against the embedded global Kabsch fit plus per-fiducial
+  residual-norm deltas — the difference between global and datum results is
+  itself a published diagnostic.
 
 ## Invariants
 
@@ -185,6 +235,30 @@ keeps its stronger decision semantics separate from the residual-RMS screen.
   semantics. Spatial-evidence identity v1 additionally binds every inspection
   pair/covariance, relation, tolerance, confidence, point bound, and tri-state
   output. Both canonicalize signed zero and are tamper-evident addresses only.
+- 3-D well-posedness is spectral and relative: design/measured scatter and
+  the cross-covariance are classified at a stated `1e-12` relative rank gate
+  after extent normalization. Coincident and collinear configurations refuse
+  with a geometric diagnosis; coplanar configurations are admitted and
+  flagged. A reflection-preferring cross-covariance with coincident trailing
+  singular values refuses as ambiguous instead of publishing one of several
+  optimal rotations; a reflection preference with a clear trailing gap is
+  admitted and surfaced as a mirrored-data diagnostic on the condition
+  payload.
+- The scalar-weighted Kabsch fit is the exact global minimizer of its
+  declared objective. The 6-dof covariance is the sandwich
+  `H^{-1} (sum w^2 J^T Sigma J) H^{-1}` for that estimator under the declared
+  per-fiducial covariances, symmetrized once and revalidated positive
+  definite before publication; hat-block leverage traces sum to the fitted
+  parameter dimension. The `rigid3` model identity binds the schema version,
+  every ordered fiducial and covariance, the cross/robust model, calibration
+  identity, transform, condition payload, covariance, weights, leverage, and
+  outlier diagnostics with length-framed, signed-zero-canonical fields under
+  a domain-separated native BLAKE3 digest.
+- Datum registration never lets a lower-priority datum contradict a higher
+  one: the A constraint consumes the plane orientation and normal offset at
+  the fitted feature, B consumes only its in-plane projection, and C consumes
+  only the along-line translation. Per-datum residuals are signed components
+  in the published orthonormal constraint frame.
 
 ## Error model
 
@@ -218,6 +292,11 @@ the retained diff identity without changing the numerical result.
 The calibrated module uses fixed iteration counts, ordered scans, symmetric
 covariance factors, canonical binary64 identity fields, and no scheduling-
 dependent reduction.
+The 3-D modules inherit `fs-la`'s deterministic Jacobi sweep orders and
+tie-breaks and add no scheduling-dependent reduction of their own, so replay
+on one platform is bitwise. No cross-ISA bit-identity is claimed for the 3-D
+paths: the Jacobi kernels evaluate plain binary64 expressions whose
+reconstruction accuracy (~1e-13), not bit pattern, is the portable contract.
 
 ## Cancellation behavior
 
@@ -232,6 +311,11 @@ The calibrated registration and spatial assessment also take an explicit `Cx`,
 poll at bounded 256-point scan boundaries plus finalization, and publish no
 partial result after cancellation. They do not yet have affine `ChildBudget`
 entry points; this absence is a no-claim, not declared resource enforcement.
+The `rigid3` and `datum` entry points follow the same pattern: explicit `Cx`,
+256-point scan strides, a final publication checkpoint, structured
+`Cancelled { phase }` refusals with no partial output, and no affine
+`ChildBudget` forms yet (the same no-claim). The 3x3 SVD/eigendecomposition
+calls between checkpoints are constant-bounded work.
 
 ## Unsafe boundary
 
@@ -265,11 +349,44 @@ heteroscedastic off-diagonal unit/order metamorphisms, G5 semantic identity
 movement/replay, receipt mutation/policy refusal, and pre-cancel publication
 refusal.
 
+`tests/rigid3.rs`: G0 exact recovery of a general rotation and a coplanar
+configuration, degenerate coincident/collinear refusals on both sides,
+mirrored-data reflection preference and the symmetric ambiguous refusal, G3
+rigid-conjugation invariance, similarity scale recovery with unit-suspicion
+firing on a seeded 25.4 unit error and staying silent near unity, the
+analytic axis-configuration 6-dof covariance, Monte-Carlo covariance
+agreement on synthetic noise, Huber outlier downweighting and fit
+improvement, typed model refusals, oversized-input refusal, G4 structured
+cancellation, and G5 bitwise replay with input-sensitive model identity.
+
+`tests/datum.rs`: the hand-worked block fixture recovering a seeded pose
+exactly, structural hierarchy invariances (B out-of-plane and C transverse
+perturbations provably cannot move the datum pose while the global fit
+moves), seeded-deviation exposure with the datum-versus-global delta, typed
+system/degeneracy/orientation refusals, the noisy scan-like e2e lane logging
+poses, covariances, per-datum residuals, and the delta diagnostic, G5 bitwise
+replay, and G4 structured cancellation.
+
 ## No-claim boundaries
 
-- v1 is 2-D rigid registration (rotation + translation) with KNOWN
-  correspondences; 3-D (Kabsch/SVD), scale, and correspondence-free ICP are
-  follow-ons.
+- Registration requires KNOWN correspondences in both the 2-D and 3-D
+  modules. Correspondence-free ICP remains an explicit [F] follow-on and is
+  not smuggled in behind the Kabsch path. CT VOLUME registration (volumetric
+  intensity alignment) is staged scope for the voxel layer, not this crate.
+- The 3-D calibrated estimator is the scalar-weighted Kabsch fit, not the
+  generalized-least-squares optimum under anisotropic per-fiducial
+  covariances; the sandwich covariance is correct for the estimator actually
+  published, and the efficiency gap under anisotropy is accepted, not hidden.
+  The standardized equicorrelation shortcut of the 2-D module is not offered
+  in 3-D; unknown dependence refuses.
+- The similarity scale standard error is a first-order diagnostic under an
+  isotropic homoscedastic residual model estimated from the fit itself; it is
+  not a calibrated bound, and no calibrated covariance is offered for the
+  7-parameter similarity pose.
+- The datum path publishes no retained execution identity and no pose
+  covariance; a calibrated datum-pose uncertainty (fitted features are not
+  exact constraints) is future work, and the 2-D module's simultaneous
+  decision machinery is not extended over the 3-D or datum poses here.
 - Registration is treated as an optimization whose global fit RMS diagnostic
   is propagated into advisory screens and the proposed regime. That residual
   is not transform covariance or a pointwise spatial uncertainty bound.
