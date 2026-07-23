@@ -39,6 +39,19 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   `Evidence<Soup>` (exact numerics, receipt-chained provenance) plus the
   `trust: promoted` receipt JSON, or a `PromotionRefusal` with blocking
   defects, ACTIONABLE fixes, and a `trust: refused` receipt.
+  `census_with_policy`/`promote_with_policy` are the tolerance-aware path:
+  callers declare a positive model tolerance, cancellation stride, and either
+  an exhaustive raw triangle-pair budget or an evenly spaced deterministic
+  sample. The report additionally counts unique small edges, sliver faces,
+  gaps between distinct simple boundary loops, and non-adjacent intersecting
+  triangle pairs. It records actual pair coverage and labels intersection
+  results as an f64 filter without exact-predicate authority. Project profiles
+  set a maximum accepted residual count per class and whether complete
+  intersection coverage is mandatory. The typed promotion receipt retains the
+  profile, every threshold, pre/post censuses, repair operations, per-class
+  deltas, residuals, and an E08-facing diagnostic geometry-budget input.
+  Residual slivers may therefore promote under an explicit scoping profile
+  while a validation profile refuses the same geometry.
 - **Persistent surface assignment** (`selection` module, bead
   `f85xj.6.3`): `resolve_mesh_assignments` consumes an already promoted
   finite triangle soup, a caller-supplied source-artifact identity hook and
@@ -320,6 +333,14 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     persistent subject and geometric statistics. A volume is published only
     when every selected undirected edge occurs exactly twice with opposite
     orientations.
+21. **Extended import diagnostics are policy-bound, not certificates**:
+    tolerance-relative small-edge/sliver/gap thresholds use the caller's
+    declared geometry length unit. The shell-intersection phase spends at most
+    its declared raw-pair budget, polls `Cx`, excludes indexed-adjacent pairs,
+    and receipts exhaustive versus sampled coverage. Invalid indices and
+    non-finite coordinates refuse before the existing repair suite can index
+    them. Promotion provenance hashes the complete before/repair/after receipt;
+    no residual list or threshold profile can be detached from the evidence.
 
 ## Error model
 
@@ -333,8 +354,10 @@ limit. Catalog resource refusals remain deterministic.
 Receipt-producing APIs use the same refusal variants and are success-only; the
 receipt's authority and no-claim fields are not substitutes for an error
 receipt.
-`PromotionRefusal` carries blocking
-defects + fixes + the refused receipt. The STEP syntax kernel uses
+`PromotionRefusal` carries blocking defects + fixes + the refused receipt.
+`CensusRefusal` distinguishes invalid policy from `Cx` cancellation;
+`ImportPromotionError` distinguishes those pre-publication failures from a
+completed threshold refusal. The STEP syntax kernel uses
 `Malformed` for grammar/graph failures, `Unsupported` for staged encoded
 characters and binary literals, and `ResourceBound` for every declared
 limit. `StepImportRefusal` separates raw admission, localized mesh integrity,
@@ -384,6 +407,10 @@ floating-point bits and face ordinals with a versioned local FNV stream.
 Identical soup, groups, requests, limits, and caller hooks produce identical
 assignments and receipt JSON on one target. These 64-bit roots are replay aids,
 not collision-resistant authority.
+Extended import reports sort finding classes, boundary components, sampled pair
+positions, repair operations, and class deltas deterministically. Identical
+soup bits, census/promotion policy, and deterministic `Cx` state yield identical
+reports and receipt JSON on one target.
 
 ## Cancellation behavior
 
@@ -427,6 +454,12 @@ source/group/request/selector/output-fingerprint records.
 Cancellation atomically returns `mesh-assignment-cancelled`; it publishes no
 assignment or success receipt. Bounded standard-library sorts and floating-point
 square roots have no internal poll.
+The tolerance-aware census polls `Cx` at entry/publication and at the declared
+stride through owned feature, boundary-loop, gap, and intersection loops. The
+intersection budget counts raw pair visits, including adjacency skips, so an
+all-shared-vertex soup cannot evade the cost cap. The legacy basic census and
+the existing `fs-rep-mesh::repair` call have no internal `Cx`; policy promotion
+polls immediately around repair but claims no cancellation latency inside it.
 
 ## Unsafe boundary
 
@@ -523,6 +556,15 @@ derived-threshold overflow and non-normalizable-axis refusals; explicit
 publication-cap admission; pre-requested cancellation; and exact predicate-work
 admission.
 
+`tests/quarantine_extended.rs` (G0/G3/G4): clean mesh; isolated small-edge,
+sliver, near-loop-gap, crossing-face, and coplanar-overlap fixtures;
+deterministic sampled coverage; a raw-pair budget drill whose 128 mutually
+adjacent faces cannot evade the three-visit cap; pre-requested cancellation;
+invalid-index/non-finite pre-repair refusal and caller-string escaping;
+residual-sliver promotion/refusal under distinct receipted profiles;
+complete-coverage enforcement; and repair-operation/class-delta receipt
+retention.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -572,10 +614,12 @@ import identically in both ASCII and binary (conformance-tested).
   the 3MF is the minimal core-spec package, no extensions.
 - **VTK export is legacy-ASCII**, one optional scalar field; XML VTK and
   vector/tensor fields land with fs-viz interop needs.
-- **The census's manifoldness check is combinatorial** (edge counts +
-  half-edge build); geometric self-intersection certification belongs to
-  the validity-certificates machinery (wqd.23) and can be layered onto
-  promotion by callers.
+- **The basic census's manifoldness check is combinatorial** (edge counts +
+  half-edge build). The extended census adds a deterministic f64 triangle
+  intersection filter, but explicitly does not certify self-intersection
+  freedom: indexed-adjacent pairs are excluded, f64 predicates are not exact,
+  and a sampled/incomplete pass is only diagnostic evidence. Exact
+  self-intersection certification remains validity-certificates work.
 - **Receipts hash with FNV-1a**; HELM upgrades to the BLAKE3-class
   content address when writing the `imports` row (same field, stated in
   the receipt schema).

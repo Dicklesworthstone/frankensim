@@ -32,7 +32,13 @@ pub use catalog::{
     ColumnSpec, Schema, SchemaDefinitionRefusal,
 };
 pub use export::{export_3mf, export_glb, export_vtk};
-pub use quarantine::{ImportDefect, ImportReceipt, PromotionRefusal, Quarantined, promote};
+pub use quarantine::{
+    CensusRefusal, IMPORT_CENSUS_SEMANTICS_VERSION, ImportCensusPolicy, ImportCensusReport,
+    ImportDefect, ImportGeometryBudgetInput, ImportPromotionError, ImportPromotionPolicy,
+    ImportPromotionReceipt, ImportReceipt, ImportRefusalThresholds, IntersectionCensusEvidence,
+    IntersectionInspection, PromotionRefusal, Quarantined, census_with_policy, promote,
+    promote_with_policy,
+};
 pub use selection::{
     AssignmentLimits, AssignmentReceipt, AssignmentRefusal, AssignmentReport, AssignmentRequest,
     AssignmentStats, HalfSpaceSide, MESH_ASSIGNMENT_POLL_STRIDE, MESH_ASSIGNMENT_SEMANTICS_VERSION,
