@@ -615,7 +615,7 @@ fn typed_functional_binding_rejects_invalid_and_cross_semantic_replay() {
                 dims: [1, 0, 0, 0, 0, 0],
                 ..base.clone()
             },
-            "does not match the sealed estimate dimensions",
+            "do not match the sealed estimate dimensions",
         ),
         (
             "superseded ambiguous schema",
