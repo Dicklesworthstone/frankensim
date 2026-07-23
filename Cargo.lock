@@ -1732,6 +1732,7 @@ dependencies = [
  "fs-ir",
  "fs-matdb",
  "fs-qty",
+ "fs-regime",
  "fs-rep-mesh",
  "fs-scenario",
 ]

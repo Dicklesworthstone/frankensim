@@ -17,6 +17,7 @@ fs-io = { path = "../fs-io" }
 fs-ir = { path = "../fs-ir" }
 fs-matdb = { path = "../fs-matdb" }
 fs-qty = { path = "../fs-qty" }
+fs-regime = { path = "../fs-regime" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 

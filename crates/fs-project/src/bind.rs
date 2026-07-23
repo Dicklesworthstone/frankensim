@@ -30,6 +30,7 @@ use fs_matdb::{
     PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_qty::Dims;
+use fs_regime::RegimeAuditCard;
 use fs_scenario::Violation;
 
 use crate::spec::{EntityDecl, ProjectSpec, dims};
@@ -171,6 +172,9 @@ pub struct ResolvedProperty {
     pub unstated_uncertainty: bool,
     /// Hex content hash of the selected claim (same at both endpoints).
     pub selected_claim: String,
+    /// Owner-neutral product-audit projection bound to the exact project card,
+    /// selected claim, portable query schema, and claim validity domain.
+    pub regime_card: RegimeAuditCard,
     /// The selected claim's provenance source citation.
     pub provenance_source: String,
     /// The selected claim's provenance license.
@@ -265,6 +269,27 @@ impl MaterialResolution {
         })
     }
 
+    /// Exact matdb claim cards consumed by this resolution, sorted and
+    /// deduplicated by their content-bound audit identity.
+    ///
+    /// These projections carry no invented discrepancy, ambition,
+    /// calibration, or validation authority. Their name binds the project card
+    /// and selected property claim hashes; their version binds the portable
+    /// query-receipt schema; their validity is cloned from that immutable
+    /// selected claim.
+    #[must_use]
+    pub fn regime_audit_cards(&self) -> Vec<RegimeAuditCard> {
+        let mut cards = BTreeMap::new();
+        for binding in &self.bindings {
+            for property in &binding.properties {
+                cards
+                    .entry(property.regime_card.name.clone())
+                    .or_insert_with(|| property.regime_card.clone());
+            }
+        }
+        cards.into_values().collect()
+    }
+
     /// Deterministic text table: one line per resolved property with the
     /// full region -> card -> property -> uncertainty -> receipts chain,
     /// for CLI logs and the e2e battery.
@@ -278,7 +303,7 @@ impl MaterialResolution {
                 let pin = binding.pinned_claim.as_deref().unwrap_or("-");
                 let _ = writeln!(
                     out,
-                    "{} | card {} ({}) | source {} | range [{}, {}] K | pin {} | {} = [{}, {}] {} | uncertainty {} | claim {} from {} ({}) | receipts {},{}",
+                    "{} | card {} ({}) | source {} | range [{}, {}] K | pin {} | {} = [{}, {}] {} | uncertainty {} | claim {} from {} ({}) | regime-card {}@{} | receipts {},{}",
                     binding.target.describe(),
                     binding.card,
                     binding.card_identity,
@@ -294,6 +319,8 @@ impl MaterialResolution {
                     property.selected_claim,
                     property.provenance_source,
                     property.provenance_license,
+                    property.regime_card.name,
+                    property.regime_card.version,
                     property.receipt_lo.receipt_hash,
                     property.receipt_hi.receipt_hash,
                 );
@@ -700,7 +727,9 @@ fn resolve_card_properties(
     let mut resolved = Vec::new();
     let mut clean = true;
     for property in properties {
-        match resolve_property(resolution, &target, claims, range, pin, axis, property) {
+        match resolve_property(
+            resolution, &target, claims, &card_hex, range, pin, axis, property,
+        ) {
             Some(row) => resolved.push(row),
             None => clean = false,
         }
@@ -723,6 +752,7 @@ fn resolve_property(
     resolution: &mut MaterialResolution,
     target: &BindingTarget,
     claims: &ClaimSet,
+    card_hex: &str,
     range: &RequiredRange,
     pin: Option<ClaimId>,
     axis: &str,
@@ -776,17 +806,29 @@ fn resolve_property(
     }
 
     let selected = low.receipt.selected;
-    let (provenance_source, provenance_license) = claims
+    let Some((_, selected_claim)) = claims
         .claims_for(&property.property)
         .into_iter()
         .find(|(id, _)| *id == selected)
-        .map(|(_, claim)| {
-            (
-                claim.provenance.source.clone(),
-                claim.provenance.license.clone(),
-            )
-        })
-        .unwrap_or_default();
+    else {
+        resolution.violations.push(violation(
+            "project-binding-selected-claim-missing",
+            format!(
+                "{}: matdb selected claim {} for `{}`, but the immutable claim set no longer exposes it",
+                target.describe(),
+                selected.0.to_hex(),
+                property.property,
+            ),
+            "refuse the resolution and investigate claim-set/query identity corruption",
+        ));
+        return None;
+    };
+    let selected_hex = selected.0.to_hex();
+    let regime_card = RegimeAuditCard::new(
+        format!("fs-matdb:claim:{card_hex}:{selected_hex}"),
+        format!("property-usage-receipt-v{}", low.receipt.schema_version),
+        selected_claim.validity.clone(),
+    );
 
     let receipt_lo = retain_receipt(resolution, target, &low, range.lo, property)?;
     let receipt_hi = retain_receipt(resolution, target, &high, range.hi, property)?;
@@ -797,9 +839,10 @@ fn resolve_property(
         dims: sample.dims,
         uncertainty: sample.uncertainty.clone(),
         unstated_uncertainty: sample.uncertainty == UncertaintyModel::Unstated,
-        selected_claim: selected.0.to_hex(),
-        provenance_source,
-        provenance_license,
+        selected_claim: selected_hex,
+        regime_card,
+        provenance_source: selected_claim.provenance.source.clone(),
+        provenance_license: selected_claim.provenance.license.clone(),
         receipt_lo,
         receipt_hi,
     })

@@ -86,6 +86,13 @@ bindings; it runs no solves and admits no scenarios itself.
   (`RetainedReceipt`: receipt, canonical bytes, content hash, context) for
   ledger retention and later `verify_receipt` replay. `render_table()` is the
   deterministic region -> card -> property -> uncertainty -> receipts log.
+  Every resolved property also retains an owner-neutral `RegimeAuditCard`
+  whose name binds the exact project card hash and selected matdb claim hash,
+  whose version binds the portable property-usage receipt schema, and whose
+  validity is cloned from that immutable selected claim.
+  `MaterialResolution::regime_audit_cards()` returns the sorted, deduplicated
+  registry for final product-output admission. It does not invent discrepancy,
+  ambition, calibration, or validation authority.
   `BindingRequirements::thermal_steady_v1()` pins the cooling vertical's
   property set (`thermal-conductivity`,
   `area-specific-thermal-contact-resistance`, axis `T`), drift-tested against

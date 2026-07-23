@@ -7,8 +7,10 @@
 //! impossible by construction.
 #![allow(clippy::float_cmp)] // bit-exact propagation of stored card values is the contract under test
 
+use std::collections::BTreeMap;
+
 use fs_blake3::hash_bytes;
-use fs_evidence::ValidityDomain;
+use fs_evidence::{Color, ValidityDomain};
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
     PINNED_CLAIM_POLICY_TAG, PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec,
@@ -21,6 +23,9 @@ use fs_project::{
     resolve_bindings,
 };
 use fs_qty::QtyAny;
+use fs_regime::{
+    AxisViolationKind, EnvelopeCoverage, OperatingPoint, QoiClaim, audit_product_output_with_cards,
+};
 use fs_scenario::Violation;
 
 const KELVIN: fs_qty::Dims = fs_qty::Dims([0, 0, 0, 1, 0, 0]);
@@ -343,6 +348,100 @@ fn the_reference_project_binds_fully_with_replayable_receipts() {
             "table must log {needle:?}:\n{table}"
         );
     }
+}
+
+#[test]
+fn actual_matdb_claim_demotes_after_reference_project_runtime_drift() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(
+        resolution.admissible(),
+        "reference project must bind: {:?}",
+        resolution.violations
+    );
+
+    let board_binding = resolution
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Region("board".to_string()))
+        .expect("reference board binding");
+    let conductivity = board_binding
+        .properties
+        .iter()
+        .find(|property| property.property == THERMAL_CONDUCTIVITY_PROPERTY)
+        .expect("board conductivity");
+    let registry = resolution.regime_audit_cards();
+    assert_eq!(registry.len(), 3, "board, spreader, and TIM claims");
+    assert_eq!(
+        conductivity.regime_card.name,
+        format!(
+            "fs-matdb:claim:{}:{}",
+            board_binding.card, conductivity.selected_claim
+        )
+    );
+    assert_eq!(
+        conductivity.regime_card.version,
+        format!(
+            "property-usage-receipt-v{}",
+            conductivity.receipt_lo.receipt.schema_version
+        )
+    );
+    assert_eq!(
+        conductivity.regime_card.validity.bound(TEMPERATURE_AXIS),
+        Some((200.0, 450.0))
+    );
+
+    let audit = audit_product_output_with_cards(
+        &registry,
+        &[
+            OperatingPoint {
+                id: "reference".to_string(),
+                groups: BTreeMap::from([(TEMPERATURE_AXIS.to_string(), 371.15)]),
+            },
+            OperatingPoint {
+                id: "runtime-drift".to_string(),
+                groups: BTreeMap::from([(TEMPERATURE_AXIS.to_string(), 451.0)]),
+            },
+        ],
+        &[QoiClaim {
+            qoi: "board-temperature".to_string(),
+            color: Color::Estimated {
+                estimator: "thermal-reference-project".to_string(),
+                dispersion: 0.02,
+            },
+            model_cards: vec![conductivity.regime_card.name.clone()],
+            override_acknowledgement: None,
+        }],
+    )
+    .expect("actual matdb card audits");
+    let receipt = &audit.receipts[0];
+    assert_eq!(receipt.coverage, EnvelopeCoverage::Partial);
+    assert_eq!(receipt.in_domain_points, ["reference"]);
+    assert_eq!(receipt.out_of_domain_points, ["runtime-drift"]);
+    assert_eq!(receipt.model_cards.len(), 1);
+    assert_eq!(receipt.model_cards[0].name, conductivity.regime_card.name);
+    assert_eq!(
+        receipt.model_cards[0].version,
+        conductivity.regime_card.version
+    );
+    assert_eq!(receipt.violations.len(), 1);
+    let violation = &receipt.violations[0];
+    assert_eq!(violation.point, "runtime-drift");
+    assert_eq!(violation.card, conductivity.regime_card.name);
+    assert_eq!(violation.axis, TEMPERATURE_AXIS);
+    assert_eq!(violation.observed, Some(451.0));
+    assert_eq!(violation.lo, 200.0);
+    assert_eq!(violation.hi, 450.0);
+    assert_eq!(violation.kind, AxisViolationKind::Above);
+    assert!(violation.distance > 0.0);
+    assert!(matches!(
+        receipt.effective_color,
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let canonical = receipt.to_canonical_json();
+    assert!(canonical.contains(&board_binding.card));
+    assert!(canonical.contains(&conductivity.selected_claim));
 }
 
 #[test]
