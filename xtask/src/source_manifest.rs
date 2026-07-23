@@ -11,20 +11,24 @@
 
 use super::depgraph::{JsonParser, JsonValue};
 use super::{Violation, constellation_assessment};
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Component, Path};
 use std::process::Stdio;
 
 pub(crate) const CHECK: &str = "source-manifest";
+pub(crate) const SPDX_CHECK: &str = "source-manifest-spdx";
 pub(crate) const MANIFEST_PATH: &str = "frankensim-source-manifest.json";
+pub(crate) const SPDX_PATH: &str = "frankensim-source-manifest.spdx.json";
 
 const SCHEMA: &str = "frankensim-source-manifest-v1";
 const IDENTITY_DOMAIN: &str = "org.frankensim.xtask.source-manifest.v1";
 const SOURCE_ROOT_DOMAIN: &str = "org.frankensim.xtask.source-root.v1";
+const SPDX_VERSION: &str = "SPDX-2.3";
+const SPDX_CREATION_EPOCH: &str = "2026-07-23T16:38:00Z";
+const SPDX_NAMESPACE_PREFIX: &str =
+    "https://github.com/Dicklesworthstone/frankensim/spdx/source-manifest-";
 const BEAD_ID: &str = "frankensim-extreal-program-f85xj.13.2";
 const REPOSITORY: &str = "https://github.com/Dicklesworthstone/frankensim";
 const MAX_TRACKED_FILES: usize = 10_000;
@@ -48,6 +52,7 @@ struct SourceFile {
     git_mode: String,
     bytes: u64,
     content_blake3: String,
+    content_sha1: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +142,20 @@ fn blake3(bytes: &[u8]) -> String {
     hasher.finalize().to_string()
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn sha1(bytes: &[u8]) -> Result<String, String> {
+    super::constellation_cleanliness::sha1_digest(bytes).map(|digest| lower_hex(&digest))
+}
+
 fn append_identity_field(payload: &mut Vec<u8>, label: &str, value: &[u8]) {
     payload.extend_from_slice(&(label.len() as u64).to_le_bytes());
     payload.extend_from_slice(label.as_bytes());
@@ -159,7 +178,7 @@ fn validate_relative_path(path: &str) -> Result<(), String> {
 }
 
 fn excluded_from_structural_source(path: &str) -> bool {
-    path == MANIFEST_PATH
+    matches!(path, MANIFEST_PATH | SPDX_PATH)
         || EXCLUDED_TRACKED_PREFIXES
             .iter()
             .any(|prefix| path.starts_with(prefix))
@@ -474,6 +493,7 @@ fn capture_worktree_file(root: &Path, indexed: &IndexedPath) -> Result<SourceFil
         git_mode: indexed.git_mode.clone(),
         bytes: byte_count,
         content_blake3: blake3(&bytes),
+        content_sha1: sha1(&bytes)?,
     })
 }
 
@@ -615,6 +635,7 @@ fn capture_indexed_source(root: &Path, indexed: &[IndexedPath]) -> Result<Vec<So
                         format!("gitlink object size does not fit u64 for {}", row.path)
                     })?,
                     content_blake3: blake3(row.git_object.as_bytes()),
+                    content_sha1: sha1(row.git_object.as_bytes())?,
                 }
             } else if is_worktree_inventory(row) {
                 capture_worktree_file(root, row)?
@@ -631,6 +652,7 @@ fn capture_indexed_source(root: &Path, indexed: &[IndexedPath]) -> Result<Vec<So
                     bytes: u64::try_from(content.len())
                         .map_err(|_| format!("byte count does not fit u64 for {}", row.path))?,
                     content_blake3: blake3(&content),
+                    content_sha1: sha1(&content)?,
                 }
             };
             total = total
@@ -1035,9 +1057,10 @@ fn render_body(model: &ManifestModel) -> String {
     json_string(&mut output, &model.source_root);
     let _ = write!(
         output,
-        ",\n    \"tracked_file_count\": {},\n    \"excluded_paths\": [\".beads/**\", \"{}\"],\n    \"files\": [\n",
+        ",\n    \"tracked_file_count\": {},\n    \"excluded_paths\": [\".beads/**\", \"{}\", \"{}\"],\n    \"files\": [\n",
         model.source_files.len(),
-        MANIFEST_PATH
+        MANIFEST_PATH,
+        SPDX_PATH
     );
     for (index, file) in model.source_files.iter().enumerate() {
         output.push_str("      {\"path\": ");
@@ -1198,13 +1221,15 @@ fn render_body(model: &ManifestModel) -> String {
     }
     output.push_str("  ],\n");
     output.push_str("  \"package_citation\": {\"status\": \"not-yet-wired\", \"current_authority\": \"EvidencePackage v8 root-binds code_version and constellation_lock only\", \"required_follow_on\": \"a versioned fs-package migration must bind this manifest identity before package-citation authority is claimed\"},\n");
-    output.push_str("  \"standard_renderings\": {\"spdx\": \"staged-follow-on-after-the-in-house-content-schema-stabilizes\"}\n");
+    output.push_str("  \"standard_renderings\": {\"spdx_2_3_json\": {\"status\": \"generated-and-drift-checked\", \"path\": ");
+    json_string(&mut output, SPDX_PATH);
+    output.push_str(", \"source\": \"manifest_identity\", \"authority\": \"deterministic format projection only; no release, authenticity, correctness, or license conclusion\"}}\n");
     output
 }
 
 fn render(model: &ManifestModel) -> String {
     let body = render_body(model);
-    let identity = fs_blake3::hash_domain(IDENTITY_DOMAIN, body.as_bytes()).to_string();
+    let identity = manifest_identity(&body);
     let mut output = String::new();
     output.push_str("{\n  \"schema\": ");
     json_string(&mut output, SCHEMA);
@@ -1218,18 +1243,519 @@ fn render(model: &ManifestModel) -> String {
     output
 }
 
-fn expected_artifact(root: &Path) -> Result<String, String> {
-    build_model(root).map(|model| render(&model))
+fn manifest_identity(body: &str) -> String {
+    fs_blake3::hash_domain(IDENTITY_DOMAIN, body.as_bytes()).to_string()
+}
+
+fn spdx_element_id(kind: &str, key: &str) -> String {
+    let mut payload = Vec::new();
+    append_identity_field(&mut payload, "kind", kind.as_bytes());
+    append_identity_field(&mut payload, "key", key.as_bytes());
+    let digest = fs_blake3::hash_domain(
+        "org.frankensim.xtask.source-manifest-spdx-element.v1",
+        &payload,
+    );
+    format!("SPDXRef-{kind}-{digest}")
+}
+
+fn spdx_file_id(file: &SourceFile) -> String {
+    spdx_element_id("File", &file.path)
+}
+
+fn spdx_crate_id(row: &CrateRow) -> String {
+    spdx_element_id("Crate", &row.manifest)
+}
+
+fn spdx_sibling_id(row: &SiblingRow) -> String {
+    spdx_element_id("Sibling", &row.lib)
+}
+
+fn spdx_boundary_id(row: &ExternalSurface) -> String {
+    spdx_element_id("Boundary", row.name)
+}
+
+fn package_verification_code(files: &[SourceFile]) -> Result<String, String> {
+    let mut file_digests = files
+        .iter()
+        .map(|file| file.content_sha1.as_str())
+        .collect::<Vec<_>>();
+    if file_digests.iter().any(|digest| {
+        digest.len() != 40
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }) {
+        return Err("source manifest retained a non-canonical SHA-1 file digest".to_string());
+    }
+    file_digests.sort_unstable();
+    let mut concatenated = String::with_capacity(file_digests.len() * 40);
+    for digest in file_digests {
+        concatenated.push_str(digest);
+    }
+    sha1(concatenated.as_bytes())
+}
+
+fn push_spdx_package_prefix(
+    output: &mut String,
+    id: &str,
+    name: &str,
+    version: Option<&str>,
+    download_location: &str,
+    files_analyzed: bool,
+) {
+    output.push_str("    {\"SPDXID\": ");
+    json_string(output, id);
+    output.push_str(", \"name\": ");
+    json_string(output, name);
+    if let Some(version) = version {
+        output.push_str(", \"versionInfo\": ");
+        json_string(output, version);
+    }
+    output.push_str(", \"downloadLocation\": ");
+    json_string(output, download_location);
+    let _ = write!(output, ", \"filesAnalyzed\": {files_analyzed}");
+}
+
+fn join_nonempty(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(",")
+    }
+}
+
+#[derive(Debug)]
+struct SpdxRelationship {
+    from: String,
+    kind: &'static str,
+    to: String,
+    comment: Option<String>,
+}
+
+fn render_spdx(model: &ManifestModel, source_manifest_identity: &str) -> Result<String, String> {
+    const ROOT_PACKAGE_ID: &str = "SPDXRef-Package-frankensim-structural-source";
+
+    let verification_code = package_verification_code(&model.source_files)?;
+    let namespace = format!("{SPDX_NAMESPACE_PREFIX}{source_manifest_identity}");
+    let file_ids = model
+        .source_files
+        .iter()
+        .map(spdx_file_id)
+        .collect::<Vec<_>>();
+    let mut all_ids = BTreeSet::new();
+    if !all_ids.insert("SPDXRef-DOCUMENT".to_string())
+        || !all_ids.insert(ROOT_PACKAGE_ID.to_string())
+    {
+        return Err("SPDX renderer produced a duplicate document/root identifier".to_string());
+    }
+    for id in &file_ids {
+        if !all_ids.insert(id.clone()) {
+            return Err(format!(
+                "SPDX renderer produced duplicate file identifier {id}"
+            ));
+        }
+    }
+    for row in &model.crates {
+        let id = spdx_crate_id(row);
+        if !all_ids.insert(id.clone()) {
+            return Err(format!(
+                "SPDX renderer produced duplicate crate identifier {id}"
+            ));
+        }
+    }
+    for row in &model.siblings {
+        let id = spdx_sibling_id(row);
+        if !all_ids.insert(id.clone()) {
+            return Err(format!(
+                "SPDX renderer produced duplicate sibling identifier {id}"
+            ));
+        }
+    }
+    for row in model
+        .external_surfaces
+        .iter()
+        .filter(|row| row.name != "fs-wasm")
+    {
+        let id = spdx_boundary_id(row);
+        if !all_ids.insert(id.clone()) {
+            return Err(format!(
+                "SPDX renderer produced duplicate external-boundary identifier {id}"
+            ));
+        }
+    }
+
+    let mut relationships = Vec::new();
+    for row in &model.crates {
+        relationships.push(SpdxRelationship {
+            from: ROOT_PACKAGE_ID.to_string(),
+            kind: "CONTAINS",
+            to: spdx_crate_id(row),
+            comment: Some(format!(
+                "structural source inventory includes {} ({}, layer {})",
+                row.manifest, row.workspace, row.layer
+            )),
+        });
+    }
+    for row in &model.siblings {
+        let sibling = spdx_sibling_id(row);
+        let (from, kind, to, comment) = if row.production_references > 0 {
+            (
+                ROOT_PACKAGE_ID.to_string(),
+                "DEPENDS_ON",
+                sibling,
+                format!(
+                    "{} runtime references; boundary={}",
+                    row.production_references, row.boundary
+                ),
+            )
+        } else if row.test_references > 0 {
+            (
+                sibling,
+                "DEV_DEPENDENCY_OF",
+                ROOT_PACKAGE_ID.to_string(),
+                format!(
+                    "{} test/dev references; boundary={}",
+                    row.test_references, row.boundary
+                ),
+            )
+        } else {
+            (
+                ROOT_PACKAGE_ID.to_string(),
+                "OTHER",
+                sibling,
+                format!(
+                    "pinned trust-cone row with no current code reference; boundary={}",
+                    row.boundary
+                ),
+            )
+        };
+        relationships.push(SpdxRelationship {
+            from,
+            kind,
+            to,
+            comment: Some(comment),
+        });
+    }
+    for row in model
+        .external_surfaces
+        .iter()
+        .filter(|row| row.name != "fs-wasm")
+    {
+        let kind = if row.name == "constellation-bootstrap" {
+            "BUILD_TOOL_OF"
+        } else {
+            "DEV_TOOL_OF"
+        };
+        relationships.push(SpdxRelationship {
+            from: spdx_boundary_id(row),
+            kind,
+            to: ROOT_PACKAGE_ID.to_string(),
+            comment: Some(format!("boundary={}; {}", row.boundary, row.isolation)),
+        });
+    }
+
+    let mut output = String::new();
+    output.push_str("{\n  \"spdxVersion\": ");
+    json_string(&mut output, SPDX_VERSION);
+    output.push_str(",\n  \"dataLicense\": \"CC0-1.0\",\n  \"SPDXID\": \"SPDXRef-DOCUMENT\",\n");
+    output.push_str("  \"name\": ");
+    json_string(
+        &mut output,
+        &format!("frankensim-source-manifest-{source_manifest_identity}"),
+    );
+    output.push_str(",\n  \"documentNamespace\": ");
+    json_string(&mut output, &namespace);
+    output.push_str(",\n  \"creationInfo\": {\n    \"created\": ");
+    json_string(&mut output, SPDX_CREATION_EPOCH);
+    output.push_str(",\n    \"creators\": [\"Tool: FrankenSim xtask source-manifest renderer-v1\"],\n    \"comment\": ");
+    json_string(
+        &mut output,
+        "The fixed renderer-v1 creation epoch makes this structural projection reproducible; it is not a build, release, observation, or attestation timestamp.",
+    );
+    output.push_str("\n  },\n  \"comment\": ");
+    json_string(
+        &mut output,
+        &format!(
+            "Deterministic SPDX 2.3 JSON projection of {MANIFEST_PATH} identity {source_manifest_identity}. It preserves structural inventory only and does not establish release binding, producer authenticity, scientific correctness, sibling correctness, vulnerability status, or a legal license conclusion."
+        ),
+    );
+    output.push_str(",\n  \"documentDescribes\": [");
+    json_string(&mut output, ROOT_PACKAGE_ID);
+    output.push_str("],\n  \"packages\": [\n");
+
+    push_spdx_package_prefix(
+        &mut output,
+        ROOT_PACKAGE_ID,
+        "frankensim-structural-source",
+        Some(&model.workspace_version),
+        "git+https://github.com/Dicklesworthstone/frankensim.git",
+        true,
+    );
+    output.push_str(", \"primaryPackagePurpose\": \"SOURCE\", \"checksums\": [{\"algorithm\": \"BLAKE3\", \"checksumValue\": ");
+    json_string(&mut output, &model.source_root);
+    output.push_str("}], \"packageVerificationCode\": {\"packageVerificationCodeValue\": ");
+    json_string(&mut output, &verification_code);
+    output.push_str("}, \"licenseConcluded\": \"NOASSERTION\", \"licenseDeclared\": \"NOASSERTION\", \"licenseComments\": ");
+    json_string(
+        &mut output,
+        "No legal normalization is claimed: Cargo metadata declares MIT OR Apache-2.0 while the repository LICENSE text includes an additional rider.",
+    );
+    output.push_str(", \"copyrightText\": \"NOASSERTION\", \"sourceInfo\": ");
+    json_string(
+        &mut output,
+        "Exact Git-index non-tracker bytes. .beads/** and the two generated manifest artifacts are outside this structural package boundary.",
+    );
+    output.push_str(", \"hasFiles\": ");
+    json_strings(&mut output, file_ids.iter().map(String::as_str));
+    output.push_str("},\n");
+
+    for row in &model.crates {
+        let id = spdx_crate_id(row);
+        push_spdx_package_prefix(
+            &mut output,
+            &id,
+            &row.name,
+            Some(&row.version),
+            "git+https://github.com/Dicklesworthstone/frankensim.git",
+            false,
+        );
+        let matching_boundary = model
+            .external_surfaces
+            .iter()
+            .find(|surface| surface.name == row.name);
+        let mut comment = format!(
+            "manifest={}; workspace={}; layer={}; registered unsafe capsules={}",
+            row.manifest, row.workspace, row.layer, row.unsafe_capsules
+        );
+        if let Some(boundary) = matching_boundary {
+            let _ = write!(
+                comment,
+                "; boundary={}; isolation={}; external inputs={}",
+                boundary.boundary,
+                boundary.isolation,
+                if boundary.external_inputs.is_empty() {
+                    "none".to_string()
+                } else {
+                    boundary.external_inputs.join(",")
+                }
+            );
+        }
+        output.push_str(", \"licenseConcluded\": \"NOASSERTION\", \"licenseDeclared\": \"NOASSERTION\", \"comment\": ");
+        json_string(&mut output, &comment);
+        output.push('}');
+        output.push_str(",\n");
+    }
+
+    for row in &model.siblings {
+        let id = spdx_sibling_id(row);
+        let download = format!("git+{}@{}", row.remote, row.git_head);
+        push_spdx_package_prefix(
+            &mut output,
+            &id,
+            &row.lib,
+            Some(&row.version),
+            &download,
+            false,
+        );
+        output.push_str(", \"comment\": ");
+        json_string(
+            &mut output,
+            &format!(
+                "Exact constellation.lock commit {}; boundary={}; runtime consumers={}; dev consumers={}. Pinning establishes content identity, not correctness, maintainer independence, or authenticity.",
+                row.git_head,
+                row.boundary,
+                join_nonempty(&row.runtime_consumers),
+                join_nonempty(&row.dev_consumers)
+            ),
+        );
+        output.push('}');
+        output.push_str(",\n");
+    }
+
+    let external_rows = model
+        .external_surfaces
+        .iter()
+        .filter(|row| row.name != "fs-wasm")
+        .collect::<Vec<_>>();
+    for (index, row) in external_rows.iter().enumerate() {
+        let id = spdx_boundary_id(row);
+        push_spdx_package_prefix(&mut output, &id, row.name, None, "NOASSERTION", false);
+        output.push_str(", \"comment\": ");
+        json_string(
+            &mut output,
+            &format!(
+                "boundary={}; manifest={}@BLAKE3:{}; lock={}; external inputs={}; isolation={}",
+                row.boundary,
+                row.manifest,
+                row.manifest_blake3,
+                row.lock.zip(row.lock_blake3.as_deref()).map_or_else(
+                    || "none".to_string(),
+                    |(path, digest)| { format!("{path}@BLAKE3:{digest}") }
+                ),
+                if row.external_inputs.is_empty() {
+                    "none".to_string()
+                } else {
+                    row.external_inputs.join(",")
+                },
+                row.isolation
+            ),
+        );
+        output.push('}');
+        if index + 1 != external_rows.len() {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+    output.push_str("  ],\n  \"files\": [\n");
+
+    for (index, (file, id)) in model.source_files.iter().zip(file_ids.iter()).enumerate() {
+        output.push_str("    {\"SPDXID\": ");
+        json_string(&mut output, id);
+        output.push_str(", \"fileName\": ");
+        json_string(&mut output, &format!("./{}", file.path));
+        output.push_str(", \"checksums\": [{\"algorithm\": \"BLAKE3\", \"checksumValue\": ");
+        json_string(&mut output, &file.content_blake3);
+        output.push_str("}], \"comment\": ");
+        json_string(
+            &mut output,
+            &format!(
+                "git-mode={}; bytes={}; SHA-1 is retained only for the SPDX package verification code",
+                file.git_mode, file.bytes
+            ),
+        );
+        output.push('}');
+        if index + 1 != model.source_files.len() {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+    output.push_str("  ],\n  \"relationships\": [\n");
+    for (index, relationship) in relationships.iter().enumerate() {
+        output.push_str("    {\"spdxElementId\": ");
+        json_string(&mut output, &relationship.from);
+        output.push_str(", \"relationshipType\": ");
+        json_string(&mut output, relationship.kind);
+        output.push_str(", \"relatedSpdxElement\": ");
+        json_string(&mut output, &relationship.to);
+        if let Some(comment) = &relationship.comment {
+            output.push_str(", \"comment\": ");
+            json_string(&mut output, comment);
+        }
+        output.push('}');
+        if index + 1 != relationships.len() {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+    output.push_str("  ]\n}\n");
+    validate_spdx_rendering(&output, model, source_manifest_identity, &verification_code)?;
+    Ok(output)
+}
+
+fn validate_spdx_rendering(
+    text: &str,
+    model: &ManifestModel,
+    source_manifest_identity: &str,
+    verification_code: &str,
+) -> Result<(), String> {
+    let value = JsonParser::new(text)
+        .finish()
+        .map_err(|error| format!("generated SPDX rendering is not valid JSON: {error}"))?;
+    let root = json_object(&value, "generated SPDX rendering")?;
+    let required_string = |field: &str| {
+        json_value_string(
+            required_json_field(root, field, "generated SPDX rendering")?,
+            &format!("generated SPDX {field}"),
+        )
+    };
+    if required_string("spdxVersion")? != SPDX_VERSION
+        || required_string("dataLicense")? != "CC0-1.0"
+        || required_string("SPDXID")? != "SPDXRef-DOCUMENT"
+        || required_string("documentNamespace")?
+            != format!("{SPDX_NAMESPACE_PREFIX}{source_manifest_identity}")
+    {
+        return Err("generated SPDX document authority fields moved".to_string());
+    }
+    let packages = json_array(
+        required_json_field(root, "packages", "generated SPDX rendering")?,
+        "generated SPDX packages",
+    )?;
+    let expected_packages =
+        1 + model.crates.len() + model.siblings.len() + model.external_surfaces.len() - 1;
+    if packages.len() != expected_packages {
+        return Err(format!(
+            "generated SPDX contains {} packages, expected {expected_packages}",
+            packages.len()
+        ));
+    }
+    let files = json_array(
+        required_json_field(root, "files", "generated SPDX rendering")?,
+        "generated SPDX files",
+    )?;
+    if files.len() != model.source_files.len() {
+        return Err(format!(
+            "generated SPDX contains {} files, expected {}",
+            files.len(),
+            model.source_files.len()
+        ));
+    }
+    let root_package = json_object(
+        packages
+            .first()
+            .ok_or_else(|| "generated SPDX has no root package".to_string())?,
+        "generated SPDX root package",
+    )?;
+    let package_code = json_object(
+        required_json_field(
+            root_package,
+            "packageVerificationCode",
+            "generated SPDX root package",
+        )?,
+        "generated SPDX packageVerificationCode",
+    )?;
+    let actual_code = json_value_string(
+        required_json_field(
+            package_code,
+            "packageVerificationCodeValue",
+            "generated SPDX packageVerificationCode",
+        )?,
+        "generated SPDX package verification code",
+    )?;
+    if actual_code != verification_code {
+        return Err("generated SPDX package verification code moved".to_string());
+    }
+    let described = json_array(
+        required_json_field(root, "documentDescribes", "generated SPDX rendering")?,
+        "generated SPDX documentDescribes",
+    )?;
+    if described.len() != 1
+        || json_value_string(&described[0], "generated SPDX described package")?
+            != "SPDXRef-Package-frankensim-structural-source"
+    {
+        return Err("generated SPDX document must describe exactly the root package".to_string());
+    }
+    Ok(())
+}
+
+fn expected_artifacts(root: &Path) -> Result<(String, String), String> {
+    let model = build_model(root)?;
+    let body = render_body(&model);
+    let identity = manifest_identity(&body);
+    let manifest = render(&model);
+    let spdx = render_spdx(&model, &identity)?;
+    Ok((manifest, spdx))
 }
 
 pub(crate) fn generate(root: &Path) -> Result<(), String> {
-    let manifest = expected_artifact(root)?;
+    let (manifest, spdx) = expected_artifacts(root)?;
     std::fs::write(root.join(MANIFEST_PATH), manifest)
-        .map_err(|error| format!("cannot write {MANIFEST_PATH}: {error}"))
+        .map_err(|error| format!("cannot write {MANIFEST_PATH}: {error}"))?;
+    std::fs::write(root.join(SPDX_PATH), spdx)
+        .map_err(|error| format!("cannot write {SPDX_PATH}: {error}"))
 }
 
 pub(crate) fn check(root: &Path) -> Vec<Violation> {
-    let expected = match expected_artifact(root) {
+    let (expected_manifest, expected_spdx) = match expected_artifacts(root) {
         Ok(expected) => expected,
         Err(detail) => {
             return vec![Violation {
@@ -1239,21 +1765,28 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
             }];
         }
     };
-    match std::fs::read_to_string(root.join(MANIFEST_PATH)) {
-        Ok(actual) if actual == expected => Vec::new(),
-        Ok(_) => vec![Violation {
-            check: CHECK,
-            crate_name: MANIFEST_PATH.to_string(),
-            detail: format!(
-                "tracked source manifest is stale; run cargo run -p xtask -- generate-source-manifest"
-            ),
-        }],
-        Err(error) => vec![Violation {
-            check: CHECK,
-            crate_name: MANIFEST_PATH.to_string(),
-            detail: format!("cannot read retained source manifest: {error}"),
-        }],
+    let mut violations = Vec::new();
+    for (check, path, expected) in [
+        (CHECK, MANIFEST_PATH, expected_manifest),
+        (SPDX_CHECK, SPDX_PATH, expected_spdx),
+    ] {
+        match std::fs::read_to_string(root.join(path)) {
+            Ok(actual) if actual == expected => {}
+            Ok(_) => violations.push(Violation {
+                check,
+                crate_name: path.to_string(),
+                detail: format!(
+                    "tracked structural manifest artifact is stale; run cargo run -p xtask -- generate-source-manifest"
+                ),
+            }),
+            Err(error) => violations.push(Violation {
+                check,
+                crate_name: path.to_string(),
+                detail: format!("cannot read retained structural manifest artifact: {error}"),
+            }),
+        }
     }
+    violations
 }
 
 #[cfg(test)]
@@ -1266,6 +1799,7 @@ mod tests {
             git_mode: "100644".to_string(),
             bytes: 3,
             content_blake3: digest.to_string(),
+            content_sha1: "0".repeat(40),
         }
     }
 
@@ -1290,9 +1824,49 @@ mod tests {
     }
 
     #[test]
+    fn spdx_package_verification_code_is_sorted_sha1_of_file_sha1_values() {
+        let mut files = vec![
+            SourceFile {
+                content_sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string(),
+                ..source_file("empty", "aaa")
+            },
+            SourceFile {
+                content_sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".to_string(),
+                ..source_file("abc", "bbb")
+            },
+        ];
+        assert_eq!(
+            package_verification_code(&files).expect("SPDX package code"),
+            "29d0dbdfff975c93e2d75e5024fe8b650ec847af"
+        );
+        files.reverse();
+        assert_eq!(
+            package_verification_code(&files).expect("order-independent SPDX package code"),
+            "29d0dbdfff975c93e2d75e5024fe8b650ec847af"
+        );
+        files[0].content_sha1.replace_range(..1, "b");
+        assert_ne!(
+            package_verification_code(&files).expect("mutated SPDX package code"),
+            "29d0dbdfff975c93e2d75e5024fe8b650ec847af"
+        );
+    }
+
+    #[test]
+    fn spdx_element_ids_bind_category_and_exact_path() {
+        let first = source_file("crates/fs-a/src/lib.rs", "aaa");
+        let second = source_file("crates/fs-b/src/lib.rs", "aaa");
+        assert_ne!(spdx_file_id(&first), spdx_file_id(&second));
+        assert_ne!(
+            spdx_element_id("File", "same"),
+            spdx_element_id("Crate", "same")
+        );
+    }
+
+    #[test]
     fn tracker_and_manifest_paths_are_explicitly_excluded() {
         assert!(excluded_from_structural_source(".beads/issues.jsonl"));
         assert!(excluded_from_structural_source(MANIFEST_PATH));
+        assert!(excluded_from_structural_source(SPDX_PATH));
         assert!(!excluded_from_structural_source("Cargo.toml"));
     }
 
@@ -1394,9 +1968,24 @@ mod tests {
             ])
         );
         let rendered = render(&model);
+        let identity = manifest_identity(&render_body(&model));
+        let spdx = render_spdx(&model, &identity).expect("live SPDX rendering builds");
         assert!(rendered.contains("\"frankensim_git_commit\""));
         assert!(rendered.contains("\"release_host\": null"));
         assert!(rendered.contains("\"package_citation\": {\"status\": \"not-yet-wired\""));
+        assert!(rendered.contains("\"status\": \"generated-and-drift-checked\""));
+        assert!(spdx.contains("\"spdxVersion\": \"SPDX-2.3\""));
+        assert!(spdx.contains("\"packageVerificationCodeValue\""));
+        assert!(spdx.contains("Pinning establishes content identity, not correctness"));
+        assert!(spdx.contains("does not establish release binding"));
+        assert_eq!(
+            spdx.matches("\"fileName\": ").count(),
+            model.source_files.len()
+        );
         assert_eq!(rendered, render(&model));
+        assert_eq!(
+            spdx,
+            render_spdx(&model, &identity).expect("live SPDX rendering is deterministic")
+        );
     }
 }

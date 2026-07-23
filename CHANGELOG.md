@@ -616,6 +616,16 @@ workstream.
   E13.3 release envelope. `fs-package` v8 does not yet cite this manifest, SPDX
   rendering remains staged, and no self-contained release-bundle claim is
   made.
+- Added the previously staged standard projection as deterministic SPDX 2.3
+  JSON. The document maps every exact structural source row to a
+  BLAKE3-checksummed SPDX file, emits component packages for all
+  workspace/standalone crates, seven sibling pins, and isolated tool
+  boundaries, and derives its unique namespace from the canonical manifest
+  identity. Its SHA-1 package verification code is the SPDX-required
+  compatibility construction, not FrankenSim content authority. This
+  supersedes the earlier staged-rendering note only; package citation, E13.3
+  release attachment, vulnerability/license conclusions, and a self-contained
+  release claim remain absent.
 
 ## Version Timeline
 

@@ -18,7 +18,7 @@
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-constellation-assessment` — keep the measured seven-sibling trust cone current.
-//! - `check-source-manifest` — keep the structural trust-cone source inventory current.
+//! - `check-source-manifest` — keep the structural trust-cone source inventory and SPDX rendering current.
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
@@ -8248,7 +8248,7 @@ fn main() -> ExitCode {
         "generate-source-manifest" => {
             return match source_manifest::generate(&root) {
                 Ok(()) => {
-                    eprintln!("structural source manifest regenerated");
+                    eprintln!("structural source manifest and SPDX 2.3 rendering regenerated");
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
@@ -8314,7 +8314,10 @@ fn main() -> ExitCode {
             constellation_assessment::check(&root),
             vec![constellation_assessment::CHECK],
         ),
-        "check-source-manifest" => (source_manifest::check(&root), vec![source_manifest::CHECK]),
+        "check-source-manifest" => (
+            source_manifest::check(&root),
+            vec![source_manifest::CHECK, source_manifest::SPDX_CHECK],
+        ),
         "check-claim-integrity" => {
             let report = claim_integrity_gate::check_claim_integrity_gate(&root);
             policy_notes = report.decisions;
@@ -8402,6 +8405,7 @@ fn main() -> ExitCode {
                     "semantic-identities",
                     constellation_assessment::CHECK,
                     source_manifest::CHECK,
+                    source_manifest::SPDX_CHECK,
                     "manifest-fixture",
                     "doc-facts",
                     "capability-matrix",

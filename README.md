@@ -182,8 +182,11 @@ cargo run -p xtask -- check-all
 The tracked [structural source manifest](frankensim-source-manifest.json)
 enumerates exact Git-index non-tracker source bytes, all seven sibling pins and
 measured usage boundaries, the crate/layer inventory, pinned toolchain
-configuration, unsafe capsules, and isolated external-tool surfaces.
-Regenerate and check it with:
+configuration, unsafe capsules, and isolated external-tool surfaces. Its
+[SPDX 2.3 JSON projection](frankensim-source-manifest.spdx.json) carries the
+same exact file set as BLAKE3-checksummed SPDX files, plus component packages
+for every `fs-*` crate, sibling pin, and external tool boundary. Regenerate and
+check both artifacts with:
 
 ```bash
 cargo run -p xtask -- generate-source-manifest
@@ -196,9 +199,12 @@ Extra-file completeness remains a Git-index property. In a live checkout,
 index-blob capture describes the exact commit candidate without absorbing
 unrelated unstaged shared-tree edits.
 
-It is not yet a release SBOM or self-contained distribution. The final Git
-commit, complete tree snapshot, build host, and retained bootstrap-provenance
-receipt must be attached by the still-open E13.3 release-bundle work.
+The SPDX package verification code uses the SPDX-mandated SHA-1 construction
+only as a format-compatibility field; BLAKE3 remains the content digest in the
+canonical manifest and on every SPDX file row. Neither artifact is yet a
+release SBOM or self-contained distribution. The final Git commit, complete
+tree snapshot, build host, and retained bootstrap-provenance receipt must be
+attached by the still-open E13.3 release-bundle work.
 
 Run the project validation lane through DSR, which is the preferred verification path for this repo:
 
@@ -226,7 +232,7 @@ FrankenSim ships an initial strict validation CLI. Its solve, report, and packag
 | `cargo run -p xtask -- check-contracts` | Verify `fs-*` crate contracts and required sections |
 | `cargo run -p xtask -- check-unsafe` | Check unsafe code against registered capsules |
 | `cargo run -p xtask -- check-constellation` | Verify sibling Franken repository pins |
-| `cargo run -p xtask -- check-source-manifest` | Verify the tracked structural source/SBOM inventory |
+| `cargo run -p xtask -- check-source-manifest` | Verify the canonical structural source/SBOM inventory and its SPDX 2.3 JSON projection |
 | `cargo run -p xtask -- check-all` | Run the implemented `xtask` policy checks together |
 | `dsr quality --tool frankensim` | Run the configured repo-level DSR quality gate when DSR is available |
 | `dsr build frankensim --target darwin/arm64` | Run the configured native DSR build lane |
@@ -1240,7 +1246,9 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- AGENTS.md                          # Agent operating rules
 |-- unsafe-capsules.json               # Registered unsafe capsules
 |-- constellation.lock                 # Franken sibling repository pin file
-`-- frankensim-source-manifest.json    # Exact structural source/SBOM inventory
+|-- frankensim-source-manifest.json    # Exact structural source/SBOM inventory
+`-- frankensim-source-manifest.spdx.json
+                                        # Deterministic SPDX 2.3 JSON projection
 ```
 
 The complete crate list is the `members` array in [Cargo.toml](Cargo.toml). Use `find crates -mindepth 2 -maxdepth 2 -name Cargo.toml` for a filesystem inventory.

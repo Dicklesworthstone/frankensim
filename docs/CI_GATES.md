@@ -484,8 +484,10 @@ provenance are not yet an independently escrowed, self-contained release bundle.
 ## Structural source manifest
 
 [`frankensim-source-manifest.json`](../frankensim-source-manifest.json) is the
-canonical in-house source/SBOM content schema for E13.2. It is generated and
-checked with:
+canonical in-house source/SBOM content schema for E13.2.
+[`frankensim-source-manifest.spdx.json`](../frankensim-source-manifest.spdx.json)
+is its deterministic SPDX 2.3 JSON projection. Both are generated and checked
+with:
 
 ```bash
 cargo run --locked -p xtask -- generate-source-manifest
@@ -495,8 +497,8 @@ cargo run --locked -p xtask -- check-source-manifest
 `check-source-manifest` is composed into `xtask check-all`, so the configured
 DSR quality gate checks it before the later repo-local quality lanes run. With
 Git metadata present, the manifest double-captures and length-frames every
-indexed non-Beads blob except the manifest itself, binding path, Git mode, byte
-count, and BLAKE3 content digest into
+indexed non-Beads blob except the two generated manifest artifacts, binding
+path, Git mode, byte count, and BLAKE3 content digest into
 `org.frankensim.xtask.source-root.v1`. Reading the index blobs rather than the
 ambient worktree makes the artifact describe the exact commit candidate and
 prevents unrelated unstaged shared-tree edits from being absorbed. Its outer
@@ -513,6 +515,17 @@ artifact also retains:
 - explicit isolation rows for the zero-dependency bootstrap, the independent
   certified-arithmetic N-version kernel, the Rug/MPFR development oracle, and
   the standalone browser/WASM distribution cone.
+
+The SPDX projection maps that same source set to one file-analyzed structural
+root package, every tracked source row to an SPDX file with a BLAKE3 checksum,
+all native and standalone crates to component packages, all seven sibling pins
+to exact VCS download locations, and the bootstrap/oracle/checker boundaries to
+explicit build/dev-tool relationships. Its document namespace is derived from
+the canonical manifest identity. SPDX 2.3 requires a SHA-1 package verification
+code when `filesAnalyzed` is true; xtask computes that compatibility field with
+its independently vector-tested internal SHA-1 implementation. SHA-1 is not
+used as FrankenSim source authority, and the rendering makes no vulnerability,
+license, authenticity, correctness, or release-attestation claim.
 
 `.beads/**` is intentionally excluded: issue-tracker churn is operational
 coordination, not build source. Untracked and unstaged work are excluded by the
@@ -531,9 +544,9 @@ canonical bootstrap-provenance identity are explicitly required but unbound.
 E13.3 must attach those fields in a release envelope and embed the manifest in
 the verified vendored bundle. `fs-package` v8 currently binds only
 `code_version` and `constellation_lock`; it does not yet cite the source-manifest
-identity. SPDX-class rendering is likewise staged until this in-house content
-schema is stable. None of those absent integrations may be inferred from a
-green structural drift check.
+identity. The standard rendering is now present, but it does not supply those
+missing release or package bindings. None of those absent integrations may be
+inferred from a green structural drift check.
 
 ## External DSR wrapper limitations
 

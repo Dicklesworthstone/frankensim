@@ -2062,7 +2062,7 @@ fn sha1_compress(state: &mut [u32; 5], block: &[u8]) {
     state[4] = state[4].wrapping_add(e);
 }
 
-fn sha1_digest(bytes: &[u8]) -> Result<[u8; 20], String> {
+pub(super) fn sha1_digest(bytes: &[u8]) -> Result<[u8; 20], String> {
     let bit_length = digest_bit_length(bytes, "SHA-1")?;
     let mut state = [
         0x6745_2301,
