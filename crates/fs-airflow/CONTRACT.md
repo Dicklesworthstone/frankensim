@@ -63,6 +63,11 @@ existing convection rung.
   alongside that fan card. Its adversarial variant changes only Reynolds
   number, proving the correlation receipt is the sole demotion cause while the
   actual fan card remains in-domain.
+- `ThermalQoiSet::audit_operating_envelope_with_cards` accepts owner-neutral
+  `RegimeAuditCard` identity/validity projections for matdb and other native
+  card schemas. The existing evidence-`ModelCard` method is an exact wrapper;
+  parity is executable, so widening the card source cannot change receipts or
+  budget demotions.
 - The operating-point pressure/flow envelope populates the conditional
   boundary-condition term for pressure and power. The cited total-efficiency
   interval populates the fan-power parameter term. Both remain accompanied by

@@ -23,8 +23,8 @@ use fs_evidence::{
 use fs_qty::{Power, Pressure, Temperature};
 use fs_regime::{
     OperatingPoint as RegimeOperatingPoint, OutputAuditBudgetError, OutputAuditError,
-    OverrideAcknowledgement, ProductOutputAudit, QoiClaim, apply_output_audit_to_budget,
-    audit_product_output,
+    OverrideAcknowledgement, ProductOutputAudit, QoiClaim, RegimeAuditCard,
+    apply_output_audit_to_budget, audit_product_output_with_cards,
 };
 
 use crate::{OperatingPoint, SourceProvenance};
@@ -391,8 +391,34 @@ impl ThermalQoiSet {
     /// Refuses missing, duplicate, or foreign card-use declarations, any
     /// shared `fs-regime` audit refusal, or a receipt/budget mismatch.
     pub fn audit_operating_envelope(
-        mut self,
+        self,
         registry: &[ModelCard],
+        operating_points: &[RegimeOperatingPoint],
+        card_uses: &[ThermalQoiCardUse],
+    ) -> Result<AuditedThermalQoiSet, ThermalOutputAuditError> {
+        let audit_cards = registry
+            .iter()
+            .map(RegimeAuditCard::from)
+            .collect::<Vec<_>>();
+        self.audit_operating_envelope_with_cards(&audit_cards, operating_points, card_uses)
+    }
+
+    /// Run the final audit with owner-neutral identity/validity projections.
+    ///
+    /// This entry point admits material and other domain-native card schemas
+    /// without inventing the extra authority fields of an evidence
+    /// [`ModelCard`]. Each projection must preserve its owner's exact identity,
+    /// version, and shared validity box. The ordinary
+    /// [`Self::audit_operating_envelope`] method is an exact wrapper over this
+    /// path for existing evidence cards.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing, duplicate, or foreign card-use declarations, any
+    /// shared `fs-regime` audit refusal, or a receipt/budget mismatch.
+    pub fn audit_operating_envelope_with_cards(
+        mut self,
+        registry: &[RegimeAuditCard],
         operating_points: &[RegimeOperatingPoint],
         card_uses: &[ThermalQoiCardUse],
     ) -> Result<AuditedThermalQoiSet, ThermalOutputAuditError> {
@@ -421,7 +447,7 @@ impl ThermalQoiSet {
             return Err(ThermalOutputAuditError::UnknownQoi { qoi: qoi.clone() });
         }
 
-        let audit = audit_product_output(registry, operating_points, &claims)?;
+        let audit = audit_product_output_with_cards(registry, operating_points, &claims)?;
         apply_receipt_to_budget(&audit, &mut self.junction_maximum.qoi.uncertainty)?;
         apply_receipt_to_budget(&audit, &mut self.pressure_drop.uncertainty)?;
         apply_receipt_to_budget(&audit, &mut self.fan_power.uncertainty)?;

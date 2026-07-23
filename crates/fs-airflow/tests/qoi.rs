@@ -23,6 +23,7 @@ use fs_evidence::{ModelCard, NumericalKind};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 use fs_regime::{
     EnvelopeCoverage, OperatingPoint as RegimeOperatingPoint, OverrideAcknowledgement,
+    RegimeAuditCard,
 };
 
 fn source(id: &str) -> SourceProvenance {
@@ -373,6 +374,29 @@ fn actual_convection_card_alone_demotes_the_complete_qoi_set() {
         assert!(matches!(model.value(), TermValue::Unknown { .. }));
         assert_eq!(model.provenance().digest(), receipt.content_id());
     }
+}
+
+#[test]
+fn owner_neutral_card_path_is_exactly_the_evidence_card_path() {
+    let (qois, operating) = extract_fixture_run();
+    let nominal_flow = operating.flow.value.value();
+    let cards = vec![fan_regime_card(), convection_regime_card()];
+    let audit_cards = cards.iter().map(RegimeAuditCard::from).collect::<Vec<_>>();
+    let uses = card_uses(&qois, &cards);
+    let points = [
+        thermal_regime_point("nominal", nominal_flow, 50_000.0),
+        thermal_regime_point("low-reynolds", nominal_flow, 1_000.0),
+    ];
+
+    let evidence_audit = qois
+        .clone()
+        .audit_operating_envelope(&cards, &points, &uses)
+        .expect("evidence-card audit");
+    let owner_neutral_audit = qois
+        .audit_operating_envelope_with_cards(&audit_cards, &points, &uses)
+        .expect("owner-neutral audit");
+
+    assert_eq!(owner_neutral_audit, evidence_audit);
 }
 
 #[test]
