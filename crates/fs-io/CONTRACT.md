@@ -148,10 +148,13 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   orientation, and then refuses every residual boundary, non-manifold edge,
   orientation conflict, or disconnected closed vertex link with a bounded
   deterministic defect prefix.
-  Publication yields a sealed `StepImportOutcome`: `Evidence<TiledSdf>` plus
-  a source-bound receipt that separately retains tessellation deviation,
+  Publication yields a sealed `StepImportOutcome`: `Evidence<TiledSdf>`, the
+  exact repaired `Soup` admitted by the topology/SDF handoff, and a
+  source-bound receipt that separately retains tessellation deviation,
   mesh-to-SDF numerical evidence, their outward-rounded combined estimate,
-  repairs, quality counters, and adapter identity.
+  repairs, quality counters, repaired mesh counts, and adapter identity.
+  Higher-layer assignment must consume `repaired_soup()`, never reconstruct or
+  reuse the pre-repair adapter tessellation.
 - **Strict native STEP faceted decoding** (`step_faceted` module): materializes
   one caller-selected, root-reachable `FACETED_BREP -> CLOSED_SHELL -> (FACE |
   FACE_SURFACE) -> FACE_OUTER_BOUND -> POLY_LOOP -> CARTESIAN_POINT` closure.
@@ -241,10 +244,12 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
    unknown at this layer. Numeric lexical spelling remains identity-bearing:
    this is layout canonicalization, not schema-aware numeric normalization.
 10. **No topology laundering at the STEP handoff**: repair is always invoked
-   with a zero hole-fill budget. Residual leaks, non-manifoldness, orientation
-   conflicts, vertex-link failures, and non-outward aggregate orientation
-   refuse publication; localized diagnostics are bounded to 256 records and
-   state when truncated.
+    with a zero hole-fill budget. Residual leaks, non-manifoldness, orientation
+    conflicts, vertex-link failures, and non-outward aggregate orientation
+    refuse publication; localized diagnostics are bounded to 256 records and
+    state when truncated. Success returns the exact post-repair soup paired
+    with the receipt, so a higher layer cannot assign faces on a different
+    pre-repair tessellation while citing the successful handoff.
 11. **No deviation laundering**: declared deviation must be a finite, ordered,
     non-negative `Exact`, `Enclosure`, or `Estimate` band. It remains separate
     in the receipt, and its upper bound is added with outward rounding to the
@@ -487,6 +492,9 @@ duplicate/degenerate/unreferenced repair receipts; repair-exhausted audit
 retention; closed disconnected vertex-link refusal; pre-requested cancellation;
 outward-rounding overflow refusal; and fast-mode refusal. Differential fixtures
 require changed soup bits or deviation claims to move output provenance.
+Success fixtures additionally prove that the returned repaired soup cardinality
+matches the receipt and differs from dirty source cardinality when repair
+removed faces or vertices.
 
 `tests/step_faceted.rs` (G0/G3/G4): unsorted tetrahedron closure and canonical
 soup materialization; bound-orientation reversal; shell-`SET` permutation

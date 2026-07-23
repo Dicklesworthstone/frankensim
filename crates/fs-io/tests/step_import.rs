@@ -116,6 +116,14 @@ fn step_import_001_closed_mesh_yields_source_bound_estimate_receipt() {
         assert_eq!(first.evidence().qoi, receipt.combined_numerical().hi);
         assert_eq!(first.evidence().provenance, receipt.output_provenance());
         assert!(receipt.quality().passes_basic_orientation_checks());
+        assert_eq!(
+            first.repaired_soup().positions.len(),
+            receipt.repaired_vertices()
+        );
+        assert_eq!(
+            first.repaired_soup().triangles.len(),
+            receipt.repaired_triangles()
+        );
 
         let json = receipt.to_json();
         assert_eq!(json, second.receipt().to_json());
@@ -442,6 +450,14 @@ fn step_import_006_safe_repairs_are_retained_without_hole_filling() {
                 .repairs()
                 .iter()
                 .all(|receipt| receipt.defect != "boundary-hole")
+        );
+        assert_eq!(
+            outcome.repaired_soup().positions.len(),
+            outcome.receipt().repaired_vertices()
+        );
+        assert_eq!(
+            outcome.repaired_soup().triangles.len(),
+            outcome.receipt().repaired_triangles()
         );
 
         let exhausted = import_step_tessellation(

@@ -259,6 +259,18 @@ impl StepImportReceipt {
         self.tessellation_deviation
     }
 
+    /// Vertex count after recorded safe repairs and compaction.
+    #[must_use]
+    pub const fn repaired_vertices(&self) -> usize {
+        self.repaired_vertices
+    }
+
+    /// Triangle count after recorded safe repairs.
+    #[must_use]
+    pub const fn repaired_triangles(&self) -> usize {
+        self.repaired_triangles
+    }
+
     /// Total estimated SDF error band after deviation composition.
     #[must_use]
     pub const fn combined_numerical(&self) -> NumericalCertificate {
@@ -392,6 +404,7 @@ impl StepImportReceipt {
 pub struct StepImportOutcome {
     evidence: Evidence<TiledSdf>,
     receipt: StepImportReceipt,
+    repaired_soup: Soup,
 }
 
 impl StepImportOutcome {
@@ -405,6 +418,16 @@ impl StepImportOutcome {
     #[must_use]
     pub const fn receipt(&self) -> &StepImportReceipt {
         &self.receipt
+    }
+
+    /// Exact repaired soup admitted by the topology and SDF handoff.
+    ///
+    /// This is the mesh whose fingerprint, quality, and repairs are recorded
+    /// by [`Self::receipt`]. Downstream assignment must use this soup rather
+    /// than the pre-repair tessellation.
+    #[must_use]
+    pub const fn repaired_soup(&self) -> &Soup {
+        &self.repaired_soup
     }
 }
 
@@ -567,6 +590,7 @@ pub fn import_step_tessellation(
     }
 
     let chart = MeshChart::new(repaired.soup);
+    let repaired_soup = chart.soup().clone();
     let mut evidence =
         mesh_to_sdf(&chart, target_h, cx).map_err(|error| StepImportRefusal::SdfBuild {
             source_fingerprint,
@@ -664,7 +688,11 @@ pub fn import_step_tessellation(
         combined_numerical,
         output_provenance: evidence.provenance,
     };
-    Ok(StepImportOutcome { evidence, receipt })
+    Ok(StepImportOutcome {
+        evidence,
+        receipt,
+        repaired_soup,
+    })
 }
 
 fn validate_adapter(identity: &StepTessellatorIdentity) -> Result<(), String> {
