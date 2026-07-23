@@ -27,6 +27,10 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   no-claim section. It omits fully in-domain QoIs and renders every demoted
   receipt with the human diagnosis, strong receipt identity, and exact canonical
   JSON. An override remains visible but cannot restore color.
+- `project_regime_audit_outputs(package, audit)` — atomic product projection
+  returning the reviewer-facing no-claim section and the evidence package with
+  every demotion retained from that same immutable audit. It refuses as a unit;
+  callers cannot receive a partial projection.
 
 ## Invariants
 
@@ -44,6 +48,10 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
 - A regime no-claim section is absent only when every final receipt is fully
   in-domain. Rendering is sorted by QoI and receipt identity, includes exact
   split-sweep partitions, and never averages coverage or drops a demotion.
+- The coupled regime projection derives both artifacts from one audit. A
+  demoted receipt therefore cannot appear in only the human or only the machine
+  projection returned by that API; an in-domain audit yields no section and an
+  unchanged package.
 
 ## Error model
 
@@ -73,7 +81,8 @@ metrics carry their units; the notebook carries the exact reproducing IR; the
 reproducibility loop closes by content hash (stable + change-sensitive);
 semantic diff recovers known edits ranked by significance; determinism; final
 regime demotions render with exact receipts while fully in-domain audits emit no
-no-claim section.
+no-claim section; the coupled projection proves every demoted receipt appears
+in both artifacts and that in-domain projection is an exact no-op.
 
 `tests/decision.rs` covers deterministic indeterminate and binary decision
 headlines, units and authority identities, explicit flip actions, and the

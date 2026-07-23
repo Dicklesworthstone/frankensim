@@ -10,7 +10,7 @@ use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_regime::{OperatingPoint, OverrideAcknowledgement, QoiClaim, audit_product_output};
 use fs_report::{
     LabNotebook, Quantity, REGIME_DEMOTION_PACKAGE_ESTIMATOR, RegimePackageError, ReproStep,
-    regime_demotion_package_claim_id, regime_no_claims_markdown,
+    project_regime_audit_outputs, regime_demotion_package_claim_id, regime_no_claims_markdown,
     retain_regime_demotions_in_package, semantic_diff,
 };
 
@@ -324,4 +324,70 @@ fn package_projection_omits_in_domain_receipts_and_refuses_id_conflicts() {
         retain_regime_demotions_in_package(conflict, &partial),
         Err(RegimePackageError::ClaimIdConflict { .. })
     ));
+}
+
+#[test]
+fn coupled_projection_cannot_drop_either_side_of_a_demoted_audit() {
+    let audit = audit_product_output(
+        &[regime_card()],
+        &[
+            OperatingPoint {
+                id: "inside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+            },
+            OperatingPoint {
+                id: "outside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 1_000.0)]),
+            },
+        ],
+        &[
+            regime_claim("temperature:max", true),
+            regime_claim("temperature:mean", false),
+        ],
+    )
+    .expect("valid final-envelope audit");
+    let base = EvidencePackage::new(Provenance::new(
+        "coupled-regime-projection-test",
+        "Cargo.lock:test",
+    ));
+    let outputs = project_regime_audit_outputs(base, &audit).expect("coupled projection");
+    let markdown = outputs
+        .no_claims_markdown
+        .expect("partial envelope must render no-claim boundaries");
+
+    for receipt in audit.receipts.iter().filter(|receipt| receipt.demoted()) {
+        assert!(markdown.contains(&receipt.content_id().to_string()));
+        assert!(markdown.contains(&receipt.to_canonical_json()));
+        let claim_id = regime_demotion_package_claim_id(&audit, receipt);
+        let claim = outputs
+            .package
+            .declared_claims_unverified()
+            .iter()
+            .find(|claim| claim.id() == claim_id)
+            .expect("the same receipt must be retained in the package");
+        assert!(
+            claim
+                .statement()
+                .contains(&receipt.content_id().to_string())
+        );
+        assert!(claim.statement().contains(&receipt.to_canonical_json()));
+    }
+
+    let in_domain = audit_product_output(
+        &[regime_card()],
+        &[OperatingPoint {
+            id: "inside".to_string(),
+            groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+        }],
+        &[regime_claim("temperature:max", false)],
+    )
+    .expect("valid in-domain audit");
+    let base = EvidencePackage::new(Provenance::new(
+        "coupled-regime-in-domain-test",
+        "Cargo.lock:test",
+    ));
+    let unchanged = project_regime_audit_outputs(base.clone(), &in_domain)
+        .expect("in-domain coupled projection");
+    assert_eq!(unchanged.no_claims_markdown, None);
+    assert_eq!(unchanged.package, base);
 }

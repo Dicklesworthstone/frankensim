@@ -20,6 +20,8 @@
 //! into the report's no-claim section without changing their evidence state.
 //! [`retain_regime_demotions_in_package`] preserves those same receipts in an
 //! evidence package as explicitly unbounded Estimated declarations.
+//! [`project_regime_audit_outputs`] couples both projections so a product path
+//! cannot silently retain only one side of the same audit.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
@@ -34,6 +36,15 @@ use fs_session::DecisionAssessment;
 
 /// Estimator identity used by package declarations that retain demotion receipts.
 pub const REGIME_DEMOTION_PACKAGE_ESTIMATOR: &str = "fs-regime/output-demotion-package-receipt-v1";
+
+/// Coupled human-readable and machine-readable projections of one regime audit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegimeAuditOutputs {
+    /// Deterministic reviewer-facing no-claim section, absent only in-domain.
+    pub no_claims_markdown: Option<String>,
+    /// Evidence package with every demotion receipt retained.
+    pub package: EvidencePackage,
+}
 
 /// Refusal while adding final-envelope demotion receipts to a package.
 #[derive(Debug)]
@@ -151,6 +162,29 @@ pub fn retain_regime_demotions_in_package(
         .try_merkle_root()
         .map_err(RegimePackageError::Package)?;
     Ok(package)
+}
+
+/// Project one final-envelope audit into both mandatory product outputs.
+///
+/// The returned Markdown and package are derived from the same immutable audit.
+/// This prevents orchestration from rendering a demotion without retaining its
+/// receipt, or retaining a receipt without surfacing the no-claim boundary.
+/// Fully in-domain audits return no Markdown and leave the package unchanged.
+///
+/// # Errors
+///
+/// Returns the same bounded package or claim-id refusal as
+/// [`retain_regime_demotions_in_package`]. No partial projection is returned.
+pub fn project_regime_audit_outputs(
+    package: EvidencePackage,
+    audit: &ProductOutputAudit,
+) -> Result<RegimeAuditOutputs, RegimePackageError> {
+    let no_claims_markdown = regime_no_claims_markdown(audit);
+    let package = retain_regime_demotions_in_package(package, audit)?;
+    Ok(RegimeAuditOutputs {
+        no_claims_markdown,
+        package,
+    })
 }
 
 /// Render every demoted final-envelope receipt in a deterministic no-claim section.
