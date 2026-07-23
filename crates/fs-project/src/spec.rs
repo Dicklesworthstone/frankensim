@@ -126,9 +126,9 @@ pub struct Versions {
 /// The seeds pillar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Seeds {
-    /// Master seed; every derived stream is keyed from it by logical
+    /// Root seed; every derived stream is keyed from it by logical
     /// identity, never by scheduling.
-    pub master: u64,
+    pub root: u64,
 }
 
 /// The budgets pillar.

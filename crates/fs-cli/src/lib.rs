@@ -502,7 +502,7 @@ fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
         limits.max_source_bytes = limits.max_source_bytes.min(memory_bytes);
         limits.max_total_source_bytes = limits.max_total_source_bytes.min(memory_bytes);
     }
-    let seed = decoded.spec.seeds.as_ref().map_or(0, |seeds| seeds.master);
+    let seed = decoded.spec.seeds.as_ref().map_or(0, |seeds| seeds.root);
     let gate = fs_exec::CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let result = pool.scope(|arena| {

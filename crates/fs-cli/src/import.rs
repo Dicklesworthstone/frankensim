@@ -1291,7 +1291,7 @@ fn explicits(
         capability.push_str(&json_string(item));
     }
     capability.push_str("]}");
-    Ok((versions, budget, capability, seeds.master.to_le_bytes()))
+    Ok((versions, budget, capability, seeds.root.to_le_bytes()))
 }
 
 fn import_ir(

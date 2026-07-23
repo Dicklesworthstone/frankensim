@@ -108,7 +108,7 @@ fn project_for_receipt(format: &str, source_hash: u64, parser_version: &str) -> 
             constellation: "00".repeat(32),
             workspace: "11".repeat(20),
         }),
-        seeds: Some(Seeds { master: 7 }),
+        seeds: Some(Seeds { root: 7 }),
         budgets: Some(Budgets {
             solve_time: QtyAny::new(60.0, fs_project::spec::dims::TIME),
             memory_bytes: 64 * 1024 * 1024,

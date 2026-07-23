@@ -243,7 +243,7 @@ fn lower_pillars(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), Pro
         ]));
     }
     if let Some(s) = &spec.seeds {
-        sections.push(list(vec![sym("seeds"), kw("master"), seed(s.master)]));
+        sections.push(list(vec![sym("seeds"), kw("root"), seed(s.root)]));
     }
     if let Some(b) = &spec.budgets {
         let memory = i64::try_from(b.memory_bytes).map_err(|_| ProjectError {
@@ -1285,18 +1285,18 @@ fn read_versions(body: &[Node], out: &mut Vec<Violation>) -> Versions {
 }
 
 fn read_seeds(body: &[Node], out: &mut Vec<Violation>) -> Option<Seeds> {
-    let pairs = read_pairs(body, "seeds", &["master"], out);
+    let pairs = read_pairs(body, "seeds", &["root"], out);
     if let Some(Node {
         kind: NodeKind::Seed(v),
         ..
-    }) = field(&pairs, "master")
+    }) = field(&pairs, "root")
     {
-        Some(Seeds { master: *v })
+        Some(Seeds { root: *v })
     } else {
         out.push(Violation {
             code: "project-malformed-clause",
-            what: "`seeds.master` expected a 0x-prefixed seed literal".to_string(),
-            fix: "spell the master seed as `0x...` hex fitting u64".to_string(),
+            what: "`seeds.root` expected a 0x-prefixed seed literal".to_string(),
+            fix: "spell the root seed as `0x...` hex fitting u64".to_string(),
         });
         None
     }

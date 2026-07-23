@@ -63,6 +63,10 @@ bindings; it runs no solves and admits no scenarios itself.
   its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
   are `Option`s so
   recognition stays lenient and validation can name every omission at once.
+- `Seeds.root` and canonical `(seeds :root 0x...)` name the root of every
+  logical RNG derivation. Schema v1 is pre-freeze, so there is one spelling:
+  the superseded keyword is refused as unknown rather than retained as an
+  identity-ambiguous compatibility alias.
 - `Metadata::permits_indeterminate()` is the context gate consumed by the
   decision layer: only `ScopingEstimate` with a non-safety-critical consequence
   returns true. Design-selection/compliance-signoff and every safety-critical

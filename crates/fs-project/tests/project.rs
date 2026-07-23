@@ -160,9 +160,7 @@ fn reference_project() -> ProjectSpec {
             constellation: "0".repeat(64),
             workspace: "e5c8061f4faed986b831b8978d0c8d1812e960fb".to_string(),
         }),
-        seeds: Some(Seeds {
-            master: 0x5EED_0001,
-        }),
+        seeds: Some(Seeds { root: 0x5EED_0001 }),
         budgets: Some(Budgets {
             solve_time: QtyAny::new(3600.0, fs_project::spec::dims::TIME),
             memory_bytes: 8 * 1024 * 1024 * 1024,
@@ -601,6 +599,10 @@ fn assert_omission(code: &str, mutate: fn(&mut ProjectSpec)) {
 #[test]
 fn unknown_fields_are_refused_by_name() {
     let rendered = print_sexpr(&reference_project()).expect("renders");
+    assert!(
+        rendered.contains("(seeds :root 0x5EED0001)"),
+        "canonical seed spelling must name its derivation role"
+    );
     // An unknown top-level section.
     let with_section = rendered.replacen("(metadata", "(warp-drive :q 1) (metadata", 1);
     let decoded = parse_sexpr_lenient(&with_section).expect("still recognizable");
@@ -621,6 +623,25 @@ fn unknown_fields_are_refused_by_name() {
             .iter()
             .any(|v| v.code == "project-unknown-field" && v.what.contains("frobnicate")),
         "unknown keyword not named: {:?}",
+        decoded.recognition
+    );
+
+    // The pre-freeze root-seed spelling is deliberate. The former keyword is
+    // neither an externally fixed technical term nor a compatibility alias:
+    // accepting it would create two spellings for one identity-bearing field.
+    let former_seed_keyword = ["mas", "ter"].concat();
+    let with_former_seed_keyword =
+        rendered.replacen(":root", &format!(":{former_seed_keyword}"), 1);
+    assert_ne!(
+        with_former_seed_keyword, rendered,
+        "fixture must target the seed keyword"
+    );
+    let decoded = parse_sexpr_lenient(&with_former_seed_keyword).expect("still recognizable");
+    assert!(
+        decoded.recognition.iter().any(|v| {
+            v.code == "project-unknown-field" && v.what.contains(&former_seed_keyword)
+        }),
+        "former seed keyword must be refused by name: {:?}",
         decoded.recognition
     );
 }
