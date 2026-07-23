@@ -18,6 +18,7 @@
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-constellation-assessment` — keep the measured seven-sibling trust cone current.
+//! - `check-source-manifest` — keep the structural trust-cone source inventory current.
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
@@ -51,6 +52,7 @@ mod manifest_fixture;
 mod matdb_pack;
 mod maturity;
 mod moonshot_policy;
+mod source_manifest;
 
 use bootstrap_provenance::{
     BootstrapProvenanceRow, bootstrap_provenance_support_preflight, provenance_path_text,
@@ -8243,6 +8245,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-source-manifest" => {
+            return match source_manifest::generate(&root) {
+                Ok(()) => {
+                    eprintln!("structural source manifest regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-identities" => return identities::generate_identities(&root),
         "depgraph-receipt" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -8300,6 +8314,7 @@ fn main() -> ExitCode {
             constellation_assessment::check(&root),
             vec![constellation_assessment::CHECK],
         ),
+        "check-source-manifest" => (source_manifest::check(&root), vec![source_manifest::CHECK]),
         "check-claim-integrity" => {
             let report = claim_integrity_gate::check_claim_integrity_gate(&root);
             policy_notes = report.decisions;
@@ -8347,6 +8362,7 @@ fn main() -> ExitCode {
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
             v.extend(constellation_assessment::check(&root));
+            v.extend(source_manifest::check(&root));
             let manifest_report = manifest_fixture::check_manifest_fixture(&root);
             v.extend(manifest_report.violations);
             policy_notes = manifest_report.decisions;
@@ -8385,6 +8401,7 @@ fn main() -> ExitCode {
                     "golden-couplings",
                     "semantic-identities",
                     constellation_assessment::CHECK,
+                    source_manifest::CHECK,
                     "manifest-fixture",
                     "doc-facts",
                     "capability-matrix",
@@ -8403,8 +8420,8 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|\
-                 check-identities|check-manifest-fixture|check-constellation-assessment|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|lock-constellation|\
+                 check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-color-admission|check-no-promotion|check-citable-producers|\
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;

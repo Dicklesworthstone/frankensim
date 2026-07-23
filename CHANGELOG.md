@@ -594,6 +594,29 @@ workstream.
   canonical-era migration, `PreparedResume`, session/ledger publication, and
   final G4/G5 closure remain successor work.
 
+### Post-checkpoint structural source-manifest authority
+
+- Added a deterministic in-house source/SBOM manifest that inventories exact
+  Git-index non-Beads source bytes, all seven constellation pins and their
+  measured production/development/planned boundaries, the native and
+  standalone crate/layer map, pinned toolchain configuration, unsafe capsules,
+  and isolated bootstrap/cert-kernel/oracle/browser dependency cones.
+- Added `generate-source-manifest` and `check-source-manifest`; the drift check
+  is part of `xtask check-all` and therefore the configured DSR quality gate.
+  Paths, Git modes, byte counts, and BLAKE3 digests are double-captured and
+  length-framed before the structural source root is published. Index-blob
+  capture describes the commit candidate without absorbing unrelated unstaged
+  shared-tree edits. Extracted snapshots without `.git` may recover only the
+  bounded path/mode inventory from the retained artifact; each listed file is
+  still independently hashed, while extra-file completeness remains a
+  Git-index claim.
+- Kept release identity honest. A tracked file cannot contain its own eventual
+  Git commit, so the structural artifact explicitly leaves the final commit,
+  complete tree snapshot, build host, and retained bootstrap receipt for the
+  E13.3 release envelope. `fs-package` v8 does not yet cite this manifest, SPDX
+  rendering remains staged, and no self-contained release-bundle claim is
+  made.
+
 ## Version Timeline
 
 There are no git tags and no GitHub Releases as of

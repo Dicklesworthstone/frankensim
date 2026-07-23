@@ -154,7 +154,9 @@ E13.3 owns the vendored, deterministic, content-addressed source bundle. Once
 that mechanism is live, every published release must retain:
 
 - FrankenSim and all seven exact sibling source trees;
-- `constellation.lock`, the unified SBOM/source manifest, and toolchain identity;
+- `constellation.lock`, the
+  [unified structural source manifest](../frankensim-source-manifest.json), and
+  toolchain identity;
 - bundle and per-tree content roots plus independent verification instructions;
 - the relevant DSR logs, before/after snapshots, compatibility verdicts, and
   claim corrections; and

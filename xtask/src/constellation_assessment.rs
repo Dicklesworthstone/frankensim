@@ -303,6 +303,16 @@ struct Assessment {
     siblings: Vec<Sibling>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceManifestUsage {
+    pub(crate) lib: String,
+    pub(crate) boundary: &'static str,
+    pub(crate) runtime_consumers: Vec<String>,
+    pub(crate) dev_consumers: Vec<String>,
+    pub(crate) production_references: usize,
+    pub(crate) test_references: usize,
+}
+
 fn repo_for_dependency(name: &str) -> Option<&'static str> {
     if name == "asupersync" {
         Some("asupersync")
@@ -475,6 +485,32 @@ fn usage_state(usage: &Usage) -> &'static str {
     } else {
         "pinned-unused"
     }
+}
+
+fn source_manifest_boundary(usage: &Usage) -> &'static str {
+    if !usage.runtime_consumers.is_empty() || usage.production_references > 0 {
+        "production-cone"
+    } else if !usage.dev_consumers.is_empty() || usage.test_references > 0 {
+        "development-reference"
+    } else {
+        "pinned-unused-planned"
+    }
+}
+
+pub(crate) fn source_manifest_usage(root: &Path) -> Result<Vec<SourceManifestUsage>, String> {
+    let assessment = build_assessment(root)?;
+    Ok(assessment
+        .siblings
+        .into_iter()
+        .map(|sibling| SourceManifestUsage {
+            lib: sibling.lock.lib,
+            boundary: source_manifest_boundary(&sibling.usage),
+            runtime_consumers: sibling.usage.runtime_consumers.into_iter().collect(),
+            dev_consumers: sibling.usage.dev_consumers.into_iter().collect(),
+            production_references: sibling.usage.production_references,
+            test_references: sibling.usage.test_references,
+        })
+        .collect())
 }
 
 fn validate(assessment: &Assessment) -> Result<(), String> {
@@ -652,7 +688,7 @@ fn render_markdown(assessment: &Assessment) -> String {
         assessment.lock_hash
     );
     output.push_str("This document separates two authorities: manifest consumers and Rust API references are measured from the live workspace, while roles, risk classes, verification gaps, and review priorities are explicit governance judgments. A pin proves content identity and cleanliness; it does not prove sibling correctness.\n\n");
-    output.push_str("Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md).\n\n");
+    output.push_str("Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md). The exact structural source inventory is retained in the [unified source manifest](../frankensim-source-manifest.json); final commit, whole-tree snapshot, build-host, and bootstrap-receipt binding remain E13.3 release-envelope obligations.\n\n");
     output.push_str("## Measured usage summary\n\n");
     output.push_str("| Sibling | State | Runtime consumers | Dev consumers | Production refs | Test refs | Correctness | Availability | Review priority |\n");
     output.push_str("| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: |\n");
@@ -676,7 +712,7 @@ fn render_markdown(assessment: &Assessment) -> String {
     output.push_str("## Prioritized findings\n\n");
     output.push_str("1. **Independent review starts with asupersync cancellation and FrankenSQLite durability (`f85xj.13.5`).** Both sit directly beneath cross-layer correctness claims and remain only partially exercised from FrankenSim.\n");
     output.push_str("2. **The compatibility suite follows measured surfaces (`f85xj.13.4`).** Active dependency and API-reference rows define the first release-train matrix; planned-only surfaces cannot silently enter it as implemented claims.\n");
-    output.push_str("3. **The SBOM/source manifest binds all seven pins (`f85xj.13.2`).** It must retain pinned-but-unused siblings so absence of use is visible rather than omitted.\n");
+    output.push_str("3. **The [structural source manifest](../frankensim-source-manifest.json) binds all seven pins (`f85xj.13.2`).** It retains pinned-but-unused siblings so absence of use is visible rather than omitted, while refusing to masquerade as the still-missing E13.3 release envelope.\n");
     output.push_str("4. **Governance now names the fail-closed operating policy (`f85xj.13.6`).** The policy treats all seven siblings as potentially single-maintainer, prioritizes asupersync and FrankenSQLite incidents by measured reachability, and keeps E13.4 compatibility trains and E13.3 archival bundles as explicit open controls rather than current capabilities.\n\n");
     output.push_str("## Per-sibling assessment\n\n");
     for sibling in &assessment.siblings {

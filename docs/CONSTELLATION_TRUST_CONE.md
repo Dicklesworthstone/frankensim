@@ -4,7 +4,7 @@
 
 This document separates two authorities: manifest consumers and Rust API references are measured from the live workspace, while roles, risk classes, verification gaps, and review priorities are explicit governance judgments. A pin proves content identity and cleanliness; it does not prove sibling correctness.
 
-Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md).
+Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md). The exact structural source inventory is retained in the [unified source manifest](../frankensim-source-manifest.json); final commit, whole-tree snapshot, build-host, and bootstrap-receipt binding remain E13.3 release-envelope obligations.
 
 ## Measured usage summary
 
@@ -24,7 +24,7 @@ Operational ownership, incident response, archival, and support are governed by 
 
 1. **Independent review starts with asupersync cancellation and FrankenSQLite durability (`f85xj.13.5`).** Both sit directly beneath cross-layer correctness claims and remain only partially exercised from FrankenSim.
 2. **The compatibility suite follows measured surfaces (`f85xj.13.4`).** Active dependency and API-reference rows define the first release-train matrix; planned-only surfaces cannot silently enter it as implemented claims.
-3. **The SBOM/source manifest binds all seven pins (`f85xj.13.2`).** It must retain pinned-but-unused siblings so absence of use is visible rather than omitted.
+3. **The [structural source manifest](../frankensim-source-manifest.json) binds all seven pins (`f85xj.13.2`).** It retains pinned-but-unused siblings so absence of use is visible rather than omitted, while refusing to masquerade as the still-missing E13.3 release envelope.
 4. **Governance now names the fail-closed operating policy (`f85xj.13.6`).** The policy treats all seven siblings as potentially single-maintainer, prioritizes asupersync and FrankenSQLite incidents by measured reachability, and keeps E13.4 compatibility trains and E13.3 archival bundles as explicit open controls rather than current capabilities.
 
 ## Per-sibling assessment

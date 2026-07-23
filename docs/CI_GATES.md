@@ -481,6 +481,60 @@ focused sibling test is not a complete pin-admission result, and the configured
 DSR release artifact, Git remotes, sibling checkouts, lock, and bootstrap
 provenance are not yet an independently escrowed, self-contained release bundle.
 
+## Structural source manifest
+
+[`frankensim-source-manifest.json`](../frankensim-source-manifest.json) is the
+canonical in-house source/SBOM content schema for E13.2. It is generated and
+checked with:
+
+```bash
+cargo run --locked -p xtask -- generate-source-manifest
+cargo run --locked -p xtask -- check-source-manifest
+```
+
+`check-source-manifest` is composed into `xtask check-all`, so the configured
+DSR quality gate checks it before the later repo-local quality lanes run. With
+Git metadata present, the manifest double-captures and length-frames every
+indexed non-Beads blob except the manifest itself, binding path, Git mode, byte
+count, and BLAKE3 content digest into
+`org.frankensim.xtask.source-root.v1`. Reading the index blobs rather than the
+ambient worktree makes the artifact describe the exact commit candidate and
+prevents unrelated unstaged shared-tree edits from being absorbed. Its outer
+canonical JSON identity uses `org.frankensim.xtask.source-manifest.v1`. The
+artifact also retains:
+
+- all seven `constellation.lock` rows, remotes, measured
+  production/development/pinned-unused boundaries, and stable references to
+  the lock, bootstrap-provenance, and trust-assessment rows;
+- the 140 native and one standalone `fs-*` crate manifests with layer and
+  unsafe-capsule counts;
+- the pinned toolchain channel/components and exact configuration digest;
+- the complete unsafe-capsule registry summary; and
+- explicit isolation rows for the zero-dependency bootstrap, the independent
+  certified-arithmetic N-version kernel, the Rug/MPFR development oracle, and
+  the standalone browser/WASM distribution cone.
+
+`.beads/**` is intentionally excluded: issue-tracker churn is operational
+coordination, not build source. Untracked and unstaged work are excluded by the
+Git-index inventory and blob capture, so a committed manifest cannot silently
+absorb another agent's scratch or mid-edit file. In a transferred or extracted
+source snapshot without `.git`, the checker uses the retained manifest only to
+recover the bounded, sorted path/mode inventory, then independently re-reads
+and re-hashes every listed file twice. This archive fallback cannot discover an
+extra file that was not in the retained inventory and refuses Git-link rows
+that cannot be rehydrated without Git metadata.
+
+This structural artifact cannot truthfully bind the Git commit that will
+contain itself. Its release fields therefore fail closed: final FrankenSim
+commit, complete root-plus-constellation snapshot, `rustc` host, and retained
+canonical bootstrap-provenance identity are explicitly required but unbound.
+E13.3 must attach those fields in a release envelope and embed the manifest in
+the verified vendored bundle. `fs-package` v8 currently binds only
+`code_version` and `constellation_lock`; it does not yet cite the source-manifest
+identity. SPDX-class rendering is likewise staged until this in-house content
+schema is stable. None of those absent integrations may be inferred from a
+green structural drift check.
+
 ## External DSR wrapper limitations
 
 The repo-local scripts above fail closed and retain their own complete evidence,
