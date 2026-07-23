@@ -42,6 +42,25 @@ linear-Gaussian core of weak-constraint assimilation.
   observation-content order, not caller order. Aggregate admission enforces
   `MAX_DENSE_OBSERVATIONS` and the multiplicative
   `MAX_DENSE_UPDATE_CUBIC_WORK` envelope before sorting or updating.
+- `RobustObservation` — a private-state record constructed as available,
+  missing, censored, saturated, or delayed. Pathology constructors validate
+  instrument identity through the checked `Observation`, finite thresholds and
+  ranges, saturation-at-endpoint, and positive sensor time constants.
+- `ObservationBatch::new(records, covariance, &Cx)` — a checked robust batch.
+  Covariance rows belong, in declaration order, only to available records;
+  instrument identities must be unique; each diagonal must exactly equal the
+  corresponding checked scalar observation variance; and the matrix must be
+  finite, exactly symmetric, interval-certified PSD, and then strictly
+  Cholesky-positive. The dense correlated dimension is capped at
+  `MAX_CORRELATED_OBSERVATIONS = 256`.
+- `assimilate_observation_batch(&Belief, &ObservationBatch, &Cx) ->
+  RobustAssimilation` — excludes missing readings, returns a no-posterior audit
+  for censored/saturated/delayed records, delegates an exactly diagonal usable
+  batch to `assimilate_all` without changing its observations, and
+  Cholesky-whitens a correlated batch before using the same scalar Joseph
+  updater. `ObservationAudit` retains every instrument disposition, the
+  effective observation degrees of freedom, terminal `BatchOutcome`, and a
+  domain-separated receipt. A refused result cannot expose a partial posterior.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -102,6 +121,21 @@ linear-Gaussian core of weak-constraint assimilation.
 - State and observation dimensions are capped at `MAX_DENSE_STATE_DIM` before a
   linear-size input can trigger quadratic dense allocation. The cap is 256 for
   this synchronous `O(n^3)` v0 core.
+- A robust batch has one observation-noise authority. Its covariance diagonal
+  and the available scalar observations' `noise_var` values must be bit-equal
+  after signed-zero canonicalization. Unique instrument identities make
+  covariance-row ownership unambiguous. The PSD certificate is the same
+  interval-backed admission used by `Belief`; the additional strict Cholesky
+  gate refuses singular PSD and unresolved positive-definite cases because
+  whitening requires an invertible factor.
+- Missing records contribute no synthetic value and reduce effective degrees
+  of freedom. A censored, saturated, or delayed record refuses the complete
+  publication boundary: otherwise-available records are reported as withheld,
+  and no partially assimilated belief escapes.
+- Robust audit receipts use
+  `robust-observation-audit:v1:<64 lowercase hex>` and bind the prior, ordered
+  records and pathology metadata, complete observation covariance,
+  dispositions, terminal outcome, and published posterior if present.
 - The candidate's `Color::Estimated.estimator` is
   `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
@@ -169,6 +203,13 @@ the invocation. Allocation failure remains
 Rust's process-level behavior inside the admitted public resource envelope.
 Preflight checks both retained covariance and temporary interval-certificate
 matrix byte shapes before the initial checkpoint.
+Robust-batch errors additionally distinguish covariance row/shape/finite/
+symmetry/noise-authority failures, certified non-PSD input, unresolved PSD
+certification, strict Cholesky failure, duplicate instrument identity, and
+invalid pathology metadata. Robust covariance certification and the delegated
+posterior update use the existing admitted core paths. The bounded Cholesky,
+whitening, and audit-framing wrapper has cancellation checkpoints but does not
+yet expose a separate typed invocation resource planner.
 
 ## Determinism class
 
@@ -178,6 +219,10 @@ permutation is canonicalized, so it does not change result bits or identity.
 Duplicate observations are retained.
 Changing the canonical schema or numerical algorithm requires a candidate
 identity version/domain bump.
+For robust batches, declaration order is semantic because it owns covariance
+rows. Reordering records requires the matching row/column permutation; v1 does
+not claim bit-identical Cholesky rounding or receipt identity across such
+equivalent permutations. Replay of the same ordered batch is deterministic.
 
 ## Cancellation behavior
 
@@ -192,6 +237,11 @@ The budgeted forms instead poll their child authority, which checks an absolute
 clock and the originating cancellation gate before consuming each poll. They
 do not publish typed output after a deadline, cancellation, resource, or
 scientific refusal.
+Robust construction polls before admission, at each Cholesky row, and through
+the reused PSD validator. Correlated whitening polls at each observation row;
+audit hashing polls at each record and matrix row and once before finalizing.
+Assimilation polls again before returning a result, so no posterior or audit is
+published after an observed cancellation.
 
 ## Unsafe boundary
 
@@ -221,12 +271,38 @@ affine budgeted diagonal/colored execution, and receipt integrity; and
 execution-mode, every budget field, every stream field, work, and poll identity
 binding.
 
+`tests/robust.rs` (bead `f85xj.12.4`, G0/G3/G4): exact replay of the existing
+diagonal update; missing-record exclusion and effective-DOF accounting;
+audited no-posterior refusals for censored, saturated, delayed, and all-missing
+batches; correlated-noise posterior difference from a naive diagonal update;
+posterior invariant revalidation; covariance PSD/noise-authority/identity
+refusals; pathology metadata validation; and pre-cancellation.
+
 ## No-claim boundaries
 
 - v1 is the LINEAR-GAUSSIAN assimilation with linear observation operators;
   full weak-constraint 4D-Var over a nonlinear forward model uses Proposal 1's
   CERTIFIED adjoints (adjoint-certs) and is the fuller deliverable — this crate
   is the Kalman/Gauss-Newton core.
+- Robust v1 does not implement nonlinear `h(x)`, Gauss-Newton iteration,
+  `fs-ad`/finite-difference Jacobians, step-size receipts, censored or clipped
+  likelihoods, temporal state augmentation for delayed sensors, robust
+  M-estimation, or sparse/shared-factor covariance beyond the dense cap.
+  Censored, saturated, and delayed records are typed audited refusals, not
+  silently Gaussianized data. A time constant is retained as metadata but is
+  not a delay correction.
+- The observation covariance gate certifies PSD using the crate's existing
+  bounded interval policy, then requires a successful binary64 Cholesky factor
+  for whitening. This is not a condition-number certificate, an exact
+  correlated-posterior proof, or authority for covariance/calibration
+  provenance. Singular PSD covariance is refused rather than pseudoinverted.
+- `effective_dof` is the count of scalar readings actually passed to the update;
+  it is not a statistical rank, residual degrees-of-freedom estimate, or
+  likelihood-complexity certificate.
+- The robust audit receipt is content-addressed replay evidence, not an
+  authenticated calibration, ledger admission, or experimental-validation
+  receipt. The wrapper's Cholesky/whitening/hash work has no typed child-budget
+  planner yet.
 - `Color::Estimated` is deliberate. Consuming calibrated measurements does not
   by itself prove model-form validity in a regime. Promotion to
   `Color::Validated` requires an external admission boundary that verifies

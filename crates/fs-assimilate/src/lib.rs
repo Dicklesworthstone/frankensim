@@ -28,6 +28,14 @@ pub use fs_evidence::{Color, ValidityDomain};
 use fs_exec::Cx;
 use fs_ivl::Interval;
 
+mod robust;
+
+pub use robust::{
+    BatchOutcome, CensorDirection, MAX_CORRELATED_OBSERVATIONS, ObservationAudit, ObservationBatch,
+    ObservationDisposition, PathologyKind, RobustAssimilation, RobustObservation,
+    assimilate_observation_batch,
+};
+
 const CANDIDATE_ID_DOMAIN: &str = "org.frankensim.fs-assimilate.candidate.v4";
 const CANDIDATE_ID_PREFIX: &str = "assimilation-candidate:v4:";
 const PSD_ADMISSION_POLICY_ID: &str = "exact-2x2-interval-schur:v1";
@@ -884,6 +892,74 @@ pub enum AssimError {
     },
     /// An aggregate operation requires at least one observation.
     EmptyObservations,
+    /// A robust observation batch declared a different covariance row count
+    /// than its number of numerically available observations.
+    ObservationCovarianceDimensionMismatch {
+        /// Number of available scalar observations.
+        observations: usize,
+        /// Number of covariance rows.
+        rows: usize,
+    },
+    /// A robust observation covariance row is ragged.
+    ObservationCovarianceRowDimensionMismatch {
+        /// Offending row.
+        row: usize,
+        /// Required column count.
+        expected: usize,
+        /// Actual column count.
+        actual: usize,
+    },
+    /// A robust observation covariance entry is NaN or infinite.
+    NonFiniteObservationCovariance {
+        /// Offending row.
+        row: usize,
+        /// Offending column.
+        column: usize,
+    },
+    /// A robust observation covariance pair is not exactly symmetric.
+    NonSymmetricObservationCovariance {
+        /// Row of the upper-triangular entry.
+        row: usize,
+        /// Column of the upper-triangular entry.
+        column: usize,
+    },
+    /// The declared observation covariance diagonal does not exactly match the
+    /// variance owned by the corresponding checked scalar observation.
+    ObservationCovarianceNoiseMismatch {
+        /// Available-observation row.
+        index: usize,
+    },
+    /// The bounded dense covariance did not pass the strict Cholesky gate.
+    ///
+    /// This is deliberately not reported as proof of indefiniteness: singular
+    /// positive-semidefinite and numerically unresolved matrices are refused by
+    /// the same fail-closed boundary.
+    ObservationCovarianceNotPositiveDefinite {
+        /// First unresolved or non-positive pivot.
+        pivot: usize,
+    },
+    /// The interval-backed covariance admission certified an indefinite
+    /// observation-noise matrix.
+    ObservationCovarianceNotPositiveSemidefinite,
+    /// The interval-backed covariance admission could not certify the
+    /// observation-noise matrix as positive semidefinite.
+    ObservationCovarianceCertificationUnresolved,
+    /// Two robust records reused one instrument identity, making covariance
+    /// row ownership ambiguous.
+    DuplicateObservationInstrument {
+        /// Reused instrument identity.
+        instrument: String,
+    },
+    /// A censoring, saturation, or delay parameter is NaN or infinite.
+    NonFinitePathologyParameter {
+        /// Stable parameter role.
+        parameter: &'static str,
+    },
+    /// A pathology parameter violates its declared ordering or sign.
+    InvalidPathologyParameter {
+        /// Stable parameter role.
+        parameter: &'static str,
+    },
     /// A regime bound is NaN or infinite.
     NonFiniteRegimeBounds,
     /// The regime lower bound exceeds its upper bound.
@@ -1015,6 +1091,51 @@ impl fmt::Display for AssimError {
                 write!(f, "invalid {field} identity: {reason}")
             }
             Self::EmptyObservations => write!(f, "at least one observation is required"),
+            Self::ObservationCovarianceDimensionMismatch { observations, rows } => write!(
+                f,
+                "robust batch has {observations} available observations but {rows} covariance rows"
+            ),
+            Self::ObservationCovarianceRowDimensionMismatch {
+                row,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "observation covariance row {row} has {actual} columns; expected {expected}"
+            ),
+            Self::NonFiniteObservationCovariance { row, column } => write!(
+                f,
+                "observation covariance entry ({row}, {column}) is non-finite"
+            ),
+            Self::NonSymmetricObservationCovariance { row, column } => write!(
+                f,
+                "observation covariance entries ({row}, {column}) and ({column}, {row}) differ"
+            ),
+            Self::ObservationCovarianceNoiseMismatch { index } => write!(
+                f,
+                "observation covariance diagonal {index} does not match its scalar observation noise"
+            ),
+            Self::ObservationCovarianceNotPositiveDefinite { pivot } => write!(
+                f,
+                "observation covariance failed the strict positive-definite gate at pivot {pivot}"
+            ),
+            Self::ObservationCovarianceNotPositiveSemidefinite => {
+                write!(f, "observation covariance is not positive semidefinite")
+            }
+            Self::ObservationCovarianceCertificationUnresolved => write!(
+                f,
+                "observation covariance semidefiniteness is unresolved by the bounded interval certificate"
+            ),
+            Self::DuplicateObservationInstrument { instrument } => write!(
+                f,
+                "robust observation instrument identity is duplicated: {instrument}"
+            ),
+            Self::NonFinitePathologyParameter { parameter } => {
+                write!(f, "robust observation {parameter} is non-finite")
+            }
+            Self::InvalidPathologyParameter { parameter } => {
+                write!(f, "robust observation {parameter} is invalid")
+            }
             Self::NonFiniteRegimeBounds => write!(f, "regime bounds must be finite"),
             Self::InvertedRegimeBounds => {
                 write!(f, "regime lower bound must not exceed its upper bound")
