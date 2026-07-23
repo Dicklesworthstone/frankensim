@@ -1779,6 +1779,7 @@ fn sr_016_numerics_tolerance_relabeling_and_scale_metamorphics() {
         SheafNumericsOutcome::Indeterminate(_)
     ));
 
+    // det-ok: fixed in-range 2^400 is exact binary64; only normalized overlap matters (4xnt)
     let unit_scale = 2.0f64.powi(400);
     let scaled = with_cx(|cx| {
         assess_hodge_decomposition_bounded(&path, &[unit_scale, unit_scale], 0.0, one_sweep, cx)

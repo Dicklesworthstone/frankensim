@@ -53,7 +53,7 @@ mod stable_product_tests {
 
     #[test]
     fn representable_residual_survives_finite_prefix_cancellation() {
-        let residual = 2.0f64.powi(-54);
+        let residual = fs_math::det::powi(2.0, -54);
         let values = [1.0, residual, -1.0];
         assert_eq!(1.0 + residual, 1.0, "fixture must exercise absorption");
         assert_eq!(

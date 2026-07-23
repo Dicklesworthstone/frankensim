@@ -18,7 +18,10 @@ struct UnitScaleExponent(i64);
 
 impl UnitScaleExponent {
     fn factor(self) -> f64 {
-        2.0_f64.powi(i32::try_from(self.0).expect("generated unit exponent fits i32"))
+        fs_math::det::powi(
+            2.0,
+            i32::try_from(self.0).expect("generated unit exponent fits i32"),
+        )
     }
 }
 

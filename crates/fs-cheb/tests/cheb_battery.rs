@@ -106,9 +106,12 @@ fn extreme_finite_domains_do_not_overflow_the_affine_map() {
     // Every naive prefix is finite, but (1 + 2^-54) rounds back to one before
     // the later -1 arrives. The exact-real integral is the representable
     // residual 2^-54 and must survive expansion summation.
-    let absorbed_residual = 2.0f64.powi(-54);
-    let finite_prefix_cancellation =
-        Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, -3.0 * 2.0f64.powi(-55), 0.0, 7.5]);
+    let absorbed_residual = fs_math::det::powi(2.0, -54);
+    let finite_prefix_cancellation = Cheb1::from_coeffs(
+        -1.0,
+        1.0,
+        vec![1.0, 0.0, -3.0 * fs_math::det::powi(2.0, -55), 0.0, 7.5],
+    );
     assert_eq!(
         finite_prefix_cancellation.integral().to_bits(),
         absorbed_residual.to_bits()

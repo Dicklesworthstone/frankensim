@@ -95,6 +95,7 @@ impl ConvexSphere {
         // additions cost a handful of ulps at the |c| + r scale. 2^-44
         // of that scale (~1e4 ulps) is a generous certified ceiling.
         let scale = center.x.abs().max(center.y.abs()).max(center.z.abs()) + radius;
+        // det-ok: fixed in-range 2^-44 is exact binary64 (4xnt)
         let slack = (scale * 2f64.powi(-44)).next_up();
         Ok(ConvexSphere {
             center,

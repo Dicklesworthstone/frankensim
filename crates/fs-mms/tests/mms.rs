@@ -15,7 +15,7 @@ fn ladder(hs: &[f64], errors: &[f64]) -> RefinementLadder {
 #[test]
 fn synthetic_power_law_ladders_recover_their_exact_order() {
     for p in [1.0f64, 1.5, 2.0, 3.0, 4.0] {
-        let hs: Vec<f64> = (0..5).map(|k| 0.5f64.powi(k)).collect();
+        let hs: Vec<f64> = (0..5).map(|k| fs_math::det::powi(0.5, k)).collect();
         let errors: Vec<f64> = hs.iter().map(|h| 3.7 * fs_math::det::pow(*h, p)).collect();
         let fit = fit_order(&ladder(&hs, &errors));
         assert!(
@@ -32,7 +32,7 @@ fn synthetic_power_law_ladders_recover_their_exact_order() {
 
 #[test]
 fn the_gate_passes_within_0_2_and_build_fails_beyond_it() {
-    let hs: Vec<f64> = (0..4).map(|k| 0.5f64.powi(k)).collect();
+    let hs: Vec<f64> = (0..4).map(|k| fs_math::det::powi(0.5, k)).collect();
     let inside: Vec<f64> = hs.iter().map(|h| fs_math::det::pow(*h, 1.85)).collect();
     let outside: Vec<f64> = hs.iter().map(|h| fs_math::det::pow(*h, 1.75)).collect();
     let gate = OrderGate { theoretical: 2.0 };
@@ -122,7 +122,7 @@ fn json_lines_escape_every_caller_controlled_string() {
 
 #[test]
 fn adjoint_ladders_get_the_identical_gate() {
-    let hs: Vec<f64> = (0..4).map(|k| 0.5f64.powi(k)).collect();
+    let hs: Vec<f64> = (0..4).map(|k| fs_math::det::powi(0.5, k)).collect();
     let dual_errors: Vec<f64> = hs
         .iter()
         .map(|h| 0.9 * fs_math::det::pow(*h, 3.92))

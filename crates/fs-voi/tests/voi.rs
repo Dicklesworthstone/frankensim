@@ -459,6 +459,7 @@ fn near_sqrt_max_uncertainties_stay_finite_end_to_end() {
 /// metamorphic determinism check across ~120 orders of magnitude.
 #[test]
 fn full_opportunity_loss_is_bitwise_power_of_two_scale_equivariant() {
+    // det-ok: fixed in-range 2^400 is exact binary64 and asserted bitwise (4xnt)
     let scale = 2.0f64.powi(400);
     let base = [
         design("a", 0.0, unc(0.5, 0.0, 0.0)),

@@ -555,7 +555,7 @@ fn verification_gate_is_invariant_to_paired_direction_step_rescaling() {
         &point,
         &gradient,
         &[direction],
-        2.0_f64.powi(-10),
+        fs_math::det::powi(2.0, -10),
         1e-12,
     );
     let scaled = verify_gradient(
@@ -563,7 +563,7 @@ fn verification_gate_is_invariant_to_paired_direction_step_rescaling() {
         &point,
         &gradient,
         &[scaled_direction],
-        2.0_f64.powi(-13),
+        fs_math::det::powi(2.0, -13),
         1e-12,
     );
 

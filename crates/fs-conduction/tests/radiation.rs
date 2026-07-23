@@ -113,7 +113,9 @@ fn linearized_robin_retains_card_and_measures_t4_discrepancy() {
         .expect("linearization");
     let point = model.evaluate(330.0).expect("in-domain evaluation");
     let expected_h = 4.0 * 0.8 * STEFAN_BOLTZMANN_W_M2_K4 * 320.0 * 320.0 * 320.0;
-    let expected_full = 0.8 * STEFAN_BOLTZMANN_W_M2_K4 * (330.0f64.powi(4) - 310.0f64.powi(4));
+    let expected_full = 0.8
+        * STEFAN_BOLTZMANN_W_M2_K4
+        * (fs_math::det::powi(330.0, 4) - fs_math::det::powi(310.0, 4));
     assert!((point.h_rad_w_m2k - expected_h).abs() <= f64::EPSILON * expected_h);
     assert!(
         (point.linearized_outward_flux_w_m2 - expected_h * 20.0).abs()
@@ -228,7 +230,8 @@ fn two_surface_gray_diffuse_radiosity_matches_closed_form_and_replays() {
             .expect("radiosity replay")
     });
     assert_eq!(first, second);
-    let expected_flux = STEFAN_BOLTZMANN_W_M2_K4 * (400.0f64.powi(4) - 300.0f64.powi(4))
+    let expected_flux = STEFAN_BOLTZMANN_W_M2_K4
+        * (fs_math::det::powi(400.0, 4) - fs_math::det::powi(300.0, 4))
         / (1.0 / 0.8 + 1.0 / 0.6 - 1.0);
     assert!((first.net_outward_flux_w_m2[0] - expected_flux).abs() <= 2.0e-13 * expected_flux);
     assert!((first.net_outward_flux_w_m2[1] + expected_flux).abs() <= 2.0e-13 * expected_flux);

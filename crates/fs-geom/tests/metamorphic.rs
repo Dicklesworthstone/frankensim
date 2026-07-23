@@ -58,7 +58,11 @@ struct RefinementPower(u32);
 
 impl RefinementPower {
     fn divisor(self) -> f64 {
-        2.0_f64.powi(i32::try_from(self.0).expect("refinement power fits i32"))
+        match self.0 {
+            1 => 2.0,
+            2 => 4.0,
+            _ => unreachable!("generated refinement power is exactly one or two"),
+        }
     }
 }
 

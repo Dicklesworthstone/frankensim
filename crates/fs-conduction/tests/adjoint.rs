@@ -158,7 +158,7 @@ const UNIT_K: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]
 /// value, while the exact L2 quadrature in `support` still integrates the
 /// squared error without a quadrature term.
 fn exact_dual(p: [f64; 3]) -> f64 {
-    p[2] - 0.25 * p[2].powi(4)
+    p[2] - 0.25 * fs_math::det::powi(p[2], 4)
 }
 
 fn dual_source(p: [f64; 3]) -> f64 {

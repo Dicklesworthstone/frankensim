@@ -429,7 +429,11 @@ fn g3_rhs_sign_and_power_of_two_scaling_preserve_cg_diagnostics() {
     assert_eq!(expected.termination, CgTermination::Converged);
     assert!(expected.relative_residual <= 1e-10, "{expected:?}");
 
-    for scale in [-1.0, 2.0_f64.powi(200), 2.0_f64.powi(-200)] {
+    for scale in [
+        -1.0,
+        fs_math::det::powi(2.0, 200),
+        fs_math::det::powi(2.0, -200),
+    ] {
         let transformed: Vec<f64> = base_rhs.iter().map(|value| value * scale).collect();
         let actual = bddc
             .solve_cg(&transformed, 1e-10, 200)

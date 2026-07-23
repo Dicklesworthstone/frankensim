@@ -184,6 +184,7 @@ fn boundary_outcome() -> CaseOutcome {
     let (sqrt_value, sqrt_grad) = gradient([0.0], |[x]| x.sqrt());
     let (asin_value, asin_grad) = gradient([1.0], |[x]| x.asin());
     let (acos_value, acos_grad) = gradient([-1.0], |[x]| x.acos());
+    // det-ok: Dual::powi dispatches its f64 lane through fs_math::det::powi (4xnt)
     let (powi_value, powi_grad) = gradient([1.0], |[x]| x.powi(i32::MIN));
     let results = [
         ("abs", "point=+0", "value", abs_value, 0.0),
@@ -267,8 +268,8 @@ fn reverse(_theta: f64) -> impl Fn(usize, &f64, (f64, f64)) -> (f64, f64) {
 }
 
 fn revolve_outcome() -> CaseOutcome {
-    let forward = forward(REVOLVE_THETA);
-    let reverse = reverse(REVOLVE_THETA);
+    let forward_step = forward(REVOLVE_THETA);
+    let reverse_step = reverse(REVOLVE_THETA);
     let budget = min_budget(REVOLVE_STEPS);
     if budget != REVOLVE_BUDGET {
         return CaseOutcome::fail(format!(
@@ -276,13 +277,19 @@ fn revolve_outcome() -> CaseOutcome {
         ))
         .with_evidence("crates/fs-ad/CONTRACT.md#public-types-and-semantics");
     }
-    let full = full_adjoint(&REVOLVE_X0, REVOLVE_STEPS, &forward, &reverse, (1.0, 0.0));
+    let full = full_adjoint(
+        &REVOLVE_X0,
+        REVOLVE_STEPS,
+        &forward_step,
+        &reverse_step,
+        (1.0, 0.0),
+    );
     let (checkpointed, stats) = checkpointed_adjoint(
         &REVOLVE_X0,
         REVOLVE_STEPS,
         budget,
-        &forward,
-        &reverse,
+        &forward_step,
+        &reverse_step,
         (1.0, 0.0),
     );
     let full_bits = [full.0.to_bits(), full.1.to_bits()];

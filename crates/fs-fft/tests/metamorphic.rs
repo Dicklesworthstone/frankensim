@@ -53,14 +53,14 @@ fn g3_forward_fft_is_equivariant_under_signal_rescaling() {
             max_relative: 1.0e-13,
         },
         |input: &Vec<(f64, f64)>, &exponent: &i64| {
-            let scale = 2.0f64.powi(exponent as i32);
+            let scale = fs_math::det::powi(2.0, exponent as i32);
             input
                 .iter()
                 .map(|&(re, im)| (re * scale, im * scale))
                 .collect()
         },
         |base: &Vec<C64>, transformed: &Vec<C64>, &exponent: &i64, tolerance| {
-            let scale = 2.0f64.powi(exponent as i32);
+            let scale = fs_math::det::powi(2.0, exponent as i32);
             let expected: Vec<C64> = base
                 .iter()
                 .map(|value| C64::new(value.re * scale, value.im * scale))

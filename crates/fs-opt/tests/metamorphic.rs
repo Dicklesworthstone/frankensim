@@ -49,7 +49,10 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
 }
 
 fn scale_for_exponent(exponent: i64) -> f64 {
-    2.0_f64.powi(i32::try_from(exponent).expect("generated exponent fits i32"))
+    fs_math::det::powi(
+        2.0,
+        i32::try_from(exponent).expect("generated exponent fits i32"),
+    )
 }
 
 #[test]
@@ -142,7 +145,11 @@ fn g3_descend_fn_is_equivariant_under_power_of_two_unit_rescaling() {
                 };
                 let exponent = exponents[(stream.next_u64() % exponents.len() as u64) as usize];
                 RelationCase::new(
-                    (target + sign * magnitude, target, 2.0_f64.powi(-10)),
+                    (
+                        target + sign * magnitude,
+                        target,
+                        fs_math::det::powi(2.0, -10),
+                    ),
                     exponent,
                 )
             },

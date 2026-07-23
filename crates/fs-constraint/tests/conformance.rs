@@ -1690,7 +1690,7 @@ fn interval_eval_bounds_shared_dag_and_powi_work() {
     let problem = b.finish();
 
     let enclosure = interval_eval(&problem, root, &[]).expect("bounded interval work");
-    let expected = 2.0f64.powi(40) + 1.0;
+    let expected = (1_u64 << 40) as f64 + 1.0;
     assert_eq!(enclosure.lo.to_bits(), expected.to_bits());
     assert_eq!(enclosure.hi.to_bits(), expected.to_bits());
 }

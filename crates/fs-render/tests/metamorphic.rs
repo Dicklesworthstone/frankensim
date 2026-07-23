@@ -17,11 +17,11 @@ fn g3_lambertian_furnace_tracks_radiance_unit_rescaling() {
             max_relative: 2.0e-12,
         },
         |&(albedo, incident): &(f64, f64), &exponent: &i64| {
-            let scale = 2.0f64.powi(exponent as i32);
+            let scale = fs_math::det::powi(2.0, exponent as i32);
             (albedo, incident * scale)
         },
         |&base: &f64, &transformed: &f64, &exponent: &i64, tolerance| {
-            let scale = 2.0f64.powi(exponent as i32);
+            let scale = fs_math::det::powi(2.0, exponent as i32);
             tolerance.evaluate_scalar(base * scale, transformed)
         },
     );

@@ -1924,7 +1924,7 @@ mod tests {
 
     #[test]
     fn nsga3_normalization_condition_gate_refuses_nonzero_pivots() {
-        let delta = 2.0f64.powi(-26);
+        let delta = fs_math::det::powi(2.0, -26);
         let matrix = vec![
             vec![1.0, 0.0, 0.0],
             vec![0.0, 1.0, 0.0],
@@ -1952,7 +1952,7 @@ mod tests {
         ];
         let accepted = nsga3_solve_hyperplane(&matrix).expect("identity solve is exact");
         let mut corrupted = accepted.clone();
-        corrupted[1] += 2.0f64.powi(-30);
+        corrupted[1] += fs_math::det::powi(2.0, -30);
         assert_eq!(
             nsga3_admit_hyperplane_solution(&matrix, corrupted),
             None,
