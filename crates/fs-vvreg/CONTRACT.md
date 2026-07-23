@@ -101,7 +101,7 @@ body.
   currently available access, a nonzero derived-rule hash, and an explicit
   read/derived/reproduced state. Historical editions additionally require
   `RuleUsePolicy::HistoricalReplay`.
-- `corpus::DatasetDraft` / `admit_dataset` / `CorpusDataset` — the version-1
+- `corpus::DatasetDraft` / `admit_dataset` / `CorpusDataset` — the version-2
   validation-dataset boundary. Fifteen top-level fields are mandatory and
   missing fields return `CorpusError::MissingField { field: DatasetField }`:
   id, title, immutable earliest-retained payload, sensor roster, geometry, acquisition
@@ -115,21 +115,46 @@ body.
   cap use at `Estimated`; they are never replaced with invented metadata.
   Measurement uncertainty is bounded, covariance-diagonal, or explicit
   `Unstated`; covariance carries squared `fs_qty::Dims`.
-- `corpus::CorpusRegistry::query` — seeded-registry-only evidence query. The
-  request names the exact declared training/calibration/validation partition
-  and supplies every context coordinate with matching dimensions and an
-  in-range finite value. Missing, duplicate, unknown, mismatched, and
-  out-of-range coordinates are distinct typed refusals. Success returns
+- `partition::PartitionLedger` / `CorpusRegistry::query` — the
+  seeded-registry-only, purpose-typed evidence boundary. The request names
+  calibration, validation, or blind-evaluation purpose independently of the
+  governed partition and supplies every context coordinate with matching
+  dimensions and an in-range finite value. Training and calibration partitions
+  both admit only calibration use. Validation admits only validation use, and
+  blind holdout additionally requires a nonzero preregistration plus blind-
+  manifest release bound to the current generation. Missing, duplicate,
+  unknown, mismatched, and out-of-range coordinates remain distinct typed
+  refusals. Success returns
   `fs_evidence::Evidence<&CorpusDataset>` with a numerical `NoClaim`, unknown
   statistical width, unbounded model-form discrepancy, and the declared
-  context box copied into model validity; the
+  context box copied into model validity, wrapped with a sealed access receipt
+  binding dataset content, generation, partition, purpose, exact canonical
+  query context, preceding repartition event, and blind release; the
   dataset's separately exposed physical claim cap is `Validated` only for C/D/E
   data with original raw retention, stated uncertainty, complete instrument,
   calibration, placement, geometry, environment, acquisition-date, license,
   replayable lineage, and pinned-envelope authority. Every explicit gap demotes
   the cap to `Estimated`.
+- `partition::{RepartitionReceipt,BlindReleaseReceipt}` — canonical versioned
+  state-transition records. Repartition increments a per-dataset generation,
+  chains the previous event identity, clears any blind release, and explicitly
+  records whether an evaluation-to-calibration move stales earlier validation
+  claims. A blind release is idempotent only for identical inputs; conflicting
+  replacements refuse.
+- `partition::PartitionLedger::register_model` / `ModelTaint` — the only public
+  model-taint constructor. It requires fresh calibration-purpose access
+  receipts and computes a bounded, order-independent transitive closure over
+  direct datasets and parent model artifacts. Each source retains a
+  deterministic artifact path to the direct consumer.
+- `partition::PartitionLedger::validate_model` / `TaintValidationReceipt` —
+  requires fresh validation or released-blind accesses and refuses any exact
+  dataset-content intersection with the model's full calibration closure. A
+  success receipt binds the exact model-taint identity and every distinct
+  access identity; it is a disjointness record, not scientific authority.
 - `corpus::CorpusDataset::{encode,decode,digest}` — bounded canonical `FSVVCRP`
-  version-1 binary round trip and domain-separated content identity. Decode
+  version-2 binary round trip and domain-separated content identity. Version 2
+  adds the `BlindHoldout` partition tag and deliberately changes the dataset
+  and registry identity domains. Decode
   validates, canonicalizes, and byte-compares; noncanonical, future-version,
   truncated, trailing, invalid-tag, and invalid-UTF-8 inputs refuse.
 - `corpus::CorpusRegistry::audit` / binary `corpus-audit` — deterministic
@@ -235,6 +260,22 @@ body.
   placement, environment, acquisition-date, license, replay, and scalar-
   envelope authority as explicit gaps. Every row remains physically
   `Estimated`, and every evidence query remains numerically `NoClaim`.
+- PURPOSE BEFORE DATA: the raw declared-partition query is crate-private. Public
+  callers must cross `PartitionLedger` with a semantic purpose; repeating the
+  stored partition name cannot bypass purpose checks. Blind data cannot be
+  queried through ordinary validation, and every repartition stales all older
+  access receipts by generation.
+- CALIBRATION TAINT IS TRANSITIVE AND CONSERVATIVE: model registration accepts
+  only fresh calibration-purpose accesses. Training data enter the same taint
+  class as calibration data. Validation compares dataset content identities,
+  so two contexts from the same dataset are treated as overlapping rather than
+  laundering reuse through a coordinate change. Parent paths are complete up
+  to the explicit depth/item caps; cycles and empty lineage refuse.
+- RECEIPT IDENTITY IS REPLAY-COMPLETE FOR THIS LAYER: access identity binds the
+  exact query context after sorting axes by name and encoding SI values as
+  IEEE-754 bits plus signed dimension exponents. Validation retains every
+  distinct access identity, including multiple coordinates from one held-out
+  dataset. Caller ordering cannot change access, taint, or validation identity.
 
 ## Error model
 
@@ -253,7 +294,11 @@ exact edition and expected/observed hashes where relevant. No partially
 admitted manifest or provenance object is published on error.
 
 Corpus admission and decoding return `CorpusError`; query failures return
-`CorpusQueryRefusal`. Both preserve the exact failing field or query boundary.
+`CorpusQueryRefusal` wrapped by `PartitionRefusal`. Purpose, freshness,
+repartition, blind-release, lineage, taint-cycle, resource, and taint-
+intersection failures are direct `PartitionRefusal` variants and retain the
+dataset, generation, attempted purpose, or model path needed to diagnose the
+boundary. Both preserve the exact failing field or query boundary.
 No partially admitted dataset or successful evidence wrapper is returned on a
 refusal.
 
@@ -276,6 +321,13 @@ The versioned binary wire length-frames all strings and collections, stores
 floating-point values as exact IEEE-754 bits, and is byte-stable across runs,
 thread counts, and ISAs. Corpus registries sort by dataset id before hashing and
 audit rendering.
+
+Partition state uses sorted dataset maps, monotonically increasing integer
+generations, fixed little-endian framing, domain-separated identities, and
+canonical sets/maps for query contexts, taint sources, and validation accesses.
+Equivalent caller order therefore cannot move a receipt identity. Exact float
+bits are identity-bearing; numerically equal but bit-distinct coordinates such
+as signed zero remain distinct provenance.
 
 ## Cancellation behavior
 
@@ -310,6 +362,12 @@ and 16 MiB canonical bytes per dataset. Registry construction is
 `O(n log n)`; dataset admission sorts bounded collections; query is one binary
 dataset lookup plus linear bounded context matching; audit is linear in
 datasets plus admission cost.
+
+Partition access, repartition, release, registration, and validation are also
+synchronous and non-preemptible. Each bounded operation admits at most 4,096
+direct items; taint explanations admit depth at most 256; justifications admit
+at most 4,096 UTF-8 bytes. Transitive closure and validation use ordered maps or
+sets and are `O(n log n)` within those caps.
 
 ## Unsafe boundary
 
@@ -363,6 +421,14 @@ invariance for registry identity and explicit authority-gap demotion; exact
 partition plus missing/unknown/duplicate/dimension/out-of-range context
 refusals; retained synthetic and Martin-Moyce fixture hash binding; and
 deterministic audit rendering with warn-level optional and claim-authority gaps.
+
+`tests/partition.rs`: G0 purpose/partition matrix, direct and transitive data-
+laundering refusals with exact model paths, stale access refusal during model
+registration and validation, blind release gating, and wrong-purpose model
+input refusal; G3 order-independent repartition/taint identities, query-context
+identity sensitivity, retention of multiple held-out accesses from one dataset,
+and disjoint held-out success constrained to a non-certifying taint-check
+receipt.
 
 `tests/thermal_level_a.rs`: G0 manifest/catalog identity and family coverage;
 independent recomputation of all 12 closed-form scalar values; exact retained-
@@ -432,13 +498,27 @@ and targets, not thermal-kernel convergence.
   solver result, or establish that an acceptance envelope is scientifically
   appropriate.
 - A corpus query proves only that the seeded row was revalidated and that the
-  caller requested its exact partition inside its declared context. The
+  caller requested an admitted purpose inside its declared context under one
+  captured in-memory partition generation. The
   returned `Evidence<&CorpusDataset>` deliberately has numerical `NoClaim` and
   cannot be certified. Its statistical and model-form components are likewise
   unknown/unbounded rather than silently absent, while model validity retains
   the dataset context box for conservative downstream intersection. The
   dataset-level color is a maximum support cap, not a minted `Color` or a
   validated prediction.
+- Partition/repartition/blind-release/access/model-taint/validation receipts
+  are exact canonical records intended for HELM/fs-ledger persistence, but this
+  UTIL crate retains them only in memory and does not prove durable storage,
+  authentication, authorization, secrecy of blind bytes, or crash recovery.
+  The nonzero preregistration and manifest hashes are caller-supplied bindings,
+  not proof that either artifact exists, predates model freeze, was independently
+  witnessed, or was honestly concealed. Full blind-protocol orchestration and
+  adversarial end-to-end audit logging remain downstream work.
+- A clean taint intersection proves only that the exact registered dataset
+  identities are disjoint. It cannot detect unregistered copies, transformed
+  leaks, common upstream source material, human prior exposure, fabricated
+  corpus metadata, or semantic dependence. It never upgrades numerical,
+  statistical, physical, or model evidence color.
 - The seed CHT row is synthetic Level B and therefore physically `Estimated`.
   Its CSV is an authored tabulation of a hard-coded query, not raw sensor data;
   the stored `1.0 K` value is an acceptance tolerance, not measurement

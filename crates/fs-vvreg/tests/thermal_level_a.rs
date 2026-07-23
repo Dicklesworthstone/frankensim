@@ -4,9 +4,8 @@ use std::collections::BTreeSet;
 
 use fs_evidence::{ColorRank, NumericalKind};
 use fs_qty::QtyAny;
-use fs_vvreg::corpus::{
-    ContextValue, CorpusEnvelope, DatasetPartition, EvidenceLevel, PayloadRetention, corpus,
-};
+use fs_vvreg::corpus::{ContextValue, CorpusEnvelope, EvidenceLevel, PayloadRetention, corpus};
+use fs_vvreg::partition::{DatasetPurpose, PartitionLedger};
 use fs_vvreg::thermal_level_a::{
     ThermalLevelAAcceptance, ThermalLevelAFamily, ThermalLevelAKind, thermal_level_a_cases,
 };
@@ -147,6 +146,7 @@ fn retained_manifest_rows_match_the_typed_catalog_exactly() {
 #[test]
 fn seeded_registry_binds_every_reference_but_returns_no_solver_claim() {
     let manifest_hash = fs_blake3::hash_bytes(MANIFEST);
+    let partitions = PartitionLedger::capture(corpus());
     for case in thermal_level_a_cases() {
         let dataset = corpus().dataset(case.id).expect("seeded Level-A row");
         assert_eq!(dataset.evidence_level(), EvidenceLevel::Analytic);
@@ -171,7 +171,7 @@ fn seeded_registry_binds_every_reference_but_returns_no_solver_claim() {
             })
             .collect::<Vec<_>>();
         let evidence = corpus()
-            .query(case.id, DatasetPartition::Validation, &context)
+            .query(&partitions, case.id, DatasetPurpose::Validation, &context)
             .expect("exact Level-A context admits");
         assert_eq!(evidence.numerical.kind, NumericalKind::NoClaim);
         assert!(evidence.statistical.rel_width(1.0).is_infinite());

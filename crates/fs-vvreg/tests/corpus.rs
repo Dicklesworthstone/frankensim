@@ -11,6 +11,7 @@ use fs_vvreg::corpus::{
     PreprocessingLineage, PreprocessingStep, RedistributionPolicy, RetentionClass, RetentionPolicy,
     SensorPlacement, SensorRecord, admit_dataset, corpus,
 };
+use fs_vvreg::partition::{DatasetPurpose, PartitionLedger, PartitionRefusal};
 use fs_vvreg::thermal_level_a::thermal_level_a_cases;
 
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
@@ -398,17 +399,21 @@ fn caller_registry_is_deterministic_but_has_no_query_authority() {
     let forward = CorpusRegistry::build(vec![a.clone(), b.clone()]).unwrap();
     let reverse = CorpusRegistry::build(vec![b, a]).unwrap();
     assert_eq!(forward.digest(), reverse.digest());
-    assert_eq!(
+    let partitions = PartitionLedger::capture(&forward);
+    assert!(matches!(
         forward.query(
+            &partitions,
             "dataset-a",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &[ContextValue {
                 name: "ambient_temperature".to_string(),
                 value: QtyAny::new(300.0, TEMPERATURE),
             }],
         ),
-        Err(CorpusQueryRefusal::UnauthoritativeRegistry)
-    );
+        Err(PartitionRefusal::Corpus(
+            CorpusQueryRefusal::UnauthoritativeRegistry
+        ))
+    ));
 }
 
 #[test]
@@ -417,10 +422,12 @@ fn seeded_query_requires_exact_partition_and_complete_in_domain_context() {
         name: "reference_cost_work_units".to_string(),
         value: QtyAny::dimensionless(250.0),
     }];
+    let partitions = PartitionLedger::capture(corpus());
     let evidence = corpus()
         .query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &context,
         )
         .unwrap();
@@ -435,42 +442,49 @@ fn seeded_query_requires_exact_partition_and_complete_in_domain_context() {
     );
     assert!(evidence.model.discrepancy_rel.is_infinite());
 
-    assert_eq!(
+    assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Training,
+            DatasetPurpose::Calibration,
             &context,
         ),
-        Err(CorpusQueryRefusal::PartitionMismatch {
+        Err(PartitionRefusal::PurposeMismatch {
+            dataset_id,
             declared: DatasetPartition::Validation,
-            requested: DatasetPartition::Training,
-        })
-    );
-    assert_eq!(
+            attempted: DatasetPurpose::Calibration,
+        }) if dataset_id == "fs-benchmark-cht-query-v1"
+    ));
+    assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &[],
         ),
-        Err(CorpusQueryRefusal::MissingContext {
-            name: "reference_cost_work_units".to_string(),
-        })
-    );
+        Err(PartitionRefusal::Corpus(CorpusQueryRefusal::MissingContext {
+            name,
+        })) if name == "reference_cost_work_units"
+    ));
 }
 
 #[test]
 fn context_refusals_distinguish_range_dimension_unknown_and_duplicate_errors() {
+    let partitions = PartitionLedger::capture(corpus());
     let out_of_range = [ContextValue {
         name: "reference_cost_work_units".to_string(),
         value: QtyAny::dimensionless(500.0),
     }];
     assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &out_of_range,
         ),
-        Err(CorpusQueryRefusal::OutOfContext { .. })
+        Err(PartitionRefusal::Corpus(
+            CorpusQueryRefusal::OutOfContext { .. }
+        ))
     ));
 
     let wrong_dims = [ContextValue {
@@ -479,27 +493,31 @@ fn context_refusals_distinguish_range_dimension_unknown_and_duplicate_errors() {
     }];
     assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &wrong_dims,
         ),
-        Err(CorpusQueryRefusal::ContextDimensionMismatch { .. })
+        Err(PartitionRefusal::Corpus(
+            CorpusQueryRefusal::ContextDimensionMismatch { .. }
+        ))
     ));
 
     let unknown = [ContextValue {
         name: "wind_speed".to_string(),
         value: QtyAny::new(0.0, Dims([1, 0, -1, 0, 0, 0])),
     }];
-    assert_eq!(
+    assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &unknown,
         ),
-        Err(CorpusQueryRefusal::UnknownContext {
-            name: "wind_speed".to_string(),
-        })
-    );
+        Err(PartitionRefusal::Corpus(CorpusQueryRefusal::UnknownContext {
+            name,
+        })) if name == "wind_speed"
+    ));
 
     let duplicate = [
         ContextValue {
@@ -511,16 +529,17 @@ fn context_refusals_distinguish_range_dimension_unknown_and_duplicate_errors() {
             value: QtyAny::dimensionless(250.0),
         },
     ];
-    assert_eq!(
+    assert!(matches!(
         corpus().query(
+            &partitions,
             "fs-benchmark-cht-query-v1",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &duplicate,
         ),
-        Err(CorpusQueryRefusal::DuplicateContext {
-            name: "reference_cost_work_units".to_string(),
-        })
-    );
+        Err(PartitionRefusal::Corpus(CorpusQueryRefusal::DuplicateContext {
+            name,
+        })) if name == "reference_cost_work_units"
+    ));
 }
 
 #[test]
@@ -554,8 +573,9 @@ fn martin_moyce_is_retained_without_inventing_missing_authority() {
 
     let evidence = corpus()
         .query(
+            &PartitionLedger::capture(corpus()),
             "martin-moyce-1952-square-column",
-            DatasetPartition::Validation,
+            DatasetPurpose::Validation,
             &[ContextValue {
                 name: "t_star".to_string(),
                 value: QtyAny::dimensionless(1.0),

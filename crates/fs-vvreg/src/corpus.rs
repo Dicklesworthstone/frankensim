@@ -23,7 +23,7 @@ use crate::thermal_level_a::{
 };
 
 /// Current canonical corpus wire and identity schema.
-pub const CORPUS_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SCHEMA_VERSION: u32 = 2;
 /// Maximum admitted datasets in one caller-built registry.
 pub const MAX_CORPUS_DATASETS: usize = 4_096;
 /// Maximum sensors on one dataset.
@@ -35,8 +35,8 @@ pub const MAX_CORPUS_TEXT_BYTES: usize = 4_096;
 /// Maximum encoded bytes for one dataset.
 pub const MAX_DATASET_CANONICAL_BYTES: usize = 16 * 1024 * 1024;
 
-const DATASET_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-dataset.v1";
-const REGISTRY_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-registry.v1";
+const DATASET_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-dataset.v2";
+const REGISTRY_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-registry.v2";
 const MAGIC: &[u8; 8] = b"FSVVCRP\0";
 const RAW_CHT_FIXTURE: &[u8] =
     include_bytes!("../../../data/vv-corpus/fs-benchmark-cht-query-v1/raw-sensors.csv");
@@ -354,7 +354,7 @@ pub struct EnvironmentCondition {
     pub uncertainty: QtyAny,
 }
 
-/// Declared training/calibration/validation partition.
+/// Declared training/calibration/validation/blind-holdout partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DatasetPartition {
     /// Data available to fitting/training procedures.
@@ -363,6 +363,9 @@ pub enum DatasetPartition {
     Calibration,
     /// Data reserved for validation.
     Validation,
+    /// Preregistered data sealed from ordinary validation until an explicit
+    /// blind-release receipt exists.
+    BlindHoldout,
 }
 
 impl DatasetPartition {
@@ -373,6 +376,7 @@ impl DatasetPartition {
             Self::Training => "training",
             Self::Calibration => "calibration",
             Self::Validation => "validation",
+            Self::BlindHoldout => "blind-holdout",
         }
     }
 }
@@ -945,7 +949,7 @@ impl CorpusRegistry {
 
     /// Query one dataset under an exact partition and complete context.
     /// The returned [`Evidence`] is intentionally non-certifying.
-    pub fn query<'a>(
+    pub(crate) fn query_declared_partition<'a>(
         &'a self,
         id: &str,
         partition: DatasetPartition,
@@ -2416,6 +2420,7 @@ const fn partition_tag(partition: DatasetPartition) -> u8 {
         DatasetPartition::Training => 1,
         DatasetPartition::Calibration => 2,
         DatasetPartition::Validation => 3,
+        DatasetPartition::BlindHoldout => 4,
     }
 }
 
@@ -2424,6 +2429,7 @@ fn parse_partition(tag: u8) -> Result<DatasetPartition, CorpusError> {
         1 => Ok(DatasetPartition::Training),
         2 => Ok(DatasetPartition::Calibration),
         3 => Ok(DatasetPartition::Validation),
+        4 => Ok(DatasetPartition::BlindHoldout),
         tag => Err(CorpusError::InvalidTag {
             kind: "dataset partition",
             tag,

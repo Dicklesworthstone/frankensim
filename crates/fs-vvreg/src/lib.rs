@@ -37,6 +37,10 @@ mod seed;
 /// and context-of-use queries.
 pub mod corpus;
 
+/// Purpose-typed corpus access, transitive calibration taint, and versioned
+/// repartition receipts.
+pub mod partition;
+
 /// Reference-only Level-A thermal analytic values and G1 order targets.
 pub mod thermal_level_a;
 
