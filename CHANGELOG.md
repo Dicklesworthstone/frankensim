@@ -69,6 +69,18 @@ workstream.
   — add the capability-maturity registry and governed promotion events that
   supply the README's current evidence boundary.
 
+### Post-checkpoint documentation-fact reconciliation
+
+- Reconciled the portable documentation-fact registry with 16 integration-test
+  files that were already tracked by Git but absent from
+  [`doc-facts-inventory.json`](doc-facts-inventory.json).
+- Updated the README badge and generated-facts table from 522 to 538 tracked
+  integration-test files. The count remains an inventory fact, not a claim that
+  every test currently passes.
+- Kept the crate and contract facts unchanged at 140 native workspace crates,
+  141 total `fs-*` crate directories including standalone `fs-wasm`, and 141
+  contracts; this slice does not promote any capability maturity level.
+
 ### Post-checkpoint validation-corpus authority slice
 
 - Added a versioned, canonical `fs-vvreg` corpus schema covering retained

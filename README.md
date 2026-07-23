@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-140%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-141%20of%20141%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-522%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-538%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -36,7 +36,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
 | Tracked `fs-*` crate directories | 141 |
 | Tracked `CONTRACT.md` files | 141 of 141 |
-| Tracked crate integration-test files | 522 |
+| Tracked crate integration-test files | 538 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=13`, `L2=18`, `L3=27`, `L4=32`, `L5=4`, `L6=25` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
