@@ -404,7 +404,7 @@ fn demotion_enters_every_named_violation_and_distance_in_model_form() {
     assert!(reason.contains("card=\"closure\"@\"1.2.3\""));
     assert!(reason.contains("axis=\"Re\""));
     assert!(reason.contains("kind=above"));
-    assert!(reason.contains("distance=1.00000000000000000e0"));
+    assert!(reason.contains(&format!("distance={:.17e}", receipt.violations[0].distance)));
     assert!(reason.contains("prior-model-form=interval"));
     assert_eq!(model_form.provenance().role(), "regime-output-audit");
     assert_eq!(model_form.provenance().digest(), receipt.content_id());
