@@ -39,6 +39,26 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   `Evidence<Soup>` (exact numerics, receipt-chained provenance) plus the
   `trust: promoted` receipt JSON, or a `PromotionRefusal` with blocking
   defects, ACTIONABLE fixes, and a `trust: refused` receipt.
+- **Persistent surface assignment** (`selection` module, bead
+  `f85xj.6.3`): `resolve_mesh_assignments` consumes an already promoted
+  finite triangle soup, a caller-supplied source-artifact identity hook and
+  length-unit ID, optional importer/adapter named groups, ordered persistent
+  subject tokens, explicit resource limits, and `Cx`. Named-group,
+  half-space, axis-aligned-box, finite-cylinder, and nearest-to-datum
+  selectors resolve without storing fragile mesh ordinals in the project.
+  Geometric predicates require every triangle vertex to qualify, so simple
+  facet subdivision cannot change a selection merely by moving a centroid.
+  An explicit-face-set escape hatch exists only with
+  `fragility_acknowledged=true`. Empty and unintended-overlap selections
+  refuse with fixes. Success reports sorted unique face ordinals, surface
+  area, bounds, and an enclosed volume only for a closed consistently
+  oriented selected boundary. Its success-only receipt binds the exact-bit
+  soup, named groups, requests, selector semantics, published faces, source
+  hook, and unit ID; canonical JSON is rendered from the complete
+  `AssignmentReport`, so a caller cannot pair a receipt with different
+  assignments. L2 treats persistent tokens and the source hook as opaque: the
+  L6 project adapter derives/checks `fs-scenario::EntityId`s and upgrades the
+  source hook rather than introducing an upward L2 dependency.
 - **Exports** (`export` + format modules): binary STL / OBJ / ASCII PLY
   (deterministic; OBJ and PLY carry f64 shortest-round-trip text, exact
   on re-import); 3MF (minimal OPC ZIP with STORED entries, fixed
@@ -285,6 +305,16 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     bounded write-parse-decode replay returns bit-identical positions and exact
     triangle order. Source and output semantic fingerprints remain distinct
     because instance-ID normalization is an explicit transformation.
+20. **Assignment is total over admitted finite tessellations**: source vertices
+    and faces, named-group face ordinals, selector parameters, labels, request
+    uniqueness, aggregate work, and publication storage are checked before a
+    success receipt escapes. Geometric selectors use all-vertex containment;
+    named and explicit lists must be unique and in range; an overlap is legal
+    only when every participating assignment opts in. Retessellation may move
+    local soup/assignment fingerprints and face counts while preserving the
+    persistent subject and geometric statistics. A volume is published only
+    when every selected undirected edge occurs exactly twice with opposite
+    orientations.
 
 ## Error model
 
@@ -314,6 +344,12 @@ retains the successful decoder receipt and selected-root provenance.
 `StepFacetedExportRefusal` separately names source admission, checked
 construction/allocation bounds, cancellation, nested syntax write/parse,
 nested semantic replay, and first exact-geometry replay mismatch.
+`AssignmentRefusal` always carries a stable code, diagnosis, and non-empty fix.
+It distinguishes malformed soup/selector/label inputs, unknown or malformed
+named groups, unacknowledged fragile ordinals, empty selections, unintended
+overlap, resource/allocation refusal, non-deterministic execution, numeric
+overflow, and cancellation. No partial `AssignmentReport` or
+`AssignmentReceipt` is returned on failure.
 
 ## Determinism class
 
@@ -337,6 +373,12 @@ Strict faceted re-emission uses dense IDs and source decoder order, fixed header
 fields plus exact caller metadata, and deterministic round-trip decimal
 spelling. Identical sealed source, metadata, and limits produce identical bytes
 and nested receipts on one target.
+Mesh assignment sorts every selected face list, validates group names through a
+canonical name index, visits requests in declared order, and fingerprints exact
+floating-point bits and face ordinals with a versioned local FNV stream.
+Identical soup, groups, requests, limits, and caller hooks produce identical
+assignments and receipt JSON on one target. These 64-bit roots are replay aids,
+not collision-resistant authority.
 
 ## Cancellation behavior
 
@@ -373,6 +415,13 @@ faces during owned graph construction, and around the bounded syntax writer,
 parser, and semantic decoder. The syntax subcalls have no internal `Cx`, so the
 re-emitter makes no sub-call latency claim inside those separately capped
 operations.
+Mesh assignment requires deterministic `Cx`, polls at entry and publication and
+at most every 4096 vertices, faces, named groups, requests, predicate tests,
+distance evaluations, statistics rows, overlap records, and
+source/group/request/selector/output-fingerprint records.
+Cancellation atomically returns `mesh-assignment-cancelled`; it publishes no
+assignment or success receipt. Bounded standard-library sorts and floating-point
+square roots have no internal poll.
 
 ## Unsafe boundary
 
@@ -456,6 +505,16 @@ profile binding; byte-identical repeated export; canonical apostrophe escaping;
 syntax-instance and semantic-vertex bound refusals; invalid metadata refusal;
 plane-semantic-loss refusal; and pre-requested cancellation.
 
+`tests/selection.rs` (G0/G3/G4): named-group, half-space, box, finite-cylinder,
+nearest-datum, and acknowledged-explicit selectors; exact area/bounds and
+closed-boundary volume statistics; one-line receipt/no-claim rendering;
+translation and facet-subdivision metamorphisms that preserve persistent
+subject resolution and area while moving source provenance; intended and
+unintended overlap; empty-selection and fragility-acknowledgement refusals;
+derived-threshold overflow and non-normalizable-axis refusals; explicit
+publication-cap admission; pre-requested cancellation; and exact predicate-work
+admission.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -512,6 +571,13 @@ import identically in both ASCII and binary (conformance-tested).
 - **Receipts hash with FNV-1a**; HELM upgrades to the BLAKE3-class
   content address when writing the `imports` row (same field, stated in
   the receipt schema).
+- **Assignment classifies only the supplied finite tessellation**. Named groups
+  are trusted only as caller-supplied importer/adapter mappings; geometric
+  predicates establish no between-facet or continuum coverage; area and
+  closed-boundary volume are deterministic sanity statistics, not topology,
+  self-intersection, CAD-semantic, or physical-sameness certificates.
+  Persistent subject and source-artifact identities are retained as opaque
+  hooks and are not authenticated or derived in L2.
 - **Catalog operation promotion is still incomplete**: the sealed schema,
   duplicate-header gate, shared projection envelope, and bounded CSV/JSON
   syntax paths remove the known unchecked work/payload dimensions. The

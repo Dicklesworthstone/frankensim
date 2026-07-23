@@ -16,6 +16,7 @@ pub mod export;
 pub mod obj;
 pub mod ply;
 pub mod quarantine;
+pub mod selection;
 pub mod step;
 pub mod step_faceted;
 pub mod step_faceted_export;
@@ -32,6 +33,11 @@ pub use catalog::{
 };
 pub use export::{export_3mf, export_glb, export_vtk};
 pub use quarantine::{ImportDefect, ImportReceipt, PromotionRefusal, Quarantined, promote};
+pub use selection::{
+    AssignmentLimits, AssignmentReceipt, AssignmentRefusal, AssignmentReport, AssignmentRequest,
+    AssignmentStats, HalfSpaceSide, MESH_ASSIGNMENT_POLL_STRIDE, MESH_ASSIGNMENT_SEMANTICS_VERSION,
+    MeshSelector, NamedFaceGroup, ResolvedAssignment, resolve_mesh_assignments,
+};
 pub use step::{
     ParsedStep, STEP_SYNTAX_VERSION, StepDocument, StepEntity, StepHeader, StepInstance,
     StepLimits, StepProfileHint, StepStructureReceipt, StepValue, parse_step,
