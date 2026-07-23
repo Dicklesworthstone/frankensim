@@ -286,6 +286,40 @@ workstream.
   radiation-dominated retained corpus case, or registered maturity promotion is
   claimed by this rung.
 
+### Post-checkpoint Level-A combined anisotropic-nonlinear MMS binding
+
+- Bound `thermal-a-mms-p1-anisotropic-nonlinear` to an executing P1 L2
+  refinement ladder rather than treating the existing constant-anisotropic and
+  isotropic-`k(T)` ladders as a substitute for the combined target. The new
+  fixture uses a rotated orthotropic frame, three distinct linear principal
+  conductivity laws, and the full manufactured chain rule
+  `-div(K(T) grad(T)) = -(K(T):H(T) + grad(T)^T K'(T) grad(T))`.
+- The fixture explicitly checks that the tensor has an off-diagonal component,
+  that multiple tensor components move with temperature, and that the nonlinear
+  driver takes at least two iterations. Its order gate is resolved from the
+  canonical `fs-vvreg` row at runtime; the separate isotropic-`k(T)` regression
+  remains in the battery.
+- Focused remote proof on `vmi1149989` passed 1/1 test with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --test mms
+  mms_anisotropic_temperature_dependent_order -- --nocapture`. The four-grid
+  ladder reported L2 errors `0.0685325`, `0.0304509`, `0.0171268`, and
+  `0.0109606`, for observed order `2.000463` against theoretical order `2.0`.
+  The shared-tree HEAD advanced from `8550df13` to `4795745c` during the lane,
+  so this is dirty-worktree execution evidence rather than same-commit proof.
+- The crate-wide remote follow-up passed 54/54 tests across seven test binaries
+  with `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --all-targets` on `vmi1149989`; this
+  includes all nine MMS tests. HEAD again moved underneath the shared-tree lane,
+  from `4795745c` to `f467b119`, so the result remains explicitly
+  dirty-worktree evidence rather than a same-commit certificate.
+- Raised aggregate Level-A execution coverage from 15/19 to 16/19. Three gaps
+  remain: P2 primal and the P1/P2 adjoint-order ladders. This observed-order
+  ladder is test-time execution evidence only: it persists no registry receipt,
+  machine fingerprint, or universal convergence certificate.
+
 ### Post-checkpoint convection-correlation rung
 
 - Added `fs-convection`, an L3 library with 11 Nusselt relations spanning

@@ -65,8 +65,8 @@ const LEVEL_A_MMS_BINDINGS: [(&str, Option<&str>, &str); 7] = [
     ),
     (
         "thermal-a-mms-p1-anisotropic-nonlinear",
-        None,
-        "the battery has separate anisotropic-constant and isotropic-k(T) ladders, not the catalog's combined case",
+        Some("tests/mms.rs::mms_anisotropic_temperature_dependent_order"),
+        "the P1 orthotropic k(T) L2 ladder executes the catalog order gate",
     ),
     (
         "thermal-a-mms-p1-neumann",
@@ -518,6 +518,157 @@ fn mms_nonlinear_conductivity_order() {
     );
 }
 
+// ---------------------------------------------------------------- case 6
+
+/// A 45-degree principal frame makes the assembled tensor non-diagonal,
+/// while distinct temperature slopes make both K(T) and dK/dT anisotropic.
+const ORTHOTROPIC_AXES: [[f64; 3]; 3] = [
+    [
+        std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    ],
+    [
+        -std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    ],
+    [0.0, 0.0, 1.0],
+];
+const PRINCIPAL_K0: [f64; 3] = [3.0, 2.0, 1.5];
+const PRINCIPAL_BETA: [f64; 3] = [0.006, -0.003, 0.004];
+
+fn principal_conductivities(temperature: f64) -> [f64; 3] {
+    std::array::from_fn(|i| PRINCIPAL_K0[i] * PRINCIPAL_BETA[i].mul_add(temperature - T0, 1.0))
+}
+
+fn tensor_from_principal(values: [f64; 3]) -> [[f64; 3]; 3] {
+    let mut tensor = [[0.0f64; 3]; 3];
+    for (axis, value) in ORTHOTROPIC_AXES.iter().zip(values) {
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] = value.mul_add(axis[i] * axis[j], tensor[i][j]);
+            }
+        }
+    }
+    tensor
+}
+
+fn anisotropic_temperature_dependent_material() -> ConductivityModel {
+    let table = |i: usize| {
+        ConductivityTable::declared_curve(vec![
+            (280.0, principal_conductivities(280.0)[i]),
+            (340.0, principal_conductivities(340.0)[i]),
+        ])
+        .expect("principal conductivity curve")
+    };
+    ConductivityModel::orthotropic(ORTHOTROPIC_AXES, [table(0), table(1), table(2)])
+        .expect("orthotropic k(T) material")
+}
+
+fn anisotropic_temperature_dependent_source(p: [f64; 3]) -> f64 {
+    // For f = -div(K(T) grad T), the chain rule gives
+    //   f = -(K(T):H(T) + grad(T)^T K'(T) grad(T)).
+    // This source is derived independently of ConductivityModel::tensor_at.
+    const HESSIAN: [[f64; 3]; 3] = [[10.0, 1.0, 1.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let temperature = FaceLinearQuadratic::value(p);
+    let k = tensor_from_principal(principal_conductivities(temperature));
+    let kp = tensor_from_principal(std::array::from_fn(|i| PRINCIPAL_K0[i] * PRINCIPAL_BETA[i]));
+    let gradient = FaceLinearQuadratic::gradient(p);
+    let mut hessian_term = 0.0f64;
+    let mut chain_term = 0.0f64;
+    for i in 0..3 {
+        let mut kp_gradient_i = 0.0f64;
+        for j in 0..3 {
+            hessian_term = k[i][j].mul_add(HESSIAN[i][j], hessian_term);
+            kp_gradient_i = kp[i][j].mul_add(gradient[j], kp_gradient_i);
+        }
+        chain_term = gradient[i].mul_add(kp_gradient_i, chain_term);
+    }
+    -(hessian_term + chain_term)
+}
+
+fn run_anisotropic_temperature_dependent(n: usize) -> f64 {
+    let (complex, positions) = unit_cube(n);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = anisotropic_temperature_dependent_material();
+    assert!(material.is_temperature_dependent());
+    let k0 = material
+        .tensor_at(T0)
+        .expect("tensor at reference temperature");
+    let k1 = material
+        .tensor_at(T0 + 10.0)
+        .expect("tensor above reference");
+    assert!(
+        k0[0][1].abs() > 0.1,
+        "the test must exercise an off-diagonal tensor"
+    );
+    assert_ne!(k0[0][0].to_bits(), k1[0][0].to_bits());
+    assert_ne!(k0[2][2].to_bits(), k1[2][2].to_bits());
+
+    let source = nodal(&mesh, &anisotropic_temperature_dependent_source);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "all",
+            |_| true,
+            ThermalBc::Dirichlet {
+                temperature: nodal(&mesh, &FaceLinearQuadratic::value),
+            },
+        )
+        .expect("dirichlet region")
+        .finish()
+        .expect("boundary");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            SolveConfig {
+                nonlinearity: Nonlinearity::default(),
+                stop: StopRule {
+                    residual_rtol: 1e-11,
+                    residual_atol: 1e-24,
+                    step_atol: 0.0,
+                    max_iterations: 25,
+                },
+                linear: LinearConfig {
+                    tolerance: 1e-13,
+                    max_iterations: 40_000,
+                    restart: 60,
+                },
+                initial: InitialGuess::DirichletMean,
+            },
+        )
+        .expect("anisotropic nonlinear solve")
+    });
+    assert!(
+        solution.report.iterations >= 2,
+        "the combined case must exercise nonlinear iteration"
+    );
+    l2_error(&mesh, &solution.temperature, &FaceLinearQuadratic::value)
+}
+
+#[test]
+fn mms_anisotropic_temperature_dependent_order() {
+    let mut hs = Vec::new();
+    let mut l2 = Vec::new();
+    for &n in &GRIDS {
+        hs.push(1.0 / n as f64);
+        l2.push(run_anisotropic_temperature_dependent(n));
+    }
+    report_level_a(
+        "thermal-a-mms-p1-anisotropic-nonlinear",
+        "conduction/mms/anisotropic-temperature-dependent/l2",
+        LadderSide::Primal,
+        &hs,
+        &l2,
+    );
+}
+
 // ----------------------------------------------------------- the matrix
 
 #[test]
@@ -537,7 +688,7 @@ fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        3
+        4
     );
     for (id, test, basis) in LEVEL_A_MMS_BINDINGS {
         assert!(
@@ -593,6 +744,13 @@ fn mms_battery_matrix_is_declared() {
                 "dirichlet-nonlinear-kt",
                 Coverage::Covered {
                     test: "tests/mms.rs::mms_nonlinear_conductivity_order".to_string(),
+                },
+            ),
+            row(
+                "p1-simplicial",
+                "dirichlet-anisotropic-nonlinear-kt",
+                Coverage::Covered {
+                    test: "tests/mms.rs::mms_anisotropic_temperature_dependent_order".to_string(),
                 },
             ),
             row(
