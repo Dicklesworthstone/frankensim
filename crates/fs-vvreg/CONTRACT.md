@@ -158,10 +158,13 @@ body.
   validates, canonicalizes, and byte-compares; noncanonical, future-version,
   truncated, trailing, invalid-tag, and invalid-UTF-8 inputs refuse.
 - `corpus::CorpusRegistry::audit` / binary `corpus-audit` — deterministic
-  per-dataset mandatory/optional completeness table. Optional as-built geometry
-  and calibration-valid-through gaps, plus mandatory reason-bearing no-claim
-  states, produce structured `level=WARN` rows; validation defects produce
-  `level=ERROR` and a nonzero CLI exit.
+  per-dataset mandatory/optional completeness table followed by the fixed-scope
+  Level-C cooling-QoI coverage map. Zero-count QoIs remain visible as `GAP`
+  rows and structured `level=WARN qoi_gap=...` diagnostics for downstream
+  planning. Optional as-built geometry and calibration-valid-through gaps,
+  plus mandatory reason-bearing no-claim states, produce structured
+  `level=WARN` rows; validation defects produce `level=ERROR` and a nonzero CLI
+  exit.
 - `thermal_level_a::thermal_level_a_cases` — 19 frozen Level-A thermal
   definitions backed by one retained TSV manifest: 12 analytic values across
   planar/2-D/axisymmetric/spherical conduction, fin efficiency, a
@@ -253,13 +256,20 @@ body.
   hash, and audit rows but cannot return evidence-bearing query results. The
   workspace seed behind `corpus()` is the only query authority. It includes 19
   Level-A thermal reference/target definitions, an explicitly synthetic
-  Level-B migration of `fs-benchmark` CHT query `cht-q3`, and the retained
-  Martin-Moyce 1952 digitized square-column curve as Level C. The Level-A rows
-  explicitly state that no solver receipt/refinement ladder is bound; the
-  Martin-Moyce row preserves its missing raw, instrument, calibration,
-  placement, environment, acquisition-date, license, replay, and scalar-
-  envelope authority as explicit gaps. Every row remains physically
-  `Estimated`, and every evidence query remains numerically `NoClaim`.
+  Level-B migration of `fs-benchmark` CHT query `cht-q3`, the retained
+  Martin-Moyce 1952 digitized square-column curve, and three published
+  electronics-cooling Level-C records: Pires-Fonseca flat/strip fins, Nunes
+  HFE-7100 micro-pin fins, and Markal-Kul fin distributions. The new records
+  bind retained publisher source bytes, licenses, nominal geometry,
+  measurement-uncertainty statements, validation partitions, context ranges,
+  QoI declarations, and complete retained-source-to-final lineage. Pires-
+  Fonseca and Nunes retain explicit plot-digitization half-widths; Markal-Kul
+  retains the publisher supplementary archive. The acquisition log also pins
+  five rejected candidates and their byte-access, metrology, geometry, or
+  payload failures. Original instrument histories, calibration certificates,
+  acquisition dates, as-built metrology, and governed acceptance envelopes are
+  not invented: the affected rows remain physically `Estimated`, and every
+  evidence query remains numerically `NoClaim`.
 - PURPOSE BEFORE DATA: the raw declared-partition query is crate-private. Public
   callers must cross `PartitionLedger` with a semantic purpose; repeating the
   stored partition name cannot bypass purpose checks. Blind data cannot be
@@ -419,8 +429,11 @@ calibration, placement, bounded-uncertainty, covariance-dimension, retention,
 lineage, canonical-codec, tamper, and caller-authority probes; G3 input-order
 invariance for registry identity and explicit authority-gap demotion; exact
 partition plus missing/unknown/duplicate/dimension/out-of-range context
-refusals; retained synthetic and Martin-Moyce fixture hash binding; and
-deterministic audit rendering with warn-level optional and claim-authority gaps.
+refusals; retained synthetic, Martin-Moyce, and three electronics-thermal
+source/final artifact hash bindings; independent Pires-Fonseca and Nunes
+re-digitized subsamples checked against declared half-widths; acquisition-log
+admission/rejection counts; and deterministic audit rendering with warn-level
+optional/claim-authority gaps plus the complete Level-C QoI coverage map.
 
 `tests/partition.rs`: G0 purpose/partition matrix, direct and transitive data-
 laundering refusals with exact model paths, stale access refusal during model
@@ -497,6 +510,13 @@ and targets, not thermal-kernel convergence.
   certificate signatures, establish population representativeness, prove a
   solver result, or establish that an acceptance envelope is scientifically
   appropriate.
+- `EvidenceLevel::PublishedExperiment` classifies source provenance; it does
+  not mean original instrument data survived. Paper figures and publisher
+  tables reduced from unretained sensor histories are `DerivedOnly` even when
+  the article calls them data. Digitization half-widths bound coordinate
+  extraction only and do not replace the paper's experimental uncertainty or
+  missing calibration authority. The Level-C QoI map counts declarations, not
+  validated solver comparisons, population coverage, or acceptance authority.
 - A corpus query proves only that the seeded row was revalidated and that the
   caller requested an admitted purpose inside its declared context under one
   captured in-memory partition generation. The

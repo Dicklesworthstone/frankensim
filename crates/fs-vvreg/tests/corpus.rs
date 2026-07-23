@@ -7,9 +7,10 @@ use fs_vvreg::corpus::{
     AcceptanceRecord, AcquisitionProvenance, Availability, CalibrationRecord, ContextRange,
     ContextValue, CorpusArtifact, CorpusDataset, CorpusEnvelope, CorpusError, CorpusLicense,
     CorpusQueryRefusal, CorpusRegistry, DatasetDraft, DatasetField, DatasetPartition,
-    EnvironmentCondition, EvidenceLevel, GeometryRecord, MeasurementUncertainty, PayloadRetention,
-    PreprocessingLineage, PreprocessingStep, RedistributionPolicy, RetentionClass, RetentionPolicy,
-    SensorPlacement, SensorRecord, admit_dataset, corpus,
+    EnvironmentCondition, EvidenceLevel, GeometryRecord, LEVEL_C_COOLING_QOIS,
+    MeasurementUncertainty, PayloadRetention, PreprocessingLineage, PreprocessingStep,
+    RedistributionPolicy, RetentionClass, RetentionPolicy, SensorPlacement, SensorRecord,
+    admit_dataset, corpus,
 };
 use fs_vvreg::partition::{DatasetPurpose, PartitionLedger, PartitionRefusal};
 use fs_vvreg::thermal_level_a::thermal_level_a_cases;
@@ -589,10 +590,135 @@ fn martin_moyce_is_retained_without_inventing_missing_authority() {
 }
 
 #[test]
+fn published_electronics_thermal_level_c_rows_are_retained_and_fail_closed() {
+    let pires_source =
+        include_bytes!("../../../data/vv-corpus/level-c/pires-fonseca-2024/source.pdf");
+    let pires_final =
+        include_bytes!("../../../data/vv-corpus/level-c/pires-fonseca-2024/digitized.tsv");
+    let nunes_source = include_bytes!("../../../data/vv-corpus/level-c/nunes-2023/source.pdf");
+    let nunes_final = include_bytes!("../../../data/vv-corpus/level-c/nunes-2023/digitized.tsv");
+    let markal_source =
+        include_bytes!("../../../data/vv-corpus/level-c/markal-kul-2026/source.pdf");
+    let markal_final =
+        include_bytes!("../../../data/vv-corpus/level-c/markal-kul-2026/supplementary.zip");
+
+    for (id, source, final_artifact) in [
+        (
+            "pires-fonseca-2024-flat-strip-fins",
+            pires_source.as_slice(),
+            pires_final.as_slice(),
+        ),
+        (
+            "nunes-2023-micro-pin-fin",
+            nunes_source.as_slice(),
+            nunes_final.as_slice(),
+        ),
+        (
+            "markal-kul-2026-fin-distribution",
+            markal_final.as_slice(),
+            markal_final.as_slice(),
+        ),
+    ] {
+        let dataset = corpus().dataset(id).unwrap();
+        assert_eq!(dataset.evidence_level(), EvidenceLevel::PublishedExperiment);
+        assert_eq!(dataset.partition(), DatasetPartition::Validation);
+        assert_eq!(dataset.physical_claim_cap(), ColorRank::Estimated);
+        assert!(matches!(
+            dataset.raw_payload(),
+            PayloadRetention::DerivedOnly { .. }
+        ));
+        assert!(matches!(dataset.geometry(), Availability::Available(_)));
+        assert!(matches!(dataset.environment(), Availability::Available(_)));
+        assert!(matches!(dataset.license(), Availability::Available(_)));
+        assert!(matches!(
+            dataset.preprocessing(),
+            PreprocessingLineage::Complete(_)
+        ));
+        assert_eq!(
+            dataset.raw_payload().artifact().digest,
+            fs_blake3::hash_bytes(source)
+        );
+        assert_eq!(
+            dataset.raw_payload().artifact().byte_len,
+            source.len() as u64
+        );
+        assert_eq!(
+            dataset.final_artifact(),
+            fs_blake3::hash_bytes(final_artifact)
+        );
+        assert!(!dataset.acceptance_envelopes().is_empty());
+    }
+
+    let markal = corpus()
+        .dataset("markal-kul-2026-fin-distribution")
+        .unwrap();
+    let Availability::Available(markal_geometry) = markal.geometry() else {
+        panic!("Markal-Kul nominal geometry must be retained")
+    };
+    assert_eq!(
+        markal_geometry.nominal.digest,
+        fs_blake3::hash_bytes(markal_source)
+    );
+
+    let acquisition_log = include_str!("../../../data/vv-corpus/level-c/acquisition-log-v1.tsv");
+    assert_eq!(
+        acquisition_log
+            .lines()
+            .filter(|line| line.starts_with("admit\t"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        acquisition_log
+            .lines()
+            .filter(|line| line.starts_with("reject\t"))
+            .count(),
+        5
+    );
+}
+
+fn tsv_row<'a>(tsv: &'a str, series: &str, x: &str) -> Vec<&'a str> {
+    tsv.lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .find(|columns| columns[0] == series && columns[1] == x)
+        .unwrap_or_else(|| panic!("missing digitized row {series}/{x}"))
+}
+
+#[test]
+fn digitization_subsamples_stay_within_declared_half_widths() {
+    let pires = include_str!("../../../data/vv-corpus/level-c/pires-fonseca-2024/digitized.tsv");
+    let pires_row = tsv_row(pires, "flat-plate-fins", "2000");
+    let stored_re = pires_row[1].parse::<f64>().unwrap();
+    let stored_nu = pires_row[2].parse::<f64>().unwrap();
+    let re_half_width = pires_row[3].parse::<f64>().unwrap();
+    let nu_half_width = pires_row[4].parse::<f64>().unwrap();
+    // Independent cursor placement on the retained Figure 7 source.
+    let redigitized_re = 2_025.0;
+    let redigitized_nu = 5.85;
+    assert!((stored_re - redigitized_re).abs() <= re_half_width);
+    assert!((stored_nu - redigitized_nu).abs() <= nu_half_width);
+    let published_flat_plate_correlation = 0.112 * stored_re.powf(0.52);
+    assert!((stored_nu - published_flat_plate_correlation).abs() <= nu_half_width);
+
+    let nunes = include_str!("../../../data/vv-corpus/level-c/nunes-2023/digitized.tsv");
+    let nunes_row = tsv_row(nunes, "S1-G1000-subcooling20", "3.2");
+    let stored_superheat = nunes_row[1].parse::<f64>().unwrap();
+    let stored_heat_flux = nunes_row[2].parse::<f64>().unwrap();
+    let superheat_half_width = nunes_row[3].parse::<f64>().unwrap();
+    let heat_flux_half_width = nunes_row[4].parse::<f64>().unwrap();
+    // Independent cursor placement on the retained Figure 6a source.
+    let redigitized_superheat = 3.0;
+    let redigitized_heat_flux = 50.0;
+    assert!((stored_superheat - redigitized_superheat).abs() <= superheat_half_width);
+    assert!((stored_heat_flux - redigitized_heat_flux).abs() <= heat_flux_half_width);
+}
+
+#[test]
 fn audit_is_deterministic_and_warns_for_seed_gaps() {
     let audit = corpus().audit();
     assert!(audit.is_clean());
-    assert_eq!(audit.rows().len(), 2 + thermal_level_a_cases().len());
+    assert_eq!(audit.rows().len(), 5 + thermal_level_a_cases().len());
     for row in audit.rows() {
         assert_eq!(row.mandatory_present(), 15);
         assert_eq!(row.mandatory_total(), 15);
@@ -608,11 +734,60 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
     assert!(rendered.contains(
         "martin-moyce-1952-square-column | 15/15 | 0/2 | validation | C | estimated | WARN"
     ));
+    assert!(rendered.contains(
+        "pires-fonseca-2024-flat-strip-fins | 15/15 | 0/2 | validation | C | estimated | WARN"
+    ));
+    assert!(
+        rendered
+            .contains("nunes-2023-micro-pin-fin | 15/15 | 0/2 | validation | C | estimated | WARN")
+    );
+    assert!(rendered.contains(
+        "markal-kul-2026-fin-distribution | 15/15 | 0/2 | validation | C | estimated | WARN"
+    ));
     assert!(
         rendered.contains("dataset=martin-moyce-1952-square-column claim_gap=raw_payload.original")
     );
     assert!(rendered.contains(
         "dataset=martin-moyce-1952-square-column claim_gap=acceptance.surge-front-position-z"
     ));
+    assert_eq!(audit.qoi_coverage().len(), LEVEL_C_COOLING_QOIS.len());
+    for (qoi, expected_datasets) in [
+        ("average-nusselt-number", 2),
+        ("component-peak-temperature", 0),
+        ("convective-thermal-resistance", 1),
+        ("effective-heat-flux", 1),
+        ("friction-factor", 1),
+        ("pressure-drop", 2),
+        ("temperature-nonuniformity", 0),
+        ("thermal-interface-resistance", 0),
+    ] {
+        let row = audit
+            .qoi_coverage()
+            .iter()
+            .find(|row| row.qoi() == qoi)
+            .unwrap();
+        assert_eq!(row.level_c_datasets(), expected_datasets);
+        assert_eq!(row.is_covered(), expected_datasets != 0);
+        let status = if expected_datasets == 0 {
+            "GAP"
+        } else {
+            "COVERED"
+        };
+        assert!(rendered.contains(&format!("{qoi} | {expected_datasets} | {status}")));
+    }
+    for qoi in [
+        "component-peak-temperature",
+        "temperature-nonuniformity",
+        "thermal-interface-resistance",
+    ] {
+        let row = audit
+            .qoi_coverage()
+            .iter()
+            .find(|row| row.qoi() == qoi)
+            .unwrap();
+        assert!(!row.is_covered());
+        assert!(rendered.contains(&format!("{qoi} | 0 | GAP")));
+        assert!(rendered.contains(&format!("qoi_gap={qoi} evidence_level=C datasets=0")));
+    }
     assert_eq!(corpus().audit().render_table(), rendered);
 }

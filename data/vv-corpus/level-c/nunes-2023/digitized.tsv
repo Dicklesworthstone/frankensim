@@ -1,0 +1,12 @@
+series	wall_superheat_k	effective_heat_flux_kw_m2	wall_superheat_digitization_half_width_k	heat_flux_digitization_half_width_kw_m2	source_locator	measurement_uncertainty_basis
+S1-G1000-subcooling20	-14.6	10.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	-10.9	15.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	-8.0	20.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	-5.0	25.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	-1.3	30.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	0.2	35.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	1.6	40.5	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	2.2	45.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	3.2	50.5	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	4.2	61.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only
+S1-G1000-subcooling20	5.0	66.0	0.3	1.0	Figure 6a	Paper reports 4-16 percent heat-flux uncertainty; this column records digitization only

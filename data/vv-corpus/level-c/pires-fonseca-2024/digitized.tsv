@@ -1,0 +1,26 @@
+series	reynolds_number	average_nusselt_number	reynolds_digitization_half_width	nusselt_digitization_half_width	source_locator	measurement_uncertainty_basis
+flat-plate-fins	820	3.75	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	1200	4.50	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	1600	5.25	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	2000	5.90	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	2400	6.50	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	2700	7.20	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	2800	7.40	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	3100	8.00	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	3350	8.60	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	3550	9.10	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	3700	9.50	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+flat-plate-fins	3800	10.00	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	850	5.10	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	1200	6.90	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	1450	7.70	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	1750	9.10	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	2050	10.70	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	2350	11.70	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	2650	12.80	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	2850	13.50	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	3100	14.10	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	3350	14.90	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	3550	15.50	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	3750	16.20	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound
+inline-strip-fins	3800	16.40	75	0.15	Figure 7	Table 2 bounds the input instruments; the paper gives no pointwise propagated Nu bound

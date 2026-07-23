@@ -42,6 +42,30 @@ const RAW_CHT_FIXTURE: &[u8] =
     include_bytes!("../../../data/vv-corpus/fs-benchmark-cht-query-v1/raw-sensors.csv");
 const MARTIN_MOYCE_FIXTURE: &[u8] =
     include_bytes!("../../../data/reference/martin-moyce-1952.jsonl");
+const PIRES_FONSECA_SOURCE: &[u8] =
+    include_bytes!("../../../data/vv-corpus/level-c/pires-fonseca-2024/source.pdf");
+const PIRES_FONSECA_DIGITIZED: &[u8] =
+    include_bytes!("../../../data/vv-corpus/level-c/pires-fonseca-2024/digitized.tsv");
+const NUNES_SOURCE: &[u8] = include_bytes!("../../../data/vv-corpus/level-c/nunes-2023/source.pdf");
+const NUNES_DIGITIZED: &[u8] =
+    include_bytes!("../../../data/vv-corpus/level-c/nunes-2023/digitized.tsv");
+const MARKAL_KUL_SOURCE: &[u8] =
+    include_bytes!("../../../data/vv-corpus/level-c/markal-kul-2026/source.pdf");
+const MARKAL_KUL_SUPPLEMENT: &[u8] =
+    include_bytes!("../../../data/vv-corpus/level-c/markal-kul-2026/supplementary.zip");
+
+/// Cooling QoIs tracked by the Level-C acquisition audit. Zero-count entries
+/// are deliberately retained so downstream planning sees uncovered regimes.
+pub const LEVEL_C_COOLING_QOIS: &[&str] = &[
+    "average-nusselt-number",
+    "component-peak-temperature",
+    "convective-thermal-resistance",
+    "effective-heat-flux",
+    "friction-factor",
+    "pressure-drop",
+    "temperature-nonuniformity",
+    "thermal-interface-resistance",
+];
 
 /// Top-level required field named by a typed missing-field refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1017,7 +1041,13 @@ impl CorpusRegistry {
 }
 
 static CORPUS: LazyLock<CorpusRegistry> = LazyLock::new(|| {
-    let mut datasets = vec![seed_cht_dataset(), seed_martin_moyce_dataset()];
+    let mut datasets = vec![
+        seed_cht_dataset(),
+        seed_martin_moyce_dataset(),
+        seed_pires_fonseca_dataset(),
+        seed_nunes_dataset(),
+        seed_markal_kul_dataset(),
+    ];
     datasets.extend(
         thermal_level_a_cases()
             .iter()
@@ -1031,8 +1061,9 @@ static CORPUS: LazyLock<CorpusRegistry> = LazyLock::new(|| {
 });
 
 /// Seeded workspace corpus: reference-only Level-A thermal rows, one explicitly
-/// synthetic Level-B CHT fixture, and one Level-C Martin-Moyce retained curve.
-/// Every query remains non-certifying; authority gaps remain explicit.
+/// synthetic Level-B CHT fixture, Martin-Moyce, and three published
+/// electronics-cooling Level-C records. Every query remains non-certifying;
+/// source, metrology, and acceptance-authority gaps remain explicit.
 #[must_use]
 pub fn corpus() -> &'static CorpusRegistry {
     &CORPUS
@@ -1307,6 +1338,391 @@ fn seed_martin_moyce_dataset() -> CorpusDataset {
             }],
         }],
         evidence_level: EvidenceLevel::PublishedExperiment,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Keep the published record's authority gaps visible together.
+fn seed_pires_fonseca_dataset() -> CorpusDataset {
+    let source = retained_artifact(
+        PIRES_FONSECA_SOURCE,
+        "application/pdf",
+        "data/vv-corpus/level-c/pires-fonseca-2024/source.pdf",
+    );
+    let digitized = retained_artifact(
+        PIRES_FONSECA_DIGITIZED,
+        "text/tab-separated-values",
+        "data/vv-corpus/level-c/pires-fonseca-2024/digitized.tsv",
+    );
+    let temperature = Dims([0, 0, 0, 1, 0, 0]);
+    let velocity = Dims([1, 0, -1, 0, 0, 0]);
+    let thermal_resistance = Dims([-2, -1, 3, 1, 0, 0]);
+    let reynolds_range = ContextRange {
+        name: "reynolds-number".to_string(),
+        lo: QtyAny::dimensionless(810.0),
+        hi: QtyAny::dimensionless(3_800.0),
+    };
+    CorpusDataset {
+        id: "pires-fonseca-2024-flat-strip-fins".to_string(),
+        title: "Forced-air flat-plate and inline-strip-fin heat-sink measurements".to_string(),
+        raw_payload: PayloadRetention::DerivedOnly {
+            retained: source.clone(),
+            reason: "the article is the earliest retained record; original thermocouple, manometer, pressure-transducer, and electrical readings are not published"
+                .to_string(),
+        },
+        sensors: vec![SensorRecord {
+            id: "type-e-base-thermocouples".to_string(),
+            instrument_id: Availability::Available(
+                "Omega type-E 0.254 mm thermocouples with Omega DP41-TC indicator"
+                    .to_string(),
+            ),
+            raw_channel: "source.pdf#section-2/Table-2-thermocouple-temperature".to_string(),
+            quantity_dims: temperature,
+            calibration: unavailable(
+                "the paper states a calibrated nozzle but retains no thermocouple-chain certificate id, hash, issue date, or validity date",
+            ),
+            placement: unavailable(
+                "three base thermocouples are described 2 mm below the surface along a diagonal, but exact coordinates and placement uncertainty are not published",
+            ),
+            uncertainty: MeasurementUncertainty::Bounded {
+                half_width: QtyAny::new(0.1, temperature),
+            },
+        }],
+        geometry: Availability::Available(GeometryRecord {
+            nominal: source.clone(),
+            as_built: None,
+            frame: "source.pdf#Figure-1/Table-1 millimetre nominal heat-sink geometry"
+                .to_string(),
+        }),
+        environment: Availability::Available(vec![EnvironmentCondition {
+            name: "interfin-air-velocity-range-midpoint".to_string(),
+            value: QtyAny::new(12.0, velocity),
+            uncertainty: QtyAny::new(8.0, velocity),
+        }]),
+        partition: DatasetPartition::Validation,
+        preprocessing: PreprocessingLineage::Complete(vec![PreprocessingStep {
+            ordinal: 0,
+            operation: "manual-cartesian-plot-digitization-with-declared-half-widths"
+                .to_string(),
+            version: "frankensim-digitization-v1".to_string(),
+            input: source.digest,
+            output: digitized.digest,
+        }]),
+        final_artifact: digitized.digest,
+        context_of_use: vec![reynolds_range.clone()],
+        license: Availability::Available(CorpusLicense {
+            identifier: "CC-BY-SA-4.0".to_string(),
+            terms: "Article and figures redistributed with attribution and share-alike terms"
+                .to_string(),
+            redistribution: RedistributionPolicy::Allowed,
+        }),
+        provenance: AcquisitionProvenance {
+            measured_by: "William Denner Pires-Fonseca and Carlos Alberto Carrasco-Altemani"
+                .to_string(),
+            organization: "Revista Facultad de Ingenieria Universidad de Antioquia"
+                .to_string(),
+            measured_on: unavailable(
+                "the paper reports submission, acceptance, and publication dates but no experimental acquisition date",
+            ),
+            source_record: "doi:10.17533/udea.redin.20230417; Figure 7; Zenodo record 10975619"
+                .to_string(),
+        },
+        retention: permanent_corpus_retention(),
+        acceptance_envelopes: vec![
+            unpinned_acceptance(
+                "average-nusselt-number",
+                Dims::NONE,
+                &reynolds_range,
+                "the retained curve and digitization bounds do not define a solver-comparison acceptance protocol",
+            ),
+            unpinned_acceptance(
+                "convective-thermal-resistance",
+                thermal_resistance,
+                &reynolds_range,
+                "the paper reports thermal-resistance behavior but no registry-governed comparison envelope is pinned",
+            ),
+            unpinned_acceptance(
+                "pressure-drop",
+                Dims([-1, 1, -2, 0, 0, 0]),
+                &reynolds_range,
+                "the paper reports pressure-drop behavior but no registry-governed comparison envelope is pinned",
+            ),
+        ],
+        evidence_level: EvidenceLevel::PublishedExperiment,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Keep the published record's authority gaps visible together.
+fn seed_nunes_dataset() -> CorpusDataset {
+    let source = retained_artifact(
+        NUNES_SOURCE,
+        "application/pdf",
+        "data/vv-corpus/level-c/nunes-2023/source.pdf",
+    );
+    let digitized = retained_artifact(
+        NUNES_DIGITIZED,
+        "text/tab-separated-values",
+        "data/vv-corpus/level-c/nunes-2023/digitized.tsv",
+    );
+    let temperature = Dims([0, 0, 0, 1, 0, 0]);
+    let mass_flux = Dims([-2, 1, -1, 0, 0, 0]);
+    let heat_flux = Dims([0, 1, -3, 0, 0, 0]);
+    let mass_flux_range = ContextRange {
+        name: "mass-flux".to_string(),
+        lo: QtyAny::new(1_000.0, mass_flux),
+        hi: QtyAny::new(1_200.0, mass_flux),
+    };
+    let subcooling_range = ContextRange {
+        name: "inlet-subcooling".to_string(),
+        lo: QtyAny::new(10.0, temperature),
+        hi: QtyAny::new(20.0, temperature),
+    };
+    let superheat_range = ContextRange {
+        name: "wall-superheat".to_string(),
+        lo: QtyAny::new(-15.0, temperature),
+        hi: QtyAny::new(6.0, temperature),
+    };
+    let regime = vec![
+        mass_flux_range.clone(),
+        subcooling_range.clone(),
+        superheat_range.clone(),
+    ];
+    CorpusDataset {
+        id: "nunes-2023-micro-pin-fin".to_string(),
+        title: "HFE-7100 micro-pin-fin heat-sink thermal measurements".to_string(),
+        raw_payload: PayloadRetention::DerivedOnly {
+            retained: source.clone(),
+            reason: "the article is the earliest retained record; the 2 s pressure, temperature, mass-flux, and voltage time histories are not published"
+                .to_string(),
+        },
+        sensors: vec![SensorRecord {
+            id: "calibrated-k-thermocouple-chain".to_string(),
+            instrument_id: Availability::Available(
+                "calibrated K-type thermocouples with Agilent 34970A acquisition"
+                    .to_string(),
+            ),
+            raw_channel: "source.pdf#section-2-temperature-chain".to_string(),
+            quantity_dims: temperature,
+            calibration: unavailable(
+                "the paper says the thermocouples were previously calibrated but retains no certificate id, hash, issue date, or validity date",
+            ),
+            placement: unavailable(
+                "inlet/outlet plenum contact is described, but exact coordinates and placement uncertainty are not published",
+            ),
+            uncertainty: MeasurementUncertainty::Bounded {
+                half_width: QtyAny::new(0.3, temperature),
+            },
+        }],
+        geometry: Availability::Available(GeometryRecord {
+            nominal: source.clone(),
+            as_built: None,
+            frame: "source.pdf#Figure-2 nominal 20 mm x 15 mm copper micro-pin-fin footprint"
+                .to_string(),
+        }),
+        environment: Availability::Available(vec![
+            EnvironmentCondition {
+                name: "mass-flux-range-midpoint".to_string(),
+                value: QtyAny::new(1_100.0, mass_flux),
+                uncertainty: QtyAny::new(100.0, mass_flux),
+            },
+            EnvironmentCondition {
+                name: "inlet-subcooling-range-midpoint".to_string(),
+                value: QtyAny::new(15.0, temperature),
+                uncertainty: QtyAny::new(5.0, temperature),
+            },
+        ]),
+        partition: DatasetPartition::Validation,
+        preprocessing: PreprocessingLineage::Complete(vec![PreprocessingStep {
+            ordinal: 0,
+            operation: "manual-cartesian-plot-digitization-with-declared-half-widths"
+                .to_string(),
+            version: "frankensim-digitization-v1".to_string(),
+            input: source.digest,
+            output: digitized.digest,
+        }]),
+        final_artifact: digitized.digest,
+        context_of_use: regime.clone(),
+        license: Availability::Available(CorpusLicense {
+            identifier: "CC-BY-4.0".to_string(),
+            terms: "Article and figures redistributed under Creative Commons Attribution 4.0"
+                .to_string(),
+            redistribution: RedistributionPolicy::Allowed,
+        }),
+        provenance: AcquisitionProvenance {
+            measured_by: "Jessica Martha Nunes et al.".to_string(),
+            organization: "Energies 16(7), 3175".to_string(),
+            measured_on: unavailable(
+                "the paper reports submission and publication dates but no experimental acquisition date",
+            ),
+            source_record: "doi:10.3390/en16073175; Figure 6a".to_string(),
+        },
+        retention: permanent_corpus_retention(),
+        acceptance_envelopes: vec![
+            AcceptanceRecord {
+                metric: "effective-heat-flux".to_string(),
+                dims: heat_flux,
+                envelope: CorpusEnvelope::Unpinned {
+                    basis: "the paper reports 4-16 percent experimental heat-flux uncertainty and the retained table records digitization bounds, but no registry-governed solver-comparison envelope is pinned"
+                        .to_string(),
+                },
+                regime: regime.clone(),
+            },
+            AcceptanceRecord {
+                metric: "pressure-drop".to_string(),
+                dims: Dims([-1, 1, -2, 0, 0, 0]),
+                envelope: CorpusEnvelope::Unpinned {
+                    basis: "the paper reports 3-9 percent pressure-drop uncertainty but no registry-governed solver-comparison envelope is pinned"
+                        .to_string(),
+                },
+                regime,
+            },
+        ],
+        evidence_level: EvidenceLevel::PublishedExperiment,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Keep the published record's authority gaps visible together.
+fn seed_markal_kul_dataset() -> CorpusDataset {
+    let source = retained_artifact(
+        MARKAL_KUL_SOURCE,
+        "application/pdf",
+        "data/vv-corpus/level-c/markal-kul-2026/source.pdf",
+    );
+    let supplement = retained_artifact(
+        MARKAL_KUL_SUPPLEMENT,
+        "application/zip",
+        "data/vv-corpus/level-c/markal-kul-2026/supplementary.zip",
+    );
+    let temperature = Dims([0, 0, 0, 1, 0, 0]);
+    let mass_flux = Dims([-2, 1, -1, 0, 0, 0]);
+    let mass_flux_range = ContextRange {
+        name: "mass-flux".to_string(),
+        lo: QtyAny::new(500.0, mass_flux),
+        hi: QtyAny::new(750.0, mass_flux),
+    };
+    CorpusDataset {
+        id: "markal-kul-2026-fin-distribution".to_string(),
+        title: "Single-phase micro-pin-fin distribution heat-sink measurements".to_string(),
+        raw_payload: PayloadRetention::DerivedOnly {
+            retained: supplement.clone(),
+            reason: "the publisher supplement retains reduced G, Nu, friction-factor, and Reynolds-number tables, not the original thermocouple, pressure, and flowmeter histories"
+                .to_string(),
+        },
+        sensors: vec![SensorRecord {
+            id: "reported-average-nusselt-number".to_string(),
+            instrument_id: Availability::Available(
+                "Keithley DAQ6510 with T-type thermocouples and Omega/McMillan pressure-flow chain"
+                    .to_string(),
+            ),
+            raw_channel: "supplementary.zip#micromachines-4153936-supplementary.xlsx:Nu"
+                .to_string(),
+            quantity_dims: Dims::NONE,
+            calibration: unavailable(
+                "the paper gives model identities and instrument bounds but no certificate ids, hashes, issue dates, or validity dates",
+            ),
+            placement: unavailable(
+                "seven 5 mm-spaced slots and 0.5 mm surface offset are documented, but the reduced Nu channel has no single sensor coordinate or placement uncertainty",
+            ),
+            uncertainty: MeasurementUncertainty::Bounded {
+                half_width: QtyAny::dimensionless(0.15),
+            },
+        }],
+        geometry: Availability::Available(GeometryRecord {
+            nominal: source,
+            as_built: None,
+            frame: "source.pdf#Figure-3 nominal MH-0/MH-1/MH-2/MH-3 millimetre geometry"
+                .to_string(),
+        }),
+        environment: Availability::Available(vec![
+            EnvironmentCondition {
+                name: "mass-flux-range-midpoint".to_string(),
+                value: QtyAny::new(625.0, mass_flux),
+                uncertainty: QtyAny::new(125.0, mass_flux),
+            },
+            EnvironmentCondition {
+                name: "inlet-temperature".to_string(),
+                value: QtyAny::new(298.15, temperature),
+                uncertainty: QtyAny::new(0.1, temperature),
+            },
+            EnvironmentCondition {
+                name: "ambient-temperature".to_string(),
+                value: QtyAny::new(297.15, temperature),
+                uncertainty: QtyAny::new(0.5, temperature),
+            },
+        ]),
+        partition: DatasetPartition::Validation,
+        preprocessing: PreprocessingLineage::Complete(vec![PreprocessingStep {
+            ordinal: 0,
+            operation: "publisher-supplement-archive-identity-import".to_string(),
+            version: "1".to_string(),
+            input: supplement.digest,
+            output: supplement.digest,
+        }]),
+        final_artifact: supplement.digest,
+        context_of_use: vec![mass_flux_range.clone()],
+        license: Availability::Available(CorpusLicense {
+            identifier: "CC-BY-4.0".to_string(),
+            terms: "Article and supplementary data redistributed under Creative Commons Attribution 4.0"
+                .to_string(),
+            redistribution: RedistributionPolicy::Allowed,
+        }),
+        provenance: AcquisitionProvenance {
+            measured_by: "Abdullah Erdogan, Burak Markal, and Mehmet Kul".to_string(),
+            organization: "Micromachines 17(4), 416".to_string(),
+            measured_on: unavailable(
+                "the publisher workbook includes unlabeled spreadsheet date cells but the article gives no authoritative experimental acquisition date",
+            ),
+            source_record: "doi:10.3390/mi17040416; Table S1; Appendix C".to_string(),
+        },
+        retention: permanent_corpus_retention(),
+        acceptance_envelopes: vec![
+            unpinned_acceptance(
+                "average-nusselt-number",
+                Dims::NONE,
+                &mass_flux_range,
+                "Appendix C reports 2.38-2.67 percent Nu uncertainty, but no registry-governed solver-comparison envelope is pinned",
+            ),
+            unpinned_acceptance(
+                "friction-factor",
+                Dims::NONE,
+                &mass_flux_range,
+                "Appendix C reports 5.42-5.44 percent friction-factor uncertainty, but no registry-governed solver-comparison envelope is pinned",
+            ),
+        ],
+        evidence_level: EvidenceLevel::PublishedExperiment,
+    }
+}
+
+fn retained_artifact(bytes: &[u8], media_type: &str, locator: &str) -> CorpusArtifact {
+    CorpusArtifact {
+        digest: hash_bytes(bytes),
+        byte_len: bytes.len() as u64,
+        media_type: media_type.to_string(),
+        locator: locator.to_string(),
+    }
+}
+
+fn permanent_corpus_retention() -> RetentionPolicy {
+    RetentionPolicy {
+        class: RetentionClass::Permanent,
+        preserve_raw: true,
+        preserve_calibration: true,
+        policy_id: "frankensim-vv-corpus-permanent-v1".to_string(),
+    }
+}
+
+fn unpinned_acceptance(
+    metric: &str,
+    dims: Dims,
+    regime: &ContextRange,
+    basis: &str,
+) -> AcceptanceRecord {
+    AcceptanceRecord {
+        metric: metric.to_string(),
+        dims,
+        envelope: CorpusEnvelope::Unpinned {
+            basis: basis.to_string(),
+        },
+        regime: vec![regime.clone()],
     }
 }
 
@@ -2668,10 +3084,38 @@ impl CorpusAuditRow {
     }
 }
 
+/// One cooling-QoI coverage row for published Level-C experiments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorpusQoiCoverageRow {
+    qoi: String,
+    level_c_datasets: usize,
+}
+
+impl CorpusQoiCoverageRow {
+    /// Stable cooling QoI identifier.
+    #[must_use]
+    pub fn qoi(&self) -> &str {
+        &self.qoi
+    }
+
+    /// Number of distinct Level-C datasets declaring this QoI.
+    #[must_use]
+    pub const fn level_c_datasets(&self) -> usize {
+        self.level_c_datasets
+    }
+
+    /// Whether at least one published experiment covers this QoI.
+    #[must_use]
+    pub const fn is_covered(&self) -> bool {
+        self.level_c_datasets != 0
+    }
+}
+
 /// Complete deterministic audit, including warn-level optional gaps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorpusAuditReport {
     rows: Vec<CorpusAuditRow>,
+    qoi_coverage: Vec<CorpusQoiCoverageRow>,
     warnings: Vec<String>,
     errors: Vec<String>,
 }
@@ -2681,6 +3125,12 @@ impl CorpusAuditReport {
     #[must_use]
     pub fn rows(&self) -> &[CorpusAuditRow] {
         &self.rows
+    }
+
+    /// Fixed-scope Level-C cooling-QoI coverage map, including zeroes.
+    #[must_use]
+    pub fn qoi_coverage(&self) -> &[CorpusQoiCoverageRow] {
+        &self.qoi_coverage
     }
 
     /// Stable warn-level gap diagnostics.
@@ -2724,6 +3174,11 @@ impl CorpusAuditReport {
                 color_name(row.physical_cap),
                 row.status
             );
+        }
+        out.push_str("level_c_qoi | datasets | status\n");
+        for row in &self.qoi_coverage {
+            let status = if row.is_covered() { "COVERED" } else { "GAP" };
+            let _ = writeln!(out, "{} | {} | {status}", row.qoi, row.level_c_datasets);
         }
         for warning in &self.warnings {
             let _ = writeln!(out, "level=WARN {warning}");
@@ -2870,8 +3325,31 @@ impl CorpusRegistry {
                 status,
             });
         }
+        let qoi_coverage = LEVEL_C_COOLING_QOIS
+            .iter()
+            .map(|qoi| CorpusQoiCoverageRow {
+                qoi: (*qoi).to_string(),
+                level_c_datasets: self
+                    .datasets
+                    .iter()
+                    .filter(|dataset| {
+                        dataset.evidence_level == EvidenceLevel::PublishedExperiment
+                            && dataset
+                                .acceptance_envelopes
+                                .iter()
+                                .any(|acceptance| acceptance.metric == *qoi)
+                    })
+                    .count(),
+            })
+            .collect::<Vec<_>>();
+        for row in &qoi_coverage {
+            if !row.is_covered() {
+                warnings.push(format!("qoi_gap={} evidence_level=C datasets=0", row.qoi));
+            }
+        }
         CorpusAuditReport {
             rows,
+            qoi_coverage,
             warnings,
             errors,
         }
