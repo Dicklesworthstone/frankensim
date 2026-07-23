@@ -69,6 +69,16 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   must refuse above a caller-supplied payload cap before any byte callback or
   result-buffer allocation,
   `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`.
+- Final operating-envelope demotion receipts:
+  `put_regime_demotion_receipt` stores the exact canonical `fs-regime`
+  receipt bytes under the dedicated `regime-output-demotion-receipt-v1`
+  artifact kind and returns both the ledger artifact identity and the
+  domain-separated receipt identity. Fully in-domain receipts are excluded
+  from this no-claim stream. `read_regime_demotion_receipt` requires a
+  caller-pinned typed receipt, preflights the dedicated kind and 1 MiB cap,
+  and returns bytes only on exact canonical equality. The adapter does not
+  parse arbitrary retained bytes into model-card authority, authenticate card
+  provenance, or restore a demoted color.
   Every byte-returning retrieval re-hashes stored content against its key.
   Retrieval treats signed database integers as untrusted: it never
   preallocates from declared `len`, uses fallible materialization, and performs

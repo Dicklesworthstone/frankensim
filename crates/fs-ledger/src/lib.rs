@@ -21,6 +21,7 @@ pub mod colors;
 pub mod crosswalk;
 pub mod hash;
 pub mod identity_migration;
+pub mod regime_output;
 pub mod schema;
 pub mod session_registry;
 pub mod state_checkpoint;
@@ -58,6 +59,10 @@ pub use identity_migration::{
     MAX_IDENTITY_MIGRATION_RULE_BYTES, MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
     MAX_IDENTITY_RECONCILE_PAGE_ROWS, OP_CONTENT_IDENTITY_ROW_VERSION, OpContentIdentity,
     TUNE_CONTENT_IDENTITY_ROW_VERSION, TuneContentIdentity,
+};
+pub use regime_output::{
+    MAX_REGIME_DEMOTION_RECEIPT_BYTES, REGIME_DEMOTION_RECEIPT_ARTIFACT_KIND,
+    RegimeDemotionArtifactReceipt,
 };
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
 pub use state_checkpoint::{
