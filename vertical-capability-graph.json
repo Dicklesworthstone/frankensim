@@ -47,6 +47,17 @@
       ]
     },
     {
+      "capability_id": "geometry.import-formats",
+      "implementing_beads": [
+        "frankensim-ext-cad-step-interchange-8uxb",
+        "frankensim-extreal-program-f85xj.6.3",
+        "frankensim-extreal-program-f85xj.6.11",
+        "frankensim-extreal-program-f85xj.11.2",
+        "frankensim-leapfrog-2026-program-i94v.2.2.10",
+        "frankensim-leapfrog-2026-program-i94v.2.2.11"
+      ]
+    },
+    {
       "capability_id": "geometry.topology-certificates",
       "implementing_beads": [
         "frankensim-extreal-program-f85xj.2.14",

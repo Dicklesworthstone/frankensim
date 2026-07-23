@@ -85,6 +85,41 @@
       "notes": "Conversion promotes to Enclosure only from an ExactDistance source; everything else stays Estimate. The sheaf seam result means agreement at retained finite interface samples -- not watertightness."
     },
     {
+      "id": "geometry.import-formats",
+      "title": "Quarantined mesh and strict faceted STEP admission",
+      "level": "L1",
+      "owner": "jemanuel",
+      "last_review": "2026-07-23",
+      "crates": [
+        "fs-io",
+        "fs-cli",
+        "fs-project"
+      ],
+      "evidence": [
+        {
+          "kind": "contract",
+          "ref": "crates/fs-io/CONTRACT.md"
+        },
+        {
+          "kind": "contract",
+          "ref": "crates/fs-cli/CONTRACT.md"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/AP242_MINIMUM_CAD_SLICE.md"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-cli/tests/import.rs::g0_dirty_stl_promotes_assigns_and_retains_complete_lineage"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-cli/tests/import.rs::g0_faceted_step_import_retains_both_receipts_and_repaired_mesh"
+        }
+      ],
+      "notes": "CLI import admits caller-bound STL, OBJ, and PLY through the mesh quarantine path and one caller-selected strict triangular FACETED_BREP subset through the STEP path; current executable product evidence proves STL and faceted STEP only. It does not discover AP242 assemblies or occurrence transforms, unit contexts, part names/attributes, trimmed NURBS, PMI/GD&T, or persistent topology. Units and named groups are caller/project declarations. The pending f85xj.6.11 lane is not claimed."
+    },
+    {
       "id": "geometry.topology-certificates",
       "title": "Self-intersection and manifoldness certificates on triangle soups",
       "level": "L2",
