@@ -28,8 +28,14 @@ pub use fs_evidence::{Color, ValidityDomain};
 use fs_exec::Cx;
 use fs_ivl::Interval;
 
+mod nonlinear;
 mod robust;
 
+pub use nonlinear::{
+    FiniteDifferenceProbe, FiniteDifferenceSettings, LinearizationDisposition,
+    NonlinearAssimilation, NonlinearLinearization, NonlinearObservationSpec,
+    assimilate_nonlinear_fd, linearize_nonlinear_fd,
+};
 pub use robust::{
     BatchOutcome, CensorDirection, MAX_CORRELATED_OBSERVATIONS, ObservationAudit, ObservationBatch,
     ObservationDisposition, PathologyKind, RobustAssimilation, RobustObservation,
@@ -960,6 +966,29 @@ pub enum AssimError {
         /// Stable parameter role.
         parameter: &'static str,
     },
+    /// A nonlinear-observation setting is zero, negative, NaN, or infinite.
+    InvalidLinearizationParameter {
+        /// Stable parameter role.
+        parameter: &'static str,
+    },
+    /// A scale-aware finite-difference perturbation could not produce two
+    /// distinct finite binary64 states.
+    FiniteDifferenceStepUnrepresentable {
+        /// State component that could not be perturbed.
+        component: usize,
+    },
+    /// A caller-supplied nonlinear model returned NaN or infinity.
+    NonFiniteModelPrediction {
+        /// Stable evaluation role (`base`, `plus`, or `minus`).
+        evaluation: &'static str,
+        /// Perturbed component, absent for the base evaluation.
+        component: Option<usize>,
+    },
+    /// Central differencing produced a NaN or infinite Jacobian coefficient.
+    NonFiniteObservationJacobian {
+        /// Offending state component.
+        component: usize,
+    },
     /// A regime bound is NaN or infinite.
     NonFiniteRegimeBounds,
     /// The regime lower bound exceeds its upper bound.
@@ -1136,6 +1165,33 @@ impl fmt::Display for AssimError {
             Self::InvalidPathologyParameter { parameter } => {
                 write!(f, "robust observation {parameter} is invalid")
             }
+            Self::InvalidLinearizationParameter { parameter } => {
+                write!(f, "nonlinear observation {parameter} is invalid")
+            }
+            Self::FiniteDifferenceStepUnrepresentable { component } => write!(
+                f,
+                "finite-difference step is not representable for state component {component}"
+            ),
+            Self::NonFiniteModelPrediction {
+                evaluation,
+                component,
+            } => {
+                if let Some(component) = component {
+                    write!(
+                        f,
+                        "nonlinear model returned a non-finite {evaluation} prediction for component {component}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "nonlinear model returned a non-finite {evaluation} prediction"
+                    )
+                }
+            }
+            Self::NonFiniteObservationJacobian { component } => write!(
+                f,
+                "nonlinear observation Jacobian component {component} is non-finite"
+            ),
             Self::NonFiniteRegimeBounds => write!(f, "regime bounds must be finite"),
             Self::InvertedRegimeBounds => {
                 write!(f, "regime lower bound must not exceed its upper bound")

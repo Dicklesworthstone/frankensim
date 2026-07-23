@@ -61,6 +61,25 @@ linear-Gaussian core of weak-constraint assimilation.
   updater. `ObservationAudit` retains every instrument disposition, the
   effective observation degrees of freedom, terminal `BatchOutcome`, and a
   domain-separated receipt. A refused result cannot expose a partial posterior.
+- `FiniteDifferenceSettings::new(relative_step,
+  max_standardized_innovation)` — checked positive finite policy for
+  scale-aware central differencing and the local innovation gate.
+  `NonlinearObservationSpec::new(...)` binds a checked scalar reading, noise,
+  instrument, caller-declared nonlinear model identity, and those settings.
+- `linearize_nonlinear_fd(&Belief, &NonlinearObservationSpec, predict, &Cx)` —
+  on success evaluates the supplied scalar model exactly
+  `1 + 2 * state_dimension` times, retains the actual representable plus/minus
+  states and model values in `FiniteDifferenceProbe` records, and constructs a
+  local affine `Observation` only when
+  `|reading - h(mean)| / sqrt(H P H^T + R)` is within the declared gate.
+  `NonlinearLinearization` retains the prediction, innovation, local variance,
+  standardized innovation, Jacobian row, probes, disposition, and
+  domain-separated receipt.
+- `assimilate_nonlinear_fd(...) -> NonlinearAssimilation` — routes an admitted
+  affine observation through the established scalar `assimilate` updater.
+  `DemotedLargeInnovation` exposes neither an affine observation nor a
+  posterior; demotion is an audited no-publication result, not a failed
+  Gaussian update.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -136,6 +155,26 @@ linear-Gaussian core of weak-constraint assimilation.
   `robust-observation-audit:v1:<64 lowercase hex>` and bind the prior, ordered
   records and pathology metadata, complete observation covariance,
   dispositions, terminal outcome, and published posterior if present.
+- A nonlinear central-difference probe for component `i` requests
+  `relative_step * max(1, |mean_i|)` and refuses unless binary64 addition and
+  subtraction produce two distinct finite states, each distinct from the
+  linearization point, whose difference is also finite and positive. The
+  derivative denominator is the difference between those actual retained
+  states, not twice the nominal step. Non-finite base or probe predictions and
+  non-finite derivatives are typed refusals.
+- Nonlinear admission is fail-closed. An admitted local model publishes
+  `H = finite_difference_jacobian` and affine value
+  `reading - h(mean) + H·mean`, so applying that observation at the
+  linearization point preserves the original innovation. A disposition outside
+  the declared standardized-innovation gate publishes no `Observation`; the
+  wrapper consequently cannot publish a posterior. A linear scalar model with
+  exactly representable probes reduces exactly to the existing linear updater.
+- Nonlinear receipts use
+  `nonlinear-fd-linearization:v1:<64 lowercase hex>` and bind the complete
+  prior, reading, noise, instrument, caller-declared model identity, finite-
+  difference and gate settings, prediction, innovation and variance, Jacobian,
+  every actual probe value, and disposition. The arbitrary callback itself
+  cannot be authenticated by this crate.
 - The candidate's `Color::Estimated.estimator` is
   `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
@@ -210,6 +249,11 @@ invalid pathology metadata. Robust covariance certification and the delegated
 posterior update use the existing admitted core paths. The bounded Cholesky,
 whitening, and audit-framing wrapper has cancellation checkpoints but does not
 yet expose a separate typed invocation resource planner.
+Nonlinear errors additionally distinguish invalid finite-difference/gate
+settings, an unrepresentable perturbation, a non-finite model evaluation, and a
+non-finite Jacobian coefficient. A large but finite standardized innovation is
+a successful typed demotion rather than an error. The bounded nonlinear wrapper
+has no separate typed invocation resource planner.
 
 ## Determinism class
 
@@ -223,6 +267,11 @@ For robust batches, declaration order is semantic because it owns covariance
 rows. Reordering records requires the matching row/column permutation; v1 does
 not claim bit-identical Cholesky rounding or receipt identity across such
 equivalent permutations. Replay of the same ordered batch is deterministic.
+For nonlinear finite differences, state-component order fixes probe evaluation
+and Jacobian order. Replay is deterministic only when the supplied callback is
+a pure deterministic implementation of the declared `model_id` under the same
+binary64 implementation/toolchain manifest. The crate cannot enforce callback
+purity or prove that two callbacks sharing an identity are equivalent.
 
 ## Cancellation behavior
 
@@ -242,6 +291,12 @@ the reused PSD validator. Correlated whitening polls at each observation row;
 audit hashing polls at each record and matrix row and once before finalizing.
 Assimilation polls again before returning a result, so no posterior or audit is
 published after an observed cancellation.
+Nonlinear linearization polls before the base evaluation, before each
+component's two probes, and before receipt publication. The wrapper polls again
+after the delegated scalar update and before publishing its result. A model
+callback is one bounded synchronous evaluation and cannot be interrupted from
+inside this crate; callers needing finer cancellation must implement it inside
+their callback.
 
 ## Unsafe boundary
 
@@ -278,19 +333,36 @@ batches; correlated-noise posterior difference from a naive diagonal update;
 posterior invariant revalidation; covariance PSD/noise-authority/identity
 refusals; pathology metadata validation; and pre-cancellation.
 
+`tests/nonlinear.rs` (bead `f85xj.12.4`, G0/G3/G4): exact reduction of a
+dyadically probed linear model to the established scalar updater; actual
+finite-difference probe retention; deterministic replay and model-identity
+receipt sensitivity; nonlinear polynomial Jacobian recovery; large-innovation
+demotion with no affine observation or posterior; malformed policy and identity
+refusals; non-finite model/Jacobian and unrepresentable-step refusals; exact
+callback count; and pre-cancellation.
+
 ## No-claim boundaries
 
 - v1 is the LINEAR-GAUSSIAN assimilation with linear observation operators;
   full weak-constraint 4D-Var over a nonlinear forward model uses Proposal 1's
   CERTIFIED adjoints (adjoint-certs) and is the fuller deliverable — this crate
   is the Kalman/Gauss-Newton core.
-- Robust v1 does not implement nonlinear `h(x)`, Gauss-Newton iteration,
-  `fs-ad`/finite-difference Jacobians, step-size receipts, censored or clipped
-  likelihoods, temporal state augmentation for delayed sensors, robust
-  M-estimation, or sparse/shared-factor covariance beyond the dense cap.
+- Robust v1 does not implement censored or clipped likelihoods, temporal state
+  augmentation for delayed sensors, robust M-estimation, or
+  sparse/shared-factor covariance beyond the dense cap.
   Censored, saturated, and delayed records are typed audited refusals, not
   silently Gaussianized data. A time constant is retained as metadata but is
   not a delay correction.
+- The nonlinear v1 seam is one local central-finite-difference linearization,
+  not Gauss-Newton iteration, `fs-ad` automatic differentiation, a derivative
+  certificate, or a nonlinear-posterior accuracy guarantee. It does not select
+  or adapt the step, compare multiple steps for truncation/roundoff stability,
+  prove model smoothness, retain an AD authority, or authenticate callback code.
+  Its standardized-innovation threshold is caller policy for local demotion,
+  not a validity certificate, calibrated hypothesis test, outlier likelihood,
+  convergence criterion, or `Color::Validated` promotion. Multi-iteration
+  solvers, automatic Jacobians, typed child-resource planning, temporal
+  augmentation, and calibrated full-rig replay remain separate work.
 - The observation covariance gate certifies PSD using the crate's existing
   bounded interval policy, then requires a successful binary64 Cholesky factor
   for whitening. This is not a condition-number certificate, an exact
