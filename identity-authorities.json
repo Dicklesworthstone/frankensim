@@ -120,7 +120,7 @@
 ],
 "external_owners": [
 {"id":"ci:content-snapshot","path":"scripts/ci/checkout_constellation.sh","symbol":"snapshot_identity","version":3,"domain":"org.frankensim.ci.content-snapshot.v3"},
-{"id":"ci:quality-proof-record","path":"scripts/ci/quality_lanes.sh","symbol":"emit_proof_seal","version":1,"domain":"org.frankensim.ci.quality-proof-record.v1"},
+{"id":"ci:quality-proof-record","path":"scripts/ci/quality_lanes.sh","symbol":"emit_proof_seal","version":2,"domain":"org.frankensim.ci.quality-proof-record.v2"},
 {"id":"ci:x86-cross-verdict","path":"scripts/ci/x86_cross_check.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-cross-verdict.v1"},
 {"id":"ci:x86-runtime-verdict","path":"scripts/ci/x86_runtime_sweep.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-runtime-verdict.v1"},
 {"id":"xtask:constellation-bootstrap-provenance","path":"xtask/src/bootstrap_provenance.rs","symbol":"write_bootstrap_provenance","version":3,"domain":"org.frankensim.xtask.constellation-bootstrap-provenance.v3"},
