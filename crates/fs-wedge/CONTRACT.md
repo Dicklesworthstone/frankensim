@@ -97,7 +97,7 @@ it constrains vertical-specific kernel work and records the commercial bet.
 - Default weights contain each factor exactly once and sum to 100. Weighted
   totals therefore lie in `0..=1000`. Exact total ties resolve by ascending
   candidate slug, independent of candidate or weight input order.
-- At inventory revision `e5c8061f4faed986b831b8978d0c8d1812e960fb`, the
+- At inventory revision `b3b5f2c1c809eec06cde1e40cbc916d6995469b5`, the
   recorded default totals are thermal design assurance `638`, SDF structural
   assurance `623`, and full electronics CHT `502`. Thermal design assurance is
   the provisional recommendation; SDF structural assurance is the runner-up
@@ -157,7 +157,17 @@ placeholder refusal; the printed kill-criterion derivation; manifest numeric
 round-trip of the envelope; the audit's baseline and refusal-drill checks;
 complete audit; negative doctrine and unique labels; deterministic JSON. The
 workspace evidence test reads every `WorkspacePath`, checks its locator
-marker, prints a deterministic `PASS`/`FAIL` table, and fails on drift.
+marker, prints a deterministic `PASS`/`FAIL` table, and fails on drift. A
+separate exhaustive kernel-matrix test independently probes the required
+implementation markers for all 15 kernel rows, derives `present`, `partial`,
+or `absent` from the number found, prints a labeled matrix/observed diff, and
+fails when a new or removed module makes the recorded readiness stale. The
+cross-crate `fs-govern/tests/wedge_audit.rs` e2e lane composes these measured
+inputs, scores, exhaustive sensitivities, sourced baseline, and kill
+derivation with the fail-closed ratification record. Its `wedge-audit` binary
+emits one content-addressed artifact plus reconstructable JSON-lines logs and
+proves a seeded missing-cycle-time-evidence pointer fails without partial
+output.
 
 ## No-claim boundaries
 
@@ -182,17 +192,22 @@ marker, prints a deterministic `PASS`/`FAIL` table, and fails on drift.
 - The recommendation is provisional pending ratification and successor
   customer-baseline work. It records the repository inventory at the pinned
   revision above and does not silently incorporate later workspace changes.
-- The CHT `correlation-Nu`, `RANS`, and `LES` entries in `fs-ladder` are rung
-  declarations with a generic `Refine1d` demonstrator; the ladder contract says
-  it does not run solves. No correlation catalog, fan curve, RANS/LES solver,
-  or solid-fluid thermal transfer is inferred from those labels.
+- `fs-convection` and `fs-airflow` now provide the typed correlation catalog,
+  fan curve, flow-network operating point, and evidence-preserving correlation
+  handoff used by the low-cost CHT rung. Their synthetic fixtures and
+  conditional mathematical certificates do not establish manufacturer or
+  enclosure accuracy. The `RANS` and `LES` entries in `fs-ladder` remain rung
+  declarations, not solvers, and no solid-fluid thermal field transfer is
+  inferred from them.
 - `fs-lbm::ThermalLbm` is measured present only for its implemented
   two-dimensional Boussinesq slab. It is not promoted into an electronics CHT
   kernel.
 - `fs-adjoint::HeatAdjoint` owns a backward-Euler reference problem over
   caller-assembled matrices. It is not a CHT assembler or coupled adjoint.
 - `fs-vpm` is a two-dimensional inviscid direct kernel and `fs-couple`'s FSI
-  fixture is a scalar linearized map. Neither is a coupled flutter solver.
+  fixture is a scalar linearized map. `fs-flutter-e2e` adds a deterministic
+  two-degree-of-freedom stability-boundary campaign, not a real aeroelastic
+  objective or verified coupled gradient.
 - AM Bench data access is recorded from NIST's official data-management pages;
   a specific case/version/file/checksum and dataset-specific reuse terms remain
   to be pinned. The NASA/AGARD and Sandia records similarly remain partial

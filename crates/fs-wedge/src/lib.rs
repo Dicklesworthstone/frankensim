@@ -581,15 +581,22 @@ const CHT_KERNELS: [KernelReadinessEntry; 6] = [
     KernelReadinessEntry {
         capability: "forced-convection-correlations-and-fan-curve",
         measurement: measured(
-            Readiness::Absent,
-            1,
-            MeasurementMethod::ContractBoundaryReview,
-            &[evidence(
-                EvidenceKind::WorkspacePath,
-                "crates/fs-ladder/src/lib.rs",
-                "cheap bottom rung: forced-convection Nusselt correlation",
-            )],
-            "The CHT ladder names a correlation rung but executes only the generic Refine1d transfer; no Nusselt correlation catalog, pressure-drop curve, or fan operating-point solve is present.",
+            Readiness::Present,
+            8,
+            MeasurementMethod::WorkspaceInventory,
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-convection/src/lib.rs",
+                    "pub struct CorrelationInputs",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-airflow/src/lib.rs",
+                    "pub struct FanCurve",
+                ),
+            ],
+            "A typed forced-convection correlation catalog and a certified-bracket fan/network operating-point solve now exist, including an explicit correlation handoff. Their retained fixtures remain synthetic and do not establish product-level airflow accuracy.",
         ),
     },
     KernelReadinessEntry {
@@ -623,15 +630,22 @@ const CHT_KERNELS: [KernelReadinessEntry; 6] = [
     KernelReadinessEntry {
         capability: "solid-fluid-thermal-coupling-and-contact-resistance",
         measurement: measured(
-            Readiness::Absent,
-            1,
+            Readiness::Partial,
+            4,
             MeasurementMethod::ContractBoundaryReview,
-            &[evidence(
-                EvidenceKind::WorkspacePath,
-                "crates/fs-couple/CONTRACT.md",
-                "The scalar evaluator does not execute vector/tensor/field",
-            )],
-            "Typed coupling metadata exists, but no field transfer closes solid conduction, fluid temperature, interface heat flux, or contact resistance.",
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/src/interface.rs",
+                    "pub struct InterfaceResistance",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-couple/CONTRACT.md",
+                    "The scalar evaluator does not execute vector/tensor/field",
+                ),
+            ],
+            "Card-backed thermal contact resistance now exists on paired P1 faces, but no field transfer closes solid conduction, fluid temperature, or interface heat flux across the solid-fluid seam.",
         ),
     },
 ];
@@ -767,15 +781,22 @@ const AERO_KERNELS: [KernelReadinessEntry; 4] = [
     KernelReadinessEntry {
         capability: "coupled-flutter-gradient",
         measurement: measured(
-            Readiness::Absent,
-            0,
+            Readiness::Partial,
+            3,
             MeasurementMethod::WorkspaceInventory,
-            &[evidence(
-                EvidenceKind::Bead,
-                "frankensim-extreal-program-f85xj.1.1",
-                "inventory found no executable coupled flutter objective or adjoint chain",
-            )],
-            "No admitted objective connects aerodynamic load, structural dynamics, flutter detection, and a verified coupled gradient.",
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-flutter-e2e/src/lib.rs",
+                    "pub fn run_campaign",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-flutter-e2e/CONTRACT.md",
+                    "not a full aeroelastic model",
+                ),
+            ],
+            "A deterministic two-degree-of-freedom flutter boundary campaign exists, but no admitted objective connects real aerodynamic load, structural dynamics, and a verified coupled gradient.",
         ),
     },
 ];
@@ -1402,8 +1423,13 @@ const CHT_FULL_FACTORS: [FactorRating; 9] = [
                 ),
                 evidence(
                     EvidenceKind::WorkspacePath,
-                    "crates/fs-ladder/CONTRACT.md",
-                    "The ladder does not run solves",
+                    "crates/fs-airflow/src/lib.rs",
+                    "pub struct FanCurve",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/src/interface.rs",
+                    "pub struct InterfaceResistance",
                 ),
                 evidence(
                     EvidenceKind::Bead,
@@ -1411,9 +1437,9 @@ const CHT_FULL_FACTORS: [FactorRating; 9] = [
                     "low-Re forced-convection RANS remains gated on ratification",
                 ),
             ],
-            "Steady anisotropic conduction is real, while correlation, fan-network, solid-fluid transfer, and RANS/LES authority remain incomplete.",
+            "Steady anisotropic conduction, correlation/fan-network support, and contact resistance are real, while solid-fluid field transfer and RANS/LES authority remain incomplete.",
         ),
-        "One load-bearing thermal kernel now exists, but full electronics CHT still depends on several absent seams and its most expensive flow rung.",
+        "Several load-bearing thermal kernels now exist, but full electronics CHT still depends on the solid-fluid transfer seam and its most expensive flow rung.",
     ),
     factor_rating(
         ScoringFactor::ValidationTractability,
@@ -1927,15 +1953,15 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         name: "full-electronics-cooling-cht",
         display: "Full electronics-cooling CHT",
         measured_on: "2026-07-22",
-        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &CHT_FULL_FACTORS,
-        minority_case: "Full CHT most completely exercises the original multi-tool coupling thesis and could become the strongest long-run moat. Its present score is held down by missing flow/coupling kernels, unmeasured compute, and a longer validation path—not by evidence that the market need is false.",
+        minority_case: "Full CHT most completely exercises the original multi-tool coupling thesis and could become the strongest long-run moat. Its present score is held down by the missing solid-fluid field transfer and high-fidelity flow rungs, unmeasured compute, and a longer validation path—not by evidence that the market need is false.",
     },
     ComparisonCandidate {
         name: "sdf-structural-topology-assurance",
         display: "SDF structural/topology optimization assurance",
         measured_on: "2026-07-22",
-        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &SDF_STRUCTURAL_FACTORS,
         minority_case: "SDF structural assurance is the lowest technical-risk route to a differentiated demo: SDF charts, CutFEM elasticity, topology optimization, deterministic replay, and checked adjoints already compose. It should win if customer-pain evidence appears or if kernel readiness/CAD burden receive materially more weight; its current weakness is external market and validation-data evidence, plus honest 2-D scope.",
     },
@@ -1943,7 +1969,7 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         name: "thermal-design-assurance",
         display: "Thermal design assurance",
         measured_on: "2026-07-22",
-        inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &THERMAL_ASSURANCE_FACTORS,
         minority_case: "Thermal design assurance preserves the declared thermal market thesis while limiting the first product to conduction, interfaces, radiation, fan/correlation rungs, and evidence-led decisions. Its remaining risk is that the customer-pain baseline and several supporting kernels are still pending.",
     },

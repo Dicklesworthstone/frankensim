@@ -56,6 +56,7 @@ pub mod ratification;
 pub mod traceability;
 pub mod traceability_fs;
 pub mod traceability_join;
+pub mod wedge_audit;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
@@ -105,6 +106,12 @@ pub use traceability_join::{
     TraceabilityOwnerJoinAudit, TraceabilityOwnerJoinDiagnostic, TraceabilityOwnerJoinField,
     TraceabilityOwnerJoinReceipt, audit_traceability_owner_join,
     generate_traceability_ledger_from_loaded_sources,
+};
+pub use wedge_audit::{
+    MAX_WEDGE_AUDIT_ARTIFACT_BYTES, MAX_WEDGE_AUDIT_EVIDENCE_BYTES,
+    WEDGE_DECISION_AUDIT_IDENTITY_DOMAIN, WEDGE_DECISION_AUDIT_SCHEMA, WedgeAuditLog,
+    WedgeAuditLogLevel, WedgeDecisionAudit, WedgeDecisionAuditError, WedgeDecisionAuditRequest,
+    build_wedge_decision_audit,
 };
 
 /// The ten addendum risks (Part V).

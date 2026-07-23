@@ -536,6 +536,34 @@ they are not implied by this solid graph core.
   workflow traces exist. A failed quarterly falsifier forces re-selection of
   the wedge, not a change to the platform architecture.
 
+## Measured wedge decision audit (`wedge_audit` module, bead f85xj.1.5)
+
+- `WedgeDecisionAuditRequest::new` requires a positive finite measured
+  FrankenSim cycle time and a non-empty bounded evidence locator. The locator
+  is retained exactly; no default measurement or anonymous scalar can enter
+  the audit.
+- `build_wedge_decision_audit` fails closed across the complete current
+  decision surface: `fs_wedge::audit`, the measured comparison and exhaustive
+  one-factor sensitivity render, the sourced cycle-time baseline and
+  conservative kill verdict, and `ratified_vertical` / `ratification_json`.
+  Success emits one JSON artifact under schema
+  `frankensim-wedge-decision-audit-v1`, with a domain-separated BLAKE3 identity
+  over the exact payload and a 1 MiB publication cap.
+- Ordered `WedgeAuditLog` JSON-lines rows retain the validated request, every
+  fs-wedge self-check, the complete measured-input/baseline manifest, scoring
+  report and sensitivities, ratification record, kill derivation, and final
+  artifact. Warning rows carry a stable refusal code and an actionable fix.
+  The `wedge-audit` binary writes the artifact to stdout and logs to stderr;
+  argument refusals exit 2 and decision-boundary refusals exit 3 without
+  publishing a partial artifact. Its explicit
+  `--seed-fault missing-cycle-time-evidence` drill proves that removing the
+  measurement provenance fails the lane.
+- The artifact is a reproducible commercial-decision audit, not an authority
+  upgrade. The caller-supplied evidence locator is not opened, authenticated,
+  content-hashed, or proven to name a production timing run. A successful
+  render does not prove market demand, technical maturity, scientific
+  validity, or that a production run met the kill criterion.
+
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
 - `principles() -> &[Principle]` — the eight design principles P1–P8 (id, name,
@@ -796,6 +824,12 @@ fs-ledger (events + content-addressed preregistration/refutation/
 decision-log artifacts), fs-package claims re-checked solver-free by
 fs-checker incl. a mismatched-root refusal, fresh-ledger byte-for-byte
 replay, and an idempotent full-retry pass.
+
+`tests/wedge_audit.rs` (bead f85xj.1.5, G0/G3/e2e): byte-identical artifact
+and log replay, complete measured-input/scoring/sensitivity/baseline/kill/
+ratification composition, typed missing-evidence refusal, deterministic binary
+stdout/stderr, a seeded missing-evidence warning with an actionable repair, and
+stable duplicate-argument refusal with no partial artifact.
 
 `tests/lanes.rs` (bead rjoq.6, cases lane-001..lane-009): G0 identity and
 state-machine laws (canonical collapse, per-field mutation sensitivity,

@@ -134,6 +134,212 @@ fn check_workspace_measurement(
     failures
 }
 
+#[derive(Debug, Clone, Copy)]
+struct KernelProbe {
+    path: &'static str,
+    marker: &'static str,
+}
+
+const fn kernel_probe(path: &'static str, marker: &'static str) -> KernelProbe {
+    KernelProbe { path, marker }
+}
+
+fn kernel_probes(vertical: &str, capability: &str) -> Option<Vec<KernelProbe>> {
+    match (vertical, capability) {
+        ("conjugate-heat-transfer", "steady-conduction-fem") => Some(vec![kernel_probe(
+            "crates/fs-conduction/src/solve.rs",
+            "pub struct ConductionSolver",
+        )]),
+        ("conjugate-heat-transfer", "thermal-natural-convection-lbm") => Some(vec![kernel_probe(
+            "crates/fs-lbm/src/thermal.rs",
+            "pub struct ThermalLbm",
+        )]),
+        ("conjugate-heat-transfer", "forced-convection-correlations-and-fan-curve") => Some(vec![
+            kernel_probe(
+                "crates/fs-convection/src/lib.rs",
+                "pub struct CorrelationInputs",
+            ),
+            kernel_probe("crates/fs-airflow/src/lib.rs", "pub struct FanCurve"),
+        ]),
+        ("conjugate-heat-transfer", "time-dependent-heat-adjoint") => Some(vec![
+            kernel_probe("crates/fs-adjoint/src/timedep.rs", "pub struct HeatAdjoint"),
+            kernel_probe(
+                "crates/fs-adjoint/src/timedep.rs",
+                "pub struct CoupledChtAdjoint",
+            ),
+        ]),
+        ("conjugate-heat-transfer", "temperature-dependent-material-properties") => Some(vec![
+            kernel_probe("crates/fs-matdb/src/lib.rs", "conductivity(T)"),
+            kernel_probe(
+                "crates/fs-matdb/src/lib.rs",
+                "pub struct ElectronicsThermalMaterialSet",
+            ),
+        ]),
+        ("conjugate-heat-transfer", "solid-fluid-thermal-coupling-and-contact-resistance") => {
+            Some(vec![
+                kernel_probe(
+                    "crates/fs-conduction/src/interface.rs",
+                    "pub struct InterfaceResistance",
+                ),
+                kernel_probe(
+                    "crates/fs-couple/src/lib.rs",
+                    "pub struct ThermalFieldTransfer",
+                ),
+            ])
+        }
+        ("aeroelastic-screening", "wing-shell-structure-and-modes") => Some(vec![
+            kernel_probe(
+                "crates/fs-solid/src/stability.rs",
+                "pub struct BucklingResult",
+            ),
+            kernel_probe("crates/fs-solid/src/lib.rs", "pub struct ShellElement3d"),
+        ]),
+        ("aeroelastic-screening", "unsteady-aerodynamic-loads") => Some(vec![
+            kernel_probe("crates/fs-vpm/src/lib.rs", "pub struct VortexParticle"),
+            kernel_probe("crates/fs-vpm/src/lib.rs", "pub struct VortexFilament3d"),
+        ]),
+        ("aeroelastic-screening", "nonlinear-field-fsi") => Some(vec![
+            kernel_probe(
+                "crates/fs-couple/src/lib.rs",
+                "pub struct AeroStructureFieldTransfer",
+            ),
+            kernel_probe(
+                "crates/fs-couple/src/lib.rs",
+                "pub struct NonlinearFsiSolver",
+            ),
+        ]),
+        ("aeroelastic-screening", "coupled-flutter-gradient") => Some(vec![
+            kernel_probe("crates/fs-flutter-e2e/src/lib.rs", "pub fn run_campaign"),
+            kernel_probe(
+                "crates/fs-flutter-e2e/src/lib.rs",
+                "pub struct CoupledFlutterGradient",
+            ),
+        ]),
+        ("additive-manufacturing-distortion", "moving-heat-source-and-phase-change") => Some(vec![
+            kernel_probe(
+                "crates/fs-conduction/src/lib.rs",
+                "pub struct MovingHeatSource",
+            ),
+            kernel_probe(
+                "crates/fs-conduction/src/lib.rs",
+                "pub struct PhaseChangeModel",
+            ),
+        ]),
+        ("additive-manufacturing-distortion", "three-dimensional-inelastic-distortion") => {
+            Some(vec![
+                kernel_probe(
+                    "crates/fs-solid/src/lib.rs",
+                    "pub struct J2ContinuumElement3d",
+                ),
+                kernel_probe(
+                    "crates/fs-solid/src/lib.rs",
+                    "pub struct AdditiveDistortionSolve",
+                ),
+            ])
+        }
+        ("additive-manufacturing-distortion", "layer-activation-time-sequencing") => Some(vec![
+            kernel_probe("crates/fs-time/src/slabs.rs", "pub fn activation_report"),
+            kernel_probe(
+                "crates/fs-time/src/slabs.rs",
+                "pub struct AmLayerActivation",
+            ),
+        ]),
+        ("additive-manufacturing-distortion", "manufacturing-constraint-screen") => Some(vec![
+            kernel_probe("crates/fs-fab/src/lib.rs", "pub fn overhang_angle"),
+            kernel_probe(
+                "crates/fs-fab/src/lib.rs",
+                "pub struct GeometryOverhangEvaluator",
+            ),
+        ]),
+        ("additive-manufacturing-distortion", "as-built-registration") => Some(vec![
+            kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct Point2"),
+            kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct Point3"),
+            kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct IcpSolver"),
+        ]),
+        _ => None,
+    }
+}
+
+fn derive_kernel_readiness(root: &Path, probes: &[KernelProbe]) -> (Readiness, Vec<String>) {
+    assert!(!probes.is_empty(), "kernel probe set must not be empty");
+    let mut present = 0_usize;
+    let mut evidence = Vec::with_capacity(probes.len());
+    for probe in probes {
+        let path = root.join(probe.path);
+        let found =
+            std::fs::read_to_string(&path).is_ok_and(|contents| contents.contains(probe.marker));
+        if found {
+            present += 1;
+        }
+        evidence.push(format!(
+            "{}:{}={}",
+            probe.path,
+            probe.marker,
+            if found { "found" } else { "missing" }
+        ));
+    }
+    let readiness = if present == probes.len() {
+        Readiness::Present
+    } else if present == 0 {
+        Readiness::Absent
+    } else {
+        Readiness::Partial
+    };
+    (readiness, evidence)
+}
+
+#[test]
+fn kernel_readiness_matrix_matches_independent_workspace_probes() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest
+        .parent()
+        .and_then(Path::parent)
+        .expect("fs-wedge lives at <workspace>/crates/fs-wedge");
+    let mut failures = Vec::new();
+    let mut checked = 0_usize;
+
+    eprintln!("RESULT\tVERTICAL\tCAPABILITY\tMATRIX\tOBSERVED\tPROBES");
+    for inputs in measured_wedge_inputs() {
+        for entry in inputs.kernels {
+            checked += 1;
+            let Some(probes) = kernel_probes(inputs.vertical, entry.capability) else {
+                failures.push(format!(
+                    "{} {}: no independent probe specification",
+                    inputs.vertical, entry.capability
+                ));
+                continue;
+            };
+            let (observed, evidence) = derive_kernel_readiness(root, &probes);
+            let passed = observed == entry.measurement.readiness;
+            eprintln!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                if passed { "PASS" } else { "FAIL" },
+                inputs.vertical,
+                entry.capability,
+                entry.measurement.readiness.label(),
+                observed.label(),
+                evidence.join("; ")
+            );
+            if !passed {
+                failures.push(format!(
+                    "{} {}: matrix={} workspace={} [{}]",
+                    inputs.vertical,
+                    entry.capability,
+                    entry.measurement.readiness.label(),
+                    observed.label(),
+                    evidence.join("; ")
+                ));
+            }
+        }
+    }
+    assert_eq!(checked, 15, "kernel probe inventory must remain exhaustive");
+    assert!(
+        failures.is_empty(),
+        "kernel readiness drift:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn workspace_evidence_paths_and_markers_have_not_drifted() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));

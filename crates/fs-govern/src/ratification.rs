@@ -144,7 +144,7 @@ pub const VERTICAL_RATIFICATION_V1: VerticalRatification = VerticalRatification 
         stack in the workspace (fs-solid, fs-topopt, fs-truss-e2e, fs-frame) and public \
         validation data with retained raw records; if thermal data acquisition stalls, it is \
         the strongest fallback.",
-    scoring_inventory_revision: "e5c8061f4faed986b831b8978d0c8d1812e960fb",
+    scoring_inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
     recorded_totals: &[
         RecordedTotal {
             candidate: "thermal-design-assurance",
