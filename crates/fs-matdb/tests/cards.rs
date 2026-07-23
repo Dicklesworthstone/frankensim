@@ -218,6 +218,7 @@ fn model_card_content_identity_is_field_sensitive() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one mutation per identity field, in field order
 fn canonical_parameter_block_hash_is_ordered_and_narrowly_scoped() {
     let base = j2_card();
     assert_eq!(

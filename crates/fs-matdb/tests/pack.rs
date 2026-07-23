@@ -705,6 +705,7 @@ fn canonical_profile_refuses_negative_zero_and_partial_frame_receipts() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one refusal drill per linkage rule, in admission order
 fn normalization_targets_are_linked_dimension_checked_and_unique() {
     let (claims, _, _) = sample_claims();
     let density = claims.claims_for("density")[0].0;

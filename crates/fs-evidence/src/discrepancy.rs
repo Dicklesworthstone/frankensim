@@ -687,14 +687,11 @@ impl ModelBracket {
         if !qoi.is_finite() {
             return Err(FitError::NonFiniteBracketQoi { name: owned_name });
         }
-        let position = match self
+        let Err(position) = self
             .members
             .binary_search_by(|(member, _)| member.as_str().cmp(owned_name.as_str()))
-        {
-            Ok(_) => {
-                return Err(FitError::DuplicateBracketMember { name: owned_name });
-            }
-            Err(position) => position,
+        else {
+            return Err(FitError::DuplicateBracketMember { name: owned_name });
         };
         let requested_members = self.members.len() + 1;
         reserve_members(&mut self.members, 1).map_err(|BracketReservationError| {

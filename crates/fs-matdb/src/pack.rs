@@ -413,6 +413,7 @@ impl NormalizedPack {
     /// ordering, finite portable values, signed-zero policy, and transform
     /// receipts.  License interpretation remains the offline compiler's job;
     /// this boundary requires its nonempty retained redistribution decision.
+    #[allow(clippy::needless_pass_by_value)] // by-value admission: the caller surrenders its set so no non-canonical alias survives
     pub fn new(
         pack_id: impl Into<String>,
         compiler: impl Into<String>,
@@ -627,6 +628,7 @@ impl NormalizedPack {
     }
 
     /// Decode and semantically re-admit a canonical normalized pack.
+    #[allow(clippy::too_many_lines)] // one canonical decode sequence: splitting would hide the wire order
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PackError> {
         if bytes.len() > MAX_PACK_BYTES {
             return Err(limit("pack_bytes", MAX_PACK_BYTES, bytes.len()));
@@ -828,6 +830,7 @@ fn canonical_claim_set(source: &ClaimSet) -> Result<ClaimSet, PackError> {
     Ok(canonical)
 }
 
+#[allow(clippy::too_many_lines)] // one admission checklist, checked in its stated order
 fn validate_claim_set(claims: &ClaimSet) -> Result<(), PackError> {
     let observation_ids: Vec<_> = claims
         .observation_ids()

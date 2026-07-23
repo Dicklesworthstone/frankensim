@@ -495,7 +495,7 @@ struct RequestIdentityReference<'a> {
     predecessor: Option<[u8; 32]>,
 }
 
-fn request_identity_reference(input: RequestIdentityReference<'_>, framed: bool) -> ContentHash {
+fn request_identity_reference(input: &RequestIdentityReference<'_>, framed: bool) -> ContentHash {
     let mut preimage = Vec::new();
     push_identity_reference_field(&mut preimage, &input.version.to_le_bytes(), framed);
     push_identity_reference_field(&mut preimage, &[input.subject_role], framed);
@@ -2233,12 +2233,12 @@ fn decision_identity_binds_every_request_scope_axis() {
         sequence: audit.scope.sequence(),
         predecessor: None,
     };
-    let reference_id = request_identity_reference(reference, true);
+    let reference_id = request_identity_reference(&reference, true);
     assert_eq!(baseline.request_id().as_bytes(), reference_id.as_bytes());
     assert_ne!(
         reference_id,
         request_identity_reference(
-            RequestIdentityReference {
+            &RequestIdentityReference {
                 domain: "org.frankensim.fs-blake3.promotion-request.other.v1",
                 ..reference
             },
@@ -2248,7 +2248,7 @@ fn decision_identity_binds_every_request_scope_axis() {
     );
     assert_ne!(
         reference_id,
-        request_identity_reference(reference, false),
+        request_identity_reference(&reference, false),
         "request length framing is identity-bearing"
     );
 
@@ -2363,7 +2363,7 @@ fn decision_identity_binds_every_request_scope_axis() {
         },
     ];
     for variant in field_variants {
-        assert_ne!(reference_id, request_identity_reference(variant, true));
+        assert_ne!(reference_id, request_identity_reference(&variant, true));
     }
     let predecessor_a = RequestIdentityReference {
         predecessor: Some(*baseline.decision_id().as_bytes()),
@@ -2374,8 +2374,8 @@ fn decision_identity_binds_every_request_scope_axis() {
         ..reference
     };
     assert_ne!(
-        request_identity_reference(predecessor_a, true),
-        request_identity_reference(predecessor_b, true),
+        request_identity_reference(&predecessor_a, true),
+        request_identity_reference(&predecessor_b, true),
         "a present predecessor's exact decision ID is identity-bearing"
     );
 }
@@ -2598,6 +2598,7 @@ fn stage_decision_identities_match_independent_complete_grammars() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // the sealed-registry version guard: one grammar, one straight-line replay
 fn final_decision_identity_matches_independent_disposition_grammar() {
     let subject = subject_receipt(80);
     let verifier = verifier_receipt(0x600D);

@@ -1248,6 +1248,7 @@ impl CertifiedF64LineageOperationV1 {
         }
     }
 
+    #[allow(clippy::unused_self)] // every op answers uniformly today; the per-op table shape is the API
     const fn parent_semantics(self) -> CertifiedF64LineageParentSemanticsV1 {
         CertifiedF64LineageParentSemanticsV1::Ordered
     }
@@ -2825,6 +2826,7 @@ where
     Ok(IdentifiedValidityDomainV1 { domain, receipt })
 }
 
+#[allow(clippy::too_many_lines)] // one canonical field sequence: splitting would hide the encoded order
 fn identify_validity_domain_receipt_v1<C>(
     domain: &ValidityDomain,
     limits: EvidenceIdentityLimits,
@@ -3630,15 +3632,12 @@ where
             .canonical_set(
                 Field::new(0, "model-card-names"),
                 card_count,
-                model_evidence.cards.iter().map(|card| card.as_bytes()),
+                model_evidence.cards.iter().map(String::as_bytes),
             )?
             .canonical_set(
                 Field::new(1, "assumptions"),
                 assumption_count,
-                model_evidence
-                    .assumptions
-                    .iter()
-                    .map(|assumption| assumption.as_bytes()),
+                model_evidence.assumptions.iter().map(String::as_bytes),
             )?
             .child(Field::new(2, "validity"), validity_receipt.id())?
             .u64(
@@ -3827,13 +3826,13 @@ where
             .canonical_set(
                 Field::new(3, "assumptions"),
                 assumption_count,
-                card.assumptions.iter().map(|value| value.as_bytes()),
+                card.assumptions.iter().map(String::as_bytes),
             )?
             .child(Field::new(4, "validity"), validity_receipt.id())?
             .canonical_set(
                 Field::new(5, "known-failures"),
                 known_failure_count,
-                card.known_failures.iter().map(|value| value.as_bytes()),
+                card.known_failures.iter().map(String::as_bytes),
             )?
             .flag(Field::new(6, "calibration-present"), supplied_calibration)?
             .child(
@@ -4202,16 +4201,12 @@ where
             .canonical_set(
                 Field::new(6, "model-cards"),
                 card_count,
-                evidence.model.cards.iter().map(|card| card.as_bytes()),
+                evidence.model.cards.iter().map(String::as_bytes),
             )?
             .canonical_set(
                 Field::new(7, "model-assumptions"),
                 assumption_count,
-                evidence
-                    .model
-                    .assumptions
-                    .iter()
-                    .map(|assumption| assumption.as_bytes()),
+                evidence.model.assumptions.iter().map(String::as_bytes),
             )?
             .child(Field::new(8, "model-validity"), validity_receipt.id())?
             .u64(
@@ -4594,7 +4589,7 @@ where
                 parent_rows
                     .iter()
                     .flat_map(|rows| rows.iter())
-                    .map(|row| row.as_slice()),
+                    .map(<[u8; 65]>::as_slice),
             )?
             .finish()?,
     )
@@ -4899,6 +4894,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ColorBufferReservationError;
 
+#[allow(clippy::too_many_lines)] // one canonical field sequence: splitting would hide the encoded order
 fn bounded_color_bytes_with_reservation<C, R>(
     color: &Color,
     limits: EvidenceIdentityLimits,
@@ -5084,7 +5080,7 @@ where
     let output_bytes = bounded_color_bytes(output, limits, &mut cancellation)?;
     let parent_count = if parents.is_some() { 2_u64 } else { 0 };
     let parent_rows = parents.map(|parents| parents.map(parent_reference_bytes));
-    let source_count: u64 = if source.is_some() { 1 } else { 0 };
+    let source_count = u64::from(source.is_some());
     let kind = operation.kind();
     let parent_semantics = operation.parent_semantics();
 
@@ -5109,7 +5105,7 @@ where
                 parent_rows
                     .iter()
                     .flat_map(|rows| rows.iter())
-                    .map(|row| row.as_slice()),
+                    .map(<[u8; 65]>::as_slice),
             )?
             .finish()?,
     )

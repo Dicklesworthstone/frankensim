@@ -940,12 +940,11 @@ const MAX_SCHEMA_CHILD_DEPTH: u32 = 16;
 const fn promotion_charter_schema_depth_is_admissible(fields: &[FieldSpec], depth: u32) -> bool {
     let mut index = 0usize;
     while index < fields.len() {
-        if let Some(child) = fields[index].child_spec() {
-            if depth >= MAX_SCHEMA_CHILD_DEPTH
-                || !promotion_charter_schema_depth_is_admissible(child.fields(), depth + 1)
-            {
-                return false;
-            }
+        if let Some(child) = fields[index].child_spec()
+            && (depth >= MAX_SCHEMA_CHILD_DEPTH
+                || !promotion_charter_schema_depth_is_admissible(child.fields(), depth + 1))
+        {
+            return false;
         }
         index += 1;
     }
@@ -3584,11 +3583,20 @@ impl PromotionCapabilityStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromotionCapabilityVerdict {
     /// Approve this exact stage and bind the retained decision statement.
-    Approve { statement: ContentId },
+    Approve {
+        /// Retained decision statement the root folds into the transcript.
+        statement: ContentId,
+    },
     /// Refuse this exact stage and bind the retained refusal reason.
-    Refuse { reason: ContentId },
+    Refuse {
+        /// Retained refusal reason the root folds into the transcript.
+        reason: ContentId,
+    },
     /// Cancellation was observed before the stage committed.
-    Cancelled { reason: ContentId },
+    Cancelled {
+        /// Retained cancellation reason observed before the commit.
+        reason: ContentId,
+    },
 }
 
 /// Final disposition committed by a published promotion decision.
@@ -4891,6 +4899,7 @@ pub const PROMOTION_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "coupling_surface=fs-blake3:promotion-decision",
 ];
 
+#[allow(clippy::too_many_lines)] // one straight-line admission sequence: splitting it would scatter the refusal order the tests pin
 fn derive_promotion_request<I, V, P>(
     receipt: IdentityReceipt<I>,
     anchor: ExternalAnchorRef,
