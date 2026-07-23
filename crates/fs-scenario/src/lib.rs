@@ -22,6 +22,7 @@ pub mod frame;
 pub mod ir;
 pub mod payload;
 pub mod scenario;
+pub mod sensor;
 pub mod signal;
 
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
@@ -45,6 +46,13 @@ pub use frame::{
 pub use scenario::{
     Combination, ContactLaw, ContactModel, DEFAULT_VALIDATION_BUDGET, Environment, LoadCase,
     Scenario, ValidationBudget, ValidationError, ValidationPlan, Violation,
+};
+pub use sensor::{
+    CompiledSensorOperator, MAX_SENSOR_STATE_DIMENSION, MAX_SENSOR_SUPPORT_TERMS,
+    MAX_SENSOR_TEXT_BYTES, ObservationSupport, ObservationTerm, PlacementUncertainty,
+    SENSOR_IDENTITY_DOMAIN, SENSOR_SCHEMA_VERSION, ScenarioSensor, SensorCalibration,
+    SensorComparison, SensorDynamics, SensorError, SensorKind, SensorLocation, SensorMount,
+    SensorObservationParts, SensorQuantity,
 };
 pub use signal::{ChebProfile, Interp, TimeSignal};
 

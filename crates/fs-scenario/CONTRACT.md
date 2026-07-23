@@ -156,6 +156,30 @@ flagships.
   system (its existence and uniqueness in the scenario's `FrameTree` are
   checked by `validate_bindings`, not at declaration time, because the catalog
   does not hold the scenario).
+- `sensor` — entity-bound instrumentation declarations. `ScenarioSensor`
+  requires a closed sensor family (`Thermocouple`, `Rtd`, `FlowMeter`,
+  `PressureTap`, or `IrCameraRegion`), a persistent `EntityRef` plus finite
+  entity-local coordinates, explicit placement uncertainty, a checked point or
+  patch-average restriction row, an explicit ideal/affine mount model, an
+  explicit instantaneous/first-order dynamics declaration, and either a dated
+  physical calibration record or a named virtual-probe definition. No field is
+  silently defaulted. The family fixes the measured SI quantity; the sensor
+  identity BLAKE3-binds schema, entity/reference kind, support, all model and
+  authority fields, and placement-candidate status.
+  `ScenarioSensor::compile` produces a private-field
+  `CompiledSensorOperator`: the declared dense restriction with mount gain
+  applied, the retained affine offset, propagated first-order placement
+  variance, physical instrument variance when present, entity/location, flags,
+  and content identity. `predict` and `compare` use that exact compiled row, so
+  a virtual QoI and predicted-versus-measured comparison cannot silently use
+  different probes. `observation_parts` converts a physical affine reading to
+  owner-neutral linear-Gaussian parts (`operator`, offset-adjusted value,
+  instrument-plus-placement variance, 64-hex instrument identity) consumable by
+  `fs-assimilate::Observation::new`; virtual sensors refuse that handoff rather
+  than inventing measurement noise. The cross-layer consumer proof is
+  test-only: it constructs that checked observation and runs the real
+  `fs_assimilate::assimilate` Joseph update, so no L3 production dependency
+  points upward into L4.
 - `ir::write_ir`/`ir::parse_ir` — canonical byte-stable, explicitly versioned
   s-expression encoding. v2 writes six-base `[m, kg, s, K, A, mol]` vectors;
   explicit v1 and historical unversioned five-vector forms decode by appending
@@ -329,6 +353,22 @@ flagships.
     string-ambiguous references are structured findings with fix hints; there
     is no first-match fallback anywhere on the path from a reference to an
     entity.
+18. **One sensor operator, one probe meaning**: point components are in range;
+    patch terms are distinct, finite, positive, sum to one, and are
+    canonicalized by component; state/support/text sizes have public caps.
+    Every validation-bearing sensor value has private fields and can enter the
+    public API only through its checked constructors, so callers cannot
+    synthesize an invalid support, uncertainty, mount, dynamics, calibration,
+    declaration, or compiled operator.
+    Mount gain is finite positive, placement
+    uncertainty is finite non-negative and either explicitly exact or
+    non-degenerate, first-order time constants and physical instrument
+    variances are finite positive, and calibration dates are valid
+    `YYYY-MM-DD` dates. Compiled values are immutable. The affine prediction,
+    corpus-style comparison, and observation handoff all use the same compiled
+    row and offset. Placement variance is the declared diagonal first-order
+    sum `Σ(sensitivity_i * standard_uncertainty_i)^2`; finite-input overflow
+    refuses. Virtual probes never acquire physical noise authority implicitly.
 
 ## Error model
 
@@ -592,6 +632,15 @@ None.
   scalar/identity/work budget charging in both base and case paths, checkpointed
   preflight cancellation, and canonical v2 payload-IR round trips (including a
   typed atom above 1 MiB) with legacy/version/case/trailing-byte refusals.
+- `tests/sensors.rs` covers all five family/quantity/entity-kind rows; exact
+  point and patch operator compilation; affine mount arithmetic; first-order
+  placement-variance propagation into observation noise; the same compiled
+  row driving prediction and comparison; a test-only handoff through
+  `fs_assimilate::Observation::new` and the real Joseph update; virtual QoI and
+  placement-candidate flags; refusal to launder a virtual probe into a physical
+  observation; malformed support, expectation, uncertainty, mount, dynamics,
+  date, variance, shape, and finite-state inputs; identity sensitivity across
+  every declaration family; and a JSONL instrumented-temperature handoff row.
 
 ## No-claim boundaries
 
@@ -668,6 +717,27 @@ None.
   objects reuse ONE diagnostic shape. This crate cannot enumerate those
   collections, so their rows are not checked for existence and they are never
   reported as unbound; only their entity references are resolved.
+- **Sensor compilation checks declarations; it does not derive geometry or
+  authenticate calibration**: v1 callers supply the state component/patch
+  weights and placement-to-reading sensitivities. This crate checks and binds
+  those values but does not derive a trace map from a mesh, prove a local
+  gradient bound, integrate an IR-camera footprint, validate a mount/contact
+  model, authenticate a certificate/date/provider, or establish calibration
+  validity. `CompiledSensorOperator::predict` is the steady affine reading; the
+  retained first-order time constant is not silently advanced. Nonlinear
+  observation operators, missing/censored/saturated/delayed/correlated sensor
+  pathologies, transient filtering, transform-covariance propagation, corpus
+  admission, and placement optimization remain owning-layer work. The
+  owner-neutral observation parts are structurally consumable by
+  `fs-assimilate`; the test-only consumer exercises the handoff but gives no
+  scientific validation or calibration authority to the resulting posterior.
+- **Sensor root/IR integration is not claimed**: `ScenarioSensor` is a checked
+  scenario-layer declaration type, but the current `Scenario` root and
+  canonical v2 IR do not yet enumerate or serialize sensor collections.
+  Consequently this slice does not prove referenced-entity existence through
+  an `EntityCatalog`, does not make `ReferenceSite::Sensor` existence-checked,
+  and does not provide whole-scenario sensor replay. Those are required before
+  this API can be described as canonical scenario persistence.
 - **Datums, tolerances, and placements are declarations, not evaluations**:
   this crate checks structure, dimensions, datum-frame arity, and source
   presence. It does not construct a datum reference frame geometrically,

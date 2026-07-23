@@ -23,6 +23,7 @@ fs-rand = { path = "../fs-rand" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-assimilate = { path = "../fs-assimilate" }
 fs-ledger = { path = "../fs-ledger" }
 
 [lints]
