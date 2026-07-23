@@ -956,6 +956,10 @@ dependencies = [
 name = "fs-cli"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
+ "fs-exec",
+ "fs-io",
+ "fs-ledger",
  "fs-project",
  "fs-qty",
 ]

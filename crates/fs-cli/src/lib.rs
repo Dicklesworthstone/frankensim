@@ -7,10 +7,17 @@
 //! fail before side effects with `cli-stage-unavailable`; a CLI-shaped mock is
 //! not substituted for an integrated workflow.
 
+mod import;
+
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+
+pub use import::{
+    GeometryImportLimits, GeometryImportRefusal, GeometryImportRun, RawGeometryLibrary,
+    RecordedImportRefusal, RetainedGeometryImport, import_project_geometry,
+};
 
 /// Maximum project source accepted by the CLI.
 pub const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
