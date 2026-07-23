@@ -3471,6 +3471,16 @@ fn casual_cfg_test_spans(
                             .ok_or_else(|| "unpaired item-header delimiter".to_string())?
                             + 1;
                     }
+                    "," if containers[cursor] == containers[index]
+                        && containers[index].is_some() =>
+                    {
+                        // Outer cfg attributes can govern comma-terminated
+                        // nodes inside a delimited list, including enum variants,
+                        // struct fields, parameters, and match arms. Stop only
+                        // at the governing node's own delimiter depth so a
+                        // test-only node cannot absorb a production sibling.
+                        break cursor;
+                    }
                     "{" => {
                         break pairs[cursor]
                             .ok_or_else(|| "unpaired cfg(test) item body".to_string())?;
@@ -4431,7 +4441,8 @@ fn casual_module_frame(
     let source = sources
         .get(&context.path)
         .expect("module targets were inventory-checked before graph entry");
-    let (edges, token_count) = casual_module_edges(&context, source, sources)?;
+    let (edges, token_count) = casual_module_edges(&context, source, sources)
+        .map_err(|error| format!("{}: {error}", context.path))?;
     *total_tokens = total_tokens
         .checked_add(token_count)
         .ok_or_else(|| "library token count overflowed".to_string())?;
@@ -5693,6 +5704,16 @@ fn casual_protected_name_binding(
     None
 }
 
+fn casual_use_declaration_at(tokens: &[CasualRustToken<'_>], index: usize) -> bool {
+    casual_unraw_keyword_at(tokens, index, "use")
+        // Rust 2024 precise capturing uses `impl Trait + use<...>`. A use
+        // declaration cannot begin with `<`, so distinguish that syntax before
+        // any import-authority analysis treats it as a statement.
+        && tokens
+            .get(index + 1)
+            .is_none_or(|token| token.text != "<")
+}
+
 fn casual_use_statement_mask(
     tokens: &[CasualRustToken<'_>],
     structural_mask: &[bool],
@@ -5700,7 +5721,7 @@ fn casual_use_statement_mask(
     let mut mask = vec![false; tokens.len()];
     let mut in_use = false;
     for index in 0..tokens.len() {
-        if !structural_mask[index] && casual_unraw_keyword_at(tokens, index, "use") {
+        if !structural_mask[index] && casual_use_declaration_at(tokens, index) {
             in_use = true;
         }
         mask[index] = in_use;
@@ -6041,10 +6062,7 @@ fn casual_production_use_leaves_with_limits(
     let mut budget = CasualUseBudget::default();
     let mut index = 0usize;
     while index < tokens.len() {
-        if structural_mask[index]
-            || test_mask[index]
-            || !casual_unraw_keyword_at(tokens, index, "use")
-        {
+        if structural_mask[index] || test_mask[index] || !casual_use_declaration_at(tokens, index) {
             index += 1;
             continue;
         }
@@ -6573,10 +6591,7 @@ fn casual_macro_authority_hazards(
 
     let mut index = 0usize;
     while index < tokens.len() {
-        if structural_mask[index]
-            || test_mask[index]
-            || !casual_unraw_keyword_at(tokens, index, "use")
-        {
+        if structural_mask[index] || test_mask[index] || !casual_use_declaration_at(tokens, index) {
             index += 1;
             continue;
         }
@@ -9004,6 +9019,51 @@ mod tests {
                 .detail
                 .contains("unterminated block comment"),
             "the graph-resolution refusal must preserve the lexical cause: {malformed_violations:?}"
+        );
+
+        let unsupported_use = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            "use crate::{#[cfg(test)] hidden};".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let unsupported_use_violations = audit_casual_print_sources(&unsupported_use);
+        assert_eq!(unsupported_use_violations.len(), 1);
+        assert!(
+            unsupported_use_violations[0]
+                .detail
+                .contains("crates/fs-new/src/lib.rs"),
+            "use-tree refusals must retain their owning source path: {unsupported_use_violations:?}"
+        );
+
+        let precise_capture = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            "pub fn captured() -> impl Copy + use<> { 1_u8 }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(
+            audit_casual_print_sources(&precise_capture).is_empty(),
+            "Rust 2024 precise captures are type syntax, not use declarations"
+        );
+
+        let cfg_variant = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "enum Mode { Production, #[cfg(test)] TestOnly, }\n",
+                "pub fn leak() { println!(\"production\"); }\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let cfg_variant_violations = audit_casual_print_sources(&cfg_variant);
+        assert_eq!(cfg_variant_violations.len(), 1);
+        assert!(
+            cfg_variant_violations
+                .iter()
+                .any(|violation| violation.detail.contains("println! in fn leak")),
+            "a test-only enum variant must not hide a following production item: {cfg_variant_violations:?}"
         );
     }
 
