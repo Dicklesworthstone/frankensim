@@ -53,7 +53,9 @@ pub use model_pack::{
     ModelNormalizationTarget, NormalizedModelPack,
 };
 pub use pack::{
-    JointStatistics, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
+    CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
+    JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
+    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
     NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
     ValidityBoundSide,
 };

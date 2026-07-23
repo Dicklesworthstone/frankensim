@@ -2178,3 +2178,402 @@ fn decode_claim(reader: &mut Reader<'_>) -> Result<PropertyClaim, PackError> {
         provenance: decode_provenance(reader)?,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Joint-aware querying (bead f85xj.7.3): correlation travels with the answer
+// or its absence is said out loud — the silent-independence path does not
+// exist.
+// ---------------------------------------------------------------------------
+
+/// Current joint-usage receipt schema.
+pub const JOINT_USAGE_RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+/// Exact BLAKE3 domain for the joint-usage receipt identity.
+pub const JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-matdb.joint-usage-receipt.v1";
+
+/// Why a joint answer carries no covariance. This enum IS the product of
+/// the design rule that independence may never be assumed silently: every
+/// absent correlation names its cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrelationUnknownReason {
+    /// No admitted joint block contains any of the selected claims.
+    NoBlock,
+    /// The selected claims span more than one block, or only some of them
+    /// sit in a block: no single admitted covariance covers the set.
+    PartialMembership,
+    /// A selected claim participates in its block only through curve-knot
+    /// components; scalar covariance exposure cannot represent it.
+    NonScalarMember,
+    /// A member claim's own marginal uncertainty is `Unstated`: a joint
+    /// band over an unstated marginal would launder absence into a
+    /// covariance claim, so the joint refuses to certify (no-laundering).
+    UnstatedMarginal,
+}
+
+impl CorrelationUnknownReason {
+    /// Stable receipt tag.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            CorrelationUnknownReason::NoBlock => "no-block",
+            CorrelationUnknownReason::PartialMembership => "partial-membership",
+            CorrelationUnknownReason::NonScalarMember => "non-scalar-member",
+            CorrelationUnknownReason::UnstatedMarginal => "unstated-marginal",
+        }
+    }
+}
+
+/// The correlation outcome of one joint query.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JointCorrelation {
+    /// One admitted block covers every selected claim: the principal
+    /// submatrix over the requested properties, packed lower-triangle in
+    /// REQUEST order.
+    Covariance {
+        /// Source block id inside the pack.
+        block_id: String,
+        /// The joint observation dataset the block cites.
+        observation: ObservationId,
+        /// Packed lower-triangle covariance over the requested order.
+        covariance: Vec<f64>,
+        /// Packed lower-triangle correlation, when the source supplied it.
+        correlation: Option<Vec<f64>>,
+    },
+    /// No usable covariance; the reason is explicit, never implied.
+    Unknown {
+        /// Why the correlation is unknown.
+        reason: CorrelationUnknownReason,
+    },
+}
+
+/// The replayable record of one joint query: which pack, which properties,
+/// which claims answered, which per-property receipts they minted, and the
+/// correlation outcome. Identity binds every field; replay authority comes
+/// from [`NormalizedPack::verify_joint_receipt`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointUsageReceipt {
+    /// Wire/schema version of this receipt shape.
+    pub schema_version: u32,
+    /// Content hash of the whole admitted pack the query ran against.
+    pub pack: ContentHash,
+    /// Requested property names, in request order.
+    pub properties: Vec<String>,
+    /// The exact query point, axis-sorted as spelled by [`QueryPoint`].
+    pub query_point: Vec<(String, f64)>,
+    /// Selection policy tag shared by every member query.
+    pub policy: &'static str,
+    /// Selected claim per property, aligned with `properties`.
+    pub selected: Vec<ClaimId>,
+    /// Content hash of each member's property-usage receipt, aligned.
+    pub member_receipts: Vec<ContentHash>,
+    /// The correlation outcome.
+    pub correlation: JointCorrelation,
+    /// The joint evaluator's semantic version.
+    pub evaluator_version: u32,
+}
+
+impl JointUsageReceipt {
+    /// Structural identity over every field, in declaration order, with
+    /// collection boundaries length-framed and floats bound by exact bits.
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        let mut writer = Writer::default();
+        writer.u32(self.schema_version);
+        writer.hash(self.pack);
+        writer.u64(self.properties.len() as u64);
+        for property in &self.properties {
+            writer.string(property);
+        }
+        writer.u64(self.query_point.len() as u64);
+        for (axis, value) in &self.query_point {
+            writer.string(axis);
+            writer.f64(*value);
+        }
+        writer.string(self.policy);
+        writer.u64(self.selected.len() as u64);
+        for claim in &self.selected {
+            writer.hash(claim.0);
+        }
+        writer.u64(self.member_receipts.len() as u64);
+        for receipt in &self.member_receipts {
+            writer.hash(*receipt);
+        }
+        match &self.correlation {
+            JointCorrelation::Covariance {
+                block_id,
+                observation,
+                covariance,
+                correlation,
+            } => {
+                writer.u8(1);
+                writer.string(block_id);
+                writer.hash(observation.0);
+                writer.u64(covariance.len() as u64);
+                for value in covariance {
+                    writer.f64(*value);
+                }
+                match correlation {
+                    Some(correlation) => {
+                        writer.u8(1);
+                        writer.u64(correlation.len() as u64);
+                        for value in correlation {
+                            writer.f64(*value);
+                        }
+                    }
+                    None => writer.u8(0),
+                }
+            }
+            JointCorrelation::Unknown { reason } => {
+                writer.u8(2);
+                writer.string(reason.tag());
+            }
+        }
+        writer.u32(self.evaluator_version);
+        hash_domain(JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN, &writer.bytes)
+    }
+}
+
+/// A complete joint answer: every member's ordinary evidence-carrying
+/// answer plus the joint receipt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointAnswer {
+    /// Per-property answers, aligned with the requested property order.
+    pub members: Vec<crate::MaterialAnswer>,
+    /// The joint receipt.
+    pub receipt: JointUsageReceipt,
+}
+
+impl NormalizedPack {
+    /// Answer several properties at one point and say — explicitly — how
+    /// their uncertainties relate. When one admitted joint block covers
+    /// every selected claim through scalar members, the answer carries the
+    /// principal covariance submatrix over the requested order; otherwise
+    /// the receipt states `CorrelationUnknown` with its reason. Assuming
+    /// independence silently is not an output this API can produce.
+    ///
+    /// # Errors
+    /// Refuses degenerate requests (`UnsupportedEvaluation`: fewer than
+    /// two properties, or duplicates), and propagates every refusal of the
+    /// underlying per-property [`ClaimSet::query`] calls unchanged.
+    pub fn query_joint(
+        &self,
+        properties: &[&str],
+        point: &crate::QueryPoint,
+        policy: crate::SelectionPolicy,
+    ) -> Result<JointAnswer, MatDbError> {
+        if properties.len() < 2 {
+            return Err(MatDbError::UnsupportedEvaluation {
+                reason: "a joint query needs at least two properties; use `query` for one",
+            });
+        }
+        for (index, property) in properties.iter().enumerate() {
+            if properties[..index].contains(property) {
+                return Err(MatDbError::UnsupportedEvaluation {
+                    reason: "a joint query's properties must be distinct",
+                });
+            }
+        }
+
+        let mut members = Vec::with_capacity(properties.len());
+        for property in properties {
+            members.push(self.claims.query(property, point, policy)?);
+        }
+        let selected: Vec<ClaimId> = members
+            .iter()
+            .map(|answer| answer.receipt.selected)
+            .collect();
+        let member_receipts: Vec<ContentHash> = members
+            .iter()
+            .map(|answer| answer.receipt.content_hash())
+            .collect();
+
+        let correlation = self.joint_correlation(&members, &selected);
+        let receipt = JointUsageReceipt {
+            schema_version: JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
+            pack: self.content_hash(),
+            properties: properties.iter().map(|p| (*p).to_string()).collect(),
+            query_point: point
+                .axes()
+                .iter()
+                .map(|(axis, &value)| (axis.clone(), value))
+                .collect(),
+            policy: policy.tag(),
+            selected,
+            member_receipts,
+            correlation,
+            evaluator_version: crate::MATDB_EVALUATOR_VERSION,
+        };
+        Ok(JointAnswer { members, receipt })
+    }
+
+    /// Determine the joint outcome for the selected claims. Blocks are
+    /// pairwise member-disjoint (admission invariant), so each claim sits
+    /// in at most one block and the outcome is unambiguous.
+    fn joint_correlation(
+        &self,
+        members: &[crate::MaterialAnswer],
+        selected: &[ClaimId],
+    ) -> JointCorrelation {
+        let unknown = |reason| JointCorrelation::Unknown { reason };
+
+        // Which block (if any) holds each selected claim's SCALAR member.
+        let mut block_of: Vec<Option<usize>> = Vec::with_capacity(selected.len());
+        let mut scalar_index_of: Vec<Option<usize>> = Vec::with_capacity(selected.len());
+        for claim in selected {
+            let mut found_block = None;
+            let mut found_scalar = None;
+            for (block_index, block) in self.joint_statistics.iter().enumerate() {
+                for (member_index, member) in block.members().iter().enumerate() {
+                    if member.claim() == *claim {
+                        found_block = Some(block_index);
+                        if member.component() == StatisticComponent::Scalar {
+                            found_scalar = Some(member_index);
+                        }
+                    }
+                }
+            }
+            block_of.push(found_block);
+            scalar_index_of.push(found_scalar);
+        }
+
+        if block_of.iter().all(Option::is_none) {
+            return unknown(CorrelationUnknownReason::NoBlock);
+        }
+        let first_block = block_of[0];
+        if first_block.is_none() || block_of.iter().any(|entry| *entry != first_block) {
+            return unknown(CorrelationUnknownReason::PartialMembership);
+        }
+        if scalar_index_of.iter().any(Option::is_none) {
+            return unknown(CorrelationUnknownReason::NonScalarMember);
+        }
+        // No-laundering: an Unstated marginal cannot anchor a joint band.
+        if members
+            .iter()
+            .any(|answer| answer.evidence.value.uncertainty == UncertaintyModel::Unstated)
+        {
+            return unknown(CorrelationUnknownReason::UnstatedMarginal);
+        }
+
+        let block = &self.joint_statistics[first_block.expect("checked above")];
+        let indices: Vec<usize> = scalar_index_of
+            .iter()
+            .map(|index| index.expect("checked above"))
+            .collect();
+        let mut covariance = Vec::with_capacity(indices.len() * (indices.len() + 1) / 2);
+        let mut correlation = block
+            .correlation()
+            .map(|_| Vec::with_capacity(indices.len() * (indices.len() + 1) / 2));
+        for (row, &block_row) in indices.iter().enumerate() {
+            for &block_column in &indices[..=row] {
+                let (hi, lo) = if block_row >= block_column {
+                    (block_row, block_column)
+                } else {
+                    (block_column, block_row)
+                };
+                covariance.push(block.covariance()[packed_index(hi, lo)]);
+                if let (Some(out), Some(source)) = (&mut correlation, block.correlation()) {
+                    out.push(source[packed_index(hi, lo)]);
+                }
+            }
+        }
+        JointCorrelation::Covariance {
+            block_id: block.block_id().to_string(),
+            observation: block.observation(),
+            covariance,
+            correlation,
+        }
+    }
+
+    /// Replay a joint receipt against this pack: the query is re-run from
+    /// the receipt's own fields and every field must reproduce.
+    ///
+    /// # Errors
+    /// [`MatDbError::ReceiptSchemaVersionDrift`] /
+    /// [`MatDbError::EvaluatorVersionDrift`] before any replay;
+    /// [`MatDbError::ReceiptMismatch`] naming the first divergent field
+    /// (including a receipt minted against another pack); the replay's own
+    /// refusals otherwise.
+    pub fn verify_joint_receipt(&self, receipt: &JointUsageReceipt) -> Result<(), MatDbError> {
+        if receipt.schema_version != JOINT_USAGE_RECEIPT_SCHEMA_VERSION {
+            return Err(MatDbError::ReceiptSchemaVersionDrift {
+                receipt: receipt.schema_version,
+                current: JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
+            });
+        }
+        if receipt.evaluator_version != crate::MATDB_EVALUATOR_VERSION {
+            return Err(MatDbError::EvaluatorVersionDrift {
+                receipt: receipt.evaluator_version,
+                current: crate::MATDB_EVALUATOR_VERSION,
+            });
+        }
+        if receipt.pack != self.content_hash() {
+            return Err(MatDbError::ReceiptMismatch { field: "pack" });
+        }
+        let policy = crate::SelectionPolicy::from_tag(receipt.policy)?;
+        let mut point = crate::QueryPoint::new();
+        for (axis, value) in &receipt.query_point {
+            point = point.with(axis.clone(), *value)?;
+        }
+        let properties: Vec<&str> = receipt.properties.iter().map(String::as_str).collect();
+        let replayed = self.query_joint(&properties, &point, policy)?;
+        let fresh = &replayed.receipt;
+        for (field, matches) in [
+            ("selected", fresh.selected == receipt.selected),
+            (
+                "member_receipts",
+                fresh.member_receipts == receipt.member_receipts,
+            ),
+            (
+                "correlation",
+                joint_correlation_exact_eq(&fresh.correlation, &receipt.correlation),
+            ),
+        ] {
+            if !matches {
+                return Err(MatDbError::ReceiptMismatch { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+fn joint_correlation_exact_eq(left: &JointCorrelation, right: &JointCorrelation) -> bool {
+    match (left, right) {
+        (
+            JointCorrelation::Covariance {
+                block_id: left_id,
+                observation: left_obs,
+                covariance: left_cov,
+                correlation: left_corr,
+            },
+            JointCorrelation::Covariance {
+                block_id: right_id,
+                observation: right_obs,
+                covariance: right_cov,
+                correlation: right_corr,
+            },
+        ) => {
+            left_id == right_id
+                && left_obs == right_obs
+                && packed_exact_eq(left_cov, right_cov)
+                && match (left_corr, right_corr) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => packed_exact_eq(left, right),
+                    _ => false,
+                }
+        }
+        (
+            JointCorrelation::Unknown { reason: left },
+            JointCorrelation::Unknown { reason: right },
+        ) => left == right,
+        _ => false,
+    }
+}
+
+fn packed_exact_eq(left: &[f64], right: &[f64]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}

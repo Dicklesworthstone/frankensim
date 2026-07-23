@@ -12,9 +12,12 @@
 > dataset beyond its first gas-association tranches (bead 1sxe).
 
 The normalized-pack boundary now carries typed joint covariance/correlation
-blocks and unit/basis normalization receipts. Query-time propagation of those
-joint statistics remains a recorded no-claim until usage receipts select and
-bind them explicitly.
+blocks and unit/basis normalization receipts, and (bead f85xj.7.3)
+`NormalizedPack::query_joint` selects and binds them at query time: a joint
+answer either carries the admitted covariance submatrix over the requested
+properties or names, in its `JointUsageReceipt`, exactly why the correlation
+is unknown — assuming independence silently is not an output the API can
+produce.
 
 ## Purpose and layer
 
@@ -304,6 +307,16 @@ conflicting claims refuse under every named policy and resolve only
 through an explicit pin; a pin to a foreign or out-of-domain claim
 refuses typed; pinned receipts round-trip the portable wire format and
 replay via `verify_receipt`.
+
+`tests/joint_query.rs` (f85xj.7.3): correlated properties answer with the
+packed covariance submatrix in REQUEST order (both orders proven against
+one block); every absent correlation names its reason (no-block,
+partial-membership, unstated-marginal); the covered subset of a partially
+covered request still answers when queried alone; degenerate requests
+refuse and member refusals (unknown property, extrapolation) propagate
+unchanged; joint receipts are deterministic, bind the pack identity, and
+replay via `verify_joint_receipt` with typed field-level mismatch and
+version-drift refusals.
 
 `tests/pack.rs`: fixed v1 canonical byte-length/hash golden, exact
 byte/semantic round-trip, and externally pinned whole-pack verification;
@@ -762,9 +775,25 @@ Wankel-housing authority.
   authenticate chemical identity, validate the molar mass or elemental
   convention against an independent authority, link a NASA/kinetics card, or
   supply thermodynamic, kinetic, equilibrium, or transport evaluation.
-- Joint statistics are preserved and validated but are not yet selected or
-  propagated by `PropertyUsageReceipt`; no query result may claim correlated
-  uncertainty until that later authority surface binds the exact block.
+- Joint selection (`NormalizedPack::query_joint`, bead f85xj.7.3) binds a
+  block only when EVERY selected claim is a Scalar member of ONE admitted
+  block (blocks are member-disjoint, so the outcome is unambiguous) and no
+  member's marginal uncertainty is `Unstated` (no-laundering: an unstated
+  marginal never anchors a joint band). Everything else is an explicit
+  `CorrelationUnknown` with a named reason (`no-block`,
+  `partial-membership`, `non-scalar-member`, `unstated-marginal`) — never a
+  silent independence assumption. The `JointUsageReceipt` binds the pack
+  identity, request order, query point, policy, selected claims, member
+  receipt identities, and the exact packed submatrix bits
+  (`org.frankensim.fs-matdb.joint-usage-receipt.v1`), and replays via
+  `NormalizedPack::verify_joint_receipt`. NOT claimed: a portable byte
+  encoding for the joint receipt (in-memory + content hash only; ledger
+  transport is routed follow-up), pinned-claim joint queries (named-policy
+  selection only in v1), curve-knot covariance exposure, card-level (non-
+  pack) joint blocks, and any downstream propagation/sampling — consuming
+  the covariance correctly (e.g. correlated draws) is e06.7's authority,
+  and the block's numbers remain pack-admitted data, not a certified
+  enclosure.
 - Frame names in normalization receipts record provenance only. Scalar/curve
   payloads do not carry tensor components, rotation matrices, or a claim that
   a frame conversion was physically valid.
