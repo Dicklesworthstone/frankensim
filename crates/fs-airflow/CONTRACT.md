@@ -26,7 +26,12 @@ existing convection rung.
   `s`, flow scales as `s` and pressure as `s^2`; series pressure adds and
   parallel flow adds.
 - `LossElement` uses a typed `LossResistance` in Pa/(m^3/s)^2. `LossNetwork`
-  composes quadratic elements recursively in series and parallel.
+  composes quadratic elements recursively in series and parallel. A loss
+  element remains cardless unless its owner explicitly attaches a finite,
+  nonempty `ValidityDomain`; `with_regime_validity` then binds the card name to
+  `airflow.loss.<element>` and the card version to the retained source
+  identifier. `LossNetwork::regime_audit_cards` and the enclosure wrapper
+  expose those exact cards without silently deduplicating ambiguous names.
 - `EnclosureNetwork` cannot be constructed without a distinct
   `LeakageElement`; leakage is not an implicit constant.
 - `solve_operating_point` returns an `OperatingPoint` with an interval-Newton
@@ -86,7 +91,9 @@ existing convection rung.
 3. The interval below the explicit stall boundary is non-admissible; the solver
    refuses an intersection there.
 4. Every loss resistance is finite, positive, typed, and carries source and
-   uncertainty authority.
+   uncertainty authority. Coefficient uncertainty alone never creates a
+   validated-domain card. An attached loss domain has at least one named,
+   finite axis and an exact retained source-version identity.
 5. A complete operating-point result has exactly one `Certified` interval root
    and no `Possible` root boxes for the nominal declared model.
 6. Manufacturer/loss/leakage uncertainty is attached as model-form `Estimate`
@@ -113,7 +120,9 @@ existing convection rung.
 `AirflowError` refuses malformed curves, invalid tolerance or speed domains,
 empty network groups, zero/invalid resistances, stall operation, absent curve
 intersections, incomplete/ambiguous root searches, unknown branches, and bad
-convection-handoff inputs. Caller input does not panic.
+convection-handoff inputs. Loss-card attachment additionally refuses an
+unconstrained/unusable validity box or malformed projected identity. Caller
+input does not panic.
 
 ## Determinism class
 
@@ -147,6 +156,10 @@ None.
 - typed branch velocity/Reynolds handoff into `fs-convection`;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
+- actual loss-card projection from an explicitly validated `LossElement`,
+  including refusal of unconstrained pseudo-validity and an isolated
+  out-of-domain loss Reynolds perturbation that demotes all seven E05.10
+  records and rebinds their model-form terms to the exact receipts;
 - G0 E05.10 fixture emitting all five QoI families and seven records (the
   uniformity family has mean, spread, and face-mean standard deviation), each
   with a complete eight-term budget and term-by-term provenance rendering;
@@ -163,6 +176,10 @@ None.
 - Piecewise-linear interpolation and quadratic loss coefficients do not model
   swirl, recirculation, acoustic interaction, thermal buoyancy, compressibility,
   fouling, or installation system effects.
+- A `LossElement` with no attached validity remains an estimate with no regime
+  card. An attached domain is only the source owner's stated operating box; it
+  does not validate the quadratic loss law or turn its uncertainty into a
+  rigorous enclosure.
 - The nominal root bracket certifies only the declared mathematical model.
   Tolerance-propagated flow, pressure, branch splits, and Reynolds values remain
   `Estimate`, not validated hardware envelopes.

@@ -7,8 +7,9 @@ use fs_airflow::qoi::{
     ThermalQoiCardUse, ThermalRequirement, extract_thermal_qois,
 };
 use fs_airflow::{
-    EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
-    LossNetwork, LossResistance, SourceProvenance, ToleranceBasis, solve_operating_point,
+    AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
+    LossElement, LossNetwork, LossResistance, SourceProvenance, ToleranceBasis,
+    solve_operating_point,
 };
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::{
@@ -19,7 +20,7 @@ use fs_convection::{CorrelationId, correlation_catalog};
 use fs_evidence::uncertainty::{
     BudgetTotal, ENGINEERING_UNCERTAINTY_TERM_COUNT, EngineeringUncertaintyKind, TermValue,
 };
-use fs_evidence::{ModelCard, NumericalKind};
+use fs_evidence::{ModelCard, NumericalKind, ValidityDomain};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 use fs_regime::{
     EnvelopeCoverage, OperatingPoint as RegimeOperatingPoint, OverrideAcknowledgement,
@@ -59,19 +60,46 @@ fn loss(name: &str, resistance: f64, uncertainty: f64) -> LossElement {
     .expect("valid loss fixture")
 }
 
-fn operating_point() -> fs_airflow::OperatingPoint {
+fn network() -> EnclosureNetwork {
     let primary = LossNetwork::series(vec![
         LossNetwork::Element(loss("inlet", 40_000.0, 0.10)),
         LossNetwork::Element(loss("heatsink", 30_000.0, 0.12)),
         LossNetwork::Element(loss("outlet", 12_000.0, 0.08)),
     ])
     .expect("series network");
-    let network = EnclosureNetwork::new(
+    EnclosureNetwork::new(
         primary,
         LeakageElement::new(loss("leakage", 180_000.0, 0.25)),
-    );
+    )
+}
+
+fn network_with_validated_heatsink_loss() -> EnclosureNetwork {
+    let heatsink = loss("heatsink", 30_000.0, 0.12)
+        .with_regime_validity(ValidityDomain::unconstrained().with(
+            "loss_reynolds",
+            2_000.0,
+            80_000.0,
+        ))
+        .expect("explicit finite loss validity");
+    let primary = LossNetwork::series(vec![
+        LossNetwork::Element(loss("inlet", 40_000.0, 0.10)),
+        LossNetwork::Element(heatsink),
+        LossNetwork::Element(loss("outlet", 12_000.0, 0.08)),
+    ])
+    .expect("series network");
+    EnclosureNetwork::new(
+        primary,
+        LeakageElement::new(loss("leakage", 180_000.0, 0.25)),
+    )
+}
+
+fn solve_fixture_network(network: &EnclosureNetwork) -> fs_airflow::OperatingPoint {
     let fan = FanBank::new(fan_curve(), 1, FanArrangement::Series, 1.0).expect("fan bank");
-    solve_operating_point(&fan, &network).expect("operating point")
+    solve_operating_point(&fan, network).expect("operating point")
+}
+
+fn operating_point() -> fs_airflow::OperatingPoint {
+    solve_fixture_network(&network())
 }
 
 fn mesh_and_solution() -> (ConductionMesh, ConductionSolution) {
@@ -117,23 +145,31 @@ fn declarations(mesh: &ConductionMesh) -> (JunctionRegion, SurfaceRegion, FanPow
 fn extract_fixture_run() -> (fs_airflow::qoi::ThermalQoiSet, fs_airflow::OperatingPoint) {
     let (mesh, solution) = mesh_and_solution();
     let operating = operating_point();
-    let (junction, surface, power) = declarations(&mesh);
+    let qois = extract_fixture_qois(&mesh, &solution, &operating);
+    (qois, operating)
+}
+
+fn extract_fixture_qois(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    operating: &fs_airflow::OperatingPoint,
+) -> fs_airflow::qoi::ThermalQoiSet {
+    let (junction, surface, power) = declarations(mesh);
     let requirement = ThermalRequirement::try_new(
         Temperature::new(380.0),
         source("component-datasheet-limit-v1"),
     )
     .expect("requirement");
-    let qois = extract_thermal_qois(
-        &mesh,
-        &solution,
-        &operating,
+    extract_thermal_qois(
+        mesh,
+        solution,
+        operating,
         &junction,
         &surface,
         &power,
         Some(&requirement),
     )
-    .expect("QoI extraction");
-    (qois, operating)
+    .expect("QoI extraction")
 }
 
 fn fan_regime_card() -> ModelCard {
@@ -161,9 +197,36 @@ fn thermal_regime_point(id: &str, flow_m3_s: f64, reynolds: f64) -> RegimeOperat
     }
 }
 
+fn thermal_regime_point_with_loss_reynolds(
+    id: &str,
+    flow_m3_s: f64,
+    reynolds: f64,
+    loss_reynolds: f64,
+) -> RegimeOperatingPoint {
+    let mut point = thermal_regime_point(id, flow_m3_s, reynolds);
+    point
+        .groups
+        .insert("loss_reynolds".to_string(), loss_reynolds);
+    point
+}
+
 fn card_uses(
     qois: &fs_airflow::qoi::ThermalQoiSet,
     model_cards: &[ModelCard],
+) -> Vec<ThermalQoiCardUse> {
+    qois.budgets()
+        .into_iter()
+        .map(|budget| ThermalQoiCardUse {
+            qoi: budget.qoi().to_string(),
+            model_cards: model_cards.iter().map(|card| card.name.clone()).collect(),
+            override_acknowledgement: None,
+        })
+        .collect()
+}
+
+fn regime_card_uses(
+    qois: &fs_airflow::qoi::ThermalQoiSet,
+    model_cards: &[RegimeAuditCard],
 ) -> Vec<ThermalQoiCardUse> {
     qois.budgets()
         .into_iter()
@@ -363,6 +426,88 @@ fn actual_convection_card_alone_demotes_the_complete_qoi_set() {
         assert_eq!(violation.observed, Some(1_000.0));
         assert_eq!(violation.lo, 10_000.0);
         assert!(violation.distance > 0.0);
+
+        let budget = audited
+            .qois
+            .budgets()
+            .into_iter()
+            .find(|budget| budget.qoi() == receipt.qoi)
+            .expect("matching QoI budget");
+        let model = budget.term(EngineeringUncertaintyKind::ModelForm);
+        assert!(matches!(model.value(), TermValue::Unknown { .. }));
+        assert_eq!(model.provenance().digest(), receipt.content_id());
+    }
+}
+
+#[test]
+fn actual_loss_card_alone_demotes_the_complete_qoi_set() {
+    assert!(
+        network().regime_audit_cards().is_empty(),
+        "legacy loss coefficients have no validated-domain authority"
+    );
+    assert!(matches!(
+        loss("unvalidated", 1_000.0, 0.10)
+            .with_regime_validity(ValidityDomain::unconstrained()),
+        Err(AirflowError::EmptyLossRegimeDomain { element })
+            if element == "unvalidated"
+    ));
+
+    let network = network_with_validated_heatsink_loss();
+    let cards = network.regime_audit_cards();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].name, "airflow.loss.heatsink");
+    assert_eq!(cards[0].version, "qoi-loss-heatsink");
+    assert_eq!(
+        cards[0].validity.bound("loss_reynolds"),
+        Some((2_000.0, 80_000.0))
+    );
+
+    let operating = solve_fixture_network(&network);
+    let nominal_flow = operating.flow.value.value();
+    let (mesh, solution) = mesh_and_solution();
+    let qois = extract_fixture_qois(&mesh, &solution, &operating);
+    let uses = regime_card_uses(&qois, &cards);
+    let audited = qois
+        .audit_operating_envelope_with_cards(
+            &cards,
+            &[
+                thermal_regime_point_with_loss_reynolds(
+                    "nominal",
+                    nominal_flow,
+                    50_000.0,
+                    50_000.0,
+                ),
+                thermal_regime_point_with_loss_reynolds(
+                    "high-loss-reynolds",
+                    nominal_flow,
+                    50_000.0,
+                    90_000.0,
+                ),
+            ],
+            &uses,
+        )
+        .expect("actual validated loss card admits the complete audit");
+
+    assert_eq!(audited.audit.receipts.len(), 7);
+    for receipt in &audited.audit.receipts {
+        assert_eq!(receipt.coverage, EnvelopeCoverage::Partial);
+        assert_eq!(receipt.in_domain_points, ["nominal"]);
+        assert_eq!(receipt.out_of_domain_points, ["high-loss-reynolds"]);
+        assert_eq!(receipt.model_cards.len(), 1);
+        assert_eq!(receipt.model_cards[0].name, "airflow.loss.heatsink");
+        assert_eq!(receipt.model_cards[0].version, "qoi-loss-heatsink");
+        assert_eq!(receipt.violations.len(), 1);
+        let violation = &receipt.violations[0];
+        assert_eq!(violation.point, "high-loss-reynolds");
+        assert_eq!(violation.card, "airflow.loss.heatsink");
+        assert_eq!(violation.axis, "loss_reynolds");
+        assert_eq!(violation.observed, Some(90_000.0));
+        assert_eq!(violation.hi, 80_000.0);
+        assert!(violation.distance > 0.0);
+        assert!(matches!(
+            receipt.effective_color,
+            fs_evidence::Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+        ));
 
         let budget = audited
             .qois

@@ -19,7 +19,7 @@ use fs_math::det;
 use fs_qty::{
     Area, Density, DynViscosity, Length, Pressure, Qty, QtyAny, Velocity, VolumetricFlowRate,
 };
-use fs_regime::{Role, RoleInput, standard_groups};
+use fs_regime::{RegimeAuditCard, Role, RoleInput, standard_groups};
 
 /// Quadratic pressure-loss resistance in Pa/(m^3/s)^2.
 pub type LossResistance = Qty<-7, 1, 0, 0, 0, 0>;
@@ -395,6 +395,11 @@ pub struct LossElement {
     pub source: SourceProvenance,
     /// Authority classification for the uncertainty.
     pub tolerance_basis: ToleranceBasis,
+    /// Explicit owner-declared validity for final product admission.
+    ///
+    /// Absence means that no validated operating domain was supplied. It must
+    /// remain cardless rather than being widened to an unconstrained claim.
+    regime_validity: Option<ValidityDomain>,
 }
 
 impl LossElement {
@@ -432,6 +437,71 @@ impl LossElement {
             uncertainty_rel,
             source,
             tolerance_basis,
+            regime_validity: None,
+        })
+    }
+
+    /// Attach the source-owned operating domain for final product admission.
+    ///
+    /// The resulting card identity is `airflow.loss.<name>` and its version is
+    /// the element's retained [`SourceProvenance::identifier`]. An
+    /// unconstrained, unusable, or anonymously sourced domain refuses rather
+    /// than creating an apparently validated loss card.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured [`AirflowError`] when the projected identity or
+    /// any validity bound cannot support deterministic product admission.
+    pub fn with_regime_validity(mut self, validity: ValidityDomain) -> Result<Self, AirflowError> {
+        let card_name = format!("airflow.loss.{}", self.name);
+        if card_name.trim() != card_name {
+            return Err(AirflowError::InvalidLossRegimeIdentity {
+                element: self.name,
+                field: "card name",
+            });
+        }
+        if self.source.identifier.is_empty()
+            || self.source.identifier.trim() != self.source.identifier
+        {
+            return Err(AirflowError::InvalidLossRegimeIdentity {
+                element: self.name,
+                field: "source identifier",
+            });
+        }
+        if validity.bounds().is_empty() {
+            return Err(AirflowError::EmptyLossRegimeDomain { element: self.name });
+        }
+        for (axis, &(lo, hi)) in validity.bounds() {
+            if axis.is_empty()
+                || axis.trim() != axis
+                || !lo.is_finite()
+                || !hi.is_finite()
+                || lo > hi
+            {
+                return Err(AirflowError::InvalidLossRegimeBound {
+                    element: self.name,
+                    axis: axis.clone(),
+                    low_bits: lo.to_bits(),
+                    high_bits: hi.to_bits(),
+                });
+            }
+        }
+        self.regime_validity = Some(validity);
+        Ok(self)
+    }
+
+    /// Project this element's exact owner identity and validity for auditing.
+    ///
+    /// `None` is an intentional no-claim boundary: the coefficient may still
+    /// participate in an estimated solve, but it has no validated-domain card.
+    #[must_use]
+    pub fn regime_audit_card(&self) -> Option<RegimeAuditCard> {
+        self.regime_validity.as_ref().map(|validity| {
+            RegimeAuditCard::new(
+                format!("airflow.loss.{}", self.name),
+                self.source.identifier.clone(),
+                validity.clone(),
+            )
         })
     }
 }
@@ -490,6 +560,17 @@ impl LossNetwork {
         LossResistance::new(self.equivalent_scalar(ResistanceBound::Nominal))
     }
 
+    /// Every explicitly validated terminal loss card in traversal order.
+    ///
+    /// Duplicate identities are retained so the final `fs-regime` audit can
+    /// refuse ambiguity instead of silently selecting or deduplicating cards.
+    #[must_use]
+    pub fn regime_audit_cards(&self) -> Vec<RegimeAuditCard> {
+        let mut cards = Vec::new();
+        self.collect_regime_audit_cards(&mut cards);
+        cards
+    }
+
     fn equivalent_scalar(&self, bound: ResistanceBound) -> f64 {
         match self {
             Self::Element(element) => {
@@ -530,6 +611,21 @@ impl LossNetwork {
                 let total_weight: f64 = weights.iter().sum();
                 for (child, weight) in children.iter().zip(weights) {
                     child.allocate(incoming * weight / total_weight, out);
+                }
+            }
+        }
+    }
+
+    fn collect_regime_audit_cards(&self, cards: &mut Vec<RegimeAuditCard>) {
+        match self {
+            Self::Element(element) => {
+                if let Some(card) = element.regime_audit_card() {
+                    cards.push(card);
+                }
+            }
+            Self::Series(children) | Self::Parallel(children) => {
+                for child in children {
+                    child.collect_regime_audit_cards(cards);
                 }
             }
         }
@@ -583,6 +679,12 @@ impl EnclosureNetwork {
     #[must_use]
     pub fn equivalent_resistance(&self) -> LossResistance {
         self.full.equivalent_resistance()
+    }
+
+    /// Every explicitly validated loss-element card consumed by this network.
+    #[must_use]
+    pub fn regime_audit_cards(&self) -> Vec<RegimeAuditCard> {
+        self.full.regime_audit_cards()
     }
 }
 
@@ -1087,6 +1189,29 @@ pub enum AirflowError {
         /// Raw IEEE-754 bits of the rejected resistance.
         value_bits: u64,
     },
+    /// Loss-card name or retained source-version identity is malformed.
+    InvalidLossRegimeIdentity {
+        /// Name of the rejected loss element.
+        element: String,
+        /// Identity field that failed validation.
+        field: &'static str,
+    },
+    /// A loss validity declaration contains no constrained axes.
+    EmptyLossRegimeDomain {
+        /// Name of the rejected loss element.
+        element: String,
+    },
+    /// A loss validity axis or its finite interval is unusable.
+    InvalidLossRegimeBound {
+        /// Name of the rejected loss element.
+        element: String,
+        /// Axis carrying the unusable identity or interval.
+        axis: String,
+        /// Raw IEEE-754 bits of the lower bound.
+        low_bits: u64,
+        /// Raw IEEE-754 bits of the upper bound.
+        high_bits: u64,
+    },
     /// A series or parallel node has no children.
     EmptyNetworkGroup {
         /// Network composition kind that had no children.
@@ -1187,6 +1312,18 @@ impl fmt::Display for AirflowError {
             Self::InvalidResistance { element, .. } => write!(
                 formatter,
                 "loss resistance for {element:?} must be finite and positive"
+            ),
+            Self::InvalidLossRegimeIdentity { element, field } => write!(
+                formatter,
+                "loss element {element:?} cannot publish a regime card with invalid {field}"
+            ),
+            Self::EmptyLossRegimeDomain { element } => write!(
+                formatter,
+                "loss element {element:?} cannot publish an unconstrained regime card"
+            ),
+            Self::InvalidLossRegimeBound { element, axis, .. } => write!(
+                formatter,
+                "loss element {element:?} has an unusable regime bound for axis {axis:?}"
             ),
             Self::EmptyNetworkGroup { kind } => {
                 write!(formatter, "{kind} loss-network group must not be empty")
