@@ -25,6 +25,12 @@
 //! - Nothing about SHAPE derivatives or mesh sensitivity.
 //! - Nothing about GOAL-ORIENTED ERROR. A verified gradient is not a DWR
 //!   estimate and carries no bound on `J(T) − J(T_h)`.
+//!
+//! The P2 manufactured-dual ladder below is a separate execution fixture. It
+//! directly exercises the high-order `fs-feec` tetrahedral operator through
+//! the generic `fs-adjoint` transposed solve for constant isotropic conduction
+//! with homogeneous Dirichlet data. It does not add a general P2 conduction
+//! frontend, a P2 design-parameter pullback, or DWR authority.
 
 mod support;
 
@@ -39,8 +45,12 @@ use fs_conduction::fixtures::{on_box_face, unit_cube};
 use fs_conduction::material::ConductivityModel;
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::{ConductionProblem, LinearConfig};
+use fs_feec::highorder::simplex::SimplexSpace;
+use fs_feec::kuhn_cube;
 use fs_mms::{LadderSide, ORDER_GATE_TOLERANCE, OrderGate, RefinementLadder};
 use fs_solver::CsrOp;
+use fs_sparse::precond::{IdentityPrecond, pcg};
+use fs_sparse::{Coo, Csr};
 use fs_vvreg::thermal_level_a::{
     ThermalLevelAAcceptance, ThermalLevelAFamily, ThermalLevelAKind, thermal_level_a_cases,
 };
@@ -301,6 +311,180 @@ fn mms_p1_adjoint_order() {
          \"runtime_case\":\"conduction/mms/p1-heat-adjoint/l2\",\
          \"max_identity_rel\":{max_identity_rel:e},\
          \"max_adjoint_residual\":{max_adjoint_residual:e},\
+         \"verdict\":\"pass\",\
+         \"authority\":\"executed-ladder-not-retained-registry-receipt\"}}"
+    );
+}
+
+fn exact_p2_dual(p: [f64; 3]) -> f64 {
+    let pi = std::f64::consts::PI;
+    (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin()
+}
+
+fn p2_dual_source(p: [f64; 3]) -> f64 {
+    let pi = std::f64::consts::PI;
+    3.0 * pi * pi * exact_p2_dual(p)
+}
+
+fn p2_reduced_operator(space: &SimplexSpace<'_>, stiffness: &Csr, free: &[usize]) -> Csr {
+    let mut slot = vec![usize::MAX; space.ndof];
+    for (i, &dof) in free.iter().enumerate() {
+        slot[dof] = i;
+    }
+    let mut reduced = Coo::new(free.len(), free.len());
+    for (i, &dof) in free.iter().enumerate() {
+        let (cols, values) = stiffness.row(dof);
+        for (&col, &value) in cols.iter().zip(values) {
+            if slot[col] != usize::MAX {
+                reduced.push(i, slot[col], value);
+            }
+        }
+    }
+    reduced.assemble()
+}
+
+fn p2_adjoint_error(n: usize) -> (f64, f64, f64, f64) {
+    let (complex, positions) = kuhn_cube(n);
+    let space = SimplexSpace::new(&complex, 2);
+    let stiffness = space.stiffness(&positions);
+    let free: Vec<usize> = space
+        .boundary_mask()
+        .iter()
+        .enumerate()
+        .filter_map(|(dof, boundary)| (!boundary).then_some(dof))
+        .collect();
+    let operator = p2_reduced_operator(&space, &stiffness, &free);
+    let dual_load = space.load(&positions, &p2_dual_source);
+    let primal_load = space.load(&positions, &|_| 1.0);
+    let dual_rhs: Vec<f64> = free.iter().map(|&dof| dual_load[dof]).collect();
+    let primal_rhs: Vec<f64> = free.iter().map(|&dof| primal_load[dof]).collect();
+
+    let mut primal_free = vec![0.0f64; free.len()];
+    let primal_report = pcg(
+        &operator,
+        &primal_rhs,
+        &mut primal_free,
+        &IdentityPrecond,
+        1e-12,
+        60_000,
+    );
+    assert!(
+        primal_report.converged,
+        "P2 manufactured primal failed at n={n}: {primal_report:?}"
+    );
+    assert!(
+        primal_report.rel_residual < 1e-10,
+        "P2 primal residual {} is too loose for the dual identity",
+        primal_report.rel_residual
+    );
+
+    let captured_dual = RefCell::new(Vec::new());
+    let capture = |lambda: &[f64]| {
+        captured_dual.borrow_mut().extend_from_slice(lambda);
+        Vec::new()
+    };
+    let op = CsrOp::symmetric(operator);
+    let (empty_gradient, adjoint_report) =
+        ift_gradient_matfree(&op, &dual_rhs, &[], &capture, 1e-12, 2_000);
+    assert!(empty_gradient.is_empty());
+    assert!(
+        adjoint_report.converged,
+        "P2 manufactured adjoint failed at n={n}: {adjoint_report:?}"
+    );
+    assert!(
+        adjoint_report.adjoint_residual < 1e-10,
+        "P2 adjoint residual {} is too loose for an order ladder",
+        adjoint_report.adjoint_residual
+    );
+    let dual_free = captured_dual.into_inner();
+    assert_eq!(dual_free.len(), free.len());
+
+    let objective: f64 = dual_rhs
+        .iter()
+        .zip(&primal_free)
+        .map(|(weight, temperature)| weight * temperature)
+        .sum();
+    let dual_action: f64 = dual_free
+        .iter()
+        .zip(&primal_rhs)
+        .map(|(lambda, load)| lambda * load)
+        .sum();
+    let identity_rel = (objective - dual_action).abs()
+        / objective
+            .abs()
+            .max(dual_action.abs())
+            .max(f64::MIN_POSITIVE);
+    assert!(
+        identity_rel < 1e-9,
+        "P2 discrete primal/dual identity relative error {identity_rel:e}"
+    );
+
+    let mut dual_full = vec![0.0f64; space.ndof];
+    for (i, &dof) in free.iter().enumerate() {
+        dual_full[dof] = dual_free[i];
+    }
+    (
+        space.l2_error(&positions, &dual_full, &exact_p2_dual),
+        identity_rel,
+        primal_report.rel_residual,
+        adjoint_report.adjoint_residual,
+    )
+}
+
+#[test]
+fn mms_p2_adjoint_order() {
+    let target = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == "thermal-a-mms-p2-adjoint")
+        .expect("P2 adjoint Level-A target");
+    assert_eq!(target.kind, ThermalLevelAKind::ManufacturedTarget);
+    assert_eq!(target.family, ThermalLevelAFamily::ManufacturedAdjoint);
+    let ThermalLevelAAcceptance::OrderGate {
+        theoretical,
+        tolerance,
+    } = target.acceptance
+    else {
+        panic!("P2 adjoint target must carry an order gate");
+    };
+    assert_eq!(target.reference_value_si.to_bits(), theoretical.to_bits());
+    assert_eq!(tolerance.to_bits(), ORDER_GATE_TOLERANCE.to_bits());
+
+    let mut hs = Vec::new();
+    let mut errors = Vec::new();
+    let mut max_identity_rel = 0.0f64;
+    let mut max_primal_residual = 0.0f64;
+    let mut max_adjoint_residual = 0.0f64;
+    for &n in &ADJOINT_GRIDS {
+        let (error, identity_rel, primal_residual, adjoint_residual) = p2_adjoint_error(n);
+        hs.push(1.0 / n as f64);
+        errors.push(error);
+        max_identity_rel = max_identity_rel.max(identity_rel);
+        max_primal_residual = max_primal_residual.max(primal_residual);
+        max_adjoint_residual = max_adjoint_residual.max(adjoint_residual);
+    }
+    let ladder = RefinementLadder::new(hs.clone(), errors.clone()).expect("P2 adjoint ladder");
+    let order = OrderGate { theoretical }
+        .check(
+            "conduction/mms/p2-heat-adjoint/l2",
+            LadderSide::Adjoint,
+            &ladder,
+        )
+        .unwrap_or_else(|error| {
+            panic!("P2 heat-adjoint order gate refused: {error}\n  h = {hs:?}\n  err = {errors:?}")
+        });
+    println!("{}", order.json_line(true));
+    println!(
+        "{{\"mms\":\"ladder\",\"case\":\"conduction/mms/p2-heat-adjoint/l2\",\
+         \"h\":{hs:?},\"errors\":{errors:?}}}"
+    );
+    println!(
+        "{{\"suite\":\"fs-conduction/adjoint\",\
+         \"level_a_case_id\":\"thermal-a-mms-p2-adjoint\",\
+         \"runtime_case\":\"conduction/mms/p2-heat-adjoint/l2\",\
+         \"max_identity_rel\":{max_identity_rel:e},\
+         \"max_primal_residual\":{max_primal_residual:e},\
+         \"max_adjoint_residual\":{max_adjoint_residual:e},\
+         \"kernel\":\"fs-feec/highorder/simplex/P2+fs-adjoint/ift\",\
          \"verdict\":\"pass\",\
          \"authority\":\"executed-ladder-not-retained-registry-receipt\"}}"
     );

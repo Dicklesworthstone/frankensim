@@ -286,6 +286,46 @@ workstream.
   radiation-dominated retained corpus case, or registered maturity promotion is
   claimed by this rung.
 
+### Post-checkpoint Level-A P2 heat-adjoint MMS binding
+
+- Bound `thermal-a-mms-p2-adjoint` to a four-grid L2 dual ladder using the
+  existing `fs_feec::highorder::simplex::SimplexSpace` order-2 stiffness,
+  load, boundary-mask, and L2 paths. The fixture solves the manufactured dual
+  `-Delta z = 3*pi^2*sin(pi*x)*sin(pi*y)*sin(pi*z)` with homogeneous
+  Dirichlet data through `fs_adjoint::ift_gradient_matfree`.
+- Every rung independently solves a unit-load primal system and checks the
+  discrete identity `(dJ/du)^T u_h = lambda_h^T b_h`, so an operator
+  transpose, boundary-elimination, or objective-load mismatch cannot hide
+  behind the observed-order fit.
+- Focused remote proof passed 1/1 on `ovh-a` (job
+  `j-29943194691043482`) with `RCH_REQUIRE_REMOTE=1 rch exec
+  --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --test adjoint mms_p2_adjoint_order --
+  --nocapture`. The four L2 errors were `0.00566462`, `0.00167318`,
+  `0.000704082`, and `0.000360002`, giving observed order `3.007794` against
+  theoretical order `3.0`. The worst discrete identity error was `4.02e-13`,
+  the worst primal residual was `8.75e-13`, and the worst adjoint residual was
+  `9.68e-13`. The shared-tree HEAD moved from
+  `6f28340fd6f399e065efed2bb83cb62e6f07458c` to
+  `9e00e57edc382794a825ece6f5d2aa68f43a0429` during the lane, so this is
+  dirty-worktree execution evidence rather than a same-commit certificate.
+- Full-crate remote proof then passed all 57 tests on `ovh-a` (job
+  `j-29943194691043487`) with `RCH_REQUIRE_REMOTE=1 rch exec
+  --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --all-targets`: 1 library, 4 adjoint,
+  8 analytic, 22 conformance, 6 contact, 10 MMS, and 6 radiation tests. The
+  lane started and ended at `9e00e57edc382794a825ece6f5d2aa68f43a0429`;
+  RCH reported 260.6 seconds total, including 98.8 seconds of sync, 161.3
+  seconds of remote execution, and successful artifact retrieval.
+- Aggregate Level-A execution coverage rises from 18/19 to 19/19: no Level-A
+  formula/order row remains without an executing kernel. This rung does not
+  turn the P1 `fs-conduction` material/boundary frontend into a general P2
+  thermal frontend, add a P2 design-gradient pullback or DWR estimate, persist
+  a corpus receipt or ladder, add a machine fingerprint, or confer L4
+  authority.
+
 ### Post-checkpoint Level-A P2 primal MMS binding
 
 - Bound `thermal-a-mms-p2-dirichlet` to a four-grid L2 ladder that executes

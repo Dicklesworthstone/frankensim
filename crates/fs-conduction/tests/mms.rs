@@ -89,8 +89,8 @@ const LEVEL_A_MMS_BINDINGS: [(&str, Option<&str>, &str); 7] = [
     ),
     (
         "thermal-a-mms-p2-adjoint",
-        None,
-        "fs-conduction implements neither P2 elements nor a dual convergence ladder",
+        Some("tests/adjoint.rs::mms_p2_adjoint_order"),
+        "the high-order FEEC P2 dual L2 ladder executes through fs-adjoint",
     ),
 ];
 
@@ -782,7 +782,7 @@ fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        6
+        7
     );
     for (id, test, basis) in LEVEL_A_MMS_BINDINGS {
         assert!(
@@ -873,10 +873,8 @@ fn mms_battery_matrix_is_declared() {
             row(
                 "p2-simplicial",
                 "adjoint-order",
-                Coverage::Gap {
-                    reason: "the high-order FEEC P2 operator has no bound dual convergence \
-                         ladder in this crate"
-                        .to_string(),
+                Coverage::Covered {
+                    test: "tests/adjoint.rs::mms_p2_adjoint_order".to_string(),
                 },
             ),
             row(
@@ -894,7 +892,7 @@ fn mms_battery_matrix_is_declared() {
         println!("{line}");
     }
     let gaps = matrix.gaps();
-    assert_eq!(gaps.len(), 2, "every declared gap must carry a reason");
+    assert_eq!(gaps.len(), 1, "every declared gap must carry a reason");
     for gap in gaps {
         match &gap.coverage {
             Coverage::Gap { reason } => assert!(!reason.is_empty()),

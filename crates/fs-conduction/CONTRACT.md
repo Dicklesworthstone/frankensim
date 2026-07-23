@@ -301,7 +301,7 @@ None. Everything here is `[S]` solid work on the default path.
 
 - `tests/conformance.rs` — G0 algebraic laws, G4 cancellation drills, G5
   determinism and snapshot round-trips, and the typed refusal surface (22 tests).
-- `tests/mms.rs` — the G1 battery: six manufactured-solution ladders gated by
+- `tests/mms.rs` — the G1 battery: seven primal manufactured-solution ladders gated by
   `fs_mms::OrderGate`, plus the declared `MmsMatrix` and a complete
   `fs-vvreg` Level-A target crosswalk whose gaps carry reasons.
 - `tests/analytic.rs` — slab (Dirichlet–Dirichlet), slab with a uniform source,
@@ -316,8 +316,8 @@ None. Everything here is `[S]` solid work on the default path.
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
-  through `fs_adjoint::verify_gradient`, plus a G1 manufactured P1 dual L2
-  ladder and per-rung discrete primal/dual identity check (3 tests).
+  through `fs_adjoint::verify_gradient`, plus G1 manufactured P1 and P2 dual L2
+  ladders with per-rung discrete primal/dual identity checks (4 tests).
 
 Stable evidence locator (historical wording): `Every test prints a JSON-lines verdict`.
 The precise current scope is narrower: every analytic comparison and MMS gate
@@ -344,9 +344,11 @@ ladder. The P2 isotropic Dirichlet target executes through the existing
 `fs_feec::highorder::simplex::SimplexSpace` order-2 stiffness, load, boundary
 mask, and L2 machinery. That is high-order FEEC-kernel evidence; it does not
 change this crate's P1 material/boundary frontend into a general P2 thermal
-frontend.
-Both test files carry a complete crosswalk over their respective catalog
-partition, so adding, removing, or silently renaming a Level-A row fails the
+frontend. The P2 heat-adjoint target uses the same high-order operator, solves
+the transposed system through `fs_adjoint::ift_gradient_matfree`, and checks the
+discrete primal/dual identity on every mesh.
+The analytic and MMS crosswalks are complete over their respective catalog
+partitions, so adding, removing, or silently renaming a Level-A row fails the
 battery and every absent binding retains a reason.
 
 This is a **test-time execution binding**, not a corpus receipt. The catalog's
@@ -355,11 +357,12 @@ definition; it is not substituted for this solver's geometry, discretization,
 or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
-remain `Estimated`, and the four rows not bound in this crate are still
-reference/target-only here. Two of those four Nusselt rows execute separately
-in `fs-convection`, and the normalized lumped-transient row executes through
-the first-order generalized-alpha paths in `fs-time`. The remaining unexecuted
-Level-A target is the P2 heat-adjoint order ladder.
+remain `Estimated`, and the three rows not bound in this crate are still
+reference/target-only here. Two Nusselt rows execute separately in
+`fs-convection`, and the normalized lumped-transient row executes through the
+first-order generalized-alpha paths in `fs-time`. Across those owning crates,
+all 19 Level-A rows now have executing-kernel bindings; this completeness does
+not promote any row beyond its registry authority.
 
 ## No-claim boundaries
 
@@ -396,8 +399,10 @@ Level-A target is the P2 heat-adjoint order ladder.
 
 **Numerical scope.**
 
-- P₁ (FEEC 0-form) elements only, on body-fitted TET complexes. No higher-order
-  thermal elements, no hexes, no CutFEM frontend.
+- The production material/boundary frontend is P1 (FEEC 0-form) only, on
+  body-fitted TET complexes. Level-A P2 fixtures directly exercise the
+  high-order `fs-feec` simplex operator; there is no general higher-order
+  thermal frontend, no hex frontend, and no CutFEM frontend.
 - Flux recovery (`element_heat_flux`) is the natural element-wise-constant
   `−K∇T_h`. It is one order lower than the temperature, it is NOT
   flux-conserving, and NO superconvergence is claimed for it.
@@ -460,6 +465,12 @@ Level-A target is the P2 heat-adjoint order ladder.
   anisotropic materials, Neumann/Robin/contact/radiation boundary lowering,
   nonlinear solves, cancellation-bounded assembly, or a retained registry
   receipt.
+- The P2 adjoint ladder covers a constant-isotropic, homogeneous-Dirichlet
+  manufactured dual on that same high-order operator. It establishes the
+  observed L2 dual order and the discrete primal/dual identity for this
+  fixture. It does not add a P2 parameter pullback or design gradient,
+  nonlinear or anisotropic adjoints, shape derivatives, DWR authority,
+  cancellation-bounded assembly, or a retained registry receipt.
 
 **Deferred, and why.**
 
