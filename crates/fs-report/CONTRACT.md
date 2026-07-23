@@ -5,8 +5,8 @@ effect.
 
 ## Purpose and layer
 
-Layer L6 (HELM). No dependencies — pure Rust (in-house FNV-1a for content
-addressing).
+Layer L6 (HELM). Pure deterministic projection over L6 session decisions and
+lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
 
 ## Public types and semantics
 
@@ -19,6 +19,10 @@ addressing).
 - `FeatureDelta { name, before, after, abs_change, rel_change, unit }` +
   `describe()`; `semantic_diff(before, after)` — a per-feature geometric
   attribution ranked by significance.
+- `decision_headline_markdown(assessment)` — compact tri-state decision
+  headline with the effective requirement, declared safety factor and policy,
+  exact evidence/context/replay identities, flip conditions, paired
+  attribution headlines, and the complete indented audit projection.
 
 ## Invariants
 
@@ -29,6 +33,10 @@ addressing).
 - `repro_ir` returns the study's steps in order (the exact reproducing recipe).
 - `semantic_diff` recovers per-feature absolute + relative edits and ranks them
   by `|relative change|` (largest first), with the feature name as tiebreak.
+- A decision headline never maps `indeterminate` to either binary verdict and
+  always retains the exact `DecisionAssessment` and replay-package identities.
+- Safety factors are reported as already applied to the effective sourced
+  limit; `fs-report` does not invent a multiplication or division convention.
 
 ## Error model
 
@@ -58,6 +66,10 @@ metrics carry their units; the notebook carries the exact reproducing IR; the
 reproducibility loop closes by content hash (stable + change-sensitive);
 semantic diff recovers known edits ranked by significance; determinism.
 
+`tests/decision.rs` covers deterministic indeterminate and binary decision
+headlines, units and authority identities, explicit flip actions, and the
+projection-only no-claim boundary.
+
 ## No-claim boundaries
 
 - v0 is the notebook DATA MODEL + deterministic Markdown render + content hash +
@@ -65,6 +77,13 @@ semantic diff recovers known edits ranked by significance; determinism.
   — FrankenPandas frames over the Design Ledger, HTML with embedded data tables
   and LUMEN renders, convergence tables, Error/Time-Ledger attributions, and
   report generation being itself a ledgered op — is staged.
+- The decision headline is a presentation of an already-admitted
+  `fs-session::DecisionAssessment`; it does not resolve content hashes,
+  authenticate requirement or policy sources, recompute compliance or
+  attribution, price evidence actions, or certify scientific evidence.
+- Reference-run assembly for every requirement-bearing QoI, deterministic HTML,
+  report routing through the CLI, and `frankensim explain` remain staged behind
+  their prerequisite work.
 - `semantic_diff` compares scalar feature maps; the GEOMETRIC diff proper
   (varifold / optimal-transport distance with transport-plan visualization and
   per-region attribution across chart types) is the fuller deliverable.

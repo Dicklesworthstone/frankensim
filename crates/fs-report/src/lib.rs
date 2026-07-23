@@ -11,10 +11,192 @@
 //!
 //! [`semantic_diff`] is the other half: a diff between two designs that is a
 //! GEOMETRIC attribution ("lip curvature −18%, wall thinned 0.4 mm"), ranked by
-//! significance — not a file diff. Deterministic; no dependencies.
+//! significance — not a file diff.
+//!
+//! [`decision_headline_markdown`] projects an already-admitted
+//! [`fs_session::DecisionAssessment`] into a compact reviewer-facing headline.
+//! It does not recompute compliance, uncertainty, attribution, or action value.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
+
+use fs_evidence::{
+    action::ActionKind,
+    uncertainty::{BudgetContribution, ComplianceVerdict, RequirementRelation},
+};
+use fs_session::DecisionAssessment;
+
+/// Render one already-validated decision assessment as deterministic Markdown.
+///
+/// The headline keeps the tri-state verdict, effective sourced requirement,
+/// safety-factor policy, context, evidence identities, flip conditions, paired
+/// attribution views, and replay root together. The indented audit projection
+/// is the exact lower-layer explanation; this function is presentation only.
+#[must_use]
+pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> String {
+    let quantity = assessment.quantity();
+    let requirement = assessment.requirement();
+    let scalar = requirement.scalar();
+    let unit = quantity.unit();
+    let relation = match scalar.relation() {
+        RequirementRelation::AtMost => "at most",
+        RequirementRelation::AtLeast => "at least",
+    };
+    let mut output = format!("## Decision headline: `{}`\n\n", quantity.qoi());
+
+    match assessment.compliance() {
+        ComplianceVerdict::Compliant { margin, .. } => {
+            let _ = writeln!(
+                output,
+                "- **Verdict:** `compliant` with residual margin `{margin} {unit}`"
+            );
+        }
+        ComplianceVerdict::NonCompliant { shortfall, .. } => {
+            let _ = writeln!(
+                output,
+                "- **Verdict:** `non-compliant` with residual shortfall `{shortfall} {unit}`"
+            );
+        }
+        ComplianceVerdict::Indeterminate {
+            known_lower,
+            known_upper,
+            ..
+        } => {
+            let _ = writeln!(
+                output,
+                "- **Verdict:** `indeterminate`; known band `[{known_lower}, {known_upper}] {unit}`"
+            );
+        }
+    }
+    let _ = writeln!(
+        output,
+        "- **Effective requirement:** `{}` — {relation} `{}` `{unit}`",
+        scalar.id(),
+        scalar.limit()
+    );
+    let _ = writeln!(
+        output,
+        "- **Declared safety factor:** `{}` (already reflected in the effective limit)",
+        requirement.safety_factor().value()
+    );
+    let _ = writeln!(
+        output,
+        "- **Requirement authority:** `{}` at `{}`",
+        scalar.provenance().role(),
+        scalar.provenance().digest()
+    );
+    let _ = writeln!(
+        output,
+        "- **Safety-factor policy:** `{}` at `{}`",
+        requirement.safety_factor().policy().role(),
+        requirement.safety_factor().policy().digest()
+    );
+    let _ = writeln!(
+        output,
+        "- **Quantity evidence:** schema `{}` at `{}`",
+        quantity.schema(),
+        quantity.artifact()
+    );
+    let _ = writeln!(
+        output,
+        "- **Context of use:** `{}` at `{}`",
+        assessment.context().id(),
+        assessment.context().hash()
+    );
+    let _ = writeln!(
+        output,
+        "- **Decision assessment:** `{}`",
+        assessment.content_hash()
+    );
+    let _ = writeln!(
+        output,
+        "- **Replay package:** `{}`\n",
+        assessment.replay_package()
+    );
+
+    output.push_str("### What could change this verdict\n\n");
+    if assessment.flip_conditions().is_empty() {
+        output.push_str("_No admitted unknown is reported as verdict-flipping._\n\n");
+    } else {
+        for unknown in assessment.flip_conditions() {
+            let _ = writeln!(
+                output,
+                "- `{}`: adverse magnitude `{}` `{unit}`; suggested evidence `{}`",
+                unknown.kind().name(),
+                unknown.required_magnitude(),
+                action_kind_name(unknown.suggested_action())
+            );
+        }
+        let _ = writeln!(
+            output,
+            "\nThe assessment retains {} explicit evidence recommendation(s).\n",
+            assessment.actions().len()
+        );
+    }
+
+    output.push_str("### Attribution headline\n\n");
+    match assessment.largest_known_budget_link() {
+        Some(link) => match link.contribution() {
+            BudgetContribution::Known {
+                conservative_half_width,
+                share_of_known,
+            } => {
+                let share = share_of_known
+                    .map_or_else(|| "not-defined".to_string(), |value| format!("{value}"));
+                let _ = writeln!(
+                    output,
+                    "- Largest finite budget group: `{}`; half-width `{conservative_half_width} {unit}`; share `{share}`",
+                    link.group().label()
+                );
+            }
+            BudgetContribution::Unknown { .. } => {
+                output.push_str("- Largest finite budget group: unavailable\n");
+            }
+        },
+        None => output.push_str("- Largest finite budget group: unavailable\n"),
+    }
+    match assessment.strongest_decision_link() {
+        Some(link) => {
+            let _ = writeln!(
+                output,
+                "- Strongest one-group-at-a-time decision influence: `{}`; signed-separation shift `{}` `{unit}`",
+                link.group().label(),
+                link.influence()
+            );
+        }
+        None => output.push_str("- Strongest decision influence: unavailable\n"),
+    }
+    if assessment.attribution().headline_disagrees() {
+        output.push_str(
+            "- **Paired-view warning:** the largest budget magnitude is not the strongest decision influence.\n",
+        );
+    }
+
+    output.push_str("\n### Exact audit projection\n\n");
+    for line in assessment.render_explain().lines() {
+        let _ = writeln!(output, "    {line}");
+    }
+    output.push_str(
+        "\n_Projection only: this report does not certify evidence, resolve artifact hashes, recompute the verdict, or authenticate requirement authorities._\n",
+    );
+    output
+}
+
+const fn action_kind_name(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::SolverTolerance => "solver-tolerance",
+        ActionKind::MeshRefinement => "mesh-refinement",
+        ActionKind::TimeRefinement => "time-refinement",
+        ActionKind::RepresentationEscalation => "representation-escalation",
+        ActionKind::UqSamples => "uq-samples",
+        ActionKind::MaterialCouponTest => "material-coupon-test",
+        ActionKind::SensorCampaign => "sensor-campaign",
+        ActionKind::Falsification => "falsification",
+        ActionKind::StandardsObligation => "standards-obligation",
+        ActionKind::Refusal => "refusal",
+        _ => "unsupported",
+    }
+}
 
 /// A dimensioned quantity — a value with its unit (units on every value).
 #[derive(Debug, Clone, PartialEq)]
