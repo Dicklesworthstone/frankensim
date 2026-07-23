@@ -316,7 +316,8 @@ None. Everything here is `[S]` solid work on the default path.
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
-  through `fs_adjoint::verify_gradient`.
+  through `fs_adjoint::verify_gradient`, plus a G1 manufactured P1 dual L2
+  ladder and per-rung discrete primal/dual identity check (3 tests).
 
 Stable evidence locator (historical wording): `Every test prints a JSON-lines verdict`.
 The precise current scope is narrower: every analytic comparison and MMS gate
@@ -331,13 +332,15 @@ parameters and reference values directly: the two slab fluxes, uniform-source
 center rise, rectangular affine probe, cylindrical- and spherical-shell
 conductances, `mL=1` fin efficiency, a two-slab matching-P1 contact network
 whose three `0.1 K/W` terms reproduce the `0.3 K/W` series reference, and the
-infinite-parallel-plate view-factor row. Four P1 L2 ladders take their
+infinite-parallel-plate view-factor row. Four primal P1 L2 ladders take their
 theoretical order and two-sided gate from the catalog: isotropic Dirichlet,
 combined anisotropic temperature-dependent conductivity, mixed Neumann, and
-Robin. The combined case uses a rotated orthotropic principal frame with three
-distinct linear `k_i(T)` laws and a chain-rule manufactured source, so it
-exercises off-diagonal `K(T)`, nonzero `dK/dT`, and nonlinear iteration in one
-executing ladder.
+Robin. A fifth P1 L2 ladder resolves the heat-adjoint target through
+`fs_adjoint` and checks the discrete dual identity on every mesh. The combined
+primal case uses a rotated orthotropic principal frame with three distinct
+linear `k_i(T)` laws and a chain-rule manufactured source, so it exercises
+off-diagonal `K(T)`, nonzero `dK/dT`, and nonlinear iteration in one executing
+ladder.
 Both test files carry a complete crosswalk over their respective catalog
 partition, so adding, removing, or silently renaming a Level-A row fails the
 battery and every absent binding retains a reason.
@@ -348,8 +351,8 @@ definition; it is not substituted for this solver's geometry, discretization,
 or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
-remain `Estimated`, and the six rows not bound in this crate are still
-reference/target-only here. Two of those six Nusselt rows execute separately
+remain `Estimated`, and the five rows not bound in this crate are still
+reference/target-only here. Two of those five Nusselt rows execute separately
 in `fs-convection`, and the normalized lumped-transient row executes through
 the first-order generalized-alpha paths in `fs-time`.
 
@@ -438,10 +441,14 @@ the first-order generalized-alpha paths in `fs-time`.
   carries faceted-surface geometry error; the separate 0.1% L2 envelope is the
   discretization claim and must shrink like `h²`.
 - The adjoint hook covers the LINEAR case only, and refuses a
-  temperature-dependent material rather than silently linearizing. A verified
-  gradient establishes consistency between the assembled `∂R/∂T`, the analytic
-  pullback, and the primal solve — nothing about shape derivatives, mesh
-  sensitivity, or goal-oriented error.
+  temperature-dependent material rather than silently linearizing. The
+  manufactured P1 dual uses `z(s) = s - s^4/4`, `-Delta z = 3s^2`, homogeneous
+  Dirichlet data at `s=0`, and a natural boundary elsewhere. Its L2 ladder and
+  discrete primal/dual identity establish observed consistency for that
+  fixture. The separate verified design gradient establishes consistency
+  between the assembled `∂R/∂T`, the analytic pullback, and the primal solve.
+  Neither result establishes shape derivatives, mesh sensitivity, or a
+  goal-oriented error bound.
 
 **Deferred, and why.**
 

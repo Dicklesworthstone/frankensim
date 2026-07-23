@@ -286,6 +286,43 @@ workstream.
   radiation-dominated retained corpus case, or registered maturity promotion is
   claimed by this rung.
 
+### Post-checkpoint Level-A P1 heat-adjoint MMS binding
+
+- Bound `thermal-a-mms-p1-adjoint` to a four-grid P1 dual L2 ladder. The
+  fixture manufactures `z(s) = s - s^4/4` with `-Delta z = 3s^2`, homogeneous
+  Dirichlet data at `s=0`, and a natural boundary elsewhere, then solves the
+  transposed conduction operator through `fs_adjoint::ift_gradient_matfree`.
+- Every rung also checks the discrete defining identity
+  `(dJ/du)^T u_h = lambda_h^T b_h`, so an operator-transpose,
+  boundary-elimination, or objective-weight mismatch cannot hide behind the
+  observed-order fit. This is dual-consistency evidence for the declared
+  fixture, not a DWR estimate or goal-oriented error bound.
+- Focused remote proof on `hz1` (job `j-29943194691043456`) passed 1/1 with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --test adjoint mms_p1_adjoint_order --
+  --nocapture`. The L2 errors were `0.00717563`, `0.00322824`, `0.00182664`,
+  and `0.00117296`, giving observed order `1.976427` against theoretical order
+  `2.0`; the worst primal/dual identity error was `5.97e-13`, and the worst
+  adjoint residual was `9.88e-13`. The initial probe refused before forming a
+  ladder because a primal residual of `1.725e-14` narrowly missed a `1e-14`
+  solver threshold; the dedicated ladder threshold is now `1e-12`, still 100x
+  tighter than the asserted `1e-10` evidence bound. The shared-tree HEAD moved
+  from `e58ce6ca` to `d50e1004` during proof, so this is dirty-worktree
+  execution evidence rather than a same-commit certificate.
+- The broader `fs-conduction` regression command,
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --all-targets`, did not reach the
+  conduction tests on `vmi1149989` (job `j-29943194691043460`). Compilation
+  stopped in a concurrent dirty `fs-matdb` edit because `query.rs:1103-1104`
+  referenced `PropertyClaim` without importing it. The shared-tree HEAD moved
+  from `d50e1004` to `3bee6d8b` during the lane. This is an external
+  shared-snapshot blocker, not crate-wide regression evidence for this rung.
+- Aggregate Level-A execution coverage rises from 16/19 to 17/19. Only the P2
+  primal and P2 adjoint targets remain without executing kernels; no retained
+  corpus receipt, full ladder artifact, or machine fingerprint is added here.
+
 ### Post-checkpoint Level-A combined anisotropic-nonlinear MMS binding
 
 - Bound `thermal-a-mms-p1-anisotropic-nonlinear` to an executing P1 L2

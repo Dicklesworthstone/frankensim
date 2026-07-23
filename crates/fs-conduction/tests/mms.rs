@@ -80,8 +80,8 @@ const LEVEL_A_MMS_BINDINGS: [(&str, Option<&str>, &str); 7] = [
     ),
     (
         "thermal-a-mms-p1-adjoint",
-        None,
-        "the adjoint test checks finite-difference consistency but retains no dual convergence ladder",
+        Some("tests/adjoint.rs::mms_p1_adjoint_order"),
+        "the manufactured P1 dual L2 ladder executes the catalog order gate",
     ),
     (
         "thermal-a-mms-p2-adjoint",
@@ -688,7 +688,7 @@ fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        4
+        5
     );
     for (id, test, basis) in LEVEL_A_MMS_BINDINGS {
         assert!(
@@ -756,12 +756,8 @@ fn mms_battery_matrix_is_declared() {
             row(
                 "p1-simplicial",
                 "adjoint-order",
-                Coverage::Gap {
-                    reason: "the adjoint ladder needs a dual manufactured solution for the \
-                         QoI functional; the IFT gradient is verified against central \
-                         finite differences in tests/adjoint.rs instead, which checks \
-                         consistency but fits no dual convergence order"
-                        .to_string(),
+                Coverage::Covered {
+                    test: "tests/adjoint.rs::mms_p1_adjoint_order".to_string(),
                 },
             ),
             row(

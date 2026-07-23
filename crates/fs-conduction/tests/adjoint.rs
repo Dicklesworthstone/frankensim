@@ -28,15 +28,23 @@
 
 mod support;
 
-use fs_adjoint::verify_gradient;
+use std::cell::RefCell;
+
+use fs_adjoint::{ift_gradient_matfree, verify_gradient};
 use fs_conduction::adjoint::ConductivityDesign;
+use fs_conduction::assemble::{DofMap, assemble_operator, reduce};
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{on_box_face, unit_cube};
 use fs_conduction::material::ConductivityModel;
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::{ConductionProblem, LinearConfig};
-use support::with_cx;
+use fs_mms::{LadderSide, ORDER_GATE_TOLERANCE, OrderGate, RefinementLadder};
+use fs_solver::CsrOp;
+use fs_vvreg::thermal_level_a::{
+    ThermalLevelAAcceptance, ThermalLevelAFamily, ThermalLevelAKind, thermal_level_a_cases,
+};
+use support::{l2_error, with_cx};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -103,6 +111,14 @@ fn linear_config() -> LinearConfig {
     }
 }
 
+fn ladder_linear_config() -> LinearConfig {
+    LinearConfig {
+        tolerance: 1e-12,
+        max_iterations: 60_000,
+        restart: 60,
+    }
+}
+
 /// Deterministic probe directions: three one-hot picks spread across the
 /// element list, a global ramp, and an alternating pattern. Keyed by
 /// index, never by RNG, so a failure reproduces exactly.
@@ -120,6 +136,174 @@ fn directions(n: usize) -> Vec<Vec<f64>> {
             .collect(),
     );
     out
+}
+
+const ADJOINT_GRIDS: [usize; 4] = [4, 6, 8, 10];
+const UNIT_K: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// Manufactured dual `z(s) = s - s^4/4`, with `s = x_3`.
+///
+/// It obeys `z(0) = 0`, `z'(1) = 0`, and `-Delta z = 3s^2`. The
+/// quartic term prevents the structured P1 mesh from reproducing every nodal
+/// value, while the exact L2 quadrature in `support` still integrates the
+/// squared error without a quadrature term.
+fn exact_dual(p: [f64; 3]) -> f64 {
+    p[2] - 0.25 * p[2].powi(4)
+}
+
+fn dual_source(p: [f64; 3]) -> f64 {
+    3.0 * p[2] * p[2]
+}
+
+fn p1_adjoint_error(n: usize) -> (f64, f64, f64) {
+    let (complex, positions) = unit_cube(n);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::constant_tensor(UNIT_K).expect("material");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "dual-dirichlet",
+            |face| on_box_face(face.centroid[2], 0.0),
+            ThermalBc::dirichlet(0.0).expect("homogeneous dual boundary"),
+        )
+        .expect("dual Dirichlet region")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let dual_load = ScalarField::Nodal(mesh.positions().iter().copied().map(dual_source).collect());
+    let primal_load = ScalarField::Uniform(1.0);
+    let zero = vec![0.0f64; mesh.vertex_count()];
+    let linear = ladder_linear_config();
+    let (dual_system, primal_system, primal_solution) = with_cx(|cx| {
+        let dual_system = assemble_operator(cx, &mesh, &boundary, &material, &dual_load, &zero)
+            .expect("dual assembly");
+        let primal_system = assemble_operator(cx, &mesh, &boundary, &material, &primal_load, &zero)
+            .expect("primal assembly");
+        let design = ConductivityDesign::new(
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &primal_load,
+            },
+            ladder_linear_config(),
+        )
+        .expect("linear conduction design");
+        let rho = vec![1.0f64; design.parameter_count()];
+        let primal_solution = design.solve(cx, &rho).expect("primal solve");
+        (dual_system, primal_system, primal_solution)
+    });
+    let dofs = DofMap::new(&boundary, mesh.vertex_count()).expect("dual dofs");
+    let (dual_matrix, dual_rhs) = reduce(&dual_system, &dofs);
+    let (_, primal_rhs) = reduce(&primal_system, &dofs);
+    let op = CsrOp::symmetric(dual_matrix);
+    let captured_dual = RefCell::new(Vec::new());
+    let capture = |lambda: &[f64]| {
+        captured_dual.borrow_mut().extend_from_slice(lambda);
+        Vec::new()
+    };
+    let (empty_gradient, report) = ift_gradient_matfree(
+        &op,
+        &dual_rhs,
+        &[],
+        &capture,
+        linear.tolerance,
+        linear.max_iterations.div_ceil(linear.restart),
+    );
+    assert!(empty_gradient.is_empty());
+    assert!(report.converged, "the manufactured adjoint must converge");
+    assert!(
+        report.adjoint_residual < 1e-10,
+        "adjoint residual {} is too loose for an order ladder",
+        report.adjoint_residual
+    );
+    let dual_free = captured_dual.into_inner();
+    assert_eq!(dual_free.len(), dofs.n());
+
+    // The same discrete operator must satisfy the defining dual identity
+    //   (dJ/du)^T u_h = lambda_h^T b_h.
+    // This catches a transposition, boundary-elimination, or objective-weight
+    // mismatch independently of the continuous manufactured error.
+    let objective: f64 = dual_rhs
+        .iter()
+        .zip(&primal_solution.free_temperature)
+        .map(|(w, temperature)| w * temperature)
+        .sum();
+    let dual_action: f64 = dual_free
+        .iter()
+        .zip(&primal_rhs)
+        .map(|(lambda, load)| lambda * load)
+        .sum();
+    let identity_rel = (objective - dual_action).abs()
+        / objective
+            .abs()
+            .max(dual_action.abs())
+            .max(f64::MIN_POSITIVE);
+    assert!(
+        identity_rel < 1e-9,
+        "discrete primal/dual identity relative error {identity_rel:e}"
+    );
+
+    let dual_full = dofs.scatter(&dual_free);
+    (
+        l2_error(&mesh, &dual_full, &exact_dual),
+        identity_rel,
+        report.adjoint_residual,
+    )
+}
+
+#[test]
+fn mms_p1_adjoint_order() {
+    let target = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == "thermal-a-mms-p1-adjoint")
+        .expect("P1 adjoint Level-A target");
+    assert_eq!(target.kind, ThermalLevelAKind::ManufacturedTarget);
+    assert_eq!(target.family, ThermalLevelAFamily::ManufacturedAdjoint);
+    let ThermalLevelAAcceptance::OrderGate {
+        theoretical,
+        tolerance,
+    } = target.acceptance
+    else {
+        panic!("P1 adjoint target must carry an order gate");
+    };
+    assert_eq!(target.reference_value_si.to_bits(), theoretical.to_bits());
+    assert_eq!(tolerance.to_bits(), ORDER_GATE_TOLERANCE.to_bits());
+
+    let mut hs = Vec::new();
+    let mut errors = Vec::new();
+    let mut max_identity_rel = 0.0f64;
+    let mut max_adjoint_residual = 0.0f64;
+    for &n in &ADJOINT_GRIDS {
+        let (error, identity_rel, adjoint_residual) = p1_adjoint_error(n);
+        hs.push(1.0 / n as f64);
+        errors.push(error);
+        max_identity_rel = max_identity_rel.max(identity_rel);
+        max_adjoint_residual = max_adjoint_residual.max(adjoint_residual);
+    }
+    let ladder = RefinementLadder::new(hs.clone(), errors.clone()).expect("adjoint ladder");
+    let order = OrderGate { theoretical }
+        .check(
+            "conduction/mms/p1-heat-adjoint/l2",
+            LadderSide::Adjoint,
+            &ladder,
+        )
+        .unwrap_or_else(|error| {
+            panic!("P1 heat-adjoint order gate refused: {error}\n  h = {hs:?}\n  err = {errors:?}")
+        });
+    println!("{}", order.json_line(true));
+    println!(
+        "{{\"mms\":\"ladder\",\"case\":\"conduction/mms/p1-heat-adjoint/l2\",\
+         \"h\":{hs:?},\"errors\":{errors:?}}}"
+    );
+    println!(
+        "{{\"suite\":\"fs-conduction/adjoint\",\
+         \"level_a_case_id\":\"thermal-a-mms-p1-adjoint\",\
+         \"runtime_case\":\"conduction/mms/p1-heat-adjoint/l2\",\
+         \"max_identity_rel\":{max_identity_rel:e},\
+         \"max_adjoint_residual\":{max_adjoint_residual:e},\
+         \"verdict\":\"pass\",\
+         \"authority\":\"executed-ladder-not-retained-registry-receipt\"}}"
+    );
 }
 
 #[test]
