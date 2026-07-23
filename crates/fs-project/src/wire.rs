@@ -21,10 +21,11 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    Budgets, Cooling, DefaultReceipt, EntityDecl, Envelope, Fan, GeometryArtifact,
-    GeometryAssignment, InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest,
-    PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent,
-    Versions,
+    Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
+    GeometryArtifact, GeometryAssignment, InterfaceCardBinding, MaterialBinding, Metadata,
+    OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
+    ThermalLimit, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -34,6 +35,46 @@ pub const FSIM_CANONICAL_DOMAIN: &str = "org.frankensim.fs-project.canonical.v1"
 #[must_use]
 pub fn canonical_hash(bytes: &[u8]) -> ContentHash {
     hash_domain(FSIM_CANONICAL_DOMAIN, bytes)
+}
+
+const fn decision_gate_tag(value: DecisionGate) -> &'static str {
+    match value {
+        DecisionGate::ScopingEstimate => "scoping-estimate",
+        DecisionGate::DesignSelection => "design-selection",
+        DecisionGate::ComplianceSignoff => "compliance-signoff",
+    }
+}
+
+const fn consequence_tag(value: ConsequenceClass) -> &'static str {
+    match value {
+        ConsequenceClass::Advisory => "advisory",
+        ConsequenceClass::Reliability => "reliability",
+        ConsequenceClass::SafetyCritical => "safety-critical",
+    }
+}
+
+const fn requirement_direction_tag(value: RequirementDirection) -> &'static str {
+    match value {
+        RequirementDirection::AtMost => "at-most",
+        RequirementDirection::AtLeast => "at-least",
+    }
+}
+
+const fn requirement_source_kind_tag(value: RequirementSourceKind) -> &'static str {
+    match value {
+        RequirementSourceKind::Standard => "standard",
+        RequirementSourceKind::Datasheet => "datasheet",
+        RequirementSourceKind::InternalPolicy => "internal-policy",
+        RequirementSourceKind::UserDeclaration => "user-declaration",
+    }
+}
+
+const fn requirement_severity_tag(value: RequirementSeverity) -> &'static str {
+    match value {
+        RequirementSeverity::ReliabilityDerating => "reliability-derating",
+        RequirementSeverity::DamageLimit => "damage-limit",
+        RequirementSeverity::SafetyCritical => "safety-critical",
+    }
 }
 
 /// Typed refusal from the wire layer (syntax, envelope, canonicality).
@@ -184,6 +225,10 @@ fn lower_pillars(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), Pro
             text(&m.context_of_use),
             kw("intended-decision"),
             text(&m.intended_decision),
+            kw("decision-gate"),
+            text(decision_gate_tag(m.decision_gate)),
+            kw("consequence"),
+            text(consequence_tag(m.consequence)),
         ]));
     }
     if let Some(v) = &spec.versions {
@@ -392,14 +437,38 @@ fn lower_operations(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), 
         for limit in requirements {
             items.push(list(vec![
                 sym("t-limit"),
+                kw("qoi"),
+                text(&limit.qoi),
                 kw("class"),
                 text(&limit.class),
                 kw("region"),
                 text(&limit.region),
+                kw("direction"),
+                text(requirement_direction_tag(limit.direction)),
                 kw("limit"),
                 qty(limit.limit)?,
                 kw("margin"),
                 qty(limit.margin)?,
+                kw("source-kind"),
+                text(requirement_source_kind_tag(limit.source.kind)),
+                kw("source-document"),
+                text(&limit.source.document),
+                kw("source-version"),
+                text(&limit.source.version),
+                kw("source-locator"),
+                text(&limit.source.locator),
+                kw("safety-factor"),
+                float(limit.safety_factor.factor),
+                kw("safety-source-kind"),
+                text(requirement_source_kind_tag(limit.safety_factor.source.kind)),
+                kw("safety-source-document"),
+                text(&limit.safety_factor.source.document),
+                kw("safety-source-version"),
+                text(&limit.safety_factor.source.version),
+                kw("safety-source-locator"),
+                text(&limit.safety_factor.source.locator),
+                kw("severity"),
+                text(requirement_severity_tag(limit.severity)),
             ]));
         }
         sections.push(list(items));
@@ -987,11 +1056,113 @@ fn field<'a>(pairs: &[(&'a str, &'a Node)], key: &str) -> Option<&'a Node> {
     pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
+fn invalid_enum(out: &mut Vec<Violation>, field: &'static str, value: &str, allowed: &str) {
+    if value.is_empty() {
+        return;
+    }
+    out.push(Violation {
+        code: "project-field-enum",
+        what: format!("`{field}` has unknown value {value:?}"),
+        fix: format!("use one of {allowed}"),
+    });
+}
+
+fn parse_decision_gate(value: String, out: &mut Vec<Violation>) -> DecisionGate {
+    match value.as_str() {
+        "scoping-estimate" => DecisionGate::ScopingEstimate,
+        "design-selection" => DecisionGate::DesignSelection,
+        "compliance-signoff" => DecisionGate::ComplianceSignoff,
+        _ => {
+            invalid_enum(
+                out,
+                "metadata.decision-gate",
+                &value,
+                "`scoping-estimate`, `design-selection`, `compliance-signoff`",
+            );
+            DecisionGate::ComplianceSignoff
+        }
+    }
+}
+
+fn parse_consequence(value: String, out: &mut Vec<Violation>) -> ConsequenceClass {
+    match value.as_str() {
+        "advisory" => ConsequenceClass::Advisory,
+        "reliability" => ConsequenceClass::Reliability,
+        "safety-critical" => ConsequenceClass::SafetyCritical,
+        _ => {
+            invalid_enum(
+                out,
+                "metadata.consequence",
+                &value,
+                "`advisory`, `reliability`, `safety-critical`",
+            );
+            ConsequenceClass::SafetyCritical
+        }
+    }
+}
+
+fn parse_requirement_direction(value: String, out: &mut Vec<Violation>) -> RequirementDirection {
+    match value.as_str() {
+        "at-most" => RequirementDirection::AtMost,
+        "at-least" => RequirementDirection::AtLeast,
+        _ => {
+            invalid_enum(out, "t-limit.direction", &value, "`at-most`, `at-least`");
+            RequirementDirection::AtMost
+        }
+    }
+}
+
+fn parse_requirement_source_kind(
+    value: String,
+    field: &'static str,
+    out: &mut Vec<Violation>,
+) -> RequirementSourceKind {
+    match value.as_str() {
+        "standard" => RequirementSourceKind::Standard,
+        "datasheet" => RequirementSourceKind::Datasheet,
+        "internal-policy" => RequirementSourceKind::InternalPolicy,
+        "user-declaration" => RequirementSourceKind::UserDeclaration,
+        _ => {
+            invalid_enum(
+                out,
+                field,
+                &value,
+                "`standard`, `datasheet`, `internal-policy`, `user-declaration`",
+            );
+            RequirementSourceKind::UserDeclaration
+        }
+    }
+}
+
+fn parse_requirement_severity(value: String, out: &mut Vec<Violation>) -> RequirementSeverity {
+    match value.as_str() {
+        "reliability-derating" => RequirementSeverity::ReliabilityDerating,
+        "damage-limit" => RequirementSeverity::DamageLimit,
+        "safety-critical" => RequirementSeverity::SafetyCritical,
+        _ => {
+            invalid_enum(
+                out,
+                "t-limit.severity",
+                &value,
+                "`reliability-derating`, `damage-limit`, `safety-critical`",
+            );
+            RequirementSeverity::SafetyCritical
+        }
+    }
+}
+
 fn read_metadata(body: &[Node], out: &mut Vec<Violation>) -> Metadata {
     let pairs = read_pairs(
         body,
         "metadata",
-        &["name", "created", "context-of-use", "intended-decision"],
+        &[
+            "name",
+            "created",
+            "context-of-use",
+            "intended-decision",
+            "decision-gate",
+            "consequence",
+        ],
         out,
     );
     Metadata {
@@ -1005,6 +1176,18 @@ fn read_metadata(body: &[Node], out: &mut Vec<Violation>) -> Metadata {
         intended_decision: expect_str(
             field(&pairs, "intended-decision"),
             "metadata.intended-decision",
+            out,
+        ),
+        decision_gate: parse_decision_gate(
+            expect_str(
+                field(&pairs, "decision-gate"),
+                "metadata.decision-gate",
+                out,
+            ),
+            out,
+        ),
+        consequence: parse_consequence(
+            expect_str(field(&pairs, "consequence"), "metadata.consequence", out),
             out,
         ),
     }
@@ -1616,7 +1799,9 @@ fn read_requirements(body: &[Node], out: &mut Vec<Violation>) -> Vec<ThermalLimi
             out.push(Violation {
                 code: "project-malformed-clause",
                 what: "`requirements` rows must be `(t-limit ...)`".to_string(),
-                fix: "declare `(t-limit :class ... :region ... :limit ... :margin ...)`"
+                fix: "declare a fully sourced `(t-limit :qoi ... :class ... :region ... \
+                      :direction ... :limit ... :margin ... :source-* ... :safety-* ... \
+                      :severity ...)`"
                     .to_string(),
             });
             continue;
@@ -1624,14 +1809,91 @@ fn read_requirements(body: &[Node], out: &mut Vec<Violation>) -> Vec<ThermalLimi
         let pairs = read_pairs(
             inner,
             "t-limit",
-            &["class", "region", "limit", "margin"],
+            &[
+                "qoi",
+                "class",
+                "region",
+                "direction",
+                "limit",
+                "margin",
+                "source-kind",
+                "source-document",
+                "source-version",
+                "source-locator",
+                "safety-factor",
+                "safety-source-kind",
+                "safety-source-document",
+                "safety-source-version",
+                "safety-source-locator",
+                "severity",
+            ],
             out,
         );
         limits.push(ThermalLimit {
+            qoi: expect_str(field(&pairs, "qoi"), "t-limit.qoi", out),
             class: expect_str(field(&pairs, "class"), "t-limit.class", out),
             region: expect_str(field(&pairs, "region"), "t-limit.region", out),
+            direction: parse_requirement_direction(
+                expect_str(field(&pairs, "direction"), "t-limit.direction", out),
+                out,
+            ),
             limit: expect_qty(field(&pairs, "limit"), "t-limit.limit", out),
             margin: expect_qty(field(&pairs, "margin"), "t-limit.margin", out),
+            source: RequirementSource {
+                kind: parse_requirement_source_kind(
+                    expect_str(field(&pairs, "source-kind"), "t-limit.source-kind", out),
+                    "t-limit.source-kind",
+                    out,
+                ),
+                document: expect_str(
+                    field(&pairs, "source-document"),
+                    "t-limit.source-document",
+                    out,
+                ),
+                version: expect_str(
+                    field(&pairs, "source-version"),
+                    "t-limit.source-version",
+                    out,
+                ),
+                locator: expect_str(
+                    field(&pairs, "source-locator"),
+                    "t-limit.source-locator",
+                    out,
+                ),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: expect_float(field(&pairs, "safety-factor"), "t-limit.safety-factor", out),
+                source: RequirementSource {
+                    kind: parse_requirement_source_kind(
+                        expect_str(
+                            field(&pairs, "safety-source-kind"),
+                            "t-limit.safety-source-kind",
+                            out,
+                        ),
+                        "t-limit.safety-source-kind",
+                        out,
+                    ),
+                    document: expect_str(
+                        field(&pairs, "safety-source-document"),
+                        "t-limit.safety-source-document",
+                        out,
+                    ),
+                    version: expect_str(
+                        field(&pairs, "safety-source-version"),
+                        "t-limit.safety-source-version",
+                        out,
+                    ),
+                    locator: expect_str(
+                        field(&pairs, "safety-source-locator"),
+                        "t-limit.safety-source-locator",
+                        out,
+                    ),
+                },
+            },
+            severity: parse_requirement_severity(
+                expect_str(field(&pairs, "severity"), "t-limit.severity", out),
+                out,
+            ),
         });
     }
     limits

@@ -2,9 +2,10 @@
 
 use fs_cli::{exit, run, validate_source};
 use fs_project::{
-    Budgets, Cooling, EntityDecl, Envelope, GeometryArtifact, GeometryAssignment, MeshSelector,
-    Metadata, OutputRequest, PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit,
-    UnitsDoctrine, Versions, print_sexpr,
+    Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, GeometryArtifact,
+    GeometryAssignment, MeshSelector, Metadata, OutputRequest, PowerDissipation, ProjectSpec,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
 
@@ -21,6 +22,8 @@ fn valid_project() -> ProjectSpec {
             created: "2026-07-22".to_string(),
             context_of_use: "CLI contract conformance".to_string(),
             intended_decision: "exercise structural project admission".to_string(),
+            decision_gate: DecisionGate::ScopingEstimate,
+            consequence: ConsequenceClass::Advisory,
         }),
         versions: Some(Versions {
             schema: fs_project::FSIM_VERSION,
@@ -90,10 +93,28 @@ fn valid_project() -> ProjectSpec {
             pressure: QtyAny::new(101_325.0, fs_project::spec::dims::PRESSURE),
         }),
         requirements: Some(vec![ThermalLimit {
+            qoi: "temperature-max".to_string(),
             class: "surface".to_string(),
             region: "hot".to_string(),
+            direction: RequirementDirection::AtMost,
             limit: kelvin(353.15),
             margin: kelvin(5.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::UserDeclaration,
+                document: "cli-test-declaration".to_string(),
+                version: "1".to_string(),
+                locator: "temperature-max".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.0,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::UserDeclaration,
+                    document: "cli-test-margin-policy".to_string(),
+                    version: "1".to_string(),
+                    locator: "factor".to_string(),
+                },
+            },
+            severity: RequirementSeverity::ReliabilityDerating,
         }]),
         solver: Some(SolverSettings {
             fidelity: "auto".to_string(),

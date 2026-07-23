@@ -11,6 +11,10 @@ conflicting claims. The `assignment` module (bead f85xj.6.3) compiles
 persisted mesh-index-free selectors to persistent `EntityId` tokens, resolves
 them against caller-supplied promoted meshes through `fs-io`, and retains the
 exact lower-layer reports.
+Bead f85xj.17.6 extends the same canonical project identity with mandatory
+requirement authority and typed context-of-use gating: requirement/policy
+sources carry exact document versions and locators, and an explicitly
+indeterminate decision is usable only in an advisory scoping context.
 
 ## Purpose and layer
 
@@ -24,7 +28,8 @@ bindings; it runs no solves and admits no scenarios itself.
 ## Public types and semantics
 
 - `ProjectSpec` carries every section of the cooling vertical's contract:
-  `Metadata` (name, created, context of use, intended decision), the Five
+  `Metadata` (name, created, context of use, intended decision,
+  `DecisionGate`, `ConsequenceClass`), the Five
   Explicits (`Versions`, `Seeds`, `Budgets`, capabilities list,
   `UnitsDoctrine`), `GeometryArtifact` references (imported quarantine-receipt
   ids — geometry never lives inline), `EntityDecl`
@@ -36,9 +41,26 @@ bindings; it runs no solves and admits no scenarios itself.
   source, optional `claim` pin), `InterfaceCardBinding` TIM/contact card refs
   (optional `claim` pin), `PowerDissipation`
   rows, `Cooling` (fans/vents/leakage; declared-empty lists are facts,
-  omission is a violation), `Envelope`, `ThermalLimit` requirements with
-  margins, `SolverSettings`, and `OutputRequest`s. Sections are `Option`s so
+  omission is a violation), `Envelope`, sourced `ThermalLimit` requirements
+  with explicit QoI, direction, effective limit, guard margin, severity,
+  versioned base authority, and an already-applied `SafetyFactorPolicy` with
+  its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
+  are `Option`s so
   recognition stays lenient and validation can name every omission at once.
+- `Metadata::permits_indeterminate()` is the context gate consumed by the
+  decision layer: only `ScopingEstimate` plus `Advisory` returns true.
+  Design-selection/compliance-signoff and every safety-critical consequence
+  require a determinate assessment.
+- `RequirementSource` identifies an exact standard, datasheet, internal
+  policy, or user declaration by document, version, and locator.
+  `requirement_source_reviews(previous, current)` deterministically reports a
+  version change only when the QoI/region/role/source kind/document/locator
+  identity is unchanged; replacing the authority is a broader project diff,
+  not mislabeled as a version bump.
+- `SafetyFactorPolicy.factor` is finite and at least one. The policy source
+  owns how it was applied; `ThermalLimit::limit` is the effective value already
+  consumed by compliance evaluation. L6 never invents a generic
+  multiply/divide rule for temperature or other quantities.
 - `ProjectSpec::validate() -> Vec<Violation>` (the fs-scenario
   code/what/fix triple): empty output is the definition of admissible. Every
   mandatory section omission has a stable `project-*-missing` code; empty
@@ -218,6 +240,10 @@ round trip with verifying receipt plus refusal of no-op and unknown-version
 migrations; entity identity pins accepting the recomputed token and refusing
 a stale one; and the broken-project corpus (14 rows) logging every violation
 with its fix as the error-message quality bar.
+The f85xj.17.6 battery additionally proves sourced requirement and factor
+lineage round-trip in both spellings, sourceless/invalid-factor refusal,
+advisory-scoping versus design/sign-off/safety context gating, and exact
+version-bump review for both the requirement and safety-factor authorities.
 
 `tests/assignment.rs` (f85xj.6.3): a promoted cube resolves named groups to
 the exact persistent region/interface identities; retained fs-io JSON and its
@@ -287,3 +313,11 @@ explicit face index.
   machinery exists so the freeze can be honest when it lands.
 - Validation is structural and dimensional; it makes no physics claim (a
   well-formed project can still describe an unsolvable or nonsensical study).
+- A versioned requirement source proves which bytes/edition/locator the caller
+  declared, not that the clause was transcribed correctly, applies to this
+  product, or is legally authoritative. `UserDeclaration` is intentionally the
+  weakest source family and never masquerades as a standard or datasheet.
+- The retained safety factor records lineage only. Because its owner-specific
+  application rule is not recomputed here, the schema does not independently
+  prove that the effective limit was derived correctly; that cross-check
+  belongs to the future standards/policy registry integration.

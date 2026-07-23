@@ -19,8 +19,9 @@ use fs_matdb::{
 use fs_project::{
     BindingRequirements, CONTACT_RESISTANCE_DIMS, CONTACT_RESISTANCE_PROPERTY, CardLibrary,
     EntityDecl, Envelope, InterfaceCardBinding, MaterialBinding, MaterialResolution, ProjectSpec,
-    TEMPERATURE_AXIS, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, ThermalLimit,
-    resolve_bindings,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    SafetyFactorPolicy, TEMPERATURE_AXIS, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
+    ThermalLimit, resolve_bindings,
 };
 use fs_qty::QtyAny;
 use fs_regime::{
@@ -224,10 +225,28 @@ fn reference_spec(board_card: &str, spreader_card: &str, tim_card: &str) -> Proj
             },
         }),
         requirements: Some(vec![ThermalLimit {
+            qoi: "t-junction-max".to_string(),
             class: "junction".to_string(),
             region: "spreader".to_string(),
+            direction: RequirementDirection::AtMost,
             limit: kelvin(371.15),
             margin: kelvin(10.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::Datasheet,
+                document: "spreader-component-limit".to_string(),
+                version: "rev-3".to_string(),
+                locator: "table-2".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.0,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::InternalPolicy,
+                    document: "thermal-margin-policy".to_string(),
+                    version: "2026.1".to_string(),
+                    locator: "section-1".to_string(),
+                },
+            },
+            severity: RequirementSeverity::DamageLimit,
         }]),
         materials: Some(vec![
             MaterialBinding {

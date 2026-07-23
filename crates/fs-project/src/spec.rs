@@ -45,6 +45,43 @@ pub struct Metadata {
     pub context_of_use: String,
     /// The engineering decision the result is intended to inform.
     pub intended_decision: String,
+    /// Decision gate controlling whether an indeterminate result may be used.
+    pub decision_gate: DecisionGate,
+    /// Consequence framing for a wrong or unsupported decision.
+    pub consequence: ConsequenceClass,
+}
+
+impl Metadata {
+    /// Whether this context may proceed with an explicitly indeterminate
+    /// assessment. Safety-significant contexts always require a determinate
+    /// result even when the intended use is nominally exploratory.
+    #[must_use]
+    pub const fn permits_indeterminate(&self) -> bool {
+        matches!(self.decision_gate, DecisionGate::ScopingEstimate)
+            && !matches!(self.consequence, ConsequenceClass::SafetyCritical)
+    }
+}
+
+/// Intended decision gate for one project context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DecisionGate {
+    /// Early scoping may retain an explicit Indeterminate result.
+    ScopingEstimate,
+    /// A design choice requires a determinate comparison.
+    DesignSelection,
+    /// Compliance sign-off requires a determinate, fully sourced verdict.
+    ComplianceSignoff,
+}
+
+/// Consequence framing for the intended decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsequenceClass {
+    /// Advisory exploration with no direct release authority.
+    Advisory,
+    /// Reliability or service-life decision.
+    Reliability,
+    /// Damage, personnel, or regulatory safety consequence.
+    SafetyCritical,
 }
 
 /// The versions pillar of the Five Explicits.
@@ -289,17 +326,179 @@ pub struct Envelope {
     pub pressure: QtyAny,
 }
 
-/// One thermal requirement with margin.
+/// Kind of retained requirement authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequirementSourceKind {
+    /// Published standard or code clause.
+    Standard,
+    /// Manufacturer datasheet or product specification.
+    Datasheet,
+    /// Versioned internal engineering policy.
+    InternalPolicy,
+    /// Explicit user declaration with no external-document authority.
+    UserDeclaration,
+}
+
+/// Versioned document and exact locator supporting a requirement or policy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequirementSource {
+    /// Authority family.
+    pub kind: RequirementSourceKind,
+    /// Stable document, dataset, or policy identity.
+    pub document: String,
+    /// Exact edition, revision, or semantic version.
+    pub version: String,
+    /// Clause, table, section, or declaration locator.
+    pub locator: String,
+}
+
+/// Direction of a scalar requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequirementDirection {
+    /// The effective quantity must not exceed the limit.
+    AtMost,
+    /// The effective quantity must not fall below the limit.
+    AtLeast,
+}
+
+/// Engineering meaning of violating a requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequirementSeverity {
+    /// Preferred derating or reliability margin.
+    ReliabilityDerating,
+    /// Component or assembly damage limit.
+    DamageLimit,
+    /// Safety or regulatory limit.
+    SafetyCritical,
+}
+
+/// Safety-factor authority already reflected in the effective limit.
+///
+/// No universal multiply/divide rule is inferred. The source owns how the
+/// finite factor was applied, and [`ThermalLimit::limit`] stores the effective
+/// value consumed by compliance evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafetyFactorPolicy {
+    /// Applied factor, finite and at least one.
+    pub factor: f64,
+    /// Versioned policy defining the application rule.
+    pub source: RequirementSource,
+}
+
+/// One sourced thermal requirement with explicit decision semantics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalLimit {
+    /// Quantity-of-interest identity consumed by the decision layer.
+    pub qoi: String,
     /// Component class the limit applies to ("junction", "case", ...).
     pub class: String,
     /// Region declared name the limit is evaluated on.
     pub region: String,
-    /// Limit temperature (K).
+    /// Comparison direction.
+    pub direction: RequirementDirection,
+    /// Effective limit temperature (K), after the retained factor policy.
     pub limit: QtyAny,
     /// Required margin below the limit (K).
     pub margin: QtyAny,
+    /// Versioned authority for the base requirement.
+    pub source: RequirementSource,
+    /// Already-applied safety-factor authority.
+    pub safety_factor: SafetyFactorPolicy,
+    /// Consequence of violating this requirement.
+    pub severity: RequirementSeverity,
+}
+
+/// Requirement-source version change requiring human review.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequirementSourceReview {
+    /// Quantity whose authority changed.
+    pub qoi: String,
+    /// Region whose requirement changed.
+    pub region: String,
+    /// `requirement` or `safety-factor`.
+    pub role: &'static str,
+    /// Stable source document identity.
+    pub document: String,
+    /// Exact source locator.
+    pub locator: String,
+    /// Previously reviewed version.
+    pub previous_version: String,
+    /// Newly declared version.
+    pub current_version: String,
+}
+
+/// Compare two admitted requirement sets and name every source-version change.
+///
+/// Matching is by QoI, region, authority role, source kind, document, and
+/// locator. New/deleted requirements and entirely different authorities are
+/// not mislabeled as version bumps; those belong to ordinary project diff
+/// review.
+#[must_use]
+pub fn requirement_source_reviews(
+    previous: &[ThermalLimit],
+    current: &[ThermalLimit],
+) -> Vec<RequirementSourceReview> {
+    type SourceKey = (
+        String,
+        String,
+        &'static str,
+        RequirementSourceKind,
+        String,
+        String,
+    );
+
+    fn sources(limit: &ThermalLimit) -> [(&'static str, &RequirementSource); 2] {
+        [
+            ("requirement", &limit.source),
+            ("safety-factor", &limit.safety_factor.source),
+        ]
+    }
+
+    let mut previous_versions = BTreeMap::<SourceKey, String>::new();
+    for limit in previous {
+        for (role, source) in sources(limit) {
+            previous_versions.insert(
+                (
+                    limit.qoi.clone(),
+                    limit.region.clone(),
+                    role,
+                    source.kind,
+                    source.document.clone(),
+                    source.locator.clone(),
+                ),
+                source.version.clone(),
+            );
+        }
+    }
+
+    let mut reviews = Vec::new();
+    for limit in current {
+        for (role, source) in sources(limit) {
+            let key = (
+                limit.qoi.clone(),
+                limit.region.clone(),
+                role,
+                source.kind,
+                source.document.clone(),
+                source.locator.clone(),
+            );
+            if let Some(previous_version) = previous_versions.get(&key)
+                && previous_version != &source.version
+            {
+                reviews.push(RequirementSourceReview {
+                    qoi: limit.qoi.clone(),
+                    region: limit.region.clone(),
+                    role,
+                    document: source.document.clone(),
+                    locator: source.locator.clone(),
+                    previous_version: previous_version.clone(),
+                    current_version: source.version.clone(),
+                });
+            }
+        }
+    }
+    reviews.sort();
+    reviews
 }
 
 /// Solver settings: fidelity selection and the stop rule.
@@ -591,6 +790,56 @@ impl ProjectSpec {
                 }
             }
         }
+        if let Some(requirements) = &self.requirements {
+            for limit in requirements {
+                for (field, value) in [
+                    ("qoi", limit.qoi.as_str()),
+                    ("class", limit.class.as_str()),
+                    ("region", limit.region.as_str()),
+                    ("source.document", limit.source.document.as_str()),
+                    ("source.version", limit.source.version.as_str()),
+                    ("source.locator", limit.source.locator.as_str()),
+                    (
+                        "safety-factor.source.document",
+                        limit.safety_factor.source.document.as_str(),
+                    ),
+                    (
+                        "safety-factor.source.version",
+                        limit.safety_factor.source.version.as_str(),
+                    ),
+                    (
+                        "safety-factor.source.locator",
+                        limit.safety_factor.source.locator.as_str(),
+                    ),
+                ] {
+                    if value.is_empty()
+                        || value.trim() != value
+                        || value.chars().any(char::is_control)
+                    {
+                        out.push(violation(
+                            "project-requirement-source-invalid",
+                            format!(
+                                "requirement `{}` field `{field}` is not a canonical nonempty identity",
+                                limit.qoi
+                            ),
+                            format!(
+                                "state a nonempty, trim-canonical, control-free `{field}` value"
+                            ),
+                        ));
+                    }
+                }
+                if !(limit.safety_factor.factor.is_finite() && limit.safety_factor.factor >= 1.0) {
+                    out.push(violation(
+                        "project-requirement-safety-factor",
+                        format!(
+                            "requirement `{}` has safety factor {}",
+                            limit.qoi, limit.safety_factor.factor
+                        ),
+                        "state the finite factor of at least one already reflected in the effective limit",
+                    ));
+                }
+            }
+        }
         if let Some(versions) = &self.versions {
             if versions.schema != crate::FSIM_VERSION {
                 out.push(violation(
@@ -797,6 +1046,19 @@ impl ProjectSpec {
                     limit.margin,
                     dims::TEMPERATURE,
                 );
+                if !limit.limit.value.is_finite()
+                    || !limit.margin.value.is_finite()
+                    || limit.margin.value < 0.0
+                {
+                    out.push(violation(
+                        "project-limit-range",
+                        format!(
+                            "requirement `{}` has effective limit {} and margin {}",
+                            limit.qoi, limit.limit.value, limit.margin.value
+                        ),
+                        "state a finite effective limit and a finite nonnegative guard margin",
+                    ));
+                }
             }
         }
         self.check_card_bindings(out);

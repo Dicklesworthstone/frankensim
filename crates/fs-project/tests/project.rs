@@ -7,11 +7,13 @@
 //! quality bar: every row logs its violation and fix.
 
 use fs_project::{
-    Budgets, Cooling, EntityDecl, Envelope, FSIM_VERSION, Fan, GeometryArtifact,
-    GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, MaterialBinding, MeshSelector,
-    Metadata, OutputRequest, PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit,
-    UnitsDoctrine, Vent, Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr,
-    parse_sexpr_lenient, print_json, print_sexpr,
+    Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan,
+    GeometryArtifact, GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, MaterialBinding,
+    MeshSelector, Metadata, OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions, canonical_hash, migrate_envelope,
+    parse_json, parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr,
+    requirement_source_reviews,
 };
 use fs_qty::QtyAny;
 use fs_scenario::EntityDeclaration;
@@ -71,6 +73,8 @@ fn reference_project() -> ProjectSpec {
             intended_decision: "select the heat sink and fan operating point that hold the \
                                 junction limit with margin"
                 .to_string(),
+            decision_gate: DecisionGate::DesignSelection,
+            consequence: ConsequenceClass::Reliability,
         }),
         versions: Some(Versions {
             schema: FSIM_VERSION,
@@ -164,10 +168,28 @@ fn reference_project() -> ProjectSpec {
             pressure: QtyAny::new(101_325.0, fs_project::spec::dims::PRESSURE),
         }),
         requirements: Some(vec![ThermalLimit {
+            qoi: "t-junction-max".to_string(),
             class: "junction".to_string(),
             region: "cpu".to_string(),
+            direction: RequirementDirection::AtMost,
             limit: kelvin(378.15),
             margin: kelvin(10.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::Datasheet,
+                document: "cpu-thermal-specification".to_string(),
+                version: "rev-7".to_string(),
+                locator: "table-5:tj-max".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.1,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::InternalPolicy,
+                    document: "thermal-derating-policy".to_string(),
+                    version: "2026.1".to_string(),
+                    locator: "section-4.2".to_string(),
+                },
+            },
+            severity: RequirementSeverity::ReliabilityDerating,
         }]),
         solver: Some(SolverSettings {
             fidelity: "auto".to_string(),
@@ -178,6 +200,72 @@ fn reference_project() -> ProjectSpec {
             kind: "scalar".to_string(),
         }]),
     }
+}
+
+#[test]
+fn requirement_authority_and_context_gate_are_mandatory_decision_inputs() {
+    let reference = reference_project();
+    let metadata = reference.metadata.as_ref().expect("metadata");
+    assert!(!metadata.permits_indeterminate());
+
+    let mut scoping = reference.clone();
+    let metadata = scoping.metadata.as_mut().expect("metadata");
+    metadata.decision_gate = DecisionGate::ScopingEstimate;
+    metadata.consequence = ConsequenceClass::Advisory;
+    assert!(metadata.permits_indeterminate());
+    metadata.consequence = ConsequenceClass::SafetyCritical;
+    assert!(
+        !metadata.permits_indeterminate(),
+        "safety consequence closes the exploratory escape hatch"
+    );
+
+    let mut sourceless = reference.clone();
+    sourceless.requirements.as_mut().expect("requirements")[0]
+        .source
+        .document
+        .clear();
+    assert!(
+        sourceless
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-requirement-source-invalid")
+    );
+
+    let mut invalid_factor = reference;
+    invalid_factor.requirements.as_mut().expect("requirements")[0]
+        .safety_factor
+        .factor = 0.99;
+    assert!(
+        invalid_factor
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-requirement-safety-factor")
+    );
+}
+
+#[test]
+fn source_version_bumps_flag_only_the_matching_requirement_authorities() {
+    let previous = reference_project().requirements.expect("requirements");
+    let mut current = previous.clone();
+    current[0].source.version = "rev-8".to_string();
+    current[0].safety_factor.source.version = "2026.2".to_string();
+
+    let reviews = requirement_source_reviews(&previous, &current);
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[0].role, "requirement");
+    assert_eq!(reviews[0].previous_version, "rev-7");
+    assert_eq!(reviews[0].current_version, "rev-8");
+    assert_eq!(reviews[1].role, "safety-factor");
+    assert_eq!(reviews[1].previous_version, "2026.1");
+    assert_eq!(reviews[1].current_version, "2026.2");
+
+    let mut replacement = current;
+    replacement[0].source.document = "replacement-datasheet".to_string();
+    assert_eq!(
+        requirement_source_reviews(&previous, &replacement),
+        reviews[1..],
+        "an entirely different authority is a project diff, not a version bump"
+    );
 }
 
 #[test]
