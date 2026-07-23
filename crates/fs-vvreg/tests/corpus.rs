@@ -13,6 +13,7 @@ use fs_vvreg::corpus::{
     admit_dataset, corpus,
 };
 use fs_vvreg::partition::{DatasetPurpose, PartitionLedger, PartitionRefusal};
+use fs_vvreg::portfolio::EvidenceAxis;
 use fs_vvreg::thermal_level_a::thermal_level_a_cases;
 
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
@@ -394,6 +395,30 @@ fn canonical_dataset_round_trip_is_bit_exact_and_tamper_evident() {
 }
 
 #[test]
+fn field_monitoring_alone_cannot_mint_a_physical_validation_cap() {
+    let mut field = complete_draft("field-only");
+    field.evidence_level = Some(EvidenceLevel::Field);
+    let dataset = admit_dataset(field).unwrap();
+    assert_eq!(
+        dataset.evidence_level().portfolio_axes(),
+        &[EvidenceAxis::FieldMonitoring]
+    );
+    assert_eq!(dataset.physical_claim_cap(), ColorRank::Estimated);
+
+    let mut blind = complete_draft("blind-controlled-experiment");
+    blind.evidence_level = Some(EvidenceLevel::Blind);
+    let dataset = admit_dataset(blind).unwrap();
+    assert_eq!(
+        dataset.evidence_level().portfolio_axes(),
+        &[
+            EvidenceAxis::ControlledExperimentalValidation,
+            EvidenceAxis::BlindPredictiveValidation,
+        ]
+    );
+    assert_eq!(dataset.physical_claim_cap(), ColorRank::Validated);
+}
+
+#[test]
 fn caller_registry_is_deterministic_but_has_no_query_authority() {
     let a = complete_draft("dataset-a");
     let b = complete_draft("dataset-b");
@@ -728,21 +753,22 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
     let rendered = audit.render_table();
     assert!(
         rendered.contains(
-            "fs-benchmark-cht-query-v1 | 15/15 | 0/2 | validation | B | estimated | WARN"
+            "fs-benchmark-cht-query-v1 | 15/15 | 0/2 | validation | B | cross-code-agreement | estimated | WARN"
         )
     );
     assert!(rendered.contains(
-        "martin-moyce-1952-square-column | 15/15 | 0/2 | validation | C | estimated | WARN"
+        "martin-moyce-1952-square-column | 15/15 | 0/2 | validation | C | controlled-experimental-validation | estimated | WARN"
     ));
     assert!(rendered.contains(
-        "pires-fonseca-2024-flat-strip-fins | 15/15 | 0/2 | validation | C | estimated | WARN"
+        "pires-fonseca-2024-flat-strip-fins | 15/15 | 0/2 | validation | C | controlled-experimental-validation | estimated | WARN"
     ));
     assert!(
-        rendered
-            .contains("nunes-2023-micro-pin-fin | 15/15 | 0/2 | validation | C | estimated | WARN")
+        rendered.contains(
+            "nunes-2023-micro-pin-fin | 15/15 | 0/2 | validation | C | controlled-experimental-validation | estimated | WARN"
+        )
     );
     assert!(rendered.contains(
-        "markal-kul-2026-fin-distribution | 15/15 | 0/2 | validation | C | estimated | WARN"
+        "markal-kul-2026-fin-distribution | 15/15 | 0/2 | validation | C | controlled-experimental-validation | estimated | WARN"
     ));
     assert!(
         rendered.contains("dataset=martin-moyce-1952-square-column claim_gap=raw_payload.original")
@@ -750,7 +776,7 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
     assert!(rendered.contains(
         "dataset=martin-moyce-1952-square-column claim_gap=acceptance.surge-front-position-z"
     ));
-    assert_eq!(audit.qoi_coverage().len(), LEVEL_C_COOLING_QOIS.len());
+    assert_eq!(audit.axis_coverage().len(), LEVEL_C_COOLING_QOIS.len());
     for (qoi, expected_datasets) in [
         ("average-nusselt-number", 2),
         ("component-peak-temperature", 0),
@@ -762,18 +788,26 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
         ("thermal-interface-resistance", 0),
     ] {
         let row = audit
-            .qoi_coverage()
+            .axis_coverage()
             .iter()
             .find(|row| row.qoi() == qoi)
             .unwrap();
-        assert_eq!(row.level_c_datasets(), expected_datasets);
-        assert_eq!(row.is_covered(), expected_datasets != 0);
-        let status = if expected_datasets == 0 {
-            "GAP"
-        } else {
-            "COVERED"
-        };
-        assert!(rendered.contains(&format!("{qoi} | {expected_datasets} | {status}")));
+        assert_eq!(
+            row.datasets(EvidenceAxis::ControlledExperimentalValidation),
+            expected_datasets
+        );
+        assert_eq!(
+            row.is_covered(EvidenceAxis::ControlledExperimentalValidation),
+            expected_datasets != 0
+        );
+        assert!(rendered.lines().any(|line| {
+            line.starts_with(&format!("{qoi} | "))
+                && line
+                    .split(" | ")
+                    .nth(3)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    == Some(expected_datasets)
+        }));
     }
     for qoi in [
         "component-peak-temperature",
@@ -781,13 +815,17 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
         "thermal-interface-resistance",
     ] {
         let row = audit
-            .qoi_coverage()
+            .axis_coverage()
             .iter()
             .find(|row| row.qoi() == qoi)
             .unwrap();
-        assert!(!row.is_covered());
-        assert!(rendered.contains(&format!("{qoi} | 0 | GAP")));
-        assert!(rendered.contains(&format!("qoi_gap={qoi} evidence_level=C datasets=0")));
+        assert!(!row.is_covered(EvidenceAxis::ControlledExperimentalValidation));
+        assert!(rendered.contains(&format!(
+            "qoi_gap={qoi} evidence_axis=controlled-experimental-validation datasets=0"
+        )));
     }
+    assert!(rendered.contains(
+        "qoi | numerical-verification | cross-code-agreement | controlled-experimental-validation | blind-predictive-validation | field-monitoring | transferability-across-regimes | independent-reproduction"
+    ));
     assert_eq!(corpus().audit().render_table(), rendered);
 }

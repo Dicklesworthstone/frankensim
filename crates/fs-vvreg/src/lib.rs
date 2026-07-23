@@ -41,6 +41,9 @@ pub mod corpus;
 /// repartition receipts.
 pub mod partition;
 
+/// Claim-scoped external-evidence axes and fail-closed portfolio admission.
+pub mod portfolio;
+
 /// Reference-only Level-A thermal analytic values and G1 order targets.
 pub mod thermal_level_a;
 

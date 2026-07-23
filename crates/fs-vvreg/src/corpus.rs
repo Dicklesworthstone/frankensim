@@ -18,12 +18,17 @@ use std::fmt;
 use std::path::Component;
 use std::sync::LazyLock;
 
+use crate::portfolio::{EvidenceAxis, axes_for_level};
 use crate::thermal_level_a::{
     THERMAL_LEVEL_A_MANIFEST, ThermalLevelAAcceptance, ThermalLevelACase, thermal_level_a_cases,
 };
 
 /// Current canonical corpus wire and identity schema.
-pub const CORPUS_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 rotates the identity domains because A-E tags are interpreted as
+/// non-ranked portfolio coordinates and field evidence no longer carries an
+/// implicit physical-validation cap.
+pub const CORPUS_SCHEMA_VERSION: u32 = 3;
 /// Maximum admitted datasets in one caller-built registry.
 pub const MAX_CORPUS_DATASETS: usize = 4_096;
 /// Maximum sensors on one dataset.
@@ -35,8 +40,8 @@ pub const MAX_CORPUS_TEXT_BYTES: usize = 4_096;
 /// Maximum encoded bytes for one dataset.
 pub const MAX_DATASET_CANONICAL_BYTES: usize = 16 * 1024 * 1024;
 
-const DATASET_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-dataset.v2";
-const REGISTRY_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-registry.v2";
+const DATASET_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-dataset.v3";
+const REGISTRY_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-registry.v3";
 const MAGIC: &[u8; 8] = b"FSVVCRP\0";
 const RAW_CHT_FIXTURE: &[u8] =
     include_bytes!("../../../data/vv-corpus/fs-benchmark-cht-query-v1/raw-sensors.csv");
@@ -54,8 +59,9 @@ const MARKAL_KUL_SOURCE: &[u8] =
 const MARKAL_KUL_SUPPLEMENT: &[u8] =
     include_bytes!("../../../data/vv-corpus/level-c/markal-kul-2026/supplementary.zip");
 
-/// Cooling QoIs tracked by the Level-C acquisition audit. Zero-count entries
-/// are deliberately retained so downstream planning sees uncovered regimes.
+/// Cooling QoIs tracked by the portfolio scorecard. The historical constant
+/// name is retained in schema v3 so downstream source code need not move in
+/// the same commit as the semantic identity rotation.
 pub const LEVEL_C_COOLING_QOIS: &[&str] = &[
     "average-nusselt-number",
     "component-peak-temperature",
@@ -98,7 +104,7 @@ pub enum DatasetField {
     Retention,
     /// Metric-specific acceptance rules.
     AcceptanceEnvelopes,
-    /// Portfolio evidence level A through E.
+    /// Legacy A-E tag interpreted as portfolio coordinates.
     EvidenceLevel,
 }
 
@@ -550,18 +556,21 @@ pub struct AcceptanceRecord {
     pub regime: Vec<ContextRange>,
 }
 
-/// Portfolio evidence doctrine A through E.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Legacy A-E corpus tag interpreted as portfolio coordinates.
+///
+/// There is deliberately no `Ord`: A-E are not an epistemic ranking. Use
+/// [`EvidenceLevel::portfolio_axes`] to obtain their exact coordinate meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceLevel {
-    /// Level A analytic or manufactured evidence.
+    /// A: numerical-verification coordinate.
     Analytic,
-    /// Level B independent cross-code evidence.
+    /// B: cross-code-agreement coordinate.
     CrossCode,
-    /// Level C published experiment.
+    /// C: controlled-experimental-validation coordinate.
     PublishedExperiment,
-    /// Level D preregistered blind evidence.
+    /// D: controlled-experiment plus blind-prediction coordinates.
     Blind,
-    /// Level E field evidence.
+    /// E: field-monitoring coordinate only.
     Field,
 }
 
@@ -576,6 +585,12 @@ impl EvidenceLevel {
             Self::Blind => "D",
             Self::Field => "E",
         }
+    }
+
+    /// Non-ranked portfolio coordinates represented by this legacy tag.
+    #[must_use]
+    pub const fn portfolio_axes(self) -> &'static [EvidenceAxis] {
+        axes_for_level(self)
     }
 }
 
@@ -721,16 +736,17 @@ impl CorpusDataset {
         &self.acceptance_envelopes
     }
 
-    /// Portfolio evidence level.
+    /// Legacy A-E tag whose semantics are exposed as portfolio coordinates.
     #[must_use]
     pub const fn evidence_level(&self) -> EvidenceLevel {
         self.evidence_level
     }
 
-    /// Maximum physical claim rank this dataset may support. A/B evidence is
-    /// not a physical experiment, and any explicit gap in raw retention,
+    /// Maximum physical claim rank this dataset may support. Only a tag that
+    /// includes the controlled-experimental-validation coordinate can reach
+    /// `Validated`; field monitoring alone cannot. Any explicit gap in raw retention,
     /// metrology, geometry, environment, lineage, licensing, acquisition date,
-    /// or a pinned acceptance envelope demotes C/D/E to `Estimated`.
+    /// or a pinned acceptance envelope demotes the result to `Estimated`.
     #[must_use]
     pub fn physical_claim_cap(&self) -> ColorRank {
         if matches!(self.raw_payload, PayloadRetention::DerivedOnly { .. })
@@ -758,11 +774,14 @@ impl CorpusDataset {
         {
             return ColorRank::Estimated;
         }
-        match self.evidence_level {
-            EvidenceLevel::PublishedExperiment | EvidenceLevel::Blind | EvidenceLevel::Field => {
-                ColorRank::Validated
-            }
-            EvidenceLevel::Analytic | EvidenceLevel::CrossCode => ColorRank::Estimated,
+        if self
+            .evidence_level
+            .portfolio_axes()
+            .contains(&EvidenceAxis::ControlledExperimentalValidation)
+        {
+            ColorRank::Validated
+        } else {
+            ColorRank::Estimated
         }
     }
 
@@ -3082,32 +3101,38 @@ impl CorpusAuditRow {
     pub const fn status(&self) -> &'static str {
         self.status
     }
+
+    /// Non-ranked portfolio coordinates represented by the dataset tag.
+    #[must_use]
+    pub const fn evidence_axes(&self) -> &'static [EvidenceAxis] {
+        self.evidence_level.portfolio_axes()
+    }
 }
 
-/// One cooling-QoI coverage row for published Level-C experiments.
+/// One per-axis cooling-QoI coverage row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CorpusQoiCoverageRow {
+pub struct CorpusAxisCoverageRow {
     qoi: String,
-    level_c_datasets: usize,
+    counts: [usize; EvidenceAxis::ALL.len()],
 }
 
-impl CorpusQoiCoverageRow {
+impl CorpusAxisCoverageRow {
     /// Stable cooling QoI identifier.
     #[must_use]
     pub fn qoi(&self) -> &str {
         &self.qoi
     }
 
-    /// Number of distinct Level-C datasets declaring this QoI.
+    /// Number of distinct datasets supplying the named coordinate.
     #[must_use]
-    pub const fn level_c_datasets(&self) -> usize {
-        self.level_c_datasets
+    pub const fn datasets(&self, axis: EvidenceAxis) -> usize {
+        self.counts[axis.index()]
     }
 
-    /// Whether at least one published experiment covers this QoI.
+    /// Whether at least one dataset supplies the named coordinate.
     #[must_use]
-    pub const fn is_covered(&self) -> bool {
-        self.level_c_datasets != 0
+    pub const fn is_covered(&self, axis: EvidenceAxis) -> bool {
+        self.datasets(axis) != 0
     }
 }
 
@@ -3115,7 +3140,7 @@ impl CorpusQoiCoverageRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorpusAuditReport {
     rows: Vec<CorpusAuditRow>,
-    qoi_coverage: Vec<CorpusQoiCoverageRow>,
+    axis_coverage: Vec<CorpusAxisCoverageRow>,
     warnings: Vec<String>,
     errors: Vec<String>,
 }
@@ -3127,10 +3152,10 @@ impl CorpusAuditReport {
         &self.rows
     }
 
-    /// Fixed-scope Level-C cooling-QoI coverage map, including zeroes.
+    /// Fixed-scope per-axis cooling-QoI coverage map, including zeroes.
     #[must_use]
-    pub fn qoi_coverage(&self) -> &[CorpusQoiCoverageRow] {
-        &self.qoi_coverage
+    pub fn axis_coverage(&self) -> &[CorpusAxisCoverageRow] {
+        &self.axis_coverage
     }
 
     /// Stable warn-level gap diagnostics.
@@ -3158,12 +3183,18 @@ impl CorpusAuditReport {
         use std::fmt::Write as _;
 
         let mut out = String::from(
-            "dataset_id | mandatory | optional | partition | evidence | physical_cap | status\n",
+            "dataset_id | mandatory | optional | partition | legacy_tag | portfolio_axes | physical_cap | status\n",
         );
         for row in &self.rows {
+            let axes = row
+                .evidence_axes()
+                .iter()
+                .map(|axis| axis.slug())
+                .collect::<Vec<_>>()
+                .join(",");
             let _ = writeln!(
                 out,
-                "{} | {}/{} | {}/{} | {} | {} | {} | {}",
+                "{} | {}/{} | {}/{} | {} | {} | {} | {} | {}",
                 row.dataset_id,
                 row.mandatory_present,
                 row.mandatory_total,
@@ -3171,14 +3202,27 @@ impl CorpusAuditReport {
                 row.optional_total,
                 row.partition.name(),
                 row.evidence_level.code(),
+                axes,
                 color_name(row.physical_cap),
                 row.status
             );
         }
-        out.push_str("level_c_qoi | datasets | status\n");
-        for row in &self.qoi_coverage {
-            let status = if row.is_covered() { "COVERED" } else { "GAP" };
-            let _ = writeln!(out, "{} | {} | {status}", row.qoi, row.level_c_datasets);
+        out.push_str(
+            "qoi | numerical-verification | cross-code-agreement | controlled-experimental-validation | blind-predictive-validation | field-monitoring | transferability-across-regimes | independent-reproduction\n",
+        );
+        for row in &self.axis_coverage {
+            let _ = writeln!(
+                out,
+                "{} | {} | {} | {} | {} | {} | {} | {}",
+                row.qoi,
+                row.datasets(EvidenceAxis::NumericalVerification),
+                row.datasets(EvidenceAxis::CrossCodeAgreement),
+                row.datasets(EvidenceAxis::ControlledExperimentalValidation),
+                row.datasets(EvidenceAxis::BlindPredictiveValidation),
+                row.datasets(EvidenceAxis::FieldMonitoring),
+                row.datasets(EvidenceAxis::TransferabilityAcrossRegimes),
+                row.datasets(EvidenceAxis::IndependentReproduction),
+            );
         }
         for warning in &self.warnings {
             let _ = writeln!(out, "level=WARN {warning}");
@@ -3325,31 +3369,38 @@ impl CorpusRegistry {
                 status,
             });
         }
-        let qoi_coverage = LEVEL_C_COOLING_QOIS
+        let axis_coverage = LEVEL_C_COOLING_QOIS
             .iter()
-            .map(|qoi| CorpusQoiCoverageRow {
-                qoi: (*qoi).to_string(),
-                level_c_datasets: self
-                    .datasets
-                    .iter()
-                    .filter(|dataset| {
-                        dataset.evidence_level == EvidenceLevel::PublishedExperiment
-                            && dataset
-                                .acceptance_envelopes
-                                .iter()
-                                .any(|acceptance| acceptance.metric == *qoi)
-                    })
-                    .count(),
+            .map(|qoi| {
+                let mut counts = [0_usize; EvidenceAxis::ALL.len()];
+                for dataset in self.datasets.iter().filter(|dataset| {
+                    dataset
+                        .acceptance_envelopes
+                        .iter()
+                        .any(|acceptance| acceptance.metric == *qoi)
+                }) {
+                    for &axis in dataset.evidence_level.portfolio_axes() {
+                        counts[axis.index()] += 1;
+                    }
+                }
+                CorpusAxisCoverageRow {
+                    qoi: (*qoi).to_string(),
+                    counts,
+                }
             })
             .collect::<Vec<_>>();
-        for row in &qoi_coverage {
-            if !row.is_covered() {
-                warnings.push(format!("qoi_gap={} evidence_level=C datasets=0", row.qoi));
+        for row in &axis_coverage {
+            if !row.is_covered(EvidenceAxis::ControlledExperimentalValidation) {
+                warnings.push(format!(
+                    "qoi_gap={} evidence_axis={} datasets=0",
+                    row.qoi,
+                    EvidenceAxis::ControlledExperimentalValidation.slug()
+                ));
             }
         }
         CorpusAuditReport {
             rows,
-            qoi_coverage,
+            axis_coverage,
             warnings,
             errors,
         }

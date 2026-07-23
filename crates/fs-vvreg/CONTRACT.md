@@ -101,13 +101,14 @@ body.
   currently available access, a nonzero derived-rule hash, and an explicit
   read/derived/reproduced state. Historical editions additionally require
   `RuleUsePolicy::HistoricalReplay`.
-- `corpus::DatasetDraft` / `admit_dataset` / `CorpusDataset` — the version-2
+- `corpus::DatasetDraft` / `admit_dataset` / `CorpusDataset` — the version-3
   validation-dataset boundary. Fifteen top-level fields are mandatory and
   missing fields return `CorpusError::MissingField { field: DatasetField }`:
   id, title, immutable earliest-retained payload, sensor roster, geometry, acquisition
   environment, partition, preprocessing lineage, final artifact,
   context-of-use ranges, license/redistribution terms, acquisition provenance,
-  retention policy, acceptance-envelope records, and A-E evidence level.
+  retention policy, acceptance-envelope records, and a legacy A-E evidence
+  tag interpreted as non-ranked portfolio coordinates.
   Sensors bind raw channel and measurement dimensions. Instrument identity,
   calibration, placement, geometry, acquisition environment/date, license, and
   complete preprocessing lineage each distinguish `Available` from a reason-bearing
@@ -130,11 +131,13 @@ body.
   context box copied into model validity, wrapped with a sealed access receipt
   binding dataset content, generation, partition, purpose, exact canonical
   query context, preceding repartition event, and blind release; the
-  dataset's separately exposed physical claim cap is `Validated` only for C/D/E
-  data with original raw retention, stated uncertainty, complete instrument,
+  dataset's separately exposed physical claim cap is `Validated` only for C/D
+  data carrying the controlled-experimental-validation coordinate, with
+  original raw retention, stated uncertainty, complete instrument,
   calibration, placement, geometry, environment, acquisition-date, license,
   replayable lineage, and pinned-envelope authority. Every explicit gap demotes
-  the cap to `Estimated`.
+  the cap to `Estimated`. Level E field monitoring alone is always
+  `Estimated`.
 - `partition::{RepartitionReceipt,BlindReleaseReceipt}` — canonical versioned
   state-transition records. Repartition increments a per-dataset generation,
   chains the previous event identity, clears any blind release, and explicitly
@@ -152,19 +155,34 @@ body.
   success receipt binds the exact model-taint identity and every distinct
   access identity; it is a disjointness record, not scientific authority.
 - `corpus::CorpusDataset::{encode,decode,digest}` — bounded canonical `FSVVCRP`
-  version-2 binary round trip and domain-separated content identity. Version 2
-  adds the `BlindHoldout` partition tag and deliberately changes the dataset
-  and registry identity domains. Decode
+  version-3 binary round trip and domain-separated content identity. Version 3
+  keeps the v2 `BlindHoldout` partition tag but rotates dataset and registry
+  identity domains because A-E are coordinate labels rather than ranks and
+  field evidence no longer inherits a validation cap. Decode
   validates, canonicalizes, and byte-compares; noncanonical, future-version,
   truncated, trailing, invalid-tag, and invalid-UTF-8 inputs refuse.
 - `corpus::CorpusRegistry::audit` / binary `corpus-audit` — deterministic
   per-dataset mandatory/optional completeness table followed by the fixed-scope
-  Level-C cooling-QoI coverage map. Zero-count QoIs remain visible as `GAP`
-  rows and structured `level=WARN qoi_gap=...` diagnostics for downstream
-  planning. Optional as-built geometry and calibration-valid-through gaps,
+  seven-axis cooling-QoI coverage map. Every QoI retains a count for numerical
+  verification, cross-code agreement, controlled experiments, blind
+  prediction, field monitoring, transferability, and independent reproduction;
+  no maximum or average is computed. Zero controlled-experiment counts emit
+  structured `level=WARN qoi_gap=... evidence_axis=...` diagnostics for
+  downstream planning. Optional as-built geometry and calibration-valid-through gaps,
   plus mandatory reason-bearing no-claim states, produce structured
   `level=WARN` rows; validation defects produce `level=ERROR` and a nonzero CLI
   exit.
+- `portfolio::{EvidenceAxis,EvidencePortfolio,PortfolioClaimClass,
+  PortfolioAdmission}` — the schema-v1 claim-scoped portfolio algebra. The
+  seven axes are independent categorical coordinates, not an epistemic order.
+  Legacy A-E tags map exactly to coordinates: A numerical verification; B
+  cross-code agreement; C controlled experiment; D controlled experiment plus
+  blind prediction; E field monitoring. Claim classes name non-substitutable
+  required axes and admission matches exact QoI and regime. Exact duplicate
+  observations are idempotent. Independent reproduction additionally requires
+  a source and group both distinct from the controlled experiment. Portfolio
+  and admission identities use versioned, domain-separated canonical
+  encodings; the opaque admission proves only that this structural rule ran.
 - `thermal_level_a::thermal_level_a_cases` — 19 frozen Level-A thermal
   definitions backed by one retained TSV manifest: 12 analytic values across
   planar/2-D/axisymmetric/spherical conduction, fin efficiency, a
@@ -252,6 +270,13 @@ body.
   finite, ordered, and nested. `Unstated` is explicit and admitted only as a
   color demotion; absence of the uncertainty field is still a missing-field
   refusal.
+- PORTFOLIO AXES DO NOT LAUNDER: `EvidenceLevel` deliberately has no ordering.
+  Field monitoring, cross-code agreement, and numerical verification cannot
+  substitute for controlled experimental validation. Repeated observations on
+  one axis are idempotent, different QoIs or regimes never satisfy one another,
+  and a claimed independent reproduction must use a different source and
+  declared independence group. Corpus audit rows aggregate each axis
+  separately.
 - CORPUS AUTHORITY SEPARATION: caller-built registries can validate, serialize,
   hash, and audit rows but cannot return evidence-bearing query results. The
   workspace seed behind `corpus()` is the only query authority. It includes 19
@@ -312,6 +337,12 @@ boundary. Both preserve the exact failing field or query boundary.
 No partially admitted dataset or successful evidence wrapper is returned on a
 refusal.
 
+Portfolio construction and claim admission return `PortfolioRefusal`. Missing
+axes name the exact claim class, axis, QoI, and regime; malformed identifiers,
+zero content identities, resource overflow, and shared-group reproduction each
+remain distinct. No partial `EvidencePortfolio` or `PortfolioAdmission` is
+published.
+
 ## Determinism class
 
 Fully deterministic: seed metadata and tracked fixture bytes are fixed inputs;
@@ -338,6 +369,10 @@ canonical sets/maps for query contexts, taint sources, and validation accesses.
 Equivalent caller order therefore cannot move a receipt identity. Exact float
 bits are identity-bearing; numerically equal but bit-distinct coordinates such
 as signed zero remain distinct provenance.
+
+Portfolio observations sort by axis, exact QoI/regime bytes, source, and
+independence group before versioned domain-separated hashing. Exact duplicates
+are idempotent; input order cannot move portfolio or admission identity.
 
 ## Cancellation behavior
 
@@ -378,6 +413,12 @@ synchronous and non-preemptible. Each bounded operation admits at most 4,096
 direct items; taint explanations admit depth at most 256; justifications admit
 at most 4,096 UTF-8 bytes. Transitive closure and validation use ordered maps or
 sets and are `O(n log n)` within those caps.
+
+Portfolio construction is synchronous and non-preemptible, capped at 4,096
+observations and 256 bytes per QoI/regime identifier. Canonicalization is
+`O(n log n)`. Ordinary claim admission is one bounded scan per required axis;
+independent-reproduction admission additionally performs a deterministic
+worst-case `O(n^2)` pair search within the same hard cap.
 
 ## Unsafe boundary
 
@@ -433,7 +474,13 @@ refusals; retained synthetic, Martin-Moyce, and three electronics-thermal
 source/final artifact hash bindings; independent Pires-Fonseca and Nunes
 re-digitized subsamples checked against declared half-widths; acquisition-log
 admission/rejection counts; and deterministic audit rendering with warn-level
-optional/claim-authority gaps plus the complete Level-C QoI coverage map.
+optional/claim-authority gaps plus the complete seven-axis QoI coverage map.
+
+`tests/portfolio.rs`: G0 exact A-E-to-axis mappings, typed missing-axis
+refusals for every claim class, field-only validation refusal, exact QoI/regime
+matching, duplicate idempotence, and distinct-group independent reproduction;
+G3 order-invariant portfolio/admission identities and source/regime mutation
+sensitivity.
 
 `tests/partition.rs`: G0 purpose/partition matrix, direct and transitive data-
 laundering refusals with exact model paths, stale access refusal during model
@@ -510,13 +557,16 @@ and targets, not thermal-kernel convergence.
   certificate signatures, establish population representativeness, prove a
   solver result, or establish that an acceptance envelope is scientifically
   appropriate.
-- `EvidenceLevel::PublishedExperiment` classifies source provenance; it does
-  not mean original instrument data survived. Paper figures and publisher
+- `EvidenceLevel` is a compact legacy source tag, not a rank.
+  `EvidenceLevel::PublishedExperiment` contributes the controlled-experiment
+  coordinate but does not mean original instrument data survived. Paper figures and publisher
   tables reduced from unretained sensor histories are `DerivedOnly` even when
   the article calls them data. Digitization half-widths bound coordinate
   extraction only and do not replace the paper's experimental uncertainty or
-  missing calibration authority. The Level-C QoI map counts declarations, not
-  validated solver comparisons, population coverage, or acceptance authority.
+  missing calibration authority. Level E contributes field monitoring only and
+  cannot mint a `Validated` cap without separate controlled-experiment
+  evidence. The per-axis QoI map counts declarations, not validated solver
+  comparisons, population coverage, or acceptance authority.
 - A corpus query proves only that the seeded row was revalidated and that the
   caller requested an admitted purpose inside its declared context under one
   captured in-memory partition generation. The
@@ -539,6 +589,12 @@ and targets, not thermal-kernel convergence.
   leaks, common upstream source material, human prior exposure, fabricated
   corpus metadata, or semantic dependence. It never upgrades numerical,
   statistical, physical, or model evidence color.
+- `EvidencePortfolio` validates bounded structural coordinates and required-axis
+  presence only. Source and independence-group hashes are caller-supplied
+  identities, not signatures or authenticated independence. A
+  `PortfolioAdmission` does not mint `Color`, `AdmittedColor`, a corpus access
+  receipt, or runtime authority. Durable authentication and exact-instance
+  policy remain `fs-package`/`fs-checker`/`fs-ledger` scope.
 - The seed CHT row is synthetic Level B and therefore physically `Estimated`.
   Its CSV is an authored tabulation of a hard-coded query, not raw sensor data;
   the stored `1.0 K` value is an acceptance tolerance, not measurement

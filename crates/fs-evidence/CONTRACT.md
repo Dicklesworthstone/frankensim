@@ -880,6 +880,13 @@ are `ContextOfUse`, `ValidationPlan`, `ExperimentArtifact`, `CalibrationSplit`,
   uncertainty, model-form validation, prediction-domain relevance, and
   comparison to experiment. Colors are never converted to percentages or
   averaged into a numeric confidence score.
+- Those seven `PredictionAssessment` axes are the internal closure of one
+  operational V&V case; they are not the external-evidence portfolio axes.
+  `fs-vvreg::portfolio` separately records numerical verification, cross-code
+  agreement, controlled experiments, blind prediction, field monitoring,
+  transferability, and independent reproduction for exact claim/QoI/regime
+  admission. Neither axis family can satisfy a missing coordinate in the other
+  by name similarity or numeric aggregation.
 - Applicability is evaluated against the declared domain. Domain exit, a
   missing axis, or a non-finite state follows the declared `Demote` or `Refuse`
   policy and is retained in the assessment; silent extrapolation is forbidden.
@@ -1077,6 +1084,12 @@ physical validation, process-standard conformance, or decision fitness.
   receipt can supply that authority. Transforming an existing `Validated`
   parent with `Verified` arithmetic preserves the weaker validation class and
   derives new lineage, but does not create a new anchor.
+- External validation is likewise a portfolio rather than a pyramid.
+  `fs-vvreg` owns the A-E-to-coordinate mapping and required-axis admission:
+  field monitoring alone cannot mint `Validated`, cross-code agreement cannot
+  become a controlled experiment through composition, and no maximum or
+  average over categorical axes grants authority. This crate continues to
+  enforce weakest-wins color composition after an external anchor is admitted.
 - Covariance aggregation is used only for a complete retained block whose
   matrix passes structural and positive-semidefinite admission. Terms outside
   a block add linearly. No independence is inferred from the absence of a
