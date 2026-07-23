@@ -288,6 +288,7 @@ fn root_receipt(report: RootSearchReport) -> RootReceipt {
         roots,
         boxes_examined,
         complete,
+        ..
     } = report;
     RootReceipt {
         boxes_examined,

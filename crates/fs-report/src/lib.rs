@@ -27,6 +27,7 @@ use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 use fs_evidence::{
+    NoUsefulBound,
     action::ActionKind,
     uncertainty::{BudgetContribution, ComplianceVerdict, RequirementRelation},
 };
@@ -275,14 +276,40 @@ fn render_verdict(verdict: &ComplianceVerdict, unit: &str, output: &mut String) 
         ComplianceVerdict::Indeterminate {
             known_lower,
             known_upper,
+            no_useful_bound,
             ..
         } => {
             let _ = writeln!(
                 output,
                 "- **Verdict:** `indeterminate`; known band `[{known_lower}, {known_upper}] {unit}`"
             );
+            if let Some(refusal) = no_useful_bound {
+                output.push('\n');
+                output.push_str(&no_useful_bound_markdown(refusal));
+            }
         }
     }
+}
+
+/// Render a typed usefulness refusal in its own visual class.
+///
+/// This projection cannot produce a certificate claim or a binary requirement
+/// verdict.
+#[must_use]
+pub fn no_useful_bound_markdown(refusal: &NoUsefulBound) -> String {
+    let criterion = refusal.criterion();
+    format!(
+        "### NoUsefulBound\n\n> The retained enclosure is valid, but it is not useful for the declared engineering decision.\n\n- **Cause:** `{}`\n- **Achieved enclosure:** `[{lower}, {upper}] {unit}`\n- **Achieved width:** `{width} {unit}`\n- **Required maximum width:** `{threshold} {unit}`\n- **Decision context:** `{context}`\n- **Suggested E09 reformulation:** `{suggestion}` ({suggestion_title})\n- **No-claim boundary:** no compliance verdict, scientific color, or certificate is minted from this refusal.\n",
+        refusal.cause().code(),
+        lower = refusal.interval().lower(),
+        upper = refusal.interval().upper(),
+        unit = criterion.unit(),
+        width = refusal.width_achieved(),
+        threshold = criterion.max_width(),
+        context = criterion.decision_context(),
+        suggestion = refusal.suggested_reformulation().code(),
+        suggestion_title = refusal.suggested_reformulation().title(),
+    )
 }
 
 fn render_decision_authorities<Q>(assessment: &DecisionAssessment<Q>, output: &mut String) {

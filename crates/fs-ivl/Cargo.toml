@@ -11,6 +11,7 @@ description = "Certified arithmetic: outward-rounded intervals, affine, Taylor m
 layer = "L1"
 
 [dependencies]
+fs-evidence = { path = "../fs-evidence" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

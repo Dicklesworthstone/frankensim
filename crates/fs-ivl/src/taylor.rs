@@ -12,6 +12,10 @@
 //! with derivative bounds from interval evaluation.
 
 use crate::Interval;
+use fs_evidence::{
+    BoundInterval, BoundOutcome, ClaimClass, NoUsefulBoundCause, UsefulBoundError,
+    UsefulnessCriterion,
+};
 
 /// Largest supported Taylor order.
 ///
@@ -240,6 +244,33 @@ impl TaylorModel1 {
     #[must_use]
     pub fn bound(&self) -> Interval {
         self.eval_interval(self.domain)
+    }
+
+    /// Project the full-domain Taylor enclosure through a caller-declared
+    /// usefulness criterion.
+    ///
+    /// A non-finite enclosure is retained and classified as
+    /// `NoUsefulBound(LipschitzBlowup)`. Finite enclosures wider than the
+    /// threshold use the caller's contextual failure cause.
+    pub fn bound_with_usefulness(
+        &self,
+        criterion: UsefulnessCriterion,
+        cause_if_too_wide: NoUsefulBoundCause,
+        suggested_reformulation: ClaimClass,
+    ) -> Result<BoundOutcome, UsefulBoundError> {
+        let enclosure = self.bound();
+        let interval = BoundInterval::try_new(enclosure.lo(), enclosure.hi())?;
+        let cause = if interval.width().is_finite() {
+            cause_if_too_wide
+        } else {
+            NoUsefulBoundCause::LipschitzBlowup
+        };
+        Ok(BoundOutcome::classify(
+            interval,
+            criterion,
+            cause,
+            suggested_reformulation,
+        ))
     }
 
     /// Scale by a constant.

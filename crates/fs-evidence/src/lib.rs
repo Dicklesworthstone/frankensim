@@ -39,11 +39,13 @@ pub mod action;
 pub mod admitted;
 pub mod balance;
 mod cards;
+pub mod claim_class;
 pub mod color;
 mod discrepancy;
 pub mod falsify;
 pub mod identity;
 pub mod uncertainty;
+pub mod useful_bound;
 pub mod vv;
 
 pub use admitted::{
@@ -51,6 +53,7 @@ pub use admitted::{
     NoAdmissionVerifier, no_admission_policy,
 };
 pub use cards::{Ambition, ModelCard, ModelRegistry, RegistryError};
+pub use claim_class::{ClaimClass, EvidenceRegime};
 pub use color::{
     COLOR_ALGEBRA_VERSION, Color, ColorError, ColorPayloadError, ColorRank, Demotion, IntervalOp,
     MAX_COLOR_IDENTITY_BYTES, check_regime, color_identity_reason, color_leaf_identity_reason,
@@ -128,6 +131,10 @@ pub use identity::{
     identify_model_bracket_v1, identify_model_card_v1, identify_model_evidence_v1,
     identify_numerical_certificate_v1, identify_sourced_certified_f64_evidence_v1,
     identify_statistical_certificate_v1, identify_validity_domain_v1,
+};
+pub use useful_bound::{
+    Bound, BoundInterval, BoundOutcome, MAX_USEFUL_BOUND_FIELD_BYTES, NoUsefulBound,
+    NoUsefulBoundCause, USEFUL_BOUND_SCHEMA_VERSION, UsefulBoundError, UsefulnessCriterion,
 };
 
 /// Crate version, re-exported for provenance stamping.

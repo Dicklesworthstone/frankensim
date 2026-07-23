@@ -1363,6 +1363,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-checker",
+ "fs-evidence",
  "fs-ledger",
  "fs-package",
  "fs-wedge",
@@ -1436,6 +1437,7 @@ name = "fs-ivl"
 version = "0.0.1"
 dependencies = [
  "fs-casebook",
+ "fs-evidence",
  "fs-math",
  "fs-propcheck",
 ]

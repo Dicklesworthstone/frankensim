@@ -11,9 +11,10 @@ registry (`traceability` module, bead
 
 ## Purpose and layer
 
-Layer UTIL. Pure data + audit, with `fs-blake3` as its only dependency for
-canonical content identities. Encodes the doctrine, proposals, original ten
-runtime risks, and twelve expansion-program risks, audits that nothing
+Layer UTIL. Pure data + audit, with `fs-blake3` for canonical content
+identities, `fs-evidence` for the shared E09 claim/evidence taxonomy, and
+`fs-wedge` for the ratified wedge audit. Encodes the doctrine, proposals,
+original ten runtime risks, and twelve expansion-program risks, audits that nothing
 survives unmeasured (design principle P8 / Governance Rule 2), and enforces
 the one-active-unproven-mechanism-per-independently-falsifiable-proof-lane
 rule as an atomic, replayable admission ledger. It also owns the pure typed
@@ -589,10 +590,12 @@ they are not implied by this solid graph core.
   evidence in chaotic systems. `THERMAL_EXAMPLES` distinguishes a steady
   temperature bound from a duty-cycle reliability claim. The former cannot
   mint the latter.
-- `EvidenceRegime::NoUsefulBound` is doctrine metadata only. The first-class
-  runtime result belongs to `frankensim-extreal-program-f85xj.9.2`, and the
-  executable mismatch-refusing router belongs to
-  `frankensim-extreal-program-f85xj.9.3`.
+- `EvidenceRegime::NoUsefulBound` remains doctrine metadata. The shared
+  `ClaimClass` / `EvidenceRegime` definitions live in low-layer `fs-evidence`
+  so its first-class `BoundOutcome::NoUsefulBound` can carry the exact E09
+  reformulation without depending upward; this module re-exports those types
+  at its existing public paths. The executable mismatch-refusing router belongs
+  to `frankensim-extreal-program-f85xj.9.3`.
 - No-claim boundary: table lookup does not create or authenticate evidence,
   prove a statement, validate a model, implement a staged reachability tube,
   or admit a runtime claim. A wide honest interval stays a valid result but

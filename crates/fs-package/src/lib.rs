@@ -35,6 +35,7 @@ pub use fs_blake3::ContentHash;
 
 pub mod color_admission;
 pub mod coverage;
+pub mod no_useful_bound;
 pub mod origin;
 pub mod receipt_catalog;
 
@@ -46,6 +47,9 @@ pub use coverage::{
     ConceptPresence, CoverageStatus, PackageCoverageReport, PackagePresenceReport,
     package_coverage, package_coverage_with, package_presence, package_presence_with,
     verified_package_coverage, verified_package_presence,
+};
+pub use no_useful_bound::{
+    MAX_NO_USEFUL_BOUND_CLAIM_ID_BYTES, NoUsefulBoundRecord, NoUsefulBoundRecordError,
 };
 pub use origin::{
     AnchoredSourceRequest, AnchoredSourceVerifier, ClaimOrigin, DerivationRequest,

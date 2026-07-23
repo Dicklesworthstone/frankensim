@@ -125,6 +125,12 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   content-addressed, bounded binary set and resolves only an exact
   `(family, wire schema, descriptor hash)` tuple. It has no dependency on
   receipt-owner crates and performs no payload decoding or semantic replay.
+- `NoUsefulBoundRecord` — a bounded package-inspection projection containing a
+  stable claim id and the exact lower-layer `NoUsefulBound`. It renders the
+  cause, achieved interval/width, failed criterion, and E09 suggestion while
+  returning `has_certificate_claim() == false`. It deliberately remains beside
+  the schema-v8 `EvidencePackage` claim list: a usefulness refusal has no
+  scientific color and cannot be converted into a certificate claim.
 - `PackageError` — structured refusals for incomplete provenance, invalid or
   duplicate claim ids, blank/placeholder claim statements, malformed color
   payloads, unsupported formats, receipt mismatches/parents, malformed
@@ -348,6 +354,9 @@ and refuses truncation, hostile counts/lengths, unknown tags, noncanonical row
 order, self-inconsistent identities, externally pinned substitution, invalid
 machine identities, duplicate/aliased owners, and inclusive/exclusive resource
 boundaries.
+`tests/no_useful_bound.rs` proves that package inspection retains the typed
+cause and reformulation while exposing neither certificate membership nor
+scientific-color authority.
 
 ## Receipt-schema catalog v1 (bead h61n)
 
@@ -531,6 +540,10 @@ spelling available in the general JSON grammar.
   with the exact owner capability; unknown or mismatched rows remain refusals.
 - The certificate payloads live in `fs-evidence::Color`; this crate bundles
   and content-addresses them, it does not produce them.
+- `NoUsefulBoundRecord` is a sidecar inspection record, not an
+  `EvidencePackage` schema-v8 claim. It authenticates no enclosure producer,
+  threshold authority, engineering verdict, or suggested reformulation, and
+  it can never contribute certificate/color coverage.
 - A validated dataset hash proves content identity, not experimental quality or
   custodial authenticity. Those stronger properties require an external
   evidence policy. Likewise, successful waiver authentication proves only that

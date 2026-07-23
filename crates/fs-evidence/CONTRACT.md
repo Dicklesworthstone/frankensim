@@ -89,6 +89,25 @@ telemetry/legacy correlation.
   effect it must contribute when the other bounded unknowns move
   adversarially, its finite/unbounded state, and an evidence-action class;
   `render_report` emits the complete deterministic reviewer trail.
+- `ClaimClass` / `EvidenceRegime` — the closed E09 schema-v1 taxonomy shared
+  with `fs-govern`. Governance still owns the doctrine rows and capability
+  table; the low-layer enum home lets evidence values name the exact
+  reformulation class without an upward dependency.
+- `BoundInterval`, `UsefulnessCriterion`, and `BoundOutcome::{Bound,
+  NoUsefulBound}` — a caller-declared decision-contextual usefulness gate over
+  one ordered extended-real enclosure. The threshold is finite, positive, and
+  unit-labelled. `NoUsefulBound` retains the achieved interval/width, one
+  closed cause (`horizon-too-long`, `lipschitz-blowup`, `domain-exit`, or
+  `budget-exhausted`), and one exact E09 suggested reformulation. Its canonical
+  identity binds every semantic field. `compose_absorbing` never invokes the
+  combining operation after either parent has refused.
+- `EngineeringUncertaintyBudget::{assess_requirement_with_bound,
+  attribute_requirement_with_bound}` — E08.4 requirement integration.
+  `Bound` preserves the existing assessment path. `NoUsefulBound` forces
+  `ComplianceVerdict::Indeterminate` with the exact cause even when the
+  eight-term budget alone would be binary. Term freezing retains the magnitude
+  ledger but cannot remove this gate: all decision states remain indeterminate
+  with zero binary influence.
 - `EngineeringUncertaintyBudget::attribute_requirement` — paired views over
   that same requirement audit. The budget view ranks finite conservative
   half-widths and reports each share of the finite known total, while retaining
@@ -396,6 +415,9 @@ telemetry/legacy correlation.
 2. Severity monotonicity: composition kind = max operand severity, floored
    at Enclosure for float ops; NoClaim absorbs to infinite bounds; an
    Estimate anywhere poisons `certified()` downstream (evd-006).
+   `NoUsefulBound` follows the same no-laundering law in its separate
+   contextual algebra: it is absorbing under composition and cannot become a
+   `Bound` by combining it with a narrower sibling.
 3. No card, no solver: `ModelRegistry::register_solver` refuses unknown
    cards with teaching text (evd-002).
 4. Discrepancy queries outside the observed parameter box refuse with the
@@ -716,6 +738,11 @@ including joint covariance attribution without double counting, an unknown
 tail source that dominates the decision view without receiving a fabricated
 budget share, recovery of the largest synthetic contributor under exact
 replay, and stable group-label ordering for equal attribution scores.
+`tests/useful_bound.rs` is the E09.2 G0/G3 battery: contextual thresholds over
+the same enclosure, bounded constructors, absorbing composition, explicit
+narrow semantic failures, content-identity movement, and an ordinarily
+compliant requirement forced to indeterminate with absorption preserved
+through term-freezing attribution.
 
 - Falsifier registration is total: malformed, duplicate, and empty declaration
   sets refuse; the catalog lint names each distinct undeclared class once in
@@ -1028,6 +1055,14 @@ physical validation, process-standard conformance, or decision fitness.
   physical source, that a cited artifact is authentic, that an interval is a
   valid enclosure, that a distribution has coverage, or that an ensemble is
   representative. Those are producer/checker and ledger-admission claims.
+- `BoundOutcome` validates enclosure shape, criterion shape, and no-laundering
+  composition. It does not authenticate the enclosure producer, prove the
+  interval is rigorous, choose an engineering threshold, or establish that its
+  suggested E09 reformulation will succeed. `NoUsefulBound` is an honest
+  refusal, not a negative scientific result. Schema v1 defines in-memory
+  semantics and deterministic reviewer rendering only; it does not register a
+  durable content identity or transport format. The package projection is an
+  explicitly non-certificate sidecar.
 - `EngineeringUncertaintyTerm` is sealed after `try_new`: source, value, and
   provenance have read-only accessors and no mutation door. A changed term must
   re-enter admission. `NumericalUncertaintyUpdate` can contain exactly

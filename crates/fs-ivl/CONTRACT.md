@@ -4,8 +4,9 @@
 Certified arithmetic (plan §6.4): outward-rounded interval arithmetic and
 affine (noise-symbol) forms. This crate defines what "certified" means
 system-wide: every operation's postcondition is ENCLOSURE — the result
-contains the true image of the inputs. Layer: **L1**. Depends only on
-fs-math (strict functions, declared budgets, nudging primitives; the
+contains the true image of the inputs. Layer: **L1**. Depends on
+fs-math (strict functions, declared budgets, nudging primitives) and the
+lower-layer `fs-evidence` useful-bound vocabulary; the
 in-house `eft`/`dd` reference machinery lives THERE at L0 as a single
 implementation shared with fs-la — recorded relocation, beads
 6ys.8/6ys.12). The independent high-precision development oracle is the
@@ -65,6 +66,10 @@ crate's dependency graph.
   documentation): expressions whose subterms are monotone and
   single-occurrence give interval arithmetic near-zero excess — TMs pay
   off exactly where the dependency problem lives.
+  `bound_with_usefulness` preserves the full-domain enclosure and applies one
+  caller-declared contextual width threshold. Non-finite width becomes
+  `NoUsefulBound(LipschitzBlowup)`; a finite over-threshold enclosure retains
+  the caller's closed cause and E09 reformulation.
 - `newton::{newton_roots, krawczyk_step, RootBox, lipschitz_bound}` —
   certified roots: `Certified` ONLY under strict-interior contraction
   (existence + uniqueness); double roots come back `Possible`, never
@@ -72,6 +77,11 @@ crate's dependency graph.
   ABSENCE. `lipschitz_bound` = outward-rounded derivative-enclosure
   magnitude (∞ when unbounded — never understated); the primitive the
   fs-geom certified-Lipschitz chart contract consumes.
+  `RootSearchReport` also retains the evaluated-box width trajectory.
+  `bound_with_usefulness` returns `None` for a complete no-candidate search,
+  classifies a complete root hull contextually, and makes an incomplete search
+  an absorbing `NoUsefulBound(BudgetExhausted)` even if the current hull is
+  narrow.
 - `AffineCtx`/`Affine` — affine forms `c₀ + Σ cᵢ·εᵢ + [−err, +err]`.
   Symbol identity IS correlation (same-context symbols cancel; fresh
   symbols don't). All rounding and the first-order mul residue
@@ -223,6 +233,9 @@ containment with shrinking enabled and the fixed cases retained.
 `tests/taylor_battery.rs`: functional containment, subdivision convergence,
 double-double-bracketed wide-domain coefficient rounding, certified-root
 honesty, Lipschitz extraction, and a cross-ISA Taylor/root golden hash.
+`tests/useful_bound.rs`: E09.2 G0/G3 driver integration, including finite
+Taylor classification, overflow-to-Lipschitz refusal, and a budget-exhausted
+root fixture whose deterministic width trajectory is retained to the refusal.
 `tests/predicates.rs`: adversarial degeneracy batteries (cocircular /
 cospherical / collinear lattice configurations), dyadic and 1-ulp
 perturbation classification, SoS tie determinism, measured stage-A filter
@@ -253,6 +266,10 @@ rejections. Reimplementations must pass the golden-hash case bit-for-bit.
   enclosure rather than a useful bound. The API makes no throughput claim near
   the cap and does not expose a user-selected memory budget below the fixed
   envelope.
+- Useful-bound projection proves only contextual classification of the
+  retained enclosure. It does not authenticate the criterion, turn a
+  `Possible` root box into an existence certificate, prove the width trajectory
+  converges, or establish that the suggested E09 reformulation will succeed.
 - Predicates are certified for inputs whose difference monomials (degree
   ≤ 5) stay inside the normal f64 range. Non-finite coordinates and detected
   overflow fail closed; intermediate underflow remains Shewchuk's inherited

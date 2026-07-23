@@ -9,6 +9,10 @@
 //! certify) — a double root can never be falsely certified (tested).
 
 use crate::Interval;
+use fs_evidence::{
+    BoundInterval, BoundOutcome, ClaimClass, NoUsefulBoundCause, UsefulBoundError,
+    UsefulnessCriterion,
+};
 
 /// Default work bound for the compatibility [`newton_roots`] entry point.
 /// Callers that need a completeness receipt should use
@@ -60,6 +64,55 @@ pub struct RootSearchReport {
     pub boxes_examined: usize,
     /// `true` only when no unevaluated subdivision boxes remain.
     pub complete: bool,
+    /// Width of each evaluated subdivision box in deterministic visit order.
+    ///
+    /// This is diagnostic evidence for the useful-bound decision, not a
+    /// convergence-order certificate.
+    pub width_trajectory: Vec<f64>,
+}
+
+impl RootSearchReport {
+    /// Project the retained root boxes through one caller-declared usefulness
+    /// criterion.
+    ///
+    /// `None` means the complete search retained no root candidates. An
+    /// incomplete search is always `NoUsefulBound(BudgetExhausted)`, even when
+    /// its current hull happens to be narrow.
+    pub fn bound_with_usefulness(
+        &self,
+        criterion: UsefulnessCriterion,
+        cause_if_too_wide: NoUsefulBoundCause,
+        suggested_reformulation: ClaimClass,
+    ) -> Result<Option<BoundOutcome>, UsefulBoundError> {
+        let Some(first) = self.roots.first() else {
+            return Ok(None);
+        };
+        let (lower, upper) = self.roots.iter().skip(1).fold(
+            (first.interval().lo(), first.interval().hi()),
+            |(lower, upper), root| {
+                (
+                    lower.min(root.interval().lo()),
+                    upper.max(root.interval().hi()),
+                )
+            },
+        );
+        let interval = BoundInterval::try_new(lower, upper)?;
+        if self.complete {
+            Ok(Some(BoundOutcome::classify(
+                interval,
+                criterion,
+                cause_if_too_wide,
+                suggested_reformulation,
+            )))
+        } else {
+            Ok(Some(BoundOutcome::refuse(
+                interval,
+                criterion,
+                NoUsefulBoundCause::BudgetExhausted,
+                suggested_reformulation,
+            )))
+        }
+    }
 }
 
 /// A root-search result box with its certification status.
@@ -155,9 +208,11 @@ where
     let mut out = Vec::new();
     let mut stack = vec![domain];
     let mut boxes_examined = 0usize;
+    let mut width_trajectory = Vec::new();
     while boxes_examined < config.max_boxes {
         let Some(x) = stack.pop() else { break };
         boxes_examined += 1;
+        width_trajectory.push(x.width());
         // Exclusion test first: 0 ∉ F(X) means no root here.
         if !f(x).contains_zero() {
             continue;
@@ -217,6 +272,7 @@ where
         roots: merge_root_boxes(out),
         boxes_examined,
         complete,
+        width_trajectory,
     })
 }
 

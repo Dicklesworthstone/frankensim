@@ -23,6 +23,11 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   headline with the effective requirement, declared safety factor and policy,
   exact evidence/context/replay identities, flip conditions, paired
   attribution headlines, and the complete indented audit projection.
+- `no_useful_bound_markdown(refusal)` — a distinct `NoUsefulBound` visual
+  class showing achieved enclosure/width, failed caller threshold, unit,
+  decision context, closed cause, exact E09 suggested reformulation, and an
+  explicit no-certificate/no-compliance boundary. Decision headlines invoke
+  it automatically for typed useful-bound indeterminacy.
 - `regime_no_claims_markdown(audit)` — deterministic final operating-envelope
   no-claim section. It omits fully in-domain QoIs and renders every demoted
   receipt with the human diagnosis, strong receipt identity, and exact canonical
@@ -43,6 +48,8 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   by `|relative change|` (largest first), with the feature name as tiebreak.
 - A decision headline never maps `indeterminate` to either binary verdict and
   always retains the exact `DecisionAssessment` and replay-package identities.
+- A `NoUsefulBound` headline never uses compliant, non-compliant, verified, or
+  certificate status. Its cause and reformulation remain visible.
 - Safety factors are reported as already applied to the effective sourced
   limit; `fs-report` does not invent a multiplication or division convention.
 - A regime no-claim section is absent only when every final receipt is fully
@@ -87,6 +94,8 @@ in both artifacts and that in-domain projection is an exact no-op.
 `tests/decision.rs` covers deterministic indeterminate and binary decision
 headlines, units and authority identities, explicit flip actions, and the
 projection-only no-claim boundary.
+`tests/useful_bound.rs` covers the distinct refusal visual class, cause,
+suggested E09 reformulation, and explicit no-certificate boundary.
 
 ## No-claim boundaries
 
@@ -99,6 +108,9 @@ projection-only no-claim boundary.
   `fs-session::DecisionAssessment`; it does not resolve content hashes,
   authenticate requirement or policy sources, recompute compliance or
   attribution, price evidence actions, or certify scientific evidence.
+- The `NoUsefulBound` block projects a lower-layer refusal. It does not prove
+  that the achieved enclosure is rigorous, select the threshold, or establish
+  that the suggested reformulation will yield useful evidence.
 - The regime no-claim section is a presentation of an `fs-regime` audit. Its
   receipt identities bind exact bytes but do not authenticate card ownership,
   calibration sources, or the completeness of the orchestrator-supplied card

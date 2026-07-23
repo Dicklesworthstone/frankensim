@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use fs_blake3::{ContentHash, hash_domain};
 
-use crate::{UncertaintyBreakdown, balance::BoundedId};
+use crate::{BoundOutcome, NoUsefulBound, UncertaintyBreakdown, balance::BoundedId};
 
 /// Current canonical transport version.
 pub const ENGINEERING_UNCERTAINTY_SCHEMA_VERSION: u32 = 1;
@@ -923,6 +923,10 @@ pub enum ComplianceVerdict {
         budget: ContentHash,
         /// Exact sourced requirement evaluated.
         requirement: ScalarRequirement,
+        /// Typed useful-bound refusal that forced this indeterminate result.
+        ///
+        /// `None` preserves the ordinary eight-term uncertainty semantics.
+        no_useful_bound: Option<NoUsefulBound>,
     },
 }
 
@@ -956,6 +960,17 @@ impl ComplianceVerdict {
                 flipping_unknowns, ..
             } => flipping_unknowns,
             Self::Compliant { .. } | Self::NonCompliant { .. } => &[],
+        }
+    }
+
+    /// Typed useful-bound refusal that forced indeterminacy, if any.
+    #[must_use]
+    pub const fn no_useful_bound(&self) -> Option<&NoUsefulBound> {
+        match self {
+            Self::Indeterminate {
+                no_useful_bound, ..
+            } => no_useful_bound.as_ref(),
+            Self::Compliant { .. } | Self::NonCompliant { .. } => None,
         }
     }
 
@@ -993,6 +1008,7 @@ impl ComplianceVerdict {
                 known_lower,
                 known_upper,
                 flipping_unknowns,
+                no_useful_bound,
                 ..
             } => {
                 let _ = writeln!(
@@ -1000,6 +1016,9 @@ impl ComplianceVerdict {
                     "verdict=indeterminate known-band=[{known_lower},{known_upper}] flipping-unknowns={}",
                     flipping_unknowns.len()
                 );
+                if let Some(refusal) = no_useful_bound {
+                    output.push_str(&refusal.render_report());
+                }
                 for unknown in flipping_unknowns {
                     let bound = match unknown.bound() {
                         FlipBound::Unbounded => "unbounded".to_string(),
@@ -1495,7 +1514,33 @@ impl EngineeringUncertaintyBudget {
             ),
             budget: self.content_id(),
             requirement: requirement.clone(),
+            no_useful_bound: None,
         })
+    }
+
+    /// Evaluate a sourced requirement while honoring a typed useful-bound gate.
+    ///
+    /// A [`BoundOutcome::NoUsefulBound`] is absorbing: even if the ordinary
+    /// eight-term budget would yield a binary result, this method returns
+    /// [`ComplianceVerdict::Indeterminate`] with the exact cause and suggested
+    /// E09 reformulation retained. A useful [`BoundOutcome::Bound`] delegates
+    /// to [`Self::assess_requirement`] without changing its existing identity.
+    pub fn assess_requirement_with_bound(
+        &self,
+        nominal: f64,
+        bound_outcome: &BoundOutcome,
+        requirement: &ScalarRequirement,
+        plausibility_bounds: &[UnknownPlausibilityBound],
+    ) -> Result<ComplianceVerdict, UncertaintyError> {
+        validate_useful_bound_requirement(bound_outcome, requirement)?;
+        match bound_outcome {
+            BoundOutcome::Bound(_) => {
+                self.assess_requirement(nominal, requirement, plausibility_bounds)
+            }
+            BoundOutcome::NoUsefulBound(refusal) => {
+                no_useful_bound_verdict(self, nominal, requirement, plausibility_bounds, refusal)
+            }
+        }
     }
 
     /// Attribute uncertainty both by conservative budget magnitude and by
@@ -1583,6 +1628,38 @@ impl EngineeringUncertaintyBudget {
             unknown_budget,
             decision_ranked,
         })
+    }
+
+    /// Attribute uncertainty under the same absorbing useful-bound gate as
+    /// [`Self::assess_requirement_with_bound`].
+    ///
+    /// Budget-magnitude rows are retained, but a `NoUsefulBound` makes every
+    /// term-freezing decision state indeterminate with zero binary influence:
+    /// removing an uncertainty term cannot launder a failed usefulness gate.
+    pub fn attribute_requirement_with_bound(
+        &self,
+        nominal: f64,
+        bound_outcome: &BoundOutcome,
+        requirement: &ScalarRequirement,
+        plausibility_bounds: &[UnknownPlausibilityBound],
+    ) -> Result<UncertaintyAttribution, UncertaintyError> {
+        validate_useful_bound_requirement(bound_outcome, requirement)?;
+        let mut attribution =
+            self.attribute_requirement(nominal, requirement, plausibility_bounds)?;
+        let BoundOutcome::NoUsefulBound(refusal) = bound_outcome else {
+            return Ok(attribution);
+        };
+
+        attribution.baseline =
+            no_useful_bound_verdict(self, nominal, requirement, plausibility_bounds, refusal)?;
+        for entry in &mut attribution.decision_ranked {
+            entry.baseline_state = AttributionVerdictState::Indeterminate;
+            entry.frozen_state = AttributionVerdictState::Indeterminate;
+            entry.baseline_signed_separation = 0.0;
+            entry.frozen_signed_separation = 0.0;
+            entry.influence = 0.0;
+        }
+        Ok(attribution)
     }
 
     /// Deterministic dominant source. Unknown sources refuse finite ranking;
@@ -2131,6 +2208,49 @@ fn validate_requirement_inputs(
         }
     }
     Ok(bounds_by_kind)
+}
+
+fn validate_useful_bound_requirement(
+    bound_outcome: &BoundOutcome,
+    requirement: &ScalarRequirement,
+) -> Result<(), UncertaintyError> {
+    if bound_outcome.criterion().unit() != requirement.unit() {
+        return refuse(
+            UncertaintyRule::RequirementAssessment,
+            format!(
+                "useful-bound criterion unit {} does not match requirement unit {}",
+                bound_outcome.criterion().unit(),
+                requirement.unit()
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn no_useful_bound_verdict(
+    budget: &EngineeringUncertaintyBudget,
+    nominal: f64,
+    requirement: &ScalarRequirement,
+    plausibility_bounds: &[UnknownPlausibilityBound],
+    refusal: &NoUsefulBound,
+) -> Result<ComplianceVerdict, UncertaintyError> {
+    let bounds_by_kind =
+        validate_requirement_inputs(budget, nominal, requirement, plausibility_bounds)?;
+    let (known_lower, known_upper) = known_requirement_band(budget, nominal);
+    let baseline_distance = requirement_baseline(requirement, known_lower, known_upper)
+        .map_or(0.0, |(_, distance)| distance);
+    Ok(ComplianceVerdict::Indeterminate {
+        known_lower,
+        known_upper,
+        flipping_unknowns: requirement_flipping_unknowns(
+            budget,
+            &bounds_by_kind,
+            baseline_distance,
+        ),
+        budget: budget.content_id(),
+        requirement: requirement.clone(),
+        no_useful_bound: Some(refusal.clone()),
+    })
 }
 
 fn known_requirement_band(budget: &EngineeringUncertaintyBudget, nominal: f64) -> (f64, f64) {
