@@ -48,7 +48,12 @@
 //! same lane ledger with named falsifiers, effort/calendar caps, terminal
 //! displacement records, and a no-refill ceiling; live Beads and critical-path
 //! graph binding remain the repository adapter's responsibility.
+//! The quantitative accelerator go/no-go policy and its honest
+//! existing-versus-new backend record map live in [`accelerators`]; that
+//! registry does not imply that an accelerator backend exists.
 
+pub mod accelerators;
+pub mod adapter_policy;
 pub mod certificate_regimes;
 pub mod claim_router;
 pub mod crates;
@@ -65,6 +70,20 @@ pub mod traceability_fs;
 pub mod traceability_join;
 pub mod wedge_audit;
 
+pub use accelerators::{
+    ACCELERATOR_CANDIDATES, ACCELERATOR_DEPENDENCY_POLICY_BEAD, ACCELERATOR_DOCTRINE,
+    ACCELERATOR_DOCTRINE_BEAD, ACCELERATOR_DOCTRINE_NO_CLAIM, ACCELERATOR_DOCTRINE_SCHEMA_VERSION,
+    ACCELERATOR_MOONSHOT_POLICY_BEAD, ACCELERATOR_PILOT_BEAD, ACCELERATOR_PROFILE_BEAD,
+    AcceleratorAmbition, AcceleratorCandidate, AcceleratorDoctrine, AcceleratorDoctrineError,
+    AcceleratorFalsifier, BACKEND_EVIDENCE_FIELDS, BackendEvidenceField, EvidenceRecordStatus,
+    MIN_PILOT_KERNEL_WALL_SHARE_BPS, MIN_TOP_THREE_ENERGY_SHARE_BPS, MIN_TOP_THREE_WALL_SHARE_BPS,
+    accelerator_doctrine, accelerator_doctrine_json, accelerator_doctrine_markdown,
+    validate_accelerator_doctrine,
+};
+pub use adapter_policy::{
+    ADAPTER_POLICY_ID, AdapterPolicyError, AdapterPolicyOption, AdapterPolicyRatification,
+    TrustInvariant, adapter_policy, adapter_policy_json,
+};
 pub use certificate_regimes::{
     CERTIFICATE_REGIME_NO_CLAIM, CERTIFICATE_REGIME_ROUTER_BEAD, CERTIFICATE_REGIME_SCHEMA_VERSION,
     CERTIFICATE_REGIMES, CERTIFICATE_REPORT_BOUNDARY, CapabilityRef, CapabilityStatus,

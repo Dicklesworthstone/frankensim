@@ -77,6 +77,11 @@ workstream.
 - Updated the README badge and generated-facts table from 522 to 538 tracked
   integration-test files. The count remains an inventory fact, not a claim that
   every test currently passes.
+- Re-ran the documentation-fact gate against the current Git index after shared
+  work landed, registered 23 more tracked integration-test files, and advanced
+  the README badge, generated fact, and hand-written `What Exists Now` row from
+  the earlier 538-file snapshot to 561. This also removes the stale 533-file
+  narrative count that the generated source of truth exposed.
 - Kept the crate and contract facts unchanged at 140 native workspace crates,
   141 total `fs-*` crate directories including standalone `fs-wasm`, and 141
   contracts; this slice does not promote any capability maturity level.
@@ -638,6 +643,38 @@ workstream.
   Citation absence remains explicit, while citation presence
   proves only tamper-evident address binding—not manifest authenticity,
   producer truth, E13.3 release attachment, or source-to-binary correspondence.
+
+### Post-checkpoint accelerator doctrine and evidence boundary
+
+- Added a versioned `fs-govern` accelerator doctrine for
+  `frankensim-extreal-program-f85xj.15.1`. The conditional pilot remains `[M]`,
+  retains the CPU path permanently, and cannot open from architecture prose:
+  it first needs the f85xj.15.2 end-to-end profile, a separate production
+  dependency ruling, and admission through the fixed-size moonshot
+  displacement policy.
+- Made the named falsifier quantitative. The profiled top three must jointly
+  account for at least 50% of workflow wall time and, where credible energy
+  data exists, at least 50% of measured energy; a selected one-kernel pilot
+  must contribute at least 15% of workflow wall time and remain suitable after
+  transfer and synchronization costs. Failure closes the pilot as
+  refused-with-evidence rather than encouraging speculative backend work.
+- Registered twelve required backend evidence fields and mapped every one to
+  an existing authority surface or an explicitly new record with no false
+  implementation locator. Existing ingredients include BLAKE3 content
+  identity, roofline kernel/machine/production records, and executor-minted
+  drain/finalize reports. Device environment, numerical equivalence, reduction
+  policy, pipeline attribution, and go/no-go receipts remain explicitly absent;
+  the existing observation-versus-prediction validation type is not presented
+  as CPU-versus-device authority.
+- Registered five unranked profiling candidates—D3Q19 LBM, SpMV, FFTs, batched
+  constitutive evaluation, and spectral path tracing—with live CPU locators,
+  suitability hypotheses, and falsifier pressures. Profiling, not table order,
+  selects any future pilot.
+- Added deterministic JSON and code-derived Markdown projections plus G0/G5
+  mutation, live-locator, fixed-point, and documentation-drift checks. Updated
+  the README and crate contract to state the current reality: FrankenSim still
+  has no accelerator backend or admitted GPU runtime and makes no device
+  speedup, energy, equivalence, cancellation, or production-fitness claim.
 
 ## Version Timeline
 

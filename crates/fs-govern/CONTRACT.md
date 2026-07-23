@@ -423,6 +423,82 @@ they are not implied by this solid graph core.
   disposition retention, terminal anti-revival, effort-envelope refusal, and
   cap-shrinking liquidation followed by replacement at the smaller cap.
 
+## Accelerator pilot doctrine (`accelerators` module, bead f85xj.15.1)
+
+- `ACCELERATOR_DOCTRINE` is the closed v1 go/no-go policy for the conditional
+  accelerator program. It binds the profiling, pilot, production-dependency
+  ruling, and moonshot-displacement Beads; fixes the pilot at `[M]`; requires a
+  permanent CPU reference; and names the cancellation boundary as one kernel
+  batch followed by request, drain, and finalize evidence.
+- The falsifier is quantitative and end-to-end. The top three profiled kernels
+  must jointly account for at least 50% of workflow wall time and, where
+  credible platform energy data is available, at least 50% of measured energy.
+  The single selected candidate must account for at least 15% of workflow wall
+  time and remain suitable after transfer and synchronization costs. Otherwise
+  the pilot closes as refused-with-evidence and no accelerator dependency is
+  admitted.
+- `BACKEND_EVIDENCE_FIELDS` is a closed twelve-row backend evidence class. Each
+  row states the required field, record owner, record type, maturity, source
+  locator, requirement, and local no-claim boundary. `Existing` rows must name
+  live repository source. `ExplicitlyNew` rows must omit a locator, preventing
+  proposed device, driver/compiler, reduction-policy, phase-attribution, and
+  go/no-go receipts from masquerading as implemented types.
+- Existing ingredients map narrowly to `fs_blake3::ContentHash`,
+  `fs_roofline::{KernelSpec, MachineAxes, RecordedProductionRun,
+  FreshProductionEvidence}`, and `fs_exec::DrainFinalizeReport`. The numerical
+  comparison instead maps to an explicitly new
+  `fs-evidence::AcceleratorEquivalenceReceipt`; the existing
+  observation-versus-prediction `ValidationMetric` is not silently repurposed.
+  These are authority ingredients and staged owners, not a claim that current
+  CPU-oriented APIs already constitute an accelerator evidence record.
+- `ACCELERATOR_CANDIDATES` registers five profiling candidates without ranking
+  them: D3Q19 LBM, sparse matrix-vector multiplication, FFT/batched transforms,
+  batched constitutive evaluation, and spectral path tracing. Each row binds a
+  live CPU source plus both the suitability hypothesis and its known falsifier
+  pressure. Only the f85xj.15.2 end-to-end profile can rank them.
+- `validate_accelerator_doctrine` refuses schema/count/id drift, empty record
+  metadata, non-workspace owners, invalid locators, dishonest
+  existing-versus-new maturity, invalid thresholds, a non-`[M]` pilot, or a
+  removable CPU reference. `accelerator_doctrine_json` and
+  `accelerator_doctrine_markdown` are deterministic projections.
+- G0 mutation tests live beside the module so adding the test suite does not
+  perturb the generated integration-test inventory. They check policy
+  completeness, identity/count drift, maturity/locator honesty, live source
+  presence, and byte-exact correspondence with
+  `docs/ACCELERATOR_DOCTRINE.md`; the JSON fixed point is a G5 replay check.
+- No-claim boundary: this module is governance data. It does not implement a
+  GPU or other accelerator backend, admit a runtime dependency, execute a
+  device kernel, authenticate caller-supplied evidence, evaluate a live
+  profile, reserve a moonshot slot, or establish speedup, energy savings,
+  equivalence, cancellation completion, or production fitness.
+
+## External-adapter ruling (`adapter_policy` module, bead f85xj.11.1)
+
+- `adapter_policy()` is the fail-closed accessor for the ratified
+  `ADPT-2026-07` decision record: OFFICIAL QUARANTINED ADAPTERS. FrankenSim
+  may ship optional adapter binaries wrapping foreign tools as separate
+  out-of-process executables with separate distribution; adapters are never
+  build-time or link-time dependencies of any workspace crate; adapter output
+  enters only through the fs-io quarantine boundary with Estimate-only
+  authority and the adapter identity plus version recorded in receipts;
+  in-process foreign kernels remain forbidden in production paths.
+- The record retains all three considered options with rejection reasons for
+  the two refused ones (pure-core-only, FFI plugins), the non-negotiable
+  trust invariants that hold under every option, four mechanically-evaluable
+  falsifiers with review thresholds, the quarterly review date, and the
+  downstream beads gated on the ruling. The authority field records the
+  bead's human-sign-off flag and the owner's explicit 2026-07-23 delegation
+  verbatim.
+- `tests/adapter_policy.rs` is a three-way drift gate: the record's amendment
+  clauses must appear (whitespace-normalized) in AGENTS.md, and the ruling id
+  plus the out-of-process boundary language must appear in xtask's check-deps
+  policy text, so record, mission text, and enforcement prose cannot drift
+  apart silently. `adapter_policy_json()` is the deterministic projection.
+- No-claim boundary: this module is governance data. It does not implement,
+  distribute, or sandbox any adapter, does not change check-deps enforcement
+  semantics (the ruling legalizes a distribution channel, never a dependency
+  edge), and confers no authority on any adapter output.
+
 ## Crate registry (`crates` module)
 
 - `addendum_crates() -> &[AddendumCrate]` — the seven net-new crates the

@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-140%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-141%20of%20141%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-538%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-561%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -36,7 +36,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
 | Tracked `fs-*` crate directories | 141 |
 | Tracked `CONTRACT.md` files | 141 of 141 |
-| Tracked crate integration-test files | 538 |
+| Tracked crate integration-test files | 561 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=13`, `L2=18`, `L3=27`, `L4=32`, `L5=4`, `L6=25` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
@@ -60,7 +60,7 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Thermal and airflow | `fs-conduction` provides a steady P1 FEM kernel, card-backed thermal contact on exact matching traces, card-backed linearized surface radiation, and deterministic gray-diffuse enclosure exchange over admitted view-factor matrices; `fs-convection` provides 11 validity-gated Nusselt cards; and `fs-airflow` provides typed fan curves, series/parallel quadratic loss networks with explicit leakage, nominal-model interval-Newton operating-point brackets, and an evidence-preserving branch-flow handoff to convection. Only conduction is currently registered for capability maturity |
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 533 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is tracked or green on the current tree |
+| Tests | 561 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
 ### Capability Maturity, Not Crate Count
 
@@ -967,11 +967,23 @@ acceptance band.
 | SIMD | Unsafe or architecture-specific code is kept behind registered capsules and safe facades; exploratory SME2 stays gated rather than becoming a default path |
 | FFTs | The current N-D implementation is correctness-first and separable; higher-radix, SIMD, cache-blocked transposes, and executor-tiled pencils remain explicit follow-up work |
 | Random generation | Bulk Philox and ziggurat normals are performance paths, while the strict path stays cross-ISA deterministic until the faster path earns the same proof |
+| Accelerators | `fs-govern` now defines the quantitative GPU/accelerator go/no-go doctrine and the required per-run evidence fields; no accelerator backend or runtime dependency exists yet |
 
 The recurring tradeoff is intentional: first make the semantics deterministic
 and testable, then optimize the hot path while proving it is still the same
 computation. When the optimized path is not yet equally proven, it stays behind
 a feature flag, fast-mode API, or no-claim boundary.
+
+Accelerator work is currently policy-first. The end-to-end profiling bead must
+show that the top three kernels dominate workflow wall time and, where credible
+platform data exists, measured energy, and that one candidate remains suitable
+after transfer and synchronization costs. Otherwise the conditional `[M]`
+pilot closes as refused-with-evidence.
+Even a passing profile still needs a separate production-dependency ruling and
+a moonshot displacement; the permanent CPU reference, numerical comparison
+envelope, device/toolchain identities, and request-drain-finalize receipt remain
+mandatory. See [`docs/ACCELERATOR_DOCTRINE.md`](docs/ACCELERATOR_DOCTRINE.md)
+for the code-derived evidence map and explicit no-claim boundary.
 
 ## How To Read A Crate Contract
 
@@ -1360,6 +1372,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |
 | Production validation corpus | Partial, not production-ready. `fs-vvreg` registers 19 Level-A thermal formula/order definitions, a synthetic Level-B fixture, and the retained Martin-Moyce 1952 Level-C digitized curve. `fs-conduction` resolves nine analytic rows, including pole-free spherical-shell, matching-P1 two-slab contact, and infinite-parallel-plate view-factor cases, plus seven MMS rows (four P1 primal, one P1 adjoint, one P2 primal, and one P2 adjoint) while executing its tests; both P2 ladders use the high-order FEEC tetrahedral kernel. `fs-convection` resolves the two circular-duct Nusselt limits; `fs-time` resolves the normalized small-Biot lumped decay through dense and operator-backed first-order generalized-alpha paths. The complete crosswalks therefore bind all 19 Level-A rows; no Level-A formula/order row remains without an executing kernel. The fourth primal P1 MMS binding combines a rotated orthotropic frame, three distinct linear `k_i(T)` laws, the full chain-rule manufactured source, and nonlinear iteration; it is observed-order evidence on the declared mesh ladder, not a universal convergence proof. The P1 heat-adjoint binding solves a quartic manufactured dual through `fs-adjoint`, checks the discrete primal/dual identity on every rung, and gates its L2 order; it is not a goal-oriented error bound. The P2 primal binding runs the existing `fs-feec` order-2 simplex stiffness/load/L2 path for a constant-isotropic homogeneous-Dirichlet fixture. The P2 heat-adjoint binding solves the manufactured dual through the same high-order operator and `fs-adjoint`, then checks the discrete primal/dual identity on every rung. Neither P2 binding turns the P1 `fs-conduction` material/boundary frontend into a general P2 thermal frontend, supplies a P2 design-gradient pullback, or establishes a DWR estimate. These are test-time crosswalks, not retained corpus receipts: solver/model envelopes remain distinct from the catalog's formula-reproduction tolerances, no ladder or machine fingerprint is persisted into `fs-vvreg`, and registry queries remain `Estimated` with numerical `NoClaim`. The contact binding is limited to exact duplicated matching-P1 traces and retains an ordered material-card/property receipt in the solve report; it has no nonmatching/mortar projection, variable contact law, scenario-object auto-lowering, or retained registry authority. The radiation binding proves the analytic view-factor identity and gray-diffuse algebra for an admitted matrix; it does not establish a geometry/QMC generator, a radiation-dominated retained corpus case, nonlinear uncertainty authority, or L4 validation. The lumped binding proves only the normalized scalar ODE under the catalog's applicability context, not a spatial transient-conduction model. The external Level-C row is derived-only and still lacks original raw records, instrument/calibration/placement authority, acquisition conditions/date, replayable digitization lineage, resolved redistribution terms, and a defensible scalar acceptance envelope. No capability may infer L4 from registration or these test bindings alone |
 | Performance claims | Must be backed by `fs-roofline`/ledger evidence; do not infer claims from architecture text alone |
+| GPU/accelerator execution | Not implemented. A code-derived `[M]` pilot doctrine, quantitative profiling falsifier, candidate list, and existing-versus-new backend evidence map now exist; they do not admit a runtime, run a device kernel, or establish speedup, energy savings, equivalence, or production fitness |
 
 The long-form architecture reference remains in `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`, but this README describes the code that is already present in the repository.
 
