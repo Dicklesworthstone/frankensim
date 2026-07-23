@@ -35,16 +35,19 @@ use fs_session::DecisionAssessment;
 #[must_use]
 pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> String {
     let quantity = assessment.quantity();
-    let requirement = assessment.requirement();
-    let scalar = requirement.scalar();
     let unit = quantity.unit();
-    let relation = match scalar.relation() {
-        RequirementRelation::AtMost => "at most",
-        RequirementRelation::AtLeast => "at least",
-    };
     let mut output = format!("## Decision headline: `{}`\n\n", quantity.qoi());
 
-    match assessment.compliance() {
+    render_verdict(assessment.compliance(), unit, &mut output);
+    render_decision_authorities(assessment, &mut output);
+    render_flip_conditions(assessment, unit, &mut output);
+    render_attribution_headline(assessment, unit, &mut output);
+    render_exact_audit(assessment, &mut output);
+    output
+}
+
+fn render_verdict(verdict: &ComplianceVerdict, unit: &str, output: &mut String) {
+    match verdict {
         ComplianceVerdict::Compliant { margin, .. } => {
             let _ = writeln!(
                 output,
@@ -68,6 +71,17 @@ pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> Stri
             );
         }
     }
+}
+
+fn render_decision_authorities<Q>(assessment: &DecisionAssessment<Q>, output: &mut String) {
+    let quantity = assessment.quantity();
+    let requirement = assessment.requirement();
+    let scalar = requirement.scalar();
+    let unit = quantity.unit();
+    let relation = match scalar.relation() {
+        RequirementRelation::AtMost => "at most",
+        RequirementRelation::AtLeast => "at least",
+    };
     let _ = writeln!(
         output,
         "- **Effective requirement:** `{}` — {relation} `{}` `{unit}`",
@@ -113,7 +127,9 @@ pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> Stri
         "- **Replay package:** `{}`\n",
         assessment.replay_package()
     );
+}
 
+fn render_flip_conditions<Q>(assessment: &DecisionAssessment<Q>, unit: &str, output: &mut String) {
     output.push_str("### What could change this verdict\n\n");
     if assessment.flip_conditions().is_empty() {
         output.push_str("_No admitted unknown is reported as verdict-flipping._\n\n");
@@ -133,7 +149,13 @@ pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> Stri
             assessment.actions().len()
         );
     }
+}
 
+fn render_attribution_headline<Q>(
+    assessment: &DecisionAssessment<Q>,
+    unit: &str,
+    output: &mut String,
+) {
     output.push_str("### Attribution headline\n\n");
     match assessment.largest_known_budget_link() {
         Some(link) => match link.contribution() {
@@ -171,7 +193,9 @@ pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> Stri
             "- **Paired-view warning:** the largest budget magnitude is not the strongest decision influence.\n",
         );
     }
+}
 
+fn render_exact_audit<Q>(assessment: &DecisionAssessment<Q>, output: &mut String) {
     output.push_str("\n### Exact audit projection\n\n");
     for line in assessment.render_explain().lines() {
         let _ = writeln!(output, "    {line}");
@@ -179,7 +203,6 @@ pub fn decision_headline_markdown<Q>(assessment: &DecisionAssessment<Q>) -> Stri
     output.push_str(
         "\n_Projection only: this report does not certify evidence, resolve artifact hashes, recompute the verdict, or authenticate requirement authorities._\n",
     );
-    output
 }
 
 const fn action_kind_name(kind: ActionKind) -> &'static str {
