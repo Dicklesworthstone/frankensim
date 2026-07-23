@@ -213,6 +213,12 @@ five linted, wire-validated `ConformanceCase` verdicts.
 - The canonical Gauntlet rows retain evidence for the fixed seeded empirical
   schedules above; they do not turn those observed rates or stopping times into
   an exhaustive finite-sample proof for untested data-generating processes.
+- Under `docs/CERTIFICATE_REGIMES.md`, time-uniform and sequential evidence can
+  support a declared long-horizon observable or reliability route only with
+  the named population, sampling/dependence law, stopping policy, failure
+  event, and separate model/field evidence. Anytime validity does not validate
+  the simulator, mint population transfer, or certify one exact long chaotic
+  trajectory.
 
 ## No-claim boundaries (hardening)
 

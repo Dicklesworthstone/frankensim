@@ -564,6 +564,41 @@ they are not implied by this solid graph core.
   render does not prove market demand, technical maturity, scientific
   validity, or that a production run met the kill criterion.
 
+## Certificate-regime doctrine (`certificate_regimes` module)
+
+- `CERTIFICATE_REGIMES` is the closed, ordered schema-v1 table that maps eight
+  claim families to the evidence object that can honestly support them:
+  finite-domain roots/events, finite-horizon reachability, discrete balances,
+  local stability, long-horizon means, broadband spectra, duty-cycle
+  reliability, and exact long chaotic trajectories.
+- `ClaimClass::required_evidence` and `certificate_regime` make the mapping
+  total and typed. `validate_certificate_regimes` refuses schema drift, row
+  reorder/duplication, claim/evidence mismatch, empty boundaries, invalid
+  workspace crate names, staged capabilities that cite implementation
+  evidence, live/thin capabilities without evidence locators, and repository
+  path escape.
+- `CapabilityStatus::{Available, Thin, Staged}` is maturity metadata, not
+  authority. `Available` means only that the narrow named source surface
+  exists. `Thin` records an incomplete route. `Staged` has no source locator
+  and may not be inferred from adjacent primitives.
+- `certificate_regime_json` is deterministic machine-readable data for the
+  future router. `certificate_regime_markdown_table` is checked byte-for-byte
+  against the marked table in `docs/CERTIFICATE_REGIMES.md`. Every named live
+  locator and workspace crate is checked by the G0 integration battery.
+- `INTERVAL_ROLES` preserves the positive bounded uses of interval/Taylor
+  evidence in chaotic systems. `THERMAL_EXAMPLES` distinguishes a steady
+  temperature bound from a duty-cycle reliability claim. The former cannot
+  mint the latter.
+- `EvidenceRegime::NoUsefulBound` is doctrine metadata only. The first-class
+  runtime result belongs to `frankensim-extreal-program-f85xj.9.2`, and the
+  executable mismatch-refusing router belongs to
+  `frankensim-extreal-program-f85xj.9.3`.
+- No-claim boundary: table lookup does not create or authenticate evidence,
+  prove a statement, validate a model, implement a staged reachability tube,
+  or admit a runtime claim. A wide honest interval stays a valid result but
+  must be reported as inconclusive or `NoUsefulBound` for a decision it cannot
+  support.
+
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
 - `principles() -> &[Principle]` — the eight design principles P1–P8 (id, name,

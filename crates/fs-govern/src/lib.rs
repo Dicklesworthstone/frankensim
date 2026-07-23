@@ -21,9 +21,12 @@
 //! Sibling modules encode the rest of the addendum's governance as data: the
 //! design principles + governance rules ([`doctrine`]) and the nineteen
 //! proposals with their kill metrics + owning beads + a completeness audit
-//! ([`proposals`]). The distinct expansion-program namespace PR-001--PR-012,
-//! with quantitative triggers and fail-closed session observations, lives in
-//! [`program_risks`]; it does not replace this crate root's R1--R10 register.
+//! ([`proposals`]). The closed claim-to-evidence routing doctrine, including
+//! honest `NoUsefulBound` routing for exact long chaotic trajectories, lives
+//! in [`certificate_regimes`]. The distinct expansion-program namespace
+//! PR-001--PR-012, with quantitative triggers and fail-closed session
+//! observations, lives in [`program_risks`]; it does not replace this crate
+//! root's R1--R10 register.
 //! The one-bet discipline itself is EXECUTABLE in [`lanes`]: an atomic,
 //! idempotent, replayable admission ledger enforcing one active unproven
 //! mechanism per independently falsifiable proof lane (bead rjoq.6). The
@@ -44,6 +47,7 @@
 //! displacement records, and a no-refill ceiling; live Beads and critical-path
 //! graph binding remain the repository adapter's responsibility.
 
+pub mod certificate_regimes;
 pub mod crates;
 pub mod doctrine;
 pub mod evidence_contract;
@@ -58,6 +62,13 @@ pub mod traceability_fs;
 pub mod traceability_join;
 pub mod wedge_audit;
 
+pub use certificate_regimes::{
+    CERTIFICATE_REGIME_NO_CLAIM, CERTIFICATE_REGIME_ROUTER_BEAD, CERTIFICATE_REGIME_SCHEMA_VERSION,
+    CERTIFICATE_REGIMES, CERTIFICATE_REPORT_BOUNDARY, CapabilityRef, CapabilityStatus,
+    CertificateRegimeError, CertificateRegimeRow, ClaimClass, EvidenceRegime, INTERVAL_ROLES,
+    IntervalRole, THERMAL_EXAMPLES, ThermalExample, certificate_regime, certificate_regime_json,
+    certificate_regime_markdown_table, certificate_regimes, validate_certificate_regimes,
+};
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
 pub use fs_blake3::ContentHash;

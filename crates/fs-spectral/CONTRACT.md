@@ -783,6 +783,12 @@ Its validated token proves only bounded schema closure, explicit hypothesis and
 falsifier coverage, acyclic lattice shape, executable convention bookkeeping,
 and deterministic identity.
 
+Certificate-regime routing follows `docs/CERTIFICATE_REGIMES.md`. A residual
+spectral enclosure may participate in a local-stability claim over its stated
+domain. Spectral computation alone is only thin machinery for a turbulent or
+broadband claim: it does not provide the required distributional validation,
+observation-process binding, regime coverage, or external comparison.
+
 Those belong to RB.1b/RB.1c/RB.1d and later solver, evidence, routing, and
 ledger beads. Until then, missing evidence remains an explicit refusal or
 no-claim state.

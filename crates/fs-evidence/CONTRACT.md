@@ -1350,6 +1350,12 @@ identity is the domain-separated BLAKE3 hash of the canonical bytes.
   chart accounts with the matching declared role.
 - `ColorRank` is carried and composed weakest-wins, but no payload-level
   color algebra (regimes, datasets, estimators) is evaluated here.
+- `docs/CERTIFICATE_REGIMES.md` routes a conserved-quantity claim to a
+  discrete balance certificate over one exact operator, complex, boundary,
+  source convention, units, and time slab. `BalanceDefectReceipt` supplies
+  owner-local accounting evidence for that route; it does not validate the
+  constitutive model, observation chain, or physical completeness of the terms
+  it was handed.
 
 ## Evidence-action vocabulary (bead frankensim-leapfrog-2026-program-i94v.1.4.1, I08.1)
 

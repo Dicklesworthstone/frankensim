@@ -101,5 +101,9 @@ None.
   constructs only quadratics.
 - `lyapunov_certifies_stability` verifies a supplied two-dimensional `P`; it
   does not search for `P` or certify nonlinear regions of attraction.
+- Under `docs/CERTIFICATE_REGIMES.md`, this is only a local-stability route
+  inside the stated model, equilibrium, parameter domain, and Lyapunov
+  assumptions. It cannot be widened into global attraction, long-horizon
+  predictive accuracy, broadband validation, or duty-cycle reliability.
 - No cross-ISA replay, cancellation/concurrency, persisted or authenticated
   ledger, external-oracle, broad-input, or performance claim is made here.

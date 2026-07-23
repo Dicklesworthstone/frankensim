@@ -166,3 +166,9 @@ structured errors rather than panicking.
 - Adaptive-MLMC rate fits assume geometric level decay; oscillatory
   correction means defeat the extrapolation (documented, as in the
   classical literature).
+- `docs/CERTIFICATE_REGIMES.md` routes long-horizon means, broadband
+  observables, and duty-cycle reliability to statistical evidence with the
+  exact sampling/dependence/stopping and model-form context. Current UQ
+  machinery is thin or staged for those complete routes; neither one simulated
+  trajectory nor an empirical estimator alone validates the model, regime,
+  population transfer, or rare-event tail.

@@ -274,6 +274,12 @@ rejections. Reimplementations must pass the golden-hash case bit-for-bit.
   random-DAG/property batteries, Taylor convergence and certified-root
   studies, adversarial predicate suites, retained cross-ISA goldens, and any
   performance or fresh dual-ISA claims remain in their dedicated lanes.
+- Certificate-regime routing follows `docs/CERTIFICATE_REGIMES.md`: interval
+  root isolation and Taylor enclosures support declared finite-domain events,
+  local exclusions, parameter bounds, balance audits, and finite-horizon tube
+  ingredients. Repeated outward propagation is not a validated reachability
+  tube, and an honest wide enclosure is `NoUsefulBound` for an engineering
+  decision it cannot resolve rather than a certificate for that decision.
 - Affine elementary functions (exp/sin on affine forms via Chebyshev
   linearization) are not implemented — interval fallback applies.
 - `Interval::midpoint` of half-infinite intervals returns 0.0 (documented
