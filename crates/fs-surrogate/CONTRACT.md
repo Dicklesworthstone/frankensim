@@ -9,7 +9,9 @@ Layer L4 (surrogate / ROM). The default core is dependency-free and pure Rust
 (an in-house symmetric eigensolver for the method of snapshots); the optional
 ladder feature depends downward on `fs-evidence`, `fs-blake3`, `fs-exec`,
 `fs-alloc`, and asupersync for evidence, content identity, bounded tile
-execution, memory admission, and live task cancellation.
+execution, memory admission, and live task cancellation. The independent
+`graph-escalation` feature depends downward on `fs-evidence`, `fs-ladder`, and
+`fs-blake3`; it emits ledger-ready records but never depends upward on HELM.
 
 ## Public types and semantics
 
@@ -29,6 +31,21 @@ execution, memory admission, and live task cancellation.
   at least as tight as the tolerance; every unbounded or malformed policy state
   returns `Escalate`.
 - Root `SurrogateError` — `NoSnapshots` / `DimMismatch` / `BadThreshold`.
+- `escalation` module (bead `frankensim-extreal-program-f85xj.10.3`; [F],
+  behind `graph-escalation`) — compatibility-preserving graph routing for the
+  `Escalate` branch. `plan_graph_escalation` accepts the current model, exact
+  `QueryContext`, exact eight-term `EngineeringUncertaintyBudget`,
+  `EscalationAdvice`, and a positive QoI reference magnitude. It requires
+  model-form dominance and delegates scientific selection to
+  `FidelityGraph::cheapest_adequate`. `EscalationPlan` retains the graph-owned
+  explanation, ordered edge walk, costs, discrepancy receipts, budget
+  identity, and an explicitly estimated post-route uncertainty.
+  `certify_or_escalate_with_graph` converts the legacy absolute band/tolerance
+  into graph-relative values through the reference magnitude and returns
+  `GraphDecision::{UseSurrogate, Escalate, Gap}` without changing the existing
+  `Decision` API. `EscalationSession` enforces strict hysteresis, a run-local
+  edge cap, and repeated-edge refusal. `EscalationCalibrationRecord` binds the
+  prediction to the actual post-run budget, cost, and run-evidence identity.
 
 - `ladder` module (addendum Proposal A, bead knh1.4; [F], behind
   `abstraction-ladder`): a bounded abstraction ladder whose present
@@ -63,6 +80,32 @@ execution, memory admission, and live task cancellation.
   closed even when an IEEE-754 comparison such as `+∞ <= +∞` would be true. A
   fleet of queries costs strictly less than all-high-fidelity whenever any query
   is served by the surrogate.
+- Graph escalation is authorized only when both the directional advice and the
+  exact eight-term budget identify model fidelity as the work to buy. QoI
+  mismatch, non-positive/non-finite reference magnitude, absolute/relative
+  tolerance mismatch, absent current model, absent evidence, no adequate
+  route, and cost-budget exhaustion all return a content-addressed gap with
+  deterministic probe suggestions. A graph query that selects the current
+  model produces a no-op gap rather than an "escalation."
+- `EscalationPlan` is sealed and nonempty. Its ordered steps are the exact path
+  in the graph recommendation, and its identity binds the complete graph
+  explanation: graph/budget/QoI/regime, costs, assessed discrepancies, evidence
+  receipts, unresolved edges, and operational tie-breaks. Cost never creates
+  epistemic authority.
+- `EscalationGap` binds the exact advice, attempted reference magnitude, graph,
+  budget, QoI/context, candidate edges, and suggestions. A tolerance,
+  hysteresis, cap, or repeated-edge refusal after route computation also binds
+  the candidate plan identity, so distinct failed requests cannot collapse to
+  one ledger key.
+- Post-route uncertainty is an ESTIMATE. It replaces only an independent
+  model-form term with the selected model's maximum adequate pairwise
+  discrepancy. Unknown/unbounded totals, covariance-coupled model form,
+  missing discrepancy prediction, and finite-arithmetic overflow remain typed
+  `Indeterminate`; none are laundered into a finite prediction.
+- A run can issue a graph edge at most once. After a plan, the hysteresis latch
+  stays closed until the accepted surrogate width falls below the strict rearm
+  boundary. A route exceeding the configured edge cap is refused atomically:
+  no edge is recorded as consumed.
 - Every ladder-emitted color is `Estimated` and passes the shared
   `fs-evidence` payload validator. RB answers carry the f64-evaluated
   QoI estimator as dispersion; concept answers carry the larger of the probe
@@ -123,6 +166,10 @@ allocator/executor failure. Cooperative cancellation returns the drained partial
 run/receipt; numerical and executor errors return their typed error after
 drain but do not currently claim a replay receipt. The non-ladder conformal
 helper still panics on nonsensical inputs (empty residuals, `α ∉ (0,1)`).
+Graph routing expresses policy refusal as `EscalationGap`, not a panic.
+`EscalationPolicy::try_new` refuses non-finite/inverted hysteresis and zero
+edge caps. Calibration admission refuses QoI/unit mismatch and invalid actual
+cost.
 
 ## Determinism class
 
@@ -135,12 +182,19 @@ injected cancellation at the same logical checkpoint replays the same retained
 prefix. Shared task-budget consumption and wall-time cancellation under
 multiple workers are schedule-dependent; any resulting prefix remains
 operational no-claim evidence rather than a deterministic scientific result.
+Graph planning, gap construction, anti-thrash transitions, canonical bytes,
+and calibration identities are deterministic for the same graph, resolver
+answers, budgets, and call sequence. Resolver acquisition and persistence are
+outside this pure module.
 
 ## Cancellation behavior
 
 The POD/conformal API and `rb_coverage` compatibility wrapper remain
 synchronous; `rb_coverage` has the explicit smaller
 `MAX_SYNCHRONOUS_COVERAGE_WORK_UNITS` cap and no interruption claim.
+Graph planning and calibration are bounded synchronous metadata operations;
+they launch no solver work. The consuming HELM scope owns cancellation and
+drain for each planned edge.
 
 `rb_coverage_scoped` requires a live asupersync `Cx`, `TilePool`, external
 `CancelGate`, declared `RunId`/per-tile `Budget`, and a bounded operation memory
@@ -167,6 +221,9 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
   `dep:fs-blake3`,
   `dep:fs-exec`, `dep:fs-alloc`, `dep:asupersync`); gates the `ladder`
   integration target.
+- `graph-escalation` [F] (default OFF) — graph-aware routing, gap reports,
+  anti-thrash state, and planner-calibration records
+  (`dep:fs-evidence`, `dep:fs-ladder`, `dep:fs-blake3`).
 
 ## Conformance tests
 
@@ -189,6 +246,13 @@ counts, nonzero single-worker retained-prefix replay, final-publication refusal,
 bounded observation latency, unbounded/over-cap/undersized lease refusal,
 memory/arena quiescence, and successful pool reuse.
 
+`tests/escalation.rs` (feature-gated): cheapest adequate routing for the
+recirculation QoI fixture; absolute-to-relative tolerance conversion;
+compatibility use-surrogate path; no-edge, unknown-model, wrong-advice,
+wrong-dominance, invalid-reference, and budget-blocked gaps; strict hysteresis,
+repeated-edge refusal, multi-step edge cap; deterministic plan/gap identity;
+and prediction-versus-actual calibration identity.
+
 ## No-claim boundaries
 
 - v0 is the CLASSICAL ROM core (POD via method of snapshots) + the conformal /
@@ -203,6 +267,10 @@ memory/arena quiescence, and successful pool reuse.
   conformal-hardening follow-on.
 - Continuous training from the ledger, versioned/model-carded surrogate
   artifacts, and design-family-respecting splits are downstream integrations.
+- Graph escalation does not execute a model, mutate graph evidence, or persist
+  a ledger row. It returns content-addressed reasoning for HELM to execute and
+  persist. Its predicted uncertainty and cost are calibration targets, not
+  certificates; only the actual post-run budget carries new evidence.
 
 ## No-claim boundaries (ladder)
 

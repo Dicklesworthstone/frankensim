@@ -15,11 +15,15 @@
 //!   ESCALATE to a certified solve.
 //!
 //! The default core is deterministic and dependency-free (including an
-//! in-house symmetric eigensolver). The optional `abstraction-ladder` feature
-//! integrates FrankenSim execution, allocation, hashing, and evidence crates.
+//! in-house symmetric eigensolver). Optional features integrate the bounded
+//! abstraction ladder and graph-aware escalation routing without changing the
+//! default API.
 
 #[cfg(feature = "abstraction-ladder")]
 pub mod ladder;
+
+#[cfg(feature = "graph-escalation")]
+pub mod escalation;
 
 /// A structured failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,7 +284,7 @@ pub fn certify_or_escalate(
             reason: "conformal band half-width must be finite and non-negative".to_string(),
         };
     }
-    if !band.alpha.is_finite() || !(band.alpha > 0.0 && band.alpha < 1.0) {
+    if !(band.alpha.is_finite() && band.alpha > 0.0 && band.alpha < 1.0) {
         return Decision::Escalate {
             reason: "conformal band alpha must be finite and in (0, 1)".to_string(),
         };

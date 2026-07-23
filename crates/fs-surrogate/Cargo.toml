@@ -16,6 +16,7 @@ fs-alloc = { path = "../fs-alloc", optional = true }
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
+fs-ladder = { path = "../fs-ladder", optional = true }
 
 [features]
 # [F]-gated per the Ambition-Tag rule (bead knh1.4, Proposal A).
@@ -25,6 +26,12 @@ abstraction-ladder = [
     "dep:fs-blake3",
     "dep:fs-evidence",
     "dep:fs-exec",
+]
+# [F]-gated graph-aware certify-or-escalate routing (f85xj.10.3).
+graph-escalation = [
+    "dep:fs-blake3",
+    "dep:fs-evidence",
+    "dep:fs-ladder",
 ]
 
 [dev-dependencies]
@@ -39,3 +46,7 @@ workspace = true
 [[test]]
 name = "ladder"
 required-features = ["abstraction-ladder"]
+
+[[test]]
+name = "escalation"
+required-features = ["graph-escalation"]
