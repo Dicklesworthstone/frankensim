@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "257ab0d32cf01e9b029e832091eeec2efc7fe51a2ec8c4920920c96935ac2916",
+  "manifest_identity": "8f24bb3a13256181f44d6d20ffc2c5c4ed8dc9008641ab359dca2653a2178157",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "3b5a3cdc1f1ccddd8d4be1ccc5354f83dcd079f289c4668c8ff1a5476651a4f9",
+    "source_root": "fee278f58597f70850810d3a2396ff745dd054bf804241fc74731438b49ca89b",
     "tracked_file_count": 1821,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1835,7 +1835,7 @@
       {"path": "xtask/src/matdb_pack.rs", "git_mode": "100644", "bytes": 225846, "content_blake3": "6ed995cc03f0c305240883d92d4798d7c565de1d4f23e30902a3bef3cd877bf9"},
       {"path": "xtask/src/maturity.rs", "git_mode": "100644", "bytes": 41230, "content_blake3": "cd5d61b1d13dc8a70497e76c178c824ff91ec8e24ea0c7aeda8377b10c1b0cde"},
       {"path": "xtask/src/moonshot_policy.rs", "git_mode": "100644", "bytes": 39011, "content_blake3": "2db1b9989f16f4b0f42ec4fba3093be2924dc86f1a8c683c1793b6151a0d436d"},
-      {"path": "xtask/src/source_manifest.rs", "git_mode": "100644", "bytes": 72788, "content_blake3": "bd704eed50b112eb4b67f73e7f25e6a554a5520101db052a92b0d682573b895f"},
+      {"path": "xtask/src/source_manifest.rs", "git_mode": "100644", "bytes": 76286, "content_blake3": "f4457aec5ad5c8c9b04f9747c18749c55a495b3d3abf68fa5d9b79dc9ed5b089"},
       {"path": "xtask/tests/constellation_admission.rs", "git_mode": "100644", "bytes": 86027, "content_blake3": "4c09c7b2262cd6629ba3ba9329d8f35623d69f6d1d4176b8e63facafe103fc49"},
       {"path": "xtask/tests/interface_pack_cli.rs", "git_mode": "100644", "bytes": 7068, "content_blake3": "eabcd587dae0166d79a7ec4504bdd997d3f74873868b30d389b8e3522e0b1dba"},
       {"path": "xtask/tests/interface_pack_seed_cli.rs", "git_mode": "100644", "bytes": 32373, "content_blake3": "289b5c69b84f72940f9e6dfa41ab24934247a8e1c5c093da454e91512bc26884"},

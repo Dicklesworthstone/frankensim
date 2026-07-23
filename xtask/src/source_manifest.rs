@@ -1739,10 +1739,14 @@ fn validate_spdx_rendering(
 
 fn expected_artifacts(root: &Path) -> Result<(String, String), String> {
     let model = build_model(root)?;
-    let body = render_body(&model);
+    artifacts_from_model(&model)
+}
+
+fn artifacts_from_model(model: &ManifestModel) -> Result<(String, String), String> {
+    let body = render_body(model);
     let identity = manifest_identity(&body);
-    let manifest = render(&model);
-    let spdx = render_spdx(&model, &identity)?;
+    let manifest = render(model);
+    let spdx = render_spdx(model, &identity)?;
     Ok((manifest, spdx))
 }
 
@@ -1752,6 +1756,34 @@ pub(crate) fn generate(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("cannot write {MANIFEST_PATH}: {error}"))?;
     std::fs::write(root.join(SPDX_PATH), spdx)
         .map_err(|error| format!("cannot write {SPDX_PATH}: {error}"))
+}
+
+fn retained_artifact_violations(
+    expected_manifest: &str,
+    expected_spdx: &str,
+    actual_manifest: std::io::Result<String>,
+    actual_spdx: std::io::Result<String>,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for (check, path, expected, actual) in [
+        (CHECK, MANIFEST_PATH, expected_manifest, actual_manifest),
+        (SPDX_CHECK, SPDX_PATH, expected_spdx, actual_spdx),
+    ] {
+        match actual {
+            Ok(actual) if actual == expected => {}
+            Ok(_) => violations.push(Violation {
+                check,
+                crate_name: path.to_string(),
+                detail: "tracked structural manifest artifact is stale; run cargo run -p xtask -- generate-source-manifest".to_string(),
+            }),
+            Err(error) => violations.push(Violation {
+                check,
+                crate_name: path.to_string(),
+                detail: format!("cannot read retained structural manifest artifact: {error}"),
+            }),
+        }
+    }
+    violations
 }
 
 pub(crate) fn check(root: &Path) -> Vec<Violation> {
@@ -1765,28 +1797,12 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
             }];
         }
     };
-    let mut violations = Vec::new();
-    for (check, path, expected) in [
-        (CHECK, MANIFEST_PATH, expected_manifest),
-        (SPDX_CHECK, SPDX_PATH, expected_spdx),
-    ] {
-        match std::fs::read_to_string(root.join(path)) {
-            Ok(actual) if actual == expected => {}
-            Ok(_) => violations.push(Violation {
-                check,
-                crate_name: path.to_string(),
-                detail: format!(
-                    "tracked structural manifest artifact is stale; run cargo run -p xtask -- generate-source-manifest"
-                ),
-            }),
-            Err(error) => violations.push(Violation {
-                check,
-                crate_name: path.to_string(),
-                detail: format!("cannot read retained structural manifest artifact: {error}"),
-            }),
-        }
-    }
-    violations
+    retained_artifact_violations(
+        &expected_manifest,
+        &expected_spdx,
+        std::fs::read_to_string(root.join(MANIFEST_PATH)),
+        std::fs::read_to_string(root.join(SPDX_PATH)),
+    )
 }
 
 #[cfg(test)]
@@ -1927,6 +1943,86 @@ mod tests {
             git_blob_queries(&rows),
             format!("{}\n", "a".repeat(40)).into_bytes()
         );
+    }
+
+    #[test]
+    fn check_mode_rejects_seeded_sibling_commit_and_artifact_divergence() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a workspace parent");
+        let baseline = build_model(root).expect("live source manifest builds");
+        let (baseline_manifest, baseline_spdx) =
+            artifacts_from_model(&baseline).expect("baseline artifacts render");
+        assert!(
+            retained_artifact_violations(
+                &baseline_manifest,
+                &baseline_spdx,
+                Ok(baseline_manifest.clone()),
+                Ok(baseline_spdx.clone()),
+            )
+            .is_empty()
+        );
+
+        let mut changed = baseline.clone();
+        let sibling = changed
+            .siblings
+            .iter_mut()
+            .find(|row| row.lib == "frankensqlite")
+            .expect("the runtime sibling is retained");
+        let original_commit = sibling.git_head.clone();
+        let replacement = if original_commit.ends_with('0') {
+            '1'
+        } else {
+            '0'
+        };
+        sibling.git_head.pop();
+        sibling.git_head.push(replacement);
+        let seeded_commit = sibling.git_head.clone();
+        assert_ne!(seeded_commit, original_commit);
+
+        let (changed_manifest, changed_spdx) =
+            artifacts_from_model(&changed).expect("seeded sibling artifacts render");
+        assert!(changed_manifest.contains(&seeded_commit));
+        assert!(changed_spdx.contains(&seeded_commit));
+        let sibling_violations = retained_artifact_violations(
+            &changed_manifest,
+            &changed_spdx,
+            Ok(baseline_manifest.clone()),
+            Ok(baseline_spdx.clone()),
+        );
+        assert_eq!(sibling_violations.len(), 2);
+        assert_eq!(
+            sibling_violations
+                .iter()
+                .map(|violation| (violation.check, violation.crate_name.as_str()))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([(CHECK, MANIFEST_PATH), (SPDX_CHECK, SPDX_PATH),])
+        );
+        assert!(
+            sibling_violations
+                .iter()
+                .all(|violation| violation.detail.contains("artifact is stale"))
+        );
+
+        let canonical_only = retained_artifact_violations(
+            &baseline_manifest,
+            &baseline_spdx,
+            Ok(format!("{baseline_manifest}\n")),
+            Ok(baseline_spdx.clone()),
+        );
+        assert_eq!(canonical_only.len(), 1);
+        assert_eq!(canonical_only[0].check, CHECK);
+        assert_eq!(canonical_only[0].crate_name, MANIFEST_PATH);
+
+        let spdx_only = retained_artifact_violations(
+            &baseline_manifest,
+            &baseline_spdx,
+            Ok(baseline_manifest.clone()),
+            Ok(format!("{baseline_spdx}\n")),
+        );
+        assert_eq!(spdx_only.len(), 1);
+        assert_eq!(spdx_only[0].check, SPDX_CHECK);
+        assert_eq!(spdx_only[0].crate_name, SPDX_PATH);
     }
 
     #[test]
