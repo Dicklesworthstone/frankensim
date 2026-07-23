@@ -10,9 +10,9 @@ cone contains `fs-evidence`, dependency-free `fs-blake3`, and the static
 `fs-crosswalk` vocabulary. A HARD
 distribution constraint (Proposal 12): NO solver stack, geometry kernel, or
 license gate anywhere in the graph. By construction the checker cannot run a
-solve. It carries `CHECKER_PROTOCOL_VERSION = 6` for the admission-receipt,
+solve. It carries `CHECKER_PROTOCOL_VERSION = 7` for the admission-receipt,
 closed semantic-registry, and semantic-context ABI
-(distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 8` is an
+(distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 9` is an
 explicit protocol literal with a compile-time assertion against
 `fs_package::FORMAT_VERSION`, so a package schema bump cannot silently retain
 an incompatible checker ABI.
@@ -21,31 +21,34 @@ an incompatible checker ABI.
 
 Four owner-local typed-binary identities seal every checker authority surface:
 
-- `fs-checker:decision-report` is identity version 8 under
-  `fs-package:v8:checker-decision`. Its identity version is a literal tied by
+- `fs-checker:decision-report` is identity version 9 under
+  `fs-package:v9:checker-decision`. Its identity version is a literal tied by
   compile-time assertion to `CHECKER_SUPPORTED_PACKAGE_FORMAT`; the independent
-  `CHECKER_PROTOCOL_VERSION = 6` is also fingerprinted and is not substituted
+  `CHECKER_PROTOCOL_VERSION = 7` is also fingerprinted and is not substituted
   for the package-format identity version. The decision binds every
   `CheckReport` and `Finding` field, nested semantic-context and verification
   receipt hashes, signature purpose/payload, collection length/order, and the
   derived decision hash rule.
-- `fs-checker:semantic-plugin` remains identity version 1 under
-  `fs-checker:semantic-plugin:v1`. Its bytes bind the exact family/schema,
+- `fs-checker:semantic-plugin` is identity version 2 under
+  `fs-checker:semantic-plugin:v2`. Its bytes bind the exact family/schema,
   payload cap, implementation revision, family-specific arithmetic limits, and
   registry revision.
-- `fs-checker:semantic-registry` remains identity version 1 under
-  `fs-checker:semantic-registry:v1`. Its bytes bind the registry revision,
+- `fs-checker:semantic-registry` is identity version 2 under
+  `fs-checker:semantic-registry:v2`. Its bytes bind the registry revision,
   implementation version, every global resource limit, and the exact compiled
   plugin count, order, descriptors, and fingerprints.
-- `fs-checker:semantic-report` remains identity version 1 under
-  `fs-checker:semantic-report:v1`. Its bytes bind the package root, registry,
+- `fs-checker:semantic-report` is identity version 2 under
+  `fs-checker:semantic-report:v2`. Its bytes bind the package root, registry,
   package status, aggregate charges, ordered claim/failure counts and rows, all
   nested receipt/failure fields, and every closed status/failure variant;
   `context_hash` is derived and never trusted as an independent input.
 
-The three established v1 logical domains and canonical byte order are retained
-unchanged. Retained decision, plugin, registry, and report digests are admitted
-only at their exact declared identity version and only as exactly 32 bytes.
+The semantic identities rotate to v2 because their owner-local encoders use the
+checker decision hash primitive, whose package-format domain advances with
+format 9. Retaining v1 labels across that byte movement would falsely admit
+incompatible hashes. Retained decision, plugin, registry, and report digests
+are admitted only at their exact declared identity version and only as exactly
+32 bytes.
 Stale, future, truncated, and extended transports refuse; there is no implicit
 cross-version migration or best-effort reinterpretation. A migration must
 re-verify the source artifact under the new implementation and emit a newly
@@ -65,7 +68,7 @@ versioned identity.
   artifacts, waivers, and signatures. The separate signature argument selects
   the exact checker-purpose context and overrides a signature capability in the
   set.
-- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v8
+- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v9
   transport counterparts. Plain `check_json` denies external origins; the
   capability-aware form authenticates them after structural parsing.
 - `check_release_preflight(&EvidencePackage, expected_root, verifier)` — a
@@ -320,7 +323,7 @@ six-case release-shape battery proves callback-free refusal for empty, unsigned,
 all-waived, unpaired, and unanchored inputs, then proves a complete mixed-origin
 candidate dispatches every capability with identical in-memory and JSON reports.
 The semantic battery covers both positive built-in families through in-memory
-and schema-v8 JSON paths, including hand-derived expected-bit goldens for
+and schema-v9 JSON paths, including hand-derived expected-bit goldens for
 outward-rounded interval addition, multiplication, and division plus a nonzero
 rectangular dense residual; witnessless status separation; false exact and
 dense residual mathematics; unknown family/version; payload/root tamper with a

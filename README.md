@@ -199,6 +199,13 @@ Extra-file completeness remains a Git-index property. In a live checkout,
 index-blob capture describes the exact commit candidate without absorbing
 unrelated unstaged shared-tree edits.
 
+`fs-package` format 9 can carry the canonical manifest identity through
+`Provenance::with_source_manifest_identity`. Citation absence is explicit;
+when present, the exact 32-byte identity is bound into the package root and
+authorization context and survives the strict JSON round trip. That is
+tamper-evident provenance, not proof that the manifest is authentic, complete,
+release-attached, or actually produced the package.
+
 The SPDX package verification code uses the SPDX-mandated SHA-1 construction
 only as a format-compatibility field; BLAKE3 remains the content digest in the
 canonical manifest and on every SPDX file row. Neither artifact is yet a
@@ -415,8 +422,12 @@ assert!(report.render_pie().contains("estimated"));
 ```
 
 This deny-all example demonstrates package self-consistency for an honestly
-Estimated claim; because the root is computed from the package immediately
-before checking, it is not an authenticity demonstration. Authoritative replay
+Estimated claim. It deliberately omits the optional format-v9 source-manifest
+citation and therefore claims no exact source closure. Producers with a
+retained canonical manifest identity add it through
+`Provenance::with_source_manifest_identity`; because the root above is still
+computed from the package immediately before checking, this is not an
+authenticity demonstration. Authoritative replay
 must receive the expected collision-resistant root or signature from an
 independent trust channel. Verified certificates, anchoring datasets, waivers,
 signatures, and falsifier artifacts never authorize themselves: use the

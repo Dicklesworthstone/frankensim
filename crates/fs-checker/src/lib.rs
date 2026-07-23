@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn checker_decision_identity_versions_and_transports_fail_closed() {
-        assert_eq!(CHECKER_DECISION_IDENTITY_VERSION, 8);
+        assert_eq!(CHECKER_DECISION_IDENTITY_VERSION, 9);
         assert_eq!(
             CHECKER_DECISION_IDENTITY_VERSION,
             CHECKER_SUPPORTED_PACKAGE_FORMAT
@@ -1529,7 +1529,7 @@ mod tests {
             ),
             Some(report.decision_hash())
         );
-        for stale in [0, 7, 9, u32::MAX] {
+        for stale in [0, 7, 8, u32::MAX] {
             assert_eq!(
                 CheckReport::admit_retained_decision_hash(stale, report.decision_hash().as_bytes(),),
                 None

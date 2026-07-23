@@ -34,17 +34,17 @@ pub const MAX_SEMANTIC_PAYLOAD_BYTES: usize = fs_package::MAX_SEMANTIC_WITNESS_T
 pub const MAX_SEMANTIC_OPERATIONS: u64 = 1_000_000;
 
 /// Semantic version of one compiled verifier fingerprint.
-pub const SEMANTIC_PLUGIN_IDENTITY_VERSION: u32 = 1;
+pub const SEMANTIC_PLUGIN_IDENTITY_VERSION: u32 = 2;
 /// Exact logical domain framed into every compiled verifier fingerprint.
-pub const SEMANTIC_PLUGIN_IDENTITY_DOMAIN: &str = "fs-checker:semantic-plugin:v1";
+pub const SEMANTIC_PLUGIN_IDENTITY_DOMAIN: &str = "fs-checker:semantic-plugin:v2";
 /// Semantic version of the closed-registry fingerprint.
-pub const SEMANTIC_REGISTRY_IDENTITY_VERSION: u32 = 1;
+pub const SEMANTIC_REGISTRY_IDENTITY_VERSION: u32 = 2;
 /// Exact logical domain framed into the closed-registry fingerprint.
-pub const SEMANTIC_REGISTRY_IDENTITY_DOMAIN: &str = "fs-checker:semantic-registry:v1";
+pub const SEMANTIC_REGISTRY_IDENTITY_DOMAIN: &str = "fs-checker:semantic-registry:v2";
 /// Semantic version of the callback-free semantic transcript digest.
-pub const SEMANTIC_REPORT_IDENTITY_VERSION: u32 = 1;
+pub const SEMANTIC_REPORT_IDENTITY_VERSION: u32 = 2;
 /// Exact logical domain framed into every semantic transcript digest.
-pub const SEMANTIC_REPORT_IDENTITY_DOMAIN: &str = "fs-checker:semantic-report:v1";
+pub const SEMANTIC_REPORT_IDENTITY_DOMAIN: &str = "fs-checker:semantic-report:v2";
 
 const _: () = assert!(MAX_SEMANTIC_WITNESS_BYTES == 256 * 1024);
 const _: () = assert!(MAX_SEMANTIC_WITNESSES == 4_096);
@@ -60,8 +60,8 @@ pub const SEMANTIC_PLUGIN_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-checker:semantic-plugin",
     "version_const=SEMANTIC_PLUGIN_IDENTITY_VERSION",
-    "version=1",
-    "domain=fs-checker:semantic-plugin:v1",
+    "version=2",
+    "domain=fs-checker:semantic-plugin:v2",
     "domain_const=SEMANTIC_PLUGIN_IDENTITY_DOMAIN",
     "encoder=SemanticPluginDescriptor::fingerprint",
     "encoder_helpers=semantic_plugin_fingerprint_with_schema",
@@ -91,8 +91,8 @@ pub const SEMANTIC_REGISTRY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-checker:semantic-registry",
     "version_const=SEMANTIC_REGISTRY_IDENTITY_VERSION",
-    "version=1",
-    "domain=fs-checker:semantic-registry:v1",
+    "version=2",
+    "domain=fs-checker:semantic-registry:v2",
     "domain_const=SEMANTIC_REGISTRY_IDENTITY_DOMAIN",
     "encoder=semantic_registry_fingerprint",
     "encoder_helpers=semantic_registry_fingerprint_with_schema",
@@ -122,8 +122,8 @@ pub const SEMANTIC_REPORT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-checker:semantic-report",
     "version_const=SEMANTIC_REPORT_IDENTITY_VERSION",
-    "version=1",
-    "domain=fs-checker:semantic-report:v1",
+    "version=2",
+    "domain=fs-checker:semantic-report:v2",
     "domain_const=SEMANTIC_REPORT_IDENTITY_DOMAIN",
     "encoder=semantic_context_hash",
     "encoder_helpers=semantic_context_hash_with_schema,hash_failure",
@@ -199,7 +199,7 @@ impl SemanticPluginDescriptor {
         )
     }
 
-    /// Admit a retained plugin fingerprint only under the exact v1 schema and
+    /// Admit a retained plugin fingerprint only under the exact v2 schema and
     /// fixed-width digest transport.
     #[must_use]
     pub fn admit_retained_fingerprint(version: u32, bytes: &[u8]) -> Option<ContentHash> {
@@ -358,7 +358,7 @@ fn semantic_registry_fingerprint_with_schema(
     hash_checker_decision(&bytes)
 }
 
-/// Admit a retained closed-registry fingerprint only under the exact v1
+/// Admit a retained closed-registry fingerprint only under the exact v2
 /// schema and fixed-width digest transport.
 #[must_use]
 pub fn admit_retained_semantic_registry_fingerprint(
@@ -709,7 +709,7 @@ impl SemanticReport {
         self.context_hash
     }
 
-    /// Admit retained semantic-context bytes only under the exact v1 schema
+    /// Admit retained semantic-context bytes only under the exact v2 schema
     /// and fixed-width digest transport.
     #[must_use]
     pub fn admit_retained_context_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
@@ -1703,20 +1703,20 @@ mod identity_tests {
 
     #[test]
     fn semantic_identity_versions_and_transports_fail_closed() {
-        assert_eq!(SEMANTIC_PLUGIN_IDENTITY_VERSION, 1);
+        assert_eq!(SEMANTIC_PLUGIN_IDENTITY_VERSION, 2);
         assert_eq!(
             SEMANTIC_PLUGIN_IDENTITY_DOMAIN,
-            "fs-checker:semantic-plugin:v1"
+            "fs-checker:semantic-plugin:v2"
         );
-        assert_eq!(SEMANTIC_REGISTRY_IDENTITY_VERSION, 1);
+        assert_eq!(SEMANTIC_REGISTRY_IDENTITY_VERSION, 2);
         assert_eq!(
             SEMANTIC_REGISTRY_IDENTITY_DOMAIN,
-            "fs-checker:semantic-registry:v1"
+            "fs-checker:semantic-registry:v2"
         );
-        assert_eq!(SEMANTIC_REPORT_IDENTITY_VERSION, 1);
+        assert_eq!(SEMANTIC_REPORT_IDENTITY_VERSION, 2);
         assert_eq!(
             SEMANTIC_REPORT_IDENTITY_DOMAIN,
-            "fs-checker:semantic-report:v1"
+            "fs-checker:semantic-report:v2"
         );
 
         let plugin = PLUGINS[0].fingerprint();
@@ -1744,7 +1744,7 @@ mod identity_tests {
             Some(report.context_hash())
         );
 
-        for stale in [0, 2, u32::MAX] {
+        for stale in [0, 1, 3, u32::MAX] {
             assert_eq!(
                 SemanticPluginDescriptor::admit_retained_fingerprint(stale, plugin.as_bytes()),
                 None
@@ -1809,7 +1809,7 @@ mod identity_tests {
         }
         assert_moves!(
             descriptor,
-            b"fs-checker:semantic-plugin:v1-mutated",
+            b"fs-checker:semantic-plugin:v2-mutated",
             SEMANTIC_IMPLEMENTATION_VERSION,
             MAX_INTERVAL_NODES,
             EXACT_I53_LIMIT,
@@ -1949,7 +1949,7 @@ mod identity_tests {
         assert_ne!(
             semantic_registry_fingerprint_with_schema(
                 &schema,
-                b"fs-checker:semantic-registry:v1-mutated",
+                b"fs-checker:semantic-registry:v2-mutated",
             ),
             baseline
         );
@@ -2018,7 +2018,7 @@ mod identity_tests {
         }
 
         assert_ne!(
-            semantic_context_hash_with_schema(&report, b"fs-checker:semantic-report:v1-mutated",),
+            semantic_context_hash_with_schema(&report, b"fs-checker:semantic-report:v2-mutated",),
             baseline
         );
         assert_moves!(|changed: &mut SemanticReport| changed.status = SemanticStatus::NotProvided);

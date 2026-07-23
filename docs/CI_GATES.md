@@ -542,11 +542,15 @@ contain itself. Its release fields therefore fail closed: final FrankenSim
 commit, complete root-plus-constellation snapshot, `rustc` host, and retained
 canonical bootstrap-provenance identity are explicitly required but unbound.
 E13.3 must attach those fields in a release envelope and embed the manifest in
-the verified vendored bundle. `fs-package` v8 currently binds only
-`code_version` and `constellation_lock`; it does not yet cite the source-manifest
-identity. The standard rendering is now present, but it does not supply those
-missing release or package bindings. None of those absent integrations may be
-inferred from a green structural drift check.
+the verified vendored bundle. `fs-package` v9 now adds the optional
+`Provenance::source_manifest_identity` citation: when supplied, citation
+presence/value is bound into the package root and waiver authorization context,
+and strict JSON decode/encode preserves it exactly. An uncited package remains
+valid but claims no exact source closure. The citation is an artifact address;
+it does not authenticate the manifest, prove that the cited source produced the
+package, or supply the still-missing E13.3 release binding. None of those
+stronger integrations may be inferred from a green structural drift check or a
+matching package field.
 
 ## External DSR wrapper limitations
 

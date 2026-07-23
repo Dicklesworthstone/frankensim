@@ -8,15 +8,16 @@ evidence-package fields onto the regulator's existing standards language.
 Layer UTIL (pure data + audit; no dependencies). It owns risk R9
 (standards-body latency): every field is mapped or explicitly flagged, so the
 package doubles as internal-QA / B2B diligence collateral regardless of
-standards-body pace. `CROSSWALK_VERSION = 5` identifies this vocabulary and
-`SUPPORTED_PACKAGE_FORMAT = 8` makes package compatibility explicit without a
+standards-body pace. `CROSSWALK_VERSION = 6` identifies this vocabulary and
+`SUPPORTED_PACKAGE_FORMAT = 9` makes package compatibility explicit without a
 dependency cycle.
 
 ## Public types and semantics
 
 - `PackageConcept` (12) — the evidence-package fields (three colors,
   certificate including its portable semantic witness when present, falsifier
-  log, regime tag, anchoring dataset, provenance, Merkle
+  log, regime tag, anchoring dataset, provenance (including the optional exact
+  source-manifest citation), Merkle
   root, signature, re-verified claim origin, and authenticated waiver
   authorization); `Standard` (4) — ASME V&V 10 / 20 / 40 and FAA/EASA CbA.
   Both expose `ALL` and `label()`; `Standard::full_name()`.
@@ -68,7 +69,17 @@ per-concept (×4) and per-standard (×12) slices; representative validation,
 claim-origin, waiver, and portable-witness decisions; unique labels;
 deterministic JSON.
 
-## Vocabulary v5: portable certificate transport on schema v8
+## Vocabulary v6: source-manifest provenance on schema v9
+
+Package format 9 adds an optional exact structural source-manifest identity to
+the provenance object. The static crosswalk keeps this under `Provenance`: when
+present, it strengthens traceability by naming the source inventory address
+that the package root binds; when absent, no source-closure claim is implied.
+The mapping does not establish that the manifest exists, is authentic, covers a
+release, or actually produced the package. Those are external admission and
+release-envelope questions.
+
+## Vocabulary v5: portable certificate transport on schema v8 (historical basis)
 
 Package format 8 adds a portable semantic witness to a source certificate.
 The static crosswalk subsumes that envelope into `Certificate`: the raw bound

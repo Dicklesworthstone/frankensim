@@ -626,6 +626,18 @@ workstream.
   supersedes the earlier staged-rendering note only; package citation, E13.3
   release attachment, vulnerability/license conclusions, and a self-contained
   release claim remain absent.
+- Superseded the package-citation part of that boundary with `fs-package`
+  format 9. Package provenance now carries an optional exact structural
+  source-manifest identity; citation presence/value moves the package root and
+  waiver authorization context, survives the strict JSON fixed point, and
+  rejects v8 transport. Stable claim and portable-witness identities remain v8
+  subidentities inside the v9 package. The independently distributed checker
+  advances to protocol 7/package format 9; its plugin, registry, and semantic
+  report identities rotate to v2 because their checker-domain digest framing
+  moved with the package format. The static crosswalk advances to vocabulary 6.
+  Citation absence remains explicit, while citation presence
+  proves only tamper-evident address binding—not manifest authenticity,
+  producer truth, E13.3 release attachment, or source-to-binary correspondence.
 
 ## Version Timeline
 

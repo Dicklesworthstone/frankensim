@@ -50,7 +50,12 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   family/version, and payload through schema-v8 derive-key domains without
   copying the payload. Package structure authenticates the envelope address;
   only a plugin can admit its mathematical meaning.
-- `Provenance { code_version, constellation_lock }`.
+- `Provenance { code_version, constellation_lock, source_manifest_identity }`.
+  The source-manifest citation is an explicit `Option<ContentHash>`: absence
+  claims no source closure; presence names one exact canonical structural
+  manifest and is bound into the package root and waiver-authorization
+  context. The hash is an address, not proof that the artifact exists or was
+  honestly produced.
 - `VerificationCapabilities` — explicit source-certificate, anchoring-dataset,
   falsifier-artifact, derivation-artifact, waiver, and detached-signature
   verification capabilities. `deny_all()` is the default. A
@@ -129,7 +134,7 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   stable claim id and the exact lower-layer `NoUsefulBound`. It renders the
   cause, achieved interval/width, failed criterion, and E09 suggestion while
   returning `has_certificate_claim() == false`. It deliberately remains beside
-  the schema-v8 `EvidencePackage` claim list: a usefulness refusal has no
+  the schema-v9 `EvidencePackage` claim list: a usefulness refusal has no
   scientific color and cannot be converted into a certificate claim.
 - `PackageError` — structured refusals for incomplete provenance, invalid or
   duplicate claim ids, blank/placeholder claim statements, malformed color
@@ -246,7 +251,8 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   admission class, compact waiver registry, and immediate taint edges are bound
   into the receipt hash.
 - CONTENT-ADDRESSING: `try_merkle_root` is deterministic and tamper-evident across
-  format version, claim count, provenance, and ordered claims. Derive-key modes
+  format version, claim count, provenance (including source-manifest citation
+  presence/value), and ordered claims. Derive-key modes
   separate package leaves/nodes from plain artifact hashes and each other; a
   detached signature does not change the root.
 - RECEIPT-SCHEMA METADATA: family ids and owner identity domains are bounded,
@@ -344,7 +350,9 @@ falsifier/derivation artifact subjects; policy-fingerprint drift; signed-zero
 receipt identity; compact waiver-taint DAGs; sealed verified-package binding;
 portable-witness construction, request binding, strict JSON, tamper detection,
 shape and aggregate caps; semantic-context signature substitution; stale-v7
-refusal; and origin transport/identity limits. The compile-fail battery proves that an
+refusal; source-manifest citation presence/value root binding, fixed-point
+round trip, tamper detection, missing-field refusal, stale-v8 refusal; and
+origin transport/identity limits. The compile-fail battery proves that an
 authenticated signature payload cannot be constructed downstream.
 
 `tests/receipt_catalog.rs` is the G0 catalog battery: it independently
@@ -360,7 +368,7 @@ scientific-color authority.
 
 ## Receipt-schema catalog v1 (bead h61n)
 
-This standalone catalog version is independent of `EvidencePackage` format 8.
+This standalone catalog version is independent of `EvidencePackage` format 9.
 It supplies a dependency-neutral rendezvous point for receipt owners and future
 ledger/package adapters without importing those owners into `fs-package` or
 changing existing package roots. The catalog owns two closed identities:
@@ -381,24 +389,22 @@ Owner crates still own their codecs, payload validation, receipt identity, and
 replay semantics; an L6 adapter must depend on both sides and require an exact
 catalog row before dispatch.
 
-## Schema v8: portable semantic witnesses and semantic release context
+## Schema v9: source-manifest provenance binding
 
-Format 8 rotates every active `fs-package:v8:*` derive-key domain. Claims add a
-mandatory JSON `semantic_witness` field and bind the witness content address
-into the canonical body, Merkle root, origin certificate hash, authorization
-context, source-verifier request, and transport accounting. Witness payloads
-remain opaque to this crate; semantic plugins own interpretation and admission.
-Release-approval signatures now bind `semantic_context` independently from the
-package-computed origin-policy `release_admission_context`. Format 7 and earlier
-are refused by the one-version contract.
+Format 9 adds the closed JSON field
+`provenance.source_manifest_identity: null | 64-lowercase-hex`. `null` is an
+explicit no-citation state. A hash value is folded into the package header, so
+both citation presence and exact identity move the package root and every
+dependent authorization/receipt/decision identity. The source-manifest field
+does not enter claim declarations or portable semantic witnesses; their
+well-established schema-v8 identities remain stable and are composed into the
+v9 package root. Format 8 and earlier are refused by the one-version contract.
 
-### Schema-v8 identity owners
+### Active identity owners
 
-The crate owns the following closed identities. Every public domain constant
-names the exact primary `fs-package:v8:*` context consumed by its encoder;
-secondary family, payload, node, and authorization-context constants likewise
-name complete contexts. Declaring these existing contexts does not change any
-schema-v8 digest or authorization bytes.
+The crate owns the following closed identities. Stable claim/witness identities
+retain their exact `fs-package:v8:*` contexts. Package-level and dependent
+authority identities rotate to `fs-package:v9:*`.
 
 | Identity | Canonical encoder and exact context | Semantic source | Intentional exclusions | Schema dependencies |
 | --- | --- | --- | --- | --- |
@@ -406,22 +412,33 @@ schema-v8 digest or authorization bytes.
 | `claim-declaration` | `Claim::declared_content_hash_unverified`; `fs-package:v8:claim` | complete claim declaration, including every artifact address and witness address | none | `semantic-witness` |
 | `claim-verification-subject` | `Claim::declared_verification_subject_hash_unverified`; `fs-package:v8:claim-verification-subject` | claim subject and witness address | receipt/falsifier artifact addresses and waiver MAC output | `claim-declaration` |
 | `source-certificate-subject` | `Claim::declared_source_certificate_subject_hash_unverified`; `fs-package:v8:source-certificate-subject` | claim/color metadata, address-free receipt/falsifier/attached-anchor metadata, portable family/schema, claim origin with source-certificate address and waiver MAC omitted | source-certificate, receipt, falsifier, attached-anchor, and witness payload addresses; witness payload; waiver MAC output | none; shared canonicalization and BLAKE3 closure are fingerprinted directly |
-| `package-root` | `EvidencePackage::try_merkle_root`; `fs-package:v8:header`, dependent claim leaves, and `fs-package:v8:node` | format, claim count/order, declaration hashes, provenance, odd-node carry rule | detached package signature | `claim-declaration` |
-| `waiver-authorization-subject` | `EvidencePackage::waiver_message`; exact `fs-package:v8:waiver-authorization\|...` bytes plus `fs-package:v8:authorization-context` digest | package header/provenance, ordered address-free claims, target index/body, waiver id, expiry | detached signature and every waiver MAC output | `claim-declaration` |
-| `signature-subject` | `signature_subject_hash`; `fs-package:v8:signature-subject` | package root, purpose tag, and every release-purpose axis | detached signature bytes | `package-root`, `release-admission-context` |
-| `verification-receipt` | `VerificationReceipt::recomputed_hash`; inner tag and outer `fs-package:v8:verification-receipt` context | root, all six policy slots, waiver day, signature status/purpose, ordered admissions and waiver registry | stored receipt hash is derived | `package-root` |
-| `release-admission-context` | `VerificationReceipt::release_admission_context`; `fs-package:v8:release-admission-context` | root, five non-signature policy slots, waiver day, ordered admissions and waiver registry | signature status, signature policy slot, and stored receipt hash | `package-root`; provisional receipt encoding is fingerprinted directly |
-| `presence-decision` | sealed presence-report digest; `fs-package:v8:presence-decision` | row count/order, concept, presence bit, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
-| `coverage-decision` | sealed coverage-report digest; `fs-package:v8:coverage-decision` | standard, crosswalk/package versions, row count/order, concept, status, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
+| `package-root` | `EvidencePackage::try_merkle_root`; `fs-package:v9:header`, dependent v8 claim leaves, and `fs-package:v9:node` | format, claim count/order, declaration hashes, code version, constellation lock, source-manifest citation presence/value, odd-node carry rule | detached package signature | `claim-declaration` |
+| `waiver-authorization-subject` | `EvidencePackage::waiver_message`; exact `fs-package:v9:waiver-authorization\|...` bytes plus `fs-package:v9:authorization-context` digest | package header/provenance including source-manifest citation, ordered address-free claims, target index/body, waiver id, expiry | detached signature and every waiver MAC output | `claim-declaration` |
+| `signature-subject` | `signature_subject_hash`; `fs-package:v9:signature-subject` | package root, purpose tag, and every release-purpose axis | detached signature bytes | `package-root`, `release-admission-context` |
+| `verification-receipt` | `VerificationReceipt::recomputed_hash`; inner tag and outer `fs-package:v9:verification-receipt` context | root, all six policy slots, waiver day, signature status/purpose, ordered admissions and waiver registry | stored receipt hash is derived | `package-root` |
+| `release-admission-context` | `VerificationReceipt::release_admission_context`; `fs-package:v9:release-admission-context` | root, five non-signature policy slots, waiver day, ordered admissions and waiver registry | signature status, signature policy slot, and stored receipt hash | `package-root`; provisional receipt encoding is fingerprinted directly |
+| `presence-decision` | sealed presence-report digest; `fs-package:v9:presence-decision` | row count/order, concept, presence bit, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
+| `coverage-decision` | sealed coverage-report digest; `fs-package:v9:coverage-decision` | standard, crosswalk/package versions, row count/order, concept, status, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
 
-Retained digest transport is exactly 32 bytes paired out of band with identity
-version 8. A stale version or any short/extended digest fails closed. Waiver
-authorization is an exact canonical byte subject rather than a fixed-width
-digest: retention requires version 8, byte equality with a freshly recomputed
-subject, and the exact schema-v8 prefix. Package JSON is retained only through
+Retained digest transport is exactly 32 bytes paired out of band with each
+identity owner's declared version. A stale version or any short/extended digest
+fails closed. Waiver authorization is an exact canonical byte subject rather
+than a fixed-width digest: retention requires version 9, byte equality with a
+freshly recomputed subject, and the exact schema-v9 prefix. Package JSON is
+retained only through
 the strict closed parser; accepted canonical JSON is a textual fixed point under
 decode then encode. None of these integrity admissions grants artifact trust,
 scientific truth, waiver authority, or signer authority.
+
+## Schema v8: portable semantic witnesses and semantic release context (historical)
+
+Format 8 introduced the mandatory JSON `semantic_witness` field and bound its
+content address into claim canonicalization and source-verifier requests.
+Witness payloads remain opaque to this crate; semantic plugins own
+interpretation and admission. Release-approval signatures also gained an
+independent `semantic_context`. The semantic-witness and claim-level identity
+domains remain active v8 subidentities inside package format 9; the historical
+v8 package transport itself is refused.
 
 ## Schema v7: algebra-versioned derivations (historical)
 
@@ -504,7 +521,7 @@ with a structured `ParseError`. The parser re-derives the magnitude
 budget from the parsed claims and RECOMPUTES the content root from the
 parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
-schema-v8 external-origin admission (inherited from v6) named above.
+schema-v9 external-origin admission (inherited from v6) named above.
 Decode-encode is both
 semantically and textually stable (tested). Half-infinite and whole-line
 Verified endpoints are accepted as rigorous but vacuous enclosures; coverage
@@ -541,7 +558,7 @@ spelling available in the general JSON grammar.
 - The certificate payloads live in `fs-evidence::Color`; this crate bundles
   and content-addresses them, it does not produce them.
 - `NoUsefulBoundRecord` is a sidecar inspection record, not an
-  `EvidencePackage` schema-v8 claim. It authenticates no enclosure producer,
+  `EvidencePackage` schema-v9 claim. It authenticates no enclosure producer,
   threshold authority, engineering verdict, or suggested reformulation, and
   it can never contribute certificate/color coverage.
 - A validated dataset hash proves content identity, not experimental quality or
@@ -550,3 +567,8 @@ spelling available in the general JSON grammar.
   the configured policy accepted the exact context through the stated date; it
   does not identify an authorized person or convert the waived claim into an independently
   reproduced result.
+- A cited source-manifest identity proves only that the exact hash was bound
+  into package provenance. `fs-package` does not fetch the manifest, verify its
+  generator, establish Git/release authenticity, or prove the cited source
+  actually produced the package. Those checks require the release envelope,
+  artifact store, and an external admission policy.

@@ -21,10 +21,10 @@ const ARTIFACT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef012
 const EXACT_WITNESS_HASH: &str = "a0e653f9901ee63e4f03c147715362cff0ae6f002e786e992f3a008138cc3345";
 const RESIDUAL_WITNESS_HASH: &str =
     "3744095132bc420c754081385509648b71c88c5de7a0d1b5dddf22eea37e3730";
-const EXACT_PLUGIN_HASH: &str = "14af87a06c1aa93da84bcc5cb020301e9d4a0aa1b75d14e1fbcb0056c1b66276";
+const EXACT_PLUGIN_HASH: &str = "cfa4f85607b2cc2572636d8b54148119c1c7d070020ae9889e1759bcdb660a1d";
 const RESIDUAL_PLUGIN_HASH: &str =
-    "2b18acdd01d48caecadc6602d90f7d35f98b2e68275d6b07a56782659feebcda";
-const REGISTRY_HASH: &str = "c9bef0915f642dcded1ce599a4705d7884c84a45ba4adc4c39b8740b676ee402";
+    "280aa2b1245d6fb2f0e0ed3ef46a44f93790a3e845b01f52b2f3a2aa3763b43b";
+const REGISTRY_HASH: &str = "c1e227caea2216aad8cdf87fc51f41ce0b276768465f6868a5621fc3daa664fc";
 
 // Canonical exact-interval v1 program: integer leaves 1 and 2, exact addition,
 // result node 2. All integer/index fields are little-endian by schema.

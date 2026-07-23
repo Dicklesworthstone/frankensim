@@ -1220,7 +1220,7 @@ fn render_body(model: &ManifestModel) -> String {
         output.push('\n');
     }
     output.push_str("  ],\n");
-    output.push_str("  \"package_citation\": {\"status\": \"not-yet-wired\", \"current_authority\": \"EvidencePackage v8 root-binds code_version and constellation_lock only\", \"required_follow_on\": \"a versioned fs-package migration must bind this manifest identity before package-citation authority is claimed\"},\n");
+    output.push_str("  \"package_citation\": {\"status\": \"wired-optional-fs-package-v9\", \"current_authority\": \"EvidencePackage v9 Provenance may cite this exact manifest_identity; citation presence and value are package-root and waiver-authorization bound and survive strict JSON round trip\", \"no_claim\": \"uncited packages remain valid and claim no exact source closure; a cited address does not prove manifest authenticity, release attachment, or source-to-binary correspondence\", \"required_follow_on\": \"E13.3 must bind the cited manifest, final commit/tree, build host, bootstrap receipt, and produced artifacts in the release envelope\"},\n");
     output.push_str("  \"standard_renderings\": {\"spdx_2_3_json\": {\"status\": \"generated-and-drift-checked\", \"path\": ");
     json_string(&mut output, SPDX_PATH);
     output.push_str(", \"source\": \"manifest_identity\", \"authority\": \"deterministic format projection only; no release, authenticity, correctness, or license conclusion\"}}\n");
@@ -2068,7 +2068,10 @@ mod tests {
         let spdx = render_spdx(&model, &identity).expect("live SPDX rendering builds");
         assert!(rendered.contains("\"frankensim_git_commit\""));
         assert!(rendered.contains("\"release_host\": null"));
-        assert!(rendered.contains("\"package_citation\": {\"status\": \"not-yet-wired\""));
+        assert!(
+            rendered
+                .contains("\"package_citation\": {\"status\": \"wired-optional-fs-package-v9\"")
+        );
         assert!(rendered.contains("\"status\": \"generated-and-drift-checked\""));
         assert!(spdx.contains("\"spdxVersion\": \"SPDX-2.3\""));
         assert!(spdx.contains("\"packageVerificationCodeValue\""));
