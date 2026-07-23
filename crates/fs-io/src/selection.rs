@@ -1199,7 +1199,7 @@ fn point_triangle_distance(point: Point3, a: Point3, b: Point3, c: Point3) -> f6
     norm(sub(ap, add(scale(ab, v), scale(ac, w))))
 }
 
-fn fingerprint_soup(soup: &Soup, cx: &Cx<'_>) -> Result<u64, AssignmentRefusal> {
+pub(crate) fn fingerprint_soup(soup: &Soup, cx: &Cx<'_>) -> Result<u64, AssignmentRefusal> {
     let mut hash = Fingerprint::new();
     hash.bytes(MESH_ASSIGNMENT_SEMANTICS_VERSION.as_bytes());
     hash.usize(soup.positions.len());
@@ -1353,7 +1353,7 @@ fn absorb_selector(
     Ok(())
 }
 
-fn fingerprint_assignments(
+pub(crate) fn fingerprint_assignments(
     assignments: &[ResolvedAssignment],
     cx: &Cx<'_>,
 ) -> Result<u64, AssignmentRefusal> {

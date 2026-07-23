@@ -11,6 +11,7 @@
 //! export is fs-img's job (L5); ledger `imports` rows are written HELM-side
 //! from the receipts this crate emits (L2 must not call L6).
 
+pub mod association;
 pub mod catalog;
 pub mod export;
 pub mod obj;
@@ -23,6 +24,12 @@ pub mod step_faceted_export;
 pub mod step_import;
 pub mod stl;
 
+pub use association::{
+    AddedRegion, AssociationDecision, AssociationDrift, AssociationPolicy, AssociationReceipt,
+    AssociationRefusal, AssociationReport, AssociationVerdict, MESH_ASSOCIATION_POLL_STRIDE,
+    MESH_ASSOCIATION_SEMANTICS_VERSION, MigrationAction, RegionChange, RigidTransform3,
+    SurfaceFingerprint, TopologySignature, associate_mesh_assignments,
+};
 pub use catalog::{
     CATALOG_CANCELLATION_POLL_STRIDE, CATALOG_CSV_PARSER_VERSION, CATALOG_JSON_PARSER_VERSION,
     CATALOG_READ_RECEIPT_VERSION, CATALOG_SCHEMA_VERSION, Catalog, CatalogCancellationEvidence,

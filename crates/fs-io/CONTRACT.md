@@ -72,6 +72,21 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   assignments. L2 treats persistent tokens and the source hook as opaque: the
   L6 project adapter derives/checks `fs-scenario::EntityId`s and upgrades the
   source hook rather than introducing an upward L2 dependency.
+- **Selector-anchored revision association** (`association` module, bead
+  `f85xj.11.4`): `associate_mesh_assignments` compares two promoted soups and
+  their complete assignment reports in one caller-declared proper rigid frame.
+  Each selected surface receives an area/centroid/extent/orientation fingerprint
+  plus an edge-subdivision-insensitive coarse topology signature (face
+  components, boundary components/loops, non-manifold edges, orientation
+  conflicts). Exact subjects take precedence and are never silently rebound.
+  Exact selector + topology + stable-threshold agreement yields `STABLE` and
+  auto-apply; a unique candidate within moved thresholds yields `MOVED` and a
+  review proposal; tied candidates yield `AMBIGUOUS`; missing, over-threshold,
+  or topology-changing assignments yield `LOST` and refuse migration. The
+  region diff distinguishes unchanged, moved, deformed, topology-changed,
+  removed, ambiguous, and added regions. Canonical JSON and deterministic
+  Markdown are report artifacts consumable by the HELM-side `compare` path;
+  L2 does not call CLI/report/ledger code.
 - **Exports** (`export` + format modules): binary STL / OBJ / ASCII PLY
   (deterministic; OBJ and PLY carry f64 shortest-round-trip text, exact
   on re-import); 3MF (minimal OPC ZIP with STORED entries, fixed
@@ -341,6 +356,21 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     non-finite coordinates refuse before the existing repair suite can index
     them. Promotion provenance hashes the complete before/repair/after receipt;
     no residual list or threshold profile can be detached from the evidence.
+22. **Association never guesses across identity or topology loss**: an exact
+    subject is evaluated only against its exact target subject, even if another
+    target looks geometrically closer. Fallback matching is permitted only
+    when the exact subject is absent and a candidate agrees in selector
+    semantics, coarse topology, and moved thresholds. Two candidates inside
+    the receipted score gap are `AMBIGUOUS`, not tie-broken into authority.
+    Targets reserved by any exact subject are excluded from fallback, and a
+    target compatible with multiple source subjects makes every competing
+    fallback ambiguous rather than allowing source-order double assignment.
+    Only `STABLE` auto-applies. Rigid-frame validation rejects reflection,
+    scale, non-finite coefficients, and excessive orthonormality residual.
+    The exact source-soup and published-assignment FNV roots are recomputed
+    before comparison, so index-compatible replacement geometry or mutated
+    public rows cannot borrow an old receipt. Every mesh, face-reference,
+    edge, and candidate bound is admitted before report publication.
 
 ## Error model
 
@@ -378,6 +408,11 @@ named groups, unacknowledged fragile ordinals, empty selections, unintended
 overlap, resource/allocation refusal, non-deterministic execution, numeric
 overflow, and cancellation. No partial `AssignmentReport` or
 `AssignmentReceipt` is returned on failure.
+`AssociationRefusal` likewise carries a stable code, diagnosis, and fix. It
+separates invalid policy/frame/unit inputs, malformed report-to-soup
+references, duplicate subjects, topology-work/candidate/allocation bounds,
+numeric overflow, non-deterministic execution, and cancellation. No partial
+`AssociationReport` or success receipt escapes.
 
 ## Determinism class
 
@@ -411,6 +446,13 @@ Extended import reports sort finding classes, boundary components, sampled pair
 positions, repair operations, and class deltas deterministically. Identical
 soup bits, census/promotion policy, and deterministic `Cx` state yield identical
 reports and receipt JSON on one target.
+Association preserves source assignment order, sorts fallback candidates by
+total normalized score then subject, sorts ambiguous names and added subjects,
+and fingerprints canonical typed output. Identical soups, assignment reports,
+frame, policy, and deterministic `Cx` state yield identical decisions and
+JSON/Markdown on one target. Face count and exact local FNV roots remain
+provenance-sensitive under re-tessellation; association authority comes from
+receipted tolerance comparisons, not equality of those roots.
 
 ## Cancellation behavior
 
@@ -460,6 +502,12 @@ intersection budget counts raw pair visits, including adjacency skips, so an
 all-shared-vertex soup cannot evade the cost cap. The legacy basic census and
 the existing `fs-rep-mesh::repair` call have no internal `Cx`; policy promotion
 polls immediately around repair but claims no cancellation latency inside it.
+Association requires deterministic `Cx`, polls at entry/publication and at its
+declared stride (bounded by 4096) through subject, face, edge-run, boundary,
+candidate, addition, and output-fingerprint loops. Cancellation atomically
+returns `mesh-association-cancelled` and publishes no report. Standard-library
+sorts, binary searches, allocation internals, floating-point square roots, and
+short disjoint-set walks are separately cap-bounded but have no internal poll.
 
 ## Unsafe boundary
 
@@ -565,6 +613,14 @@ residual-sliver promotion/refusal under distinct receipted profiles;
 complete-coverage enforcement; and repair-operation/class-delta receipt
 retention.
 
+`tests/association.rs` (G0/G3/G4): stable re-tessellation despite changed face
+count/local fingerprint; a receipted proper rigid frame; distinct moved,
+deformed, and topology-changed verdicts; equal-candidate ambiguity that refuses
+rather than guesses; unique selector-anchored fallback that remains a proposal;
+receipt-to-soup and receipt-to-row rebinding refusals; many-source/one-target
+fallback ambiguity; canonical JSON/Markdown artifacts; unit/frame/resource
+refusals; and pre-requested cancellation.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -630,6 +686,14 @@ import identically in both ASCII and binary (conformance-tested).
   self-intersection, CAD-semantic, or physical-sameness certificates.
   Persistent subject and source-artifact identities are retained as opaque
   hooks and are not authenticated or derived in L2.
+- **Association is not persistent topological naming**. Its subject/source
+  identities and source-to-target frame are caller-presented, its topology
+  signature is coarse, its geometric moments are f64 diagnostics, and its FNV
+  roots are not collision-resistant. Adversarial topology changes, symmetric
+  features, selector drift, independently moving subassemblies, and
+  between-facet/continuum correspondence require explicit review or a stronger
+  CAD/kernel authority. `STABLE` proves only agreement of the supplied finite
+  tessellations under the declared policy.
 - **Catalog operation promotion is still incomplete**: the sealed schema,
   duplicate-header gate, shared projection envelope, and bounded CSV/JSON
   syntax paths remove the known unchecked work/payload dimensions. The
