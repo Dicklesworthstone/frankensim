@@ -38,6 +38,9 @@
 //!   convective boundary *coupling*: `h` is an input, never a computed
 //!   correlation. Surface-to-ambient radiation and enclosure exchange
 //!   are separate beads that couple in through the same row.
+//! - Thermal contact supports matching P1 traces on exact duplicated
+//!   coordinates. Nonmatching/mortar contact, pressure-dependent closure,
+//!   and implicit perfect contact are outside this rung.
 //! - Observed convergence orders are OBSERVED. The G1 battery fits and
 //!   gates slopes on the fixture ladders it runs; it is not a proof of
 //!   the order for arbitrary meshes, coefficients, or data.
@@ -50,15 +53,25 @@ pub mod assemble;
 pub mod bc;
 pub mod field;
 pub mod fixtures;
+pub mod interface;
 pub mod material;
 pub mod mesh;
 pub mod solve;
 
 use core::fmt;
 
-pub use assemble::{ASSEMBLY_TILE, AssembledSystem, DofMap, assemble_jacobian, assemble_operator};
+pub use assemble::{
+    ASSEMBLY_TILE, AssembledSystem, DofMap, assemble_jacobian, assemble_jacobian_with_interfaces,
+    assemble_operator, assemble_operator_with_interfaces,
+};
 pub use bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 pub use field::ScalarField;
+pub use interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+    InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface, ResistanceOrigin,
+    ResistanceUncertainty, SeriesResistanceBudget, SeriesThermalResistance, ThermalInterfaces,
+    ThermalResistanceTerm,
+};
 pub use material::{
     CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,
 };
@@ -66,7 +79,7 @@ pub use mesh::{BoundaryFace, ConductionMesh};
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
     EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
-    SolveConfig, StopReason, StopRule, solve,
+    SolveConfig, StopReason, StopRule, solve, solve_with_interfaces,
 };
 
 /// Crate version, re-exported for provenance stamping.
@@ -78,6 +91,8 @@ pub const TEMPERATURE_DIMS: fs_qty::Dims = fs_qty::Dims([0, 0, 0, 1, 0, 0]);
 pub const HEAT_FLUX_DIMS: fs_qty::Dims = fs_qty::Dims([0, 1, -3, 0, 0, 0]);
 /// SI exponents of a convective transfer coefficient, W/(m²·K).
 pub const HTC_DIMS: fs_qty::Dims = fs_qty::Dims([0, 1, -3, -1, 0, 0]);
+/// SI exponents of a total thermal resistance, K/W.
+pub const THERMAL_RESISTANCE_DIMS: fs_qty::Dims = fs_qty::Dims([-2, -1, 3, 1, 0, 0]);
 /// SI exponents of a volumetric heat source, W/m³.
 pub const VOLUMETRIC_SOURCE_DIMS: fs_qty::Dims = fs_qty::Dims([-1, 1, -3, 0, 0, 0]);
 
@@ -158,6 +173,17 @@ pub enum ConductionError {
     Conductivity {
         /// Diagnosis.
         what: String,
+    },
+    /// A thermal interface declaration, material-card binding, or matching
+    /// trace is not admissible.
+    Interface {
+        /// Stable scenario interface name, or a diagnostic placeholder when
+        /// the interface was not declared.
+        interface: String,
+        /// What was refused.
+        what: String,
+        /// Actionable correction.
+        fix: String,
     },
     /// A temperature left the span the conductivity table was sampled
     /// over. Extrapolation is never implicit.
@@ -300,6 +326,14 @@ impl fmt::Display for ConductionError {
             ConductionError::Conductivity { what } => {
                 write!(f, "inadmissible conductivity model: {what}")
             }
+            ConductionError::Interface {
+                interface,
+                what,
+                fix,
+            } => write!(
+                f,
+                "thermal interface {interface:?} refused: {what}; fix: {fix}"
+            ),
             ConductionError::OutsideTemperatureSpan {
                 temperature,
                 low,
@@ -383,6 +417,7 @@ impl ConductionError {
             ConductionError::NoFreeDofs => "conduction-no-free-dofs",
             ConductionError::SingularPureNeumann => "conduction-singular-pure-neumann",
             ConductionError::Conductivity { .. } => "conduction-conductivity",
+            ConductionError::Interface { .. } => "conduction-interface",
             ConductionError::OutsideTemperatureSpan { .. } => "conduction-outside-span",
             ConductionError::MaterialQuery { .. } => "conduction-material-query",
             ConductionError::ScenarioRow { .. } => "conduction-scenario-row",

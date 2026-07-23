@@ -50,11 +50,13 @@ use fs_sparse::precond::{Ilu0, Precond, ilu0};
 
 use crate::ConductionError;
 use crate::assemble::{
-    AssembledSystem, DofMap, assemble_jacobian, assemble_operator, full_residual, reduce,
-    reduce_matrix_and_lift, residual,
+    AssembledSystem, DofMap, assemble_jacobian_with_optional_interfaces,
+    assemble_operator_scaled_with_interfaces, full_residual, reduce, reduce_matrix_and_lift,
+    residual,
 };
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
+use crate::interface::{InterfaceFlux, ThermalInterfaces};
 use crate::material::{ConductivityModel, ProvenanceClass};
 use crate::mesh::ConductionMesh;
 
@@ -354,6 +356,8 @@ pub struct ConductionReport {
     pub material_provenance: ProvenanceClass,
     /// How many `fs-matdb` receipts travel with this solve.
     pub material_receipts: usize,
+    /// One evidence-bearing integrated heat rate per named interface.
+    pub interface_fluxes: Vec<InterfaceFlux>,
     /// Free degrees of freedom.
     pub free_dofs: usize,
     /// Element count.
@@ -500,6 +504,7 @@ struct Evaluated {
 /// The resumable steady-conduction solver.
 pub struct ConductionSolver<'m> {
     problem: ConductionProblem<'m>,
+    interfaces: Option<&'m ThermalInterfaces>,
     dofs: DofMap,
     config: SolveConfig,
     state: ConductionState,
@@ -541,6 +546,26 @@ impl<'m> ConductionSolver<'m> {
         problem: ConductionProblem<'m>,
         config: SolveConfig,
     ) -> Result<ConductionSolver<'m>, ConductionError> {
+        Self::new_inner(problem, None, config)
+    }
+
+    /// Build a solver with an explicitly complete matching-face interface set.
+    ///
+    /// # Errors
+    /// The same refusals as [`ConductionSolver::new`].
+    pub fn new_with_interfaces(
+        problem: ConductionProblem<'m>,
+        interfaces: &'m ThermalInterfaces,
+        config: SolveConfig,
+    ) -> Result<ConductionSolver<'m>, ConductionError> {
+        Self::new_inner(problem, Some(interfaces), config)
+    }
+
+    fn new_inner(
+        problem: ConductionProblem<'m>,
+        interfaces: Option<&'m ThermalInterfaces>,
+        config: SolveConfig,
+    ) -> Result<ConductionSolver<'m>, ConductionError> {
         config.validate()?;
         problem
             .source
@@ -552,6 +577,7 @@ impl<'m> ConductionSolver<'m> {
         let free_temperature = initial_free(&problem, &dofs, &config.initial)?;
         Ok(ConductionSolver {
             problem,
+            interfaces,
             dofs,
             config,
             state: ConductionState {
@@ -618,13 +644,15 @@ impl<'m> ConductionSolver<'m> {
 
     fn merit(&self, cx: &Cx<'_>, free: &[f64]) -> Result<Option<f64>, ConductionError> {
         let full = self.dofs.scatter(free);
-        match assemble_operator(
+        match assemble_operator_scaled_with_interfaces(
             cx,
             self.problem.mesh,
             self.problem.boundary,
             self.problem.material,
             self.problem.source,
             &full,
+            None,
+            self.interfaces,
         ) {
             Ok(system) => Ok(Some(norm2(&residual(&system, &self.dofs, &full)))),
             Err(ConductionError::OutsideTemperatureSpan { .. }) => Ok(None),
@@ -638,13 +666,15 @@ impl<'m> ConductionSolver<'m> {
             at: self.state.iteration,
         })?;
         let full = self.dofs.scatter(&self.state.free_temperature);
-        let system = assemble_operator(
+        let system = assemble_operator_scaled_with_interfaces(
             cx,
             self.problem.mesh,
             self.problem.boundary,
             self.problem.material,
             self.problem.source,
             &full,
+            None,
+            self.interfaces,
         )?;
         let (a_ff, b_f) = reduce(&system, &self.dofs);
         let r = residual(&system, &self.dofs, &full);
@@ -736,12 +766,13 @@ impl<'m> ConductionSolver<'m> {
                     .collect())
             }
             Nonlinearity::Newton { .. } => {
-                let jacobian = assemble_jacobian(
+                let jacobian = assemble_jacobian_with_optional_interfaces(
                     cx,
                     self.problem.mesh,
                     self.problem.boundary,
                     self.problem.material,
                     &ev.full,
+                    self.interfaces,
                 )?;
                 let (j_ff, _) = reduce_matrix_and_lift(&jacobian, &self.dofs);
                 let rhs: Vec<f64> = ev.r.iter().map(|v| -v).collect();
@@ -900,10 +931,10 @@ impl<'m> ConductionSolver<'m> {
                 });
             }
         }
-        Ok(self.finish())
+        self.finish()
     }
 
-    fn finish(&mut self) -> ConductionSolution {
+    fn finish(&mut self) -> Result<ConductionSolution, ConductionError> {
         let system = self
             .last_system
             .as_ref()
@@ -918,7 +949,12 @@ impl<'m> ConductionSolver<'m> {
             &temperature,
         );
         let final_residual = norm2(&residual(system, &self.dofs, &temperature));
-        ConductionSolution {
+        let interface_fluxes = self
+            .interfaces
+            .map(|interfaces| interfaces.fluxes(&temperature))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(ConductionSolution {
             temperature,
             report: ConductionReport {
                 iterations: self.state.iteration,
@@ -932,10 +968,11 @@ impl<'m> ConductionSolver<'m> {
                 energy,
                 material_provenance: self.problem.material.provenance(),
                 material_receipts: self.problem.material.receipts().len(),
+                interface_fluxes,
                 free_dofs: self.dofs.n(),
                 elements: self.problem.mesh.element_count(),
             },
-        }
+        })
     }
 }
 
@@ -1092,4 +1129,18 @@ pub fn solve(
     config: SolveConfig,
 ) -> Result<ConductionSolution, ConductionError> {
     ConductionSolver::new(problem, config)?.run(cx)
+}
+
+/// Solve a steady conduction problem with matching-face contact resistance.
+///
+/// # Errors
+/// Every refusal [`ConductionSolver::new_with_interfaces`] and
+/// [`ConductionSolver::run`] can produce.
+pub fn solve_with_interfaces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: &ThermalInterfaces,
+    config: SolveConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    ConductionSolver::new_with_interfaces(problem, interfaces, config)?.run(cx)
 }

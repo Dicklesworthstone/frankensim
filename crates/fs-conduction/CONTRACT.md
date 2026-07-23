@@ -1,7 +1,7 @@
 # CONTRACT: fs-conduction
 
-> Bead `frankensim-extreal-program-f85xj.5.1`. The cooling vertical's core
-> physics capability: a steady heat-conduction solve on tetrahedral complexes.
+> Beads `frankensim-extreal-program-f85xj.5.1` and `.5.3`. The cooling
+> vertical's steady heat-conduction solve and its matching-P1 contact rung.
 
 ## Purpose and layer
 
@@ -9,6 +9,12 @@ Assemble and solve the STEADY heat-conduction equation on `fs-feec` tet
 complexes, with anisotropic and temperature-dependent conductivity from
 `fs-matdb` cards whose query receipts travel with the solve. Layer: **L3**
 (FLUX).
+
+An optional contact operator couples two duplicated, exactly coincident P1
+traces without identifying their temperature degrees of freedom. For an
+area-specific resistance `R'' > 0`, side A to side B heat flux is
+`q_ab = (T_a - T_b)/R''`. The ordered `fs-matdb::InterfaceSystemCard` identity
+and selected-property receipt travel with every reported interface flux.
 
 Strong form:
 
@@ -24,6 +30,7 @@ Weak form solved (find `T ∈ H¹` with `T = T_D` on `Γ_D`, for all
 
 ```text
   ∫_Ω ∇v·k(T)∇T dV + ∫_{Γ_R} h v T dA
+      + ∫_{Γ_C} (1/R'') (T_a - T_b) (v_a - v_b) dA
       = ∫_Ω v f dV − ∫_{Γ_N} v q_n dA + ∫_{Γ_R} h v T_ref dA
 ```
 
@@ -51,6 +58,7 @@ re-derives it. Assembly stages triplets into `fs_sparse::Coo`.
 | `∫_F λ_a q_n dA` | `Σ_b A(1+δ_ab)/12 · q_b` | `q_n` linear on the face |
 | `∫_F h λ_a λ_b dA` | `h̄_F · A(1+δ_ab)/12` | `h` constant on the face (second-order otherwise); `h̄_F` is the face mean |
 | `∫_F h λ_a T_ref dA` | `h̄_F · Σ_b A(1+δ_ab)/12 · T_ref,b` | `h` face-constant AND `T_ref` linear on the face |
+| `∫_F (1/R'') λ_a λ_b dA` | `(1/R'') · A(1+δ_ab)/12`, staged as signed A/A, B/B, A/B, and B/A blocks | face-constant `R''` on exactly matching P1 traces |
 
 `K` is evaluated once per element at `T̄_e`, the element mean of the P₁
 iterate. For P₁ that mean is the EXACT element average of `T_h`, so for `k`
@@ -66,6 +74,9 @@ diameter.
 | `ScalarField` | uniform or per-vertex nodal data; the single carrier for every boundary value and source. There is no closure-valued field — a closure cannot be snapshotted or content-addressed |
 | `ThermalBc` | `Dirichlet{temperature}`, `Neumann{outward_flux}`, `Robin{htc, t_ref}` |
 | `ThermalBoundaryBuilder` / `ThermalBoundary` | a boundary PARTITION: regions may not overlap, leftovers refuse unless an adiabatic remainder is declared out loud |
+| `InterfaceResistance` | a positive area-specific resistance in m² K/W selected from an ordered `InterfaceSystemCard`; retains both the card identity and exact property-use receipt |
+| `InterfaceSurface` / `ThermalInterfaces` | named, explicitly oriented matching-face pairs; every coincident boundary pair must be bound exactly once and may not also carry an external boundary condition |
+| `ThermalResistanceTerm` / `SeriesThermalResistance` | named K/W terms and a deterministic series sum; stated half-widths combine conservatively by addition, while any unstated term keeps the complete band unknown |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
@@ -156,6 +167,13 @@ producing solver's own typed claim is carried verbatim in
 8. **Energy balance.** `closure_w = source + dirichlet_in − neumann_out −
    robin_out` equals `−Σ_{free} r_i` identically; on a converged solve it is
    below `1e-9` relative. Evidence: `tests/conformance.rs::energy_balance_closes`.
+9. **Contact is complete and explicit.** Exact coincident boundary triangles
+   are never treated as perfect contact and never silently left as an
+   adiabatic gap. Every pair requires one named surface, a positive in-domain
+   `area-specific-thermal-contact-resistance` claim, and an explicit
+   `ThermalInterfaces` solve/assembly path. Reusing a bound object with a
+   different face set, vertex mapping, area, or boundary condition refuses.
+   Evidence: `tests/contact.rs`.
 
 ## Error model
 
@@ -169,13 +187,17 @@ Structurally impossible internal states are `expect`/`debug_assert` (e.g. the
 converged step caching its own assembled system); they are not reachable from
 any public input.
 
-Two refusals exist specifically to stop a plausible wrong answer:
+Three refusals exist specifically to stop a plausible wrong answer:
 
 - `SingularPureNeumann` — with neither a Dirichlet nor a Robin row the steady
   operator is singular up to a constant. A Krylov method would return something
   that looks like a temperature field. This refuses instead.
 - `LinearSolveFailed` — raised on the RECOMPUTED Euclidean residual, not the
   solver's recurrence estimate.
+- `Interface` — raised when a resistance card is missing, ambiguous,
+  dimensionally wrong, non-positive, when exact face ownership is incomplete,
+  or when a mesh-bound interface object no longer matches the supplied mesh
+  and boundary.
 
 ## Determinism class
 
@@ -195,6 +217,9 @@ Why it is achievable, mechanism by mechanism:
 - Conductivity tables are piecewise-linear with a declared tie-break (a
   temperature landing exactly on an interior knot uses the segment to its
   RIGHT), so `eval` and `derivative` agree on which piece is in force.
+- Contact surfaces, face pairs, and series-resistance terms are sorted by
+  stable names/slot keys before assembly or summation. Input permutation cannot
+  change their floating-point accumulation order.
 - The library calls NO platform transcendental. Only `sqrt` (IEEE-754
   correctly rounded, hence exempt) and, in `fixtures::annulus_sector`,
   `fs_math::det::{sin, cos}`.
@@ -211,10 +236,12 @@ Evidence at the claimed class: `tests/conformance.rs::replay_is_bitwise_identica
 ## Cancellation behavior
 
 Element and boundary-face loops run in tiles of `ASSEMBLY_TILE` (512) and poll
-`Cx` at every tile boundary; the nonlinear driver polls once per iteration. A
+`Cx` at every tile boundary; contact-face assembly uses the same tile bound,
+and the nonlinear driver polls once per iteration. A
 cancelled run returns `ConductionError::Cancelled { stage, at }` naming the
 stage (`"assemble-elements"`, `"assemble-boundary"`, `"assemble-jacobian"`,
-`"nonlinear-iteration"`) and the tile or iteration index that was about to run.
+`"assemble-interfaces"`, `"nonlinear-iteration"`) and the tile or iteration
+index that was about to run.
 
 Cancellation DRAINS: the partially staged `Coo` is dropped, and a cancelled
 iteration leaves `ConductionState` untouched — no half-applied update can
@@ -249,6 +276,9 @@ None. Everything here is `[S]` solid work on the default path.
   spherical-shell patch, and an adiabatic-tip straight fin, each with a
   declared envelope and a stated reason for its size; a complete Level-A
   analytic crosswalk keeps unsupported rows visible.
+- `tests/contact.rs` — G1 two-slab series-resistance comparison against the
+  Level-A `0.3 K/W` row, plus G0 receipt, uncertainty, determinism, missing-card,
+  missing-binding, overflow, and wrong-mesh refusals.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`.
 
@@ -260,10 +290,12 @@ those batteries reproduces from its log line alone.
 ### Level-A registry binding is executable, not retained authority
 
 The analytic and MMS tests dev-depend on `fs-vvreg` and resolve canonical
-Level-A case rows at runtime. Seven analytic cases use the catalog parameters
+Level-A case rows at runtime. Eight analytic cases use the catalog parameters
 and reference values directly: the two slab fluxes, uniform-source center rise,
 rectangular affine probe, cylindrical- and spherical-shell conductances, and
-`mL=1` fin efficiency. Three P1 L2 ladders take their theoretical order and
+`mL=1` fin efficiency, plus a two-slab matching-P1 contact network whose three
+`0.1 K/W` terms reproduce the `0.3 K/W` series reference. Three P1 L2 ladders
+take their theoretical order and
 two-sided gate from the catalog: isotropic Dirichlet, mixed Neumann, and Robin.
 Both test files carry a complete crosswalk over their respective catalog
 partition, so adding, removing, or silently renaming a Level-A row fails the
@@ -275,8 +307,8 @@ definition; it is not substituted for this solver's geometry, discretization,
 or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
-remain `Estimated`, and the nine rows not bound in this crate are still
-reference/target-only here. Two of those nine Nusselt rows execute separately
+remain `Estimated`, and the eight rows not bound in this crate are still
+reference/target-only here. Two of those eight Nusselt rows execute separately
 in `fs-convection`, and the normalized lumped-transient row executes through
 the first-order generalized-alpha paths in `fs-time`.
 
@@ -292,8 +324,12 @@ the first-order generalized-alpha paths in `fs-time`.
 - NO CONVECTION PHYSICS. The Robin row is a convective BOUNDARY COUPLING: `h`
   is an input. This crate computes no correlation, solves no boundary layer, and
   has no fluid side. Conjugate coupling is a separate bead.
-- NO CONTACT RESISTANCE. Interfaces are perfectly conducting; a TIM/contact
-  model is a separate bead.
+- CONTACT IS MATCHING P1 ONLY. The implemented jump law requires exact
+  coordinate-bit equality between duplicated boundary triangles and one
+  face-constant positive `R''` per named surface. There is no nonmatching or
+  mortar projection, pressure/gap/temperature-dependent resistance, changing
+  contact area, imperfect geometric match tolerance, or automatic lowering
+  from an `fs-scenario` interface object. Perfect contact is never inferred.
 - NO PHASE CHANGE, no latent heat, no moving boundaries.
 
 **Numerical scope.**
@@ -306,6 +342,14 @@ the first-order generalized-alpha paths in `fs-time`.
 - The energy balance checks the assembled operator against an independent
   post-integration of the SAME boundary data. It catches a sign or scale error
   in one of those two paths, not an error in the data itself.
+- Internal contact contributions cancel from the global energy balance. The
+  report exposes each interface's integrated A-to-B heat rate, but that is not
+  a local flux-conservation certificate or an interface-error estimator.
+- The series uncertainty budget is a conservative sum of stated symmetric
+  half-widths, not a probabilistic convolution and not a confidence
+  certificate. Correlation among terms is not modeled; one `Unstated` term
+  makes the complete half-width unavailable. Contact-resistance adjoints are
+  not exposed.
 
 **Evidence scope — read this before quoting an order.**
 

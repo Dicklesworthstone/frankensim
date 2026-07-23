@@ -41,6 +41,7 @@ use fs_sparse::{Coo, Csr};
 use crate::ConductionError;
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
+use crate::interface::ThermalInterfaces;
 use crate::material::ConductivityModel;
 use crate::mesh::ConductionMesh;
 
@@ -203,7 +204,42 @@ pub fn assemble_operator(
     source: &ScalarField,
     temperature: &[f64],
 ) -> Result<AssembledSystem, ConductionError> {
-    assemble_operator_scaled(cx, mesh, boundary, material, source, temperature, None)
+    assemble_operator_scaled_with_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        source,
+        temperature,
+        None,
+        None,
+    )
+}
+
+/// [`assemble_operator`] with an explicitly bound matching-face contact set.
+///
+/// The contact block is temperature independent and symmetric positive
+/// semidefinite.  Every coincident face pair was already checked as complete by
+/// [`ThermalInterfaces::new`].
+pub fn assemble_operator_with_interfaces(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    source: &ScalarField,
+    temperature: &[f64],
+    interfaces: &ThermalInterfaces,
+) -> Result<AssembledSystem, ConductionError> {
+    assemble_operator_scaled_with_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        source,
+        temperature,
+        None,
+        Some(interfaces),
+    )
 }
 
 /// [`assemble_operator`] with an optional per-element multiplier on the
@@ -226,6 +262,33 @@ pub fn assemble_operator_scaled(
     temperature: &[f64],
     element_scale: Option<&[f64]>,
 ) -> Result<AssembledSystem, ConductionError> {
+    assemble_operator_scaled_with_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        source,
+        temperature,
+        element_scale,
+        None,
+    )
+}
+
+pub(crate) fn assemble_operator_scaled_with_interfaces(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    source: &ScalarField,
+    temperature: &[f64],
+    element_scale: Option<&[f64]>,
+    interfaces: Option<&ThermalInterfaces>,
+) -> Result<AssembledSystem, ConductionError> {
+    if let Some(interfaces) = interfaces {
+        interfaces.validate_for(mesh, boundary)?;
+    } else {
+        ThermalInterfaces::require_no_undeclared(mesh)?;
+    }
     let n = mesh.vertex_count();
     if let Some(scale) = element_scale
         && scale.len() != mesh.element_count()
@@ -283,6 +346,9 @@ pub fn assemble_operator_scaled(
     }
 
     assemble_boundary(cx, mesh, boundary, &mut coo, &mut load)?;
+    if let Some(interfaces) = interfaces {
+        interfaces.assemble_into(cx, &mut coo)?;
+    }
 
     Ok(AssembledSystem {
         operator: coo.assemble(),
@@ -360,6 +426,41 @@ pub fn assemble_jacobian(
     material: &ConductivityModel,
     temperature: &[f64],
 ) -> Result<Csr, ConductionError> {
+    assemble_jacobian_with_optional_interfaces(cx, mesh, boundary, material, temperature, None)
+}
+
+/// [`assemble_jacobian`] with the constant matching-face contact block.
+pub fn assemble_jacobian_with_interfaces(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    temperature: &[f64],
+    interfaces: &ThermalInterfaces,
+) -> Result<Csr, ConductionError> {
+    assemble_jacobian_with_optional_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        temperature,
+        Some(interfaces),
+    )
+}
+
+pub(crate) fn assemble_jacobian_with_optional_interfaces(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    temperature: &[f64],
+    interfaces: Option<&ThermalInterfaces>,
+) -> Result<Csr, ConductionError> {
+    if let Some(interfaces) = interfaces {
+        interfaces.validate_for(mesh, boundary)?;
+    } else {
+        ThermalInterfaces::require_no_undeclared(mesh)?;
+    }
     let n = mesh.vertex_count();
     if temperature.len() != n {
         return Err(ConductionError::FieldLength {
@@ -416,6 +517,9 @@ pub fn assemble_jacobian(
         start = end;
     }
     assemble_boundary(cx, mesh, boundary, &mut coo, &mut discard)?;
+    if let Some(interfaces) = interfaces {
+        interfaces.assemble_into(cx, &mut coo)?;
+    }
     Ok(coo.assemble())
 }
 

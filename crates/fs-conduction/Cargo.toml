@@ -12,6 +12,7 @@ layer = "L3"
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-feec = { path = "../fs-feec" }
 fs-math = { path = "../fs-math" }
@@ -24,7 +25,6 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
-fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-mms = { path = "../fs-mms" }
 fs-vvreg = { path = "../fs-vvreg" }

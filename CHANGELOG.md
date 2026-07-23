@@ -204,6 +204,44 @@ workstream.
   retained comparison receipt or machine fingerprint; registry authority
   remains `NoClaim`/`Estimated`.
 
+### Post-checkpoint Level-A contact-resistance execution binding
+
+- Added an internal Robin-jump operator for exact duplicated matching-P1
+  traces. Every coincident boundary-face pair must be named and bound exactly
+  once; an undeclared pair refuses instead of becoming implicit perfect
+  contact or an unnoticed adiabatic gap.
+- Resolved positive area-specific resistance `R''` in canonical m² K/W from an
+  ordered `fs-matdb::InterfaceSystemCard`. The card identity and exact
+  property-use receipt travel into the integrated per-interface heat-rate
+  report and replay against the source claim set.
+- Added deterministic series-resistance budgets. Stable term ordering makes
+  input permutations bit-identical, stated symmetric half-widths combine by a
+  conservative sum with a confidence floor, finite-sum overflow refuses, and
+  any unstated term keeps the complete uncertainty band unavailable.
+- Bound `thermal-a-contact-series` to a G1 two-slab solve. The focused remote
+  fixture reproduced the `0.3 K/W` Level-A network as
+  `0.30000000000000004 K/W`, with `1.393e-11 K` maximum nodal error and
+  approximately `100 W` A-to-B interface heat rate. Missing cards, missing
+  bindings, changed-mesh reuse, and aggregate uncertainty overflow have typed
+  refusal tests.
+- Remote regression proof passed with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --all-targets` on worker `vmi1149989`:
+  46/46 tests passed (2 adjoint, 8 analytic, 22 conformance, 6 contact, and 8
+  MMS; the library target contained 0 tests). RCH reported 581.0 seconds total,
+  including 346.395 seconds of sync, 163.212 seconds for the remote command,
+  and 1.836 seconds for artifact retrieval. Shared `HEAD` moved from
+  `90137712` to `34c57c5b` during the lane without touching the reserved
+  contact files, so this is passing dirty-worktree evidence rather than a
+  same-HEAD retained receipt.
+- Raised aggregate Level-A execution coverage from 13/19 to 14/19. Five gaps
+  remain: radiation, P2 primal, combined anisotropic-nonlinear MMS, and the
+  P1/P2 adjoint-order ladders. This rung has no nonmatching/mortar projection,
+  pressure/gap/temperature-dependent contact law, changing contact area,
+  scenario-interface auto-lowering, contact adjoint, dominance-attribution
+  corpus case, retained registry comparison receipt, or L4 authority.
+
 ### Post-checkpoint convection-correlation rung
 
 - Added `fs-convection`, an L3 library with 11 Nusselt relations spanning

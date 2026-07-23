@@ -92,8 +92,8 @@ const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 12] = [
     ),
     (
         "thermal-a-contact-series",
-        None,
-        "fs-conduction implements no contact-resistance interface",
+        Some("tests/contact.rs::two_slab_contact_matches_level_a_series_and_retains_receipt"),
+        "the matching-P1 two-slab fixture binds an ordered interface card and retains its property receipt",
     ),
 ];
 
@@ -919,7 +919,7 @@ fn level_a_analytic_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        7
+        8
     );
     for (id, test, basis) in LEVEL_A_ANALYTIC_BINDINGS {
         assert!(
@@ -928,7 +928,7 @@ fn level_a_analytic_binding_matrix_is_complete_and_gap_preserving() {
         );
         if let Some(test) = test {
             assert!(
-                test.starts_with("tests/analytic.rs::"),
+                test.starts_with("tests/analytic.rs::") || test.starts_with("tests/contact.rs::"),
                 "{id}: executing test path must be stable"
             );
         }
