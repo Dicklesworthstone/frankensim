@@ -11,7 +11,11 @@ in-house `eft`/`dd` reference machinery lives THERE at L0 as a single
 implementation shared with fs-la — recorded relocation, beads
 6ys.8/6ys.12). The independent high-precision development oracle is the
 isolated, non-production `tools/oracle` MPFR harness; it is not part of this
-crate's dependency graph.
+crate's dependency graph. A second isolated, non-production
+`tools/cert-kernel` workspace supplies the diverse implementation: its basic
+operations use exact residuals and dyadic comparisons while its `exp` and
+`ln` use bounded positive series. It does not reuse fs-ivl's outward-nudge
+mechanism and is likewise absent from the production dependency graph.
 
 ## Public types and semantics
 - `INTERVAL_SEMANTICS_VERSION = 1` — package-version-independent identity for
@@ -140,6 +144,16 @@ crate's dependency graph.
    run per family passed as part of a 327,049-observation report with zero
    failures. The lane is development-only and absent from the production
    workspace dependency graph.
+6. **Diverse-implementation cross-check (G0)**: `tools/cert-kernel`
+   deterministically compares independently enclosed add/sub/mul/div/sqrt/
+   exp/ln results with fs-ivl, retains per-family non-overlap counts and width
+   ratio quantiles, and must detect a seeded one-ULP enclosure shrink. A green
+   finite corpus establishes agreement only for those observations; it cannot
+   promote either implementation to certificate authority or discharge the
+   exhaustive corpus obligation. Any non-overlap fails the lane and is
+   adjudicated with exact rational arithmetic where applicable, otherwise the
+   256-bit MPFR oracle. Neither side is silently widened to manufacture
+   agreement.
 
 ## Error model
 Domain violations that admit NO enclosure panic with structured messages:

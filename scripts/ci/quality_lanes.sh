@@ -7,7 +7,10 @@
 #      removing a gated target changes the lane set automatically.
 #   2. HIGH-PRECISION ORACLE: the isolated tools/oracle workspace checks
 #      fs-math ULP budgets and fs-ivl enclosures against MPFR at >=200 bits.
-#   3. FS-WASM STANDALONE: the nested fs-wasm workspace (native unit
+#   3. INDEPENDENT CERT KERNEL: a diverse implementation of basic and
+#      elementary interval operations cross-checks fs-ivl without reusing
+#      its rounding mechanisms.
+#   4. FS-WASM STANDALONE: the nested fs-wasm workspace (native unit
 #      tests; the browser build itself stays a wasm-pack lane).
 #
 # Every lane writes its COMPLETE log and a provisional JSONL verdict to a
@@ -298,6 +301,72 @@ else
   done
 fi
 
+# ---- Independent certified-arithmetic kernel (isolated N-version check) ----
+CERT_KERNEL_MANIFEST="tools/cert-kernel/Cargo.toml"
+CERT_KERNEL_LOCK="tools/cert-kernel/Cargo.lock"
+CERT_KERNEL_TARGET_DIR="$QUALITY_TARGET_DIR/cert-kernel"
+CERT_KERNEL_SAMPLES=4096
+CERT_KERNEL_FMT_LOG="$LOG_DIR/cert-kernel-fmt.log"
+CERT_KERNEL_CLIPPY_LOG="$LOG_DIR/cert-kernel-clippy.log"
+CERT_KERNEL_TEST_LOG="$LOG_DIR/cert-kernel-tests.log"
+CERT_KERNEL_AUDIT_LOG="$LOG_DIR/cert-kernel-audit.jsonl"
+
+if [[ -f "$CERT_KERNEL_MANIFEST" && -f "$CERT_KERNEL_LOCK" ]]; then
+  if cargo fmt --manifest-path "$CERT_KERNEL_MANIFEST" --check \
+      >"$CERT_KERNEL_FMT_LOG" 2>&1; then
+    row "cert-kernel-fmt" "pass" \
+      "isolated independent-kernel formatting" "$CERT_KERNEL_FMT_LOG"
+  else
+    row "cert-kernel-fmt" "fail" \
+      "isolated independent-kernel formatting failed" "$CERT_KERNEL_FMT_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$CERT_KERNEL_TARGET_DIR" \
+      cargo clippy --locked --manifest-path "$CERT_KERNEL_MANIFEST" --all-targets \
+        -- -D warnings >"$CERT_KERNEL_CLIPPY_LOG" 2>&1; then
+    row "cert-kernel-clippy" "pass" \
+      "isolated independent-kernel strict clippy" "$CERT_KERNEL_CLIPPY_LOG"
+  else
+    row "cert-kernel-clippy" "fail" \
+      "isolated independent-kernel strict clippy failed" "$CERT_KERNEL_CLIPPY_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$CERT_KERNEL_TARGET_DIR" \
+      cargo test --locked --manifest-path "$CERT_KERNEL_MANIFEST" \
+        >"$CERT_KERNEL_TEST_LOG" 2>&1; then
+    row "cert-kernel-tests" "pass" \
+      "isolated independent-kernel unit and cross-check tests" "$CERT_KERNEL_TEST_LOG"
+  else
+    row "cert-kernel-tests" "fail" \
+      "isolated independent-kernel tests failed" "$CERT_KERNEL_TEST_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if env CARGO_TARGET_DIR="$CERT_KERNEL_TARGET_DIR" \
+      cargo run --quiet --locked --manifest-path "$CERT_KERNEL_MANIFEST" -- \
+        --samples "$CERT_KERNEL_SAMPLES" >"$CERT_KERNEL_AUDIT_LOG" 2>&1; then
+    row "cert-kernel-audit" "pass" \
+      "independent comparison samples_per_family=$CERT_KERNEL_SAMPLES" \
+      "$CERT_KERNEL_AUDIT_LOG"
+  else
+    row "cert-kernel-audit" "fail" \
+      "independent comparison found an enclosure disagreement" \
+      "$CERT_KERNEL_AUDIT_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+else
+  CERT_KERNEL_MISSING="required independent cert-kernel manifest or reviewed lock is missing"
+  for cert_kernel_lane in fmt clippy tests audit; do
+    cert_kernel_log="$LOG_DIR/cert-kernel-${cert_kernel_lane}.log"
+    printf '%s\n' "$CERT_KERNEL_MISSING" >"$cert_kernel_log"
+    row "cert-kernel-${cert_kernel_lane}" "fail" \
+      "$CERT_KERNEL_MISSING" "$cert_kernel_log"
+    FAILURES=$((FAILURES + 1))
+  done
+fi
+
 # ---- fs-wasm standalone workspace (native tests) ----
 WASM_MANIFEST="crates/fs-wasm/Cargo.toml"
 WASM_LOCK="crates/fs-wasm/Cargo.lock"
@@ -395,6 +464,9 @@ patterns = (
     "constellation.lock", "scripts/ci/*.sh", "xtask/src/**/*.rs",
     "tools/oracle/Cargo.toml", "tools/oracle/Cargo.lock",
     "tools/oracle/README.md", "tools/oracle/src/**/*.rs",
+    "tools/cert-kernel/Cargo.toml", "tools/cert-kernel/Cargo.lock",
+    "tools/cert-kernel/README.md", "tools/cert-kernel/src/**/*.rs",
+    "tools/cert-kernel/tests/**/*.rs",
     "crates/*/Cargo.toml", "crates/*/Cargo.lock", "crates/*/.cargo/*.toml",
     "crates/*/CONTRACT.md", "crates/*/build.rs",
     "crates/*/src/**/*.rs", "crates/*/tests/**/*.rs", "crates/*/benches/**/*.rs",
@@ -472,7 +544,7 @@ if [[ "$SNAPSHOT_AFTER" == "$SNAPSHOT_BEFORE" \
 fi
 
 python3 - "$HEAD_SHA" "$DIRTY" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
-  "$CONSTELLATION_LOCK_HASH" "$((LANE_COUNT + 7))" "$FAILURES" "$LOG_DIR" <<'PY' | tee -a "$VERDICTS"
+  "$CONSTELLATION_LOCK_HASH" "$((LANE_COUNT + 11))" "$FAILURES" "$LOG_DIR" <<'PY' | tee -a "$VERDICTS"
 import json
 import sys
 
