@@ -4,6 +4,8 @@
 
 This document separates two authorities: manifest consumers and Rust API references are measured from the live workspace, while roles, risk classes, verification gaps, and review priorities are explicit governance judgments. A pin proves content identity and cleanliness; it does not prove sibling correctness.
 
+Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md).
+
 ## Measured usage summary
 
 | Sibling | State | Runtime consumers | Dev consumers | Production refs | Test refs | Correctness | Availability | Review priority |
@@ -23,7 +25,7 @@ This document separates two authorities: manifest consumers and Rust API referen
 1. **Independent review starts with asupersync cancellation and FrankenSQLite durability (`f85xj.13.5`).** Both sit directly beneath cross-layer correctness claims and remain only partially exercised from FrankenSim.
 2. **The compatibility suite follows measured surfaces (`f85xj.13.4`).** Active dependency and API-reference rows define the first release-train matrix; planned-only surfaces cannot silently enter it as implemented claims.
 3. **The SBOM/source manifest binds all seven pins (`f85xj.13.2`).** It must retain pinned-but-unused siblings so absence of use is visible rather than omitted.
-4. **Governance covers availability as well as hashes (`f85xj.13.6`).** Release cadence, incident response, archival, and maintainer continuity are unresolved for the critical siblings.
+4. **Governance now names the fail-closed operating policy (`f85xj.13.6`).** The policy treats all seven siblings as potentially single-maintainer, prioritizes asupersync and FrankenSQLite incidents by measured reachability, and keeps E13.4 compatibility trains and E13.3 archival bundles as explicit open controls rather than current capabilities.
 
 ## Per-sibling assessment
 
@@ -126,9 +128,9 @@ This document separates two authorities: manifest consumers and Rust API referen
 - **Sampled API references:**
   - `fsqlite` at `crates/fs-ledger/src/crosswalk.rs`:14
   - `fsqlite` at `crates/fs-ledger/src/identity_migration.rs`:24
-  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:78
-  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2593
-  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2619
+  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:83
+  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2598
+  - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2624
 - **Risk:** correctness `critical`, availability `high`; security surface: SQL, schema migration, database-file, blob, transaction, and recovery inputs.
 - **Review status:** Pinned and heavily exercised through fs-ledger; independent durability review remains pending.
 - **Current verification:** constellation.lock pin and clean-tree verification; fs-ledger conformance, migration, time-travel, identity-guard, and artifact batteries; fs-vskeleton ledger integration and reopen tests

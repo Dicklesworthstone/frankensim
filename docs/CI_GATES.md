@@ -459,6 +459,28 @@ repositories at a mismatched HEAD are never repaired automatically. Bumping a
 sibling remains deliberate: re-run `cargo run -p xtask -- lock-constellation`
 locally and commit the new lock (schema v2 records remotes).
 
+## Constellation governance
+
+[Constellation Governance](CONSTELLATION_GOVERNANCE.md) defines the
+single-maintainer planning assumption, review cadence, reachability-based
+incident classification, fail-closed emergency-update policy, archival
+requirements, and support horizon for all seven pinned siblings. The generated
+[trust-cone assessment](CONSTELLATION_TRUST_CONE.md) links that policy to
+measured consumers and risk classes. The retained
+[July 2026 FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md)
+exercises report, triage, candidate pin, emergency train, and archival decisions.
+
+`cargo run -p xtask -- check-constellation-assessment` requires these documents,
+their normative sections, and their cross-references. This is a documentation
+and consistency gate. It does not prove maintainer availability or incident
+resolution.
+
+E13.4 still owns the executable cross-repository compatibility train, and E13.3
+still owns the deterministic vendored source bundle. Both are open. Therefore a
+focused sibling test is not a complete pin-admission result, and the configured
+DSR release artifact, Git remotes, sibling checkouts, lock, and bootstrap
+provenance are not yet an independently escrowed, self-contained release bundle.
+
 ## External DSR wrapper limitations
 
 The repo-local scripts above fail closed and retain their own complete evidence,

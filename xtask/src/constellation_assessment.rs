@@ -13,10 +13,52 @@ use std::path::Path;
 pub(crate) const CHECK: &str = "constellation-trust-cone";
 const DATA_PATH: &str = "constellation-trust-assessment.json";
 const DOC_PATH: &str = "docs/CONSTELLATION_TRUST_CONE.md";
+const GOVERNANCE_PATH: &str = "docs/CONSTELLATION_GOVERNANCE.md";
+const TABLETOP_PATH: &str = "docs/CONSTELLATION_INCIDENT_TABLETOP_2026-07.md";
+const CI_GATES_PATH: &str = "docs/CI_GATES.md";
 const SCHEMA: &str = "frankensim-constellation-trust-assessment-v1";
 const IDENTITY_DOMAIN: &str = "org.frankensim.xtask.constellation-trust-assessment.v1";
 const BEAD_ID: &str = "frankensim-extreal-program-f85xj.13.1";
 const MAX_SAMPLES_PER_SIBLING: usize = 5;
+const GOVERNANCE_MARKERS: &[&str] = &[
+    "# FrankenSim Constellation Governance",
+    "frankensim-extreal-program-f85xj.13.6",
+    "## Scope and authority",
+    "## Maintainer reality and decision rights",
+    "## Review cadence",
+    "## Incident classification",
+    "## Incident-response protocol",
+    "## Release trains and emergency updates",
+    "## Archival, escrow, and retention",
+    "## Support horizon",
+    "(CONSTELLATION_TRUST_CONE.md)",
+    "(CLAIM_INTEGRITY.md)",
+    "(CONSTELLATION_INCIDENT_TABLETOP_2026-07.md)",
+    "E13.3",
+    "E13.4",
+    "pinned-unused",
+];
+const TABLETOP_MARKERS: &[&str] = &[
+    "# Constellation Incident Tabletop: Synthetic FrankenSQLite Corruption",
+    "frankensim-extreal-program-f85xj.13.6",
+    "no actual corruption was observed",
+    "report -> triage -> emergency train -> bundle",
+    "## Transcript",
+    "### T+00 — report and preserve",
+    "### T+15 — triage reachability",
+    "### T+75 — emergency compatibility train",
+    "### T+105 — release and archival bundle",
+    "E13.3",
+    "E13.4",
+    "failed-readiness",
+    "(CONSTELLATION_GOVERNANCE.md)",
+    "(CLAIM_INTEGRITY.md)",
+];
+const CI_GATES_MARKERS: &[&str] = &[
+    "## Constellation governance",
+    "(CONSTELLATION_GOVERNANCE.md)",
+    "(CONSTELLATION_INCIDENT_TABLETOP_2026-07.md)",
+];
 
 #[derive(Clone, Copy)]
 struct Policy {
@@ -610,6 +652,7 @@ fn render_markdown(assessment: &Assessment) -> String {
         assessment.lock_hash
     );
     output.push_str("This document separates two authorities: manifest consumers and Rust API references are measured from the live workspace, while roles, risk classes, verification gaps, and review priorities are explicit governance judgments. A pin proves content identity and cleanliness; it does not prove sibling correctness.\n\n");
+    output.push_str("Operational ownership, incident response, archival, and support are governed by [Constellation Governance](CONSTELLATION_GOVERNANCE.md). Its retained readiness exercise is the [July 2026 synthetic FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md).\n\n");
     output.push_str("## Measured usage summary\n\n");
     output.push_str("| Sibling | State | Runtime consumers | Dev consumers | Production refs | Test refs | Correctness | Availability | Review priority |\n");
     output.push_str("| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: |\n");
@@ -634,7 +677,7 @@ fn render_markdown(assessment: &Assessment) -> String {
     output.push_str("1. **Independent review starts with asupersync cancellation and FrankenSQLite durability (`f85xj.13.5`).** Both sit directly beneath cross-layer correctness claims and remain only partially exercised from FrankenSim.\n");
     output.push_str("2. **The compatibility suite follows measured surfaces (`f85xj.13.4`).** Active dependency and API-reference rows define the first release-train matrix; planned-only surfaces cannot silently enter it as implemented claims.\n");
     output.push_str("3. **The SBOM/source manifest binds all seven pins (`f85xj.13.2`).** It must retain pinned-but-unused siblings so absence of use is visible rather than omitted.\n");
-    output.push_str("4. **Governance covers availability as well as hashes (`f85xj.13.6`).** Release cadence, incident response, archival, and maintainer continuity are unresolved for the critical siblings.\n\n");
+    output.push_str("4. **Governance now names the fail-closed operating policy (`f85xj.13.6`).** The policy treats all seven siblings as potentially single-maintainer, prioritizes asupersync and FrankenSQLite incidents by measured reachability, and keeps E13.4 compatibility trains and E13.3 archival bundles as explicit open controls rather than current capabilities.\n\n");
     output.push_str("## Per-sibling assessment\n\n");
     for sibling in &assessment.siblings {
         let policy = sibling.policy;
@@ -716,6 +759,39 @@ pub(crate) fn generate(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn missing_markers<'a>(text: &str, required: &'a [&'a str]) -> Vec<&'a str> {
+    required
+        .iter()
+        .copied()
+        .filter(|marker| !text.contains(marker))
+        .collect()
+}
+
+fn check_required_document(root: &Path, path: &str, markers: &[&str]) -> Option<Violation> {
+    match std::fs::read_to_string(root.join(path)) {
+        Ok(text) => {
+            let missing = missing_markers(&text, markers);
+            if missing.is_empty() {
+                None
+            } else {
+                Some(Violation {
+                    check: CHECK,
+                    crate_name: path.to_string(),
+                    detail: format!(
+                        "required constellation-governance markers are missing: {}",
+                        missing.join(", ")
+                    ),
+                })
+            }
+        }
+        Err(error) => Some(Violation {
+            check: CHECK,
+            crate_name: path.to_string(),
+            detail: format!("cannot read required constellation-governance document: {error}"),
+        }),
+    }
+}
+
 pub(crate) fn check(root: &Path) -> Vec<Violation> {
     let (json, markdown) = match expected_artifacts(root) {
         Ok(artifacts) => artifacts,
@@ -727,7 +803,7 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
             }];
         }
     };
-    [(DATA_PATH, json), (DOC_PATH, markdown)]
+    let mut violations: Vec<_> = [(DATA_PATH, json), (DOC_PATH, markdown)]
         .into_iter()
         .filter_map(|(path, expected)| match std::fs::read_to_string(root.join(path)) {
             Ok(actual) if actual == expected => None,
@@ -744,7 +820,17 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
                 detail: format!("cannot read retained assessment artifact: {error}"),
             }),
         })
-        .collect()
+        .collect();
+    for (path, markers) in [
+        (GOVERNANCE_PATH, GOVERNANCE_MARKERS),
+        (TABLETOP_PATH, TABLETOP_MARKERS),
+        (CI_GATES_PATH, CI_GATES_MARKERS),
+    ] {
+        if let Some(violation) = check_required_document(root, path, markers) {
+            violations.push(violation);
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
@@ -787,5 +873,14 @@ mod tests {
             .find(|sibling| sibling.policy.lib == "frankenpandas")
             .expect("FrankenPandas is retained even while unused");
         assert_eq!(usage_state(&pandas.usage), "pinned-unused");
+    }
+
+    #[test]
+    fn governance_marker_lint_names_missing_controls() {
+        let source = "# FrankenSim Constellation Governance\n## Scope and authority\n";
+        let missing = missing_markers(source, GOVERNANCE_MARKERS);
+        assert!(missing.contains(&"## Incident-response protocol"));
+        assert!(missing.contains(&"E13.3"));
+        assert!(!missing.contains(&"# FrankenSim Constellation Governance"));
     }
 }

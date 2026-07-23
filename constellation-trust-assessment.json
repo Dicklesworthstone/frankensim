@@ -94,7 +94,7 @@
       "gaps": ["no independent cross-repo WAL, power-loss, and checkpoint adjudication backs FrankenSim durability claims", "multi-GiB artifact and long-running concurrent-reader stress remains outside routine focused tests"],
       "review_priority": 1,
       "review_targets": ["WAL durability", "transaction boundaries", "migration refusal", "blob and checkpoint behavior"],
-      "usage": {"state": "active", "runtime_consumers": ["fs-ledger", "fs-vskeleton"], "dev_consumers": ["fs-ledger"], "production_api_references": 29, "test_api_references": 35, "samples": [{"path": "crates/fs-ledger/src/crosswalk.rs", "line": 14, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/identity_migration.rs", "line": 24, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 78, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 2593, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 2619, "symbol": "fsqlite"}]}
+      "usage": {"state": "active", "runtime_consumers": ["fs-ledger", "fs-vskeleton"], "dev_consumers": ["fs-ledger"], "production_api_references": 29, "test_api_references": 35, "samples": [{"path": "crates/fs-ledger/src/crosswalk.rs", "line": 14, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/identity_migration.rs", "line": 24, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 83, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 2598, "symbol": "fsqlite"}, {"path": "crates/fs-ledger/src/lib.rs", "line": 2624, "symbol": "fsqlite"}]}
     },
     {
       "lib": "frankentorch",
