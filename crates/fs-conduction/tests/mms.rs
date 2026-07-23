@@ -39,10 +39,14 @@ use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::{
     ConductionProblem, InitialGuess, LinearConfig, Nonlinearity, SolveConfig, StopRule, solve,
 };
+use fs_feec::highorder::simplex::SimplexSpace;
+use fs_feec::kuhn_cube;
 use fs_mms::{
     Coverage, LadderSide, MmsMatrix, MmsMatrixRow, ORDER_GATE_TOLERANCE, OrderGate,
     RefinementLadder,
 };
+use fs_sparse::Coo;
+use fs_sparse::precond::{IdentityPrecond, pcg};
 use fs_vvreg::thermal_level_a::{
     ThermalLevelAAcceptance, ThermalLevelAKind, thermal_level_a_cases,
 };
@@ -60,8 +64,8 @@ const LEVEL_A_MMS_BINDINGS: [(&str, Option<&str>, &str); 7] = [
     ),
     (
         "thermal-a-mms-p2-dirichlet",
-        None,
-        "fs-conduction implements P1 elements only",
+        Some("tests/mms.rs::mms_p2_isotropic_dirichlet_order"),
+        "the high-order FEEC P2 tetrahedral kernel executes the catalog order gate",
     ),
     (
         "thermal-a-mms-p1-anisotropic-nonlinear",
@@ -225,6 +229,96 @@ fn mms_isotropic_dirichlet_orders() {
         1.0,
         &hs,
         &h1,
+    );
+}
+
+// ---------------------------------------------------------------- P2 case
+
+fn p2_temperature(p: [f64; 3]) -> f64 {
+    let pi = std::f64::consts::PI;
+    (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin()
+}
+
+fn p2_source(p: [f64; 3]) -> f64 {
+    let pi = std::f64::consts::PI;
+    3.0 * pi * pi * p2_temperature(p)
+}
+
+fn run_p2_isotropic_dirichlet(n: usize) -> (f64, f64) {
+    let (complex, positions) = kuhn_cube(n);
+    let space = SimplexSpace::new(&complex, 2);
+    let stiffness = space.stiffness(&positions);
+    let load = space.load(&positions, &p2_source);
+    let boundary = space.boundary_mask();
+    let free: Vec<usize> = (0..space.ndof).filter(|&dof| !boundary[dof]).collect();
+    let mut slot = vec![usize::MAX; space.ndof];
+    for (i, &dof) in free.iter().enumerate() {
+        slot[dof] = i;
+    }
+
+    let mut reduced = Coo::new(free.len(), free.len());
+    for (i, &dof) in free.iter().enumerate() {
+        let (cols, values) = stiffness.row(dof);
+        for (&col, &value) in cols.iter().zip(values) {
+            if slot[col] != usize::MAX {
+                reduced.push(i, slot[col], value);
+            }
+        }
+    }
+    let operator = reduced.assemble();
+    let rhs: Vec<f64> = free.iter().map(|&dof| load[dof]).collect();
+    let mut free_temperature = vec![0.0f64; free.len()];
+    let solver = pcg(
+        &operator,
+        &rhs,
+        &mut free_temperature,
+        &IdentityPrecond,
+        1e-12,
+        60_000,
+    );
+    assert!(
+        solver.converged,
+        "P2 isotropic Dirichlet solve failed at n={n}: {solver:?}"
+    );
+    assert!(
+        solver.rel_residual < 1e-10,
+        "P2 residual {} is too loose for an order ladder",
+        solver.rel_residual
+    );
+
+    let mut temperature = vec![0.0f64; space.ndof];
+    for (i, &dof) in free.iter().enumerate() {
+        temperature[dof] = free_temperature[i];
+    }
+    (
+        space.l2_error(&positions, &temperature, &p2_temperature),
+        solver.rel_residual,
+    )
+}
+
+#[test]
+fn mms_p2_isotropic_dirichlet_order() {
+    let mut hs = Vec::new();
+    let mut errors = Vec::new();
+    let mut max_residual = 0.0f64;
+    for &n in &GRIDS {
+        let (error, residual) = run_p2_isotropic_dirichlet(n);
+        hs.push(1.0 / n as f64);
+        errors.push(error);
+        max_residual = max_residual.max(residual);
+    }
+    report_level_a(
+        "thermal-a-mms-p2-dirichlet",
+        "conduction/mms/p2-isotropic-dirichlet/l2",
+        LadderSide::Primal,
+        &hs,
+        &errors,
+    );
+    println!(
+        "{{\"suite\":\"fs-conduction/mms\",\
+         \"runtime_case\":\"conduction/mms/p2-isotropic-dirichlet/l2\",\
+         \"max_linear_residual\":{max_residual:e},\
+         \"kernel\":\"fs-feec/highorder/simplex/P2\"}}"
     );
 }
 
@@ -688,7 +782,7 @@ fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        5
+        6
     );
     for (id, test, basis) in LEVEL_A_MMS_BINDINGS {
         assert!(
@@ -696,9 +790,18 @@ fn level_a_mms_binding_matrix_is_complete_and_gap_preserving() {
             "{id} must state its binding or gap basis"
         );
         if let Some(test) = test {
+            let Some(relative) = test.strip_prefix("tests/") else {
+                panic!("{id}: executing test path must be crate-relative");
+            };
+            let Some((target, test_name)) = relative.split_once(".rs::") else {
+                panic!("{id}: executing test path must name an integration test function");
+            };
             assert!(
-                test.starts_with("tests/mms.rs::"),
-                "{id}: executing test path must be stable"
+                !target.is_empty()
+                    && !target.contains('/')
+                    && !test_name.is_empty()
+                    && !test_name.contains("::"),
+                "{id}: executing test path must be a stable top-level integration test"
             );
         }
     }
@@ -762,10 +865,17 @@ fn mms_battery_matrix_is_declared() {
             ),
             row(
                 "p2-simplicial",
-                "any",
+                "dirichlet-isotropic",
+                Coverage::Covered {
+                    test: "tests/mms.rs::mms_p2_isotropic_dirichlet_order".to_string(),
+                },
+            ),
+            row(
+                "p2-simplicial",
+                "adjoint-order",
                 Coverage::Gap {
-                    reason: "this crate discretizes the P1 (FEEC 0-form) space only; \
-                         higher-order thermal elements are not built"
+                    reason: "the high-order FEEC P2 operator has no bound dual convergence \
+                         ladder in this crate"
                         .to_string(),
                 },
             ),
@@ -784,7 +894,7 @@ fn mms_battery_matrix_is_declared() {
         println!("{line}");
     }
     let gaps = matrix.gaps();
-    assert_eq!(gaps.len(), 3, "every declared gap must carry a reason");
+    assert_eq!(gaps.len(), 2, "every declared gap must carry a reason");
     for gap in gaps {
         match &gap.coverage {
             Coverage::Gap { reason } => assert!(!reason.is_empty()),

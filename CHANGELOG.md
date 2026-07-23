@@ -286,6 +286,51 @@ workstream.
   radiation-dominated retained corpus case, or registered maturity promotion is
   claimed by this rung.
 
+### Post-checkpoint Level-A P2 primal MMS binding
+
+- Bound `thermal-a-mms-p2-dirichlet` to a four-grid L2 ladder that executes
+  the existing `fs_feec::highorder::simplex::SimplexSpace` order-2
+  tetrahedral kernel. The fixture solves
+  `-Delta T = 3*pi^2*sin(pi*x)*sin(pi*y)*sin(pi*z)` with homogeneous
+  Dirichlet temperature-excess data and evaluates the discrete field through
+  the kernel's high-order L2 path.
+- Focused remote proof passed 1/1 on `hz1` (job
+  `j-29943194691043463`) with
+  `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --test mms
+  mms_p2_isotropic_dirichlet_order -- --nocapture`. The four L2 errors were
+  `0.00566462`, `0.00167318`, `0.000704082`, and `0.000360002`, giving
+  observed order `3.007794` against theoretical order `3.0`; the worst linear
+  residual was `9.87e-13`. The lane started and ended at
+  `7a2a63ffc1535e62452550624cb8bc719b29e836`, so this is stable-HEAD
+  dirty-worktree execution evidence.
+- The first complete MMS-test run on `vmi1227854` (job
+  `j-29943194691043465`) passed all nine numerical and matrix checks that it
+  reached, then exposed the crosswalk guard's stale expected executing-binding
+  count (`5` rather than `6`). After correcting that count, the focused guard
+  retry on `hz1` (job `j-29943194691043470`) exposed a second stale assumption
+  that every executing target lived in `tests/mms.rs`; the already-bound P1
+  adjoint correctly lives in `tests/adjoint.rs`. The guard now validates a
+  canonical crate-relative integration-test function path, and its next retry
+  passed 1/1 on `hz1` (job `j-29943194691043475`). These were registry-test
+  bookkeeping failures, not numerical ladder failures, and remain recorded
+  here rather than being folded into the passing result.
+- Full-crate remote proof then passed all 56 tests on `vmi1227854` (job
+  `j-29943194691043477`) with `RCH_REQUIRE_REMOTE=1 rch exec
+  --no-self-healing -- env
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
+  cargo test --locked -p fs-conduction --all-targets`: 1 library, 3 adjoint,
+  8 analytic, 22 conformance, 6 contact, 10 MMS, and 6 radiation tests. The
+  lane started and ended at `c942e7100989e3fa6bff641317350d0b9d9c74c1`;
+  RCH reported the artifact retrieval in its terminal output and a successful
+  remote verdict.
+- Aggregate Level-A execution coverage rises from 17/19 to 18/19. Only the P2
+  heat-adjoint order target remains without an executing kernel. This rung
+  does not turn the P1 `fs-conduction` material/boundary frontend into a
+  general P2 thermal frontend, persist a corpus receipt or ladder, or add a
+  machine fingerprint or L4 authority.
+
 ### Post-checkpoint Level-A P1 heat-adjoint MMS binding
 
 - Bound `thermal-a-mms-p1-adjoint` to a four-grid P1 dual L2 ladder. The

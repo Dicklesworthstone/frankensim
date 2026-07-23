@@ -340,7 +340,11 @@ Robin. A fifth P1 L2 ladder resolves the heat-adjoint target through
 primal case uses a rotated orthotropic principal frame with three distinct
 linear `k_i(T)` laws and a chain-rule manufactured source, so it exercises
 off-diagonal `K(T)`, nonzero `dK/dT`, and nonlinear iteration in one executing
-ladder.
+ladder. The P2 isotropic Dirichlet target executes through the existing
+`fs_feec::highorder::simplex::SimplexSpace` order-2 stiffness, load, boundary
+mask, and L2 machinery. That is high-order FEEC-kernel evidence; it does not
+change this crate's P1 material/boundary frontend into a general P2 thermal
+frontend.
 Both test files carry a complete crosswalk over their respective catalog
 partition, so adding, removing, or silently renaming a Level-A row fails the
 battery and every absent binding retains a reason.
@@ -351,10 +355,11 @@ definition; it is not substituted for this solver's geometry, discretization,
 or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
-remain `Estimated`, and the five rows not bound in this crate are still
-reference/target-only here. Two of those five Nusselt rows execute separately
+remain `Estimated`, and the four rows not bound in this crate are still
+reference/target-only here. Two of those four Nusselt rows execute separately
 in `fs-convection`, and the normalized lumped-transient row executes through
-the first-order generalized-alpha paths in `fs-time`.
+the first-order generalized-alpha paths in `fs-time`. The remaining unexecuted
+Level-A target is the P2 heat-adjoint order ladder.
 
 ## No-claim boundaries
 
@@ -449,6 +454,12 @@ the first-order generalized-alpha paths in `fs-time`.
   between the assembled `∂R/∂T`, the analytic pullback, and the primal solve.
   Neither result establishes shape derivatives, mesh sensitivity, or a
   goal-oriented error bound.
+- The P2 primal ladder covers constant isotropic conductivity, homogeneous
+  Dirichlet temperature-excess data, and the existing high-order FEEC
+  tetrahedral operator. It does not establish P2 temperature-dependent or
+  anisotropic materials, Neumann/Robin/contact/radiation boundary lowering,
+  nonlinear solves, cancellation-bounded assembly, or a retained registry
+  receipt.
 
 **Deferred, and why.**
 
