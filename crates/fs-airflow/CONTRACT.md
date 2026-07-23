@@ -59,6 +59,10 @@ existing convection rung.
 - `FanCurve::model_card` exposes the exact fan-law card already consumed by
   airflow evidence so product admission can audit the retained base-curve flow
   and speed-ratio axes without synthesizing a parallel card definition.
+- The E05.10 battery also consumes the public Dittus-Boelter correlation card
+  alongside that fan card. Its adversarial variant changes only Reynolds
+  number, proving the correlation receipt is the sole demotion cause while the
+  actual fan card remains in-domain.
 - The operating-point pressure/flow envelope populates the conditional
   boundary-condition term for pressure and power. The cited total-efficiency
   interval populates the fan-power parameter term. Both remain accompanied by
