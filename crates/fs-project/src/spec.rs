@@ -270,13 +270,15 @@ pub struct MaterialBinding {
     /// without conflicts needs no pin, and a conflict without a pin is a
     /// validation refusal — the system never auto-picks between sources.
     pub claim: Option<String>,
-    /// Material state identifier on the card.
+    /// Exact manufactured-state identifier on the card. It must be nonempty,
+    /// trim-canonical, and control-free; a bulk material name is not a state.
     pub state: String,
     /// Lower bound of the admitted temperature range.
     pub temp_lo: QtyAny,
     /// Upper bound of the admitted temperature range.
     pub temp_hi: QtyAny,
-    /// Source channel the card came from.
+    /// Source channel the card came from. This is visible project provenance,
+    /// not a substitute for the selected claim's own source authority.
     pub source: String,
 }
 
@@ -642,6 +644,10 @@ fn interface_declaration(
 /// spelling for card and claim references.
 fn is_hex_digest(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub(crate) fn is_canonical_binding_text(text: &str) -> bool {
+    !text.is_empty() && text.trim() == text && !text.chars().any(char::is_control)
 }
 
 fn violation(code: &'static str, what: impl Into<String>, fix: impl Into<String>) -> Violation {
@@ -1104,6 +1110,26 @@ impl ProjectSpec {
     fn check_card_bindings(&self, out: &mut Vec<Violation>) {
         if let Some(materials) = &self.materials {
             for binding in materials {
+                if !is_canonical_binding_text(&binding.state) {
+                    out.push(violation(
+                        "project-material-state-invalid",
+                        format!(
+                            "material binding for `{}` has an empty or noncanonical manufactured state",
+                            binding.region
+                        ),
+                        "copy the exact manufactured-state identity from the referenced card; a material name alone is not a state",
+                    ));
+                }
+                if !is_canonical_binding_text(&binding.source) {
+                    out.push(violation(
+                        "project-material-source-invalid",
+                        format!(
+                            "material binding for `{}` has an empty or noncanonical source channel",
+                            binding.region
+                        ),
+                        "state the pack, registry, or custody channel that supplied the referenced card",
+                    ));
+                }
                 check_dims(
                     out,
                     "project-material-dims",
@@ -1154,6 +1180,16 @@ impl ProjectSpec {
         }
         if let Some(interface_cards) = &self.interface_cards {
             for binding in interface_cards {
+                if !is_canonical_binding_text(&binding.source) {
+                    out.push(violation(
+                        "project-interface-source-invalid",
+                        format!(
+                            "interface-card binding for `{}` has an empty or noncanonical source channel",
+                            binding.interface
+                        ),
+                        "state the pack, registry, or custody channel that supplied the referenced interface card",
+                    ));
+                }
                 if !is_hex_digest(&binding.card) {
                     out.push(violation(
                         "project-interface-card",

@@ -11,6 +11,10 @@ conflicting claims. The `assignment` module (bead f85xj.6.3) compiles
 persisted mesh-index-free selectors to persistent `EntityId` tokens, resolves
 them against caller-supplied promoted meshes through `fs-io`, and retains the
 exact lower-layer reports.
+Bead f85xj.17.2 makes the material side of that schema fail closed: every
+binding carries an exact manufactured state, admitted temperature range, and
+visible source channel, while uncertainty remains owned by the selected
+sourced matdb claim rather than an override on the binding.
 Bead f85xj.17.6 extends the same canonical project identity with mandatory
 requirement authority and typed context-of-use gating: requirement/policy
 sources carry exact document versions and locators, and an explicitly
@@ -149,6 +153,11 @@ bindings; it runs no solves and admits no scenarios itself.
 - Uncertainty surfacing: `Unstated` uncertainty is an `Advisory`
   (`binding-uncertainty-unstated`) up front, never a refusal and never
   laundered — it caps downstream evidence at Estimated and the table says so.
+  `ResolvedProperty::uncertainty` is copied exactly from the selected matdb
+  claim. Schema v1 intentionally has no binding-side uncertainty override:
+  an override-looking wire keyword is refused as unknown. Tightening therefore
+  requires a new matdb claim with its own provenance and content identity,
+  followed by ordinary explicit `:claim` selection when claims conflict.
 - `assignment::resolve_geometry_assignments(&ProjectSpec,
   &ImportedMeshLibrary, AssignmentLimits, &Cx) -> GeometryResolution`
   resolves declarations first, compiles project-local targets to the actual
@@ -242,6 +251,12 @@ from two claims refuses; card-unknown, state-mismatch, non-region target,
 duplicate, unbound-region/interface, wrong-dims, and missing-property each
 carry their named code with a fix; missing sections name the precondition;
 and the property constants drift-test against `fs-conduction`.
+The f85xj.17.2 closeout assertions additionally prove that empty,
+whitespace-padded, or control-bearing manufactured-state/source fields refuse;
+direct resolver callers cannot bypass source validation; the resolved
+uncertainty equals the selected claim's uncertainty exactly; and an attempted
+binding-side uncertainty override is an unknown-field refusal rather than a
+silent narrowing path.
 
 `tests/project.rs`: the reference cooling project renders, parses strictly,
 is admissible, and hash-stable; canonical bytes are identical across both

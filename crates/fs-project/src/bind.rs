@@ -33,7 +33,7 @@ use fs_qty::Dims;
 use fs_regime::RegimeAuditCard;
 use fs_scenario::Violation;
 
-use crate::spec::{EntityDecl, ProjectSpec, dims};
+use crate::spec::{EntityDecl, ProjectSpec, dims, is_canonical_binding_text};
 
 /// Canonical matdb property name for bulk thermal conductivity, aligned
 /// with `fs-conduction`'s consumption (W/(m·K)).
@@ -724,6 +724,17 @@ fn resolve_card_properties(
     axis: &str,
     properties: &[RequiredProperty],
 ) {
+    if !is_canonical_binding_text(&declared_source) {
+        resolution.violations.push(violation(
+            "project-binding-source-invalid",
+            format!(
+                "{} has an empty or noncanonical declared card-source channel",
+                target.describe()
+            ),
+            "state the pack, registry, or custody channel that supplied the referenced card before resolving it",
+        ));
+        return;
+    }
     let mut resolved = Vec::new();
     let mut clean = true;
     for property in properties {

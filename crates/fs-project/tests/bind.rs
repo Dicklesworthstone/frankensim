@@ -324,6 +324,16 @@ fn the_reference_project_binds_fully_with_replayable_receipts() {
     );
     assert!(resolution.advisories.is_empty());
     assert_eq!(resolution.bindings.len(), 3);
+    let board_binding = resolution
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Region("board".to_string()))
+        .expect("board binding");
+    assert_eq!(
+        board_binding.properties[0].uncertainty,
+        stated(),
+        "the project binding has no authority to narrow or replace the selected claim's uncertainty"
+    );
     let receipts: Vec<_> = resolution.receipts().collect();
     assert_eq!(receipts.len(), 6, "3 bindings x 1 property x 2 endpoints");
 
@@ -675,6 +685,37 @@ fn structural_refusals_cover_cards_states_targets_and_coverage() {
         "project-material-state-mismatch",
         "`FR4`",
         "manufactured state, never a name",
+    );
+
+    // A direct resolver caller cannot bypass ordinary ProjectSpec validation
+    // to publish a binding without a visible card-source channel.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].source = " seed-v1".to_string();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-source-invalid",
+        "region `board`",
+        "custody channel",
+    );
+    assert!(
+        !resolution
+            .bindings
+            .iter()
+            .any(|binding| binding.target == fs_project::BindingTarget::Region("board".into())),
+        "invalid source provenance must not leave a resolved row"
+    );
+
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.interface_cards.as_mut().expect("interface cards")[0]
+        .source
+        .clear();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-source-invalid",
+        "interface `tim`",
+        "custody channel",
     );
 
     // Binding to a non-region entity.

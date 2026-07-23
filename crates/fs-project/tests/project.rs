@@ -945,3 +945,56 @@ fn claim_pins_travel_through_both_spellings_and_validate_as_hex() {
             .any(|v| v.code == "project-interface-claim")
     );
 }
+
+#[test]
+fn material_state_source_and_uncertainty_authority_are_fail_closed() {
+    let mut invalid = reference_project();
+    let material = &mut invalid.materials.as_mut().expect("materials")[0];
+    material.state.clear();
+    material.source = " matdb".to_string();
+    invalid.interface_cards.as_mut().expect("interface cards")[0].source =
+        "registry\nmirror".to_string();
+
+    let findings = invalid.validate();
+    for (code, fix) in [
+        (
+            "project-material-state-invalid",
+            "exact manufactured-state identity",
+        ),
+        ("project-material-source-invalid", "custody channel"),
+        ("project-interface-source-invalid", "custody channel"),
+    ] {
+        let finding = findings
+            .iter()
+            .find(|finding| finding.code == code)
+            .unwrap_or_else(|| panic!("missing `{code}` in {findings:?}"));
+        assert!(
+            finding.fix.contains(fix),
+            "`{code}` must give an actionable fix: {finding:?}"
+        );
+    }
+
+    // Binding-side uncertainty overrides do not exist in schema v1. A user
+    // seeking a tighter band must provide a new sourced matdb claim, whose
+    // provenance and content identity then travel through ordinary `:claim`
+    // selection. An override-looking keyword is therefore refused by name.
+    let canonical = print_sexpr(&reference_project()).expect("project renders");
+    let attempted_override = canonical.replacen(
+        ":source \"matdb\"",
+        ":uncertainty-half-width 0.001 :source \"matdb\"",
+        1,
+    );
+    assert_ne!(
+        attempted_override, canonical,
+        "fixture must target one material binding"
+    );
+    let decoded = parse_sexpr_lenient(&attempted_override).expect("document remains recognizable");
+    assert!(
+        decoded.recognition.iter().any(|finding| {
+            finding.code == "project-unknown-field"
+                && finding.what.contains("uncertainty-half-width")
+        }),
+        "binding-side uncertainty narrowing must not be silently accepted: {:?}",
+        decoded.recognition
+    );
+}
