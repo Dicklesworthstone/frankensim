@@ -629,6 +629,29 @@ they are not implied by this solid graph core.
 - `fs-thrust-e2e` is the first L6 adopter. Its long-horizon drift claim records
   route `CR-05` and the required statistical/model evidence while its current
   unchecked-RK4 outputs remain `Estimated`.
+- `tests/chaotic_doctrine_demonstrator.rs` is the paired E09 proof fixture. The
+  same fixed-step Lorenz-63 discretization produces (a) an outward-rounded
+  interval-width trajectory classified as `NoUsefulBound` for `CR-08` and
+  (b) a bounded odd long-run observable routed through `CR-05` and inspected
+  with `GaussianMixtureCs`. The continuous model's origin linearization adds
+  a positive dominant-eigenvalue enclosure for `CR-04` and a closed-form
+  interval bracket for the unstable mode's tenfold-amplitude event under
+  `CR-01`. A symmetry-randomized synthetic population gives the represented
+  RK4 map an independently checkable zero-mean truth.
+- The demonstrator names G0/G3/G5 obligations directly: typed route separation,
+  time-unit rescaling and parameter perturbation, synthetic-truth coverage at
+  every retained confidence-sequence checkpoint, and bit-identical same-ISA
+  replay of the curve, observations, routes, report, and report identity. The
+  retained curve is replay data, not yet a policy-frozen cross-ISA golden.
+- The interval path encloses only the stated discrete RK4 map; it is not a
+  validated continuous-time reachability tube. The confidence sequence is
+  conditional on the declared bounded symmetric sampling law and does not
+  validate the Lorenz model or pseudorandom independence. The two local
+  `Verified` colors cover only the retained interval numerics for the stated
+  continuous-model linearization and do not transfer to the nonlinear long
+  trajectory. The dissipative model asserts no conserved quantity, and the
+  final claims table records that route as not applicable rather than forging
+  a balance certificate.
 - No-claim boundary: routing is a governance plan. It does not prove that a
   capability ran, that a model or assumption is valid, that a required evidence
   object exists, or that a claim is scientifically true or runtime-admitted.

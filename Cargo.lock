@@ -1363,9 +1363,13 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-checker",
+ "fs-eproc",
  "fs-evidence",
+ "fs-ivl",
  "fs-ledger",
  "fs-package",
+ "fs-rand",
+ "fs-report",
  "fs-wedge",
 ]
 

@@ -10,8 +10,9 @@ decision determine the route.
 
 The table is descriptive governance data. Looking up a row does not mint
 evidence, authenticate an artifact, prove a scientific statement, or admit a
-runtime claim. The executable router is separately owned by
-`frankensim-extreal-program-f85xj.9.3`.
+runtime claim. The executable router now lives in
+`fs_govern::claim_router`; its deterministic records remain routing provenance,
+not authority.
 
 ## Closed claim-to-evidence table
 
@@ -52,6 +53,37 @@ The fifth role is deliberately narrow. Ordinary repeated interval propagation
 does not become a validated reachability tube merely because every arithmetic
 operation was outward rounded.
 
+## Paired chaotic-system demonstrator
+
+`crates/fs-govern/tests/chaotic_doctrine_demonstrator.rs` exercises the
+distinction on one fixed-step Lorenz-63 discretization:
+
+- outward-rounded propagation of a narrow initial box retains its width curve
+  until the requested exact long trajectory becomes `NoUsefulBound` under
+  `CR-08`;
+- a bounded odd long-run observable over a symmetry-randomized synthetic
+  population routes independently through `CR-05` and a
+  `GaussianMixtureCs`;
+- the continuous model's origin linearization has an interval-enclosed positive
+  dominant eigenvalue under `CR-04`, and that same unstable mode has a
+  closed-form interval bracket for a short tenfold-amplitude event under
+  `CR-01`;
+- the paired lab notebook retains all four router records, the refusal, Five
+  Explicits, width-curve stages, stopping decision, and final claims table. The
+  long-horizon RK4 statistic remains `Estimated`; the two local `Verified`
+  rows cover only their retained interval numerics.
+
+The interval curve encloses the discrete RK4 map, not the continuous Lorenz
+ODE or a validated reachability tube. The confidence-sequence check uses a
+synthetic zero-mean truth implied by the represented map's sign symmetry; it
+does not validate the physical model, pseudorandom independence, or coverage
+outside the declared sub-Gaussian sampling law. G3 covers time-unit rescaling
+and a parameter perturbation; G5 covers exact same-ISA replay. The local
+stability and event results do not transfer to the nonlinear long trajectory.
+Lorenz-63 is dissipative and this fixture asserts no conserved quantity, so its
+claims table records conservation as not applicable rather than inventing a
+balance certificate. A cross-ISA golden is not claimed by this fixture.
+
 ## Report-language boundary
 
 A mathematically valid enclosure remains a valid result even when it is too
@@ -89,7 +121,7 @@ model-form, calibration, and field-transfer evidence.
 Refusal boundary: a steady temperature interval or one long simulated
 trajectory cannot mint this reliability claim.
 
-## Capability maturity and future routing
+## Capability maturity and routing
 
 `available` means a narrow serving implementation exists at the source locator;
 it does not mean the complete scientific claim is established. `thin` means
@@ -100,6 +132,6 @@ inferred from adjacent primitives.
 The v1 table is closed and ordered. New claim families or evidence objects
 require a schema-version change, explicit migration semantics, updated
 no-claim boundaries, and tests that reject the old schema where the new
-semantics matter. The future router must consume this table as data and remain
+semantics matter. The live router consumes this table as data and remains
 unable to widen a staged, thin, inconclusive, or `NoUsefulBound` route into
 stronger authority.
