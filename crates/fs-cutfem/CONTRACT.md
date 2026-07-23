@@ -103,13 +103,16 @@ same certified cuts; its constitutive parameters come from
   nodal values, active cells, the retained cut rules and canonical ghost
   faces, algebraic compliance, dropped-cut count, CG iterations, and final
   residual as a typed `ResidualClaim::TrueEuclidean`, recomputed by an explicit
-  `b - Ax` operator application after CG rather than copied from CG's recursive
-  estimate. The legacy public magnitude and the fail-closed
-  `euclidean_rel_residual()` accessor are derived from that same claim. On a
-  graded tree, `node_ids()` contains only algebraic
-  terminal blocks while `nodal_values()` and solved fields reconstruct all
-  active hanging nodes. A requested hanging-node clamp refuses unless every
-  terminal in its trace is clamped; clamping a terminal alone is valid. Its
+  `b - Ax` operator application rather than copied from CG's recursive estimate.
+  If that true residual misses the requested gate after the recursive estimate
+  stops, deterministic CG correction passes solve the latest true residual;
+  every pass shares the configured aggregate iteration cap, and only a fresh
+  `b - Ax` application can establish success. The legacy public magnitude and
+  the fail-closed `euclidean_rel_residual()` accessor are derived from that
+  same claim. On a graded tree, `node_ids()` contains only algebraic terminal
+  blocks while `nodal_values()` and solved fields reconstruct all active
+  hanging nodes. A requested hanging-node clamp refuses unless every terminal
+  in its trace is clamped; clamping a terminal alone is valid. Its
   Q1 value/gradient evaluator refuses inactive cells, absent corners, and
   non-finite state rather than substituting zero.
 - With `adjoint-vjp`, `register_elasticity_apply_vjp` registers the

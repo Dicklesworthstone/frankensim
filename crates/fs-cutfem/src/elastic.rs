@@ -430,6 +430,58 @@ impl LinearOp for CutElasticityOperator {
     }
 }
 
+/// Solve with deterministic CG correction passes until an explicitly
+/// recomputed Euclidean residual meets the requested gate.
+///
+/// CG's recursively updated residual can drift below the true `b - A x`
+/// residual near a tight tolerance. Each pass therefore solves the latest
+/// true residual as a correction equation. All passes share one aggregate
+/// iteration budget, and only the explicit operator application can establish
+/// convergence.
+fn solve_cg_to_true_euclidean_gate(
+    operator: &CutElasticityOperator,
+    preconditioner: &JacobiPrecond,
+    tol: f64,
+    max_iters: usize,
+) -> (Vec<f64>, usize, ResidualClaim) {
+    let rhs = operator.rhs();
+    let mut x = vec![0.0; rhs.len()];
+    let mut total_iters = 0usize;
+
+    loop {
+        let residual_claim = recomputed_euclidean_residual_claim(operator, &x, rhs);
+        let rel_residual = residual_claim
+            .euclidean()
+            .expect("the elasticity solve explicitly recomputes its Euclidean residual");
+        if !rel_residual.is_finite() || rel_residual < tol || total_iters >= max_iters {
+            return (x, total_iters, residual_claim);
+        }
+
+        let mut applied = vec![0.0; rhs.len()];
+        operator.apply(&x, &mut applied);
+        let correction_rhs = rhs
+            .iter()
+            .zip(applied)
+            .map(|(b, ax)| b - ax)
+            .collect::<Vec<_>>();
+        let mut correction = CgState::new(operator, preconditioner, &correction_rhs);
+        let remaining_iters = max_iters - total_iters;
+        let _ = correction.run(operator, preconditioner, tol, remaining_iters);
+        total_iters += correction.iters;
+        for (value, delta) in x.iter_mut().zip(correction.x) {
+            *value += delta;
+        }
+
+        // A finite, nonzero residual starts every correction pass at relative
+        // residual one, so zero work here means the requested gate cannot make
+        // progress (for example, a tolerance >= 1 that was not already met).
+        if correction.iters == 0 {
+            let residual_claim = recomputed_euclidean_residual_claim(operator, &x, rhs);
+            return (x, total_iters, residual_claim);
+        }
+    }
+}
+
 /// Solved vector field plus convergence and integration metadata.
 #[derive(Debug, Clone)]
 pub struct CutElasticitySolution {
@@ -440,7 +492,7 @@ pub struct CutElasticitySolution {
     ghost_faces: Vec<FaceKey>,
     compliance: f64,
     dropped_cut_cells: usize,
-    /// CG iterations.
+    /// Aggregate CG iterations across all true-residual correction passes.
     pub iters: usize,
     /// Final recomputed Euclidean relative residual.
     pub rel_residual: f64,
@@ -1216,35 +1268,32 @@ impl CutElasticity<'_> {
         self.validate_solver()?;
         let operator = self.assemble_impl(f, g, boundary_traction)?;
         let preconditioner = JacobiPrecond::new(operator.matrix());
-        let mut state = CgState::new(&operator, &preconditioner, operator.rhs());
-        let _ = state.run(
+        let (coefficients, iters, residual_claim) = solve_cg_to_true_euclidean_gate(
             &operator,
             &preconditioner,
             self.solver_tol,
             self.solver_max_iters,
         );
-        let residual_claim =
-            recomputed_euclidean_residual_claim(&operator, &state.x, operator.rhs());
         let rel_residual = residual_claim
             .euclidean()
             .expect("the elasticity solve stores an explicitly recomputed Euclidean residual");
         if !rel_residual.is_finite() || rel_residual >= self.solver_tol {
             return Err(CutFemError::SolveNotConverged {
-                iters: state.iters,
+                iters,
                 rel_residual,
             });
         }
-        let nodal = operator.nodal_values(&state.x);
-        let compliance = operator.algebraic_compliance(&state.x)?;
+        let nodal = operator.nodal_values(&coefficients);
+        let compliance = operator.algebraic_compliance(&coefficients)?;
         Ok(CutElasticitySolution {
-            coefficients: state.x,
+            coefficients,
             nodal,
             active: operator.active,
             rules: operator.rules,
             ghost_faces: operator.ghost_faces,
             compliance,
             dropped_cut_cells: operator.dropped_cut_cells,
-            iters: state.iters,
+            iters,
             rel_residual,
             residual_claim,
         })
