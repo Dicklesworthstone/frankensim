@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use fs_report::{LabNotebook, Quantity, ReproStep, semantic_diff};
+use fs_evidence::{Ambition, Color, ModelCard, ValidityDomain};
+use fs_regime::{OperatingPoint, OverrideAcknowledgement, QoiClaim, audit_product_output};
+use fs_report::{LabNotebook, Quantity, ReproStep, regime_no_claims_markdown, semantic_diff};
 
 fn study() -> LabNotebook {
     let mut nb = LabNotebook::new("Bracket study", 42, "0.1.0");
@@ -121,4 +123,89 @@ fn semantic_diff_recovers_known_edits() {
 fn reporting_is_deterministic() {
     assert_eq!(study().content_hash(), study().content_hash());
     assert_eq!(study().render_markdown(), study().render_markdown());
+}
+
+fn regime_card() -> ModelCard {
+    ModelCard::new(
+        "forced-convection",
+        "2.1.0",
+        Ambition::Solid,
+        vec![],
+        ValidityDomain::unconstrained().with("Re", 10.0, 100.0),
+        vec![],
+        0.05,
+    )
+}
+
+fn regime_claim(qoi: &str, acknowledgement: bool) -> QoiClaim {
+    QoiClaim {
+        qoi: qoi.to_string(),
+        color: Color::Validated {
+            regime: ValidityDomain::unconstrained().with("Re", 10.0, 100.0),
+            dataset: "forced-convection-reference-v1".to_string(),
+        },
+        model_cards: vec!["forced-convection".to_string()],
+        override_acknowledgement: acknowledgement.then(|| OverrideAcknowledgement {
+            actor: "reviewer-7".to_string(),
+            reason: "exploratory-only".to_string(),
+        }),
+    }
+}
+
+#[test]
+fn report_renders_exact_regime_receipts_in_the_no_claim_section() {
+    let audit = audit_product_output(
+        &[regime_card()],
+        &[
+            OperatingPoint {
+                id: "inside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+            },
+            OperatingPoint {
+                id: "outside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 1_000.0)]),
+            },
+        ],
+        &[
+            regime_claim("temperature:max", true),
+            regime_claim("temperature:mean", false),
+        ],
+    )
+    .expect("valid final-envelope audit");
+    let markdown = regime_no_claims_markdown(&audit).expect("demotions render");
+
+    for receipt in &audit.receipts {
+        assert!(markdown.contains(&receipt.content_id().to_string()));
+        assert!(markdown.contains(&receipt.to_canonical_json()));
+    }
+    for expected in [
+        "## Operating-envelope no-claim boundaries",
+        "estimated / no dispersion claim",
+        "coverage `partial`",
+        "`outside` / `forced-convection` / `Re`",
+        "Override acknowledged by `reviewer-7`",
+        "acknowledgement does not restore color",
+        "cannot authenticate model-card or calibration authorities",
+    ] {
+        assert!(
+            markdown.contains(expected),
+            "missing {expected:?}:\n{markdown}"
+        );
+    }
+    assert_eq!(markdown, regime_no_claims_markdown(&audit).unwrap());
+}
+
+#[test]
+fn fully_in_domain_audit_does_not_invent_a_no_claim_section() {
+    let audit = audit_product_output(
+        &[regime_card()],
+        &[OperatingPoint {
+            id: "inside".to_string(),
+            groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+        }],
+        &[regime_claim("temperature:max", false)],
+    )
+    .expect("valid final-envelope audit");
+
+    assert_eq!(regime_no_claims_markdown(&audit), None);
 }

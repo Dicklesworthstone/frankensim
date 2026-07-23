@@ -13,6 +13,7 @@ layer = "L6"
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
 fs-obs = { path = "../fs-obs" }
+fs-regime = { path = "../fs-regime" }
 fs-session = { path = "../fs-session" }
 
 [dev-dependencies]

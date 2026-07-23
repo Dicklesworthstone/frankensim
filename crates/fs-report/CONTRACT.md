@@ -23,6 +23,10 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   headline with the effective requirement, declared safety factor and policy,
   exact evidence/context/replay identities, flip conditions, paired
   attribution headlines, and the complete indented audit projection.
+- `regime_no_claims_markdown(audit)` — deterministic final operating-envelope
+  no-claim section. It omits fully in-domain QoIs and renders every demoted
+  receipt with the human diagnosis, strong receipt identity, and exact canonical
+  JSON. An override remains visible but cannot restore color.
 
 ## Invariants
 
@@ -37,6 +41,9 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   always retains the exact `DecisionAssessment` and replay-package identities.
 - Safety factors are reported as already applied to the effective sourced
   limit; `fs-report` does not invent a multiplication or division convention.
+- A regime no-claim section is absent only when every final receipt is fully
+  in-domain. Rendering is sorted by QoI and receipt identity, includes exact
+  split-sweep partitions, and never averages coverage or drops a demotion.
 
 ## Error model
 
@@ -61,10 +68,12 @@ None.
 
 ## Conformance tests
 
-`tests/report.rs` (6 cases): the notebook renders all sections with units;
+`tests/report.rs`: the notebook renders all sections with units;
 metrics carry their units; the notebook carries the exact reproducing IR; the
 reproducibility loop closes by content hash (stable + change-sensitive);
-semantic diff recovers known edits ranked by significance; determinism.
+semantic diff recovers known edits ranked by significance; determinism; final
+regime demotions render with exact receipts while fully in-domain audits emit no
+no-claim section.
 
 `tests/decision.rs` covers deterministic indeterminate and binary decision
 headlines, units and authority identities, explicit flip actions, and the
@@ -81,6 +90,10 @@ projection-only no-claim boundary.
   `fs-session::DecisionAssessment`; it does not resolve content hashes,
   authenticate requirement or policy sources, recompute compliance or
   attribution, price evidence actions, or certify scientific evidence.
+- The regime no-claim section is a presentation of an `fs-regime` audit. Its
+  receipt identities bind exact bytes but do not authenticate card ownership,
+  calibration sources, or the completeness of the orchestrator-supplied card
+  set and operating envelope.
 - Reference-run assembly for every requirement-bearing QoI, deterministic HTML,
   report routing through the CLI, and `frankensim explain` remain staged behind
   their prerequisite work.

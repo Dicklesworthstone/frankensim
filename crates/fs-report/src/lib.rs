@@ -16,6 +16,8 @@
 //! [`decision_headline_markdown`] projects an already-admitted
 //! [`fs_session::DecisionAssessment`] into a compact reviewer-facing headline.
 //! It does not recompute compliance, uncertainty, attribution, or action value.
+//! [`regime_no_claims_markdown`] projects final operating-envelope demotions
+//! into the report's no-claim section without changing their evidence state.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
@@ -24,7 +26,59 @@ use fs_evidence::{
     action::ActionKind,
     uncertainty::{BudgetContribution, ComplianceVerdict, RequirementRelation},
 };
+use fs_regime::ProductOutputAudit;
 use fs_session::DecisionAssessment;
+
+/// Render every demoted final-envelope receipt in a deterministic no-claim section.
+///
+/// Fully in-domain QoIs are omitted. Each demoted entry includes the human
+/// diagnosis, the strong receipt identity, and the exact canonical receipt JSON
+/// needed for ledger/package handoff. This is presentation only: it cannot
+/// restore color or authenticate model-card authorities.
+#[must_use]
+pub fn regime_no_claims_markdown(audit: &ProductOutputAudit) -> Option<String> {
+    let mut receipts = audit
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.demoted())
+        .collect::<Vec<_>>();
+    if receipts.is_empty() {
+        return None;
+    }
+    receipts.sort_by(|left, right| {
+        left.qoi
+            .cmp(&right.qoi)
+            .then_with(|| left.content_id().cmp(&right.content_id()))
+    });
+
+    let mut output = String::from("## Operating-envelope no-claim boundaries\n\n");
+    let _ = writeln!(
+        output,
+        "- **Audit collection provenance:** `{:016x}`\n",
+        audit.provenance.0
+    );
+    for receipt in receipts {
+        let Some(summary) = receipt.no_claim_markdown() else {
+            continue;
+        };
+        let _ = writeln!(output, "{summary}");
+        let _ = writeln!(
+            output,
+            "  - **Receipt identity:** `{}`",
+            receipt.content_id()
+        );
+        output.push_str("  - **Exact canonical receipt:**\n\n");
+        let _ = writeln!(
+            output,
+            "    ```json\n    {}\n    ```\n",
+            receipt.to_canonical_json()
+        );
+    }
+    output.push_str(
+        "_Projection only: this section cannot authenticate model-card or calibration authorities, and an acknowledged override cannot restore evidence color._\n",
+    );
+    Some(output)
+}
 
 /// Render one already-validated decision assessment as deterministic Markdown.
 ///

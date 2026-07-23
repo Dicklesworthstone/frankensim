@@ -1886,6 +1886,7 @@ dependencies = [
  "fs-evidence",
  "fs-obs",
  "fs-package",
+ "fs-regime",
  "fs-session",
  "fs-voi",
 ]
