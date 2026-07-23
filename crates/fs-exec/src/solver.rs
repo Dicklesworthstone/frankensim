@@ -1026,8 +1026,8 @@ pub mod snapshot_v2 {
 
     use super::{SolverStateV2, codec};
     use crate::cx::{
-        DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN, DRAIN_FINALIZE_REPORT_IDENTITY_VERSION,
-        DrainFinalizeReport,
+        DRAIN_FINALIZE_REPORT_GRAMMAR_DESCRIPTOR, DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN,
+        DRAIN_FINALIZE_REPORT_IDENTITY_VERSION, DrainFinalizeReport, drain_finalize_report_content,
     };
 
     /// Envelope layout version for the strong-identity format.
@@ -1186,6 +1186,69 @@ pub mod snapshot_v2 {
         /// Exact domain/version/wire-grammar era of executor drain reports.
         SnapshotDrainReportEraIdV2
     );
+    snapshot_binding_id!(
+        /// Identity of one reviewed historical-to-current snapshot migrator.
+        SnapshotEraMigrationCodeIdV2
+    );
+    snapshot_binding_id!(
+        /// Identity of the exact historical-to-current field/schema mapping.
+        SnapshotEraMigrationSchemaIdV2
+    );
+    snapshot_binding_id!(
+        /// Identity of caller-admitted units, policy, and migration context.
+        SnapshotEraMigrationContextIdV2
+    );
+
+    /// Complete identity-encoding era declared by one v2 envelope.
+    ///
+    /// The descriptor is observational. It can name an unsupported historical
+    /// era without granting this process the encoder required to interpret
+    /// that era's semantic roots.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct SnapshotIdentityEraV2 {
+        canonical_frame_version: u32,
+        resume_schema_id: [u8; 32],
+        authority_schema_id: [u8; 32],
+        drain_report_era: SnapshotDrainReportEraIdV2,
+    }
+
+    impl SnapshotIdentityEraV2 {
+        /// Canonical frame version declared in the fixed header.
+        #[must_use]
+        pub const fn canonical_frame_version(self) -> u32 {
+            self.canonical_frame_version
+        }
+
+        /// Exact resume-schema descriptor identity declared in the header.
+        #[must_use]
+        pub const fn resume_schema_id(self) -> [u8; 32] {
+            self.resume_schema_id
+        }
+
+        /// Exact authority-subject descriptor identity declared in the header.
+        #[must_use]
+        pub const fn authority_schema_id(self) -> [u8; 32] {
+            self.authority_schema_id
+        }
+
+        /// Exact drain-report grammar era declared in the header.
+        #[must_use]
+        pub const fn drain_report_era(self) -> SnapshotDrainReportEraIdV2 {
+            self.drain_report_era
+        }
+    }
+
+    /// Identity-encoding era implemented by this process.
+    #[must_use]
+    pub fn current_identity_era() -> SnapshotIdentityEraV2 {
+        SnapshotIdentityEraV2 {
+            canonical_frame_version: CANONICAL_FRAME_VERSION,
+            resume_schema_id: *SchemaId::<SnapshotResumeIdentitySchemaV2>::for_schema().as_bytes(),
+            authority_schema_id: *SchemaId::<SnapshotAuthoritySubjectSchemaV2>::for_schema()
+                .as_bytes(),
+            drain_report_era: current_drain_report_era(),
+        }
+    }
 
     /// Exact whole-envelope byte identity. This proves no origin or authority.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1303,7 +1366,8 @@ pub mod snapshot_v2 {
                     drained: drained_workers,
                 });
             }
-            let computed = drain_report_content(run, registered_workers, drained_workers);
+            let computed =
+                *drain_finalize_report_content(run, registered_workers, drained_workers).as_bytes();
             if drain_report != computed {
                 return Err(SnapshotV2Error::DrainReportMismatch {
                     declared: drain_report,
@@ -1402,27 +1466,12 @@ pub mod snapshot_v2 {
         }
     }
 
-    fn drain_report_content(run: u64, registered_workers: u64, drained_workers: u64) -> [u8; 32] {
-        let mut preimage = [0_u8; 28];
-        preimage[..4].copy_from_slice(&DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
-        preimage[4..12].copy_from_slice(&run.to_le_bytes());
-        preimage[12..20].copy_from_slice(&registered_workers.to_le_bytes());
-        preimage[20..28].copy_from_slice(&drained_workers.to_le_bytes());
-        *fs_blake3::hash_domain(DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN, &preimage).as_bytes()
-    }
-
     pub(super) fn current_drain_report_era() -> SnapshotDrainReportEraIdV2 {
         let domain = ContentId::of_bytes(DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN.as_bytes());
         let mut preimage = [0_u8; 45];
         preimage[..4].copy_from_slice(&DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
         preimage[4..36].copy_from_slice(domain.as_bytes());
-        // Descriptor of the current report preimage grammar: little-endian u32
-        // version followed by little-endian u64 run, registered-worker, and
-        // drained-worker fields in that order. This literal pins the current
-        // era but is not mechanically derived from the report encoder; the
-        // registry/coupling successor must make synchronized rotation and
-        // independent retained vectors executable obligations.
-        preimage[36..45].copy_from_slice(&[1, 4, 8, 8, 8, 0, 1, 2, 3]);
+        preimage[36..45].copy_from_slice(&DRAIN_FINALIZE_REPORT_GRAMMAR_DESCRIPTOR);
         SnapshotDrainReportEraIdV2::from_bytes(
             *fs_blake3::hash_domain(SNAPSHOT_DRAIN_REPORT_ERA_DOMAIN_V2, &preimage).as_bytes(),
         )
@@ -1896,10 +1945,10 @@ pub mod snapshot_v2 {
         "version=2",
         "domain=org.frankensim.fs-exec.solver-resume.v2",
         "domain_const=SNAPSHOT_RESUME_IDENTITY_DOMAIN_V2",
-        "encoder=resume_receipt",
-        "encoder_helpers=resume_identity_components,encode_resume_receipt,ExpectedResumeContextV2::for_paused_state,SnapshotResumeContextV2::for_paused_state,SnapshotResumeContextV2::from_header,PausedSnapshotBoundaryV2::from_drain_report,PausedSnapshotBoundaryV2::declaration,DeclaredPausedSnapshotBoundaryV2::from_header,current_drain_report_era",
-        "schema_constants=SNAPSHOT_RESUME_IDENTITY_VERSION_V2,SNAPSHOT_DRAIN_REPORT_ERA_DOMAIN_V2,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_VERSION,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN",
-        "schema_functions=resume_receipt,resume_identity_components,encode_resume_receipt,current_drain_report_era,crates/fs-blake3/src/identity.rs#CanonicalEncoder::new,crates/fs-blake3/src/identity.rs#CanonicalEncoder::bytes,crates/fs-blake3/src/identity.rs#CanonicalEncoder::u64,crates/fs-blake3/src/identity.rs#CanonicalEncoder::variant,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/identity.rs#ContentId::of_bytes",
+        "encoder=snapshot_v2::resume_receipt",
+        "encoder_helpers=snapshot_v2::resume_identity_components,snapshot_v2::encode_resume_receipt,ExpectedResumeContextV2::for_paused_state,SnapshotResumeContextV2::for_paused_state,SnapshotResumeContextV2::from_header,PausedSnapshotBoundaryV2::from_drain_report,PausedSnapshotBoundaryV2::declaration,DeclaredPausedSnapshotBoundaryV2::from_header,snapshot_v2::current_drain_report_era",
+        "schema_constants=SNAPSHOT_RESUME_IDENTITY_VERSION_V2,SNAPSHOT_DRAIN_REPORT_ERA_DOMAIN_V2,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_VERSION,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_GRAMMAR_VERSION,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_GRAMMAR_DESCRIPTOR,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_PREIMAGE_LEN",
+        "schema_functions=snapshot_v2::resume_receipt,snapshot_v2::resume_identity_components,snapshot_v2::encode_resume_receipt,snapshot_v2::current_drain_report_era,crates/fs-blake3/src/identity.rs#CanonicalEncoder::new,crates/fs-blake3/src/identity.rs#CanonicalEncoder::bytes,crates/fs-blake3/src/identity.rs#CanonicalEncoder::u64,crates/fs-blake3/src/identity.rs#CanonicalEncoder::variant,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/identity.rs#ContentId::of_bytes",
         "schema_dependencies=fs-blake3:canonical-identity-frame",
         "digest=fs-blake3",
         "encoding=typed-binary",
@@ -1913,7 +1962,7 @@ pub mod snapshot_v2 {
         "mutations=canonical-frame-schema:crates/fs-exec/src/solver.rs#v2_canonical_frame_and_identity_eras_fail_closed_before_payload,state-type:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,state-schema:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,state-codec:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,state-codec-version:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,algorithm:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,algorithm-version:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,problem:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,rng-counter:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,determinism:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,execution-fingerprint:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,budget:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,provenance:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,pause-request:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,gate-generation:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-report-version:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-report-era:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-run:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-registered:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-drained:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,drain-report:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,payload-content:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently,payload-length:crates/fs-exec/src/solver.rs#v2_each_resume_source_field_moves_identity_independently",
         "nonsemantic_mutations=envelope-content-id:crates/fs-exec/src/solver.rs#v2_authority_subject_binds_content_and_resume_axes,caller-expected-root:crates/fs-exec/src/solver.rs#v2_authority_subject_binds_content_and_resume_axes,authority-anchor:crates/fs-exec/src/solver.rs#v2_authority_metadata_does_not_move_subject_identity,allocation-limit:crates/fs-exec/src/solver.rs#v2_nonsemantic_limits_do_not_move_roots,cancellation-schedule:crates/fs-exec/src/solver.rs#v2_nonsemantic_limits_do_not_move_roots",
         "field_guard=classify_snapshot_resume_fields",
-        "transport_guard=inspect",
+        "transport_guard=snapshot_v2::inspect",
         "version_guard=crates/fs-exec/src/solver.rs#v2_refuses_corruption_downgrade_and_hostile_lengths_before_decode",
         "coupling_surface=fs-exec:solver-resume",
     ];
@@ -1926,10 +1975,10 @@ pub mod snapshot_v2 {
         "version=2",
         "domain=org.frankensim.fs-exec.solver-snapshot-authority-subject.v2",
         "domain_const=SNAPSHOT_AUTHORITY_SUBJECT_IDENTITY_DOMAIN_V2",
-        "encoder=authority_subject_receipt",
+        "encoder=snapshot_v2::authority_subject_receipt",
         "encoder_helpers=none",
         "schema_constants=SNAPSHOT_AUTHORITY_SUBJECT_IDENTITY_VERSION_V2",
-        "schema_functions=authority_subject_receipt,crates/fs-blake3/src/identity.rs#CanonicalEncoder::new,crates/fs-blake3/src/identity.rs#CanonicalEncoder::bytes,crates/fs-blake3/src/identity.rs#CanonicalEncoder::child,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish",
+        "schema_functions=snapshot_v2::authority_subject_receipt,crates/fs-blake3/src/identity.rs#CanonicalEncoder::new,crates/fs-blake3/src/identity.rs#CanonicalEncoder::bytes,crates/fs-blake3/src/identity.rs#CanonicalEncoder::child,crates/fs-blake3/src/identity.rs#CanonicalEncoder::finish",
         "schema_dependencies=fs-blake3:canonical-identity-frame,fs-exec:solver-resume",
         "digest=fs-blake3",
         "encoding=typed-binary",
@@ -1943,7 +1992,7 @@ pub mod snapshot_v2 {
         "mutations=canonical-frame-schema:crates/fs-exec/src/solver.rs#v2_canonical_frame_and_identity_eras_fail_closed_before_payload,envelope-content:crates/fs-exec/src/solver.rs#v2_authority_subject_binds_content_and_resume_axes,resume:crates/fs-exec/src/solver.rs#v2_authority_subject_binds_content_and_resume_axes",
         "nonsemantic_mutations=authority-anchor:crates/fs-exec/src/solver.rs#v2_authority_metadata_does_not_move_subject_identity,verifier-id:crates/fs-exec/src/solver.rs#v2_authority_metadata_does_not_move_subject_identity,key-policy-id:crates/fs-exec/src/solver.rs#v2_authority_metadata_does_not_move_subject_identity,admission-state:crates/fs-exec/src/solver.rs#v2_authority_metadata_does_not_move_subject_identity,allocation-limit:crates/fs-exec/src/solver.rs#v2_nonsemantic_limits_do_not_move_roots,cancellation-schedule:crates/fs-exec/src/solver.rs#v2_nonsemantic_limits_do_not_move_roots",
         "field_guard=classify_snapshot_authority_subject_fields",
-        "transport_guard=inspect_authorized",
+        "transport_guard=snapshot_v2::inspect_authorized",
         "version_guard=crates/fs-exec/src/solver.rs#v2_refuses_corruption_downgrade_and_hostile_lengths_before_decode",
         "coupling_surface=fs-exec:solver-snapshot-authority-subject",
     ];
@@ -2822,6 +2871,302 @@ pub mod snapshot_v2 {
         }
     }
 
+    /// Independently declared code, mapping, and policy bindings for one
+    /// historical identity-era migration.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SnapshotEraMigrationPlanV2 {
+        code: SnapshotEraMigrationCodeIdV2,
+        schema: SnapshotEraMigrationSchemaIdV2,
+        context: SnapshotEraMigrationContextIdV2,
+    }
+
+    impl SnapshotEraMigrationPlanV2 {
+        /// Construct a plan from identities admitted independently of the
+        /// candidate snapshot bytes.
+        #[must_use]
+        pub const fn new(
+            code: SnapshotEraMigrationCodeIdV2,
+            schema: SnapshotEraMigrationSchemaIdV2,
+            context: SnapshotEraMigrationContextIdV2,
+        ) -> Self {
+            Self {
+                code,
+                schema,
+                context,
+            }
+        }
+
+        /// Exact migration implementation identity.
+        #[must_use]
+        pub const fn code(self) -> SnapshotEraMigrationCodeIdV2 {
+            self.code
+        }
+
+        /// Exact source-to-target mapping identity.
+        #[must_use]
+        pub const fn schema(self) -> SnapshotEraMigrationSchemaIdV2 {
+            self.schema
+        }
+
+        /// Exact admitted migration context identity.
+        #[must_use]
+        pub const fn context(self) -> SnapshotEraMigrationContextIdV2 {
+            self.context
+        }
+    }
+
+    /// Exact historical v2 bytes retained without interpreting their old
+    /// semantic roots through the current canonical encoder.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct HistoricalSnapshotV2<'a> {
+        bytes: &'a [u8],
+        exact_bytes: ContentId,
+        declared_era: SnapshotIdentityEraV2,
+        declared_resume: [u8; 32],
+    }
+
+    impl<'a> HistoricalSnapshotV2<'a> {
+        /// Exact source bytes. They remain attached to migration output.
+        #[must_use]
+        pub const fn bytes(self) -> &'a [u8] {
+            self.bytes
+        }
+
+        /// Plain BLAKE3 identity of the complete historical artifact.
+        #[must_use]
+        pub const fn exact_bytes_id(self) -> ContentId {
+            self.exact_bytes
+        }
+
+        /// Complete unsupported era declared by the historical header.
+        #[must_use]
+        pub const fn declared_era(self) -> SnapshotIdentityEraV2 {
+            self.declared_era
+        }
+
+        /// Raw resume-root bytes retained from the historical header. They are
+        /// not parsed under the current resume schema.
+        #[must_use]
+        pub const fn declared_resume_bytes(self) -> [u8; 32] {
+            self.declared_resume
+        }
+    }
+
+    /// Stable refusal returned by a selected historical encoder/migrator.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SnapshotEraMigratorFailureV2 {
+        reason: &'static str,
+    }
+
+    impl SnapshotEraMigratorFailureV2 {
+        /// Construct a stable, owner-defined refusal reason.
+        #[must_use]
+        pub const fn new(reason: &'static str) -> Self {
+            Self { reason }
+        }
+
+        /// Stable refusal reason supplied by the migration owner.
+        #[must_use]
+        pub const fn reason(&self) -> &'static str {
+            self.reason
+        }
+    }
+
+    /// Why historical-era quarantine or explicit migration refused.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SnapshotEraMigrationErrorV2 {
+        /// The candidate was not a structurally bounded v2 artifact.
+        Source(SnapshotV2Error),
+        /// All declared era markers are current, so the historical path is an
+        /// attempted downgrade of the ordinary current-era inspector.
+        CurrentEraNotHistorical {
+            /// Current era implemented by this process.
+            current: SnapshotIdentityEraV2,
+        },
+        /// No reviewed encoder for the exact declared historical era was
+        /// supplied. Exact source bytes remain quarantined.
+        HistoricalCanonicalEncoderUnavailable {
+            /// Unsupported era retained in the source header.
+            declared: SnapshotIdentityEraV2,
+            /// Current era implemented by this process.
+            current: SnapshotIdentityEraV2,
+        },
+        /// The selected migrator was registered for a different source era.
+        MigratorEraMismatch {
+            /// Era retained in the exact source bytes.
+            declared: SnapshotIdentityEraV2,
+            /// Era claimed by the selected migrator.
+            supported: SnapshotIdentityEraV2,
+        },
+        /// The selected explicit migrator refused the source.
+        MigratorRefused(SnapshotEraMigratorFailureV2),
+        /// Canonical construction of the migration receipt refused.
+        Receipt(CanonicalError),
+        /// Cancellation was observed after target construction but before the
+        /// source/target/receipt transaction could be published.
+        CancelledBeforePublication,
+    }
+
+    impl fmt::Display for SnapshotEraMigrationErrorV2 {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Source(error) => write!(formatter, "historical snapshot refused: {error}"),
+                Self::CurrentEraNotHistorical { .. } => formatter.write_str(
+                    "snapshot declares the current identity era; use the current-era inspector",
+                ),
+                Self::HistoricalCanonicalEncoderUnavailable { .. } => formatter.write_str(
+                    "historical snapshot quarantined: no encoder for its exact identity era is available",
+                ),
+                Self::MigratorEraMismatch { .. } => formatter.write_str(
+                    "selected snapshot migrator does not own the source identity era",
+                ),
+                Self::MigratorRefused(error) => {
+                    write!(formatter, "historical snapshot migrator refused: {}", error.reason())
+                }
+                Self::Receipt(error) => {
+                    write!(formatter, "snapshot era migration receipt refused: {error}")
+                }
+                Self::CancelledBeforePublication => formatter.write_str(
+                    "snapshot era migration cancelled before transactional publication",
+                ),
+            }
+        }
+    }
+
+    impl core::error::Error for SnapshotEraMigrationErrorV2 {
+        fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+            match self {
+                Self::Source(error) => Some(error),
+                Self::Receipt(error) => Some(error),
+                _ => None,
+            }
+        }
+    }
+
+    /// Canonical receipt schema for one explicit identity-era migration.
+    pub enum SnapshotEraMigrationReceiptSchemaV2 {}
+
+    static SNAPSHOT_ERA_MIGRATION_TARGET_RESUME_CHILD: ChildSpec =
+        ChildSpec::for_identity::<SnapshotResumeIdV2>();
+    static SNAPSHOT_ERA_MIGRATION_TARGET_AUTHORITY_CHILD: ChildSpec =
+        ChildSpec::for_identity::<SnapshotAuthoritySubjectIdV2>();
+
+    impl CanonicalSchema for SnapshotEraMigrationReceiptSchemaV2 {
+        const DOMAIN: &'static str = "org.frankensim.fs-exec.snapshot-era-migration-receipt.v1";
+        const NAME: &'static str = "snapshot-era-migration-receipt";
+        const VERSION: u32 = 1;
+        const CONTEXT: &'static str = "transactional record binding exact historical v2 bytes and their declared identity era to an independently identified migrator and one current-era v2 target; no producer authentication or migration-correctness claim";
+        const FIELDS: &'static [FieldSpec] = &[
+            FieldSpec::required("source-content", WireType::Bytes),
+            FieldSpec::required("source-length", WireType::U64),
+            FieldSpec::required("source-canonical-frame", WireType::U64),
+            FieldSpec::required("source-resume-schema", WireType::Bytes),
+            FieldSpec::required("source-authority-schema", WireType::Bytes),
+            FieldSpec::required("source-drain-report-era", WireType::Bytes),
+            FieldSpec::required("source-declared-resume", WireType::Bytes),
+            FieldSpec::required("migration-code", WireType::Bytes),
+            FieldSpec::required("migration-schema", WireType::Bytes),
+            FieldSpec::required("migration-context", WireType::Bytes),
+            FieldSpec::required("target-canonical-frame", WireType::U64),
+            FieldSpec::required("target-resume-schema", WireType::Bytes),
+            FieldSpec::required("target-authority-schema", WireType::Bytes),
+            FieldSpec::required("target-drain-report-era", WireType::Bytes),
+            FieldSpec::required("target-content", WireType::Bytes),
+            FieldSpec::child_of("target-resume", &SNAPSHOT_ERA_MIGRATION_TARGET_RESUME_CHILD),
+            FieldSpec::child_of(
+                "target-authority-subject",
+                &SNAPSHOT_ERA_MIGRATION_TARGET_AUTHORITY_CHILD,
+            ),
+        ];
+    }
+
+    /// Typed identity of one historical-to-current snapshot migration receipt.
+    pub type SnapshotEraMigrationReceiptIdV2 = SemanticId<SnapshotEraMigrationReceiptSchemaV2>;
+
+    /// Canonical evidence binding exact source bytes and declared/current eras
+    /// to one migration plan and exact current-era target.
+    #[must_use = "migration evidence must be retained, ledgered, or explicitly discharged"]
+    pub struct SnapshotEraMigrationReceiptV2 {
+        identity: IdentityReceipt<SnapshotEraMigrationReceiptIdV2>,
+        source_content: ContentId,
+        source_length: u64,
+        source_era: SnapshotIdentityEraV2,
+        source_declared_resume: [u8; 32],
+        plan: SnapshotEraMigrationPlanV2,
+        target_era: SnapshotIdentityEraV2,
+        target_content: SnapshotContentIdV2,
+        target_resume: SnapshotResumeIdV2,
+        target_authority_subject: SnapshotAuthoritySubjectIdV2,
+    }
+
+    impl SnapshotEraMigrationReceiptV2 {
+        /// Typed canonical receipt identity.
+        #[must_use]
+        pub const fn id(&self) -> SnapshotEraMigrationReceiptIdV2 {
+            self.identity.id()
+        }
+
+        /// Complete canonical receipt metadata.
+        #[must_use]
+        pub const fn identity_receipt(&self) -> IdentityReceipt<SnapshotEraMigrationReceiptIdV2> {
+            self.identity
+        }
+
+        /// Plain exact-byte root of the complete historical source.
+        #[must_use]
+        pub const fn source_content_id(&self) -> ContentId {
+            self.source_content
+        }
+
+        /// Exact historical source byte length.
+        #[must_use]
+        pub const fn source_length(&self) -> u64 {
+            self.source_length
+        }
+
+        /// Complete identity era retained in the historical source header.
+        #[must_use]
+        pub const fn source_era(&self) -> SnapshotIdentityEraV2 {
+            self.source_era
+        }
+
+        /// Raw historical resume root, without current-schema interpretation.
+        #[must_use]
+        pub const fn source_declared_resume_bytes(&self) -> [u8; 32] {
+            self.source_declared_resume
+        }
+
+        /// Independently declared migration plan.
+        #[must_use]
+        pub const fn plan(&self) -> SnapshotEraMigrationPlanV2 {
+            self.plan
+        }
+
+        /// Exact identity era implemented by the produced target.
+        #[must_use]
+        pub const fn target_era(&self) -> SnapshotIdentityEraV2 {
+            self.target_era
+        }
+
+        /// Exact complete target-byte identity.
+        #[must_use]
+        pub const fn target_content_id(&self) -> SnapshotContentIdV2 {
+            self.target_content
+        }
+
+        /// Exact current-era target resume identity.
+        #[must_use]
+        pub const fn target_resume_id(&self) -> SnapshotResumeIdV2 {
+            self.target_resume
+        }
+
+        /// Exact current-era target authority subject. This is not admission.
+        #[must_use]
+        pub const fn target_authority_subject_id(&self) -> SnapshotAuthoritySubjectIdV2 {
+            self.target_authority_subject
+        }
+    }
+
     /// Admission path attached by an inspection entry point. The names avoid
     /// turning caller expectations or policy admission into global trust.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3032,6 +3377,314 @@ pub mod snapshot_v2 {
                 expected_context: self.expected_context.clone(),
             }
         }
+    }
+
+    /// Owner-supplied historical canonical encoder and semantic migrator.
+    ///
+    /// Implementations must name exactly one source era. The wrapper binds
+    /// that declaration, exact source bytes, the independently supplied plan,
+    /// and the opaque current-era target into a canonical receipt. The trait
+    /// cannot make the implementation correct or authenticate the source.
+    pub trait SnapshotEraMigratorV2 {
+        /// Exact historical era implemented by this migrator.
+        fn source_era(&self) -> SnapshotIdentityEraV2;
+
+        /// Decode under the historical grammar and seal one current-era
+        /// target. Implementations must not reinterpret a historical root with
+        /// the current canonical encoder.
+        fn migrate(
+            &mut self,
+            source: HistoricalSnapshotV2<'_>,
+            expected_target: &ExpectedResumeContextV2,
+            limits: SnapshotLimitsV2,
+            cancellation: &mut dyn CancellationProbe,
+        ) -> Result<SealedSnapshotV2, SnapshotEraMigratorFailureV2>;
+    }
+
+    /// Explicit availability state for a historical canonical encoder.
+    pub enum HistoricalCanonicalEncoderV2<'a> {
+        /// No reviewed encoder for the source era is linked into this process.
+        Unavailable,
+        /// A reviewed owner-supplied migrator is available.
+        Available(&'a mut dyn SnapshotEraMigratorV2),
+    }
+
+    /// Transactional historical source, current target, and canonical receipt.
+    #[must_use = "source, target, and migration receipt must remain attached"]
+    pub struct MigratedSnapshotEraV2<'a> {
+        source: HistoricalSnapshotV2<'a>,
+        target: SealedSnapshotV2,
+        receipt: SnapshotEraMigrationReceiptV2,
+    }
+
+    impl<'a> MigratedSnapshotEraV2<'a> {
+        /// Exact quarantined historical source.
+        #[must_use]
+        pub const fn source(&self) -> HistoricalSnapshotV2<'a> {
+            self.source
+        }
+
+        /// Exact sealed current-era target.
+        #[must_use]
+        pub const fn target(&self) -> &SealedSnapshotV2 {
+            &self.target
+        }
+
+        /// Canonical source/era/plan/target receipt.
+        #[must_use]
+        pub const fn receipt(&self) -> &SnapshotEraMigrationReceiptV2 {
+            &self.receipt
+        }
+
+        /// Explicitly discharge all attached migration evidence together.
+        #[must_use]
+        pub fn into_parts(
+            self,
+        ) -> (
+            HistoricalSnapshotV2<'a>,
+            SealedSnapshotV2,
+            SnapshotEraMigrationReceiptV2,
+        ) {
+            (self.source, self.target, self.receipt)
+        }
+    }
+
+    /// Structurally bound and content-address a historical identity-era v2
+    /// artifact without invoking the current semantic encoders.
+    ///
+    /// This checks only the stable v2 transport prefix, fixed header length,
+    /// bounded exact payload extent, and the fact that at least one identity
+    /// era marker differs. Historical tag, drain, payload, and semantic-root
+    /// validation belongs to the explicitly selected historical migrator.
+    pub fn quarantine_historical_era<C: CancellationProbe>(
+        bytes: &[u8],
+        limits: SnapshotLimitsV2,
+        mut cancellation: C,
+    ) -> Result<HistoricalSnapshotV2<'_>, SnapshotEraMigrationErrorV2> {
+        validate_limits(limits).map_err(SnapshotEraMigrationErrorV2::Source)?;
+        if bytes.len() < 8 {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::Truncated {
+                    needed: 8,
+                    have: bytes.len(),
+                },
+            ));
+        }
+        if bytes[..8] != MAGIC_V2 {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::BadMagic,
+            ));
+        }
+        if bytes.len() < HEADER_LEN_V2 {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::Truncated {
+                    needed: HEADER_LEN_V2,
+                    have: bytes.len(),
+                },
+            ));
+        }
+        let version = read_u32(bytes, OFFSET_VERSION);
+        if version != ENVELOPE_VERSION_V2 {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::UnknownEnvelopeVersion { found: version },
+            ));
+        }
+        let declared_header = read_u32(bytes, OFFSET_HEADER_LEN);
+        if usize::try_from(declared_header).ok() != Some(HEADER_LEN_V2) {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::InvalidHeaderLength {
+                    declared: declared_header,
+                },
+            ));
+        }
+        let payload_len = read_u64(bytes, OFFSET_PAYLOAD_LEN);
+        if payload_len > limits.max_payload_bytes {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::PayloadLimitExceeded {
+                    declared: payload_len,
+                    limit: limits.max_payload_bytes,
+                },
+            ));
+        }
+        let payload_len_usize = usize::try_from(payload_len).map_err(|_| {
+            SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::CodecResourceLimitExceeded {
+                resource: "platform payload bytes",
+                requested: payload_len,
+                limit: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+                at: 0,
+            })
+        })?;
+        let total_len = HEADER_LEN_V2.checked_add(payload_len_usize).ok_or(
+            SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::LengthOverflow),
+        )?;
+        if bytes.len() != total_len {
+            let actual = u64::try_from(bytes.len() - HEADER_LEN_V2).map_err(|_| {
+                SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::LengthOverflow)
+            })?;
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::LengthMismatch {
+                    declared: payload_len,
+                    actual,
+                },
+            ));
+        }
+        let declared_era = declared_identity_era(bytes);
+        let current = current_identity_era();
+        if declared_era == current {
+            return Err(SnapshotEraMigrationErrorV2::CurrentEraNotHistorical { current });
+        }
+        let exact_bytes = hash_content(
+            bytes,
+            limits.hash_poll_bytes,
+            "historical envelope hashing",
+            &mut cancellation,
+        )
+        .map_err(SnapshotEraMigrationErrorV2::Source)?;
+        if cancellation.is_cancelled() {
+            return Err(SnapshotEraMigrationErrorV2::Source(
+                SnapshotV2Error::Cancelled {
+                    phase: "historical quarantine publication",
+                    at: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                },
+            ));
+        }
+        Ok(HistoricalSnapshotV2 {
+            bytes,
+            exact_bytes,
+            declared_era,
+            declared_resume: read_32(bytes, OFFSET_RESUME_ID),
+        })
+    }
+
+    fn build_snapshot_era_migration_receipt<C: CancellationProbe>(
+        source: HistoricalSnapshotV2<'_>,
+        plan: SnapshotEraMigrationPlanV2,
+        target: &SealedSnapshotV2,
+        limits: CanonicalLimits,
+        cancellation: &mut C,
+    ) -> Result<SnapshotEraMigrationReceiptV2, SnapshotEraMigrationErrorV2> {
+        let source_length = u64::try_from(source.bytes.len())
+            .map_err(|_| SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::LengthOverflow))?;
+        let source_era = source.declared_era;
+        let target_era = current_identity_era();
+        let mut build = || {
+            CanonicalEncoder::<SnapshotEraMigrationReceiptIdV2, _>::new(limits, || {
+                cancellation.is_cancelled()
+            })?
+            .bytes(
+                Field::new(0, "source-content"),
+                source.exact_bytes.as_bytes(),
+            )?
+            .u64(Field::new(1, "source-length"), source_length)?
+            .u64(
+                Field::new(2, "source-canonical-frame"),
+                u64::from(source_era.canonical_frame_version),
+            )?
+            .bytes(
+                Field::new(3, "source-resume-schema"),
+                &source_era.resume_schema_id,
+            )?
+            .bytes(
+                Field::new(4, "source-authority-schema"),
+                &source_era.authority_schema_id,
+            )?
+            .bytes(
+                Field::new(5, "source-drain-report-era"),
+                source_era.drain_report_era.as_bytes(),
+            )?
+            .bytes(
+                Field::new(6, "source-declared-resume"),
+                &source.declared_resume,
+            )?
+            .bytes(Field::new(7, "migration-code"), plan.code.as_bytes())?
+            .bytes(Field::new(8, "migration-schema"), plan.schema.as_bytes())?
+            .bytes(Field::new(9, "migration-context"), plan.context.as_bytes())?
+            .u64(
+                Field::new(10, "target-canonical-frame"),
+                u64::from(target_era.canonical_frame_version),
+            )?
+            .bytes(
+                Field::new(11, "target-resume-schema"),
+                &target_era.resume_schema_id,
+            )?
+            .bytes(
+                Field::new(12, "target-authority-schema"),
+                &target_era.authority_schema_id,
+            )?
+            .bytes(
+                Field::new(13, "target-drain-report-era"),
+                target_era.drain_report_era.as_bytes(),
+            )?
+            .bytes(
+                Field::new(14, "target-content"),
+                target.content_id().as_bytes(),
+            )?
+            .child(Field::new(15, "target-resume"), target.resume_id())?
+            .child(
+                Field::new(16, "target-authority-subject"),
+                target.authority_subject_receipt().id(),
+            )?
+            .finish()
+        };
+        let identity = build().map_err(SnapshotEraMigrationErrorV2::Receipt)?;
+        Ok(SnapshotEraMigrationReceiptV2 {
+            identity,
+            source_content: source.exact_bytes,
+            source_length,
+            source_era,
+            source_declared_resume: source.declared_resume,
+            plan,
+            target_era,
+            target_content: target.content_id(),
+            target_resume: target.resume_id(),
+            target_authority_subject: target.authority_subject_receipt().id(),
+        })
+    }
+
+    /// Explicitly migrate one quarantined historical era, or fail closed when
+    /// its exact historical canonical encoder is unavailable.
+    pub fn migrate_historical_era<'a, C: CancellationProbe>(
+        source: HistoricalSnapshotV2<'a>,
+        plan: SnapshotEraMigrationPlanV2,
+        expected_target: &ExpectedResumeContextV2,
+        limits: SnapshotLimitsV2,
+        encoder: HistoricalCanonicalEncoderV2<'_>,
+        mut cancellation: C,
+    ) -> Result<MigratedSnapshotEraV2<'a>, SnapshotEraMigrationErrorV2> {
+        let current = current_identity_era();
+        let HistoricalCanonicalEncoderV2::Available(migrator) = encoder else {
+            return Err(
+                SnapshotEraMigrationErrorV2::HistoricalCanonicalEncoderUnavailable {
+                    declared: source.declared_era,
+                    current,
+                },
+            );
+        };
+        let supported = migrator.source_era();
+        if supported != source.declared_era {
+            return Err(SnapshotEraMigrationErrorV2::MigratorEraMismatch {
+                declared: source.declared_era,
+                supported,
+            });
+        }
+        let target = migrator
+            .migrate(source, expected_target, limits, &mut cancellation)
+            .map_err(SnapshotEraMigrationErrorV2::MigratorRefused)?;
+        let receipt = build_snapshot_era_migration_receipt(
+            source,
+            plan,
+            &target,
+            limits.identity,
+            &mut cancellation,
+        )?;
+        if cancellation.is_cancelled() {
+            return Err(SnapshotEraMigrationErrorV2::CancelledBeforePublication);
+        }
+        Ok(MigratedSnapshotEraV2 {
+            source,
+            target,
+            receipt,
+        })
     }
 
     /// Caller-held exact roots required by the expected-root open path.
@@ -3914,6 +4567,18 @@ pub mod snapshot_v2 {
         bytes[offset..offset + 32]
             .try_into()
             .expect("fixed v2 header was length-checked")
+    }
+
+    fn declared_identity_era(bytes: &[u8]) -> SnapshotIdentityEraV2 {
+        SnapshotIdentityEraV2 {
+            canonical_frame_version: read_u32(bytes, OFFSET_CANONICAL_FRAME_VERSION),
+            resume_schema_id: read_32(bytes, OFFSET_RESUME_SCHEMA_ID),
+            authority_schema_id: read_32(bytes, OFFSET_AUTHORITY_SCHEMA_ID),
+            drain_report_era: SnapshotDrainReportEraIdV2::from_bytes(read_32(
+                bytes,
+                OFFSET_DRAIN_REPORT_ERA,
+            )),
+        }
     }
 
     /// Consume already encoded solver-state payload bytes and seal canonical v2
@@ -6996,6 +7661,48 @@ mod tests {
     }
 
     #[test]
+    fn v2_full_header_resume_and_authority_vectors_are_retained() {
+        fn hex(bytes: &[u8]) -> String {
+            use core::fmt::Write as _;
+
+            let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+            for byte in bytes {
+                write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            encoded
+        }
+
+        let context = base_v2_context::<JacobiState>();
+        let limits = v2_limits(64, 64);
+        let sealed = snapshot_v2::seal(
+            b"snapshot-v2-canonical-era-vector",
+            &context,
+            limits,
+            || false,
+        )
+        .expect("retained-vector fixture seals");
+
+        let header = &sealed.bytes()[..snapshot_v2::HEADER_LEN_V2];
+        let header_hex = hex(header);
+        let resume_preimage = sealed.resume_receipt().canonical_preimage();
+        let authority_preimage = sealed.authority_subject_receipt().canonical_preimage();
+        let resume_hex = hex(resume_preimage.as_bytes());
+        let authority_hex = hex(authority_preimage.as_bytes());
+        const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c02000041414141414141414141414141414141414141414141414141414141414141414a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4ac1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e952127f6545c614e632456dc3b2b9e055e6e48ab4ca6c35ce7438f7756bd871b96b";
+        assert_eq!(header_hex.len(), snapshot_v2::HEADER_LEN_V2 * 2);
+        assert_eq!(EXPECTED_HEADER_HEX.len(), snapshot_v2::HEADER_LEN_V2 * 2);
+        assert_eq!(header_hex, EXPECTED_HEADER_HEX);
+        assert_eq!(
+            resume_hex,
+            "e17eee709f77d025e2dc3b8383f2e4f59c5e27e9b02220f5dbf313072289bce0"
+        );
+        assert_eq!(
+            authority_hex,
+            "eaa9c50d0dc49efa403d253f609661de18611bda6fd1cf4ff6b6a2cf6cf52d97"
+        );
+    }
+
+    #[test]
     fn v2_canonical_frame_and_identity_eras_fail_closed_before_payload() {
         const OFFSET_CANONICAL_FRAME_VERSION: usize = 224;
         const OFFSET_RESUME_SCHEMA_ID: usize = 228;
@@ -7039,6 +7746,75 @@ mod tests {
             snapshot_v2::inspect(&stale_drain_era, limits, || false),
             Err(snapshot_v2::SnapshotV2Error::UnsupportedDrainReportEra { .. })
         ));
+    }
+
+    #[test]
+    fn v2_historical_era_is_exactly_quarantined_when_encoder_is_unavailable() {
+        const OFFSET_CANONICAL_FRAME_VERSION: usize = 224;
+        const OFFSET_RESUME_ID: usize = 556;
+
+        let context = base_v2_context::<JacobiState>();
+        let limits = v2_limits(64, 64);
+        let sealed = snapshot_v2::seal(
+            b"historical-era-quarantine-vector",
+            &context,
+            limits,
+            || false,
+        )
+        .expect("current fixture seals");
+        assert!(matches!(
+            snapshot_v2::quarantine_historical_era(sealed.bytes(), limits, || false),
+            Err(snapshot_v2::SnapshotEraMigrationErrorV2::CurrentEraNotHistorical { .. })
+        ));
+
+        let mut historical_bytes = sealed.bytes().to_vec();
+        let historical_frame = fs_blake3::identity::CANONICAL_FRAME_VERSION.wrapping_add(1);
+        historical_bytes[OFFSET_CANONICAL_FRAME_VERSION..OFFSET_CANONICAL_FRAME_VERSION + 4]
+            .copy_from_slice(&historical_frame.to_le_bytes());
+        historical_bytes[snapshot_v2::HEADER_LEN_V2] ^= 1;
+
+        let source = snapshot_v2::quarantine_historical_era(&historical_bytes, limits, || false)
+            .expect("unsupported era remains quarantined without semantic reinterpretation");
+        assert_eq!(source.bytes(), historical_bytes);
+        assert_eq!(
+            source.exact_bytes_id(),
+            fs_blake3::identity::ContentId::of_bytes(&historical_bytes)
+        );
+        assert_eq!(
+            source.declared_resume_bytes(),
+            historical_bytes[OFFSET_RESUME_ID..OFFSET_RESUME_ID + 32]
+        );
+        assert_eq!(
+            source.declared_era().canonical_frame_version(),
+            historical_frame
+        );
+
+        let plan = snapshot_v2::SnapshotEraMigrationPlanV2::new(
+            snapshot_v2::SnapshotEraMigrationCodeIdV2::from_bytes([0x71; 32]),
+            snapshot_v2::SnapshotEraMigrationSchemaIdV2::from_bytes([0x72; 32]),
+            snapshot_v2::SnapshotEraMigrationContextIdV2::from_bytes([0x73; 32]),
+        );
+        let refusal = match snapshot_v2::migrate_historical_era(
+            source,
+            plan,
+            &context,
+            limits,
+            snapshot_v2::HistoricalCanonicalEncoderV2::Unavailable,
+            || false,
+        ) {
+            Ok(_) => panic!("missing historical encoder published a migration"),
+            Err(error) => error,
+        };
+        match refusal {
+            snapshot_v2::SnapshotEraMigrationErrorV2::HistoricalCanonicalEncoderUnavailable {
+                declared,
+                current,
+            } => {
+                assert_eq!(declared, source.declared_era());
+                assert_eq!(current, snapshot_v2::current_identity_era());
+            }
+            other => panic!("unexpected historical-era refusal: {other}"),
+        }
     }
 
     #[test]

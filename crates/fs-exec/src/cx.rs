@@ -206,6 +206,69 @@ pub const DRAIN_FINALIZE_REPORT_IDENTITY_VERSION: u32 = 1;
 pub const DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-exec.drain-finalize-report.v1";
 
+/// Version of the exact drain-report preimage grammar.
+///
+/// Version 1 is little-endian and orders the identity version, logical run,
+/// registered-worker count, and drained-worker count. This version is kept
+/// separate from [`DRAIN_FINALIZE_REPORT_IDENTITY_VERSION`] so a grammar edit
+/// cannot masquerade as the same retained byte schema.
+pub const DRAIN_FINALIZE_REPORT_GRAMMAR_VERSION: u8 = 1;
+/// Canonical descriptor of the retained v1 report preimage grammar.
+///
+/// Bytes are: grammar version, the four field widths, then the four field
+/// ordinals in encoded order. The identity registry couples this descriptor to
+/// the encoder body and the snapshot-era discriminator.
+pub const DRAIN_FINALIZE_REPORT_GRAMMAR_DESCRIPTOR: [u8; 9] = [
+    DRAIN_FINALIZE_REPORT_GRAMMAR_VERSION,
+    4,
+    8,
+    8,
+    8,
+    0,
+    1,
+    2,
+    3,
+];
+/// Exact byte length of a v1 drain-report identity preimage.
+pub const DRAIN_FINALIZE_REPORT_PREIMAGE_LEN: usize = 28;
+
+const _: () = {
+    assert!(core::mem::size_of::<u32>() == 4);
+    assert!(core::mem::size_of::<u64>() == 8);
+};
+
+/// Encode the one authoritative v1 drain-report identity preimage.
+///
+/// Report minting and snapshot inspection both use this function. Its body and
+/// grammar descriptor are governed identity inputs; changing field order,
+/// width, or endian convention without rotating retained era evidence must
+/// fail the repository identity/coupling gates.
+#[must_use]
+pub(crate) fn encode_drain_finalize_report_identity_preimage(
+    run: u64,
+    registered_workers: u64,
+    drained_workers: u64,
+) -> [u8; DRAIN_FINALIZE_REPORT_PREIMAGE_LEN] {
+    let mut preimage = [0_u8; DRAIN_FINALIZE_REPORT_PREIMAGE_LEN];
+    preimage[..4].copy_from_slice(&DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
+    preimage[4..12].copy_from_slice(&run.to_le_bytes());
+    preimage[12..20].copy_from_slice(&registered_workers.to_le_bytes());
+    preimage[20..28].copy_from_slice(&drained_workers.to_le_bytes());
+    preimage
+}
+
+/// Recompute the exact domain-separated content identity of a drain report.
+#[must_use]
+pub(crate) fn drain_finalize_report_content(
+    run: u64,
+    registered_workers: u64,
+    drained_workers: u64,
+) -> fs_blake3::ContentHash {
+    let preimage =
+        encode_drain_finalize_report_identity_preimage(run, registered_workers, drained_workers);
+    fs_blake3::hash_domain(DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN, &preimage)
+}
+
 /// A completed request -> drain -> finalize witness for one logical run.
 ///
 /// Fields are private and the only constructor is [`DrainTracker::finalize`],
@@ -339,16 +402,15 @@ impl<'a> DrainTracker<'a> {
                 active: state.active_workers,
             });
         }
-        let mut preimage = Vec::with_capacity(28);
-        preimage.extend_from_slice(&DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
-        preimage.extend_from_slice(&self.run.0.to_le_bytes());
-        preimage.extend_from_slice(&state.registered_workers.to_le_bytes());
-        preimage.extend_from_slice(&state.drained_workers.to_le_bytes());
         let report = DrainFinalizeReport {
             run: self.run,
             registered_workers: state.registered_workers,
             drained_workers: state.drained_workers,
-            content_hash: fs_blake3::hash_domain(DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN, &preimage),
+            content_hash: drain_finalize_report_content(
+                self.run.0,
+                state.registered_workers,
+                state.drained_workers,
+            ),
         };
         state.report = Some(report);
         Ok(report)
@@ -765,6 +827,26 @@ mod tests {
             tracker.register_worker(),
             Err(DrainFinalizeError::RegistrationClosed)
         ));
+    }
+
+    #[test]
+    fn drain_report_v1_canonical_grammar_and_hash_are_retained() {
+        assert_eq!(
+            DRAIN_FINALIZE_REPORT_GRAMMAR_DESCRIPTOR,
+            [1, 4, 8, 8, 8, 0, 1, 2, 3]
+        );
+        let preimage = encode_drain_finalize_report_identity_preimage(0x51, 2, 2);
+        assert_eq!(
+            preimage,
+            [
+                1, 0, 0, 0, 0x51, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
+                0,
+            ]
+        );
+        assert_eq!(
+            drain_finalize_report_content(0x51, 2, 2).to_hex(),
+            "c5c09a1803d05b154d5a8bba2ec50d861dc8ff5e1489b87f26088d82ea843762"
+        );
     }
 
     #[test]

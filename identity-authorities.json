@@ -23,6 +23,8 @@
 {"id":"fs-evidence:vv-case"},
 {"id":"fs-evidence:vv-schema-admission-receipt"},
 {"id":"fs-exec:gemm-tune-key"},
+{"id":"fs-exec:solver-resume"},
+{"id":"fs-exec:solver-snapshot-authority-subject"},
 {"id":"fs-exec:tilepool-placement"},
 {"id":"fs-exec:tune-row"},
 {"id":"fs-exec:tuning-decision"},

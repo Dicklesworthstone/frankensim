@@ -445,8 +445,9 @@ that the target payload changed.
 Neither expected admission nor the receipt authenticates the legacy producer,
 proves the migration code correct, admits the v2 target for resume, or creates
 semantic fork lineage. Durable owner registration, shared generated catalogs,
-canonical-era migration, policy-authority verification, `PreparedResume`
-activation, and session/ledger publication remain successor boundaries.
+historical encoder implementations, policy-authority verification,
+`PreparedResume` activation, and session/ledger publication remain successor
+boundaries.
 
 ### Strong-identity v2 (code-first tranche; central proof pending)
 
@@ -471,9 +472,33 @@ drain-report eras before ordinary identity comparison or payload decode.
 
 Those era fields are fail-closed compatibility discriminators, not a theorem
 that an upstream owner can never forget to rotate an identifier. Registry
-registration, generated coupling validation, retained canonical vectors, and
-explicit era-to-era migration are owned by the snapshot identity-registration
-successor and are not yet claimed by this tranche.
+registration and generated coupling validation remain repository-level proof
+obligations. The executor drain-report root and its era discriminator now share
+one versioned grammar descriptor and preimage encoder, and retained vectors pin
+that grammar, the complete 588-byte header, and the resume/authority canonical
+frame roots.
+
+`quarantine_historical_era` is the bounded historical-era boundary. It checks
+only the stable v2 transport prefix, fixed header and exact capped extent,
+retains a plain BLAKE3 identity of the complete unchanged source bytes, and
+records all four declared era markers plus the raw historical resume root. It
+does not validate historical tags, drain semantics, payload content, or a
+semantic root with current framing. `SnapshotEraMigratorV2` must name the exact
+source era it implements; `migrate_historical_era` refuses with
+`HistoricalCanonicalEncoderUnavailable` when no such implementation is linked
+and with `MigratorEraMismatch` when the selected implementation names another
+era. A successful migration keeps source bytes, the opaque current-era target,
+and `SnapshotEraMigrationReceiptV2` attached. The canonical receipt binds the
+source content/length/declared era/raw resume root, independently declared
+migration code/schema/context identities, current target era, target content,
+target resume identity, and target authority subject.
+
+This interface and receipt do not supply any historical encoder themselves.
+They do not authenticate the producer, prove the migrator or its mapping
+correct, authorize the target, or permit recomputing an old semantic root with
+the current canonical encoder. Each readable historical era still requires a
+reviewed owner implementation and retained source-era vectors; otherwise the
+artifact remains exactly quarantined.
 
 The four identity/authority axes remain deliberately separate:
 
