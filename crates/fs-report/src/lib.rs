@@ -18,6 +18,8 @@
 //! It does not recompute compliance, uncertainty, attribution, or action value.
 //! [`regime_no_claims_markdown`] projects final operating-envelope demotions
 //! into the report's no-claim section without changing their evidence state.
+//! [`retain_regime_demotions_in_package`] preserves those same receipts in an
+//! evidence package as explicitly unbounded Estimated declarations.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
@@ -26,8 +28,130 @@ use fs_evidence::{
     action::ActionKind,
     uncertainty::{BudgetContribution, ComplianceVerdict, RequirementRelation},
 };
-use fs_regime::ProductOutputAudit;
+use fs_package::{Claim, EvidencePackage, PackageError};
+use fs_regime::{OutputClaimReceipt, ProductOutputAudit};
 use fs_session::DecisionAssessment;
+
+/// Estimator identity used by package declarations that retain demotion receipts.
+pub const REGIME_DEMOTION_PACKAGE_ESTIMATOR: &str = "fs-regime/output-demotion-package-receipt-v1";
+
+/// Refusal while adding final-envelope demotion receipts to a package.
+#[derive(Debug)]
+pub enum RegimePackageError {
+    /// An existing claim reused the deterministic receipt claim id for
+    /// different declaration bytes.
+    ClaimIdConflict {
+        /// Deterministic receipt claim identity.
+        claim_id: String,
+    },
+    /// The resulting package exceeded its normal structural or transport gate.
+    Package(PackageError),
+}
+
+impl core::fmt::Display for RegimePackageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ClaimIdConflict { claim_id } => write!(
+                f,
+                "package already contains a different claim at regime receipt id {claim_id:?}"
+            ),
+            Self::Package(error) => write!(f, "regime receipt package refused: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RegimePackageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ClaimIdConflict { .. } => None,
+            Self::Package(error) => Some(error),
+        }
+    }
+}
+
+/// Deterministic package claim id for one receipt in one audit collection.
+#[must_use]
+pub fn regime_demotion_package_claim_id(
+    audit: &ProductOutputAudit,
+    receipt: &OutputClaimReceipt,
+) -> String {
+    format!(
+        "regime-output-demotion/{:016x}/{}",
+        audit.provenance.0,
+        receipt.content_id()
+    )
+}
+
+fn regime_demotion_package_statement(
+    audit: &ProductOutputAudit,
+    receipt: &OutputClaimReceipt,
+) -> String {
+    format!(
+        "{{\"schema\":\"fs-regime-output-demotion-package-v1\",\"audit_provenance\":\"{:016x}\",\"receipt_content_id\":\"{}\",\"receipt\":{}}}",
+        audit.provenance.0,
+        receipt.content_id(),
+        receipt.to_canonical_json()
+    )
+}
+
+/// Retain every demoted audit receipt as an explicitly unbounded package claim.
+///
+/// Each declaration is `Estimated` with infinite dispersion. Its statement
+/// binds the audit collection provenance, the domain-separated receipt
+/// identity, and the exact canonical receipt JSON. Fully in-domain receipts
+/// add nothing. Exact retries are idempotent; a deterministic claim-id
+/// collision with different bytes refuses.
+///
+/// The wrapper is structural retention only. It does not use the portable
+/// semantic-witness path, authenticate model-card authorities, or restore any
+/// evidence color.
+///
+/// # Errors
+///
+/// Returns [`RegimePackageError::ClaimIdConflict`] for a conflicting retained
+/// id or [`RegimePackageError::Package`] when the resulting package exceeds its
+/// ordinary bounded transport gate.
+pub fn retain_regime_demotions_in_package(
+    mut package: EvidencePackage,
+    audit: &ProductOutputAudit,
+) -> Result<EvidencePackage, RegimePackageError> {
+    let mut receipts = audit
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.demoted())
+        .collect::<Vec<_>>();
+    receipts.sort_by(|left, right| {
+        left.qoi
+            .cmp(&right.qoi)
+            .then_with(|| left.content_id().cmp(&right.content_id()))
+    });
+
+    for receipt in receipts {
+        let claim_id = regime_demotion_package_claim_id(audit, receipt);
+        let claim = Claim::estimated(
+            claim_id.clone(),
+            regime_demotion_package_statement(audit, receipt),
+            REGIME_DEMOTION_PACKAGE_ESTIMATOR,
+            f64::INFINITY,
+        );
+        if let Some(existing) = package
+            .declared_claims_unverified()
+            .iter()
+            .find(|candidate| candidate.id() == claim_id)
+        {
+            if existing != &claim {
+                return Err(RegimePackageError::ClaimIdConflict { claim_id });
+            }
+            continue;
+        }
+        package = package.with_claim(claim);
+    }
+
+    package
+        .try_merkle_root()
+        .map_err(RegimePackageError::Package)?;
+    Ok(package)
+}
 
 /// Render every demoted final-envelope receipt in a deterministic no-claim section.
 ///

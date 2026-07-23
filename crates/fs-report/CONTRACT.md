@@ -94,6 +94,13 @@ projection-only no-claim boundary.
   receipt identities bind exact bytes but do not authenticate card ownership,
   calibration sources, or the completeness of the orchestrator-supplied card
   set and operating envelope.
+- `retain_regime_demotions_in_package` adds one deterministic declaration per
+  demoted receipt and is an exact-retry-idempotent no-op for fully in-domain
+  receipts. Each declaration is permanently `Estimated` with infinite
+  dispersion and package-root-binds the collection provenance, receipt
+  identity, and exact canonical JSON. It deliberately does not use
+  `SemanticWitness`, which is reserved for `Verified` source certificates; the
+  projection authenticates no card authority and cannot restore color.
 - Reference-run assembly for every requirement-bearing QoI, deterministic HTML,
   report routing through the CLI, and `frankensim explain` remain staged behind
   their prerequisite work.

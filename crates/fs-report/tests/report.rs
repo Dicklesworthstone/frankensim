@@ -6,8 +6,13 @@
 use std::collections::BTreeMap;
 
 use fs_evidence::{Ambition, Color, ModelCard, ValidityDomain};
+use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_regime::{OperatingPoint, OverrideAcknowledgement, QoiClaim, audit_product_output};
-use fs_report::{LabNotebook, Quantity, ReproStep, regime_no_claims_markdown, semantic_diff};
+use fs_report::{
+    LabNotebook, Quantity, REGIME_DEMOTION_PACKAGE_ESTIMATOR, RegimePackageError, ReproStep,
+    regime_demotion_package_claim_id, regime_no_claims_markdown,
+    retain_regime_demotions_in_package, semantic_diff,
+};
 
 fn study() -> LabNotebook {
     let mut nb = LabNotebook::new("Bracket study", 42, "0.1.0");
@@ -208,4 +213,115 @@ fn fully_in_domain_audit_does_not_invent_a_no_claim_section() {
     .expect("valid final-envelope audit");
 
     assert_eq!(regime_no_claims_markdown(&audit), None);
+}
+
+#[test]
+fn demotion_receipts_round_trip_in_packages_without_certificate_laundering() {
+    let audit = audit_product_output(
+        &[regime_card()],
+        &[
+            OperatingPoint {
+                id: "inside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+            },
+            OperatingPoint {
+                id: "outside".to_string(),
+                groups: BTreeMap::from([("Re".to_string(), 1_000.0)]),
+            },
+        ],
+        &[
+            regime_claim("temperature:max", true),
+            regime_claim("temperature:mean", false),
+        ],
+    )
+    .expect("valid final-envelope audit");
+    let package = retain_regime_demotions_in_package(
+        EvidencePackage::new(Provenance::new("regime-package-test", "Cargo.lock:test")),
+        &audit,
+    )
+    .expect("demotion receipts package");
+
+    let demoted = audit
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.demoted())
+        .collect::<Vec<_>>();
+    assert_eq!(package.declared_claims_unverified().len(), demoted.len());
+    for receipt in demoted {
+        let claim = package
+            .declared_claims_unverified()
+            .iter()
+            .find(|claim| claim.id() == regime_demotion_package_claim_id(&audit, receipt))
+            .expect("receipt claim is present");
+        assert!(matches!(
+            claim.declared_color_unverified(),
+            Color::Estimated {
+                estimator,
+                dispersion,
+            } if estimator == REGIME_DEMOTION_PACKAGE_ESTIMATOR && dispersion.is_infinite()
+        ));
+        assert_eq!(claim.declared_semantic_witness_unverified(), None);
+        assert_eq!(
+            claim.statement(),
+            format!(
+                "{{\"schema\":\"fs-regime-output-demotion-package-v1\",\"audit_provenance\":\"{:016x}\",\"receipt_content_id\":\"{}\",\"receipt\":{}}}",
+                audit.provenance.0,
+                receipt.content_id(),
+                receipt.to_canonical_json()
+            )
+        );
+    }
+
+    let json = package.to_json().expect("bounded package serializes");
+    let decoded = EvidencePackage::from_json(&json).expect("package round trips");
+    assert_eq!(decoded, package);
+    let idempotent = retain_regime_demotions_in_package(package.clone(), &audit)
+        .expect("exact retry is idempotent");
+    assert_eq!(idempotent, package);
+}
+
+#[test]
+fn package_projection_omits_in_domain_receipts_and_refuses_id_conflicts() {
+    let in_domain = audit_product_output(
+        &[regime_card()],
+        &[OperatingPoint {
+            id: "inside".to_string(),
+            groups: BTreeMap::from([("Re".to_string(), 50.0)]),
+        }],
+        &[regime_claim("temperature:max", false)],
+    )
+    .expect("valid final-envelope audit");
+    let base = EvidencePackage::new(Provenance::new(
+        "regime-package-in-domain-test",
+        "Cargo.lock:test",
+    ));
+    let unchanged = retain_regime_demotions_in_package(base.clone(), &in_domain)
+        .expect("fully in-domain audit is a no-op");
+    assert_eq!(unchanged, base);
+
+    let mut partial = audit_product_output(
+        &[regime_card()],
+        &[OperatingPoint {
+            id: "outside".to_string(),
+            groups: BTreeMap::from([("Re".to_string(), 1_000.0)]),
+        }],
+        &[regime_claim("temperature:max", false)],
+    )
+    .expect("valid demotion audit");
+    let receipt = partial.receipts.pop().expect("one receipt");
+    let conflict = EvidencePackage::new(Provenance::new(
+        "regime-package-conflict-test",
+        "Cargo.lock:test",
+    ))
+    .with_claim(Claim::estimated(
+        regime_demotion_package_claim_id(&partial, &receipt),
+        "different retained bytes",
+        REGIME_DEMOTION_PACKAGE_ESTIMATOR,
+        f64::INFINITY,
+    ));
+    partial.receipts.push(receipt);
+    assert!(matches!(
+        retain_regime_demotions_in_package(conflict, &partial),
+        Err(RegimePackageError::ClaimIdConflict { .. })
+    ));
 }
