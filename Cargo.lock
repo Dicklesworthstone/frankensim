@@ -1704,12 +1704,17 @@ dependencies = [
 name = "fs-project"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-conduction",
  "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-io",
  "fs-ir",
  "fs-matdb",
  "fs-qty",
+ "fs-rep-mesh",
  "fs-scenario",
 ]
 

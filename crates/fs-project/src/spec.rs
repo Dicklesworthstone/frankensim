@@ -10,10 +10,11 @@
 //! omitted sections: `(cooling (fans) (vents))` states "no fans" as a fact,
 //! while a missing `cooling` section is a violation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use fs_io::MeshSelector;
 use fs_qty::{Dims, QtyAny};
-use fs_scenario::{EntityDeclaration, EntityId, InterfacePair, Violation};
+use fs_scenario::{EntityDeclaration, EntityId, EntityKind, InterfacePair, Violation};
 
 /// SI dimension vectors this schema checks against.
 pub mod dims {
@@ -98,6 +99,25 @@ pub struct GeometryArtifact {
     pub source_hash: u64,
     /// Parser version that produced the receipt.
     pub parser_version: String,
+}
+
+/// One mesh-index-free assignment declared in the project file.
+///
+/// `target` is a project-local declared entity name. The L6 assignment
+/// adapter resolves it to the actual [`EntityId`] and gives fs-io only that
+/// persistent token; a raw mesh ordinal is never an identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeometryAssignment {
+    /// Geometry artifact role this selector operates on.
+    pub artifact: String,
+    /// Declared region or interface name to bind.
+    pub target: String,
+    /// Explicit coordinate unit carried into the fs-io receipt.
+    pub length_unit: String,
+    /// Deterministic named/geometric selector.
+    pub selector: MeshSelector,
+    /// Whether overlap with other overlap-enabled assignments is intentional.
+    pub allow_overlap: bool,
 }
 
 /// One entity declaration with a persistent identity. Names are the
@@ -330,6 +350,8 @@ pub struct ProjectSpec {
     pub units: Option<UnitsDoctrine>,
     /// Imported geometry artifact references.
     pub geometry: Option<Vec<GeometryArtifact>>,
+    /// Mesh-index-free region/interface assignments.
+    pub assignments: Option<Vec<GeometryAssignment>>,
     /// Assembly/part/region/interface declarations.
     pub assembly: Option<Vec<EntityDecl>>,
     /// Material bindings.
@@ -423,11 +445,12 @@ impl ProjectSpec {
         self.check_quantities(&mut out);
         let ids = self.resolve_entities(&mut out);
         self.check_references(&ids, &mut out);
+        self.check_assignment_coverage(&ids, &mut out);
         out
     }
 
     fn check_sections(&self, out: &mut Vec<Violation>) {
-        let mandatory: [(&'static str, bool, &str); 16] = [
+        let mandatory: [(&'static str, bool, &str); 17] = [
             (
                 "project-metadata-missing",
                 self.metadata.is_some(),
@@ -450,6 +473,11 @@ impl ProjectSpec {
                 "project-geometry-missing",
                 self.geometry.is_some(),
                 "geometry",
+            ),
+            (
+                "project-assignments-missing",
+                self.assignments.is_some(),
+                "assignments",
             ),
             (
                 "project-assembly-missing",
@@ -496,7 +524,7 @@ impl ProjectSpec {
     }
 
     fn check_nonempty_sections(&self, out: &mut Vec<Violation>) {
-        let nonempty: [(&'static str, Option<usize>, &str); 6] = [
+        let nonempty: [(&'static str, Option<usize>, &str); 7] = [
             (
                 "project-capabilities-empty",
                 self.capabilities.as_ref().map(Vec::len),
@@ -506,6 +534,11 @@ impl ProjectSpec {
                 "project-geometry-empty",
                 self.geometry.as_ref().map(Vec::len),
                 "geometry",
+            ),
+            (
+                "project-assignments-empty",
+                self.assignments.as_ref().map(Vec::len),
+                "assignments",
             ),
             (
                 "project-assembly-empty",
@@ -622,6 +655,30 @@ impl ProjectSpec {
                 format!("budgets.accuracy-rel is {}", budgets.accuracy_rel),
                 "state a finite positive relative accuracy target",
             ));
+        }
+        if let Some(assignments) = &self.assignments {
+            for assignment in assignments {
+                for (field, value) in [
+                    ("artifact", assignment.artifact.as_str()),
+                    ("target", assignment.target.as_str()),
+                    ("length-unit", assignment.length_unit.as_str()),
+                ] {
+                    if value.is_empty()
+                        || value.trim() != value
+                        || value.chars().any(char::is_control)
+                    {
+                        out.push(violation(
+                            "project-assignment-field-invalid",
+                            format!(
+                                "assignment field `{field}` value {value:?} is not a canonical nonempty label"
+                            ),
+                            format!(
+                                "state a nonempty, trim-canonical, control-free `{field}` value"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -923,7 +980,12 @@ impl ProjectSpec {
         if self.assembly.is_none() {
             return;
         }
-        let mut check_ref = |context: String, name: &str| {
+        fn check_ref(
+            ids: &BTreeMap<String, EntityId>,
+            out: &mut Vec<Violation>,
+            context: String,
+            name: &str,
+        ) {
             if !ids.contains_key(name) {
                 out.push(violation(
                     "project-ref-unknown",
@@ -931,10 +993,12 @@ impl ProjectSpec {
                     "reference entities by their declared names from the assembly section",
                 ));
             }
-        };
+        }
         if let Some(materials) = &self.materials {
             for binding in materials {
                 check_ref(
+                    ids,
+                    out,
                     format!("material binding `{}`", binding.card),
                     &binding.region,
                 );
@@ -942,25 +1006,138 @@ impl ProjectSpec {
         }
         if let Some(power) = &self.power {
             for row in power {
-                check_ref("power map row".to_string(), &row.region);
+                check_ref(ids, out, "power map row".to_string(), &row.region);
             }
         }
         if let Some(cooling) = &self.cooling {
             for vent in &cooling.vents {
-                check_ref(format!("vent (area {})", vent.area.value), &vent.region);
+                check_ref(
+                    ids,
+                    out,
+                    format!("vent (area {})", vent.area.value),
+                    &vent.region,
+                );
             }
         }
         if let Some(requirements) = &self.requirements {
             for limit in requirements {
-                check_ref(format!("requirement `{}`", limit.class), &limit.region);
+                check_ref(
+                    ids,
+                    out,
+                    format!("requirement `{}`", limit.class),
+                    &limit.region,
+                );
             }
         }
         if let Some(interface_cards) = &self.interface_cards {
             for binding in interface_cards {
                 check_ref(
+                    ids,
+                    out,
                     format!("interface card `{}`", binding.card),
                     &binding.interface,
                 );
+            }
+        }
+        if let Some(assignments) = &self.assignments {
+            let geometry_roles: BTreeSet<&str> = self
+                .geometry
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|artifact| artifact.role.as_str())
+                .collect();
+            for assignment in assignments {
+                check_ref(
+                    ids,
+                    out,
+                    format!("geometry assignment on `{}`", assignment.artifact),
+                    &assignment.target,
+                );
+                if !geometry_roles.contains(assignment.artifact.as_str()) {
+                    out.push(violation(
+                        "project-assignment-artifact-unknown",
+                        format!(
+                            "assignment for `{}` references geometry role `{}`, which is not declared",
+                            assignment.target, assignment.artifact
+                        ),
+                        "reference the exact role of one declared geometry artifact",
+                    ));
+                }
+                if let Some(id) = ids.get(&assignment.target)
+                    && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+                {
+                    out.push(violation(
+                        "project-assignment-target-kind",
+                        format!(
+                            "assignment target `{}` is a {}, not a region or interface",
+                            assignment.target,
+                            id.kind().label()
+                        ),
+                        "assign finite mesh faces only to declared regions or interfaces",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn check_assignment_coverage(
+        &self,
+        ids: &BTreeMap<String, EntityId>,
+        out: &mut Vec<Violation>,
+    ) {
+        let Some(assignments) = &self.assignments else {
+            return;
+        };
+        let mut targets = BTreeSet::new();
+        let mut artifacts = BTreeSet::new();
+        for assignment in assignments {
+            if !targets.insert(assignment.target.as_str()) {
+                out.push(violation(
+                    "project-assignment-target-duplicate",
+                    format!(
+                        "entity `{}` has more than one geometry assignment",
+                        assignment.target
+                    ),
+                    "declare exactly one artifact and selector for each region or interface",
+                ));
+            }
+            artifacts.insert(assignment.artifact.as_str());
+        }
+        for (name, id) in ids {
+            if matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+                && !targets.contains(name.as_str())
+            {
+                out.push(violation(
+                    "project-assignment-target-unbound",
+                    format!("{} `{name}` has no geometry assignment", id.kind().label()),
+                    "declare one mesh-index-free named or geometric selector for this entity",
+                ));
+            }
+        }
+        if let Some(geometry) = &self.geometry {
+            let mut roles = BTreeSet::new();
+            for artifact in geometry {
+                if !roles.insert(artifact.role.as_str()) {
+                    out.push(violation(
+                        "project-geometry-role-duplicate",
+                        format!(
+                            "geometry role `{}` is declared more than once",
+                            artifact.role
+                        ),
+                        "give each imported geometry artifact a unique project role",
+                    ));
+                }
+                if !artifacts.contains(artifact.role.as_str()) {
+                    out.push(violation(
+                        "project-assignment-artifact-unassigned",
+                        format!(
+                            "geometry role `{}` has no region/interface assignments",
+                            artifact.role
+                        ),
+                        "declare at least one selector for every imported geometry artifact, or remove the unused artifact",
+                    ));
+                }
             }
         }
     }

@@ -12,6 +12,7 @@
 //! refused, and the only defaults are receipted, never silent. Version bumps
 //! travel through explicit [`migration`] receipts.
 
+pub mod assignment;
 pub mod bind;
 pub mod migration;
 pub mod spec;
@@ -21,17 +22,24 @@ pub mod wire;
 /// older envelopes must pass through [`migration::migrate_envelope`].
 pub const FSIM_VERSION: u32 = 1;
 
+pub use assignment::{
+    GEOMETRY_ASSIGNMENT_REPORT_DOMAIN, GEOMETRY_SOURCE_IDENTITY_DOMAIN, GeometryResolution,
+    ImportedMeshLibrary, ResolvedGeometryArtifact, ResolvedProjectAssignment,
+    geometry_source_identity, resolve_geometry_assignments,
+};
 pub use bind::{
     Advisory, BindingRequirements, BindingTarget, CONTACT_RESISTANCE_DIMS,
     CONTACT_RESISTANCE_PROPERTY, CardLibrary, MaterialResolution, RequiredProperty,
     ResolvedBinding, ResolvedProperty, RetainedReceipt, TEMPERATURE_AXIS,
     THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, resolve_bindings,
 };
+pub use fs_io::{HalfSpaceSide, MeshSelector};
 pub use migration::{MigratedProject, MigrationRule, ProjectMigrationReceipt, migrate_envelope};
 pub use spec::{
     Budgets, Cooling, DefaultReceipt, EntityDecl, Envelope, Fan, GeometryArtifact,
-    InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest, PowerDissipation, ProjectSpec,
-    Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    GeometryAssignment, InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest,
+    PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent,
+    Versions,
 };
 pub use wire::{
     CanonicalizationReceipt, DecodedProject, ProjectError, canonical_hash, lower, parse_json,

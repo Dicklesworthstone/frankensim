@@ -7,15 +7,19 @@ canonical bytes, typed violations, receipted defaults, and explicit migration
 receipts. The `bind` module (bead f85xj.6.4) adds validate-time resolution of
 material/interface bindings against matdb cards: envelope-vs-domain refusal,
 surfaced uncertainty, retained usage receipts, and pin-only resolution of
-conflicting claims.
+conflicting claims. The `assignment` module (bead f85xj.6.3) compiles
+persisted mesh-index-free selectors to persistent `EntityId` tokens, resolves
+them against caller-supplied promoted meshes through `fs-io`, and retains the
+exact lower-layer reports.
 
 ## Purpose and layer
 
 Layer L6 (HELM). Depends on `fs-ir` (AST + both concrete syntaxes),
 `fs-scenario` (entity identities, `Violation`), `fs-matdb` (cards, receipted
-queries), `fs-qty`, `fs-blake3`. This crate persists project intent and
-resolves its card bindings; it runs no solves and admits no scenarios
-itself.
+queries), `fs-io` (deterministic mesh assignments), `fs-rep-mesh` (promoted
+finite meshes), `fs-exec` (cancellation context), `fs-qty`, and `fs-blake3`.
+This crate persists project intent and resolves its card and geometry
+bindings; it runs no solves and admits no scenarios itself.
 
 ## Public types and semantics
 
@@ -25,6 +29,9 @@ itself.
   `UnitsDoctrine`), `GeometryArtifact` references (imported quarantine-receipt
   ids — geometry never lives inline), `EntityDecl`
   assembly/part/region/interface declarations with persistent identities,
+  mandatory `GeometryAssignment` rows (one declared artifact, persistent
+  region/interface target, explicit coordinate unit, one `MeshSelector`, and
+  overlap policy),
   `MaterialBinding` matdb card refs (state, admitted temperature range,
   source, optional `claim` pin), `InterfaceCardBinding` TIM/contact card refs
   (optional `claim` pin), `PowerDissipation`
@@ -52,6 +59,10 @@ itself.
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
   The strict parsers refuse noncanonical input (`fsim-non-canonical`, first
   difference position) and applied defaults (`fsim-default-in-strict-mode`).
+  The canonical `assignments` section spells named-group, half-space, box,
+  cylinder, nearest-datum, and explicit-face-set selectors without depending
+  on imported face ordinals except where the explicitly fragile
+  `explicit-face-set` variant is intentionally chosen and acknowledged.
 - Canonical bytes are the checked s-expression render; `canonical_hash`
   hashes them under `org.frankensim.fs-project.canonical.v1`. The JSON
   spelling parses to the same AST, so both spellings reach one hash.
@@ -95,6 +106,18 @@ itself.
 - Uncertainty surfacing: `Unstated` uncertainty is an `Advisory`
   (`binding-uncertainty-unstated`) up front, never a refusal and never
   laundered — it caps downstream evidence at Estimated and the table says so.
+- `assignment::resolve_geometry_assignments(&ProjectSpec,
+  &ImportedMeshLibrary, AssignmentLimits, &Cx) -> GeometryResolution`
+  resolves declarations first, compiles project-local targets to the actual
+  `EntityId::token()` strings, then delegates every artifact's selector plan
+  to `fs_io::resolve_mesh_assignments`. `ImportedMeshLibrary::insert`
+  computes its own domain-separated key from the exact `GeometryArtifact`
+  row; callers cannot supply a mismatched map key. Every successful
+  `ResolvedGeometryArtifact` retains fs-io's report unchanged, its exact
+  canonical JSON bytes, a domain-separated report hash, and the declared-name
+  to `EntityId` correspondence. `render_table()` surfaces entity, artifact,
+  source identity, unit, selector fingerprint, selected face count, area,
+  optional enclosed volume, bounds, and report hash.
 
 ## Invariants
 
@@ -108,6 +131,14 @@ itself.
   violations with placeholder values that validation then rejects.
 - `Violation.fix` is non-empty for every emitted code (tested via the broken
   corpus).
+- Every declared region/interface has exactly one geometry assignment; every
+  declared geometry artifact has at least one assignment; roles and targets
+  are unique where required. Geometry reports publish atomically only after
+  every artifact succeeds, so refusal or cancellation exposes no partial
+  assignment result.
+- The adapter preserves fs-io assignment order and rejects any returned
+  subject/order mismatch before retention. Project-wide request and selected
+  face counts are checked against the explicit `AssignmentLimits`.
 
 ## Error model
 
@@ -121,18 +152,29 @@ same triples (`project-binding-*` / `project-material-*` /
 refusal text travels in `what`) plus non-refusing `Advisory` rows; it is
 total over garbage input, naming preconditions instead of panicking.
 Internal `expect` is limited to infallible writes to `String`.
+Geometry-assignment preflight and adapter failures use the same
+`Violation` triple (`project-assignment-*`); fs-io refusal codes, `what`, and
+`fix` propagate without changing their lower-layer meaning, with the geometry
+role added as context. Refusal and cancellation leave `artifacts` empty.
 
 ## Determinism class
 
-Fully deterministic: pure functions of the input bytes/spec; canonical
-rendering has one spelling; hashing is domain-separated BLAKE3 over exact
-bytes. No clocks, no RNG, no environment reads.
+Fully deterministic: pure functions of the input bytes/spec and explicitly
+supplied card/mesh libraries; canonical rendering has one spelling; hashing
+is domain-separated BLAKE3 over exact bytes. Mesh resolution inherits
+fs-io's deterministic face-order and selector-fingerprint contract. No
+clocks, no RNG, no environment reads.
 
 ## Cancellation behavior
 
-None. Documents are bounded project descriptions; a validation budget/plan
-triad (fs-scenario style) is deliberately deferred until real projects show
-the loader can be large, and is named future work rather than pretended.
+Static document recognition and validation do not take a cancellation
+context; their descriptions are bounded by the caller's document admission
+layer. Geometry assignment resolution takes an explicit `Cx`, polls before
+entry, at artifact boundaries, and inside fs-io's bounded face/selector tile
+loops. Cancellation is a typed `mesh-assignment-cancelled` violation and
+publishes no partial report. A validation budget/plan triad (fs-scenario
+style) remains deferred until real projects show the structural loader can be
+large.
 
 ## Unsafe boundary
 
@@ -161,7 +203,7 @@ and the property constants drift-test against `fs-conduction`.
 `tests/project.rs`: the reference cooling project renders, parses strictly,
 is admissible, and hash-stable; canonical bytes are identical across both
 spellings; parse-render-parse idempotence across variants (empty cooling
-lists, identity pins); all sixteen mandatory-section omissions surface their
+lists, identity pins); all seventeen mandatory-section omissions surface their
 named violations; unknown section and keyword refusal; the receipted duty
 default with canonicalization receipt (and strict-mode refusal of the same
 bytes); noncanonical whitespace refusal/receipt; the synthetic v0 migration
@@ -170,14 +212,28 @@ migrations; entity identity pins accepting the recomputed token and refusing
 a stale one; and the broken-project corpus (14 rows) logging every violation
 with its fix as the error-message quality bar.
 
+`tests/assignment.rs` (f85xj.6.3): a promoted cube resolves named groups to
+the exact persistent region/interface identities; retained fs-io JSON and its
+domain hash replay exactly; re-tessellation changes source/report material
+while preserving the project entity and physical area; dangling and
+wrong-kind targets, unit mismatch, empty selection, and unacknowledged
+explicit-face fragility refuse without partial publication; pre-cancelled
+resolution is atomic. `tests/project.rs` additionally round-trips all six
+selector variants in both canonical spellings, including the maximum `u32`
+explicit face index.
+
 ## No-claim boundaries
 
 - An admissible `.fsim` document proves the project is well-formed and
   internally consistent. It does NOT prove the referenced geometry artifacts,
   matdb cards, or capabilities exist, are compatible, or are validated —
-  geometry existence checks belong to the import/admission path (bead .6.3)
-  and the capability registry, not this schema. Card existence and coverage
-  ARE checked by `bind::resolve_bindings`, but only against the
+  geometry existence and selector checks require
+  `assignment::resolve_geometry_assignments`, not structural schema
+  validation. That resolver checks only the caller-supplied promoted
+  `ImportedMeshLibrary`: its computed keys bind an entry to one exact project
+  geometry row, but WHO supplied the mesh is the caller's trust channel.
+  Card existence and coverage ARE checked by `bind::resolve_bindings`, but
+  only against the
   caller-supplied `CardLibrary`: the library keys cards by their own content
   hashes (a key cannot lie about its card), while WHO supplied the collection
   is the caller's trust channel — resolution proves binding coverage, never
@@ -199,6 +255,11 @@ with its fix as the error-message quality bar.
   (.16.5): version 1 is still pre-freeze (see below), absence of the field
   is the canonical spelling of "no pin", and pre-pin documents are
   byte-identical under the extended grammar.
+- The mandatory `assignments` section was also added to version 1 before the
+  schema freeze. Unlike the optional claim pin, this intentionally makes old
+  pre-freeze documents incomplete: they must declare one selector per
+  region/interface before becoming admissible again. No compatibility shim
+  invents geometric intent.
 - Entity identity pins prove byte-equal derivation inputs at declaration
   time; unequal pins prove nothing about physical sameness (re-exports change
   bytes), which is why drift is a violation to adjudicate, not an automatic
@@ -211,7 +272,9 @@ with its fix as the error-message quality bar.
 - `source_hash` on geometry artifacts reproduces `fs_io::ImportReceipt`'s
   current 64-bit FNV field: deterministic correlation, not
   collision-resistant authentication; the HELM-side BLAKE3-class upgrade is
-  tracked upstream.
+  tracked upstream. The adapter's BLAKE3 source identity binds that field and
+  the complete geometry row exactly, but cannot strengthen the importer's
+  underlying FNV collision guarantee or authenticate the supplied mesh.
 - The schema freeze (e16, bead .16.5) has NOT happened: version 1 is the
   first implemented version, not yet a frozen public promise. The migration
   machinery exists so the freeze can be honest when it lands.

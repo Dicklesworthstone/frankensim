@@ -2,9 +2,9 @@
 
 use fs_cli::{exit, run, validate_source};
 use fs_project::{
-    Budgets, Cooling, EntityDecl, Envelope, GeometryArtifact, Metadata, OutputRequest,
-    PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Versions,
-    print_sexpr,
+    Budgets, Cooling, EntityDecl, Envelope, GeometryArtifact, GeometryAssignment, MeshSelector,
+    Metadata, OutputRequest, PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit,
+    UnitsDoctrine, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
 
@@ -43,6 +43,15 @@ fn valid_project() -> ProjectSpec {
             format: "stl".to_string(),
             source_hash: 9,
             parser_version: "1".to_string(),
+        }]),
+        assignments: Some(vec![GeometryAssignment {
+            artifact: "plate".to_string(),
+            target: "hot".to_string(),
+            length_unit: "m".to_string(),
+            selector: MeshSelector::NamedGroup {
+                name: "HOT".to_string(),
+            },
+            allow_overlap: false,
         }]),
         assembly: Some(vec![
             EntityDecl::Assembly {
@@ -119,8 +128,8 @@ fn g0_validate_retains_every_finding_and_fix() {
     let output = validate_source("broken.fsim", &source, false, true);
     assert_eq!(output.exit_code, exit::REFUSED);
     assert!(output.stdout.contains("\"status\":\"refused\""));
-    assert!(output.stdout.contains("\"finding_count\":16"));
-    assert_eq!(output.stderr.lines().count(), 16);
+    assert!(output.stdout.contains("\"finding_count\":17"));
+    assert_eq!(output.stderr.lines().count(), 17);
     assert!(output.stderr.contains("project-metadata-missing"));
     assert!(output.stderr.contains("\"fix\":"));
 }

@@ -14,6 +14,7 @@
 //! silent re-emission.
 
 use fs_blake3::{ContentHash, hash_domain};
+use fs_io::{HalfSpaceSide, MeshSelector};
 use fs_ir::{Node, NodeKind};
 use fs_qty::QtyAny;
 use fs_scenario::Violation;
@@ -21,8 +22,9 @@ use fs_scenario::Violation;
 use crate::FSIM_VERSION;
 use crate::spec::{
     Budgets, Cooling, DefaultReceipt, EntityDecl, Envelope, Fan, GeometryArtifact,
-    InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest, PowerDissipation, ProjectSpec,
-    Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    GeometryAssignment, InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest,
+    PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent,
+    Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -139,6 +141,10 @@ fn seed(value: u64) -> Node {
     Node::synthetic(NodeKind::Seed(value))
 }
 
+fn boolean(value: bool) -> Node {
+    sym(if value { "true" } else { "false" })
+}
+
 fn list(items: Vec<Node>) -> Node {
     Node::synthetic(NodeKind::List(items))
 }
@@ -244,6 +250,25 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
                 text(&format!("{:016x}", artifact.source_hash)),
                 kw("parser"),
                 text(&artifact.parser_version),
+            ]));
+        }
+        sections.push(list(items));
+    }
+    if let Some(assignments) = &spec.assignments {
+        let mut items = vec![sym("assignments")];
+        for assignment in assignments {
+            items.push(list(vec![
+                sym("assign"),
+                kw("artifact"),
+                text(&assignment.artifact),
+                kw("target"),
+                text(&assignment.target),
+                kw("length-unit"),
+                text(&assignment.length_unit),
+                kw("selector"),
+                lower_selector(&assignment.selector),
+                kw("allow-overlap"),
+                boolean(assignment.allow_overlap),
             ]));
         }
         sections.push(list(items));
@@ -475,6 +500,102 @@ fn lower_entity(decl: &EntityDecl) -> Node {
     list(items)
 }
 
+fn vec3(value: [f64; 3]) -> Node {
+    list(vec![
+        sym("vec3"),
+        float(value[0]),
+        float(value[1]),
+        float(value[2]),
+    ])
+}
+
+fn lower_selector(selector: &MeshSelector) -> Node {
+    match selector {
+        MeshSelector::NamedGroup { name } => list(vec![sym("named-group"), kw("name"), text(name)]),
+        MeshSelector::HalfSpace {
+            normal,
+            offset,
+            side,
+            tolerance,
+        } => list(vec![
+            sym("half-space"),
+            kw("normal"),
+            vec3(*normal),
+            kw("offset"),
+            float(*offset),
+            kw("side"),
+            sym(match side {
+                HalfSpaceSide::AtMost => "at-most",
+                HalfSpaceSide::AtLeast => "at-least",
+            }),
+            kw("tolerance"),
+            float(*tolerance),
+        ]),
+        MeshSelector::Box {
+            min,
+            max,
+            tolerance,
+        } => list(vec![
+            sym("box"),
+            kw("min"),
+            vec3(*min),
+            kw("max"),
+            vec3(*max),
+            kw("tolerance"),
+            float(*tolerance),
+        ]),
+        MeshSelector::Cylinder {
+            origin,
+            axis,
+            radius,
+            axial_min,
+            axial_max,
+            tolerance,
+        } => list(vec![
+            sym("cylinder"),
+            kw("origin"),
+            vec3(*origin),
+            kw("axis"),
+            vec3(*axis),
+            kw("radius"),
+            float(*radius),
+            kw("axial-min"),
+            float(*axial_min),
+            kw("axial-max"),
+            float(*axial_max),
+            kw("tolerance"),
+            float(*tolerance),
+        ]),
+        MeshSelector::NearestDatum {
+            point,
+            max_distance,
+            tolerance,
+        } => list(vec![
+            sym("nearest-datum"),
+            kw("point"),
+            vec3(*point),
+            kw("max-distance"),
+            float(*max_distance),
+            kw("tolerance"),
+            float(*tolerance),
+        ]),
+        MeshSelector::ExplicitFaceSet {
+            faces,
+            fragility_acknowledged,
+        } => {
+            let mut face_items = vec![sym("faces")];
+            face_items.extend(faces.iter().map(|face| int(i64::from(*face))));
+            list(vec![
+                sym("explicit-face-set"),
+                kw("faces"),
+                list(face_items),
+                kw("fragility-acknowledged"),
+                boolean(*fragility_acknowledged),
+            ])
+        }
+    }
+}
+
 /// Render the canonical s-expression bytes for a project.
 pub fn print_sexpr(spec: &ProjectSpec) -> Result<String, ProjectError> {
     let node = lower(spec)?;
@@ -661,6 +782,62 @@ fn expect_float(node: Option<&Node>, context: &str, out: &mut Vec<Violation>) ->
     }
 }
 
+fn expect_boolean(node: Option<&Node>, context: &str, out: &mut Vec<Violation>) -> bool {
+    match node {
+        Some(Node {
+            kind: NodeKind::Symbol(value),
+            ..
+        }) if value == "true" => true,
+        Some(Node {
+            kind: NodeKind::Symbol(value),
+            ..
+        }) if value == "false" => false,
+        _ => {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: format!("`{context}` expected symbol `true` or `false`"),
+                fix: format!("spell `{context}` as exactly `true` or `false`"),
+            });
+            false
+        }
+    }
+}
+
+fn expect_vec3(node: Option<&Node>, context: &str, out: &mut Vec<Violation>) -> [f64; 3] {
+    let Some(Node {
+        kind: NodeKind::List(items),
+        ..
+    }) = node
+    else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("`{context}` expected `(vec3 <x> <y> <z>)`"),
+            fix: format!("spell `{context}` as three explicit decimal coordinates"),
+        });
+        return [f64::NAN; 3];
+    };
+    if !matches!(
+        items.first(),
+        Some(Node {
+            kind: NodeKind::Symbol(head),
+            ..
+        }) if head == "vec3"
+    ) || items.len() != 4
+    {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("`{context}` expected exactly `(vec3 <x> <y> <z>)`"),
+            fix: format!("spell `{context}` as three explicit decimal coordinates"),
+        });
+        return [f64::NAN; 3];
+    }
+    [
+        expect_float(items.get(1), &format!("{context}[0]"), out),
+        expect_float(items.get(2), &format!("{context}[1]"), out),
+        expect_float(items.get(3), &format!("{context}[2]"), out),
+    ]
+}
+
 fn section_name(node: &Node) -> Option<(&str, &[Node])> {
     if let NodeKind::List(items) = &node.kind
         && let Some(Node {
@@ -736,6 +913,9 @@ pub fn recognize(node: &Node) -> Result<DecodedProject, ProjectError> {
             "capabilities" => spec.capabilities = Some(read_capabilities(body, &mut recognition)),
             "units" => spec.units = Some(read_units(body, &mut recognition)),
             "geometry" => spec.geometry = Some(read_geometry(body, &mut recognition)),
+            "assignments" => {
+                spec.assignments = Some(read_assignments(body, &mut recognition));
+            }
             "assembly" => spec.assembly = Some(read_assembly(body, &mut recognition)),
             "materials" => spec.materials = Some(read_materials(body, &mut recognition)),
             "interface-cards" => {
@@ -971,6 +1151,218 @@ fn read_geometry(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryArtifac
         });
     }
     artifacts
+}
+
+fn read_assignments(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryAssignment> {
+    let mut assignments = Vec::new();
+    for node in body {
+        let Some(("assign", inner)) = section_name(node) else {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "`assignments` rows must be `(assign ...)`".to_string(),
+                fix: "declare one artifact, target, length unit, selector, and overlap policy per row"
+                    .to_string(),
+            });
+            continue;
+        };
+        let pairs = read_pairs(
+            inner,
+            "assign",
+            &[
+                "artifact",
+                "target",
+                "length-unit",
+                "selector",
+                "allow-overlap",
+            ],
+            out,
+        );
+        assignments.push(GeometryAssignment {
+            artifact: expect_str(field(&pairs, "artifact"), "assign.artifact", out),
+            target: expect_str(field(&pairs, "target"), "assign.target", out),
+            length_unit: expect_str(field(&pairs, "length-unit"), "assign.length-unit", out),
+            selector: read_selector(field(&pairs, "selector"), out),
+            allow_overlap: expect_boolean(
+                field(&pairs, "allow-overlap"),
+                "assign.allow-overlap",
+                out,
+            ),
+        });
+    }
+    assignments
+}
+
+fn read_selector(node: Option<&Node>, out: &mut Vec<Violation>) -> MeshSelector {
+    let Some(node) = node else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`assign.selector` is missing".to_string(),
+            fix: "declare one named, geometric, datum, or acknowledged explicit-face selector"
+                .to_string(),
+        });
+        return MeshSelector::NamedGroup {
+            name: String::new(),
+        };
+    };
+    let Some((kind, body)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`assign.selector` must be a selector list".to_string(),
+            fix: "use `(named-group ...)`, `(half-space ...)`, `(box ...)`, `(cylinder ...)`, `(nearest-datum ...)`, or `(explicit-face-set ...)`".to_string(),
+        });
+        return MeshSelector::NamedGroup {
+            name: String::new(),
+        };
+    };
+    match kind {
+        "named-group" => {
+            let pairs = read_pairs(body, kind, &["name"], out);
+            MeshSelector::NamedGroup {
+                name: expect_str(field(&pairs, "name"), "named-group.name", out),
+            }
+        }
+        "half-space" => {
+            let pairs = read_pairs(body, kind, &["normal", "offset", "side", "tolerance"], out);
+            let side = match field(&pairs, "side") {
+                Some(Node {
+                    kind: NodeKind::Symbol(side),
+                    ..
+                }) if side == "at-most" => HalfSpaceSide::AtMost,
+                Some(Node {
+                    kind: NodeKind::Symbol(side),
+                    ..
+                }) if side == "at-least" => HalfSpaceSide::AtLeast,
+                _ => {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "`half-space.side` must be `at-most` or `at-least`".to_string(),
+                        fix: "state which closed half-space the selector admits".to_string(),
+                    });
+                    HalfSpaceSide::AtMost
+                }
+            };
+            MeshSelector::HalfSpace {
+                normal: expect_vec3(field(&pairs, "normal"), "half-space.normal", out),
+                offset: expect_float(field(&pairs, "offset"), "half-space.offset", out),
+                side,
+                tolerance: expect_float(field(&pairs, "tolerance"), "half-space.tolerance", out),
+            }
+        }
+        "box" => {
+            let pairs = read_pairs(body, kind, &["min", "max", "tolerance"], out);
+            MeshSelector::Box {
+                min: expect_vec3(field(&pairs, "min"), "box.min", out),
+                max: expect_vec3(field(&pairs, "max"), "box.max", out),
+                tolerance: expect_float(field(&pairs, "tolerance"), "box.tolerance", out),
+            }
+        }
+        "cylinder" => {
+            let pairs = read_pairs(
+                body,
+                kind,
+                &[
+                    "origin",
+                    "axis",
+                    "radius",
+                    "axial-min",
+                    "axial-max",
+                    "tolerance",
+                ],
+                out,
+            );
+            MeshSelector::Cylinder {
+                origin: expect_vec3(field(&pairs, "origin"), "cylinder.origin", out),
+                axis: expect_vec3(field(&pairs, "axis"), "cylinder.axis", out),
+                radius: expect_float(field(&pairs, "radius"), "cylinder.radius", out),
+                axial_min: expect_float(field(&pairs, "axial-min"), "cylinder.axial-min", out),
+                axial_max: expect_float(field(&pairs, "axial-max"), "cylinder.axial-max", out),
+                tolerance: expect_float(field(&pairs, "tolerance"), "cylinder.tolerance", out),
+            }
+        }
+        "nearest-datum" => {
+            let pairs = read_pairs(body, kind, &["point", "max-distance", "tolerance"], out);
+            MeshSelector::NearestDatum {
+                point: expect_vec3(field(&pairs, "point"), "nearest-datum.point", out),
+                max_distance: expect_float(
+                    field(&pairs, "max-distance"),
+                    "nearest-datum.max-distance",
+                    out,
+                ),
+                tolerance: expect_float(field(&pairs, "tolerance"), "nearest-datum.tolerance", out),
+            }
+        }
+        "explicit-face-set" => {
+            let pairs = read_pairs(body, kind, &["faces", "fragility-acknowledged"], out);
+            MeshSelector::ExplicitFaceSet {
+                faces: read_faces(field(&pairs, "faces"), out),
+                fragility_acknowledged: expect_boolean(
+                    field(&pairs, "fragility-acknowledged"),
+                    "explicit-face-set.fragility-acknowledged",
+                    out,
+                ),
+            }
+        }
+        other => {
+            unknown_field(out, "assign.selector", other);
+            MeshSelector::NamedGroup {
+                name: String::new(),
+            }
+        }
+    }
+}
+
+fn read_faces(node: Option<&Node>, out: &mut Vec<Violation>) -> Vec<u32> {
+    let Some(Node {
+        kind: NodeKind::List(items),
+        ..
+    }) = node
+    else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`explicit-face-set.faces` expected `(faces <ordinal>...)`".to_string(),
+            fix: "list non-negative u32 face ordinals and acknowledge their remeshing fragility"
+                .to_string(),
+        });
+        return Vec::new();
+    };
+    if !matches!(
+        items.first(),
+        Some(Node {
+            kind: NodeKind::Symbol(head),
+            ..
+        }) if head == "faces"
+    ) {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`explicit-face-set.faces` list must open with `faces`".to_string(),
+            fix: "spell the value as `(faces <ordinal>...)`".to_string(),
+        });
+        return Vec::new();
+    }
+    let mut faces = Vec::new();
+    for item in &items[1..] {
+        let Node {
+            kind: NodeKind::Int(value),
+            ..
+        } = item
+        else {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "`explicit-face-set.faces` contains a non-u32 ordinal".to_string(),
+                fix: "list only non-negative face ordinals that fit u32".to_string(),
+            });
+            continue;
+        };
+        match u32::try_from(*value) {
+            Ok(face) => faces.push(face),
+            Err(_) => out.push(Violation {
+                code: "project-malformed-clause",
+                what: "`explicit-face-set.faces` contains a non-u32 ordinal".to_string(),
+                fix: "list only non-negative face ordinals that fit u32".to_string(),
+            }),
+        }
+    }
+    faces
 }
 
 fn read_assembly(body: &[Node], out: &mut Vec<Violation>) -> Vec<EntityDecl> {

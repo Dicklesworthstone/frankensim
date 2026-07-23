@@ -8,9 +8,10 @@
 
 use fs_project::{
     Budgets, Cooling, EntityDecl, Envelope, FSIM_VERSION, Fan, GeometryArtifact,
-    InterfaceCardBinding, MaterialBinding, Metadata, OutputRequest, PowerDissipation, ProjectSpec,
-    Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions, canonical_hash,
-    migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr,
+    GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, MaterialBinding, MeshSelector,
+    Metadata, OutputRequest, PowerDissipation, ProjectSpec, Seeds, SolverSettings, ThermalLimit,
+    UnitsDoctrine, Vent, Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr,
+    parse_sexpr_lenient, print_json, print_sexpr,
 };
 use fs_qty::QtyAny;
 use fs_scenario::EntityDeclaration;
@@ -95,6 +96,35 @@ fn reference_project() -> ProjectSpec {
             source_hash: 0x00ab_cdef_0123_4567,
             parser_version: "0.0.1".to_string(),
         }]),
+        assignments: Some(vec![
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "cpu".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "CPU".to_string(),
+                },
+                allow_overlap: false,
+            },
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "sink-base".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "SINK_BASE".to_string(),
+                },
+                allow_overlap: false,
+            },
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "cpu-sink-tim".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "CPU_SINK_TIM".to_string(),
+                },
+                allow_overlap: false,
+            },
+        ]),
         assembly: Some(reference_assembly()),
         materials: Some(vec![MaterialBinding {
             region: "board".to_string(),
@@ -223,8 +253,58 @@ fn parse_render_parse_is_idempotent_across_project_variants() {
 }
 
 #[test]
+fn every_assignment_selector_round_trips_through_both_spellings() {
+    let selectors = [
+        MeshSelector::NamedGroup {
+            name: "CPU".to_string(),
+        },
+        MeshSelector::HalfSpace {
+            normal: [0.0, 0.0, 1.0],
+            offset: 1.0,
+            side: HalfSpaceSide::AtLeast,
+            tolerance: 1e-9,
+        },
+        MeshSelector::Box {
+            min: [-1.0, -2.0, -3.0],
+            max: [1.0, 2.0, 3.0],
+            tolerance: 1e-8,
+        },
+        MeshSelector::Cylinder {
+            origin: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            radius: 0.5,
+            axial_min: -1.0,
+            axial_max: 1.0,
+            tolerance: 1e-8,
+        },
+        MeshSelector::NearestDatum {
+            point: [1.0, 2.0, 3.0],
+            max_distance: 0.25,
+            tolerance: 1e-9,
+        },
+        MeshSelector::ExplicitFaceSet {
+            faces: vec![0, 2, u32::MAX],
+            fragility_acknowledged: true,
+        },
+    ];
+
+    for selector in selectors {
+        let mut spec = reference_project();
+        spec.assignments.as_mut().expect("assignments")[0].selector = selector;
+        let sexpr = print_sexpr(&spec).expect("selector renders");
+        let from_sexpr = parse_sexpr(&sexpr).expect("selector parses");
+        assert_eq!(from_sexpr.spec, spec);
+        let json = print_json(&spec).expect("selector JSON renders");
+        let from_json = parse_json(&json).expect("selector JSON parses");
+        assert_eq!(from_json.spec, spec);
+        assert_eq!(from_json.hash(), from_sexpr.hash());
+        assert!(from_sexpr.findings().is_empty());
+    }
+}
+
+#[test]
 fn every_mandatory_section_omission_is_a_named_violation() {
-    let cases: [OmissionCase; 16] = [
+    let cases: [OmissionCase; 17] = [
         ("project-metadata-missing", |s| s.metadata = None),
         ("project-versions-missing", |s| s.versions = None),
         ("project-seeds-missing", |s| s.seeds = None),
@@ -232,6 +312,7 @@ fn every_mandatory_section_omission_is_a_named_violation() {
         ("project-capabilities-missing", |s| s.capabilities = None),
         ("project-units-missing", |s| s.units = None),
         ("project-geometry-missing", |s| s.geometry = None),
+        ("project-assignments-missing", |s| s.assignments = None),
         ("project-assembly-missing", |s| s.assembly = None),
         ("project-materials-missing", |s| s.materials = None),
         ("project-interface-cards-missing", |s| {
