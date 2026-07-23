@@ -4,6 +4,9 @@ use fs_blake3::hash_domain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::Point3;
 use fs_io::{AssignmentLimits, HalfSpaceSide, MeshSelector, NamedFaceGroup};
+use fs_project::assignment::{
+    InterfaceAuditLimits, InterfaceDeclarationAudit, audit_interface_declarations,
+};
 use fs_project::{
     EntityDecl, GEOMETRY_ASSIGNMENT_REPORT_DOMAIN, GeometryArtifact, GeometryAssignment,
     GeometryResolution, ImportedMeshLibrary, ProjectSpec, geometry_source_identity,
@@ -164,6 +167,19 @@ fn named_groups() -> Vec<NamedFaceGroup> {
             faces: vec![4, 5],
         },
     ]
+}
+
+fn spec_without_interface() -> ProjectSpec {
+    let mut spec = named_spec();
+    spec.assembly
+        .as_mut()
+        .expect("assembly")
+        .retain(|entity| !matches!(entity, EntityDecl::Interface { .. }));
+    spec.assignments
+        .as_mut()
+        .expect("assignments")
+        .retain(|assignment| assignment.target != "front-interface");
+    spec
 }
 
 fn one_top_spec() -> ProjectSpec {
@@ -376,5 +392,118 @@ fn g4_cancellation_is_atomic_at_the_l6_boundary() {
         let result = resolve_geometry_assignments(&spec, &library, AssignmentLimits::DEFAULT, cx);
         assert_eq!(result.violations[0].code, "mesh-assignment-cancelled");
         assert!(result.artifacts.is_empty());
+    });
+}
+
+#[test]
+fn g0_g3_interface_audit_detects_seeded_omission_at_the_tolerance_boundary() {
+    let spec = spec_without_interface();
+    let artifact = spec.geometry.as_ref().expect("geometry")[0].clone();
+    let mut library = ImportedMeshLibrary::new();
+    library.insert(&artifact, cube(), "m", named_groups());
+    let gate = CancelGate::new_clock_free();
+
+    with_cx(&gate, |cx| {
+        let resolution =
+            resolve_geometry_assignments(&spec, &library, AssignmentLimits::DEFAULT, cx);
+        assert!(resolution.admissible(), "{:?}", resolution.violations);
+
+        let near_miss = audit_interface_declarations(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            InterfaceAuditLimits {
+                proximity_tolerance: 0.99,
+                max_triangle_pair_tests: 16,
+            },
+            cx,
+        );
+        assert!(near_miss.admissible(), "{near_miss:?}");
+        assert!(near_miss.undeclared_contacts.is_empty());
+
+        let detected = audit_interface_declarations(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            InterfaceAuditLimits {
+                proximity_tolerance: 1.0,
+                max_triangle_pair_tests: 16,
+            },
+            cx,
+        );
+        assert_eq!(
+            detected.violations[0].code,
+            "project-interface-undeclared-contact"
+        );
+        assert_eq!(detected.undeclared_contacts.len(), 1);
+        let contact = &detected.undeclared_contacts[0];
+        assert_eq!(
+            (
+                contact.first_region.as_str(),
+                contact.second_region.as_str()
+            ),
+            ("bottom", "top")
+        );
+        assert_eq!(contact.separation, 1.0);
+        assert_eq!(contact.length_unit, "m");
+        assert!(
+            InterfaceDeclarationAudit::no_claim().contains("does not certify continuum contact")
+        );
+    });
+}
+
+#[test]
+fn g0_g4_declared_pairs_are_exempt_and_resource_refusal_publishes_no_partial_list() {
+    let declared_spec = named_spec();
+    let artifact = declared_spec.geometry.as_ref().expect("geometry")[0].clone();
+    let mut library = ImportedMeshLibrary::new();
+    library.insert(&artifact, cube(), "m", named_groups());
+    let gate = CancelGate::new_clock_free();
+
+    with_cx(&gate, |cx| {
+        let declared_resolution =
+            resolve_geometry_assignments(&declared_spec, &library, AssignmentLimits::DEFAULT, cx);
+        assert!(
+            declared_resolution.admissible(),
+            "{:?}",
+            declared_resolution.violations
+        );
+        let declared = audit_interface_declarations(
+            &declared_spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            InterfaceAuditLimits {
+                proximity_tolerance: 1.0,
+                max_triangle_pair_tests: 0,
+            },
+            cx,
+        );
+        assert!(declared.admissible(), "{declared:?}");
+        assert_eq!(declared.triangle_pair_tests, 0);
+
+        let omitted_spec = spec_without_interface();
+        let omitted_resolution =
+            resolve_geometry_assignments(&omitted_spec, &library, AssignmentLimits::DEFAULT, cx);
+        assert!(
+            omitted_resolution.admissible(),
+            "{:?}",
+            omitted_resolution.violations
+        );
+        let bounded = audit_interface_declarations(
+            &omitted_spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            InterfaceAuditLimits {
+                proximity_tolerance: 1.0,
+                max_triangle_pair_tests: 1,
+            },
+            cx,
+        );
+        assert_eq!(
+            bounded.violations[0].code,
+            "project-interface-audit-resource-bound"
+        );
+        assert!(bounded.undeclared_contacts.is_empty());
+        assert_eq!(bounded.triangle_pair_tests, 1);
     });
 }
