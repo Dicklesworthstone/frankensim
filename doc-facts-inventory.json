@@ -719,6 +719,7 @@
     "crates/fs-rep-nurbs/tests/sdf.rs",
     "crates/fs-rep-sdf/tests/conformance.rs",
     "crates/fs-rep-voxel/tests/conformance.rs",
+    "crates/fs-report/tests/as_built.rs",
     "crates/fs-report/tests/decision.rs",
     "crates/fs-report/tests/report.rs",
     "crates/fs-report/tests/useful_bound.rs",

@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-140%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-141%20of%20141%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-562%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-563%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -36,7 +36,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
 | Tracked `fs-*` crate directories | 141 |
 | Tracked `CONTRACT.md` files | 141 of 141 |
-| Tracked crate integration-test files | 562 |
+| Tracked crate integration-test files | 563 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=13`, `L2=18`, `L3=27`, `L4=32`, `L5=4`, `L6=25` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
@@ -60,7 +60,7 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Thermal and airflow | `fs-conduction` provides a steady P1 FEM kernel, card-backed thermal contact on exact matching traces, card-backed linearized surface radiation, and deterministic gray-diffuse enclosure exchange over admitted view-factor matrices; `fs-convection` provides 11 validity-gated Nusselt cards; and `fs-airflow` provides typed fan curves, series/parallel quadratic loss networks with explicit leakage, nominal-model interval-Newton operating-point brackets, and an evidence-preserving branch-flow handoff to convection. Only conduction is currently registered for capability maturity |
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 562 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+| Tests | 563 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
 ### Capability Maturity, Not Crate Count
 

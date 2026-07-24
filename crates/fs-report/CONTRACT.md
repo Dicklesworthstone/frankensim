@@ -42,6 +42,24 @@ lower-layer evidence; notebook identities use `fs-obs::IdentityBuilder`.
   returning the reviewer-facing no-claim section and the evidence package with
   every demotion retained from that same immutable audit. It refuses as a unit;
   callers cannot receive a partial projection.
+- `AsBuiltQoiDelta::try_new(qoi, unit, nominal, as_built, geometry)` — one
+  nominal-versus-as-built comparison row. It borrows the geometry term rather
+  than copying it, and refuses at construction when the cited term is not the
+  budget's geometry slot (`AsBuiltDeltaError::NotGeometryTerm`) or a value is
+  not finite (`NonFiniteValue`). `shift()` is `as_built - nominal`;
+  `geometry_half_width()` reads the conservative half-width, taking the UPPER
+  endpoint of an `IntervalBound` because that variant brackets the half-width
+  itself; `shift_resolved()` is a TRI-STATE — `Some(true)` when the shift
+  strictly exceeds that half-width, `Some(false)` when it does not, and `None`
+  when the term publishes no half-width at all, so an unanswerable question is
+  never rendered as a negative answer.
+- `nominal_vs_as_built_markdown(rows)` — deterministic design-build-measure-
+  update table rendering each QoI's shift, the attributed geometry term with its
+  `role@digest`, the resolution tri-state, and a correlation line derived from
+  the rows themselves: one shared propagation record across several QoIs renders
+  as a single correlated block, distinct records render as an explicit refusal
+  of that claim, and one row claims no cross-QoI correlation at all. Row order
+  is caller order, not a sort.
 
 ## Invariants
 
@@ -107,6 +125,14 @@ as admitted for advisory scoping versus refused for compliance sign-off.
 `tests/useful_bound.rs` covers the distinct refusal visual class, cause,
 suggested E09 reformulation, and explicit no-certificate boundary.
 
+`tests/as_built.rs` covers the nominal-versus-as-built projection: fail-closed
+row construction (non-geometry term, non-finite value), the resolution
+tri-state including the strict boundary case and the `Unknown` term a rejected
+upstream linearization produces, the `IntervalBound` upper-endpoint reading,
+the shared-record correlated-block sentence, the explicit refusal when terms
+cite distinct records, single-row and empty tables making no correlation claim,
+render determinism, and caller-order row rendering.
+
 ## No-claim boundaries
 
 - v0 is the notebook DATA MODEL + deterministic Markdown render + content hash +
@@ -126,6 +152,19 @@ suggested E09 reformulation, and explicit no-certificate boundary.
 - The `NoUsefulBound` block projects a lower-layer refusal. It does not prove
   that the achieved enclosure is rigorous, select the threshold, or establish
   that the suggested reformulation will yield useful evidence.
+- The nominal-versus-as-built table is a PRESENTATION of two already-computed
+  solves and one already-computed geometry term. It runs no solve, performs no
+  covariance propagation, and does not verify that the two values came from the
+  same study, the same mesh, the same physics, or the placements they claim.
+  The rendered shift is a difference between two computed numbers, never a
+  measurement of the physical part. The geometry term bounds only the
+  pose-propagated contribution and covers no discretization, parameter,
+  boundary-condition, or model-form error, so `shift_resolved() == Some(true)`
+  means the shift exceeds the POSE band alone and is not a claim that the shift
+  is physically real. `Some(false)` is likewise not evidence that nothing
+  changed. The correlation line reports only whether the supplied terms cite one
+  propagation record; agreement on an identity is not proof that the upstream
+  block is correctly calibrated, and this crate never resolves that identity.
 - The regime no-claim section is a presentation of an `fs-regime` audit. Its
   receipt identities bind exact bytes but do not authenticate card ownership,
   calibration sources, or the completeness of the orchestrator-supplied card

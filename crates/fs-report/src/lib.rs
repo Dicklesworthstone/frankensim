@@ -24,6 +24,12 @@
 //! evidence package as explicitly unbounded Estimated declarations.
 //! [`project_regime_audit_outputs`] couples both projections so a product path
 //! cannot silently retain only one side of the same audit.
+//!
+//! [`nominal_vs_as_built_markdown`] renders the design-build-measure-update
+//! comparison: per-QoI nominal-versus-as-built shifts with the geometry
+//! uncertainty term attributed, whether each shift is resolved by the pose
+//! measurement at all, and whether the terms actually agree on one propagation
+//! record — the only thing that makes the cross-QoI correlation real.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
@@ -31,7 +37,10 @@ use std::collections::BTreeMap;
 use fs_evidence::{
     NoUsefulBound,
     action::ActionKind,
-    uncertainty::{BudgetContribution, ComplianceVerdict, RequirementRelation},
+    uncertainty::{
+        BudgetContribution, ComplianceVerdict, EngineeringUncertaintyKind,
+        EngineeringUncertaintyTerm, RequirementRelation, TermValue,
+    },
 };
 use fs_package::{Claim, EvidencePackage, PackageError};
 use fs_project::ProjectDecisionAuthority;
@@ -782,4 +791,277 @@ pub fn semantic_diff(
             .then_with(|| x.name.cmp(&y.name))
     });
     deltas
+}
+
+// ---------------------------------------------------------------------------
+// Nominal-versus-as-built QoI rendering (bead f85xj.12.2 item (d))
+// ---------------------------------------------------------------------------
+
+/// Refusal while building a nominal-versus-as-built comparison row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsBuiltDeltaError {
+    /// The cited term is not the budget's geometry slot.
+    NotGeometryTerm {
+        /// The kind actually supplied.
+        kind: EngineeringUncertaintyKind,
+    },
+    /// A rendered value was not finite.
+    NonFiniteValue {
+        /// Which field.
+        field: &'static str,
+    },
+}
+
+impl core::fmt::Display for AsBuiltDeltaError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AsBuiltDeltaError::NotGeometryTerm { kind } => write!(
+                f,
+                "the as-built comparison must cite the geometry term, not the {} term",
+                kind.name()
+            ),
+            AsBuiltDeltaError::NonFiniteValue { field } => {
+                write!(f, "{field} is not finite")
+            }
+        }
+    }
+}
+
+impl core::error::Error for AsBuiltDeltaError {}
+
+/// One QoI compared between a nominal-placement solve and an as-built-placement
+/// solve, carrying the geometry term that attributes the difference.
+///
+/// The term is borrowed rather than copied so the row cannot drift from the
+/// budget it claims to describe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsBuiltQoiDelta<'a> {
+    qoi: String,
+    unit: String,
+    nominal: f64,
+    as_built: f64,
+    geometry: &'a EngineeringUncertaintyTerm,
+}
+
+impl<'a> AsBuiltQoiDelta<'a> {
+    /// Build one comparison row.
+    ///
+    /// # Errors
+    /// The cited term is not the geometry slot, or a value is not finite.
+    pub fn try_new(
+        qoi: impl Into<String>,
+        unit: impl Into<String>,
+        nominal: f64,
+        as_built: f64,
+        geometry: &'a EngineeringUncertaintyTerm,
+    ) -> Result<Self, AsBuiltDeltaError> {
+        if geometry.kind() != EngineeringUncertaintyKind::Geometry {
+            return Err(AsBuiltDeltaError::NotGeometryTerm {
+                kind: geometry.kind(),
+            });
+        }
+        if !nominal.is_finite() {
+            return Err(AsBuiltDeltaError::NonFiniteValue { field: "nominal" });
+        }
+        if !as_built.is_finite() {
+            return Err(AsBuiltDeltaError::NonFiniteValue { field: "as_built" });
+        }
+        Ok(Self {
+            qoi: qoi.into(),
+            unit: unit.into(),
+            nominal,
+            as_built,
+            geometry,
+        })
+    }
+
+    /// The QoI name.
+    #[must_use]
+    pub fn qoi(&self) -> &str {
+        &self.qoi
+    }
+
+    /// The budget unit.
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// The nominal-placement value.
+    #[must_use]
+    pub const fn nominal(&self) -> f64 {
+        self.nominal
+    }
+
+    /// The as-built-placement value.
+    #[must_use]
+    pub const fn as_built(&self) -> f64 {
+        self.as_built
+    }
+
+    /// The geometry term attributing the shift.
+    #[must_use]
+    pub const fn geometry(&self) -> &EngineeringUncertaintyTerm {
+        self.geometry
+    }
+
+    /// The as-built minus nominal shift, in the budget unit.
+    #[must_use]
+    pub fn shift(&self) -> f64 {
+        self.as_built - self.nominal
+    }
+
+    /// The geometry term's conservative half-width, when the term carries one.
+    ///
+    /// `None` whenever the term is `Unknown` — which is exactly what a rejected
+    /// linearization spot-check produces upstream — or any representation that
+    /// publishes no half-width.
+    ///
+    /// `IntervalBound` brackets the half-width itself rather than the value, so
+    /// the conservative reading is its upper endpoint. That is the same choice
+    /// `fs-evidence` makes when it aggregates a marginal, and taking the
+    /// midpoint here instead would quietly report less uncertainty than the
+    /// budget does.
+    #[must_use]
+    pub fn geometry_half_width(&self) -> Option<f64> {
+        match self.geometry.value() {
+            TermValue::Distribution(distribution) => Some(distribution.conservative_half_width),
+            TermValue::IntervalBound { upper, .. } => Some(*upper),
+            _ => None,
+        }
+    }
+
+    /// Whether the shift is larger than the geometry uncertainty that the
+    /// as-built measurement itself carries.
+    ///
+    /// `None` when the geometry term publishes no half-width, so the question
+    /// is unanswerable rather than answered negatively. A `Some(false)` says
+    /// the shift sits inside the pose-propagated band: the two solves differ,
+    /// but this measurement cannot resolve the difference from its own noise.
+    #[must_use]
+    pub fn shift_resolved(&self) -> Option<bool> {
+        self.geometry_half_width()
+            .map(|half_width| self.shift().abs() > half_width)
+    }
+
+    /// A human attribution string.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut s = String::new();
+        let _ = write!(
+            s,
+            "{}: {} {} → {} {} (shift {:+} {})",
+            self.qoi,
+            self.nominal,
+            self.unit,
+            self.as_built,
+            self.unit,
+            self.shift(),
+            self.unit
+        );
+        s
+    }
+}
+
+/// Render a nominal-versus-as-built QoI table with the geometry term attributed
+/// and the cross-QoI correlation structure stated.
+///
+/// Rows are rendered in the order supplied: the caller's declaration order is
+/// the report order, so a given study renders identically on every run.
+///
+/// The correlation line is the load-bearing part. Upstream, one pose covariance
+/// propagates into every QoI through a single content-addressed record, and each
+/// per-QoI geometry term cites that record. This renderer therefore does not
+/// assert correlation — it reports whether the terms in front of it actually
+/// agree on one record, and says so plainly when they do not.
+///
+/// This is presentation only: it recomputes no solve, no propagation, and no
+/// compliance verdict.
+#[must_use]
+pub fn nominal_vs_as_built_markdown(rows: &[AsBuiltQoiDelta<'_>]) -> String {
+    let mut output = String::from("## Nominal versus as-built\n\n");
+    if rows.is_empty() {
+        output.push_str(
+            "- **No rows:** no QoI was compared, so this section makes no as-built claim.\n",
+        );
+        return output;
+    }
+
+    for row in rows {
+        let _ = writeln!(
+            output,
+            "- **`{}`:** `{} {}` → `{} {}`; shift `{:+} {}`",
+            row.qoi(),
+            row.nominal(),
+            row.unit(),
+            row.as_built(),
+            row.unit(),
+            row.shift(),
+            row.unit()
+        );
+        let provenance = row.geometry().provenance();
+        match row.geometry().value() {
+            TermValue::Unknown { reason } => {
+                let _ = writeln!(
+                    output,
+                    "    - geometry term: `unknown` ({reason}); the shift is NOT attributed"
+                );
+            }
+            _ => {
+                if let Some(half_width) = row.geometry_half_width() {
+                    let _ = writeln!(
+                        output,
+                        "    - geometry term: conservative half-width `{half_width} {}`",
+                        row.unit()
+                    );
+                }
+            }
+        }
+        let resolution = match row.shift_resolved() {
+            Some(true) => "resolved: the shift exceeds the pose-propagated half-width",
+            Some(false) => "NOT resolved: the shift sits inside the pose-propagated half-width",
+            None => "not decidable: the geometry term publishes no half-width",
+        };
+        let _ = writeln!(output, "    - {resolution}");
+        let _ = writeln!(
+            output,
+            "    - attribution: `{}@{}`",
+            provenance.role(),
+            provenance.digest()
+        );
+    }
+
+    output.push('\n');
+    let mut records: Vec<String> = rows
+        .iter()
+        .map(|row| row.geometry().provenance().digest().to_hex())
+        .collect();
+    records.sort();
+    records.dedup();
+    match records.as_slice() {
+        [single] if rows.len() > 1 => {
+            let _ = writeln!(
+                output,
+                "- **Correlation:** all {} geometry terms cite one propagation record `{single}`, so the pose error is carried as a single correlated block rather than as independent per-QoI noise.",
+                rows.len()
+            );
+        }
+        [single] => {
+            let _ = writeln!(
+                output,
+                "- **Correlation:** one QoI, one propagation record `{single}`; no cross-QoI correlation is exercised by this table."
+            );
+        }
+        many => {
+            let _ = writeln!(
+                output,
+                "- **Correlation:** the geometry terms cite {} distinct propagation records, so NO single correlated block covers this table and cross-QoI correlation is not established here.",
+                many.len()
+            );
+        }
+    }
+    output.push_str(
+        "- **No-claim boundary:** the shift is a difference between two computed values, not a measurement of the physical part. The geometry term bounds only the pose-propagated contribution and covers no discretization, parameter, boundary-condition, or model-form error. A shift inside the half-width is not evidence that nothing changed.\n",
+    );
+    output
 }

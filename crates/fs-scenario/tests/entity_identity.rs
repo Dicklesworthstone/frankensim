@@ -14,6 +14,7 @@
 //! exercised against. It is not a repo-wide canonical artifact and does not
 //! claim to be one.
 
+use fs_blake3::ContentHash;
 use fs_ga::{Point, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::entity::{
@@ -1283,5 +1284,123 @@ fn ec_009_bindings_are_ordered_and_deterministic() {
     verdict(
         "ec-009",
         "identity derivation, receipt roots, and site enumeration are deterministic across independent builds",
+    );
+}
+
+/// As-built placement binding (bead `frankensim-extreal-program-f85xj.12.2`
+/// item (b)): a placement may be carried on the authority of a calibrated
+/// registration record, cited by that record's content identity.
+///
+/// What this case pins is the SEAM, not the measurement. `fs-scenario` is L3
+/// and never resolves the citation; it only refuses a citation that names
+/// nothing and enumerates the rest in declaration order for the product layer.
+#[test]
+fn ec_010_as_built_placements_cite_a_registration_identity() {
+    let model = cooling_model();
+
+    // A nominal placement cites no measurement. That is a different statement
+    // from citing one that is unavailable, so the accessor is None, not a
+    // zero hash.
+    assert_eq!(PlacementBasis::Nominal.registration_ref(), None);
+    assert_eq!(PlacementBasis::Nominal.label(), "nominal");
+
+    // The citation is the identity published by
+    // CalibratedRigid3Registration::model_identity(). This test constructs a
+    // stand-in identity directly: the point under test is that fs-scenario
+    // transports a 32-byte root faithfully, not that fs-asbuilt computed it.
+    let registration_ref =
+        ContentHash::from_hex("9f2c4a10bb37e5d6084c1e77a9530bd2ff461c8e75a30219cc4d6b8e0a17f3d5")
+            .expect("64 hex chars");
+    let basis = PlacementBasis::AsBuilt { registration_ref };
+    assert_eq!(basis.label(), "as-built");
+    assert_eq!(basis.registration_ref(), Some(registration_ref));
+
+    // An as-built basis is a strictly stronger claim than nominal, so the two
+    // must not compare equal even for the same occurrence and frame.
+    assert_ne!(basis, PlacementBasis::Nominal);
+
+    let mut as_built = cooling_model();
+    as_built
+        .catalog
+        .declare_placement(as_built.tim, FrameId(2), basis)
+        .expect("as-built placement of the TIM occurrence");
+    let placed = as_built
+        .catalog
+        .placement_of(as_built.tim)
+        .expect("tim placement");
+    assert_eq!(placed.basis(), basis);
+    assert_eq!(placed.basis().registration_ref(), Some(registration_ref));
+
+    // The resolution seam: only as-built rows appear, in declaration order.
+    // The die was already placed nominally by the fixture and must not leak
+    // into a list whose whole purpose is "identities a solve must resolve".
+    let citations = as_built.catalog.as_built_registrations();
+    assert_eq!(citations, vec![(as_built.tim, registration_ref)]);
+    assert_eq!(model.catalog.as_built_registrations(), Vec::new());
+
+    // Declaration order is the enumeration order, and it is deterministic.
+    let mut two = cooling_model();
+    let second_ref =
+        ContentHash::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .expect("64 hex chars");
+    two.catalog
+        .declare_placement(two.tim, FrameId(2), basis)
+        .expect("first as-built row");
+    two.catalog
+        .declare_placement(
+            two.plate,
+            FrameId(1),
+            PlacementBasis::AsBuilt {
+                registration_ref: second_ref,
+            },
+        )
+        .expect("second as-built row");
+    assert_eq!(
+        two.catalog.as_built_registrations(),
+        vec![(two.tim, registration_ref), (two.plate, second_ref)]
+    );
+
+    // Fail closed: the all-zero identity names no artifact. Admitting it would
+    // let the stronger claim be declared while citing nothing at all.
+    let mut unbound = cooling_model();
+    let refusal = unbound
+        .catalog
+        .declare_placement(
+            unbound.tim,
+            FrameId(2),
+            PlacementBasis::AsBuilt {
+                registration_ref: ContentHash([0u8; 32]),
+            },
+        )
+        .expect_err("the all-zero citation must be refused");
+    assert!(matches!(
+        refusal,
+        fs_scenario::entity::EntityError::PlacementRegistrationUnbound { occurrence }
+            if occurrence == unbound.tim
+    ));
+    assert_eq!(refusal.code(), "entity-placement-registration-unbound");
+    assert!(!refusal.fix().is_empty());
+    // The refusal happened before any mutation.
+    assert!(unbound.catalog.as_built_registrations().is_empty());
+
+    // An as-built basis does not bypass the ordinary placement rules: a
+    // non-part occurrence is still refused, and by the kind rule, not by a
+    // weaker as-built-specific path.
+    let mut wrong_kind = cooling_model();
+    let kind_refusal = wrong_kind
+        .catalog
+        .declare_placement(wrong_kind.die_top, FrameId(2), basis)
+        .expect_err("a surface is not placeable");
+    assert_eq!(kind_refusal.code(), "entity-placement-occurrence-kind");
+
+    println!(
+        "{{\"suite\":\"fs-scenario/entity\",\"case\":\"ec-010\",\"event\":\"as-built-citations\",\
+         \"rows\":{},\"first\":\"{}\"}}",
+        citations.len(),
+        registration_ref
+    );
+    verdict(
+        "ec-010",
+        "as-built placements transport a registration content identity, enumerate in declaration order, and refuse the unbound all-zero citation",
     );
 }

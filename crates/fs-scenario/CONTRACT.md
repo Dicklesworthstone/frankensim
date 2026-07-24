@@ -775,8 +775,23 @@ None.
   perform tolerance stack-up, decide whether a part conforms, or evaluate a
   drawing. `PlacementBasis::Nominal` names the frame that is DECLARED to carry
   an occurrence's placement; the crate does not verify that the frame's
-  transform is where the part actually is, and there is deliberately no
-  as-built variant until the as-built layer lands.
+  transform is where the part actually is.
+- **An as-built placement is a citation, not a measurement** (bead
+  `frankensim-extreal-program-f85xj.12.2`): `PlacementBasis::AsBuilt {
+  registration_ref }` records that an occurrence is placed on the authority of
+  the artifact with that content identity — nothing more. This crate is L3 and
+  the calibrated registration lives in L2 `fs-asbuilt`, so the citation is a
+  bare `fs_blake3::ContentHash` and no dependency edge exists in either
+  direction. The crate therefore does NOT check that the identity resolves to
+  a real `CalibratedRigid3Registration`, that the record is authentic, that its
+  covariance is calibrated, that its fiducials cover this occurrence, or that
+  the frame's transform is the registered pose. The one thing it does enforce
+  is that the citation names something: the all-zero identity is refused at
+  declaration with `EntityError::PlacementRegistrationUnbound`, before any
+  mutation, so the stronger as-built claim can never be declared while citing
+  nothing. `EntityCatalog::as_built_registrations()` enumerates the citations in
+  declaration order; resolving and authenticating them, and refusing when they
+  do not resolve, is the product layer's obligation.
 - **Legacy migration infers no structure**: a bare string carries no part
   hierarchy and no geometry, so migration puts every migrated surface under one
   synthetic legacy part with no fingerprint. It is a mechanical renaming of the

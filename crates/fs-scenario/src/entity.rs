@@ -1234,10 +1234,27 @@ impl Tolerance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlacementBasis {
     /// The nominal (as-designed) placement.
-    ///
-    /// An as-built variant binds here when the as-built layer lands; it is
-    /// deliberately absent rather than approximated by `Nominal`.
     Nominal,
+    /// The measured (as-built) placement, cited by the content identity of a
+    /// calibrated registration record.
+    ///
+    /// The citation is a bare `ContentHash` on purpose. This crate is L3 and
+    /// the registration record lives in L2 `fs-asbuilt`; carrying the record
+    /// itself would either invert the layer direction or duplicate a 6-dof
+    /// covariance that already has exactly one owner. What this variant
+    /// asserts is therefore narrow and checkable: *this occurrence is placed
+    /// on the authority of the artifact with this identity*.
+    ///
+    /// It asserts nothing about that artifact's existence, authenticity, or
+    /// fitness. Resolving the identity back to a
+    /// `fs_asbuilt::rigid3::CalibratedRigid3Registration` — and refusing when
+    /// it does not resolve — is the product layer's obligation. See the
+    /// no-claim boundary in `CONTRACT.md`.
+    AsBuilt {
+        /// Content identity of the calibrated registration record, as
+        /// published by `CalibratedRigid3Registration::model_identity()`.
+        registration_ref: ContentHash,
+    },
 }
 
 impl PlacementBasis {
@@ -1246,6 +1263,20 @@ impl PlacementBasis {
     pub const fn label(self) -> &'static str {
         match self {
             PlacementBasis::Nominal => "nominal",
+            PlacementBasis::AsBuilt { .. } => "as-built",
+        }
+    }
+
+    /// The cited registration identity, when this basis is measured.
+    ///
+    /// `None` for [`PlacementBasis::Nominal`]: a nominal placement cites no
+    /// measurement, which is a different statement from citing one that
+    /// happens to be unavailable.
+    #[must_use]
+    pub const fn registration_ref(self) -> Option<ContentHash> {
+        match self {
+            PlacementBasis::Nominal => None,
+            PlacementBasis::AsBuilt { registration_ref } => Some(registration_ref),
         }
     }
 }
@@ -1516,6 +1547,11 @@ pub enum EntityError {
         /// Its kind.
         kind: EntityKind,
     },
+    /// An as-built placement cited the all-zero registration identity.
+    PlacementRegistrationUnbound {
+        /// The occurrence whose citation is unbound.
+        occurrence: EntityId,
+    },
     /// A named admission limit was exceeded.
     CapacityExceeded {
         /// Which resource.
@@ -1570,6 +1606,9 @@ impl EntityError {
             EntityError::DuplicateDatum { .. } => "entity-duplicate-datum",
             EntityError::DatumOwnerKind { .. } => "entity-datum-owner-kind",
             EntityError::PlacementOccurrenceKind { .. } => "entity-placement-occurrence-kind",
+            EntityError::PlacementRegistrationUnbound { .. } => {
+                "entity-placement-registration-unbound"
+            }
             EntityError::CapacityExceeded { .. } => "entity-capacity-exceeded",
             EntityError::AllocationRefused { .. } => "entity-allocation-refused",
             EntityError::HopBudgetExceeded { .. } => "entity-hop-budget-exceeded",
@@ -1663,6 +1702,10 @@ impl EntityError {
             }
             EntityError::PlacementOccurrenceKind { .. } => {
                 "place a part occurrence; regions, surfaces, and interfaces move with their part"
+                    .to_string()
+            }
+            EntityError::PlacementRegistrationUnbound { .. } => {
+                "cite the identity of a real calibrated registration record, or declare the placement nominal"
                     .to_string()
             }
             EntityError::CapacityExceeded { resource, .. } => {
@@ -1801,6 +1844,12 @@ impl fmt::Display for EntityError {
                 write!(
                     f,
                     "{occurrence} is a {kind}, not a placeable part occurrence"
+                )
+            }
+            EntityError::PlacementRegistrationUnbound { occurrence } => {
+                write!(
+                    f,
+                    "the as-built placement of {occurrence} cites the all-zero registration identity, which names no artifact"
                 )
             }
             EntityError::CapacityExceeded {
@@ -3158,12 +3207,14 @@ impl EntityCatalog {
         Ok(row)
     }
 
-    /// Declare the nominal placement of one part occurrence in a scenario
-    /// frame. The transform itself lives in the scenario's `FrameTree`.
+    /// Declare the placement of one part occurrence in a scenario frame. The
+    /// transform itself lives in the scenario's `FrameTree`; the basis says
+    /// whether that transform is the as-designed one or is carried on the
+    /// authority of a measured registration.
     ///
     /// # Errors
-    /// Unknown or inactive occurrence, a non-part occurrence, or a capacity
-    /// refusal.
+    /// Unknown or inactive occurrence, a non-part occurrence, an as-built
+    /// basis citing the all-zero registration identity, or a capacity refusal.
     pub fn declare_placement(
         &mut self,
         occurrence: EntityId,
@@ -3185,6 +3236,16 @@ impl EntityCatalog {
                 kind: entity.kind(),
             });
         }
+        // The all-zero hash is what an uninitialized or defaulted citation
+        // looks like. Admitting it would let an as-built basis — the stronger
+        // claim — be declared while naming no artifact at all, which is the
+        // one failure this variant exists to prevent. Refuse at declaration
+        // rather than leaving it for a downstream resolver that may not run.
+        if let PlacementBasis::AsBuilt { registration_ref } = basis
+            && registration_ref.as_bytes() == &[0u8; 32]
+        {
+            return Err(EntityError::PlacementRegistrationUnbound { occurrence });
+        }
         if self.placements.len() >= self.budget.max_placements {
             return Err(EntityError::CapacityExceeded {
                 resource: "placements",
@@ -3204,6 +3265,29 @@ impl EntityCatalog {
             "placements",
         )?;
         Ok(row)
+    }
+
+    /// Every as-built placement, as `(occurrence, registration_ref)` pairs in
+    /// declaration order.
+    ///
+    /// This is the resolution seam for the product layer: it enumerates the
+    /// registration identities a solve would have to resolve and authenticate
+    /// before it may claim an as-built geometry term. Nominal placements are
+    /// absent because they cite nothing.
+    ///
+    /// The order is declaration order, so the result is deterministic for a
+    /// given catalog and is safe to fold into a downstream identity.
+    #[must_use]
+    pub fn as_built_registrations(&self) -> Vec<(EntityId, ContentHash)> {
+        self.placements
+            .iter()
+            .filter_map(|placement| {
+                placement
+                    .basis
+                    .registration_ref()
+                    .map(|citation| (placement.occurrence, citation))
+            })
+            .collect()
     }
 
     /// The placement of one occurrence, when exactly one row names it.
