@@ -251,6 +251,8 @@ already using the PR/full split.
 | `check-identities` | persisted/replayed identity schemas with unclassified source fields, missing exact-field mutations or replay-version refusal guard targets, stale generated coverage, or schema/domain drift without a golden-coupling bump (`identity-schemas.json`) |
 | `check-manifest-fixture` | a new-domain package/edge omitted from `proposed-manifest-fixture.json`, an observed undeclared or forbidden edge, a missing declared-present edge, same-layer cycle/order drift, a root/standalone-`fs-wasm` metadata mismatch, or duplicate ownership of a registered domain type |
 | `check-vv-scorecard` | tracked `vv-scorecard.md`/`vv-scorecard.json` drifting from the deterministic projection of the seeded validation corpus and adversarial registry (regenerate with `generate-vv-scorecard`) |
+| `check-program-metrics` | tracked `program-metrics.md`/`program-metrics.json` drifting from the deterministic projection of the seeded validation corpus, adversarial registry, and capability maturity registry (regenerate with `generate-program-metrics`) |
+| `check-schemas` | a frozen public schema whose version constant drifted from its policy record, a migration obligation whose evidence test is missing, a `no-predecessor` schema bumped without declaring a migration path, or a new public version constant in a product-boundary crate that is neither promised nor explicitly disclaimed (`schema-policy.json`, docs/SCHEMA_POLICY.md) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
 Each is also runnable alone (same names). Golden re-pins follow
@@ -575,6 +577,50 @@ honestly renders every prediction-error, interval-coverage, and
 false-acceptance cell as `NO-DATA`; a populated cell requires a future
 persisting lane (e05/e07 scope), never a hand edit. The scorecard is a
 diagnostic projection: nothing it shows upgrades any corpus claim cap.
+
+## Program metrics dashboard
+
+[`program-metrics.md`](../program-metrics.md) and
+[`program-metrics.json`](../program-metrics.json) are the program's OUTCOME
+metrics as one deterministic artifact (bead
+`frankensim-extreal-program-f85xj.16.4`). Rows are projected from the seeded
+`fs-vvreg` corpus, the adversarial registry, the V&V scorecard, and
+`capability-maturity.json`:
+
+```bash
+cargo run --locked -p xtask -- generate-program-metrics
+cargo run --locked -p xtask -- check-program-metrics
+cargo run --locked -p xtask -- record-program-metrics "<label>"
+```
+
+`check-program-metrics` regenerates both artifacts in memory and requires byte
+identity with the tracked files; it is composed into `xtask check-all`, so the
+configured DSR quality gate checks it. **Editing `capability-maturity.json` or
+the `fs-vvreg` corpus therefore requires regenerating this dashboard**, exactly
+as it already requires regenerating the V&V scorecard.
+
+Two properties are worth knowing before reading the artifact:
+
+- **`NO-DATA` and a measured zero are different, and neither is laundered into
+  the other.** `NO-DATA` means no measurement machinery exists, so any number
+  would be invented; each such row names the tracked bead that would make it
+  live. A measured `0` means the population is enumerable and the answer is
+  genuinely none — several rows are real zeros today, and hiding those behind
+  `NO-DATA` would conceal a known-bad result. Ratio denominators are
+  `NonZeroU64`, so an empty population cannot render as `0%`.
+- **Trend is computed against the retained history, not against the artifact
+  itself.** `record-program-metrics` appends one generation to
+  `program-metrics-history.jsonl`; `generate` never writes it. That separation
+  is what keeps `check` idempotent — a dashboard that read its own output as
+  its trend basis could not be byte-checked. Because each recorded generation
+  carries the `source_identity` of its values, an `unchanged` trend over an
+  identical identity is provable rather than coincidental.
+
+Kernel throughput, crate counts, test-file counts, and open-issue counts are
+deliberately EXCLUDED and the artifact says so with reasons: they are
+diagnostics rather than outcomes, and the issue store in particular churns on
+every unrelated edit, which would make this checked artifact stale for every
+agent in the repository.
 
 ## External DSR wrapper limitations
 

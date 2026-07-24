@@ -30,6 +30,14 @@
 //! uncertainty term attributed, whether each shift is resolved by the pose
 //! measurement at all, and whether the terms actually agree on one propagation
 //! record — the only thing that makes the cross-QoI correlation real.
+//!
+//! [`program_metrics`] is the other altitude: where a [`LabNotebook`] reports
+//! one study, the program metrics dashboard reports the PROGRAM — outcome
+//! metrics projected from ledgered corpus and registry artifacts, with a
+//! measured zero and an unmeasured `NO-DATA` kept strictly distinct.
+
+/// Program metrics dashboard: outcome metrics as one deterministic artifact.
+pub mod program_metrics;
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
