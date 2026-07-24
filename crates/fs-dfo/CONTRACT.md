@@ -326,9 +326,10 @@ binds the version and root of the single typed normalization-policy identity;
 the full-study replay configuration binds that same versioned root rather than
 maintaining a second policy-field encoder. Caller mutation tests require both
 retained preimages to move when the shared policy root moves. The golden
-deliberately retains `GOLDEN_HASH_V2=None` until the central runtime selector
-emits and reviewers approve the actual hash; the former
-`0xd912_6c49_f1b1_6897` hash is not relabeled as current evidence.
+is frozen as `GOLDEN_HASH_V2=0x518f_9b30_a05c_d5e4` after the complete central
+normalization, study-replay, WFG-family, and WFG4 selector union passed against
+one source snapshot. The former `0xd912_6c49_f1b1_6897` hash remains historical
+maxima-normalized evidence and is not relabeled as current evidence.
 tests/wfg4_battery.rs adds the canonical normalized WFG4 fixture at
 `M=3, k=4, l=20`, following the corrected WFG toolkit's `s_multi(30,10,0.35)`,
 equal-weight `r_sum`, and concave shape construction. It composes that evaluator
@@ -353,11 +354,14 @@ against jMetal revision `ea7e882f6b8f94b99535921674e62cda7986f20e`.
 At the retained seed and fixed 36,892-evaluation budget, the first
 pre-extension central run measured mean front distance
 `0.23171459361058497`; that observation is not a measurement of the v2 campaign
-identity. The coarse conformance ceiling remains `0.25`, but current headroom is
-intentionally unreported until the central v2 run emits it. This is a
-fixed-fixture acceptance band, not a convergence-rate or optimizer-performance
-claim. The budget and orthogonal gates remain unchanged; a passing v2 receipt
-supersedes rather than relabels the earlier receipt.
+identity. The central v2 campaign measured mean front distance
+`0.21508385736544294`, worst distance `0.313057630600937`, direction coverage
+`86/91`, and hypervolume `62.62495408182373`; it replayed the complete ordered
+front bit-for-bit. The coarse conformance ceiling remains `0.25`. These are
+fixed-fixture observations, not a convergence-rate, broad WFG-family quality,
+cross-ISA, or optimizer-performance claim. The budget and orthogonal gates
+remain unchanged; the v2 receipt supersedes rather than relabels the earlier
+receipt.
 As in the older fs-dfo aggregate batteries, impossible public-API structural
 failures such as an empty front remain ordinary Rust diagnostics before aggregate
 emission; gate failures after a front exists retain structured red evidence.

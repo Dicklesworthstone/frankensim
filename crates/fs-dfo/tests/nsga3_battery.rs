@@ -307,9 +307,10 @@ fn many_objective_m5_beats_nsga2_on_hv() {
 }
 
 // The v1 hash named the pre-extension maxima-normalized lane. The v2 policy
-// changes selection semantics and must be measured by the central runtime lane;
-// `None` is an intentional fail-loud sentinel, never a guessed replacement.
-const GOLDEN_HASH_V2: Option<u64> = None;
+// changes selection semantics; its replacement was retained only after the
+// complete central normalization, study-replay, WFG-family, and WFG4 selector
+// union passed against the same source snapshot.
+const GOLDEN_HASH_V2: u64 = 0x518f_9b30_a05c_d5e4;
 
 fn golden_feed_bytes(accumulator: &mut u64, bytes: &[u8]) {
     for &byte in bytes {
@@ -382,13 +383,11 @@ fn nsga3_golden_hash() {
             golden_feed_u64(&mut acc, v.to_bits());
         }
     }
-    let expected = GOLDEN_HASH_V2
-        .map(|hash| format!("{hash:#018x}"))
-        .unwrap_or_else(|| "pending-central-refresh".to_string());
     measurement(
         "nsga3-golden",
         format!(
-            "{{\"identity_schema\":2,\"actual\":\"{acc:#018x}\",\"expected\":\"{expected}\",\
+            "{{\"identity_schema\":2,\"actual\":\"{acc:#018x}\",\
+             \"expected\":\"{GOLDEN_HASH_V2:#018x}\",\
              \"input_seed\":{GOLDEN_INPUT_SEED},\"normalization_variant\":\"{}\",\
              \"normalization_policy_schema\":{},\"normalization_identity_version\":{},\
              \"normalization_identity_root\":\"0x{:016x}\"}}",
@@ -398,16 +397,9 @@ fn nsga3_golden_hash() {
             normalization_identity.root(),
         ),
     );
-    let Some(golden_hash) = GOLDEN_HASH_V2 else {
-        panic!(
-            "NSGA-III v2 golden is intentionally pending central measurement; observed \
-             {acc:#018x}. Review the complete central selector output before replacing \
-             GOLDEN_HASH_V2=None"
-        );
-    };
     assert_eq!(
-        acc, golden_hash,
-        "nsga3 bits changed: {acc:#018x} vs {golden_hash:#018x} — bump only with semantic \
+        acc, GOLDEN_HASH_V2,
+        "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH_V2:#018x} — bump only with semantic \
          justification (golden-evidence policy)"
     );
 }
