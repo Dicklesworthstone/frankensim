@@ -1112,6 +1112,8 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-report",
+ "fs-scenario",
  "fs-toleralloc",
 ]
 

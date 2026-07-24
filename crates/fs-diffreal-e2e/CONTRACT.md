@@ -19,6 +19,10 @@ does not mint a second spend authority. Registry cardinality and declaration
 diagnostics are not bounded. The crate does not own a general differentiation
 or numerical primitive.
 
+`fs-report` and `fs-scenario` are DEV-dependencies only, added for the as-built
+product-chain battery (bead `frankensim-extreal-program-f85xj.12.2`). The
+library composes neither, and neither appears in this crate's runtime graph.
+
 ## Public types and semantics
 
 - `run_battery(&Cx) -> Result<DiffRealReport, DiffRealError>` runs all four
@@ -271,6 +275,19 @@ on its dependency to exercise the shared tape/VJP path.
 
 ## Conformance tests
 
+`tests/as_built_chain.rs` covers the as-built product chain end to end —
+register (`fs-asbuilt`) → bind (`fs-scenario`) → resolve → propagate + budget
+(`fs-asbuilt`/`fs-evidence`) → render (`fs-report`) — asserting that the
+scenario cites exactly the registration it was bound to, that a foreign
+citation does not resolve to it, that the two gap QoIs sharing the pose
+translation are genuinely correlated, that every geometry term cites the one
+shared propagation record, that the render reaches the same shared-record
+conclusion and names that record, that an unchanged QoI still renders, and that
+per-stage forensic logging retains every stage plus the correlation structure.
+A second case pins determinism: two independent runs produce the same
+registration identity and the same propagation record, and the binding
+transports that identity unchanged.
+
 `tests/e2e.rs` covers the shared tape/VJP result, a perturbed-VJP kill test,
 dual-number gradient agreement, the coarse/fine FD study, sealed-receipt
 replay/integrity, valid/invalid unit rescaling, NaN, both infinities,
@@ -301,6 +318,16 @@ misfits, full allocation/GD&T rows and totals, and the robustness verdict.
 
 ## No-claim boundaries
 
+- `tests/as_built_chain.rs` proves that ONE identity survives the five-stage
+  as-built product chain: the registration's `model_identity()` is what the
+  scenario cites, and the propagation record's identity is what every geometry
+  term and the rendered correlation line agree on. Its "solve" is a LINEAR QoI
+  evaluator, not a physics solve. The battery therefore establishes that the
+  seams compose and the identities flow; it does not establish that any thermal
+  or structural result is correct, does not exercise a real solver consuming
+  `PlacementBasis::AsBuilt`, and does not validate the registration against any
+  measured artifact. The fiducial scan is synthetic with fixed literal
+  perturbations.
 - "Production" here means the shared `fs-adjoint` `Tape`/`VjpRegistry`
   implementation. The names `sdf`, `spline`, and `solve` denote crate-local
   affine, square, and identity scalar fixtures. This battery does not execute

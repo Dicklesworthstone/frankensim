@@ -422,6 +422,7 @@
     "crates/fs-dfo/tests/wfg_family_battery.rs",
     "crates/fs-dfo/tests/wfg_problem_dispatch.rs",
     "crates/fs-dfo/tests/wfg_problem_identity.rs",
+    "crates/fs-diffreal-e2e/tests/as_built_chain.rs",
     "crates/fs-diffreal-e2e/tests/e2e.rs",
     "crates/fs-dimine/tests/dimine.rs",
     "crates/fs-dwr/tests/battery.rs",
