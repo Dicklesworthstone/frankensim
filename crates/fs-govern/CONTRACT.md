@@ -1094,3 +1094,85 @@ identity guard has a test that fails if the guard is removed.
   its retries; a
   multi-process admission service needs an external serialization or the
   ledger-backed successor.
+
+## Program metrics dashboard (`program_metrics` module, bead f85xj.16.4)
+
+This module lives in `fs-govern` rather than `fs-report` for a load-bearing
+reason: `xtask` consumes it, and `xtask` must remain buildable when a pinned
+sibling is broken. `fs-report` transitively reaches `fs-exec`/asupersync and
+`fs-ledger`/FrankenSQLite, so hosting it there made the policy-gate tool
+unbuildable during exactly the sibling outages `check-constellation` exists to
+report. `fs-govern`'s cone (`fs-blake3`, `fs-evidence`, `fs-vvreg`, `fs-wedge`)
+is sibling-free.
+
+- `program_metrics` — the program-level dashboard, one altitude above the
+  per-study notebook. `MetricCell` is the load-bearing type: `NoData { reason,
+  unblocked_by }` for a metric with no measurement machinery, and
+  `Measured(MetricObservation)` for a real value including a real zero.
+  `MetricObservation::Ratio` carries a `NonZeroU64` denominator, so an empty
+  population is unrepresentable as `0%`. `MetricRow::try_new` requires a
+  non-blank honesty statement on EVERY row and at least one source reference on
+  every measured row. `MetricHistory` is an append-only, strictly increasing
+  generation list used solely as a trend basis; `build_dashboard(rows, history)`
+  projects both into a `ProgramDashboard` whose `render_markdown`,
+  `render_json`, and `render_history_line` are pure. `ProgramSources` and
+  `frankensim_rows` hold this program's concrete metric set; they take typed
+  registry values and perform no I/O, so the projection cannot reach past what
+  the caller already loaded.
+
+`program_metrics::DashboardError` is the module's fail-closed refusal:
+`ResourceLimit`, `InvalidMetricField`, `DuplicateMetric`,
+`MissingSourceCitation`, `NonMonotonicHistory`, `EmptySourceRegistry`,
+`UninterpretableSource`, and `UnseededCorpus`. Refusal is total: no partial
+dashboard is produced. Two refusals are load-bearing rather than defensive.
+`EmptySourceRegistry` treats an empty registry as a READ FAILURE instead of a
+program containing nothing, because the upstream `capability_levels` extractor
+skips rows it cannot parse and would otherwise yield the most flattering
+possible answer. `UnseededCorpus` refuses a caller-built corpus so a synthetic
+registry can never masquerade as public program state.
+
+`program_metrics` renders byte-identically from identical inputs. Rows are
+keyed by `(family index, id)` in a `BTreeMap`, so caller order cannot move the
+artifact; source references are a sorted, deduplicated set. The module performs
+NO floating-point arithmetic — ratios are exact integers and percentages are
+rendered from `u128` integer basis points — so no render can drift with
+rounding mode or build mode, and ratio comparison is exact cross-multiplication
+rather than division. Both identities are domain-separated BLAKE3 over
+length-framed typed fields, never over rendered bytes: `source_identity` binds
+the metric VALUES alone, and `identity()` binds the whole projection including
+computed trends. Because `source_identity` excludes trends, two generations
+sharing it were provably computed from identical values, which is what makes an
+`unchanged` trend a statement rather than a coincidence of equal renders.
+
+Conformance: `tests/program_metrics.rs` a measured
+zero rendering as a real zero while an unmeasured row renders `NO-DATA`, with
+NEGATIVE assertions in both directions so neither can be laundered into the
+other; exact integer ratios, `NonZeroU64` denominators, and shape-mismatched
+comparison claiming no movement; trend arithmetic across two recorded
+generations in both declared directions plus `NewlyMeasured`, `LostData`,
+`NotComparable`, and `NoPrior`; the seeded regression visibly flipping a cell
+to `WORSENED` in both renders; `sources_identical_to_prior` distinguishing a
+provably static program from two renders that merely agree; history lines
+recording values and source identity but never derived trends; G5 byte-identity
+of both renders and the identity across independent builds; caller-order
+independence; fail-closed admission compared against exact error values
+(including the mandatory honesty statement and the uncited measurement); and
+the real seeded registries projecting the live metric set, with the
+caller-built-corpus and empty/uninterpretable maturity-registry refusals.
+
+No-claim boundaries:
+
+- `program_metrics` reports COVERAGE AND MOVEMENT, never correctness. A metric
+  trending in its better direction is not evidence that any underlying claim is
+  true; `externally-anchored-claim-cells` counts references ATTACHED to a cell,
+  not agreement with them; and `adversarial-suite-execution` counts challenges
+  RUN, not challenges survived. Supplying rows or a history grants no authority.
+- The dashboard's `unchanged` trend is a statement about recorded values only.
+  It cannot detect a change that occurred and reverted between two recordings,
+  and the history is a caller-recorded artifact, not an authenticated ledger:
+  the module verifies that generations strictly increase, not that anyone
+  actually recorded them honestly.
+- The metric set is deliberately incomplete and ships that way. Rows whose
+  machinery does not exist render `NO-DATA` with the tracked work that would
+  make them live; that visible gap list is the artifact's purpose, not a defect
+  to be filled with proxies.

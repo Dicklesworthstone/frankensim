@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 
 use fs_blake3::ContentHash;
-use fs_report::program_metrics::{
+use fs_govern::program_metrics::{
     DashboardError, HistoryGeneration, MAX_METRIC_ROWS, MetricCell, MetricDirection, MetricFamily,
     MetricHistory, MetricObservation, MetricRow, Trend, build_dashboard,
 };
@@ -518,7 +518,7 @@ fn honesty_and_exclusions_are_always_rendered() {
 /// the point — they must be visible, not hidden behind `NO-DATA`.
 #[test]
 fn real_registries_project_the_program_metric_set() {
-    use fs_report::program_metrics::{ProgramSources, frankensim_rows};
+    use fs_govern::program_metrics::{ProgramSources, frankensim_rows};
     use fs_vvreg::adversarial::adversarial_registry;
     use fs_vvreg::corpus::corpus;
     use fs_vvreg::scorecard::build_scorecard;

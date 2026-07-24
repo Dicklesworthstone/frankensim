@@ -55,8 +55,8 @@ pub const MAX_HISTORY_GENERATIONS: usize = 4_096;
 /// Upper bound on any caller-supplied text field, in bytes.
 pub const MAX_METRIC_TEXT_BYTES: usize = 4_096;
 
-const DASHBOARD_IDENTITY_DOMAIN: &str = "org.frankensim.fs-report.program-metrics.v1";
-const SOURCE_IDENTITY_DOMAIN: &str = "org.frankensim.fs-report.program-metrics-sources.v1";
+const DASHBOARD_IDENTITY_DOMAIN: &str = "org.frankensim.fs-govern.program-metrics.v1";
+const SOURCE_IDENTITY_DOMAIN: &str = "org.frankensim.fs-govern.program-metrics-sources.v1";
 
 /// Measurements deliberately excluded from the metric set, with the reason.
 ///

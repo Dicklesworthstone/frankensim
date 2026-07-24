@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use fs_report::program_metrics::{
+use fs_govern::program_metrics::{
     HistoryGeneration, MetricCell, MetricHistory, MetricObservation, ProgramDashboard,
     ProgramSources, build_dashboard, frankensim_rows,
 };

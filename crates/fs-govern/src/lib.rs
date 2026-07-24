@@ -62,6 +62,8 @@ pub mod evidence_contract;
 pub mod evidence_graph;
 pub mod lanes;
 pub mod moonshots;
+/// Program metrics dashboard: outcome metrics as one deterministic artifact.
+pub mod program_metrics;
 pub mod program_risks;
 pub mod proposals;
 pub mod ratification;

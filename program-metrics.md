@@ -5,7 +5,7 @@ metrics: 19
 measured: 8
 no_data: 11
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 611f1afc9ba737a492271bc4484726d947876d0d5e5c309175d24e7af0c3c4a2
+source_identity: 9def37aadb7283f3b8b5b788a0c030fc6b7ef8bb6155ea55a8c6f46320906404
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -88,4 +88,4 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
 - open issue counts — the beads store churns on every unrelated issue edit, which would make this checked artifact stale for every agent in the repository
 
-identity: 2ce9f333a951f45151843f39be493b837731f9ed7ac3ce534d198651f460e251
+identity: 34e416f8795b5d53bd283e59e6aed8784890f26c4571b716184b940c4de381e4
