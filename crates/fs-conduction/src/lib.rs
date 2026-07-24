@@ -59,6 +59,7 @@ pub mod fixtures;
 pub mod interface;
 pub mod material;
 pub mod mesh;
+pub mod power;
 pub mod radiation;
 pub mod solve;
 
@@ -75,6 +76,10 @@ pub use interface::{
     InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface, ResistanceOrigin,
     ResistanceUncertainty, ResistanceValueOrigin, SeriesResistanceBudget, SeriesThermalResistance,
     ThermalInterfaces, ThermalResistanceTerm,
+};
+pub use power::{
+    COMPONENT_POWER_DIMS, ComponentPower, DEFAULT_POWER_TOLERANCE, MAX_COMPONENTS, PowerAudit,
+    PowerAuditRow, PowerMap, PowerUncertainty,
 };
 pub use material::{
     CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,

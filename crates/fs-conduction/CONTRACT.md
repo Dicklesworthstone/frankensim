@@ -90,6 +90,9 @@ diameter.
 | `InterfaceResistance` | a positive area-specific resistance in m² K/W selected from an ordered `InterfaceSystemCard`; retains both the card identity and exact property-use receipt |
 | `InterfaceSurface` / `ThermalInterfaces` | named, explicitly oriented matching-face pairs; every coincident boundary pair must be bound exactly once and may not also carry an external boundary condition |
 | `ThermalResistanceTerm` / `SeriesThermalResistance` | named K/W terms and a deterministic series sum; stated half-widths combine conservatively by addition, while any unstated term keeps the complete band unknown |
+| `ComponentPower` / `PowerMap` | per-component dissipation in W bound to a mesh vertex set, plus the declared system total. Names are unique and sorted; bound vertices are sorted and deduplicated so a repeated binding cannot take a double share while the totals still balance |
+| `PowerMap::volumetric_source` | projects the map onto the nodal `W/m³` source AND returns the audit computed from that same field, so the reported delivered power is what the solve receives rather than a parallel estimate of it |
+| `PowerAudit` / `PowerAuditRow` | the retained three-number balance — declared total, component sum, delivered total — with a per-component table of bound volume, applied density, and delivered watts. `total_half_width_w()` sums stated bands conservatively and returns `None` if any component is `Unstated` |
 | `SurfaceEmissivity` | one dimensionless hemispherical-total emissivity selected from an `fs-matdb` material card; retains material state, card identity, exact property-use receipt, and the source uncertainty statement |
 | `LinearizedSurfaceRadiation` / `LinearizedRadiationPoint` | a declared `4 ε σ T_mean³` Robin coefficient with its validity domain, full `T⁴` comparison, measured point discrepancy, and first-order emissivity-width propagation |
 | `ViewFactorMatrix` / `ViewFactorEvidence` | an admitted closed-enclosure matrix whose row sums, area-weighted reciprocity, tolerances, evidence tag, and content identity are checked and retained |
@@ -199,6 +202,23 @@ producing solver's own typed claim is carried verbatim in
     radiosity solve. Enclosure exchange closes globally, and the outer
     conduction coupling stops only on its declared surface-temperature rule.
     Evidence: `tests/radiation.rs`.
+11. **Component power is delivered EXACTLY, not to discretization order.**
+    Summing the exact P1 element load `∫ λ_a λ_b dV = V(1+δ_ab)/20` over `a`
+    gives `V/4 · Σ_b f_b`, so the power the assembled operator injects is
+    `Σ_a f_a w_a` with the lumped nodal volume `w_a = (1/4) Σ_{e ∋ a} V_e`.
+    Distributing a component's watts by those same weights makes its delivered
+    power equal its declared power identically, at every mesh resolution.
+    Distributing a per-element density onto nodes instead would lose power
+    wherever an element is shared at a component boundary — and the loss would
+    be invisible, because it looks exactly like discretization error.
+    Overlapping components are ADMITTED and still balance, since the delivered
+    functional is linear in the nodal field. Evidence: `tests/power.rs`.
+12. **A power map that does not add up refuses, and names the rows.** The
+    declared system total is a checked input, not a comment: a mismatch beyond
+    the caller's relative tolerance returns the per-component table inside the
+    refusal, so the reader sees which row is wrong. A forgotten component is
+    the commonest data-entry error in a thermal model and the cheapest to
+    catch. Evidence: `tests/power.rs`.
 
 ## Error model
 
@@ -327,6 +347,17 @@ None. Everything here is `[S]` solid work on the default path.
   `R''` halving the conductance; and refusals for a count mismatch, mixed
   cards, a blank measured rationale, and non-finite/non-positive measured
   values.
+- `tests/power.rs` — component power maps (`f85xj.5.9`): delivered power equal
+  to declared power at `1e-12` and INVARIANT ACROSS MESH REFINEMENT (n = 2..5),
+  which is what separates an arithmetic identity from a discretization
+  property; overlapping components superposing without loss; a duplicated
+  vertex binding collapsing instead of taking a double share; the analytic
+  cross-check that a whole-domain map reproduces the equivalent
+  `ScalarField::Uniform` SOLVE to `1e-9`, pinning the power path to the
+  crate's existing source path; audit refusal carrying the per-component
+  table; binary64 rounding admitted inside tolerance while a forgotten
+  component refuses; one `Unstated` component making the total band `None`;
+  the full admission-refusal surface; and declaration-order independence.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -451,6 +482,41 @@ not promote any row beyond its registry authority.
   the caller supplies an uncertainty describing the supplied value, and
   `Unstated` stays an honest unknown. A measured map entering a solve does not
   make the solve validated.
+- STEADY STATE ONLY. THE TRANSIENT PATH IS STAGED, NOT FORGOTTEN — this is the
+  explicit staging decision record for bead `f85xj.5.9`. This crate solves the
+  steady problem; there is no time integration, no capacitance term, no
+  duty-cycle driver, and no transient adjoint here, and none is implied by the
+  presence of a power map. Component dissipation is modelled NOW because it is
+  the primary excitation and its data model must be right from the start; the
+  time dimension is deferred DELIBERATELY so that the architecture is planned
+  against `fs-time` and the checkpointed `fs-adjoint::timedep` pattern rather
+  than discovered later. Each staged item carries its own follow-on bead:
+  `f85xj.5.11` (method-of-lines transient solve on fs-time primitives with the
+  checkpointed adjoint), `f85xj.5.12` (duty-cycle drivers from the E17 envelope
+  objects), and `f85xj.5.13` (the lumped-network reduced transient rung for the
+  fidelity graph). Until those land, any transient claim about this crate is
+  unsupported: no API surface here accepts a time step or a thermal mass.
+- POWER-MAP INGESTION IS THE CALLER'S. `PowerMap` admits already-parsed typed
+  rows. Reading a component power table off disk — CSV/tabular ingestion
+  through the `fs-io` quarantine and catalog path — is NOT implemented here,
+  deliberately: this crate takes no `fs-io` dependency, and file parsing is a
+  quarantine concern, not a physics one. The crate validates what it is handed
+  and refuses what does not balance; it asserts nothing about where the
+  numbers came from or whether the file they came from was well-formed.
+- SURFACE (boundary) POWER MAPS ARE NOT IMPLEMENTED. `PowerMap` projects onto
+  the VOLUMETRIC source only. A per-component surface dissipation would enter
+  through the Neumann flux path and needs its own face-area lumping and
+  boundary-partition integration; it is not provided and must not be
+  approximated by binding a surface component to its adjacent volume vertices,
+  which would place the heat in the solid rather than on the face.
+- A BALANCED POWER MAP IS NOT A VALIDATED ONE. The audit proves the declared,
+  summed, and delivered totals agree — an internal consistency and correct
+  discrete distribution claim. It says nothing about whether the declared
+  watts are the component's real dissipation, whether the footprint binding
+  matches the physical die, or whether the resulting temperatures are right.
+  Component uncertainty is a conservative arithmetic sum of stated
+  half-widths, not a probabilistic convolution, and no correlation between
+  components is modelled.
 - NO PHASE CHANGE, no latent heat, no moving boundaries.
 - PCB HOMOGENIZATION IS CONSUMED, NOT REINTERPRETED. This crate uses the
   nominal tensor and retains its constituent property receipts. Coverage

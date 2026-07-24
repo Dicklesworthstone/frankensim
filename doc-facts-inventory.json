@@ -376,6 +376,7 @@
     "crates/fs-conduction/tests/level_b_crosscode.rs",
     "crates/fs-conduction/tests/mms.rs",
     "crates/fs-conduction/tests/pcb_homogenization.rs",
+    "crates/fs-conduction/tests/power.rs",
     "crates/fs-conduction/tests/radiation.rs",
     "crates/fs-conduction/tests/support/mod.rs",
     "crates/fs-conform/tests/conform.rs",
