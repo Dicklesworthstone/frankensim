@@ -6,12 +6,13 @@ use std::collections::BTreeSet;
 use fs_assimilate::{Belief, Observation, assimilate};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey, VirtualClock};
 use fs_scenario::{
-    Correspondence, EntityCatalog, EntityDeclaration, EntityKind, EntityRef, EvidenceTier,
-    GeometryFingerprint, ImportRevision, ImportScope, ImportedEntity, KindExpectation,
-    ObservationSupport, ObservationTerm, PlacementUncertainty, RebindEvent, ScenarioSensor,
-    SensorCalibration, SensorDynamics, SensorError, SensorKind, SensorLocation, SensorMount,
-    SensorQuantity, SensorSetBudget, SensorSetError, compile_sensor_set,
-    compile_sensor_set_with_budget, plan_sensor_set,
+    Correspondence, EntityCatalog, EntityDeclaration, EntityKind, EntityRef, Environment,
+    EvidenceTier, GeometryFingerprint, ImportRevision, ImportScope, ImportedEntity,
+    KindExpectation, ObservationSupport, ObservationTerm, PlacementUncertainty, RebindEvent,
+    SENSOR_EXTENSION_ARTIFACT_KIND, SENSOR_EXTENSION_SCHEMA_VERSION, Scenario, ScenarioSensor,
+    ScenarioSensorExtension, SensorCalibration, SensorDynamics, SensorError, SensorExtensionError,
+    SensorKind, SensorLocation, SensorMount, SensorQuantity, SensorSetBudget, SensorSetError,
+    compile_sensor_set, compile_sensor_set_with_budget, plan_sensor_set,
 };
 
 const TEST_STREAM: StreamKey = StreamKey {
@@ -760,4 +761,187 @@ fn sensor_set_retains_supersession_evidence_and_uses_the_current_entity() {
     assert_eq!(binding.operator().entity(), current);
     assert_eq!(binding.supersession_hops(), 1);
     assert_eq!(binding.evidence_tier(), EvidenceTier::ContentMatched);
+}
+
+#[test]
+fn canonical_sensor_extension_round_trips_and_survives_ledger_reopen() {
+    let scenario = Scenario::new("instrumented-rig", 0x5e45_4e53, Environment::earth_lab());
+    let e = entities();
+    let physical = physical_sensor(
+        "tc-top",
+        SensorKind::Thermocouple,
+        e.surface,
+        KindExpectation::Boundary,
+        ObservationSupport::point(3, 2).expect("point"),
+        SensorMount::affine(0.98, 1.25, "bonded-bead-model").expect("mount"),
+        PlacementUncertainty::axis_aligned(
+            [0.0002, 0.0003, 0.0001],
+            [10.0, -4.0, 2.0],
+            "placement-survey",
+        )
+        .expect("placement"),
+        true,
+    );
+    let virtual_sensor = ScenarioSensor::new(
+        "ir-patch-qoi",
+        SensorKind::IrCameraRegion,
+        SensorLocation::new(
+            EntityRef::new(e.surface, KindExpectation::Boundary),
+            [0.01, 0.02, 0.0],
+            PlacementUncertainty::declared_exact("mesh-trace").expect("placement"),
+        )
+        .expect("location"),
+        ObservationSupport::patch_average(
+            3,
+            vec![ObservationTerm::new(0, 0.25), ObservationTerm::new(2, 0.75)],
+        )
+        .expect("patch"),
+        SensorMount::declared_ideal("virtual-trace").expect("mount"),
+        SensorDynamics::declared_instantaneous("steady-qoi").expect("dynamics"),
+        SensorCalibration::virtual_sensor("qoi:ir-patch-v1").expect("virtual"),
+        false,
+    )
+    .expect("sensor");
+    let extension =
+        ScenarioSensorExtension::new(&scenario, vec![physical.clone(), virtual_sensor.clone()])
+            .expect("extension");
+    let bytes = extension.try_encode().expect("canonical bytes");
+    let decoded = ScenarioSensorExtension::decode(&bytes).expect("decode");
+    assert_eq!(decoded, extension);
+    assert!(decoded.verifies_scenario(&scenario));
+    assert_eq!(
+        decoded.sensors(),
+        &[physical.clone(), virtual_sensor.clone()]
+    );
+
+    let other = Scenario::new("different-rig", 0x5e45_4e53, Environment::earth_lab());
+    assert!(!decoded.verifies_scenario(&other));
+    let reversed =
+        ScenarioSensorExtension::new(&scenario, vec![virtual_sensor, physical]).expect("reversed");
+    assert_ne!(decoded.identity(), reversed.identity());
+
+    let ledger_path = std::env::temp_dir().join(format!(
+        "fs-scenario-sensor-extension-{}.led",
+        std::process::id()
+    ));
+    let receipt = {
+        let ledger =
+            fs_ledger::Ledger::open(ledger_path.to_str().expect("utf8 path")).expect("ledger");
+        ledger
+            .put_artifact(SENSOR_EXTENSION_ARTIFACT_KIND, &bytes, None)
+            .expect("persist extension")
+    };
+    let reopened =
+        fs_ledger::Ledger::open(ledger_path.to_str().expect("utf8 path")).expect("reopen ledger");
+    let persisted = reopened
+        .get_artifact(&receipt.hash)
+        .expect("read extension")
+        .expect("present");
+    assert_eq!(
+        ScenarioSensorExtension::decode(&persisted).expect("decode persisted"),
+        extension
+    );
+    assert!(
+        reopened
+            .verify_artifact_integrity()
+            .expect("integrity sweep")
+            .is_clean()
+    );
+}
+
+#[test]
+fn sensor_extension_refuses_future_tampered_truncated_and_noncanonical_wire() {
+    let scenario = Scenario::new("wire-rig", 17, Environment::earth_lab());
+    let e = entities();
+    let sensor = physical_sensor(
+        "wire-tc",
+        SensorKind::Thermocouple,
+        e.surface,
+        KindExpectation::Boundary,
+        ObservationSupport::point(1, 0).expect("point"),
+        SensorMount::declared_ideal("mount").expect("mount"),
+        PlacementUncertainty::declared_exact("placement").expect("placement"),
+        false,
+    );
+    let extension =
+        ScenarioSensorExtension::new(&scenario, vec![sensor.clone()]).expect("extension");
+    let bytes = extension.try_encode().expect("bytes");
+
+    for cut in 0..bytes.len() {
+        assert!(
+            ScenarioSensorExtension::decode(&bytes[..cut]).is_err(),
+            "truncated prefix {cut} must refuse"
+        );
+    }
+
+    let mut future = bytes.clone();
+    future[8..10].copy_from_slice(&(SENSOR_EXTENSION_SCHEMA_VERSION + 1).to_le_bytes());
+    assert_eq!(
+        ScenarioSensorExtension::decode(&future),
+        Err(SensorExtensionError::UnsupportedVersion {
+            observed: SENSOR_EXTENSION_SCHEMA_VERSION + 1,
+            supported: SENSOR_EXTENSION_SCHEMA_VERSION,
+        })
+    );
+
+    let mut excessive = bytes.clone();
+    excessive[42..46].copy_from_slice(&4_097u32.to_le_bytes());
+    assert_eq!(
+        ScenarioSensorExtension::decode(&excessive),
+        Err(SensorExtensionError::LimitExceeded {
+            resource: "sensor declarations",
+            requested: 4_097,
+            limit: 4_096,
+        })
+    );
+
+    let name_start = 50;
+    let kind_offset = name_start + sensor.name().len();
+    let mut bad_tag = bytes.clone();
+    bad_tag[kind_offset] = 0;
+    assert_eq!(
+        ScenarioSensorExtension::decode(&bad_tag),
+        Err(SensorExtensionError::InvalidTag {
+            field: "sensor kind",
+            observed: 0,
+        })
+    );
+
+    let mut tampered = bytes.clone();
+    tampered[name_start] ^= 1;
+    assert_eq!(
+        ScenarioSensorExtension::decode(&tampered),
+        Err(SensorExtensionError::SensorIdentityMismatch { row: 0 })
+    );
+
+    let mut bad_extension_identity = bytes.clone();
+    let last = bad_extension_identity.len() - 1;
+    bad_extension_identity[last] ^= 1;
+    assert_eq!(
+        ScenarioSensorExtension::decode(&bad_extension_identity),
+        Err(SensorExtensionError::ExtensionIdentityMismatch)
+    );
+
+    let position_start = kind_offset + 1 + 1 + 32 + 1;
+    let mut negative_zero = bytes.clone();
+    negative_zero[position_start + 2 * 8 + 7] |= 0x80;
+    assert_eq!(
+        ScenarioSensorExtension::decode(&negative_zero),
+        Err(SensorExtensionError::NonCanonical)
+    );
+
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert_eq!(
+        ScenarioSensorExtension::decode(&trailing),
+        Err(SensorExtensionError::TrailingBytes { count: 1 })
+    );
+
+    assert_eq!(
+        ScenarioSensorExtension::new(&scenario, vec![sensor.clone(), sensor]),
+        Err(SensorExtensionError::DuplicateName {
+            first: 0,
+            second: 1,
+        })
+    );
 }

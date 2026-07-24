@@ -188,6 +188,15 @@ flagships.
   binds the exact catalog receipt root plus every ordered operator binding.
   Caller order is semantic. The complete catalog root is conservatively
   semantic too: an unrelated receipt changes the set identity.
+  `ScenarioSensorExtension` is the version-1 canonical persistence sidecar for
+  the checked declarations. It binds the ordered sensor identities to the
+  BLAKE3 content hash of the exact canonical scenario IR emitted by
+  `write_ir`, carries embedded per-sensor and extension identities, and
+  reconstructs every private declaration through its checked constructor.
+  The bounded `FSSENX1` decoder rejects future versions, unknown closed tags,
+  oversized counts/text/input, invalid constructors, tampered identities,
+  alternate byte spellings, truncation, and trailing bytes. The generic Design
+  Ledger artifact kind is `scenario-sensor-extension-v1`.
 - `ir::write_ir`/`ir::parse_ir` — canonical byte-stable, explicitly versioned
   s-expression encoding. v2 writes six-base `[m, kg, s, K, A, mol]` vectors;
   explicit v1 and historical unversioned five-vector forms decode by appending
@@ -380,6 +389,10 @@ flagships.
     A compiled set has unique exact names, resolves every entity through one
     exact catalog snapshot, retains resolution evidence without laundering it,
     and publishes no partial prefix after any refusal.
+    A canonical sensor extension has at most 4,096 unique exact-name rows,
+    binds one exact canonical scenario-IR hash, embeds and recomputes every
+    sensor identity and its ordered extension identity, and has exactly one
+    admitted byte spelling. Reordering rows is semantic and changes identity.
 
 ## Error model
 
@@ -410,6 +423,10 @@ subset and carries the same `code`/`fix` pair.
 `SensorSetError` separates count/work/allocation refusal, exact-name
 duplication, catalog resolution, resolved sensor-family kind mismatch,
 operator compilation, and cancellation with phase/completed/planned work.
+`SensorExtensionError` separately identifies byte/count limits, checked length
+overflow, allocation refusal, magic/version/tag/UTF-8/truncation faults,
+constructor-invalid rows, duplicate names, per-row or extension identity
+mismatch, noncanonical encodings, and trailing bytes.
 
 ## Determinism class
 
@@ -427,6 +444,10 @@ constant-screw lowering with the same frame declaration and tube parameters is
 bit-identical. IR text is canonical. Payload V1 bytes are canonical for every
 admitted value: signed zero is normalized on write and rejected when supplied
 noncanonically on the wire; all other finite IEEE-754 bits are retained.
+Sensor-extension bytes and identities are likewise D0: fixed little-endian
+fields, closed tags, canonical signed zero, exact caller order, and
+domain-separated BLAKE3 identities contain no map, clock, thread, or address
+input.
 
 ## Cancellation behavior
 
@@ -505,6 +526,13 @@ allocation. Entity resolution and one dense operator compilation remain
 individually bounded but do not poll internally in sensor-set schema v1. A
 request observed at a set checkpoint drops private scratch and returns no
 partial set.
+
+Sensor-extension encode/decode is synchronous and non-preemptible. Input is
+hard-capped at 64 MiB; sensor, support, state, and text counts are checked
+before their allocations; output length is checked and exactly reserved before
+emission; decoding reserves each bounded collection fallibly and returns no
+partial extension. This is bounded wire work, not a cancellation-correct hot
+kernel or a claim about allocator metadata.
 
 ## Unsafe boundary
 
@@ -667,7 +695,10 @@ None.
   every declaration family; deterministic ordered catalog-set compilation;
   exact receipt-root sensitivity; direct and content-matched supersession
   evidence; exact count/work admission; duplicate, dangling, and
-  pre-cancellation refusal; and a JSONL instrumented-temperature handoff row.
+  pre-cancellation refusal; canonical scenario-bound sensor-extension
+  round-trip; generic ledger persistence across a real reopen; future/tag/
+  count/tamper/truncation/trailing/noncanonical refusal; and a JSONL
+  instrumented-temperature handoff row.
 
 ## No-claim boundaries
 
@@ -761,6 +792,14 @@ None.
 - **Sensor root/IR integration is not claimed**: `ScenarioSensor` is a checked
   scenario-layer declaration type, but the current `Scenario` root and
   canonical v2 IR do not yet enumerate or serialize sensor collections.
+  `ScenarioSensorExtension` now provides a canonical, content-addressed sidecar
+  that binds checked sensor declarations to the exact canonical scenario-IR
+  hash and can survive generic ledger persistence. It is deliberately not a
+  silent mutation of scenario IR v2: parsing the scenario artifact alone still
+  yields no sensors, and a product must retain and select both artifacts. The
+  sidecar hash does not authenticate who selected either artifact, and generic
+  artifact storage provides no dedicated pair-membership/index or atomic
+  scenario-plus-sensor publication event.
   `compile_sensor_set` proves existence and retains resolution evidence only
   when a caller explicitly supplies a catalog; it is not invoked by
   `Scenario::validate`, does not make `ReferenceSite::Sensor`

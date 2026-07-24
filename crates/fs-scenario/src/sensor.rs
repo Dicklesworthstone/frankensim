@@ -14,12 +14,14 @@
 
 use core::fmt;
 
-use fs_blake3::{ContentHash, DomainHasher};
+use fs_blake3::{ContentHash, DomainHasher, hash_bytes};
 use fs_exec::Cx;
 
 use crate::entity::{
     EntityCatalog, EntityId, EntityKind, EntityRef, EvidenceTier, KindExpectation, ResolutionFault,
 };
+use crate::ir::write_ir;
+use crate::scenario::Scenario;
 
 /// Schema version bound into every scenario-sensor identity.
 pub const SENSOR_SCHEMA_VERSION: u32 = 1;
@@ -32,6 +34,20 @@ pub const SENSOR_SET_SCHEMA_VERSION: u32 = 1;
 
 /// Domain-separated identity namespace for catalog-checked sensor sets.
 pub const SENSOR_SET_IDENTITY_DOMAIN: &str = "org.frankensim.scenario.sensor-set.v1";
+
+/// Version of the canonical scenario-bound sensor-extension envelope.
+pub const SENSOR_EXTENSION_SCHEMA_VERSION: u16 = 1;
+
+/// Domain-separated identity namespace for scenario-bound sensor extensions.
+pub const SENSOR_EXTENSION_IDENTITY_DOMAIN: &str = "org.frankensim.scenario.sensor-extension.v1";
+
+/// Generic Design Ledger artifact kind for canonical sensor extensions.
+pub const SENSOR_EXTENSION_ARTIFACT_KIND: &str = "scenario-sensor-extension-v1";
+
+/// Maximum admitted bytes in one canonical sensor-extension envelope.
+pub const MAX_SENSOR_EXTENSION_WIRE_BYTES: usize = 64 * 1024 * 1024;
+
+const SENSOR_EXTENSION_MAGIC: &[u8; 8] = b"FSSENX1\0";
 
 /// Maximum dense state dimension accepted by the v1 operator compiler.
 pub const MAX_SENSOR_STATE_DIMENSION: usize = 65_536;
@@ -973,6 +989,844 @@ impl ScenarioSensor {
             virtual_sensor: self.calibration.is_virtual(),
             placement_candidate: self.placement_candidate,
         })
+    }
+}
+
+/// Canonical sidecar binding checked sensor declarations to one exact scenario.
+///
+/// The sidecar deliberately preserves scenario IR v2. Its scenario root is the
+/// BLAKE3 content hash of [`write_ir`] output, and its own semantic identity
+/// binds that root plus every ordered [`ScenarioSensor::identity`]. Decoding
+/// reconstructs every declaration through the same checked constructors used
+/// at authoring time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScenarioSensorExtension {
+    scenario_ir_hash: ContentHash,
+    sensors: Vec<ScenarioSensor>,
+    identity: ContentHash,
+}
+
+impl ScenarioSensorExtension {
+    /// Bind an ordered sensor collection to the canonical IR of `scenario`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses more than [`DEFAULT_SENSOR_SET_BUDGET`] sensors or duplicate
+    /// exact names. Caller order is semantic.
+    pub fn new(
+        scenario: &Scenario,
+        sensors: Vec<ScenarioSensor>,
+    ) -> Result<Self, SensorExtensionError> {
+        let canonical_ir = write_ir(scenario);
+        Self::from_hash(hash_bytes(canonical_ir.as_bytes()), sensors)
+    }
+
+    fn from_hash(
+        scenario_ir_hash: ContentHash,
+        sensors: Vec<ScenarioSensor>,
+    ) -> Result<Self, SensorExtensionError> {
+        if sensors.len() > DEFAULT_SENSOR_SET_BUDGET.max_sensors {
+            return Err(SensorExtensionError::LimitExceeded {
+                resource: "sensor declarations",
+                requested: sensors.len(),
+                limit: DEFAULT_SENSOR_SET_BUDGET.max_sensors,
+            });
+        }
+        for second in 1..sensors.len() {
+            if let Some(first) = sensors[..second]
+                .iter()
+                .position(|sensor| sensor.name() == sensors[second].name())
+            {
+                return Err(SensorExtensionError::DuplicateName { first, second });
+            }
+        }
+        let identity = sensor_extension_identity(scenario_ir_hash, &sensors);
+        Ok(Self {
+            scenario_ir_hash,
+            sensors,
+            identity,
+        })
+    }
+
+    /// Hash of the exact canonical scenario IR this extension accompanies.
+    #[must_use]
+    pub const fn scenario_ir_hash(&self) -> ContentHash {
+        self.scenario_ir_hash
+    }
+
+    /// Ordered checked sensor declarations.
+    #[must_use]
+    pub fn sensors(&self) -> &[ScenarioSensor] {
+        &self.sensors
+    }
+
+    /// Domain-separated identity of the scenario root and ordered sensors.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Whether `scenario` emits the exact canonical IR root bound here.
+    #[must_use]
+    pub fn verifies_scenario(&self, scenario: &Scenario) -> bool {
+        hash_bytes(write_ir(scenario).as_bytes()) == self.scenario_ir_hash
+    }
+
+    /// Materialize the canonical bounded wire envelope.
+    ///
+    /// # Errors
+    ///
+    /// Refuses checked length overflow, the wire-byte ceiling, or exact output
+    /// reservation failure before publishing bytes.
+    pub fn try_encode(&self) -> Result<Vec<u8>, SensorExtensionError> {
+        let encoded_len = sensor_extension_wire_len(self)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(encoded_len).map_err(|_| {
+            SensorExtensionError::AllocationRefused {
+                resource: "sensor extension wire bytes",
+                requested: encoded_len,
+            }
+        })?;
+        out.extend_from_slice(SENSOR_EXTENSION_MAGIC);
+        out.extend_from_slice(&SENSOR_EXTENSION_SCHEMA_VERSION.to_le_bytes());
+        out.extend_from_slice(self.scenario_ir_hash.as_bytes());
+        push_wire_u32(&mut out, self.sensors.len())?;
+        for sensor in &self.sensors {
+            encode_sensor(&mut out, sensor)?;
+            out.extend_from_slice(sensor.identity().as_bytes());
+        }
+        out.extend_from_slice(self.identity.as_bytes());
+        debug_assert_eq!(out.len(), encoded_len);
+        Ok(out)
+    }
+
+    /// Decode one complete canonical bounded wire envelope.
+    ///
+    /// Every declaration is reconstructed through its checked constructors.
+    /// Embedded per-sensor and extension identities are recomputed, and the
+    /// final byte-for-byte re-encoding check rejects alternate spellings such
+    /// as negative zero.
+    ///
+    /// # Errors
+    ///
+    /// Refuses oversized, truncated, future-version, malformed-tag,
+    /// constructor-invalid, identity-mismatched, noncanonical, or trailing
+    /// input without publishing a partial extension.
+    pub fn decode(bytes: &[u8]) -> Result<Self, SensorExtensionError> {
+        if bytes.len() > MAX_SENSOR_EXTENSION_WIRE_BYTES {
+            return Err(SensorExtensionError::LimitExceeded {
+                resource: "sensor extension wire bytes",
+                requested: bytes.len(),
+                limit: MAX_SENSOR_EXTENSION_WIRE_BYTES,
+            });
+        }
+        let mut reader = SensorWireReader::new(bytes);
+        if reader.read_array::<8>("magic")? != *SENSOR_EXTENSION_MAGIC {
+            return Err(SensorExtensionError::BadMagic);
+        }
+        let observed_version = reader.read_u16("schema version")?;
+        if observed_version != SENSOR_EXTENSION_SCHEMA_VERSION {
+            return Err(SensorExtensionError::UnsupportedVersion {
+                observed: observed_version,
+                supported: SENSOR_EXTENSION_SCHEMA_VERSION,
+            });
+        }
+        let scenario_ir_hash = reader.read_hash("scenario IR hash")?;
+        let sensor_count =
+            reader.read_count("sensor declarations", DEFAULT_SENSOR_SET_BUDGET.max_sensors)?;
+        let mut sensors = Vec::new();
+        sensors.try_reserve_exact(sensor_count).map_err(|_| {
+            SensorExtensionError::AllocationRefused {
+                resource: "decoded sensor declarations",
+                requested: sensor_count,
+            }
+        })?;
+        for row in 0..sensor_count {
+            let sensor = decode_sensor(&mut reader, row)?;
+            let embedded_identity = reader.read_hash("sensor identity")?;
+            if embedded_identity != sensor.identity() {
+                return Err(SensorExtensionError::SensorIdentityMismatch { row });
+            }
+            sensors.push(sensor);
+        }
+        let embedded_identity = reader.read_hash("extension identity")?;
+        if reader.remaining() != 0 {
+            return Err(SensorExtensionError::TrailingBytes {
+                count: reader.remaining(),
+            });
+        }
+        let extension = Self::from_hash(scenario_ir_hash, sensors)?;
+        if extension.identity != embedded_identity {
+            return Err(SensorExtensionError::ExtensionIdentityMismatch);
+        }
+        if extension.try_encode()?.as_slice() != bytes {
+            return Err(SensorExtensionError::NonCanonical);
+        }
+        Ok(extension)
+    }
+}
+
+/// Canonical sensor-extension admission or wire refusal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SensorExtensionError {
+    /// A named count or byte limit was exceeded.
+    LimitExceeded {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Observed or requested units.
+        requested: usize,
+        /// Admitted units.
+        limit: usize,
+    },
+    /// Checked wire-length arithmetic overflowed.
+    LengthOverflow,
+    /// A fallible exact reservation was refused.
+    AllocationRefused {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Requested elements or bytes.
+        requested: usize,
+    },
+    /// The fixed envelope magic did not match.
+    BadMagic,
+    /// The wire declares a schema this build does not implement.
+    UnsupportedVersion {
+        /// Version found on the wire.
+        observed: u16,
+        /// Only version admitted by this build.
+        supported: u16,
+    },
+    /// Input ended before one complete field was available.
+    Truncated {
+        /// Stable field name.
+        field: &'static str,
+    },
+    /// A closed wire tag used an unknown value.
+    InvalidTag {
+        /// Stable tagged field name.
+        field: &'static str,
+        /// Unknown tag.
+        observed: u8,
+    },
+    /// A length-prefixed text field was not UTF-8.
+    InvalidUtf8 {
+        /// Stable text field name.
+        field: &'static str,
+    },
+    /// One reconstructed declaration failed its checked constructor.
+    InvalidSensor {
+        /// Sensor row.
+        row: usize,
+        /// Constructor refusal.
+        source: SensorError,
+    },
+    /// Two ordered declarations repeat one exact name.
+    DuplicateName {
+        /// First row carrying the name.
+        first: usize,
+        /// Later row carrying the same name.
+        second: usize,
+    },
+    /// A stored per-sensor identity does not match the decoded declaration.
+    SensorIdentityMismatch {
+        /// Sensor row.
+        row: usize,
+    },
+    /// The stored extension identity does not match its semantic fields.
+    ExtensionIdentityMismatch,
+    /// Input decoded semantically but was not the one canonical byte spelling.
+    NonCanonical,
+    /// Complete canonical input was followed by extra bytes.
+    TrailingBytes {
+        /// Unconsumed byte count.
+        count: usize,
+    },
+}
+
+impl fmt::Display for SensorExtensionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LimitExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                formatter,
+                "sensor extension {resource} request {requested} exceeds limit {limit}"
+            ),
+            Self::LengthOverflow => formatter.write_str("sensor extension wire length overflowed"),
+            Self::AllocationRefused {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "sensor extension allocation for {requested} {resource} units was refused"
+            ),
+            Self::BadMagic => formatter.write_str("invalid sensor extension magic"),
+            Self::UnsupportedVersion {
+                observed,
+                supported,
+            } => write!(
+                formatter,
+                "unsupported sensor extension schema {observed}; supported schema is {supported}"
+            ),
+            Self::Truncated { field } => {
+                write!(formatter, "sensor extension ended inside {field}")
+            }
+            Self::InvalidTag { field, observed } => {
+                write!(
+                    formatter,
+                    "sensor extension {field} has unknown tag {observed}"
+                )
+            }
+            Self::InvalidUtf8 { field } => {
+                write!(formatter, "sensor extension {field} is not UTF-8")
+            }
+            Self::InvalidSensor { row, source } => {
+                write!(formatter, "sensor extension row {row} is invalid: {source}")
+            }
+            Self::DuplicateName { first, second } => write!(
+                formatter,
+                "sensor extension rows {first} and {second} repeat the same exact name"
+            ),
+            Self::SensorIdentityMismatch { row } => {
+                write!(
+                    formatter,
+                    "sensor extension row {row} identity does not verify"
+                )
+            }
+            Self::ExtensionIdentityMismatch => {
+                formatter.write_str("sensor extension identity does not verify")
+            }
+            Self::NonCanonical => {
+                formatter.write_str("sensor extension has a noncanonical byte spelling")
+            }
+            Self::TrailingBytes { count } => {
+                write!(formatter, "sensor extension has {count} trailing bytes")
+            }
+        }
+    }
+}
+
+impl core::error::Error for SensorExtensionError {}
+
+fn sensor_extension_identity(
+    scenario_ir_hash: ContentHash,
+    sensors: &[ScenarioSensor],
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(SENSOR_EXTENSION_IDENTITY_DOMAIN);
+    absorb_u64(&mut hasher, u64::from(SENSOR_EXTENSION_SCHEMA_VERSION));
+    hasher.update(scenario_ir_hash.as_bytes());
+    absorb_u64(&mut hasher, sensors.len() as u64);
+    for sensor in sensors {
+        hasher.update(sensor.identity().as_bytes());
+    }
+    hasher.finalize()
+}
+
+fn sensor_extension_wire_len(
+    extension: &ScenarioSensorExtension,
+) -> Result<usize, SensorExtensionError> {
+    let mut length = SENSOR_EXTENSION_MAGIC.len()
+        + core::mem::size_of::<u16>()
+        + 32
+        + core::mem::size_of::<u32>()
+        + 32;
+    for sensor in &extension.sensors {
+        checked_wire_add(&mut length, sensor_wire_len(sensor)?)?;
+        checked_wire_add(&mut length, 32)?;
+    }
+    if length > MAX_SENSOR_EXTENSION_WIRE_BYTES {
+        return Err(SensorExtensionError::LimitExceeded {
+            resource: "sensor extension wire bytes",
+            requested: length,
+            limit: MAX_SENSOR_EXTENSION_WIRE_BYTES,
+        });
+    }
+    Ok(length)
+}
+
+fn sensor_wire_len(sensor: &ScenarioSensor) -> Result<usize, SensorExtensionError> {
+    let mut length = wire_text_len(&sensor.name)?;
+    checked_wire_add(&mut length, 1 + 1 + 32 + 1 + 3 * 8)?;
+    checked_wire_add(
+        &mut length,
+        match &sensor.location.placement.kind {
+            PlacementUncertaintyKind::DeclaredExact { source } => 1 + wire_text_len(source)?,
+            PlacementUncertaintyKind::AxisAligned { source, .. } => {
+                1 + 6 * 8 + wire_text_len(source)?
+            }
+        },
+    )?;
+    checked_wire_add(
+        &mut length,
+        match &sensor.support.kind {
+            ObservationSupportKind::Point { .. } => 1 + 2 * 4,
+            ObservationSupportKind::PatchAverage { terms } => 1 + 2 * 4 + terms.len() * (4 + 8),
+        },
+    )?;
+    checked_wire_add(
+        &mut length,
+        match &sensor.mount.kind {
+            SensorMountKind::DeclaredIdeal { source } => 1 + wire_text_len(source)?,
+            SensorMountKind::Affine { source, .. } => 1 + 2 * 8 + wire_text_len(source)?,
+        },
+    )?;
+    checked_wire_add(
+        &mut length,
+        match &sensor.dynamics.kind {
+            SensorDynamicsKind::DeclaredInstantaneous { source } => 1 + wire_text_len(source)?,
+            SensorDynamicsKind::FirstOrder { source, .. } => 1 + 8 + wire_text_len(source)?,
+        },
+    )?;
+    checked_wire_add(
+        &mut length,
+        match &sensor.calibration.kind {
+            SensorCalibrationKind::Physical {
+                certificate_ref,
+                date,
+                source,
+                ..
+            } => {
+                1 + wire_text_len(certificate_ref)?
+                    + wire_text_len(date)?
+                    + wire_text_len(source)?
+                    + 8
+            }
+            SensorCalibrationKind::Virtual { definition_ref } => 1 + wire_text_len(definition_ref)?,
+        },
+    )?;
+    checked_wire_add(&mut length, 1)?;
+    Ok(length)
+}
+
+fn wire_text_len(text: &str) -> Result<usize, SensorExtensionError> {
+    core::mem::size_of::<u32>()
+        .checked_add(text.len())
+        .ok_or(SensorExtensionError::LengthOverflow)
+}
+
+fn checked_wire_add(total: &mut usize, value: usize) -> Result<(), SensorExtensionError> {
+    *total = total
+        .checked_add(value)
+        .ok_or(SensorExtensionError::LengthOverflow)?;
+    Ok(())
+}
+
+fn encode_sensor(out: &mut Vec<u8>, sensor: &ScenarioSensor) -> Result<(), SensorExtensionError> {
+    push_wire_text(out, &sensor.name)?;
+    out.push(sensor.kind.tag());
+    encode_entity_ref(out, sensor.location.entity);
+    for value in sensor.location.local_position_m {
+        push_wire_f64(out, value);
+    }
+    match &sensor.location.placement.kind {
+        PlacementUncertaintyKind::DeclaredExact { source } => {
+            out.push(1);
+            push_wire_text(out, source)?;
+        }
+        PlacementUncertaintyKind::AxisAligned {
+            standard_uncertainty_m,
+            reading_sensitivity_per_m,
+            source,
+        } => {
+            out.push(2);
+            for value in standard_uncertainty_m {
+                push_wire_f64(out, *value);
+            }
+            for value in reading_sensitivity_per_m {
+                push_wire_f64(out, *value);
+            }
+            push_wire_text(out, source)?;
+        }
+    }
+    match &sensor.support.kind {
+        ObservationSupportKind::Point { component } => {
+            out.push(1);
+            push_wire_u32(out, sensor.support.state_dimension)?;
+            push_wire_u32(out, *component)?;
+        }
+        ObservationSupportKind::PatchAverage { terms } => {
+            out.push(2);
+            push_wire_u32(out, sensor.support.state_dimension)?;
+            push_wire_u32(out, terms.len())?;
+            for term in terms {
+                push_wire_u32(out, term.component)?;
+                push_wire_f64(out, term.weight);
+            }
+        }
+    }
+    match &sensor.mount.kind {
+        SensorMountKind::DeclaredIdeal { source } => {
+            out.push(1);
+            push_wire_text(out, source)?;
+        }
+        SensorMountKind::Affine {
+            gain,
+            offset,
+            source,
+        } => {
+            out.push(2);
+            push_wire_f64(out, *gain);
+            push_wire_f64(out, *offset);
+            push_wire_text(out, source)?;
+        }
+    }
+    match &sensor.dynamics.kind {
+        SensorDynamicsKind::DeclaredInstantaneous { source } => {
+            out.push(1);
+            push_wire_text(out, source)?;
+        }
+        SensorDynamicsKind::FirstOrder {
+            time_constant_s,
+            source,
+        } => {
+            out.push(2);
+            push_wire_f64(out, *time_constant_s);
+            push_wire_text(out, source)?;
+        }
+    }
+    match &sensor.calibration.kind {
+        SensorCalibrationKind::Physical {
+            certificate_ref,
+            date,
+            source,
+            instrument_variance,
+        } => {
+            out.push(1);
+            push_wire_text(out, certificate_ref)?;
+            push_wire_text(out, date)?;
+            push_wire_text(out, source)?;
+            push_wire_f64(out, *instrument_variance);
+        }
+        SensorCalibrationKind::Virtual { definition_ref } => {
+            out.push(2);
+            push_wire_text(out, definition_ref)?;
+        }
+    }
+    out.push(u8::from(sensor.placement_candidate));
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn decode_sensor(
+    reader: &mut SensorWireReader<'_>,
+    row: usize,
+) -> Result<ScenarioSensor, SensorExtensionError> {
+    let invalid = |source| SensorExtensionError::InvalidSensor { row, source };
+    let name = reader.read_text("sensor name")?;
+    let kind = decode_sensor_kind(reader.read_u8("sensor kind")?)?;
+    let entity = decode_entity_ref(reader)?;
+    let mut local_position_m = [0.0; 3];
+    for value in &mut local_position_m {
+        *value = reader.read_f64("sensor local position")?;
+    }
+    let placement = match reader.read_u8("placement tag")? {
+        1 => PlacementUncertainty::declared_exact(reader.read_text("placement source")?),
+        2 => {
+            let mut standard_uncertainty_m = [0.0; 3];
+            for value in &mut standard_uncertainty_m {
+                *value = reader.read_f64("placement uncertainty")?;
+            }
+            let mut reading_sensitivity_per_m = [0.0; 3];
+            for value in &mut reading_sensitivity_per_m {
+                *value = reader.read_f64("placement sensitivity")?;
+            }
+            PlacementUncertainty::axis_aligned(
+                standard_uncertainty_m,
+                reading_sensitivity_per_m,
+                reader.read_text("placement source")?,
+            )
+        }
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "placement",
+                observed,
+            });
+        }
+    }
+    .map_err(invalid)?;
+    let support = match reader.read_u8("support tag")? {
+        1 => ObservationSupport::point(
+            reader.read_count("sensor state dimension", MAX_SENSOR_STATE_DIMENSION)?,
+            reader.read_count("sensor component", MAX_SENSOR_STATE_DIMENSION)?,
+        ),
+        2 => {
+            let state_dimension =
+                reader.read_count("sensor state dimension", MAX_SENSOR_STATE_DIMENSION)?;
+            let term_count = reader.read_count("sensor support terms", MAX_SENSOR_SUPPORT_TERMS)?;
+            let mut terms = Vec::new();
+            terms.try_reserve_exact(term_count).map_err(|_| {
+                SensorExtensionError::AllocationRefused {
+                    resource: "decoded sensor support terms",
+                    requested: term_count,
+                }
+            })?;
+            for _ in 0..term_count {
+                terms.push(ObservationTerm::new(
+                    reader.read_count("sensor component", MAX_SENSOR_STATE_DIMENSION)?,
+                    reader.read_f64("sensor support weight")?,
+                ));
+            }
+            ObservationSupport::patch_average(state_dimension, terms)
+        }
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "support",
+                observed,
+            });
+        }
+    }
+    .map_err(invalid)?;
+    let mount = match reader.read_u8("mount tag")? {
+        1 => SensorMount::declared_ideal(reader.read_text("mount source")?),
+        2 => SensorMount::affine(
+            reader.read_f64("mount gain")?,
+            reader.read_f64("mount offset")?,
+            reader.read_text("mount source")?,
+        ),
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "mount",
+                observed,
+            });
+        }
+    }
+    .map_err(invalid)?;
+    let dynamics = match reader.read_u8("dynamics tag")? {
+        1 => SensorDynamics::declared_instantaneous(reader.read_text("dynamics source")?),
+        2 => SensorDynamics::first_order(
+            reader.read_f64("dynamics time constant")?,
+            reader.read_text("dynamics source")?,
+        ),
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "dynamics",
+                observed,
+            });
+        }
+    }
+    .map_err(invalid)?;
+    let calibration = match reader.read_u8("calibration tag")? {
+        1 => SensorCalibration::physical(
+            reader.read_text("calibration certificate")?,
+            reader.read_text("calibration date")?,
+            reader.read_text("calibration source")?,
+            reader.read_f64("instrument variance")?,
+        ),
+        2 => SensorCalibration::virtual_sensor(reader.read_text("virtual definition")?),
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "calibration",
+                observed,
+            });
+        }
+    }
+    .map_err(invalid)?;
+    let placement_candidate = match reader.read_u8("placement candidate")? {
+        0 => false,
+        1 => true,
+        observed => {
+            return Err(SensorExtensionError::InvalidTag {
+                field: "placement candidate",
+                observed,
+            });
+        }
+    };
+    let location = SensorLocation::new(entity, local_position_m, placement).map_err(invalid)?;
+    ScenarioSensor::new(
+        name,
+        kind,
+        location,
+        support,
+        mount,
+        dynamics,
+        calibration,
+        placement_candidate,
+    )
+    .map_err(invalid)
+}
+
+fn decode_sensor_kind(tag: u8) -> Result<SensorKind, SensorExtensionError> {
+    match tag {
+        1 => Ok(SensorKind::Thermocouple),
+        2 => Ok(SensorKind::Rtd),
+        3 => Ok(SensorKind::FlowMeter),
+        4 => Ok(SensorKind::PressureTap),
+        5 => Ok(SensorKind::IrCameraRegion),
+        observed => Err(SensorExtensionError::InvalidTag {
+            field: "sensor kind",
+            observed,
+        }),
+    }
+}
+
+fn encode_entity_ref(out: &mut Vec<u8>, reference: EntityRef) {
+    out.push(entity_kind_tag(reference.target().kind()));
+    out.extend_from_slice(reference.target().digest().as_bytes());
+    out.push(expectation_tag(reference.expect()));
+}
+
+fn decode_entity_ref(reader: &mut SensorWireReader<'_>) -> Result<EntityRef, SensorExtensionError> {
+    let kind = decode_entity_kind(reader.read_u8("entity kind")?)?;
+    let digest = reader.read_hash("entity digest")?;
+    let expectation = decode_expectation(reader.read_u8("entity expectation")?)?;
+    Ok(EntityRef::new(
+        EntityId::from_wire(kind, digest),
+        expectation,
+    ))
+}
+
+fn decode_entity_kind(tag: u8) -> Result<EntityKind, SensorExtensionError> {
+    match tag {
+        1 => Ok(EntityKind::Assembly),
+        2 => Ok(EntityKind::Part),
+        3 => Ok(EntityKind::Region),
+        4 => Ok(EntityKind::Surface),
+        5 => Ok(EntityKind::Interface),
+        observed => Err(SensorExtensionError::InvalidTag {
+            field: "entity kind",
+            observed,
+        }),
+    }
+}
+
+fn expectation_tag(expectation: KindExpectation) -> u8 {
+    match expectation {
+        KindExpectation::Exact(EntityKind::Assembly) => 1,
+        KindExpectation::Exact(EntityKind::Part) => 2,
+        KindExpectation::Exact(EntityKind::Region) => 3,
+        KindExpectation::Exact(EntityKind::Surface) => 4,
+        KindExpectation::Exact(EntityKind::Interface) => 5,
+        KindExpectation::Domain => 6,
+        KindExpectation::Boundary => 7,
+        KindExpectation::Any => 8,
+    }
+}
+
+fn decode_expectation(tag: u8) -> Result<KindExpectation, SensorExtensionError> {
+    match tag {
+        1 => Ok(KindExpectation::Exact(EntityKind::Assembly)),
+        2 => Ok(KindExpectation::Exact(EntityKind::Part)),
+        3 => Ok(KindExpectation::Exact(EntityKind::Region)),
+        4 => Ok(KindExpectation::Exact(EntityKind::Surface)),
+        5 => Ok(KindExpectation::Exact(EntityKind::Interface)),
+        6 => Ok(KindExpectation::Domain),
+        7 => Ok(KindExpectation::Boundary),
+        8 => Ok(KindExpectation::Any),
+        observed => Err(SensorExtensionError::InvalidTag {
+            field: "entity expectation",
+            observed,
+        }),
+    }
+}
+
+fn push_wire_u32(out: &mut Vec<u8>, value: usize) -> Result<(), SensorExtensionError> {
+    let value = u32::try_from(value).map_err(|_| SensorExtensionError::LengthOverflow)?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn push_wire_f64(out: &mut Vec<u8>, value: f64) {
+    out.extend_from_slice(&canonicalize_zero(value).to_bits().to_le_bytes());
+}
+
+fn push_wire_text(out: &mut Vec<u8>, text: &str) -> Result<(), SensorExtensionError> {
+    push_wire_u32(out, text.len())?;
+    out.extend_from_slice(text.as_bytes());
+    Ok(())
+}
+
+struct SensorWireReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> SensorWireReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    const fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
+    fn read_array<const N: usize>(
+        &mut self,
+        field: &'static str,
+    ) -> Result<[u8; N], SensorExtensionError> {
+        let end = self
+            .position
+            .checked_add(N)
+            .ok_or(SensorExtensionError::Truncated { field })?;
+        let source = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(SensorExtensionError::Truncated { field })?;
+        let mut value = [0u8; N];
+        value.copy_from_slice(source);
+        self.position = end;
+        Ok(value)
+    }
+
+    fn read_u8(&mut self, field: &'static str) -> Result<u8, SensorExtensionError> {
+        Ok(self.read_array::<1>(field)?[0])
+    }
+
+    fn read_u16(&mut self, field: &'static str) -> Result<u16, SensorExtensionError> {
+        Ok(u16::from_le_bytes(self.read_array(field)?))
+    }
+
+    fn read_u32(&mut self, field: &'static str) -> Result<u32, SensorExtensionError> {
+        Ok(u32::from_le_bytes(self.read_array(field)?))
+    }
+
+    fn read_f64(&mut self, field: &'static str) -> Result<f64, SensorExtensionError> {
+        Ok(f64::from_bits(u64::from_le_bytes(self.read_array(field)?)))
+    }
+
+    fn read_hash(&mut self, field: &'static str) -> Result<ContentHash, SensorExtensionError> {
+        Ok(ContentHash(self.read_array(field)?))
+    }
+
+    fn read_count(
+        &mut self,
+        resource: &'static str,
+        limit: usize,
+    ) -> Result<usize, SensorExtensionError> {
+        let requested = self.read_u32(resource)? as usize;
+        if requested > limit {
+            return Err(SensorExtensionError::LimitExceeded {
+                resource,
+                requested,
+                limit,
+            });
+        }
+        Ok(requested)
+    }
+
+    fn read_text(&mut self, field: &'static str) -> Result<String, SensorExtensionError> {
+        let length = self.read_count(field, MAX_SENSOR_TEXT_BYTES)?;
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(SensorExtensionError::Truncated { field })?;
+        let source = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(SensorExtensionError::Truncated { field })?;
+        let text = core::str::from_utf8(source)
+            .map_err(|_| SensorExtensionError::InvalidUtf8 { field })?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(length)
+            .map_err(|_| SensorExtensionError::AllocationRefused {
+                resource: field,
+                requested: length,
+            })?;
+        owned.push_str(text);
+        self.position = end;
+        Ok(owned)
     }
 }
 

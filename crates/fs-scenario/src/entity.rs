@@ -241,6 +241,12 @@ pub struct EntityId {
 }
 
 impl EntityId {
+    /// Reconstruct an already-derived identity carried by a checked crate wire
+    /// envelope. This does not derive or validate a declaration preimage.
+    pub(crate) const fn from_wire(kind: EntityKind, digest: ContentHash) -> Self {
+        Self { kind, digest }
+    }
+
     /// The kind this identity was derived for.
     #[must_use]
     pub const fn kind(self) -> EntityKind {
