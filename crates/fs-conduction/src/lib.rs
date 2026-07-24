@@ -73,8 +73,8 @@ pub use field::ScalarField;
 pub use interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface, ResistanceOrigin,
-    ResistanceUncertainty, SeriesResistanceBudget, SeriesThermalResistance, ThermalInterfaces,
-    ThermalResistanceTerm,
+    ResistanceUncertainty, ResistanceValueOrigin, SeriesResistanceBudget, SeriesThermalResistance,
+    ThermalInterfaces, ThermalResistanceTerm,
 };
 pub use material::{
     CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,

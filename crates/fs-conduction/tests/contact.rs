@@ -19,7 +19,8 @@ use fs_conduction::solve::{
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ConductionError, InterfaceFacePair, InterfaceResistance, InterfaceSurface,
-    ResistanceUncertainty, SeriesThermalResistance, ThermalInterfaces, ThermalResistanceTerm,
+    ResistanceUncertainty, ResistanceValueOrigin, SeriesThermalResistance, ThermalInterfaces,
+    ThermalResistanceTerm,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -438,4 +439,347 @@ fn contact_level_a_row_exposes_a_tolerance_gate() {
         ThermalLevelAAcceptance::Tolerance { atol, rtol }
             if atol.is_finite() && atol >= 0.0 && rtol.is_finite() && rtol >= 0.0
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Map-valued (spatially varying) interface resistance — bead f85xj.12.9.
+// ---------------------------------------------------------------------------
+
+/// Build one per-face resistance list from the shared card, scaling the card
+/// value by a per-face factor. This is the shape an as-built thickness map
+/// takes once the caller has turned `t_i` into `R''_i = t_i / k`: the card
+/// supplies `k` and the material authority, metrology supplies `t_i`.
+fn scaled_face_resistances(
+    card: &InterfaceSystemCard,
+    factors: &[f64],
+) -> Vec<InterfaceResistance> {
+    let base = resistance(card);
+    factors
+        .iter()
+        .map(|factor| {
+            base.with_measured_value(
+                AREA_SPECIFIC_RESISTANCE * factor,
+                UncertaintyModel::Unstated,
+                "synthetic as-built bond-line thickness map",
+            )
+            .expect("measured face resistance")
+        })
+        .collect()
+}
+
+#[test]
+fn a_mapped_interface_applies_each_face_its_own_resistance() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(2);
+    let pairs = oriented_pairs(&mesh);
+    // Every face gets a distinct multiplier so a single shared value, or a
+    // silently reused first entry, cannot reproduce the expected conductance.
+    let factors: Vec<f64> = (0..pairs.len())
+        .map(|index| 1.0 + 0.5 * (index as f64))
+        .collect();
+    let surface = InterfaceSurface::new_mapped(
+        "bondline",
+        pairs.clone(),
+        scaled_face_resistances(&card, &factors),
+    )
+    .expect("mapped interface admits");
+    assert!(surface.is_mapped());
+    assert!(
+        surface.resistance().is_none(),
+        "a mapped surface has no single resistance to report"
+    );
+
+    let boundary = boundary(&mesh);
+    let interfaces =
+        ThermalInterfaces::new(&mesh, &boundary, vec![surface]).expect("interfaces bind");
+    assert_eq!(interfaces.surface_is_mapped("bondline"), Some(true));
+
+    // The bound per-face values must be a permutation of what was supplied,
+    // with the same multiset of values.
+    let mut bound = interfaces
+        .surface_face_resistances("bondline")
+        .expect("bound resistances");
+    let mut expected: Vec<f64> = factors
+        .iter()
+        .map(|factor| AREA_SPECIFIC_RESISTANCE * factor)
+        .collect();
+    bound.sort_by(f64::total_cmp);
+    expected.sort_by(f64::total_cmp);
+    assert_eq!(bound.len(), expected.len());
+    for (got, want) in bound.iter().zip(expected.iter()) {
+        assert!((got - want).abs() < 1e-15, "bound {got} != supplied {want}");
+    }
+}
+
+#[test]
+fn mapped_resistances_follow_their_face_pairs_through_the_deterministic_sort() {
+    // THE hazard this bead exists to prevent. `ThermalInterfaces::new` sorts
+    // face pairs into a deterministic order. If the resistance map were a
+    // parallel array indexed after that sort, every face would silently get a
+    // neighbour's value and nothing would report an error. Binding a
+    // deliberately REVERSED declaration must produce exactly the same solve as
+    // declaring the same (pair, resistance) association in sorted order.
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(2);
+    let boundary = boundary(&mesh);
+    let pairs = oriented_pairs(&mesh);
+    let factors: Vec<f64> = (0..pairs.len())
+        .map(|index| 1.0 + 0.25 * (index as f64))
+        .collect();
+
+    let forward = InterfaceSurface::new_mapped(
+        "bondline",
+        pairs.clone(),
+        scaled_face_resistances(&card, &factors),
+    )
+    .expect("forward mapped interface");
+
+    // Reverse BOTH the pairs and their factors, preserving each pair's
+    // association with its own value. The declaration order changes; the
+    // physics must not.
+    let mut reversed_pairs = pairs.clone();
+    reversed_pairs.reverse();
+    let mut reversed_factors = factors.clone();
+    reversed_factors.reverse();
+    let reversed = InterfaceSurface::new_mapped(
+        "bondline",
+        reversed_pairs,
+        scaled_face_resistances(&card, &reversed_factors),
+    )
+    .expect("reversed mapped interface");
+
+    let forward_bound = ThermalInterfaces::new(&mesh, &boundary, vec![forward])
+        .expect("forward binds")
+        .surface_face_resistances("bondline")
+        .expect("forward resistances");
+    let reversed_bound = ThermalInterfaces::new(&mesh, &boundary, vec![reversed])
+        .expect("reversed binds")
+        .surface_face_resistances("bondline")
+        .expect("reversed resistances");
+
+    assert_eq!(
+        forward_bound.len(),
+        reversed_bound.len(),
+        "both declarations bind the same faces"
+    );
+    for (index, (forward_value, reversed_value)) in
+        forward_bound.iter().zip(reversed_bound.iter()).enumerate()
+    {
+        assert!(
+            (forward_value - reversed_value).abs() < 1e-15,
+            "bound face {index} got {forward_value} from the forward declaration \
+             and {reversed_value} from the reversed one; the sort separated a \
+             face from its resistance"
+        );
+    }
+    // And the values must not have collapsed to one number, or the test would
+    // pass vacuously.
+    let first = forward_bound[0];
+    assert!(
+        forward_bound
+            .iter()
+            .any(|value| (value - first).abs() > 1e-12),
+        "the fixture must supply genuinely distinct per-face resistances"
+    );
+}
+
+#[test]
+fn an_all_equal_map_reproduces_the_uniform_surface_exactly() {
+    // Metamorphic: a map whose every entry equals the card value is the same
+    // physics as the uniform declaration, so the assembled solve must agree
+    // bitwise. This is what pins the mapped path to the existing Level-A
+    // contact result rather than leaving it on its own private arithmetic.
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(2);
+    let boundary = boundary(&mesh);
+    let pairs = oriented_pairs(&mesh);
+    let ones = vec![1.0f64; pairs.len()];
+
+    let uniform = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![InterfaceSurface::new("bondline", pairs.clone(), resistance(&card)).expect("uniform")],
+    )
+    .expect("uniform binds");
+    let mapped = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new_mapped("bondline", pairs, scaled_face_resistances(&card, &ones))
+                .expect("mapped"),
+        ],
+    )
+    .expect("mapped binds");
+
+    let temperature = vec![T_HOT; mesh.vertex_count()];
+    let uniform_flux = uniform.fluxes(&temperature).expect("uniform fluxes");
+    let mapped_flux = mapped.fluxes(&temperature).expect("mapped fluxes");
+    assert_eq!(uniform_flux.len(), mapped_flux.len());
+    assert_eq!(
+        uniform_flux[0].conductance_w_per_k.to_bits(),
+        mapped_flux[0].conductance_w_per_k.to_bits(),
+        "an all-equal map must be bitwise identical to the uniform surface"
+    );
+    assert_eq!(
+        uniform_flux[0].card_identity, mapped_flux[0].card_identity,
+        "both cite the same material card"
+    );
+    assert_eq!(uniform.surface_is_mapped("bondline"), Some(false));
+    assert_eq!(mapped.surface_is_mapped("bondline"), Some(true));
+}
+
+#[test]
+fn a_thicker_bond_line_conducts_less() {
+    // Directional sanity: doubling every face's area-specific resistance —
+    // what a uniformly thicker measured bond line means — must halve the
+    // interface conductance, not change it by an arbitrary amount.
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(2);
+    let boundary = boundary(&mesh);
+    let pairs = oriented_pairs(&mesh);
+    let temperature = vec![T_HOT; mesh.vertex_count()];
+
+    let nominal = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new_mapped(
+                "bondline",
+                pairs.clone(),
+                scaled_face_resistances(&card, &vec![1.0; pairs.len()]),
+            )
+            .expect("nominal"),
+        ],
+    )
+    .expect("nominal binds")
+    .fluxes(&temperature)
+    .expect("nominal fluxes")[0]
+        .conductance_w_per_k;
+
+    let thick = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new_mapped(
+                "bondline",
+                pairs.clone(),
+                scaled_face_resistances(&card, &vec![2.0; pairs.len()]),
+            )
+            .expect("thick"),
+        ],
+    )
+    .expect("thick binds")
+    .fluxes(&temperature)
+    .expect("thick fluxes")[0]
+        .conductance_w_per_k;
+
+    assert!(
+        (thick - 0.5 * nominal).abs() < 1e-12 * nominal,
+        "doubling R'' must halve the conductance: {thick} vs {nominal}"
+    );
+}
+
+#[test]
+fn a_mapped_interface_refuses_a_count_mismatch() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(2);
+    let pairs = oriented_pairs(&mesh);
+    assert!(pairs.len() > 1, "the fixture needs several faces");
+    let error = InterfaceSurface::new_mapped(
+        "bondline",
+        pairs.clone(),
+        scaled_face_resistances(&card, &[1.0]),
+    )
+    .expect_err("one resistance cannot cover many faces");
+    assert!(matches!(
+        error,
+        ConductionError::Interface { ref interface, .. } if interface == "bondline"
+    ));
+}
+
+#[test]
+fn a_mapped_interface_refuses_faces_citing_different_cards() {
+    // A resistance map varies the VALUE, not the AUTHORITY. Two different
+    // cards under one interface name is two interfaces, and it must be
+    // declared as two named surfaces rather than silently averaged or
+    // silently attributed to whichever card happened to be first.
+    let card = contact_card(UncertaintyModel::Unstated);
+    let other = contact_card(UncertaintyModel::HalfWidth {
+        half_width: 0.01,
+        confidence: 0.95,
+    });
+    let (mesh, _) = two_slab_mesh(2);
+    let pairs = oriented_pairs(&mesh);
+    assert!(pairs.len() > 1, "the fixture needs several faces");
+
+    let mut mixed = scaled_face_resistances(&card, &vec![1.0; pairs.len()]);
+    mixed[1] = resistance(&other);
+    assert_ne!(
+        mixed[0].card_identity(),
+        mixed[1].card_identity(),
+        "the fixture must actually supply two distinct cards"
+    );
+
+    let error = InterfaceSurface::new_mapped("bondline", pairs, mixed)
+        .expect_err("a mapped surface must cite one card");
+    assert!(matches!(
+        error,
+        ConductionError::Interface { ref interface, .. } if interface == "bondline"
+    ));
+}
+
+#[test]
+fn a_measured_value_cannot_masquerade_as_the_cards_own_claim() {
+    // The card identity records the MATERIAL authority. It must not be
+    // readable as an endorsement of a number the card never claimed: a
+    // measured bond line is `t / k` with `t` from metrology. The origin is
+    // what keeps citing a card distinct from laundering a measurement
+    // through one.
+    let card = contact_card(UncertaintyModel::Unstated);
+    let base = resistance(&card);
+    assert_eq!(base.value_origin(), &ResistanceValueOrigin::CardClaim);
+
+    let measured = base
+        .with_measured_value(
+            0.25,
+            UncertaintyModel::HalfWidth {
+                half_width: 0.02,
+                confidence: 0.95,
+            },
+            "as-built bond-line thickness map, station 7",
+        )
+        .expect("measured value admits");
+
+    assert_eq!(measured.card_identity(), base.card_identity());
+    assert!(
+        (measured.value_m2_k_per_w() - 0.25).abs() < 1e-15,
+        "the supplied value is retained verbatim"
+    );
+    match measured.value_origin() {
+        ResistanceValueOrigin::CallerSupplied { rationale } => {
+            assert!(rationale.contains("station 7"));
+        }
+        ResistanceValueOrigin::CardClaim => {
+            panic!("a measured value must not report itself as the card's claim")
+        }
+    }
+
+    // The supplied uncertainty describes the SUPPLIED value, and an unstated
+    // one stays an honest unknown rather than inheriting the card's band.
+    assert!(matches!(
+        measured.uncertainty(),
+        UncertaintyModel::HalfWidth { .. }
+    ));
+    assert!(
+        base.with_measured_value(0.25, UncertaintyModel::Unstated, "   ")
+            .is_err(),
+        "a blank rationale is refused"
+    );
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            base.with_measured_value(bad, UncertaintyModel::Unstated, "probe")
+                .is_err(),
+            "{bad} must be refused; perfect contact is never an implicit default"
+        );
+    }
 }

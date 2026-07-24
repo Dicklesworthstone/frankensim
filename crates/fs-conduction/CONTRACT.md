@@ -318,7 +318,15 @@ None. Everything here is `[S]` solid work on the default path.
   analytic crosswalk keeps unsupported rows visible.
 - `tests/contact.rs` — G1 two-slab series-resistance comparison against the
   Level-A `0.3 K/W` row, plus G0 receipt, uncertainty, determinism, missing-card,
-  missing-binding, overflow, and wrong-mesh refusals.
+  missing-binding, overflow, and wrong-mesh refusals. Mapped-resistance
+  coverage (`f85xj.12.9`): per-face application; the SORT-PERMUTATION test —
+  a reversed declaration, pairs and values reversed together, must bind to the
+  same per-face values as the forward one, which is what proves the
+  deterministic face sort cannot separate a face from its resistance; the
+  metamorphic all-equal map reproducing the uniform surface BITWISE; doubling
+  `R''` halving the conductance; and refusals for a count mismatch, mixed
+  cards, a blank measured rationale, and non-finite/non-positive measured
+  values.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -415,11 +423,34 @@ not promote any row beyond its registry authority.
   is an input. This crate computes no correlation, solves no boundary layer, and
   has no fluid side. Conjugate coupling is a separate bead.
 - CONTACT IS MATCHING P1 ONLY. The implemented jump law requires exact
-  coordinate-bit equality between duplicated boundary triangles and one
-  face-constant positive `R''` per named surface. There is no nonmatching or
-  mortar projection, pressure/gap/temperature-dependent resistance, changing
-  contact area, imperfect geometric match tolerance, or automatic lowering
-  from an `fs-scenario` interface object. Perfect contact is never inferred.
+  coordinate-bit equality between duplicated boundary triangles and a positive
+  `R''` that is constant ON EACH FACE. `InterfaceSurface::new` declares one
+  value for the whole surface; `InterfaceSurface::new_mapped` declares one per
+  face pair (bead `frankensim-extreal-program-f85xj.12.9`), which is what lets
+  a measured as-built bond-line thickness or roughness map drive the operator.
+  A map is still a GEOMETRY-DRIVEN SPATIAL VARIATION, not a constitutive law:
+  there is still no nonmatching or mortar projection, no
+  pressure/gap/temperature-dependent resistance, no changing contact area, no
+  imperfect geometric match tolerance, and no automatic lowering from an
+  `fs-scenario` interface object. Perfect contact is never inferred, and a
+  mapped surface still resolves nothing about where its numbers came from —
+  see the value-origin boundary below.
+- A RESISTANCE MAP VARIES THE VALUE, NOT THE AUTHORITY. Every face of a mapped
+  surface must cite the same material card; a surface whose faces disagree
+  about their card refuses rather than averaging them or attributing the
+  result to whichever card came first. Per-face values are bound to their own
+  face pair before the deterministic face sort, so the reorder cannot separate
+  a face from its resistance.
+- `ResistanceValueOrigin` SEPARATES CITING A CARD FROM LAUNDERING A
+  MEASUREMENT THROUGH ONE. A value produced by
+  `InterfaceResistance::with_measured_value` retains the card identity and
+  receipt for MATERIAL authority only and records
+  `CallerSupplied { rationale }`; the card is not evidence for that number.
+  This crate does not validate the supplied value, does not know how it was
+  measured, and does not compose its metrology uncertainty with the card's —
+  the caller supplies an uncertainty describing the supplied value, and
+  `Unstated` stays an honest unknown. A measured map entering a solve does not
+  make the solve validated.
 - NO PHASE CHANGE, no latent heat, no moving boundaries.
 - PCB HOMOGENIZATION IS CONSUMED, NOT REINTERPRETED. This crate uses the
   nominal tensor and retains its constituent property receipts. Coverage

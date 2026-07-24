@@ -39,6 +39,27 @@ pub struct InterfaceResistance {
     uncertainty: UncertaintyModel,
     card_identity: ContentHash,
     receipt: PropertyUsageReceipt,
+    value_origin: ResistanceValueOrigin,
+}
+
+/// Where an [`InterfaceResistance`]'s NUMBER came from.
+///
+/// The card identity and receipt record the material authority. They do not,
+/// by themselves, say that the retained value is the card's own claim: a
+/// measured as-built bond line yields `R'' = t / k` where `k` is the card's
+/// and `t` is metrology's. Recording that split is the difference between
+/// citing a card and laundering a measurement through one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResistanceValueOrigin {
+    /// The value is the card's selected property claim.
+    CardClaim,
+    /// The value was supplied by the caller — typically derived from a
+    /// measured as-built field — while the retained card supplies only the
+    /// material authority behind it.
+    CallerSupplied {
+        /// Why this caller-supplied value is authoritative here.
+        rationale: String,
+    },
 }
 
 impl InterfaceResistance {
@@ -100,7 +121,61 @@ impl InterfaceResistance {
             uncertainty: sample.uncertainty.clone(),
             card_identity: card.content_hash(),
             receipt: answer.receipt,
+            value_origin: ResistanceValueOrigin::CardClaim,
         })
+    }
+
+    /// Derive a per-face resistance whose VALUE is caller-supplied while the
+    /// material authority stays this card's.
+    ///
+    /// This is how a measured as-built field reaches the operator: a bond-line
+    /// thickness map becomes `R''_i = t_i / k`, where `k` is the card's
+    /// property and `t_i` is metrology's. The returned resistance retains this
+    /// card's identity and receipt, and records
+    /// [`ResistanceValueOrigin::CallerSupplied`] so a later reader can tell
+    /// that the number is not the card's own claim.
+    ///
+    /// The supplied `uncertainty` must describe the SUPPLIED value, not the
+    /// card's. It is the caller's obligation to compose the metrology and
+    /// material contributions; this crate does not infer one from the other,
+    /// and [`UncertaintyModel::Unstated`] remains an honest unknown.
+    ///
+    /// # Errors
+    /// A non-finite or non-positive value, or a blank rationale.
+    pub fn with_measured_value(
+        &self,
+        value_m2_k_per_w: f64,
+        uncertainty: UncertaintyModel,
+        rationale: impl Into<String>,
+    ) -> Result<Self, ConductionError> {
+        let rationale = rationale.into();
+        if rationale.trim().is_empty() {
+            return Err(interface_error(
+                "<measured>",
+                "measured interface resistance has a blank rationale",
+                "state why this measured value is authoritative for this face",
+            ));
+        }
+        if !value_m2_k_per_w.is_finite() || value_m2_k_per_w <= 0.0 {
+            return Err(interface_error(
+                "<measured>",
+                "measured interface resistance is not finite and positive",
+                "supply a positive measured resistance; perfect contact is not an implicit default",
+            ));
+        }
+        Ok(Self {
+            value_m2_k_per_w,
+            uncertainty,
+            card_identity: self.card_identity,
+            receipt: self.receipt.clone(),
+            value_origin: ResistanceValueOrigin::CallerSupplied { rationale },
+        })
+    }
+
+    /// Whether this value is the card's own claim or a caller-supplied one.
+    #[must_use]
+    pub const fn value_origin(&self) -> &ResistanceValueOrigin {
+        &self.value_origin
     }
 
     /// Area-specific resistance, m² K/W.
@@ -486,40 +561,131 @@ impl InterfaceFacePair {
 }
 
 /// One named interface surface, possibly tessellated into many face pairs.
+///
+/// `resistances` holds exactly one entry when the surface is uniform and one
+/// entry per face pair when it is mapped; `mapped` distinguishes the two so a
+/// single-face mapped surface stays distinguishable from a uniform one. Both
+/// invariants are established at construction and never re-derived.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceSurface {
     name: String,
     face_pairs: Vec<InterfaceFacePair>,
-    resistance: InterfaceResistance,
+    resistances: Vec<InterfaceResistance>,
+    mapped: bool,
+}
+
+/// One interface surface expanded into per-face units, ready to bind.
+struct ExpandedSurface {
+    name: String,
+    mapped: bool,
+    card_identity: ContentHash,
+    receipt: PropertyUsageReceipt,
+    faces: Vec<(InterfaceFacePair, InterfaceResistance)>,
 }
 
 impl InterfaceSurface {
-    /// Bind a named ordered card result to explicit oriented face pairs.
+    /// Bind a named ordered card result to explicit oriented face pairs, with
+    /// ONE area-specific resistance across the whole surface.
     pub fn new(
         name: impl Into<String>,
         face_pairs: Vec<InterfaceFacePair>,
         resistance: InterfaceResistance,
     ) -> Result<Self, ConductionError> {
-        let name = name.into();
-        if name.trim().is_empty() {
-            return Err(interface_error(
-                "<unnamed>",
-                "interface surface name is blank",
-                "use the scenario interface name",
-            ));
-        }
-        if face_pairs.is_empty() {
+        let name = admit_surface_name(name)?;
+        admit_face_pairs(&name, &face_pairs)?;
+        Ok(Self {
+            name,
+            face_pairs,
+            resistances: vec![resistance],
+            mapped: false,
+        })
+    }
+
+    /// Bind a SPATIALLY VARYING area-specific resistance: one value per face
+    /// pair, index-paired to `face_pairs`.
+    ///
+    /// This is the seam a measured as-built field drives — a bond-line
+    /// thickness map becomes `R'' = t / k` per face, a roughness map becomes a
+    /// per-face contact conductance. Converting a measured field into these
+    /// values is the CALLER's job; this crate takes no dependency on the
+    /// metrology layer and asserts nothing about where the numbers came from.
+    ///
+    /// # The map varies the VALUE, not the AUTHORITY
+    ///
+    /// Every supplied resistance must cite the SAME material card. A thickness
+    /// map over one bond line is one material measured in many places, so a
+    /// surface whose faces disagree about their card is not a map — it is two
+    /// interfaces wearing one name, and it refuses. Declare them as separate
+    /// named surfaces instead.
+    ///
+    /// # Errors
+    /// A blank name, no face pairs, a resistance count that does not match the
+    /// face-pair count, or resistances citing more than one card identity.
+    pub fn new_mapped(
+        name: impl Into<String>,
+        face_pairs: Vec<InterfaceFacePair>,
+        resistances: Vec<InterfaceResistance>,
+    ) -> Result<Self, ConductionError> {
+        let name = admit_surface_name(name)?;
+        admit_face_pairs(&name, &face_pairs)?;
+        if resistances.len() != face_pairs.len() {
             return Err(interface_error(
                 &name,
-                "interface surface has no paired faces",
-                "bind at least one coincident face pair",
+                format!(
+                    "mapped interface has {} resistances for {} face pairs",
+                    resistances.len(),
+                    face_pairs.len()
+                ),
+                "supply exactly one area-specific resistance per declared face pair, in the same order",
+            ));
+        }
+        let first = resistances[0].card_identity;
+        if let Some(position) = resistances
+            .iter()
+            .position(|entry| entry.card_identity != first)
+        {
+            return Err(interface_error(
+                &name,
+                format!("mapped interface face {position} cites a different material card"),
+                "a resistance map varies the value, not the authority; declare separately named surfaces for distinct cards",
             ));
         }
         Ok(Self {
             name,
             face_pairs,
-            resistance,
+            resistances,
+            mapped: true,
         })
+    }
+
+    /// Expand into per-face `(pair, resistance)` units in the crate's
+    /// deterministic face order.
+    ///
+    /// Binding each resistance to its own pair BEFORE the sort is the whole
+    /// safety property: the reorder moves them together because they are one
+    /// value. Sorting the pairs and indexing a parallel resistance array
+    /// afterwards would hand every face a neighbour's resistance and report
+    /// nothing wrong anywhere.
+    fn expand(self) -> ExpandedSurface {
+        let card_identity = self.resistances[0].card_identity;
+        let receipt = self.resistances[0].receipt.clone();
+        let mut faces: Vec<(InterfaceFacePair, InterfaceResistance)> = if self.mapped {
+            self.face_pairs.into_iter().zip(self.resistances).collect()
+        } else {
+            let uniform = &self.resistances[0];
+            self.face_pairs
+                .into_iter()
+                .map(|pair| (pair, uniform.clone()))
+                .collect()
+        };
+        faces.sort_by_key(|(pair, _)| pair.normalized());
+        ExpandedSurface {
+            name: self.name,
+            mapped: self.mapped,
+            card_identity,
+            receipt,
+            faces,
+        }
     }
 
     /// Stable interface name.
@@ -534,11 +700,75 @@ impl InterfaceSurface {
         &self.face_pairs
     }
 
-    /// Evidence-bearing resistance.
+    /// Evidence-bearing resistance for a UNIFORM surface.
+    ///
+    /// Returns `None` for a mapped surface: there is no single value, and
+    /// returning the first face's would be a quietly wrong answer to
+    /// "what is this interface's resistance?".
     #[must_use]
-    pub const fn resistance(&self) -> &InterfaceResistance {
-        &self.resistance
+    pub fn resistance(&self) -> Option<&InterfaceResistance> {
+        if self.mapped {
+            None
+        } else {
+            self.resistances.first()
+        }
     }
+
+    /// Per-face-pair resistances in declared order, for a MAPPED surface.
+    #[must_use]
+    pub fn face_resistances(&self) -> Option<&[InterfaceResistance]> {
+        if self.mapped {
+            Some(&self.resistances)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this surface carries a spatially varying resistance.
+    #[must_use]
+    pub const fn is_mapped(&self) -> bool {
+        self.mapped
+    }
+}
+
+fn admit_surface_name(name: impl Into<String>) -> Result<String, ConductionError> {
+    let name = name.into();
+    if name.trim().is_empty() {
+        return Err(interface_error(
+            "<unnamed>",
+            "interface surface name is blank",
+            "use the scenario interface name",
+        ));
+    }
+    Ok(name)
+}
+
+/// Refuse two bound surfaces sharing one name, on a NAME-SORTED slice.
+///
+/// Each named scenario interface must be bound exactly once; two cards under
+/// one name is an ambiguity the operator cannot resolve.
+fn refuse_duplicate_names(surfaces: &[InterfaceSurface]) -> Result<(), ConductionError> {
+    for names in surfaces.windows(2) {
+        if names[0].name == names[1].name {
+            return Err(interface_error(
+                &names[0].name,
+                "interface surface name is duplicated",
+                "bind each named scenario interface exactly once",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn admit_face_pairs(name: &str, face_pairs: &[InterfaceFacePair]) -> Result<(), ConductionError> {
+    if face_pairs.is_empty() {
+        return Err(interface_error(
+            name,
+            "interface surface has no paired faces",
+            "bind at least one coincident face pair",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -548,13 +778,26 @@ struct BoundFacePair {
     side_a_vertices: [usize; 3],
     side_b_vertices: [usize; 3],
     area_m2: f64,
+    /// The resistance governing THIS face.
+    ///
+    /// Held per face rather than per surface so that the deterministic
+    /// face-pair sort in [`ThermalInterfaces::new`] cannot separate a face
+    /// from its value: they move as one unit because they ARE one unit. A
+    /// parallel array indexed alongside the sorted pairs would silently give
+    /// every face a neighbour's resistance, with no error anywhere.
+    resistance: InterfaceResistance,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct BoundSurface {
     name: String,
     faces: Vec<BoundFacePair>,
-    resistance: InterfaceResistance,
+    /// Shared material-card identity and its usage receipt. Uniform and
+    /// mapped surfaces alike cite exactly one card, so this stays
+    /// surface-level; only the VALUE varies per face.
+    card_identity: ContentHash,
+    receipt: PropertyUsageReceipt,
+    mapped: bool,
 }
 
 /// Complete, fail-closed contact-interface set for one mesh/boundary pair.
@@ -580,22 +823,14 @@ impl ThermalInterfaces {
             .map(|pair| pair.normalized())
             .collect::<BTreeSet<_>>();
         surfaces.sort_by(|a, b| a.name.cmp(&b.name));
-        for names in surfaces.windows(2) {
-            if names[0].name == names[1].name {
-                return Err(interface_error(
-                    &names[0].name,
-                    "interface surface name is duplicated",
-                    "bind each named scenario interface exactly once",
-                ));
-            }
-        }
+        refuse_duplicate_names(&surfaces)?;
 
         let mut claimed = BTreeSet::new();
         let mut bound_surfaces = Vec::with_capacity(surfaces.len());
-        for mut surface in surfaces {
-            surface.face_pairs.sort_by_key(|pair| pair.normalized());
-            let mut bound_faces = Vec::with_capacity(surface.face_pairs.len());
-            for pair in surface.face_pairs {
+        for surface in surfaces {
+            let surface = surface.expand();
+            let mut bound_faces = Vec::with_capacity(surface.faces.len());
+            for (pair, face_resistance) in surface.faces {
                 if pair.side_a >= mesh.boundary().len() || pair.side_b >= mesh.boundary().len() {
                     return Err(interface_error(
                         &surface.name,
@@ -655,12 +890,15 @@ impl ThermalInterfaces {
                     side_a_vertices,
                     side_b_vertices,
                     area_m2: mesh.boundary()[pair.side_a].area,
+                    resistance: face_resistance,
                 });
             }
             bound_surfaces.push(BoundSurface {
                 name: surface.name,
                 faces: bound_faces,
-                resistance: surface.resistance,
+                card_identity: surface.card_identity,
+                receipt: surface.receipt,
+                mapped: surface.mapped,
             });
         }
 
@@ -764,6 +1002,39 @@ impl ThermalInterfaces {
         self.surfaces.len()
     }
 
+    /// Whether the named bound surface carries a spatially varying resistance.
+    ///
+    /// `None` when no surface has that name. A report layer needs this to say
+    /// whether an interface's resistance was one declared card value or a
+    /// per-face map, which is a materially different provenance claim even
+    /// though both cite one card.
+    #[must_use]
+    pub fn surface_is_mapped(&self, name: &str) -> Option<bool> {
+        self.surfaces
+            .iter()
+            .find(|surface| surface.name == name)
+            .map(|surface| surface.mapped)
+    }
+
+    /// Per-face area-specific resistances of the named bound surface, in the
+    /// crate's deterministic bound-face order.
+    ///
+    /// Exposed so a caller can verify that a supplied map survived binding
+    /// intact rather than trusting that it did.
+    #[must_use]
+    pub fn surface_face_resistances(&self, name: &str) -> Option<Vec<f64>> {
+        self.surfaces
+            .iter()
+            .find(|surface| surface.name == name)
+            .map(|surface| {
+                surface
+                    .faces
+                    .iter()
+                    .map(|face| face.resistance.value_m2_k_per_w)
+                    .collect()
+            })
+    }
+
     /// Aggregate one flux record per named interface.
     pub fn fluxes(&self, temperature: &[f64]) -> Result<Vec<InterfaceFlux>, ConductionError> {
         let maximum_vertex = self
@@ -782,11 +1053,11 @@ impl ThermalInterfaces {
         }
         let mut out = Vec::with_capacity(self.surfaces.len());
         for surface in &self.surfaces {
-            let conductance_density = 1.0 / surface.resistance.value_m2_k_per_w;
             let mut area_m2 = 0.0f64;
             let mut heat_rate = 0.0f64;
             let mut conductance = 0.0f64;
             for face in &surface.faces {
+                let conductance_density = 1.0 / face.resistance.value_m2_k_per_w;
                 let mean_jump = face
                     .side_a_vertices
                     .iter()
@@ -805,8 +1076,8 @@ impl ThermalInterfaces {
                 conductance_w_per_k: conductance,
                 mean_jump_k: heat_rate / conductance,
                 heat_rate_a_to_b_w: heat_rate,
-                card_identity: surface.resistance.card_identity,
-                receipt: surface.resistance.receipt.clone(),
+                card_identity: surface.card_identity,
+                receipt: surface.receipt.clone(),
             });
         }
         Ok(out)
@@ -815,8 +1086,8 @@ impl ThermalInterfaces {
     pub(crate) fn assemble_into(&self, cx: &Cx<'_>, coo: &mut Coo) -> Result<(), ConductionError> {
         let mut face_index = 0usize;
         for surface in &self.surfaces {
-            let conductance_density = 1.0 / surface.resistance.value_m2_k_per_w;
             for face in &surface.faces {
+                let conductance_density = 1.0 / face.resistance.value_m2_k_per_w;
                 if face_index % crate::assemble::ASSEMBLY_TILE == 0 {
                     cx.checkpoint().map_err(|_| ConductionError::Cancelled {
                         stage: "assemble-interfaces",
