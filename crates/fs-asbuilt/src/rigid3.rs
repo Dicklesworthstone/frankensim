@@ -1623,6 +1623,7 @@ pub struct CalibratedRigid3Registration {
     outlier_diagnostics: Vec<Rigid3OutlierDiagnostic>,
     model_identity: fs_blake3::ContentHash,
     robust_conditional: bool,
+    rotation_pivot: Vec3,
 }
 
 impl CalibratedRigid3Registration {
@@ -1677,6 +1678,96 @@ impl CalibratedRigid3Registration {
     pub const fn robust_conditional(&self) -> bool {
         self.robust_conditional
     }
+
+    /// The weighted design centroid this covariance's rotation block pivots
+    /// about, in DESIGN coordinates.
+    ///
+    /// [`PoseCovariance6`] parameterizes rotation as a left rotation-vector
+    /// perturbation about the image of this point. A sensitivity computed
+    /// about any other pivot is silently wrong, so the pivot is published
+    /// rather than left for callers to reconstruct: the estimator weights are
+    /// the model base weights `3 / trace(Sigma_i)` times the Huber
+    /// multipliers, and recomputing that product is exactly the mistake this
+    /// accessor exists to prevent. Prefer
+    /// [`CalibratedRigid3Registration::normal_deviation_sensitivity`], which
+    /// consumes the pivot for you.
+    #[must_use]
+    pub const fn rotation_pivot(&self) -> Vec3 {
+        self.rotation_pivot
+    }
+
+    /// First-order sensitivity of a SIGNED NORMAL DEVIATION at one surface
+    /// point to the pose parameters `(tx, ty, tz, rx, ry, rz)`.
+    ///
+    /// `design_point` and `outward_normal` are both in DESIGN coordinates.
+    /// Under a pose perturbation the registered image of the point moves by
+    /// `dp = dt + dr x y` with `y = R (design_point - pivot)`, so the
+    /// deviation measured along the registered normal `n = R * outward_normal`
+    /// moves by `n . dt + dr . (y x n)`. The returned gradient is therefore
+    /// `[n, y x n]`, expressed in the SAME parameterization and about the SAME
+    /// pivot as [`CalibratedRigid3Registration::covariance`]. It is directly
+    /// admissible as a [`crate::propagate::QoiSensitivity`] gradient.
+    ///
+    /// This is a first-order sensitivity of the deviation to the REGISTRATION
+    /// POSE only. It says nothing about measurement noise at the point, about
+    /// correspondence validity, or about whether the supplied normal is the
+    /// true surface normal.
+    ///
+    /// # Errors
+    /// Non-finite inputs, or an `outward_normal` that is not unit length
+    /// within [`NORMAL_UNIT_TOLERANCE`].
+    pub fn normal_deviation_sensitivity(
+        &self,
+        design_point: Point3,
+        outward_normal: Vec3,
+    ) -> Result<[f64; 6], Rigid3Error> {
+        admit_unit_normal(outward_normal)?;
+        let rotated_normal = mat3_vec(&self.registration.rotation, outward_normal);
+        let pivoted = sub3(design_point.coords(), self.rotation_pivot);
+        let y = mat3_vec(&self.registration.rotation, pivoted);
+        let moment = cross3(y, rotated_normal);
+        let gradient = [
+            rotated_normal[0],
+            rotated_normal[1],
+            rotated_normal[2],
+            moment[0],
+            moment[1],
+            moment[2],
+        ];
+        for value in gradient {
+            if !value.is_finite() {
+                return Err(Rigid3Error::ArithmeticOverflow {
+                    field: "normal deviation sensitivity",
+                });
+            }
+        }
+        Ok(gradient)
+    }
+}
+
+/// Admitted departure from unit length for a declared surface normal.
+///
+/// Normals are declared, not derived, so this is an input-grammar check: a
+/// normal that is merely "close to" unit length would silently rescale every
+/// deviation computed against it.
+pub const NORMAL_UNIT_TOLERANCE: f64 = 1e-9;
+
+/// Refuse a declared direction that is not finite and unit length.
+pub(crate) fn admit_unit_normal(normal: Vec3) -> Result<(), Rigid3Error> {
+    if !normal.iter().all(|value| value.is_finite()) {
+        return Err(Rigid3Error::InvalidScalar {
+            field: "outward normal",
+            requirement: "finite",
+        });
+    }
+    let norm_squared = dot3(normal, normal);
+    if !norm_squared.is_finite() || (norm_squared - 1.0).abs() > 2.0 * NORMAL_UNIT_TOLERANCE {
+        return Err(Rigid3Error::InvalidScalar {
+            field: "outward normal",
+            requirement: "unit length",
+        });
+    }
+    Ok(())
 }
 
 /// The 3x6 pose Jacobian block for one fiducial: `[I3 | -[y]x]` with
@@ -1973,6 +2064,7 @@ pub fn estimate_calibrated_rigid3(
         outlier_diagnostics,
         model_identity,
         robust_conditional: !matches!(model.huber, HuberPolicy::Disabled),
+        rotation_pivot: centroid,
     })
 }
 

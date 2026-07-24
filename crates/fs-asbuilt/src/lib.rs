@@ -33,6 +33,9 @@ use fs_ivl::Interval;
 /// Datum-priority (3-2-1) registration with per-datum residuals and the
 /// datum-versus-global diagnostic delta.
 pub mod datum;
+/// As-built deviation, thickness/gap, warpage-form, and profile-roughness
+/// fields over supplied surface correspondences.
+pub mod field;
 /// Registration pose covariance propagated into correlated cross-QoI
 /// geometry-budget terms.
 pub mod propagate;

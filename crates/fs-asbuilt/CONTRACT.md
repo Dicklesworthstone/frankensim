@@ -165,6 +165,44 @@ as correlated cross-QoI geometry terms.
   wrong half-width is unrepresentable at this API. Every term cites the
   shared record identity as provenance and replay, which is how the cross-QoI
   correlation structure travels with per-QoI budgets.
+- `field::SurfaceSample` is one SUPPLIED correspondence: a design-frame
+  nominal point, the outward unit normal declared there, and the measured
+  point asserted to correspond to it. A non-unit normal is refused at
+  declaration, because a normal of length `l` would silently scale every
+  deviation computed against it by `l`.
+- `field::ProbeModel` is the instrument's declared first-order error model:
+  a measured-frame unit probe direction, the smallest admitted incidence
+  cosine, and one-sigma lateral and along-probe position uncertainties.
+- `field::DeviationField::extract` returns the signed normal deviation at
+  every admitted station with three separately reported one-sigma
+  contributions — range noise `range_sigma * c`, registration
+  `sqrt(g' C g)`, and correspondence ambiguity
+  `lateral_sigma * sqrt(1 - c^2) / c` for `c = |n . v|` — combined in
+  quadrature and scaled by the declared `CoveragePolicy`. Stations at or below
+  the grazing floor are REFUSED and retained by supplied index in
+  `grazing()`; `sample_count()` accounts for every supplied sample.
+- `field::DeviationField::measurement_term(role)` projects the field into the
+  `Measurement` slot of the eight-term engineering budget as an
+  `IntervalBound` bracketing the per-point half-widths. It is deliberately NOT
+  a `Geometry` term: the pose contribution reaches a budget through
+  `propagate`, and emitting it twice would inflate the budget while looking
+  more rigorous.
+- `field::ThicknessField::extract` pairs opposing-face stations into local
+  thickness `nominal + d_a + d_b`. Its registration term is the quadratic form
+  of the SUMMED pose sensitivity, not a quadrature over the two faces: both
+  faces ride one pose, so their pose errors are perfectly correlated and
+  largely cancel on opposing normals. A station is refused if EITHER face is
+  grazing.
+- `field::fit_form` fits a total-degree polynomial (capped at
+  `MAX_FORM_ORDER`) to the deviations over supplied in-plane stations,
+  returning coefficients in an internally normalized frame plus the RMS and
+  maximum residual and the fitted surface's peak-to-valley span — the warpage
+  statement. A design matrix that cannot determine the declared order refuses
+  with `RankDeficientFit` rather than returning an arbitrary member of the
+  solution family.
+- `field::profile_statistics` returns `Ra`, `Rq`, `Rt`, and segment-averaged
+  `Rz` after removing a DECLARED mean-line form. These are UNFILTERED; see the
+  no-claim boundaries.
 
 ## Invariants
 
@@ -284,6 +322,28 @@ as correlated cross-QoI geometry terms.
   the fitted feature, B consumes only its in-plane projection, and C consumes
   only the along-line translation. Per-datum residuals are signed components
   in the published orthonormal constraint frame.
+- The pose sensitivity of a signed normal deviation is `[n, y x n]` with
+  `n = R * normal` and `y = R (point - pivot)`, in the SAME parameterization
+  and about the SAME pivot as the published covariance. The pivot — the
+  weighted design centroid the covariance's rotation block pivots about — is
+  published by `CalibratedRigid3Registration::rotation_pivot` precisely so a
+  caller never reconstructs it from the base weights and Huber multipliers and
+  gets it subtly wrong; `tests/field.rs` pins the gradient against a finite
+  difference of an explicitly reconstructed perturbed pose, so a wrong pivot
+  fails as a first-order error.
+- Every supplied field sample is accounted for exactly once: admitted stations
+  and grazing refusals partition the input, refusals retain the SUPPLIED index
+  (so they can be traced back to the scan), and the refusal set is bound into
+  the record identity — two scans agreeing on every admitted point but
+  disagreeing on what they refused are different records.
+- A thickness station's pose uncertainty is the quadratic form of the summed
+  face sensitivities, so a rigid motion — which cannot change the distance
+  between two faces of one part — contributes no first-order thickness
+  uncertainty.
+- A form fit either determines its declared order or refuses. Rank is checked
+  on the QR diagonal before the solve, so a rank-deficient station set never
+  reaches `solve_ls` to divide by a zero pivot and return non-finite
+  coefficients.
 
 ## Error model
 
@@ -307,6 +367,14 @@ panics.
 correlation, confidence, geometry, dependence, arithmetic, allocation, and
 cancellation failures. Unknown scientific dependence is never silently
 converted to independence.
+`field::FieldError` separately names empty/oversized sample sets, index-pairing
+length mismatches, malformed scalars, a refusing registration, an all-refused
+scan (`NoAdmittedSamples`, which carries the grazing count so the caller learns
+WHY nothing survived), underdetermined and rank-deficient form fits, an
+over-cap form order, a too-short profile, arithmetic overflow, allocation
+failure, cancellation, and a refused uncertainty term. Refusals never degrade
+into a silently empty field: a scan whose every station was edge-on is an
+error, not an empty success.
 
 ## Determinism class
 
@@ -322,6 +390,12 @@ tie-breaks and add no scheduling-dependent reduction of their own, so replay
 on one platform is bitwise. No cross-ISA bit-identity is claimed for the 3-D
 paths: the Jacobi kernels evaluate plain binary64 expressions whose
 reconstruction accuracy (~1e-13), not bit pattern, is the portable contract.
+`field` extraction is a fixed-order loop over supplied samples with no
+scheduling-dependent reduction, canonical signed-zero identity fields, and
+monomial basis entries built by repeated multiplication rather than `powi`, so
+the fitted coefficients cannot move with the build mode. Its least-squares
+paths inherit `fs-la`'s deterministic Householder QR, so the same platform
+replays bitwise under the same cross-ISA boundary stated above.
 
 ## Cancellation behavior
 
@@ -342,6 +416,12 @@ structured `Cancelled { phase }` refusals with no partial output, and no
 affine `ChildBudget` forms yet (the same no-claim). The 3x3
 SVD/eigendecomposition and 6x6 factorization calls between checkpoints are
 constant-bounded work.
+`field::DeviationField::extract` and `field::ThicknessField::extract` follow
+that same pattern: explicit `Cx`, 256-point strides, a final publication
+checkpoint, `FieldError::Cancelled { phase }` with no partial field, and no
+affine `ChildBudget` form. `fit_form` and `profile_statistics` are pure
+synchronous functions over already-extracted data and take no `Cx`; their cost
+is bounded by the caller's station count and the capped basis width.
 
 ## Unsafe boundary
 
@@ -362,6 +442,26 @@ deterministic replay; typed resource planning, affine budgeted registration and
 diff execution, retained last-maximum index ties, and receipt integrity; G4
 pre-cancel, exact stride-boundary, mid-phase, and publication cancellation; and
 G5 execution/work/poll identity separation.
+
+`tests/field.rs`: G0 deviation recovery of injected analytic offsets under
+identity and general poses (including a tangential slide that must NOT
+register as deviation); the composed half-width equalling the declared
+coverage-scaled quadrature exactly; opposite monotonic movement of the range
+and ambiguity terms with incidence; the INDEPENDENT pivot oracle — the pose
+sensitivity checked against a finite difference of the deviation under an
+explicitly reconstructed perturbed pose, at a tolerance that admits only
+second-order truncation and therefore rejects any wrong pivot; thickness
+recovery of an injected bond line and first-order cancellation of rigid pose
+error on opposing faces; adversarial near-edge-on refusal, counted by supplied
+index, plus all-grazing refusal; form-fit recovery of an injected quadratic
+bow, residual exposure at too low an order, and rank-deficient/underdetermined/
+over-order refusals; closed-form square-wave `Ra`/`Rq`/`Rt`/`Rz`, declared
+form removal cancelling a ramp, the deliberate blindness of `Ra` to a smooth
+residual inside the ripple amplitude with `Rt` discriminating instead,
+unfiltered statistics demonstrably absorbing waviness, and trailing-remainder
+segment folding; and G5 replay equality, identity movement under a
+one-nanometre content change, identity binding of the REFUSAL set, and
+cancellation publishing no partial field.
 
 `tests/spatial_uncertainty.rs`: G0 analytic independent/equicorrelated
 cardinal-geometry covariance and leverage, covariance/correlation/rank refusal,
@@ -408,6 +508,61 @@ eight-term-budget e2e lane logging the correlation structure.
   modules. Correspondence-free ICP remains an explicit [F] follow-on and is
   not smuggled in behind the Kabsch path. CT VOLUME registration (volumetric
   intensity alignment) is staged scope for the voxel layer, not this crate.
+- FIELD EXTRACTION INHERITS THAT RULE. `field` consumes supplied
+  correspondences and never discovers them: it does not project onto a chart,
+  search for a closest point, or verify that the declared nominal point is the
+  one actually measured. A wrong correspondence produces a confident wrong
+  deviation, and nothing in this module can detect it. Chart-driven
+  correspondence search is the follow-on that would need `fs-geom`/`fs-query`;
+  this module deliberately takes no geometry-query dependency.
+- The field uncertainty composition ASSUMES the station measurement errors are
+  independent of the fiducial errors that fixed the pose. That is false when
+  one instrument measured both, which is the normal case. The three reported
+  terms are therefore a declared decomposition, not a joint covariance, and
+  the composed half-width is not a confidence interval.
+- The grazing floor is an ADMISSION SCREEN on measurement geometry, not a
+  correctness certificate. A station above the floor can still be wrong for
+  reasons this module does not model: multipath, edge effects, penetration
+  into translucent material, or a correspondence error. Passing the screen
+  means the declared first-order model was not obviously inapplicable.
+- The ambiguity term models lateral footprint elongation at oblique incidence
+  as `1/c`. It is a declared engineering model, not a derivation from an
+  instrument's point-spread function, and it does not model SURFACE CURVATURE
+  interacting with a lateral offset (a second-order `kappa d^2 / 2` effect
+  that this module ignores because the curvature is not supplied).
+- `field` handles PLATE-LIKE and simple mating geometries: the deviation is a
+  scalar along a declared normal and the form fit is a low-order polynomial
+  over two supplied in-plane coordinates. FREE-FORM surfaces, where no single
+  in-plane parameterization exists, are explicit no-claim — the caller would
+  have to supply a chart parameterization that this module does not define.
+- WARPAGE is the peak-to-valley span of the FITTED low-order surface, not of
+  the part. What the declared order did not capture is reported as the fit
+  residual and is not folded into the warpage number; a warpage value quoted
+  without its residual is a statement about the fit, not about the part.
+- ROUGHNESS IS UNFILTERED AND IS THEREFORE NOT ISO 4287. `Ra`/`Rq`/`Rz`/`Rt`
+  are defined there on a profile separated into roughness and waviness by a
+  phase-correct Gaussian filter at a declared cutoff (ISO 16610-21), over a
+  stated number of sampling lengths. NO SUCH FILTER IS IMPLEMENTED. These are
+  the same arithmetic on a merely form-removed profile, so waviness inside the
+  supplied trace is counted as roughness and the values generally read HIGH
+  against a filtering instrument (`tests/field.rs` demonstrates that inflation
+  rather than merely asserting it). They are a self-consistent relative
+  statistic and a legitimate input declaration; they are not a conformance
+  value and must not be reported as `Ra` without the unfiltered qualifier.
+  `Rz` here averages equal INDEX segments of the supplied trace, which is not
+  the ISO sampling length unless the caller made it so.
+- No MATERIAL-STATE field (density, porosity) is extracted. Those require
+  CT-class volumetric data, which no admitted representation in this crate
+  carries; the CT lane stays staged scope, and this module reserves no schema
+  for it.
+- The extracted field is NOT bound into physics. A spatially varying interface
+  resistance in `fs-conduction` remains one face-constant `R''` per named
+  surface; consuming a thickness or roughness MAP there is a separate L3
+  change that this L2 module enables but does not perform.
+- Every field record identity is a domain-separated integrity address over the
+  typed content and the refusal set. It is not authentication: it proves
+  neither that the scan is genuine nor that the cited registration is the one
+  that actually produced these coordinates.
 - The 3-D calibrated estimator is the scalar-weighted Kabsch fit, not the
   generalized-least-squares optimum under anisotropic per-fiducial
   covariances; the sandwich covariance is correct for the estimator actually
