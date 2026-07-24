@@ -1176,3 +1176,49 @@ No-claim boundaries:
   machinery does not exist render `NO-DATA` with the tracked work that would
   make them live; that visible gap list is the artifact's purpose, not a defect
   to be filled with proxies.
+
+## Cross-repository compatibility suite (`compatibility` module, bead f85xj.13.4)
+
+Makes a sibling pin change a tested, recorded event. `SURFACES` registers, per
+sibling, the load-bearing claims FrankenSim depends on and the FrankenSim tests
+that exercise them; `SiblingSurface::selector` renders the exact `cargo test`
+invocation, and returns `None` for an uncovered surface so no runnable command
+can be shown for a sibling with no coverage. `pin_delta` compares a recorded
+pin set against a live or candidate one and returns the movement of EVERY
+sibling — including unchanged, added, and removed — so a disappearing sibling
+cannot be silently ignored; `PinDelta::describe` names the sibling and both
+endpoints, which the aggregate lock hash structurally cannot.
+
+`evaluate_bump` adjudicates fail-closed. Refusal is total, and every failing
+condition is reported at once. `SuiteOutcome::NotRun` is never green, and
+`Executed { passed: 0, .. }` is refused as well: a selector that matched
+nothing is not evidence. Coverage is required for every moved sibling and for
+every `P1`/`P2` surface regardless of movement, because one sibling's move can
+break another's surface. A moved sibling that is unregistered, or registered
+but uncovered, is refused rather than admitted by default. `EmergencyClass` is
+a closed set, so convenience, upstream features, and version freshness are
+unrepresentable as emergency justification.
+
+This module is hosted here rather than in a higher-layer crate for a
+load-bearing reason: `fs-govern`'s cone is sibling-free, so the machinery that
+adjudicates a sibling bump keeps building while a sibling is broken.
+
+Conformance: `tests/compatibility.rs` pins registry integrity (every registered
+test cites a claim its own surface declares; every uncovered surface records
+why; covered surfaces render a selector and uncovered ones do not), the real
+2026-07-24 seven-sibling drift as the delta fixture, added/removed reporting,
+and five negative bump cases — unrun, failing, zero-test execution, missing
+result, and a moved-but-uncovered sibling — plus the admitted path and
+render determinism.
+
+No-claim boundaries:
+
+- The module RECORDS and ADJUDICATES. It runs no tests, reads no lock file, and
+  observes no checkout; callers supply pin rows and executed outcomes. An
+  admitted verdict means the declared suite passed AS REPORTED, never that the
+  sibling is correct or that the reporter was honest.
+- Registered coverage is not proof of adequacy. A surface can be green and
+  still miss the behaviour a bump actually changed; the claim list states what
+  is exercised, not what is sufficient.
+- The suite is currently registered but NOT executed. No pin bump has passed
+  the train, and none is claimed.

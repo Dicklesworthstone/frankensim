@@ -138,6 +138,58 @@ owns the executable compatibility suite and full release-train protocol. Until
 that Bead lands, no document may claim a current pin bump passed the complete
 cross-repository train.
 
+### The compatibility registry and the bump gate
+
+`fs_govern::compatibility` registers, per sibling, the load-bearing claims
+FrankenSim depends on and the FrankenSim tests that exercise them, and
+adjudicates a proposed pin change. `cargo run -p xtask -- compatibility-report`
+names which siblings are off-pin and prints the exact selector each one
+requires. It is a report rather than a `check-all` gate, matching the existing
+decision to keep `check-constellation` out of `check-all`: a pin drift is a
+release-train event, not a source-tree defect.
+
+The registry deliberately records **uncovered** surfaces as well as covered
+ones, each with the reason it carries no test. An uncovered surface is a
+standing gap that the report shows every run; it is never a blank.
+
+### The bump protocol
+
+A pin change is adjudicated by `evaluate_bump`, which is fail-closed. A bump is
+admitted only when all of the following hold, and refusal reports every failing
+condition at once rather than one per attempt:
+
+1. Something actually moved. An empty train cannot be recorded as a successful
+   one.
+2. Every moved sibling has a registered compatibility surface. A sibling nobody
+   registered cannot be adjudicated at all.
+3. Every moved sibling's surface carries tests. A surface with no coverage
+   cannot supply evidence, so a bump that moves it is refused rather than waved
+   through.
+4. Every `P1`/`P2` surface reports a green execution, whether or not that
+   sibling moved, because one sibling's move can break another's surface.
+5. Each required result is EXECUTED. `NotRun` is never a pass, and an executed
+   result reporting zero tests is refused as well: a selector that matched
+   nothing is not evidence.
+6. The golden implication is declared. Pins and semantic goldens move together;
+   an undeclared implication is a refusal, not a default-pass.
+
+Emergency justification is a closed classification, so an out-of-train bump
+must name one of: reachable security defect, credible corruption, false
+scientific or certificate result, cancellation/durability contract violation,
+or a critical sibling becoming unavailable. Convenience, new upstream features,
+and version freshness are not merely discouraged — they are unrepresentable in
+the type, so they cannot be argued into an emergency.
+
+### Current state (2026-07-24)
+
+The suite is REGISTERED, not yet EXECUTED: no compatibility run has been made
+against live pins, so no bump has passed the train and none is claimed. On its
+first run the report found **all seven siblings off their recorded pins**,
+including a `franken_numpy` minor-version move (`0.1.0` to `0.2.0`) into an
+uncovered surface, which the gate therefore refuses. The previously reported
+single-sibling drift was an artifact of the aggregate lock hash, which reports
+that *a* repository moved without naming it.
+
 An out-of-train candidate is justified by a reachable security defect, credible
 corruption, false scientific/certificate result, cancellation or durability
 contract violation, or a critical sibling becoming unavailable. Convenience,
