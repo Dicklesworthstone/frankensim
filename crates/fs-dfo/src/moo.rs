@@ -1,5 +1,6 @@
-//! Multi-objective machinery (plan §9.9): NSGA-II with DETERMINISTIC
-//! tie-breaking everywhere (index order — bitwise-replayable runs),
+//! Multi-objective machinery (plan §9.9): NSGA-II with deterministic
+//! index tie-breaking and NSGA-III with deterministic, index-neutral
+//! equal-rank mating,
 //! exact hypervolume for m <= 4 (2D sweep + recursive exclusive
 //! contributions above), Monte Carlo hypervolume beyond that,
 //! least-contributor archives, NSGA-III/MOEA/D many-objective lanes,
@@ -628,6 +629,79 @@ fn perp_distance(f: &[f64], dir: &[f64]) -> f64 {
         .sqrt()
 }
 
+/// Versioned semantic descriptor for NSGA-III mating selection.
+///
+/// The two candidate indices are ordered uniform draws. Lower nondomination
+/// rank wins; equal ranks keep the first draw without comparing live
+/// population indices or consuming a third tie-break draw. This preserves
+/// deterministic replay while making the equal-rank law equivariant under a
+/// consistent permutation of population positions and draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nsga3MatingPolicy {
+    /// Identity schema for this descriptor.
+    pub schema_version: u32,
+    /// Stable algorithm-variant name.
+    pub variant: &'static str,
+    /// Number of ordered candidate draws per tournament.
+    pub tournament_arity: usize,
+    /// How candidate positions are sampled.
+    pub draw_policy: &'static str,
+    /// Primary fitness comparison.
+    pub rank_policy: &'static str,
+    /// Resolution when both candidates have the same rank.
+    pub equal_rank_policy: &'static str,
+    /// Exact stream-consumption rule.
+    pub stream_consumption_policy: &'static str,
+    /// Population-index permutation law.
+    pub permutation_policy: &'static str,
+}
+
+/// Domain-separated artifact kind for [`Nsga3MatingPolicy::replay_identity`].
+pub const NSGA3_MATING_POLICY_IDENTITY_KIND: &str = "fs-dfo-nsga3-mating-policy-v1";
+
+impl Nsga3MatingPolicy {
+    /// Return the typed canonical identity of every mating-policy field.
+    #[must_use]
+    pub fn replay_identity(self) -> ReplayIdentity {
+        let Nsga3MatingPolicy {
+            schema_version,
+            variant,
+            tournament_arity,
+            draw_policy,
+            rank_policy,
+            equal_rank_policy,
+            stream_consumption_policy,
+            permutation_policy,
+        } = self;
+
+        IdentityBuilder::new(NSGA3_MATING_POLICY_IDENTITY_KIND)
+            .u64("policy-schema-version", u64::from(schema_version))
+            .str("variant", variant)
+            .u64(
+                "tournament-arity",
+                u64::try_from(tournament_arity).expect("NSGA-III tournament arity must fit u64"),
+            )
+            .str("draw-policy", draw_policy)
+            .str("rank-policy", rank_policy)
+            .str("equal-rank-policy", equal_rank_policy)
+            .str("stream-consumption-policy", stream_consumption_policy)
+            .str("permutation-policy", permutation_policy)
+            .finish()
+    }
+}
+
+/// The mating policy used by [`nsga3`].
+pub const NSGA3_MATING_POLICY: Nsga3MatingPolicy = Nsga3MatingPolicy {
+    schema_version: 1,
+    variant: "rank-then-first-ordered-draw-v1",
+    tournament_arity: 2,
+    draw_policy: "two-ordered-uniform-next-below-population-length-draws",
+    rank_policy: "lower-current-population-nondomination-rank",
+    equal_rank_policy: "first-ordered-draw-with-no-live-index-comparison",
+    stream_consumption_policy: "exactly-two-index-draws-with-no-extra-tie-draw",
+    permutation_policy: "equivariant-under-consistent-population-and-draw-index-permutation",
+};
+
 /// Versioned semantic descriptor for FrankenSim's NSGA-III normalization.
 ///
 /// This is deliberately public so retained study/campaign identities can bind
@@ -757,8 +831,9 @@ pub const NSGA3_NORMALIZATION_POLICY: Nsga3NormalizationPolicy = Nsga3Normalizat
 /// legacy floored first-front maxima as a deterministic refusal fallback.
 /// This is not canonical Deb--Jain normalization and does not retain ideal or
 /// extreme points across generations. Deterministic throughout (index
-/// tie-breaks). See [`NSGA3_NORMALIZATION_POLICY`] for identity-bearing
-/// constants and exact no-claim boundaries.
+/// tie-breaks in environmental selection; ordered-draw ties in mating). See
+/// [`NSGA3_MATING_POLICY`] and [`NSGA3_NORMALIZATION_POLICY`] for the
+/// identity-bearing policies and exact no-claim boundaries.
 pub fn nsga3(
     objectives: &mut dyn FnMut(&[f64]) -> Vec<f64>,
     dim: usize,
@@ -792,17 +867,15 @@ pub fn nsga3(
     );
     for _ in 0..params.generations {
         let fronts = non_dominated_sort(&pop);
-        // Rank-only binary tournament (NSGA-III drops crowding).
+        // Rank-only binary tournament (NSGA-III drops crowding). Equal-rank
+        // candidates keep the first uniform draw: live population position is
+        // not a second fitness objective.
         let mut offspring = Vec::with_capacity(params.pop);
         while offspring.len() < params.pop {
             let pick = |s: &mut fs_rand::Stream| -> usize {
                 let a = s.next_below(pop.len() as u64) as usize;
                 let b = s.next_below(pop.len() as u64) as usize;
-                if fronts[a] < fronts[b] || (fronts[a] == fronts[b] && a <= b) {
-                    a
-                } else {
-                    b
-                }
+                nsga3_mating_winner(&fronts, a, b)
             };
             let p1 = pick(&mut stream);
             let p2 = pick(&mut stream);
@@ -825,6 +898,14 @@ pub fn nsga3(
         .filter(|(_, r)| *r == 0)
         .map(|(ind, _)| ind)
         .collect()
+}
+
+fn nsga3_mating_winner(fronts: &[usize], first_draw: usize, second_draw: usize) -> usize {
+    if fronts[first_draw] <= fronts[second_draw] {
+        first_draw
+    } else {
+        second_draw
+    }
 }
 
 /// NSGA-III environmental selection to `target` members.
@@ -1438,6 +1519,66 @@ pub fn moead(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nsga3_equal_rank_mating_keeps_first_draw_instead_of_lower_index() {
+        const N: usize = 5;
+        let equal_fronts = [0; N];
+        let mut wins = [0usize; N];
+        for first in 0..N {
+            for second in 0..N {
+                wins[nsga3_mating_winner(&equal_fronts, first, second)] += 1;
+            }
+        }
+        assert_eq!(
+            wins, [N; N],
+            "every live position must win exactly once per second-draw value"
+        );
+
+        let ordered_fronts = [0, 0, 1, 2];
+        assert_eq!(nsga3_mating_winner(&ordered_fronts, 3, 2), 2);
+        assert_eq!(nsga3_mating_winner(&ordered_fronts, 2, 3), 2);
+    }
+
+    #[test]
+    fn nsga3_mating_policy_identity_moves_for_every_semantic_field() {
+        let policy = NSGA3_MATING_POLICY;
+        let current = policy.replay_identity();
+        let mut mutations = Vec::new();
+
+        let mut mutant = policy;
+        mutant.schema_version += 1;
+        mutations.push(("schema_version", mutant));
+        let mut mutant = policy;
+        mutant.variant = "mutant-variant";
+        mutations.push(("variant", mutant));
+        let mut mutant = policy;
+        mutant.tournament_arity += 1;
+        mutations.push(("tournament_arity", mutant));
+        let mut mutant = policy;
+        mutant.draw_policy = "mutant-draw-policy";
+        mutations.push(("draw_policy", mutant));
+        let mut mutant = policy;
+        mutant.rank_policy = "mutant-rank-policy";
+        mutations.push(("rank_policy", mutant));
+        let mut mutant = policy;
+        mutant.equal_rank_policy = "lower-live-index-mutant";
+        mutations.push(("equal_rank_policy", mutant));
+        let mut mutant = policy;
+        mutant.stream_consumption_policy = "mutant-stream-consumption";
+        mutations.push(("stream_consumption_policy", mutant));
+        let mut mutant = policy;
+        mutant.permutation_policy = "mutant-permutation-policy";
+        mutations.push(("permutation_policy", mutant));
+
+        for (field, mutant) in mutations {
+            assert_ne!(
+                current.root(),
+                mutant.replay_identity().root(),
+                "{field} must move the mating-policy identity"
+            );
+        }
+    }
 
     fn individual(objectives: [f64; 3]) -> Individual {
         Individual {

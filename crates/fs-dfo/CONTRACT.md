@@ -17,6 +17,16 @@ the fs-opt problem IR is a wiring bead once that crate stabilizes
 (deliberate collision avoidance, bead 7tv.4 trail).
 
 ## Public types and semantics
+- `nsga3(...)` uses the versioned `NSGA3_MATING_POLICY` variant
+  `rank-then-first-ordered-draw-v1`. Each binary mating tournament consumes
+  exactly two ordered uniform population-index draws. Lower nondomination rank
+  wins; equal ranks keep the first draw without comparing live population
+  indices or consuming another random value. Thus ancestry/vector position is
+  not a hidden fitness objective, and the equal-rank rule is equivariant under
+  a consistent permutation of the population and drawn indices. The public
+  descriptor binds its arity, draw/rank/tie/stream/permutation policies into a
+  domain-separated replay identity; exhaustive source destructuring and
+  field-by-field mutation tests make future policy changes explicit.
 - `nsga3(...)` uses the versioned
   `NSGA3_NORMALIZATION_POLICY` variant
   `frankensim-scale-equilibrated-current-generation-asf-intercepts-v1`.
@@ -311,7 +321,7 @@ hypervolume's malformed-point ignore policy, empty dimension returns
 zero, and zero samples are rejected; bounded archive — dominated
 inserts are no-ops, dominating inserts evict, over-capacity eviction
 removes the TRUE least contributor (verified against brute-force
-keep-(k−1) subset enumeration); tests/nsga3_battery.rs (12 tests):
+keep-(k−1) subset enumeration); tests/nsga3_battery.rs (13 tests):
 Das–Dennis counts
 (C(p+m−1, m−1) exact: 91 at (3,12), 70 at (5,4)) and on-simplex
 membership; public guards reject zero-division directions, invalid
@@ -321,15 +331,18 @@ NSGA-III/NSGA-II comparison, the matched-budget MOEA/D comparison, and bitwise
 replay remain executable gates. The earlier `0.0238`/98%, `6.51` vs `4.39`, and
 `2.7457` vs `2.7775` observations belong to the pre-extension maxima-normalized
 lane; they are historical context, not measurements of the named
-scale-equilibrated v1 variant. Its policy-bound golden schema is v2 and
-binds the version and root of the single typed normalization-policy identity;
-the full-study replay configuration binds that same versioned root rather than
-maintaining a second policy-field encoder. Caller mutation tests require both
-retained preimages to move when the shared policy root moves. The golden
-is frozen as `GOLDEN_HASH_V2=0x518f_9b30_a05c_d5e4` after the complete central
-normalization, study-replay, WFG-family, and WFG4 selector union passed against
-one source snapshot. The former `0xd912_6c49_f1b1_6897` hash remains historical
-maxima-normalized evidence and is not relabeled as current evidence.
+scale-equilibrated v1 normalization plus index-neutral mating variant. Its
+policy-bound golden schema is v3 and binds the version/root of both typed
+normalization and mating policies. The full-study replay configuration binds
+those same two versioned roots rather than maintaining duplicate policy-field
+encoders. Caller mutation tests require the golden and study configurations to
+move when either shared policy root moves. The current golden is
+`GOLDEN_HASH_V3=0x0282_b7f4_f7eb_9210`; it may be ratified only by the complete
+central normalization, mating-law, study-replay, WFG-family, and WFG4 selector
+union against one source snapshot. The former
+`GOLDEN_HASH_V2=0x518f_9b30_a05c_d5e4` names the lower-live-index mating lane,
+and `0xd912_6c49_f1b1_6897` remains historical maxima-normalized evidence;
+neither is relabeled as current evidence.
 tests/wfg4_battery.rs adds the canonical normalized WFG4 fixture at
 `M=3, k=4, l=20`, following the corrected WFG toolkit's `s_multi(30,10,0.35)`,
 equal-weight `r_sum`, and concave shape construction. It composes that evaluator
@@ -338,11 +351,11 @@ objective evaluations per run. The battery checks the analytic `[0,0,6]`
 front extreme, the output-reconstructed scaled-sphere identity over deterministic
 probes, a wrong-center transformation mutant, exact evaluation accounting, front
 distance, Das-Dennis direction coverage, exact 3D hypervolume, and complete
-ordered-front bitwise replay. Its v2 canonical configuration identity binds units,
-seed plus stream kernel/tile, algorithm constants, the versioned typed child
-root produced from every field of `NSGA3_NORMALIZATION_POLICY`, budgets, gates,
-versions, and capabilities. A caller mutation test requires the campaign root
-to move when that child root moves.
+ordered-front bitwise replay. Its v4 canonical configuration identity binds
+units, seed plus stream kernel/tile, algorithm constants, and the versioned
+typed child roots produced from every field of `NSGA3_NORMALIZATION_POLICY` and
+`NSGA3_MATING_POLICY`, plus budgets, gates, versions, and capabilities. Caller
+mutation tests require the campaign root to move when either policy child moves.
 Separate original/replay front children bind every retained decision
 and objective bit; the result child binds both roots, actual transform samples,
 all metrics and verdicts, and the first differing component/bit when replay fails.
@@ -353,15 +366,23 @@ Multi-objective Test Problem Toolkit* (corrected EMO 2005 version), cross-read
 against jMetal revision `ea7e882f6b8f94b99535921674e62cda7986f20e`.
 At the retained seed and fixed 36,892-evaluation budget, the first
 pre-extension central run measured mean front distance
-`0.23171459361058497`; that observation is not a measurement of the v2 campaign
-identity. The central v2 campaign measured mean front distance
-`0.21508385736544294`, worst distance `0.313057630600937`, direction coverage
-`86/91`, and hypervolume `62.62495408182373`; it replayed the complete ordered
-front bit-for-bit. The coarse conformance ceiling remains `0.25`. These are
-fixed-fixture observations, not a convergence-rate, broad WFG-family quality,
-cross-ISA, or optimizer-performance claim. The budget and orthogonal gates
-remain unchanged; the v2 receipt supersedes rather than relabels the earlier
-receipt.
+`0.23171459361058497`; that observation is not a measurement of the later
+campaign identities. The central lower-live-index v3 campaign measured mean
+front distance `0.21508385736544294`, worst distance `0.313057630600937`,
+direction coverage `86/91`, and hypervolume `62.62495408182373`; it replayed
+the complete ordered front bit-for-bit. With only the equal-rank mating rule
+changed and the exact same seed, stream, population, variation parameters,
+directions, and
+36,892-evaluation budget, the index-neutral v4 diagnostic measured mean
+distance `0.1552020235285961`, worst distance `0.23731291160639517`, direction
+coverage `88/91`, and hypervolume `66.60613786390628`, with bitwise replay.
+That is a same-fixture reduction of about 27.8% in mean distance and
+simultaneous improvement in every listed metric, but it remains far above the
+parent program's `0.05` stretch target. The coarse conformance ceiling remains
+`0.25`. These are fixed-fixture observations, not a convergence-rate, broad
+WFG-family quality, cross-ISA, or optimizer-performance claim. The budget and
+orthogonal gates remain unchanged; the v4 receipt supersedes rather than
+relabels the earlier receipts.
 As in the older fs-dfo aggregate batteries, impossible public-API structural
 failures such as an empty front remain ordinary Rust diagnostics before aggregate
 emission; gate failures after a front exists retain structured red evidence.
@@ -667,6 +688,13 @@ remain assertion-only and silent.
   front-quality, hypervolume, coverage, diversity, optimizer-superiority,
   all-objective/dimension/configuration/seed, refreshed cross-ISA, `Cx`, checkpoint,
   parallelism, authenticated-ledger, external-oracle, or performance claim.
+- NSGA-III equal-rank mating is index-neutral only in the exact sense recorded
+  by `NSGA3_MATING_POLICY`: for a fixed ordered pair of uniform draws, a
+  consistent renaming of population positions and draw indices renames the
+  winner. Environmental-selection ties still use their documented deterministic
+  index order. The WFG4 improvement at one registered seed is evidence for that
+  fixture, not a theorem that first-draw ties dominate every stochastic tie
+  policy, seed, landscape, or optimizer family.
 - NSGA-III ordinary normalization is the named FrankenSim
   scale-equilibrated/current-generation extension: the ideal is the
   componentwise minimum over the current environmental-selection considered

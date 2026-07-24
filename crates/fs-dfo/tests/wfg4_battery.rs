@@ -332,8 +332,9 @@ fn campaign_identity_with_semantics(
     direction_count: usize,
     problem: &ReplayIdentity,
     normalization: &ReplayIdentity,
+    mating: &ReplayIdentity,
 ) -> ReplayIdentity {
-    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v3")
+    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v4")
         .child("problem-semantics", problem)
         .str("problem", "WFG4-normalized")
         .str("source", "Huband-et-al-EMO-2005-corrected-WFG-toolkit")
@@ -367,6 +368,7 @@ fn campaign_identity_with_semantics(
         .str("shape", "WFG-concave-M3")
         .str("optimizer", "fs-dfo-nsga3")
         .child("normalization-policy", normalization)
+        .child("mating-policy", mating)
         .u64("input-seed", INPUT_SEED)
         .u64("optimizer-stream-kernel", u64::from(NSGA3_STREAM_KERNEL))
         .u64("optimizer-stream-tile", u64::from(NSGA3_STREAM_TILE))
@@ -464,7 +466,8 @@ fn campaign_identity(direction_count: usize) -> ReplayIdentity {
         DISTANCE_PARAMETERS,
     );
     let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
-    campaign_identity_with_semantics(direction_count, &problem, &normalization)
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY.replay_identity();
+    campaign_identity_with_semantics(direction_count, &problem, &normalization, &mating)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -581,6 +584,8 @@ fn emit_receipt(
 ) {
     let replay_mismatch_json =
         replay_mismatch.map_or_else(|| "null".to_string(), |value| format!("\"{value}\""));
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY;
+    let mating_identity = mating.replay_identity();
     let event = emitter.emit(
         Severity::Info,
         EventKind::Custom {
@@ -589,6 +594,8 @@ fn emit_receipt(
                 "{{\"campaign_identity\":\"{}\",\"result_identity\":\"{}\",\
                  \"front_identity\":\"{}\",\"replay_front_identity\":\"{}\",\
                  \"problem\":\"WFG4\",\"normalized\":true,\
+                 \"mating_policy\":{{\"variant\":\"{}\",\"schema_version\":{},\
+                 \"identity\":\"{}\"}},\
                  \"source_revision\":\"{JMETAL_REVISION}\",\
                  \"units\":\"dimensionless-normalized-decisions-and-objectives\",\
                  \"objectives\":{OBJECTIVES},\
@@ -637,6 +644,9 @@ fn emit_receipt(
                 result.hex(),
                 front_identity.hex(),
                 replay_front_identity.hex(),
+                mating.variant,
+                mating.schema_version,
+                mating_identity.hex(),
                 fs_rand::STREAM_SEMANTICS_VERSION,
                 transform_samples[0],
                 transform_samples[1],
@@ -686,10 +696,15 @@ fn wfg4_campaign_consumes_shared_normalization_policy_root() {
     let mutant = mutant_policy.replay_identity();
     assert_ne!(current.root(), mutant.root());
 
-    let current_campaign =
-        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &problem, &current);
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY.replay_identity();
+    let current_campaign = campaign_identity_with_semantics(
+        EXPECTED_REFERENCE_DIRECTIONS,
+        &problem,
+        &current,
+        &mating,
+    );
     let mutant_campaign =
-        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &problem, &mutant);
+        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &problem, &mutant, &mating);
     assert_ne!(
         current_campaign.root(),
         mutant_campaign.root(),
@@ -698,16 +713,56 @@ fn wfg4_campaign_consumes_shared_normalization_policy_root() {
 }
 
 #[test]
+fn wfg4_campaign_consumes_shared_mating_policy_root() {
+    let problem = problem_identity(
+        WfgVariant::Wfg4,
+        OBJECTIVES,
+        POSITION_PARAMETERS,
+        DISTANCE_PARAMETERS,
+    );
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
+    let policy = fs_dfo::moo::NSGA3_MATING_POLICY;
+    let current = policy.replay_identity();
+    let mut mutant_policy = policy;
+    mutant_policy.equal_rank_policy = "lower-live-index-mutant";
+    let mutant = mutant_policy.replay_identity();
+    assert_ne!(current.root(), mutant.root());
+
+    let current_campaign = campaign_identity_with_semantics(
+        EXPECTED_REFERENCE_DIRECTIONS,
+        &problem,
+        &normalization,
+        &current,
+    );
+    let mutant_campaign = campaign_identity_with_semantics(
+        EXPECTED_REFERENCE_DIRECTIONS,
+        &problem,
+        &normalization,
+        &mutant,
+    );
+    assert_ne!(
+        current_campaign.root(),
+        mutant_campaign.root(),
+        "the retained WFG4 campaign must bind the mating-policy child"
+    );
+}
+
+#[test]
 fn wfg4_campaign_consumes_typed_problem_semantics_root() {
     let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY.replay_identity();
     let current = problem_identity(
         WfgVariant::Wfg4,
         OBJECTIVES,
         POSITION_PARAMETERS,
         DISTANCE_PARAMETERS,
     );
-    let current_campaign =
-        campaign_identity_with_semantics(EXPECTED_REFERENCE_DIRECTIONS, &current, &normalization);
+    let current_campaign = campaign_identity_with_semantics(
+        EXPECTED_REFERENCE_DIRECTIONS,
+        &current,
+        &normalization,
+        &mating,
+    );
 
     let mutants = [
         problem_identity(
@@ -741,6 +796,7 @@ fn wfg4_campaign_consumes_typed_problem_semantics_root() {
             EXPECTED_REFERENCE_DIRECTIONS,
             &mutant,
             &normalization,
+            &mating,
         );
         assert_ne!(
             current_campaign.root(),

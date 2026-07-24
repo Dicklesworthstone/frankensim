@@ -9,10 +9,12 @@
 //! once that crate stabilizes (deliberate collision avoidance; see bead
 //! 7tv.4's comment trail).
 //!
-//! DETERMINISM: all sampling flows from keyed Philox streams; ranking
-//! uses `total_cmp` with lowest-index tie-breaks — the whole evolution
-//! is a pure function of the seed (bitwise rerun-tested, cross-ISA
-//! golden-hashed).
+//! DETERMINISM: all sampling flows from keyed Philox streams; ordering
+//! uses `total_cmp` or explicitly versioned deterministic tie policies.
+//! In particular, NSGA-III equal-rank mating keeps the first ordered
+//! uniform draw instead of treating the lower live population index as
+//! fitter. The whole evolution is a pure function of the seed (bitwise
+//! rerun-tested and golden-hashed).
 
 pub mod cma;
 pub mod dro;

@@ -306,11 +306,11 @@ fn many_objective_m5_beats_nsga2_on_hv() {
     );
 }
 
-// The v1 hash named the pre-extension maxima-normalized lane. The v2 policy
-// changes selection semantics; its replacement was retained only after the
-// complete central normalization, study-replay, WFG-family, and WFG4 selector
-// union passed against the same source snapshot.
-const GOLDEN_HASH_V2: u64 = 0x518f_9b30_a05c_d5e4;
+// The v1 hash named the pre-extension maxima-normalized lane. V2 ratified the
+// typed normalization policy. V3 also binds the index-neutral equal-rank
+// mating policy and must be frozen only after the complete central selector
+// union passes against one source snapshot.
+const GOLDEN_HASH_V3: u64 = 0x0282_b7f4_f7eb_9210;
 
 fn golden_feed_bytes(accumulator: &mut u64, bytes: &[u8]) {
     for &byte in bytes {
@@ -331,8 +331,8 @@ fn golden_feed_str(accumulator: &mut u64, value: &str) {
     golden_feed_bytes(accumulator, value.as_bytes());
 }
 
-fn golden_feed_normalization_policy_identity(accumulator: &mut u64, identity: &ReplayIdentity) {
-    golden_feed_str(accumulator, "fs-dfo-nsga3-golden-v2");
+fn golden_feed_policy_identity(accumulator: &mut u64, field: &str, identity: &ReplayIdentity) {
+    golden_feed_str(accumulator, field);
     golden_feed_u64(accumulator, u64::from(identity.version()));
     golden_feed_u64(accumulator, identity.root());
 }
@@ -347,9 +347,9 @@ fn nsga3_golden_preimage_consumes_shared_normalization_policy_root() {
     assert_ne!(current.root(), mutant.root());
 
     let mut current_accumulator = 0xcbf2_9ce4_8422_2325;
-    golden_feed_normalization_policy_identity(&mut current_accumulator, &current);
+    golden_feed_policy_identity(&mut current_accumulator, "normalization-policy", &current);
     let mut mutant_accumulator = 0xcbf2_9ce4_8422_2325;
-    golden_feed_normalization_policy_identity(&mut mutant_accumulator, &mutant);
+    golden_feed_policy_identity(&mut mutant_accumulator, "normalization-policy", &mutant);
     assert_ne!(
         current_accumulator, mutant_accumulator,
         "the retained golden preimage must consume the shared typed policy root"
@@ -357,11 +357,34 @@ fn nsga3_golden_preimage_consumes_shared_normalization_policy_root() {
 }
 
 #[test]
+fn nsga3_golden_preimage_consumes_shared_mating_policy_root() {
+    let policy = fs_dfo::moo::NSGA3_MATING_POLICY;
+    let current = policy.replay_identity();
+    let mut mutant_policy = policy;
+    mutant_policy.equal_rank_policy = "lower-live-index-mutant";
+    let mutant = mutant_policy.replay_identity();
+    assert_ne!(current.root(), mutant.root());
+
+    let mut current_accumulator = 0xcbf2_9ce4_8422_2325;
+    golden_feed_policy_identity(&mut current_accumulator, "mating-policy", &current);
+    let mut mutant_accumulator = 0xcbf2_9ce4_8422_2325;
+    golden_feed_policy_identity(&mut mutant_accumulator, "mating-policy", &mutant);
+    assert_ne!(
+        current_accumulator, mutant_accumulator,
+        "the retained golden preimage must consume the mating-policy root"
+    );
+}
+
+#[test]
 fn nsga3_golden_hash() {
     let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
     let normalization_identity = normalization.replay_identity();
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY;
+    let mating_identity = mating.replay_identity();
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    golden_feed_normalization_policy_identity(&mut acc, &normalization_identity);
+    golden_feed_str(&mut acc, "fs-dfo-nsga3-golden-v3");
+    golden_feed_policy_identity(&mut acc, "normalization-policy", &normalization_identity);
+    golden_feed_policy_identity(&mut acc, "mating-policy", &mating_identity);
     let dirs = das_dennis(3, 6);
     for d in dirs.iter().step_by(5) {
         for v in d {
@@ -386,20 +409,26 @@ fn nsga3_golden_hash() {
     measurement(
         "nsga3-golden",
         format!(
-            "{{\"identity_schema\":2,\"actual\":\"{acc:#018x}\",\
-             \"expected\":\"{GOLDEN_HASH_V2:#018x}\",\
+            "{{\"identity_schema\":3,\"actual\":\"{acc:#018x}\",\
+             \"expected\":\"{GOLDEN_HASH_V3:#018x}\",\
              \"input_seed\":{GOLDEN_INPUT_SEED},\"normalization_variant\":\"{}\",\
              \"normalization_policy_schema\":{},\"normalization_identity_version\":{},\
-             \"normalization_identity_root\":\"0x{:016x}\"}}",
+             \"normalization_identity_root\":\"0x{:016x}\",\"mating_variant\":\"{}\",\
+             \"mating_policy_schema\":{},\"mating_identity_version\":{},\
+             \"mating_identity_root\":\"0x{:016x}\"}}",
             normalization.variant,
             normalization.schema_version,
             normalization_identity.version(),
             normalization_identity.root(),
+            mating.variant,
+            mating.schema_version,
+            mating_identity.version(),
+            mating_identity.root(),
         ),
     );
     assert_eq!(
-        acc, GOLDEN_HASH_V2,
-        "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH_V2:#018x} — bump only with semantic \
+        acc, GOLDEN_HASH_V3,
+        "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH_V3:#018x} — bump only with semantic \
          justification (golden-evidence policy)"
     );
 }

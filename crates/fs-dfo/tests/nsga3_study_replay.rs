@@ -20,7 +20,7 @@ use fs_obs::ident::ReplayIdentity;
 use fs_rand::StreamKey;
 use std::panic::catch_unwind;
 
-const SUITE: &str = "fs-dfo/nsga3-study-replay-v2";
+const SUITE: &str = "fs-dfo/nsga3-study-replay-v3";
 const CASE: &str = "short-three-objective-complete-callback-and-front";
 const RED_CASE: &str = "seeded-returned-objective-corruption";
 
@@ -267,7 +267,8 @@ fn push_u64_slice(bytes: &mut Vec<u8>, values: &[u64]) {
     }
 }
 
-fn push_normalization_policy_identity(bytes: &mut Vec<u8>, identity: &ReplayIdentity) {
+fn push_policy_identity(bytes: &mut Vec<u8>, field: &str, identity: &ReplayIdentity) {
+    push_str(bytes, field);
     push_u64(bytes, u64::from(identity.version()));
     push_u64(bytes, identity.root());
 }
@@ -296,13 +297,14 @@ fn directions() -> Vec<Vec<f64>> {
     das_dennis(OBJECTIVES, DIRECTION_DIVISIONS)
 }
 
-fn config_bytes_with_normalization(identity: &ReplayIdentity) -> Vec<u8> {
+fn config_bytes_with_policies(normalization: &ReplayIdentity, mating: &ReplayIdentity) -> Vec<u8> {
     let directions = directions();
     assert_eq!(directions.len(), EXPECTED_DIRECTIONS);
-    let mut bytes = b"fs-dfo-nsga3-study-config-v2".to_vec();
+    let mut bytes = b"fs-dfo-nsga3-study-config-v3".to_vec();
     push_str(&mut bytes, CASE);
     push_str(&mut bytes, "fs_dfo::nsga3");
-    push_normalization_policy_identity(&mut bytes, identity);
+    push_policy_identity(&mut bytes, "normalization-policy", normalization);
+    push_policy_identity(&mut bytes, "mating-policy", mating);
     push_str(&mut bytes, "three-objective-polynomial-tradeoff-v1");
     push_str(&mut bytes, "dimensionless");
     push_len(&mut bytes, DIMENSION);
@@ -338,8 +340,9 @@ fn config_bytes_with_normalization(identity: &ReplayIdentity) -> Vec<u8> {
 }
 
 fn config_bytes() -> Vec<u8> {
-    let identity = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
-    config_bytes_with_normalization(&identity)
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY.replay_identity();
+    config_bytes_with_policies(&normalization, &mating)
 }
 
 fn tri_objective(decision: &[f64]) -> Vec<f64> {
@@ -567,13 +570,34 @@ fn nsga3_study_config_consumes_shared_normalization_policy_root() {
     let mutant = mutant_policy.replay_identity();
     assert_ne!(current.root(), mutant.root());
 
-    let current_config = config_bytes_with_normalization(&current);
-    let mutant_config = config_bytes_with_normalization(&mutant);
+    let mating = fs_dfo::moo::NSGA3_MATING_POLICY.replay_identity();
+    let current_config = config_bytes_with_policies(&current, &mating);
+    let mutant_config = config_bytes_with_policies(&mutant, &mating);
     assert_ne!(current_config, mutant_config);
     assert_ne!(
         fnv1a64(&current_config),
         fnv1a64(&mutant_config),
         "the retained study configuration must consume the shared typed policy root"
+    );
+}
+
+#[test]
+fn nsga3_study_config_consumes_shared_mating_policy_root() {
+    let policy = fs_dfo::moo::NSGA3_MATING_POLICY;
+    let current = policy.replay_identity();
+    let mut mutant_policy = policy;
+    mutant_policy.equal_rank_policy = "lower-live-index-mutant";
+    let mutant = mutant_policy.replay_identity();
+    assert_ne!(current.root(), mutant.root());
+
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY.replay_identity();
+    let current_config = config_bytes_with_policies(&normalization, &current);
+    let mutant_config = config_bytes_with_policies(&normalization, &mutant);
+    assert_ne!(current_config, mutant_config);
+    assert_ne!(
+        fnv1a64(&current_config),
+        fnv1a64(&mutant_config),
+        "the retained study configuration must consume the mating-policy root"
     );
 }
 
