@@ -250,6 +250,7 @@ already using the PR/full split.
 | `check-goldens` | golden hashes whose upstream semantic surfaces drifted without a deliberate re-freeze (`golden-couplings.json`, docs/GOLDEN_POLICY.md) |
 | `check-identities` | persisted/replayed identity schemas with unclassified source fields, missing exact-field mutations or replay-version refusal guard targets, stale generated coverage, or schema/domain drift without a golden-coupling bump (`identity-schemas.json`) |
 | `check-manifest-fixture` | a new-domain package/edge omitted from `proposed-manifest-fixture.json`, an observed undeclared or forbidden edge, a missing declared-present edge, same-layer cycle/order drift, a root/standalone-`fs-wasm` metadata mismatch, or duplicate ownership of a registered domain type |
+| `check-vv-scorecard` | tracked `vv-scorecard.md`/`vv-scorecard.json` drifting from the deterministic projection of the seeded validation corpus and adversarial registry (regenerate with `generate-vv-scorecard`) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
 Each is also runnable alone (same names). Golden re-pins follow
@@ -551,6 +552,29 @@ it does not authenticate the manifest, prove that the cited source produced the
 package, or supply the still-missing E13.3 release binding. None of those
 stronger integrations may be inferred from a green structural drift check or a
 matching package field.
+
+## Public V&V scorecard
+
+[`vv-scorecard.md`](../vv-scorecard.md) and
+[`vv-scorecard.json`](../vv-scorecard.json) are the public V&V scorecard: a
+deterministic projection of the seeded `fs-vvreg` validation corpus and the
+built-in adversarial registry into per-(QoI, regime) outcome cells with a
+loud KNOWN GAPS list (bead `frankensim-extreal-program-f85xj.4.8`). Both are
+generated and checked with:
+
+```bash
+cargo run --locked -p xtask -- generate-vv-scorecard
+cargo run --locked -p xtask -- check-vv-scorecard
+```
+
+`check-vv-scorecard` regenerates both artifacts in memory and requires byte
+identity with the tracked files; it is composed into `xtask check-all`, so
+the configured DSR quality gate checks it. No retained ledgered run-result or
+executed adversarial-assessment store exists yet, so the committed artifact
+honestly renders every prediction-error, interval-coverage, and
+false-acceptance cell as `NO-DATA`; a populated cell requires a future
+persisting lane (e05/e07 scope), never a hand edit. The scorecard is a
+diagnostic projection: nothing it shows upgrades any corpus claim cap.
 
 ## External DSR wrapper limitations
 

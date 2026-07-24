@@ -47,6 +47,10 @@ pub mod partition;
 /// Claim-scoped external-evidence axes and fail-closed portfolio admission.
 pub mod portfolio;
 
+/// Deterministic public V&V scorecard: per-QoI/regime outcome cells with
+/// loud NO-DATA semantics and byte-identical renders.
+pub mod scorecard;
+
 /// Reference-only Level-A thermal analytic values and G1 order targets.
 pub mod thermal_level_a;
 

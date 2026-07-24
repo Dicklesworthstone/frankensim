@@ -15,6 +15,7 @@ fs-govern = { path = "../crates/fs-govern" }
 fs-matdb = { path = "../crates/fs-matdb" }
 fs-obs = { path = "../crates/fs-obs" }
 fs-qty = { path = "../crates/fs-qty" }
+fs-vvreg = { path = "../crates/fs-vvreg" }
 
 [lints]
 workspace = true

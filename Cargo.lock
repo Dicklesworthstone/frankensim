@@ -4432,6 +4432,7 @@ dependencies = [
  "fs-matdb",
  "fs-obs",
  "fs-qty",
+ "fs-vvreg",
 ]
 
 [[package]]

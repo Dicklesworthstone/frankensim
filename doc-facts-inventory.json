@@ -846,6 +846,7 @@
     "crates/fs-vvreg/tests/corpus.rs",
     "crates/fs-vvreg/tests/partition.rs",
     "crates/fs-vvreg/tests/portfolio.rs",
+    "crates/fs-vvreg/tests/scorecard.rs",
     "crates/fs-vvreg/tests/standards_manifest.rs",
     "crates/fs-vvreg/tests/thermal_level_a.rs",
     "crates/fs-vvreg/tests/thermal_level_b.rs",

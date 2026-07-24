@@ -227,6 +227,27 @@ body.
   external run's own known-answer self-check must have recorded `pass` or
   parsing refuses. Declared per-case probe-temperature envelopes are
   investigation triggers, never silently widened.
+- `scorecard::build_scorecard` — the public V&V scorecard as a pure,
+  fail-closed projection of (corpus registry, adversarial registry,
+  ledgered `ScorecardRunRecord`s, executed `AdversarialAssessment`s). Cells
+  are keyed by (QoI metric, canonical regime label derived from the
+  acceptance record's `ContextRange`s); each cell reports reference counts
+  per portfolio axis, external-reference coverage (`EXTERNAL_AXES` =
+  cross-code, controlled-experimental, blind-predictive, field), sorted
+  per-run signed-error rows with the declared `ReferenceUncertainty`
+  rendered next to the model error, envelope arithmetic
+  (`EnvelopeCheck::{Pass, Fail, Unpinned}`), interval coverage (always
+  `NO-DATA` until e07 machinery exists), and a `FalseAcceptanceCell` that
+  is `NoData` whenever zero bound challenges executed. Run records naming
+  unknown datasets or undeclared metrics refuse the whole build; foreign
+  or duplicate assessments refuse through the adversarial renderer's own
+  validation. `render_markdown`/`render_json` are pure functions of the
+  typed content; the scorecard identity binds typed fields (never rendered
+  bytes) plus sorted assessment identities. The honesty header carries
+  corpus schema/digest, seeded-vs-caller-built authority, per-level and
+  per-axis dataset counts, and a sorted KNOWN GAPS list naming every
+  (QoI, regime) cell — plus every scoped cooling QoI with no dataset at
+  all — that has zero external coverage.
 
 ## Invariants
 
@@ -421,6 +442,14 @@ Portfolio observations sort by axis, exact QoI/regime bytes, source, and
 independence group before versioned domain-separated hashing. Exact duplicates
 are idempotent; input order cannot move portfolio or admission identity.
 
+The scorecard is byte-identical for equal inputs: cells live in a sorted map
+keyed by (metric, canonical regime label), run rows sort by (dataset id, run
+identity, exact value bits), gap rows sort lexicographically, and both renders
+are pure. Markdown/JSON float display uses Rust's shortest-round-trip
+formatting (value-injective) and the JSON additionally carries exact IEEE-754
+bit tokens; the scorecard identity is a domain-separated BLAKE3 over
+length-framed typed fields, not over rendered bytes.
+
 ## Cancellation behavior
 
 None; operations are synchronous with no cancellation points. Honest
@@ -558,12 +587,37 @@ registration with `CrossCode` level, `Estimated` physical cap, retained-locator
 identity, and pinned per-case envelopes. The executing cross-code comparison
 itself lives in `fs-conduction/tests/level_b_crosscode.rs`.
 
+`tests/scorecard.rs`: G0 known-error cell arithmetic on a synthetic corpus
+(exact regime label, axis/external counts, pass/fail/unpinned split, exact
+signed errors); loud NO-DATA for empty cells and zero executed challenges
+(never rendered as zero); reference-uncertainty rendering in both renders;
+G5 byte-identity of Markdown, JSON, and identity across independent builds;
+the real-corpus e2e lane logging per-cell inputs and the gap list while
+pinning the seeded honesty header; a seeded false acceptance surfacing in
+exactly the cells of its retained challenge dataset and nowhere else; and
+fail-closed refusals for non-finite values, negative half-widths, blank ids,
+unknown datasets/metrics, the run-record resource limit, and foreign or
+duplicate assessments.
+
 ## No-claim boundaries
 
 - Admission proves the ENTRY is fully pinned; it does not prove any solver
   result, and it does not verify that an external deck's bytes exist or
   match their registered digest — artifact retrieval/verification is the
   consuming lane's job.
+- The scorecard is a diagnostic projection, never authority: supplying run
+  records or assessments cannot upgrade any corpus claim cap, an in-envelope
+  run row is envelope arithmetic (not an evidence colour), and cell
+  false-acceptance attribution follows the retained challenge dataset only —
+  planned-evidence cases stay in the adversarial section as `NO-DATA`. The
+  scorecard does not verify that a `ScorecardRunRecord`'s ledger identity
+  exists in any ledger or that its values were actually produced by the
+  named run; binding run provenance is the persisting lane's job (e05
+  scope). No retained ledgered run-result store exists yet, so the
+  committed repository artifact renders every prediction-error, coverage,
+  and false-acceptance cell as `NO-DATA`; the embedded adversarial
+  section's `false_acceptance_count` line counts supplied assessments and
+  is subordinate to the header's `NO-DATA` marker when nothing executed.
 - An executable envelope proves only that a caller-supplied scalar satisfies
   the exact arithmetic rule stored on the named seeded-registry QoI. It does not
   bind a reference to an oracle, bind a computed value to a deck/run, establish

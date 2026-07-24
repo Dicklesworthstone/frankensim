@@ -994,6 +994,15 @@ impl CorpusRegistry {
             .map(|index| &self.datasets[index])
     }
 
+    /// Whether this registry is the seeded workspace corpus. Caller-built
+    /// registries report `false` so downstream artifacts (for example the
+    /// public V&V scorecard) cannot present a synthetic corpus as the
+    /// authoritative one.
+    #[must_use]
+    pub const fn is_seeded(&self) -> bool {
+        matches!(self.authority, CorpusAuthority::Seeded)
+    }
+
     /// Query one dataset under an exact partition and complete context.
     /// The returned [`Evidence`] is intentionally non-certifying.
     pub(crate) fn query_declared_partition<'a>(

@@ -56,6 +56,7 @@ mod matdb_pack;
 mod maturity;
 mod moonshot_policy;
 mod source_manifest;
+mod vv_scorecard;
 
 use bootstrap_provenance::{
     BootstrapProvenanceRow, bootstrap_provenance_support_preflight, provenance_path_text,
@@ -8262,6 +8263,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-vv-scorecard" => {
+            return match vv_scorecard::generate(&root) {
+                Ok(()) => {
+                    eprintln!("public V&V scorecard artifacts regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-identities" => return identities::generate_identities(&root),
         "depgraph-receipt" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -8323,6 +8336,7 @@ fn main() -> ExitCode {
             source_manifest::check(&root),
             vec![source_manifest::CHECK, source_manifest::SPDX_CHECK],
         ),
+        "check-vv-scorecard" => (vv_scorecard::check(&root), vec![vv_scorecard::CHECK]),
         "check-claim-integrity" => {
             let report = claim_integrity_gate::check_claim_integrity_gate(&root);
             policy_notes = report.decisions;
@@ -8371,6 +8385,7 @@ fn main() -> ExitCode {
             v.extend(identities::check_identities(&root));
             v.extend(constellation_assessment::check(&root));
             v.extend(source_manifest::check(&root));
+            v.extend(vv_scorecard::check(&root));
             let manifest_report = manifest_fixture::check_manifest_fixture(&root);
             v.extend(manifest_report.violations);
             policy_notes = manifest_report.decisions;
@@ -8411,6 +8426,7 @@ fn main() -> ExitCode {
                     constellation_assessment::CHECK,
                     source_manifest::CHECK,
                     source_manifest::SPDX_CHECK,
+                    vv_scorecard::CHECK,
                     "manifest-fixture",
                     "doc-facts",
                     "capability-matrix",
@@ -8429,8 +8445,8 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|\
-                 check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|lock-constellation|\
+                 check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;
