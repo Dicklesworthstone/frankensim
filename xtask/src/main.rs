@@ -24,6 +24,8 @@
 //! - `check-source-manifest` — keep the structural trust-cone source inventory and SPDX rendering current.
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
+//! - `check-schemas`  — frozen public schema versions, migration obligations, and accretion control.
+//! - `check-program-metrics` — the program outcome-metrics dashboard is a checked deterministic artifact.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
@@ -55,6 +57,8 @@ mod manifest_fixture;
 mod matdb_pack;
 mod maturity;
 mod moonshot_policy;
+mod program_metrics;
+mod schemas;
 mod source_manifest;
 mod vv_scorecard;
 
@@ -8275,6 +8279,35 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-program-metrics" => {
+            return match program_metrics::generate(&root) {
+                Ok(()) => {
+                    eprintln!("program metrics dashboard artifacts regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        "record-program-metrics" => {
+            let Some(label) = std::env::args().nth(2) else {
+                eprintln!(
+                    "error: record-program-metrics needs a label, e.g. \
+                     `record-program-metrics \"2026-07-24 release train\"`; the label is how a \
+                     reader tells two recorded generations apart"
+                );
+                return ExitCode::FAILURE;
+            };
+            return match program_metrics::record(&root, &label) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-identities" => return identities::generate_identities(&root),
         "depgraph-receipt" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -8366,6 +8399,15 @@ fn main() -> ExitCode {
             violations.extend(projection.violations);
             (violations, vec!["doc-facts", "capability-matrix"])
         }
+        "check-schemas" => {
+            let report = schemas::check_schema_policy(&root);
+            policy_notes = report.decisions;
+            (report.violations, vec![schemas::CHECK])
+        }
+        "check-program-metrics" => (
+            program_metrics::check(&root),
+            vec![program_metrics::CHECK],
+        ),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
@@ -8404,6 +8446,10 @@ fn main() -> ExitCode {
             let gate_report = claim_integrity_gate::check_claim_integrity_gate(&root);
             v.extend(gate_report.violations);
             policy_notes.extend(gate_report.decisions);
+            let schema_report = schemas::check_schema_policy(&root);
+            v.extend(schema_report.violations);
+            policy_notes.extend(schema_report.decisions);
+            v.extend(program_metrics::check(&root));
             v.extend(claims::check_claim_language(&root));
             v.extend(closures::check_closures(&root));
             v.extend(check_citable_producers(&root));
@@ -8434,6 +8480,8 @@ fn main() -> ExitCode {
                     critical_path::CHECK,
                     moonshot_policy::CHECK,
                     "claim-integrity-gate",
+                    schemas::CHECK,
+                    program_metrics::CHECK,
                     "claim-state",
                     "closure-evidence",
                     CITABLE_PRODUCER_CHECK,
@@ -8444,9 +8492,9 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
-                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|\
+                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-program-metrics|\
                  check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|lock-constellation|\
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|record-program-metrics|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;

@@ -255,6 +255,25 @@ result is an admissible replacement at six-of-six active slots. The rehearsal
 changes no Bead state and grants no scientific or product authority; it
 exercises the policy shape and live dependency graph only.
 
+## Public schema freeze (bead f85xj.16.5, enforced: `check-schemas`)
+
+A small set of serialized schemas are public promises; everything else is
+internal and breakable. The frozen set, per-schema compatibility rules, and
+migration obligations live in `schema-policy.json`, with the doctrine in
+`docs/SCHEMA_POLICY.md`.
+
+Two rules bind day-to-day work:
+
+- Bumping a frozen schema's version constant without updating its policy record
+  in the same commit fails `check-all`. The check reads the constant out of its
+  declared source file, so the registry cannot describe a format that no longer
+  exists.
+- Adding a `pub const *_VERSION` integer to a product-boundary crate
+  (`fs-checker`, `fs-crosswalk`, `fs-ledger`, `fs-matdb`, `fs-package`,
+  `fs-project`, `fs-scenario`) requires classifying it: `frozen` if it is a
+  promise, `not_promised` with a reason class if it is internal. An
+  unclassified constant is accretion and fails the gate.
+
 ## Compiler checks
 
 After substantive changes:

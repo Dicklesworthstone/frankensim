@@ -1,0 +1,609 @@
+{
+  "schema": "frankensim-schema-policy-v1",
+  "policy_bead": "frankensim-extreal-program-f85xj.16.5",
+  "ratified": "2026-07-24",
+  "doctrine": "docs/SCHEMA_POLICY.md",
+  "accretion_scope": [
+    "fs-checker",
+    "fs-crosswalk",
+    "fs-ledger",
+    "fs-matdb",
+    "fs-package",
+    "fs-project",
+    "fs-scenario"
+  ],
+  "frozen": [
+    {
+      "id": "project.fsim",
+      "title": "The .fsim project schema",
+      "owner": "fs-project",
+      "version_kind": "integer-const",
+      "version_constant": "FSIM_VERSION",
+      "version_location": "crates/fs-project/src/lib.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "the canonical .fsim envelope and its canonical-hash construction",
+        "the Five Explicits fields required of every project",
+        "declared region and interface material bindings",
+        "the optional per-binding claim pin (`:claim <hex>`, both spellings) admitted at bead f85xj.6.4; a pin never bypasses validity and refuses as PinnedClaimOutOfDomain or PinnedClaimUnknown",
+        "structural finding identifiers reported by `frankensim validate`"
+      ],
+      "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
+      "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
+      "migration_obligation": "auto-migration-receipt",
+      "migration_evidence": [
+        {
+          "test": "the_version_bump_machinery_is_proven_with_the_synthetic_migration",
+          "location": "crates/fs-project/tests/project.rs"
+        }
+      ],
+      "deprecation_horizon": "a removed field stays accepted for one major version after the release that deprecates it"
+    },
+    {
+      "id": "package.format",
+      "title": "The evidence-package format",
+      "owner": "fs-package",
+      "version_kind": "integer-const",
+      "version_constant": "FORMAT_VERSION",
+      "version_location": "crates/fs-package/src/lib.rs",
+      "current_version": "9",
+      "lockstep": [
+        {
+          "constant": "CHECKER_SUPPORTED_PACKAGE_FORMAT",
+          "location": "crates/fs-checker/src/lib.rs",
+          "value": "9"
+        },
+        {
+          "constant": "CHECKER_DECISION_IDENTITY_VERSION",
+          "location": "crates/fs-checker/src/lib.rs",
+          "value": "9"
+        },
+        {
+          "constant": "SUPPORTED_PACKAGE_FORMAT",
+          "location": "crates/fs-crosswalk/src/lib.rs",
+          "value": "9"
+        }
+      ],
+      "surface": [
+        "the strict canonical JSON round trip of an EvidencePackage",
+        "the Merkle root construction over claims and provenance",
+        "claim evidence colours and the conservative composition rule",
+        "the optional format-9 source-manifest identity citation carried by Provenance::with_source_manifest_identity"
+      ],
+      "minor_bump": "not available: this format has no minor channel, because the checker binds the exact format integer at compile time",
+      "major_bump": "any change to the canonical bytes, root construction, or claim semantics; the checker and crosswalk lockstep constants must move in the same commit",
+      "migration_obligation": "refuse-unmigratable",
+      "migration_evidence": [
+        {
+          "test": "an_unsupported_format_version_is_rejected",
+          "location": "crates/fs-package/tests/package.rs"
+        }
+      ],
+      "deprecation_horizon": "none: a superseded package format is refused immediately and by name, never silently reinterpreted"
+    },
+    {
+      "id": "checker.protocol",
+      "title": "The standalone checker protocol",
+      "owner": "fs-checker",
+      "version_kind": "integer-const",
+      "version_constant": "CHECKER_PROTOCOL_VERSION",
+      "version_location": "crates/fs-checker/src/lib.rs",
+      "current_version": "7",
+      "lockstep": [],
+      "surface": [
+        "the advertised protocol integer",
+        "the solver-free re-check verdict surface: pass or fail, merkle root, budget pie",
+        "the Phase-0A release-gate admission inputs a caller must supply"
+      ],
+      "minor_bump": "may add report fields that a prior reader can ignore; may not change an existing verdict for unchanged inputs",
+      "major_bump": "any change to verdict semantics or required admission inputs; deliberately independent of the package format integer it supports",
+      "migration_obligation": "refuse-unmigratable",
+      "migration_evidence": [
+        {
+          "test": "the_checker_advertises_its_protocol_version",
+          "location": "crates/fs-checker/tests/checker.rs"
+        }
+      ],
+      "deprecation_horizon": "none: a mismatched protocol is refused, never negotiated down"
+    },
+    {
+      "id": "scenario.ir",
+      "title": "The scenario IR",
+      "owner": "fs-scenario",
+      "version_kind": "integer-const",
+      "version_constant": "SCENARIO_IR_VERSION",
+      "version_location": "crates/fs-scenario/src/ir.rs",
+      "current_version": "2",
+      "lockstep": [
+        {
+          "constant": "LEGACY_SCENARIO_IR_VERSION",
+          "location": "crates/fs-scenario/src/ir.rs",
+          "value": "1"
+        }
+      ],
+      "surface": [
+        "the canonical scenario IR encoding and its stable entity identities",
+        "typed boundary, load, and quantity records with six-base dimensions",
+        "the migration receipts emitted when a legacy document is admitted"
+      ],
+      "minor_bump": "may add optional typed records; every prior document must still decode and must emit a receipt naming each applied rule",
+      "major_bump": "may retire a legacy decode path; the retired version must then refuse by name rather than decode approximately",
+      "migration_obligation": "auto-migration-receipt",
+      "migration_evidence": [
+        {
+          "test": "sc_001a_legacy_five_base_ir_decodes_with_receipt",
+          "location": "crates/fs-scenario/tests/conformance.rs"
+        },
+        {
+          "test": "ec_006_legacy_string_scenarios_migrate_mechanically",
+          "location": "crates/fs-scenario/tests/entity_identity.rs"
+        }
+      ],
+      "deprecation_horizon": "a legacy IR version stays decodable for one major version after the release that supersedes it"
+    },
+    {
+      "id": "matdb.pack",
+      "title": "The FSMATPK material pack family",
+      "owner": "fs-matdb",
+      "version_kind": "integer-const",
+      "version_constant": "MATDB_PACK_SCHEMA_VERSION",
+      "version_location": "crates/fs-matdb/src/pack.rs",
+      "current_version": "1",
+      "lockstep": [
+        {
+          "constant": "SPECIES_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/species_pack.rs",
+          "value": "1"
+        },
+        {
+          "constant": "INTERFACE_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/interface_pack.rs",
+          "value": "1"
+        },
+        {
+          "constant": "MODEL_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/model_pack.rs",
+          "value": "1"
+        }
+      ],
+      "surface": [
+        "the FSMATPK magic and container layout of a compiled pack",
+        "the material, species, interface, and model pack payload structure",
+        "the card claim/provenance/validity-domain fields a consumer reads",
+        "refusal rather than extrapolation outside a declared validity domain"
+      ],
+      "minor_bump": "may add optional payload sections that an older reader can skip without changing any admitted query answer",
+      "major_bump": "any container, magic, or payload-structure change; every shipped pack must be recompilable from its tracked source",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "not yet applicable: the family has never been bumped, so no predecessor exists to support"
+    },
+    {
+      "id": "ledger.schema",
+      "title": "The design-ledger database schema",
+      "owner": "fs-ledger",
+      "version_kind": "integer-const",
+      "version_constant": "SCHEMA_VERSION",
+      "version_location": "crates/fs-ledger/src/schema.rs",
+      "current_version": "20",
+      "lockstep": [],
+      "surface": [
+        "the PRAGMA user_version integer of a FrankenSQLite ledger file",
+        "the forward migration ladder: an older ledger file opens and migrates in place",
+        "artifact, operation, event, metric, tune, and lineage row identity across a migration",
+        "time-travel query results for history retained before the migration"
+      ],
+      "minor_bump": "not available: every schema change increments the single user_version integer and adds a ladder rung",
+      "major_bump": "each rung is a major event; a rung may add tables or columns but must preserve retained history and row identity",
+      "migration_obligation": "auto-migration-receipt",
+      "migration_evidence": [
+        {
+          "test": "tt_001_v1_database_migrates_to_v2_with_history_intact",
+          "location": "crates/fs-ledger/tests/travel.rs"
+        },
+        {
+          "test": "ledger_003_schema_migration_versioned",
+          "location": "crates/fs-ledger/tests/conformance.rs"
+        }
+      ],
+      "deprecation_horizon": "every rung from v1 forward stays migratable; dropping a rung requires a decision record"
+    },
+    {
+      "id": "sbom.source_manifest",
+      "title": "The structural source manifest and its SPDX projection",
+      "owner": "xtask",
+      "version_kind": "string-const",
+      "version_constant": "SCHEMA",
+      "version_location": "xtask/src/source_manifest.rs",
+      "current_version": "frankensim-source-manifest-v1",
+      "lockstep": [
+        {
+          "constant": "SPDX_VERSION",
+          "location": "xtask/src/source_manifest.rs",
+          "value": "SPDX-2.3"
+        }
+      ],
+      "surface": [
+        "the tracked frankensim-source-manifest.json field set and its BLAKE3 file digests",
+        "the deterministic SPDX 2.3 JSON projection over the same exact file set",
+        "the 32-byte canonical manifest identity that fs-package format 9 may cite"
+      ],
+      "minor_bump": "may add optional top-level sections; the exact file set, digests, and canonical identity construction must not move",
+      "major_bump": "any change to the identity construction or digest algorithm; a citing package format must move in lockstep",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "not yet applicable: the manifest schema has never been bumped"
+    },
+    {
+      "id": "maturity.registry",
+      "title": "The capability-maturity registry and its generated matrix",
+      "owner": "xtask",
+      "version_kind": "string-const",
+      "version_constant": "REGISTRY_SCHEMA",
+      "version_location": "xtask/src/maturity.rs",
+      "current_version": "frankensim-capability-maturity-v1",
+      "lockstep": [],
+      "surface": [
+        "the tracked capability-maturity.json field set and its level vocabulary",
+        "the level definitions enforced from docs/MATURITY_LEVELS.md",
+        "the generated README capability matrix, which is the dashboard projection of this registry"
+      ],
+      "minor_bump": "may add capabilities or optional record fields; may not redefine an existing level or silently restate a boundary",
+      "major_bump": "any change to the level vocabulary or to a level's meaning; requires a MATURITY_LEVELS.md change in the same commit",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "not yet applicable: the registry schema has never been bumped"
+    }
+  ],
+  "not_promised": [
+    {
+      "constant": "INITIAL_SEMANTIC_SCHEMA_VERSION",
+      "location": "crates/fs-checker/src/semantic.rs",
+      "reason_class": "internal-wire",
+      "reason": "semantic plugin scaffolding; no external producer is invited to emit it"
+    },
+    {
+      "constant": "SEMANTIC_IMPLEMENTATION_VERSION",
+      "location": "crates/fs-checker/src/semantic.rs",
+      "reason_class": "internal-wire",
+      "reason": "identifies the in-tree semantic implementation, not a document a third party writes"
+    },
+    {
+      "constant": "SEMANTIC_PLUGIN_IDENTITY_VERSION",
+      "location": "crates/fs-checker/src/semantic.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for plugin identity"
+    },
+    {
+      "constant": "SEMANTIC_REGISTRY_IDENTITY_VERSION",
+      "location": "crates/fs-checker/src/semantic.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for registry identity"
+    },
+    {
+      "constant": "SEMANTIC_REPORT_IDENTITY_VERSION",
+      "location": "crates/fs-checker/src/semantic.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for report identity"
+    },
+    {
+      "constant": "CROSSWALK_VERSION",
+      "location": "crates/fs-crosswalk/src/lib.rs",
+      "reason_class": "internal-wire",
+      "reason": "versions the standards-vocabulary mapping text, not a serialized artifact another tool parses"
+    },
+    {
+      "constant": "COLOR_DEMOTION_ROW_SCHEMA_VERSION",
+      "location": "crates/fs-ledger/src/colors.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape; carried across upgrades by the ledger schema ladder"
+    },
+    {
+      "constant": "COLOR_WRITE_ROW_SCHEMA_VERSION",
+      "location": "crates/fs-ledger/src/colors.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape; carried across upgrades by the ledger schema ladder"
+    },
+    {
+      "constant": "ARTIFACT_CONTENT_IDENTITY_ROW_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape used by the identity migration"
+    },
+    {
+      "constant": "EDGE_CONTENT_IDENTITY_ROW_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape used by the identity migration"
+    },
+    {
+      "constant": "IDENTITY_MIGRATION_RECEIPT_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-receipt",
+      "reason": "receipt retained inside the ledger; readable through the ledger API rather than promised as a file format"
+    },
+    {
+      "constant": "IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-receipt",
+      "reason": "encoding of the retained migration receipt; covered by the ledger schema promise"
+    },
+    {
+      "constant": "IDENTITY_RECONCILE_CURSOR_WIRE_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-wire",
+      "reason": "resume cursor for an in-process migration; never leaves the ledger file"
+    },
+    {
+      "constant": "OP_CONTENT_IDENTITY_ROW_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape used by the identity migration"
+    },
+    {
+      "constant": "TUNE_CONTENT_IDENTITY_ROW_VERSION",
+      "location": "crates/fs-ledger/src/identity_migration.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape used by the identity migration"
+    },
+    {
+      "constant": "ARTIFACT_CONTENT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "COLOR_ADMISSION_POLICY_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "COLOR_NODE_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "DERIVED_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "PHYSICAL_INSTANCE_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SESSION_FLUSH_BATCH_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SESSION_MUTATION_CLAIM_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SESSION_TERMINAL_EVENTS_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SOURCE_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SOURCE_ORIGIN_REQUEST_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "VCS_COMMIT_ENVELOPE_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "VCS_COMMIT_LEAF_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "VCS_COMMIT_ROOT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "VCS_LEDGER_LINEAGE_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SESSION_REGISTRY_ROW_SCHEMA_VERSION",
+      "location": "crates/fs-ledger/src/session_registry.rs",
+      "reason_class": "internal-row",
+      "reason": "ledger-internal row shape; carried across upgrades by the ledger schema ladder"
+    },
+    {
+      "constant": "SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/session_registry.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-ledger/src/state_checkpoint.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "PI_COMPARE_POLICY_VERSION",
+      "location": "crates/fs-ledger/src/tombstone.rs",
+      "reason_class": "internal-wire",
+      "reason": "versions an internal comparison policy, not a serialized document"
+    },
+    {
+      "constant": "CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION",
+      "location": "crates/fs-matdb/src/cards.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for a canonical parameter block"
+    },
+    {
+      "constant": "MATDB_SCHEMA_VERSION",
+      "location": "crates/fs-matdb/src/cards.rs",
+      "reason_class": "derived-lockstep",
+      "reason": "card structure travels inside a compiled pack and is covered by the matdb.pack promise; it is not separately promised as a standalone file format"
+    },
+    {
+      "constant": "JOINT_USAGE_RECEIPT_SCHEMA_VERSION",
+      "location": "crates/fs-matdb/src/pack.rs",
+      "reason_class": "internal-receipt",
+      "reason": "query receipt returned through the API; retained by a caller, not exchanged as a promised file"
+    },
+    {
+      "constant": "PCB_HOMOGENIZATION_SCHEMA_VERSION",
+      "location": "crates/fs-matdb/src/pcb.rs",
+      "reason_class": "internal-wire",
+      "reason": "in-flight homogenization surface with no registered maturity claim"
+    },
+    {
+      "constant": "MATDB_EVALUATOR_VERSION",
+      "location": "crates/fs-matdb/src/query.rs",
+      "reason_class": "internal-wire",
+      "reason": "identifies the in-tree evaluator implementation"
+    },
+    {
+      "constant": "PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-matdb/src/query.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for a usage receipt"
+    },
+    {
+      "constant": "PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION",
+      "location": "crates/fs-matdb/src/query.rs",
+      "reason_class": "internal-receipt",
+      "reason": "query receipt returned through the API; retained by a caller, not exchanged as a promised file"
+    },
+    {
+      "constant": "COVERAGE_DECISION_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/coverage.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "PRESENCE_DECISION_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/coverage.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "CLAIM_DECLARATION_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator retained at 8 because its subject bytes did not change at format 9"
+    },
+    {
+      "constant": "CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator retained at 8 because its subject bytes did not change at format 9"
+    },
+    {
+      "constant": "PACKAGE_ROOT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator bound to the package format integer"
+    },
+    {
+      "constant": "RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SEMANTIC_WITNESS_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator retained at 8 because its subject bytes did not change at format 9"
+    },
+    {
+      "constant": "SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator retained at 8 because its subject bytes did not change at format 9"
+    },
+    {
+      "constant": "VERIFICATION_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/lib.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "SIGNATURE_SUBJECT_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/origin.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for the signature subject"
+    },
+    {
+      "constant": "RECEIPT_SCHEMA_CATALOG_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/receipt_catalog.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "RECEIPT_SCHEMA_CATALOG_VERSION",
+      "location": "crates/fs-package/src/receipt_catalog.rs",
+      "reason_class": "internal-wire",
+      "reason": "in-tree catalog of receipt descriptors; not an interchange document"
+    },
+    {
+      "constant": "RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_VERSION",
+      "location": "crates/fs-package/src/receipt_catalog.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "PAYLOAD_WIRE_VERSION",
+      "location": "crates/fs-scenario/src/payload.rs",
+      "reason_class": "internal-wire",
+      "reason": "payload encoding internal to the scenario crate"
+    },
+    {
+      "constant": "SENSOR_EXTENSION_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/sensor.rs",
+      "reason_class": "internal-wire",
+      "reason": "sensor extension surface landed at bead f85xj.17.4 with no registered maturity claim"
+    },
+    {
+      "constant": "SENSOR_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/sensor.rs",
+      "reason_class": "internal-wire",
+      "reason": "sensor extension surface landed at bead f85xj.17.4 with no registered maturity claim"
+    },
+    {
+      "constant": "SENSOR_SET_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/sensor.rs",
+      "reason_class": "internal-wire",
+      "reason": "sensor extension surface landed at bead f85xj.17.4 with no registered maturity claim"
+    }
+  ]
+}

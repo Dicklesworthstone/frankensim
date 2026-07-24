@@ -240,9 +240,49 @@ FrankenSim ships an initial strict validation CLI. Its solve, report, and packag
 | `cargo run -p xtask -- check-unsafe` | Check unsafe code against registered capsules |
 | `cargo run -p xtask -- check-constellation` | Verify sibling Franken repository pins |
 | `cargo run -p xtask -- check-source-manifest` | Verify the canonical structural source/SBOM inventory and its SPDX 2.3 JSON projection |
+| `cargo run -p xtask -- check-schemas` | Verify the frozen public schema set, its migration obligations, and accretion control |
 | `cargo run -p xtask -- check-all` | Run the implemented `xtask` policy checks together |
 | `dsr quality --tool frankensim` | Run the configured repo-level DSR quality gate when DSR is available |
 | `dsr build frankensim --target darwin/arm64` | Run the configured native DSR build lane |
+
+## Schema Promises
+
+FrankenSim promises a **small** set of serialized schemas. Everything else is
+internal and breakable. The list is the promise: there is no implicit public
+schema, no matter how stable a format looks or how many readers it has
+acquired. The authoritative registry is
+[`schema-policy.json`](schema-policy.json); the doctrine, including the
+per-schema compatibility and deprecation rules, is
+[`docs/SCHEMA_POLICY.md`](docs/SCHEMA_POLICY.md).
+
+| Frozen schema | Owner | Version | If an older document appears |
+|---------------|-------|---------|------------------------------|
+| `.fsim` project schema | `fs-project` | 1 | migrates, with a receipt |
+| Evidence-package format | `fs-package` | 9 | refused by name |
+| Checker protocol | `fs-checker` | 7 | refused by name |
+| Scenario IR | `fs-scenario` | 2 | migrates, with a receipt |
+| FSMATPK material pack family | `fs-matdb` | 1 | no predecessor yet |
+| Design-ledger schema | `fs-ledger` | 20 | migrates in place, history intact |
+| Source manifest + SPDX projection | `xtask` | `-v1` | no predecessor yet |
+| Capability-maturity registry | `xtask` | `-v1` | no predecessor yet |
+
+`cargo run -p xtask -- check-schemas` reads each version constant out of its
+declared source file, so a promise cannot describe a format that no longer
+exists. It also enforces the migration obligation each record declares, and
+scans the product-boundary crates for public version constants that are neither
+promised nor explicitly disclaimed, so a new serialized format cannot drift into
+accidental-public status.
+
+Two boundaries are worth stating plainly. **Refusal is an obligation, not an
+absence of one**: the evidence-package format and checker protocol deliberately
+have no migration path, because silently reinterpreting a stale package is worse
+than refusing it. And a `no-predecessor` schema is *not* a claim that migration
+works — it records that the schema has never been bumped, and the gate refuses
+the first bump until the record declares how the predecessor is handled.
+
+Because there is no crates.io release yet, these records currently bind the
+tree and the `check-all` gate rather than a published artifact; they become the
+compatibility promise of the first tagged release.
 
 ## Implemented Workspace
 
@@ -294,7 +334,7 @@ FrankenSim is organized as layered Rust crates. The names below are crates prese
 
 | Crate | What is implemented |
 |-------|---------------------|
-| `fs-ledger` | Versioned Design Ledger schema (currently v12) on FrankenSQLite, immutable persisted ledger identity, dual-index fail-closed discovery and durable session-mutation receipts, content-addressed artifacts, exact five-to-six quantity crosswalks, semantic state-checkpoint bindings, operations, event streams, lineage, metrics, tune cache, extension rows, integrity/lint checks, and time-travel queries |
+| `fs-ledger` | Versioned Design Ledger schema (currently v20) on FrankenSQLite, immutable persisted ledger identity, dual-index fail-closed discovery and durable session-mutation receipts, content-addressed artifacts, exact five-to-six quantity crosswalks, semantic state-checkpoint bindings, operations, event streams, lineage, metrics, tune cache, extension rows, integrity/lint checks, and time-travel queries |
 | `fs-ir` | FrankenScript typed AST with spans, isomorphic s-expression and JSON syntaxes, shape comparison, study recognition, lowering, structured IR errors, durable Machine-IR entity/topology lineage, dependency-neutral machine-graph admission, separately identified behavior and assurance overlays, and cancellation-correct one-way admission of caller-materialized `fs-scenario` plus exact external-domain artifacts through a complete stable-ID crosswalk and replayable manifest |
 | `fs-plan` | Cost model types, error and time ledgers, plan-cost oracle, and cost-model construction from tune records |
 | `fs-roofline` | Machine-axis probing, protected historical baselines, kernel registry, measurement receipts, baseline-bound ledger recording, and staleness checks |
@@ -456,6 +496,7 @@ cargo run -p xtask -- check-unsafe
 cargo run -p xtask -- check-all
 cargo run -p xtask -- check-constellation
 cargo run -p xtask -- check-source-manifest
+cargo run -p xtask -- check-schemas
 ```
 
 ## Architecture
