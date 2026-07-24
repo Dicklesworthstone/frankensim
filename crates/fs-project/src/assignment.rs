@@ -12,6 +12,7 @@ use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{DomainHasher, hash_domain};
+use fs_conduction::{ConductionMesh, InterfaceFacePair, ThermalInterfaces};
 use fs_exec::Cx;
 use fs_io::{
     AssignmentLimits, AssignmentReport, AssignmentRequest, NamedFaceGroup, resolve_mesh_assignments,
@@ -30,6 +31,7 @@ pub const GEOMETRY_ASSIGNMENT_REPORT_DOMAIN: &str =
 
 const PROJECT_ASSIGNMENT_NO_CLAIM: &str = "the adapter binds exact project entity identities, one declared selector plan, and one supplied finite tessellation; it does not authenticate the mesh supplier, prove continuum/CAD/physical-region sameness, or make fs-io face ordinals stable across re-import";
 const INTERFACE_AUDIT_NO_CLAIM: &str = "the audit reports finite-mesh region pairs whose supplied triangle soups approach within the declared tolerance in one shared coordinate unit; it does not certify continuum contact, infer a physical interface law, authenticate assembly transforms, or prove that a declared interface is complete";
+const CONDUCTION_INTERFACE_NO_CLAIM: &str = "the lowering binds exact coordinate-bit equality among one resolved imported triangle soup, its retained face ordinals, declared region/interface selectors, and one exact ConductionMesh boundary; it does not authenticate the importer, prove continuum or CAD identity, infer region ownership when oriented source faces do not establish it, select an interface card, or construct a thermal operator";
 
 /// One caller-supplied promoted mesh and its importer-provided named groups.
 #[derive(Debug)]
@@ -242,6 +244,139 @@ impl InterfaceDeclarationAudit {
     #[must_use]
     pub const fn no_claim() -> &'static str {
         INTERFACE_AUDIT_NO_CLAIM
+    }
+}
+
+/// Explicit resource envelope for exact imported-face to conduction-boundary
+/// lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConductionInterfaceLimits {
+    /// Maximum selected source faces indexed across the complete lowering.
+    pub max_source_faces: u64,
+}
+
+impl ConductionInterfaceLimits {
+    /// Conservative default for one project-to-conduction adapter call.
+    pub const DEFAULT: Self = Self {
+        max_source_faces: 1_000_000,
+    };
+}
+
+impl Default for ConductionInterfaceLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Exact imported face retained as provenance for one conduction boundary
+/// slot.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ConductionSourceFace {
+    /// Project geometry role whose immutable assignment report selected it.
+    pub artifact: String,
+    /// Exact source identity used by the assignment receipt.
+    pub source_identity: String,
+    /// Face ordinal in that exact imported triangle soup.
+    pub face: u32,
+}
+
+/// One declared scenario interface lowered to an oriented pair of exact
+/// `ConductionMesh::boundary()` slots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConductionInterfacePair {
+    /// Declared interface entity name.
+    pub interface: String,
+    /// Declared `from` region name.
+    pub from_region: String,
+    /// Declared `to` region name.
+    pub to_region: String,
+    /// Boundary slot whose outward-oriented source face belongs to `from`.
+    pub from_boundary_slot: usize,
+    /// Boundary slot whose outward-oriented source face belongs to `to`.
+    pub to_boundary_slot: usize,
+    /// Imported source face proving the `from` slot association.
+    pub from_source: ConductionSourceFace,
+    /// Imported source face proving the `to` slot association.
+    pub to_source: ConductionSourceFace,
+    /// Imported faces selected by the interface entity for this exact
+    /// geometric triangle. One shared CAD face or both duplicated traces are
+    /// admitted; an empty selector match refuses.
+    pub interface_sources: Vec<ConductionSourceFace>,
+}
+
+impl ResolvedConductionInterfacePair {
+    /// The fs-conduction face-pair value, preserving declared scenario
+    /// orientation.
+    #[must_use]
+    pub const fn face_pair(&self) -> InterfaceFacePair {
+        InterfaceFacePair {
+            side_a: self.from_boundary_slot,
+            side_b: self.to_boundary_slot,
+        }
+    }
+}
+
+/// Atomic result of lowering every coincident conduction trace to declared
+/// scenario interface semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConductionInterfaceResolution {
+    /// Typed precondition, geometry, resource, or cancellation refusals.
+    pub violations: Vec<Violation>,
+    /// Lowered pairs in deterministic conduction candidate order. Empty on
+    /// any refusal; partial interface publication is forbidden.
+    pub pairs: Vec<ResolvedConductionInterfacePair>,
+    /// Exact selected source faces indexed before publication.
+    pub source_faces_indexed: u64,
+}
+
+impl ConductionInterfaceResolution {
+    /// True only when every coincident conduction trace has exactly one
+    /// declared interface and every declared interface lowered at least once.
+    #[must_use]
+    pub fn admissible(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    /// Deterministic table for end-to-end evidence and operator handoff.
+    #[must_use]
+    pub fn render_table(&self) -> String {
+        let mut output = String::new();
+        for pair in &self.pairs {
+            let interface_faces = pair
+                .interface_sources
+                .iter()
+                .map(|source| {
+                    format!(
+                        "{}:{}:{}",
+                        source.artifact, source.source_identity, source.face
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let _ = writeln!(
+                output,
+                "{} | {} slot {} <- {}:{}:{} | {} slot {} <- {}:{}:{} | interface-faces [{}]",
+                pair.interface,
+                pair.from_region,
+                pair.from_boundary_slot,
+                pair.from_source.artifact,
+                pair.from_source.source_identity,
+                pair.from_source.face,
+                pair.to_region,
+                pair.to_boundary_slot,
+                pair.to_source.artifact,
+                pair.to_source.source_identity,
+                pair.to_source.face,
+                interface_faces,
+            );
+        }
+        output
+    }
+
+    /// Explicit authority boundary shared by every successful row.
+    #[must_use]
+    pub const fn no_claim() -> &'static str {
+        CONDUCTION_INTERFACE_NO_CLAIM
     }
 }
 
@@ -574,6 +709,355 @@ pub fn resolve_geometry_assignments(
     }
 
     result.artifacts = pending;
+    result
+}
+
+type ConductionPointKey = [u64; 3];
+type ConductionFaceKey = [ConductionPointKey; 3];
+
+#[derive(Debug, Clone)]
+struct IndexedConductionSourceFace {
+    source: ConductionSourceFace,
+    outward: [f64; 3],
+}
+
+/// Lower exact, oriented imported surface assignments to the boundary-slot
+/// identity consumed by fs-conduction.
+///
+/// This function deliberately resolves geometry assignments itself while
+/// borrowing the imported library and conduction mesh for the complete call.
+/// A source face associates with a boundary slot only when all three vertex
+/// coordinate bit patterns agree and the source triangle orientation agrees
+/// with that slot's outward normal. Interface selectors must cover the same
+/// exact triangle, every coincident conduction pair must be claimed once, and
+/// every declared interface must lower at least once.
+#[must_use]
+pub fn resolve_conduction_interface_pairs(
+    spec: &ProjectSpec,
+    library: &ImportedMeshLibrary,
+    assignment_limits: AssignmentLimits,
+    limits: ConductionInterfaceLimits,
+    mesh: &ConductionMesh,
+    cx: &Cx<'_>,
+) -> ConductionInterfaceResolution {
+    let mut result = ConductionInterfaceResolution::default();
+    if cx.checkpoint().is_err() {
+        result
+            .violations
+            .push(conduction_interface_cancelled("conduction-interface-entry"));
+        return result;
+    }
+
+    let geometry = resolve_geometry_assignments(spec, library, assignment_limits, cx);
+    if !geometry.admissible() {
+        result.violations = geometry.violations;
+        return result;
+    }
+    let Some(assembly) = &spec.assembly else {
+        result.violations.push(violation(
+            "project-conduction-interface-preconditions",
+            "conduction interface lowering requires the `assembly` section",
+            "declare the region and interface entities before lowering boundary slots",
+        ));
+        return result;
+    };
+
+    let mut declarations = Vec::new();
+    let mut declaration_pairs = BTreeMap::<(&str, &str), &str>::new();
+    for entity in assembly {
+        if let EntityDecl::Interface { name, from, to, .. } = entity {
+            let region_pair = ordered_pair(from, to);
+            if let Some(previous) = declaration_pairs.insert(region_pair, name) {
+                result.violations.push(violation(
+                    "project-conduction-interface-pair-ambiguous",
+                    format!(
+                        "interfaces `{previous}` and `{name}` both join regions `{}` and `{}`",
+                        region_pair.0, region_pair.1
+                    ),
+                    "declare one thermal interface entity per region pair; staged mechanical joints need a separate typed relationship",
+                ));
+            }
+            declarations.push((name.as_str(), from.as_str(), to.as_str()));
+        }
+    }
+    if !result.violations.is_empty() {
+        return result;
+    }
+
+    let mut index =
+        BTreeMap::<(String, ConductionFaceKey), Vec<IndexedConductionSourceFace>>::new();
+    for artifact in &geometry.artifacts {
+        let Some(imported) = library.get(&artifact.source_identity) else {
+            result.violations.push(violation(
+                "project-conduction-interface-mesh-unavailable",
+                format!(
+                    "resolved geometry role `{}` no longer has its exact imported mesh",
+                    artifact.artifact_role
+                ),
+                "keep the imported mesh library alive through conduction boundary lowering",
+            ));
+            return result;
+        };
+        if artifact.entities.len() != artifact.report.assignments.len() {
+            result.violations.push(violation(
+                "project-conduction-interface-report-mismatch",
+                format!(
+                    "resolved geometry role `{}` has different entity and assignment row counts",
+                    artifact.artifact_role
+                ),
+                "discard the inconsistent resolution and rerun the project assignment adapter",
+            ));
+            return result;
+        }
+        if artifact.report.receipt.length_unit() != "m" {
+            result.violations.push(violation(
+                "project-conduction-interface-unit",
+                format!(
+                    "geometry role `{}` retains length unit `{}`, but ConductionMesh coordinates are SI metres",
+                    artifact.artifact_role,
+                    artifact.report.receipt.length_unit()
+                ),
+                "promote and assign the geometry in explicit `m` coordinates before exact conduction lowering",
+            ));
+            return result;
+        }
+        for (entity, assignment) in artifact.entities.iter().zip(&artifact.report.assignments) {
+            for &face in &assignment.faces {
+                if result.source_faces_indexed == limits.max_source_faces {
+                    result.violations.push(violation(
+                        "project-conduction-interface-resource-bound",
+                        format!(
+                            "conduction interface lowering reached the admitted {} selected source faces",
+                            limits.max_source_faces
+                        ),
+                        "raise the explicit source-face limit within the run budget or reduce the selector plan",
+                    ));
+                    return result;
+                }
+                if result.source_faces_indexed % 1_024 == 0 && cx.checkpoint().is_err() {
+                    result.violations.push(conduction_interface_cancelled(
+                        "conduction-interface-source-index",
+                    ));
+                    return result;
+                }
+                result.source_faces_indexed += 1;
+                let face_index = face as usize;
+                let triangle = imported.soup.tri(face_index);
+                let coordinates = triangle.map(|point| [point.x, point.y, point.z]);
+                let outward = cross3(
+                    subtract(coordinates[1], coordinates[0]),
+                    subtract(coordinates[2], coordinates[0]),
+                );
+                if !(dot3(outward, outward).is_finite() && dot3(outward, outward) > 0.0) {
+                    result.violations.push(violation(
+                        "project-conduction-interface-source-face",
+                        format!(
+                            "entity `{}` selected degenerate or non-finite source face {} from `{}`",
+                            entity.declared_target, face, artifact.artifact_role
+                        ),
+                        "repair the promoted triangle soup before assigning it to conduction semantics",
+                    ));
+                    return result;
+                }
+                index
+                    .entry((
+                        entity.declared_target.clone(),
+                        coordinate_face_key(coordinates),
+                    ))
+                    .or_default()
+                    .push(IndexedConductionSourceFace {
+                        source: ConductionSourceFace {
+                            artifact: artifact.artifact_role.clone(),
+                            source_identity: artifact.source_identity.clone(),
+                            face,
+                        },
+                        outward,
+                    });
+            }
+        }
+    }
+
+    let candidates = match ThermalInterfaces::coincident_face_pairs(mesh) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            result.violations.push(violation(
+                "project-conduction-interface-geometry",
+                format!("fs-conduction refused the exact boundary candidate set: {error}"),
+                "repair the duplicated matching-P1 traces before lowering scenario interfaces",
+            ));
+            return result;
+        }
+    };
+    let mut claimed_declarations = BTreeSet::new();
+    let mut pending = Vec::new();
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+        if candidate_index % 1_024 == 0 && cx.checkpoint().is_err() {
+            result.violations.push(conduction_interface_cancelled(
+                "conduction-interface-candidate",
+            ));
+            return result;
+        }
+        let key = conduction_face_key(mesh, candidate.side_a);
+        let mut claims = Vec::new();
+        for &(interface, from, to) in &declarations {
+            let direct_from = match unique_oriented_source(
+                &index,
+                from,
+                key,
+                mesh.boundary()[candidate.side_a].outward_normal,
+            ) {
+                Ok(source) => source,
+                Err(violation) => {
+                    result.violations.push(violation);
+                    return result;
+                }
+            };
+            let direct_to = match unique_oriented_source(
+                &index,
+                to,
+                key,
+                mesh.boundary()[candidate.side_b].outward_normal,
+            ) {
+                Ok(source) => source,
+                Err(violation) => {
+                    result.violations.push(violation);
+                    return result;
+                }
+            };
+            let reverse_from = match unique_oriented_source(
+                &index,
+                from,
+                key,
+                mesh.boundary()[candidate.side_b].outward_normal,
+            ) {
+                Ok(source) => source,
+                Err(violation) => {
+                    result.violations.push(violation);
+                    return result;
+                }
+            };
+            let reverse_to = match unique_oriented_source(
+                &index,
+                to,
+                key,
+                mesh.boundary()[candidate.side_a].outward_normal,
+            ) {
+                Ok(source) => source,
+                Err(violation) => {
+                    result.violations.push(violation);
+                    return result;
+                }
+            };
+            let orientation = match (direct_from, direct_to, reverse_from, reverse_to) {
+                (Some(from_source), Some(to_source), None, None) => {
+                    Some((candidate.side_a, candidate.side_b, from_source, to_source))
+                }
+                (None, None, Some(from_source), Some(to_source)) => {
+                    Some((candidate.side_b, candidate.side_a, from_source, to_source))
+                }
+                (None, None, None, None) => None,
+                _ => {
+                    result.violations.push(violation(
+                        "project-conduction-interface-orientation",
+                        format!(
+                            "declared interface `{interface}` does not uniquely orient coincident boundary slots {} and {} from `{from}` to `{to}`",
+                            candidate.side_a, candidate.side_b
+                        ),
+                        "supply exactly one outward-oriented imported face for each declared region side",
+                    ));
+                    return result;
+                }
+            };
+            let Some((from_slot, to_slot, from_source, to_source)) = orientation else {
+                continue;
+            };
+            let Some(interface_rows) = index.get(&(interface.to_string(), key)) else {
+                result.violations.push(violation(
+                    "project-conduction-interface-selector-miss",
+                    format!(
+                        "interface `{interface}` joins the exact boundary triangle at slots {} and {}, but its geometry selector does not select that triangle",
+                        candidate.side_a, candidate.side_b
+                    ),
+                    "make the interface selector cover the exact shared face while retaining explicit overlap with both region selectors",
+                ));
+                return result;
+            };
+            let mut interface_sources = interface_rows
+                .iter()
+                .map(|row| row.source.clone())
+                .collect::<Vec<_>>();
+            interface_sources.sort();
+            interface_sources.dedup();
+            if interface_sources.len() > 2 {
+                result.violations.push(violation(
+                    "project-conduction-interface-selector-ambiguous",
+                    format!(
+                        "interface `{interface}` selects {} source faces for one exact geometric triangle",
+                        interface_sources.len()
+                    ),
+                    "select one shared CAD face or the two explicit duplicated traces; model higher-order junctions separately",
+                ));
+                return result;
+            }
+            claims.push(ResolvedConductionInterfacePair {
+                interface: interface.to_string(),
+                from_region: from.to_string(),
+                to_region: to.to_string(),
+                from_boundary_slot: from_slot,
+                to_boundary_slot: to_slot,
+                from_source,
+                to_source,
+                interface_sources,
+            });
+        }
+        match claims.as_slice() {
+            [] => {
+                result.violations.push(violation(
+                    "project-conduction-interface-undeclared",
+                    format!(
+                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface",
+                        candidate.side_a, candidate.side_b
+                    ),
+                    "declare and geometrically assign the interface between the two owning regions; no contact law is inferred",
+                ));
+                return result;
+            }
+            [claim] => {
+                claimed_declarations.insert(claim.interface.clone());
+                pending.push(claim.clone());
+            }
+            many => {
+                result.violations.push(violation(
+                    "project-conduction-interface-multiple",
+                    format!(
+                        "coincident conduction boundary slots {} and {} are claimed by interfaces {}",
+                        candidate.side_a,
+                        candidate.side_b,
+                        many.iter()
+                            .map(|claim| claim.interface.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    "bind each exact duplicated trace to one declared scenario interface",
+                ));
+                return result;
+            }
+        }
+    }
+    for &(interface, _, _) in &declarations {
+        if !claimed_declarations.contains(interface) {
+            result.violations.push(violation(
+                "project-conduction-interface-no-face-pair",
+                format!(
+                    "declared interface `{interface}` did not lower to any exact coincident ConductionMesh boundary pair"
+                ),
+                "supply duplicated matching-P1 traces and outward-oriented region assignments for this interface",
+            ));
+        }
+    }
+    if result.violations.is_empty() {
+        result.pairs = pending;
+    }
     result
 }
 
@@ -998,6 +1482,58 @@ fn cross3(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 
 fn norm3(vector: [f64; 3]) -> f64 {
     dot3(vector, vector).sqrt()
+}
+
+fn coordinate_point_key(point: [f64; 3]) -> ConductionPointKey {
+    [point[0].to_bits(), point[1].to_bits(), point[2].to_bits()]
+}
+
+fn coordinate_face_key(coordinates: [[f64; 3]; 3]) -> ConductionFaceKey {
+    let mut key = coordinates.map(coordinate_point_key);
+    key.sort_unstable();
+    key
+}
+
+fn conduction_face_key(mesh: &ConductionMesh, slot: usize) -> ConductionFaceKey {
+    let coordinates = mesh.boundary()[slot]
+        .vertices
+        .map(|vertex| mesh.positions()[vertex as usize]);
+    coordinate_face_key(coordinates)
+}
+
+fn unique_oriented_source(
+    index: &BTreeMap<(String, ConductionFaceKey), Vec<IndexedConductionSourceFace>>,
+    entity: &str,
+    key: ConductionFaceKey,
+    outward_normal: [f64; 3],
+) -> Result<Option<ConductionSourceFace>, Violation> {
+    let Some(rows) = index.get(&(entity.to_string(), key)) else {
+        return Ok(None);
+    };
+    let matching = rows
+        .iter()
+        .filter(|row| dot3(row.outward, outward_normal) > 0.0)
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [row] => Ok(Some(row.source.clone())),
+        many => Err(violation(
+            "project-conduction-interface-source-ambiguous",
+            format!(
+                "entity `{entity}` has {} outward-oriented imported faces for one exact conduction boundary slot",
+                many.len()
+            ),
+            "remove duplicate source faces or make the selector identify one retained oriented trace",
+        )),
+    }
+}
+
+fn conduction_interface_cancelled(stage: &'static str) -> Violation {
+    violation(
+        "project-conduction-interface-cancelled",
+        format!("conduction interface lowering was cancelled at `{stage}`"),
+        "retry under a live deterministic cancellation context; no partial boundary-slot mapping was published",
+    )
 }
 
 fn interface_audit_cancelled(stage: &'static str) -> Violation {

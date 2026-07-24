@@ -1,18 +1,20 @@
 //! G0/G3/G4 coverage for the L6 project-to-fs-io assignment adapter.
 
 use fs_blake3::hash_domain;
+use fs_conduction::{ConductionMesh, ThermalInterfaces};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::Point3;
 use fs_io::{AssignmentLimits, HalfSpaceSide, MeshSelector, NamedFaceGroup};
 use fs_project::assignment::{
-    InterfaceAuditLimits, InterfaceDeclarationAudit, audit_interface_declarations,
+    ConductionInterfaceLimits, ConductionInterfaceResolution, InterfaceAuditLimits,
+    InterfaceDeclarationAudit, audit_interface_declarations, resolve_conduction_interface_pairs,
 };
 use fs_project::{
     EntityDecl, GEOMETRY_ASSIGNMENT_REPORT_DOMAIN, GeometryArtifact, GeometryAssignment,
     GeometryResolution, ImportedMeshLibrary, ProjectSpec, geometry_source_identity,
     resolve_geometry_assignments,
 };
-use fs_rep_mesh::Soup;
+use fs_rep_mesh::{Soup, TetComplex};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -167,6 +169,174 @@ fn named_groups() -> Vec<NamedFaceGroup> {
             faces: vec![4, 5],
         },
     ]
+}
+
+fn two_trace_conduction_fixture() -> (
+    ProjectSpec,
+    ImportedMeshLibrary,
+    ConductionMesh,
+    usize,
+    usize,
+) {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let complex = TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3], [4, 6, 5, 7]]);
+    let mesh = ConductionMesh::new(complex, positions).expect("two valid duplicated-trace tets");
+    let pair = ThermalInterfaces::coincident_face_pairs(&mesh)
+        .expect("fixture has valid coincident traces")
+        .pop()
+        .expect("fixture has one coincident pair");
+    let from_slot = [pair.side_a, pair.side_b]
+        .into_iter()
+        .find(|&slot| mesh.boundary()[slot].outward_normal[0] > 0.0)
+        .expect("left trace points in +x");
+    let to_slot = if from_slot == pair.side_a {
+        pair.side_b
+    } else {
+        pair.side_a
+    };
+
+    let mut soup_positions = Vec::new();
+    let mut triangles = Vec::new();
+    for slot in [from_slot, to_slot] {
+        let face = &mesh.boundary()[slot];
+        let start = u32::try_from(soup_positions.len()).expect("fixture indices fit u32");
+        let mut coordinates = face
+            .vertices
+            .map(|vertex| mesh.positions()[vertex as usize]);
+        let first = [
+            coordinates[1][0] - coordinates[0][0],
+            coordinates[1][1] - coordinates[0][1],
+            coordinates[1][2] - coordinates[0][2],
+        ];
+        let second = [
+            coordinates[2][0] - coordinates[0][0],
+            coordinates[2][1] - coordinates[0][1],
+            coordinates[2][2] - coordinates[0][2],
+        ];
+        let normal = [
+            first[1] * second[2] - first[2] * second[1],
+            first[2] * second[0] - first[0] * second[2],
+            first[0] * second[1] - first[1] * second[0],
+        ];
+        let alignment = normal[0] * face.outward_normal[0]
+            + normal[1] * face.outward_normal[1]
+            + normal[2] * face.outward_normal[2];
+        if alignment < 0.0 {
+            coordinates.swap(1, 2);
+        }
+        soup_positions.extend(
+            coordinates
+                .into_iter()
+                .map(|point| Point3::new(point[0], point[1], point[2])),
+        );
+        triangles.push([start, start + 1, start + 2]);
+    }
+    let soup = Soup {
+        positions: soup_positions,
+        triangles,
+    };
+    let artifact = GeometryArtifact {
+        role: "two-trace".to_string(),
+        format: "fixture".to_string(),
+        source_hash: 0x17_03,
+        parser_version: "fixture/v1".to_string(),
+    };
+    let spec = ProjectSpec {
+        geometry: Some(vec![artifact.clone()]),
+        assignments: Some(vec![
+            GeometryAssignment {
+                artifact: artifact.role.clone(),
+                target: "solid-a".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "SIDE_A".to_string(),
+                },
+                allow_overlap: true,
+            },
+            GeometryAssignment {
+                artifact: artifact.role.clone(),
+                target: "solid-b".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "SIDE_B".to_string(),
+                },
+                allow_overlap: true,
+            },
+            GeometryAssignment {
+                artifact: artifact.role.clone(),
+                target: "bondline".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "BONDLINE".to_string(),
+                },
+                allow_overlap: true,
+            },
+        ]),
+        assembly: Some(vec![
+            EntityDecl::Assembly {
+                name: "rig".to_string(),
+                display: "Rig".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Part {
+                parent: "rig".to_string(),
+                name: "stack".to_string(),
+                display: "Stack".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Region {
+                parent: "stack".to_string(),
+                name: "solid-a".to_string(),
+                display: "Solid A".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Region {
+                parent: "stack".to_string(),
+                name: "solid-b".to_string(),
+                display: "Solid B".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Interface {
+                parent: "rig".to_string(),
+                name: "bondline".to_string(),
+                display: "Bondline".to_string(),
+                from: "solid-a".to_string(),
+                to: "solid-b".to_string(),
+                expect_id: None,
+            },
+        ]),
+        ..ProjectSpec::default()
+    };
+    let mut library = ImportedMeshLibrary::new();
+    library.insert(
+        &artifact,
+        soup,
+        "m",
+        vec![
+            NamedFaceGroup {
+                name: "SIDE_A".to_string(),
+                faces: vec![0],
+            },
+            NamedFaceGroup {
+                name: "SIDE_B".to_string(),
+                faces: vec![1],
+            },
+            NamedFaceGroup {
+                name: "BONDLINE".to_string(),
+                faces: vec![0, 1],
+            },
+        ],
+    );
+    (spec, library, mesh, from_slot, to_slot)
 }
 
 fn spec_without_interface() -> ProjectSpec {
@@ -505,5 +675,106 @@ fn g0_g4_declared_pairs_are_exempt_and_resource_refusal_publishes_no_partial_lis
         );
         assert!(bounded.undeclared_contacts.is_empty());
         assert_eq!(bounded.triangle_pair_tests, 1);
+    });
+}
+
+#[test]
+fn g0_conduction_interface_lowering_binds_exact_oriented_boundary_slots() {
+    let (spec, library, mesh, from_slot, to_slot) = two_trace_conduction_fixture();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let resolution = resolve_conduction_interface_pairs(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            ConductionInterfaceLimits::DEFAULT,
+            &mesh,
+            cx,
+        );
+        assert!(resolution.admissible(), "{:?}", resolution.violations);
+        assert_eq!(resolution.source_faces_indexed, 4);
+        assert_eq!(resolution.pairs.len(), 1);
+        let pair = &resolution.pairs[0];
+        assert_eq!(pair.interface, "bondline");
+        assert_eq!(pair.from_region, "solid-a");
+        assert_eq!(pair.to_region, "solid-b");
+        assert_eq!(pair.from_boundary_slot, from_slot);
+        assert_eq!(pair.to_boundary_slot, to_slot);
+        assert_eq!(pair.face_pair().side_a, from_slot);
+        assert_eq!(pair.face_pair().side_b, to_slot);
+        assert_eq!(pair.from_source.face, 0);
+        assert_eq!(pair.to_source.face, 1);
+        assert_eq!(pair.interface_sources.len(), 2);
+        assert!(
+            resolution
+                .render_table()
+                .contains("bondline | solid-a slot")
+        );
+        assert!(
+            ConductionInterfaceResolution::no_claim()
+                .contains("does not authenticate the importer")
+        );
+    });
+}
+
+#[test]
+fn g0_g4_conduction_interface_lowering_refuses_orientation_and_budget_atomically() {
+    let (mut wrong_orientation, library, mesh, _, _) = two_trace_conduction_fixture();
+    let assignments = wrong_orientation
+        .assignments
+        .as_mut()
+        .expect("fixture assignments");
+    assignments[1].selector = MeshSelector::NamedGroup {
+        name: "SIDE_A".to_string(),
+    };
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let refused = resolve_conduction_interface_pairs(
+            &wrong_orientation,
+            &library,
+            AssignmentLimits::DEFAULT,
+            ConductionInterfaceLimits::DEFAULT,
+            &mesh,
+            cx,
+        );
+        assert_eq!(
+            refused.violations[0].code,
+            "project-conduction-interface-orientation"
+        );
+        assert!(refused.pairs.is_empty());
+
+        let (spec, library, mesh, _, _) = two_trace_conduction_fixture();
+        let bounded = resolve_conduction_interface_pairs(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            ConductionInterfaceLimits {
+                max_source_faces: 2,
+            },
+            &mesh,
+            cx,
+        );
+        assert_eq!(
+            bounded.violations[0].code,
+            "project-conduction-interface-resource-bound"
+        );
+        assert_eq!(bounded.source_faces_indexed, 2);
+        assert!(bounded.pairs.is_empty());
+
+        gate.request();
+        let cancelled = resolve_conduction_interface_pairs(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            ConductionInterfaceLimits::DEFAULT,
+            &mesh,
+            cx,
+        );
+        assert_eq!(
+            cancelled.violations[0].code,
+            "project-conduction-interface-cancelled"
+        );
+        assert_eq!(cancelled.source_faces_indexed, 0);
+        assert!(cancelled.pairs.is_empty());
     });
 }

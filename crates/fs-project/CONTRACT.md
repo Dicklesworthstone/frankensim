@@ -196,6 +196,18 @@ bindings; it runs no solves and admits no scenarios itself.
   to `EntityId` correspondence. `render_table()` surfaces entity, artifact,
   source identity, unit, selector fingerprint, selected face count, area,
   optional enclosed volume, bounds, and report hash.
+- `assignment::resolve_conduction_interface_pairs` is the explicit
+  scenario-to-E05_3 topology seam. It reruns assignment resolution while
+  holding the same immutable `ImportedMeshLibrary`, indexes only explicit
+  metre (`m`) source faces under an exact sorted coordinate-bit key, and
+  requires each region source triangle's winding to agree with one
+  `ConductionMesh` boundary slot's outward normal. Every exact coincident
+  matching-P1 pair reported by `fs_conduction::ThermalInterfaces` must be
+  claimed by exactly one declared interface; that interface's own selector
+  must cover the same triangle. Every declared interface must lower at least
+  once. Success retains the oriented `from`/`to` slots plus source
+  artifact/source-identity/face ordinals for both regions and the interface
+  selector. It does not select a card or construct an operator.
 
 ## Invariants
 
@@ -217,6 +229,11 @@ bindings; it runs no solves and admits no scenarios itself.
 - The adapter preserves fs-io assignment order and rejects any returned
   subject/order mismatch before retention. Project-wide request and selected
   face counts are checked against the explicit `AssignmentLimits`.
+- Conduction interface lowering never treats Soup face ordinals as
+  `ConductionMesh` boundary slots. Exact coordinate bits, outward orientation,
+  declaration coverage, and interface-selector coverage are all required;
+  any ambiguity, uncovered candidate, unused declaration, budget exhaustion,
+  or cancellation publishes no pair rows.
 
 ## Error model
 
@@ -234,6 +251,8 @@ Geometry-assignment preflight and adapter failures use the same
 `Violation` triple (`project-assignment-*`); fs-io refusal codes, `what`, and
 `fix` propagate without changing their lower-layer meaning, with the geometry
 role added as context. Refusal and cancellation leave `artifacts` empty.
+Conduction lowering adds `project-conduction-interface-*` violations and
+leaves `pairs` empty on every refusal.
 
 ## Determinism class
 
@@ -241,7 +260,9 @@ Fully deterministic: pure functions of the input bytes/spec and explicitly
 supplied card/mesh libraries; canonical rendering has one spelling; hashing
 is domain-separated BLAKE3 over exact bytes. Mesh resolution inherits
 fs-io's deterministic face-order and selector-fingerprint contract. No
-clocks, no RNG, no environment reads.
+clocks, no RNG, no environment reads. Conduction pair order is
+fs-conduction's deterministic exact candidate order; source provenance rows
+are sorted before publication.
 
 ## Cancellation behavior
 
@@ -253,6 +274,10 @@ loops. Cancellation is a typed `mesh-assignment-cancelled` violation and
 publishes no partial report. A validation budget/plan triad (fs-scenario
 style) remains deferred until real projects show the structural loader can be
 large.
+Conduction lowering additionally polls while indexing selected source faces
+and traversing coincident candidates. It returns
+`project-conduction-interface-cancelled`, retains the completed work count,
+and publishes no partial pair table.
 
 ## Unsafe boundary
 
@@ -317,6 +342,11 @@ explicit-face fragility refuse without partial publication; pre-cancelled
 resolution is atomic. `tests/project.rs` additionally round-trips all six
 selector variants in both canonical spellings, including the maximum `u32`
 explicit face index.
+The f85xj.17.3 assignment battery also constructs two disconnected tetrahedra
+with duplicated matching-P1 traces, proves exact source-face orientation
+lowers the declared interface to the correct `from`/`to` boundary slots, and
+proves wrong orientation, source-face budget exhaustion, and pre-cancellation
+refuse atomically.
 
 ## No-claim boundaries
 
@@ -334,6 +364,12 @@ explicit face index.
   hashes (a key cannot lie about its card), while WHO supplied the collection
   is the caller's trust channel — resolution proves binding coverage, never
   card authenticity or scientific truth of the underlying claims.
+- A successful conduction interface mapping proves exact coordinate-bit,
+  retained source-face, selector, and outward-orientation agreement for the
+  supplied finite meshes. It does not authenticate the importer, prove the
+  finite mesh is the intended continuum/CAD assembly, establish material or
+  contact-law authority, support nonmatching/mortar contact, or construct
+  `InterfaceResistance`, `InterfaceSurface`, or `ThermalInterfaces`.
 - Binding resolution is temperature-axis-only in v1: cards whose claims
   depend on further validity axes refuse (`project-binding-axis`) rather
   than being partially resolved. The required ceiling uses DECLARED thermal

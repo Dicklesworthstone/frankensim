@@ -24,9 +24,11 @@ pub mod wire;
 pub const FSIM_VERSION: u32 = 1;
 
 pub use assignment::{
+    ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
     GEOMETRY_ASSIGNMENT_REPORT_DOMAIN, GEOMETRY_SOURCE_IDENTITY_DOMAIN, GeometryResolution,
-    ImportedMeshLibrary, ResolvedGeometryArtifact, ResolvedProjectAssignment,
-    geometry_source_identity, resolve_geometry_assignments,
+    ImportedMeshLibrary, ResolvedConductionInterfacePair, ResolvedGeometryArtifact,
+    ResolvedProjectAssignment, geometry_source_identity, resolve_conduction_interface_pairs,
+    resolve_geometry_assignments,
 };
 pub use bind::{
     Advisory, BindingRequirements, BindingTarget, CONTACT_RESISTANCE_DIMS,
