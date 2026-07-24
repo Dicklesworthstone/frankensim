@@ -56,6 +56,8 @@ pub mod accelerators;
 pub mod adapter_policy;
 pub mod certificate_regimes;
 pub mod claim_router;
+/// Cross-repository compatibility suite and release-train protocol.
+pub mod compatibility;
 pub mod crates;
 pub mod doctrine;
 pub mod evidence_contract;

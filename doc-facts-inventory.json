@@ -503,6 +503,7 @@
     "crates/fs-govern/tests/certificate_regimes.rs",
     "crates/fs-govern/tests/chaotic_doctrine_demonstrator.rs",
     "crates/fs-govern/tests/claim_router.rs",
+    "crates/fs-govern/tests/compatibility.rs",
     "crates/fs-govern/tests/crate_registry.rs",
     "crates/fs-govern/tests/evidence_contract.rs",
     "crates/fs-govern/tests/evidence_graph.rs",

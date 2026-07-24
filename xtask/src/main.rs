@@ -27,6 +27,7 @@
 //! - `check-schemas`  — frozen public schema versions, migration obligations, and accretion control.
 //! - `check-consolidation` — crates no supported workflow exercises must carry a recorded disposition.
 //! - `check-program-metrics` — the program outcome-metrics dashboard is a checked deterministic artifact.
+//! - `compatibility-report` — names which sibling is off-pin and which compatibility surface must go green.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
@@ -46,6 +47,7 @@
 
 mod bootstrap_provenance;
 mod claim_integrity_gate;
+mod compatibility;
 mod claims;
 mod closures;
 mod consolidation;
@@ -8310,6 +8312,15 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "compatibility-report" => {
+            return match compatibility::report(&root) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-identities" => return identities::generate_identities(&root),
         "depgraph-receipt" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -8505,7 +8516,7 @@ fn main() -> ExitCode {
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
                  check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|record-program-metrics|lock-constellation|\
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|record-program-metrics|compatibility-report|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;
