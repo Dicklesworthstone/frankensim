@@ -180,25 +180,45 @@ or a critical sibling becoming unavailable. Convenience, new upstream features,
 and version freshness are not merely discouraged — they are unrepresentable in
 the type, so they cannot be argued into an emergency.
 
-### Current state (2026-07-24)
+### Current state (2026-07-24): one rehearsed bump, REJECTED
 
-The suite is REGISTERED, not yet EXECUTED: no compatibility run has been made
-against live pins, so no bump has passed the train and none is claimed. On its
-first run the report found **all seven siblings off their recorded pins**,
-including a `franken_numpy` minor-version move (`0.1.0` to `0.2.0`) into an
-uncovered surface, which the gate therefore refuses. The previously reported
+The protocol has been exercised once, end to end, against the live pins. It was
+not a synthetic drill — the constellation had genuinely drifted, and the
+transcript below is the real outcome. It is pinned as an executable test
+(`rehearsed_bump_2026_07_24_is_refused`) so the verdict cannot quietly change.
+
+Stage 1, candidate. All SEVEN siblings were off their recorded pins, including
+a `franken_numpy` MINOR move (`0.1.0` to `0.2.0`). The previously understood
 single-sibling drift was an artifact of the aggregate lock hash, which reports
 that *a* repository moved without naming it.
 
-An out-of-train candidate is justified by a reachable security defect, credible
-corruption, false scientific/certificate result, cancellation or durability
-contract violation, or a critical sibling becoming unavailable. Convenience,
-new upstream features, or version freshness are not emergency criteria.
+Stage 2, suite. Two P1 surfaces were executed against the live pins:
 
-The previous verified lock is the rollback reference. Rollback is a new,
-recorded `main` commit; it is never an unrecorded filesystem or history rewrite.
-Rollback is insufficient when already-published artifacts are contaminated:
-those artifacts also require correction or tombstoning.
+- `asupersync` at `0.3.9@054cff23` — **GREEN, 25/25** (`fs-exec` conformance 14,
+  `constellation_smoke` 1, `lease_battery` 10, 0 failed). FrankenSim's bounded
+  cancellation, drain, budget-propagation and latency-lane contracts hold on
+  the new commit.
+- `frankensqlite` at `31fc4a3b` — **DID NOT BUILD**. `fsqlite-btree` is mid
+  async-pager migration: seven errors where synchronous callers `?` a future.
+  The surface therefore recorded `NotRun`. A dependency that fails to compile
+  is an absence of evidence, never an absence of a problem.
+
+Stage 3, adjudication. **REFUSED**, for two independent reasons: the
+`frankensqlite` P1 durability surface never executed, and `franken_numpy` moved
+across a minor version into a surface with NO compatibility coverage, so no
+evidence exists that could admit it.
+
+Stage 4, disposition. The bump is rejected and the recorded lock stands as the
+rollback reference. No pin was moved and no train is claimed to have passed.
+
+This is the protocol working as intended: a green surface does not launder the
+refusal for the others, and the outcome of a real train may legitimately be
+"reject".
+
+Known limitation: `fs-govern`'s dev-dependencies include `fs-ledger`, so
+`cargo test -p fs-govern` cannot run during a FrankenSQLite outage even though
+the library itself stays sibling-free and `xtask` keeps building. The adjudicator
+is available when it matters; its own test target is not.
 
 ## Archival, escrow, and retention
 

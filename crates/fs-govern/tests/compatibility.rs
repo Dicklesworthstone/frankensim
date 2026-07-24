@@ -436,3 +436,93 @@ fn registry_renders_deterministically_and_shows_gaps() {
     );
     assert!(first.contains("cargo test --locked -p fs-exec"));
 }
+
+/// The 2026-07-24 rehearsed bump, as an executable transcript.
+///
+/// This is not a synthetic drill. It records the real seven-sibling drift,
+/// the real executed outcomes — the asupersync surface ran 25/25 green
+/// (conformance 14, constellation_smoke 1, lease_battery 10) against
+/// `0.3.9@054cff23`, while the frankensqlite surface could not even build
+/// because `fsqlite-btree` is mid async-pager migration — and the verdict the
+/// protocol actually returns. A surface that fails to compile is `NotRun`:
+/// there is no execution to report, and an unbuildable dependency must never
+/// read as an absent problem.
+#[test]
+fn rehearsed_bump_2026_07_24_is_refused() {
+    let recorded = vec![
+        PinRow::new(
+            "asupersync",
+            "0.3.8",
+            "5973b0ff31f405ae90fa9e6e2ef5f61a75c5b78b",
+        ),
+        PinRow::new(
+            "franken_numpy",
+            "0.1.0",
+            "7fca9f6006c9f4ecdb6c7432318a0893f3a7bea1",
+        ),
+        PinRow::new(
+            "frankensqlite",
+            "unversioned-workspace",
+            "987cfb97f86d3fca4d9b44e7871f427636b10126",
+        ),
+    ];
+    let candidate = vec![
+        PinRow::new(
+            "asupersync",
+            "0.3.9",
+            "054cff2356fc525e38d54100749ff3fa33e89d7a",
+        ),
+        // A MINOR version move, into a surface with no coverage at all.
+        PinRow::new(
+            "franken_numpy",
+            "0.2.0",
+            "c5b6339f2c28bdecf7066201f74e570e925ee3dc",
+        ),
+        PinRow::new(
+            "frankensqlite",
+            "unversioned-workspace",
+            "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
+        ),
+    ];
+
+    let deltas = pin_delta(&recorded, &candidate);
+    assert_eq!(moved(&deltas).len(), 3, "all three moved");
+
+    let attempt = BumpAttempt {
+        kind: BumpKind::ReleaseTrain,
+        deltas,
+        results: vec![
+            // Measured: 14 + 1 + 10 across the three registered targets.
+            SuiteResult::new(
+                "asupersync",
+                SuiteOutcome::Executed {
+                    passed: 25,
+                    failed: 0,
+                },
+            ),
+            // The surface did not build, so nothing executed.
+            SuiteResult::new("frankensqlite", SuiteOutcome::NotRun),
+        ],
+        golden: GoldenDisposition::NoGoldenSurface,
+    };
+
+    let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
+        panic!("a bump with an unbuildable P1 surface must never be admitted")
+    };
+
+    // The durability surface never ran: refused, not quietly skipped.
+    assert!(reasons.contains(&BumpRefusal::NotExecuted {
+        lib: "frankensqlite".to_string()
+    }));
+    // franken_numpy moved a minor version into a surface with no coverage.
+    assert!(reasons.iter().any(|reason| matches!(
+        reason,
+        BumpRefusal::UncoveredSurface { lib, .. } if lib == "franken_numpy"
+    )));
+    // A green surface does not launder the refusal for the others.
+    assert!(!reasons.iter().any(|reason| matches!(
+        reason,
+        BumpRefusal::NotExecuted { lib } | BumpRefusal::FailingSurface { lib, .. }
+            if lib == "asupersync"
+    )));
+}
