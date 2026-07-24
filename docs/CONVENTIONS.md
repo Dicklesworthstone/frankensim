@@ -274,6 +274,27 @@ Two rules bind day-to-day work:
   promise, `not_promised` with a reason class if it is internal. An
   unclassified constant is accretion and fails the gate.
 
+## Abstraction consolidation (bead f85xj.16.8, enforced: `check-consolidation`)
+
+Once per release train, a usage sweep asks which crates no supported workflow
+(vertical, campaign, or e2e lane) transitively exercises. Every such crate needs
+a recorded disposition — `KEEP` with a named consumer or trust rationale,
+`CONSOLIDATE`, `FREEZE`, `REPAIR-OR-QUARANTINE`, or a `RETIRE` **proposal**.
+Agents never execute a retirement. Protocol: `docs/CONSOLIDATION_REVIEW.md`;
+record: `consolidation-review.json`.
+
+Two rules bind day-to-day work:
+
+- `FREEZE` asserts green. A candidate whose tests are red gets
+  `REPAIR-OR-QUARANTINE` instead, so a parked label never implies a green state
+  that does not exist.
+- A frozen crate that later gains a workflow consumer fails the gate. Unfreeze
+  it and record the change; the disposition is a claim about the tree, not a
+  label applied once.
+
+The sweep doubles as an **L3-promotion falsifier**: a capability whose crates no
+workflow reaches cannot honestly hold an "integrated workflow" claim.
+
 ## Compiler checks
 
 After substantive changes:

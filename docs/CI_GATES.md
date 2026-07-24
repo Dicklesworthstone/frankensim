@@ -253,6 +253,7 @@ already using the PR/full split.
 | `check-vv-scorecard` | tracked `vv-scorecard.md`/`vv-scorecard.json` drifting from the deterministic projection of the seeded validation corpus and adversarial registry (regenerate with `generate-vv-scorecard`) |
 | `check-program-metrics` | tracked `program-metrics.md`/`program-metrics.json` drifting from the deterministic projection of the seeded validation corpus, adversarial registry, and capability maturity registry (regenerate with `generate-program-metrics`) |
 | `check-schemas` | a frozen public schema whose version constant drifted from its policy record, a migration obligation whose evidence test is missing, a `no-predecessor` schema bumped without declaring a migration path, or a new public version constant in a product-boundary crate that is neither promised nor explicitly disclaimed (`schema-policy.json`, docs/SCHEMA_POLICY.md) |
+| `check-consolidation` | a crate that no supported workflow exercises and no review has dispositioned, a `FREEZE`/`CONSOLIDATE`/`REPAIR-OR-QUARANTINE` disposition on a crate that has since gained a workflow consumer, a disposition without a rationale, or a usage sweep whose known-exercised control crate is itself unreached (`consolidation-review.json`, docs/CONSOLIDATION_REVIEW.md) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
 Each is also runnable alone (same names). Golden re-pins follow

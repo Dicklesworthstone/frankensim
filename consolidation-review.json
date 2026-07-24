@@ -1,0 +1,298 @@
+{
+  "schema": "frankensim-consolidation-review-v1",
+  "policy_bead": "frankensim-extreal-program-f85xj.16.8",
+  "protocol": "docs/CONSOLIDATION_REVIEW.md",
+  "reviews": [
+    {
+      "review_id": "CONS-2026-07-A",
+      "date": "2026-07-24",
+      "reviewer": "GoldSnow",
+      "cadence_anchor": "release-train (e13.4)",
+      "method": "Mechanical usage sweep: transitive closure over crates/*/Cargo.toml fs-* dependency edges from every supported-workflow root (all *-e2e lanes plus the named verticals/campaigns and fs-cli), counting runtime AND dev-dependency edges. A crate outside that closure is exercised by no supported workflow.",
+      "roots": [
+        "fs-adaptbo-e2e",
+        "fs-cli",
+        "fs-diffreal-e2e",
+        "fs-epi-e2e",
+        "fs-flagship-e2e",
+        "fs-flowcert-e2e",
+        "fs-flutter-e2e",
+        "fs-flywheel-e2e",
+        "fs-frame",
+        "fs-grammar-e2e",
+        "fs-marquee",
+        "fs-metamat-e2e",
+        "fs-neuroshape-e2e",
+        "fs-oed-e2e",
+        "fs-ornith",
+        "fs-robustopt-e2e",
+        "fs-schedule-e2e",
+        "fs-selfknow-e2e",
+        "fs-thrust-e2e",
+        "fs-topopt",
+        "fs-truss-e2e",
+        "fs-vessel",
+        "fs-vskeleton"
+      ],
+      "totals": {
+        "crates": 141,
+        "workflow_roots": 23,
+        "reached_runtime_only": 115,
+        "reached_including_dev": 121,
+        "unreached_including_dev": 20
+      },
+      "validation": {
+        "known_exercised_control": "fs-sparse (17 dependent crates) is reached and not flagged",
+        "zero_dependent_spot_checks": "fs-airflow and fs-rep-voxel confirmed to have no dependent crate anywhere"
+      },
+      "capability_cross_reference": [
+        {
+          "capability": "wasm.browser-flagships",
+          "level": "L1",
+          "crates": [
+            "fs-wasm"
+          ],
+          "workflow_consumer": false,
+          "disposition": "REPAIR-OR-QUARANTINE"
+        },
+        {
+          "capability": "geometry.topology-certificates",
+          "level": "L2",
+          "crates": [
+            "fs-topo"
+          ],
+          "workflow_consumer": false,
+          "disposition": "KEEP",
+          "note": "Sweep independently corroborates the registry boundary \"Not L3 -- no e2e lane exercises it\"."
+        }
+      ],
+      "candidates": [
+        {
+          "crate": "fs-airflow",
+          "disposition": "KEEP",
+          "rationale": "Named consumer pending in-flight: the E06 cooling product workflow (f85xj.6.5/.6.11) is the declared consumer; landed 2026-07-23 and documented in README. New investment, not decay.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-23",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-bisect",
+          "disposition": "KEEP",
+          "rationale": "Bisect-style proof/debug infrastructure; developer-facing tool rather than a workflow participant.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-13",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-conform",
+          "disposition": "KEEP",
+          "rationale": "Restriction-map plugin conformance; verification-layer primitive named in README.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-18",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-contact",
+          "disposition": "KEEP",
+          "rationale": "Thermal-contact lane companion to fs-conduction; same E06 consumer path.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-18",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-contract",
+          "disposition": "KEEP",
+          "rationale": "Assume-guarantee component contracts; verification-layer primitive.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-14",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-dd",
+          "disposition": "KEEP",
+          "rationale": "Touched 2026-07-23; active lane.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-23",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-detaudit",
+          "disposition": "KEEP",
+          "rationale": "Determinism-audit tooling; G5 lane support, developer-facing by design.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 1,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-dimine",
+          "disposition": "FREEZE",
+          "rationale": "Executed worked example. No workflow consumer AND no dependent crate anywhere; oldest candidate (last touched 2026-07-07); single dependency (fs-evidence); 9/9 conformance tests verified green at review time. Parked visibly via a FROZEN notice in its CONTRACT.md. Unfreeze on a named consumer.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-07",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-flux",
+          "disposition": "KEEP",
+          "rationale": "FLUX-layer scaffolding, 5 source files, touched 2026-07-16.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 5,
+            "last_commit": "2026-07-16",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-gen",
+          "disposition": "KEEP",
+          "rationale": "Generator scaffolding, no dependencies at all; smallest surface in the candidate set. Re-review next train.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-10",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-geocon",
+          "disposition": "KEEP",
+          "rationale": "Geometric-constraint layer named in the README query/certificate family.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 3,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-iga",
+          "disposition": "KEEP",
+          "rationale": "Spline/shell FLUX element family in the plan atlas; prior soundness-audit subject.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-11",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-probe",
+          "disposition": "KEEP",
+          "rationale": "Probe surface named in README HELM/utility family.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 1,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-rep-voxel",
+          "disposition": "KEEP",
+          "rationale": "Named MORPH representation in the plan atlas and README; zero dependents today.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 6,
+            "last_commit": "2026-07-18",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-thermochem",
+          "disposition": "KEEP",
+          "rationale": "In-flight NASA-9 thermochemistry lane; no test files yet, so it is pre-first-release rather than unexercised. Re-review next train.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 5,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-topo",
+          "disposition": "KEEP",
+          "rationale": "Hosts registered L2 capability geometry.topology-certificates. Trust-risk rationale: exact predicates for self-intersection/manifoldness are load-bearing for every geometry claim, so absence of a workflow consumer is a promotion blocker, not a retirement signal.",
+          "evidence": {
+            "test_files": 3,
+            "src_files": 4,
+            "last_commit": "2026-07-22",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-topols",
+          "disposition": "KEEP",
+          "rationale": "Level-set topology lane; sole consumer of fs-topo.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 7,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-vmanifest",
+          "disposition": "KEEP",
+          "rationale": "18 test files, 24 source files, touched 2026-07-23 \u2014 one of the most active crates in the tree; the manifest family is a shared G1-freeze schema with many landed instances.",
+          "evidence": {
+            "test_files": 18,
+            "src_files": 24,
+            "last_commit": "2026-07-23",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-wasm",
+          "disposition": "REPAIR-OR-QUARANTINE",
+          "rationale": "Cannot be FROZEN: FREEZE requires a green gate and this crate has none (0 test files here; the registry records two campaign tests red from an earlier code-first slice, and a standalone nested workspace that does not build in place). Registered L1 wasm.browser-flagships. Disposition is deliberately NOT \"freeze\" because that would imply a green parked state that does not exist.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 8,
+            "last_commit": "2026-07-22",
+            "dependent_crates": null
+          }
+        },
+        {
+          "crate": "fs-xform",
+          "disposition": "KEEP",
+          "rationale": "Core MORPH parameterization named in the plan crate atlas; sole dependent is fs-wasm. Design-parameterization seam for future optimization lanes.",
+          "evidence": {
+            "test_files": 3,
+            "src_files": 7,
+            "last_commit": "2026-07-17",
+            "dependent_crates": null
+          }
+        }
+      ],
+      "residual_concerns": [
+        "The sweep proves absence of a dependency EDGE from a workflow root, not absence of use: a crate exercised only through a doc example, a binary, or a non-crate harness would still be flagged.",
+        "Roots are a curated list; adding a workflow root changes the candidate set, so the root list is part of the reviewed record rather than an implementation detail.",
+        "Every candidate was committed within the preceding ~3 weeks and all but two ship test files. This inventory is \"not yet composed into a workflow\", NOT \"abandoned\" -- which is why KEEP is the default disposition and no RETIRE is proposed in this review."
+      ]
+    }
+  ]
+}

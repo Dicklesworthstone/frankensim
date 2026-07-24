@@ -4,6 +4,16 @@ Dimensional knowledge mining (plan addendum, Proposal 9's knowledge apex): fit
 closed-form power-law scaling laws over a certified corpus in dimensionless-
 group (π) space.
 
+> **Consolidation status: FROZEN** (2026-07-24, bead
+> `frankensim-extreal-program-f85xj.16.8`, record `consolidation-review.json`).
+> No supported workflow — no vertical, campaign, or e2e lane — transitively
+> depends on this crate, and no crate in the workspace depends on it at all.
+> Frozen means *explicitly parked and visible*, not deprecated and not slated
+> for removal: the crate compiles, its 9 conformance tests are green, and it
+> keeps its contract. What FROZEN withdraws is new investment. Unfreezing needs
+> only a named consumer: add one, record the disposition change in the review
+> record, and this notice comes off. Reviewed at each release train.
+
 ## Purpose and layer
 
 Layer L4. Depends only on `fs-evidence` (UTIL, the `Color` lattice). Pure-Rust

@@ -25,6 +25,7 @@
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
 //! - `check-schemas`  — frozen public schema versions, migration obligations, and accretion control.
+//! - `check-consolidation` — crates no supported workflow exercises must carry a recorded disposition.
 //! - `check-program-metrics` — the program outcome-metrics dashboard is a checked deterministic artifact.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
@@ -47,6 +48,7 @@ mod bootstrap_provenance;
 mod claim_integrity_gate;
 mod claims;
 mod closures;
+mod consolidation;
 pub mod constellation_admission;
 mod constellation_assessment;
 mod constellation_cleanliness;
@@ -8404,6 +8406,11 @@ fn main() -> ExitCode {
             policy_notes = report.decisions;
             (report.violations, vec![schemas::CHECK])
         }
+        "check-consolidation" => {
+            let report = consolidation::check_consolidation(&root);
+            policy_notes = report.decisions;
+            (report.violations, vec![consolidation::CHECK])
+        }
         "check-program-metrics" => (
             program_metrics::check(&root),
             vec![program_metrics::CHECK],
@@ -8449,6 +8456,9 @@ fn main() -> ExitCode {
             let schema_report = schemas::check_schema_policy(&root);
             v.extend(schema_report.violations);
             policy_notes.extend(schema_report.decisions);
+            let consolidation_report = consolidation::check_consolidation(&root);
+            v.extend(consolidation_report.violations);
+            policy_notes.extend(consolidation_report.decisions);
             v.extend(program_metrics::check(&root));
             v.extend(claims::check_claim_language(&root));
             v.extend(closures::check_closures(&root));
@@ -8481,6 +8491,7 @@ fn main() -> ExitCode {
                     moonshot_policy::CHECK,
                     "claim-integrity-gate",
                     schemas::CHECK,
+                    consolidation::CHECK,
                     program_metrics::CHECK,
                     "claim-state",
                     "closure-evidence",
@@ -8492,7 +8503,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
-                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-program-metrics|\
+                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
                  check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|record-program-metrics|lock-constellation|\
                  check-constellation|depgraph-receipt|matdb-pack"
