@@ -545,3 +545,350 @@ fn the_audit_table_reports_every_row_and_all_three_totals() {
         assert!((row.delivered_w() - row.declared_w()).abs() < 1e-12);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Surface power maps — bead f85xj.5.14.
+// ---------------------------------------------------------------------------
+
+use fs_conduction::{SurfaceComponentPower, SurfacePowerMap};
+
+/// Boundary-face SLOTS whose centroid lies on the `x = value` plane.
+fn faces_on_x(mesh: &ConductionMesh, value: f64) -> Vec<usize> {
+    mesh.boundary()
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| on_box_face(face.centroid[0], value))
+        .map(|(slot, _)| slot)
+        .collect()
+}
+
+#[test]
+fn delivered_surface_power_equals_declared_power_identically() {
+    let mesh = unit_mesh(3);
+    let faces = faces_on_x(&mesh, 1.0);
+    assert!(!faces.is_empty(), "the fixture needs a populated face");
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("heater", 9.5, PowerUncertainty::Unstated, faces)
+                .expect("component admits"),
+        ],
+        9.5,
+    )
+    .expect("map admits");
+
+    let (_, audit) = map
+        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+        .expect("projection admits");
+    assert!(
+        (audit.delivered_total_w() - 9.5).abs() < 1e-12,
+        "delivered {} != declared 9.5",
+        audit.delivered_total_w()
+    );
+}
+
+#[test]
+fn delivered_surface_power_is_exact_across_mesh_refinement() {
+    for n in [2usize, 3, 4, 5] {
+        let mesh = unit_mesh(n);
+        let map = SurfacePowerMap::new(
+            vec![
+                SurfaceComponentPower::new(
+                    "heater",
+                    4.75,
+                    PowerUncertainty::Unstated,
+                    faces_on_x(&mesh, 1.0),
+                )
+                .expect("component"),
+            ],
+            4.75,
+        )
+        .expect("map admits");
+        let (_, audit) = map
+            .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+            .expect("projection");
+        assert!(
+            (audit.delivered_total_w() - 4.75).abs() < 1e-12,
+            "n={n}: delivered {} drifted",
+            audit.delivered_total_w()
+        );
+    }
+}
+
+#[test]
+fn adjacent_footprints_sharing_vertices_still_balance() {
+    // Two components on the SAME face plane, disjoint face sets but sharing
+    // the vertices along their common edge. The map-wide lumped area is what
+    // keeps this exact; a per-component lumping would double-count the shared
+    // vertices and over-deliver.
+    let mesh = unit_mesh(4);
+    let all = faces_on_x(&mesh, 1.0);
+    assert!(all.len() >= 4, "need several faces to split");
+    let split = all.len() / 2;
+    let (left, right) = all.split_at(split);
+
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("a", 3.0, PowerUncertainty::Unstated, left.to_vec())
+                .expect("a"),
+            SurfaceComponentPower::new("b", 5.0, PowerUncertainty::Unstated, right.to_vec())
+                .expect("b"),
+        ],
+        8.0,
+    )
+    .expect("map admits");
+
+    let (_, audit) = map
+        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+        .expect("projection");
+    assert!(
+        (audit.delivered_total_w() - 8.0).abs() < 1e-12,
+        "adjacent footprints delivered {}",
+        audit.delivered_total_w()
+    );
+    // The shared-vertex effect is real: at least one component's lumped area
+    // must exceed its own geometric face area, or the fixture is not actually
+    // exercising the case this test exists for.
+    assert!(
+        audit
+            .rows()
+            .iter()
+            .any(|row| row.lumped_area_m2() > row.face_area_m2() + 1e-15),
+        "the two footprints must actually share vertices"
+    );
+}
+
+#[test]
+fn a_full_face_map_reproduces_the_equivalent_uniform_neumann_solve() {
+    // A component covering an entire face with power P is the same physics as
+    // ThermalBc::Neumann{ Uniform(-P/A) }. Solving both and comparing pins the
+    // surface path to the crate's existing Neumann path, and — because the
+    // sign is the easiest thing to get backwards here — it also pins the
+    // direction.
+    let mesh = unit_mesh(3);
+    let faces = faces_on_x(&mesh, 1.0);
+    let area: f64 = faces.iter().map(|&slot| mesh.boundary()[slot].area).sum();
+    let power = 6.0;
+
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("heater", power, PowerUncertainty::Unstated, faces)
+                .expect("component"),
+        ],
+        power,
+    )
+    .expect("map admits");
+    let (mapped_flux, audit) = map
+        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+        .expect("projection");
+    assert!((audit.delivered_total_w() - power).abs() < 1e-12);
+
+    let material = ConductivityModel::isotropic_declared(10.0).expect("material");
+    let zero_source = ScalarField::uniform("volumetric source", 0.0).expect("no volume source");
+
+    let solve_with_flux = |flux: ScalarField| {
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "cold",
+                |face| on_box_face(face.centroid[0], 0.0),
+                ThermalBc::dirichlet(300.0).expect("cold"),
+            )
+            .expect("cold region")
+            .region(
+                "heated",
+                map.region_selector(&mesh),
+                ThermalBc::Neumann { outward_flux: flux },
+            )
+            .expect("heated region")
+            .adiabatic_remainder()
+            .finish()
+            .expect("complete partition");
+        with_cx(|cx| {
+            solve(
+                cx,
+                ConductionProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material,
+                    source: &zero_source,
+                },
+                config(),
+            )
+            .expect("solve")
+        })
+    };
+
+    let mapped = solve_with_flux(mapped_flux);
+    let uniform = solve_with_flux(
+        ScalarField::uniform("surface power flux", -power / area).expect("uniform flux"),
+    );
+
+    for (index, (a, b)) in mapped
+        .temperature
+        .iter()
+        .zip(uniform.temperature.iter())
+        .enumerate()
+    {
+        assert!(
+            (a - b).abs() < 1e-9,
+            "vertex {index}: mapped {a} vs uniform {b}; the surface path must \
+             agree with the crate's existing Neumann path"
+        );
+    }
+    // And the direction: heating a face must raise it above the cold wall.
+    let hot = mapped
+        .temperature
+        .iter()
+        .fold(f64::NEG_INFINITY, |acc, t| acc.max(*t));
+    assert!(
+        hot > 300.0 + 1e-6,
+        "a surface heat SOURCE must raise the temperature above the 300 K \
+         Dirichlet wall, got max {hot}; if this reads <= 300 the outward-flux \
+         sign is inverted"
+    );
+}
+
+#[test]
+fn the_region_selector_matches_exactly_the_claimed_faces() {
+    // The lumping weight assumes the assembled Neumann load integrates over
+    // exactly the map's faces. If the selector and the map ever disagreed the
+    // audit would silently report a power the solve does not deliver.
+    let mesh = unit_mesh(3);
+    let faces = faces_on_x(&mesh, 1.0);
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("heater", 1.0, PowerUncertainty::Unstated, faces.clone())
+                .expect("component"),
+        ],
+        1.0,
+    )
+    .expect("map admits");
+
+    let selector = map.region_selector(&mesh);
+    let selected: Vec<usize> = mesh
+        .boundary()
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| selector(face))
+        .map(|(slot, _)| slot)
+        .collect();
+    assert_eq!(selected, faces, "selector must reproduce the claimed slots");
+    assert!(
+        selected.len() < mesh.boundary().len(),
+        "the fixture must not cover the whole boundary, or the test is vacuous"
+    );
+}
+
+#[test]
+fn a_face_claimed_by_two_components_refuses() {
+    let mesh = unit_mesh(2);
+    let faces = faces_on_x(&mesh, 1.0);
+    let error = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("a", 1.0, PowerUncertainty::Unstated, faces.clone())
+                .expect("a"),
+            SurfaceComponentPower::new("b", 1.0, PowerUncertainty::Unstated, faces).expect("b"),
+        ],
+        2.0,
+    )
+    .expect_err("one face carries one surface load");
+    match error {
+        ConductionError::ScenarioRow { what, .. } => {
+            assert!(what.contains("claimed by both"), "got: {what}");
+        }
+        other => panic!("expected a scenario-row refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_surface_total_that_does_not_match_refuses_with_the_table() {
+    let mesh = unit_mesh(2);
+    let all = faces_on_x(&mesh, 1.0);
+    let split = all.len() / 2;
+    let (left, right) = all.split_at(split);
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("film-a", 2.0, PowerUncertainty::Unstated, left.to_vec())
+                .expect("a"),
+            SurfaceComponentPower::new("film-b", 3.0, PowerUncertainty::Unstated, right.to_vec())
+                .expect("b"),
+        ],
+        10.0,
+    )
+    .expect("map admits");
+    let error = map
+        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+        .expect_err("a surface map that does not add up must refuse");
+    match error {
+        ConductionError::ScenarioRow { what, .. } => {
+            assert!(what.contains("film-a"), "table must list film-a:\n{what}");
+            assert!(what.contains("film-b"), "table must list film-b:\n{what}");
+            assert!(what.contains("10"), "declared total must be named");
+        }
+        other => panic!("expected a scenario-row refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn surface_admission_refuses_degenerate_declarations() {
+    let mesh = unit_mesh(2);
+    let faces = faces_on_x(&mesh, 1.0);
+    assert!(
+        SurfaceComponentPower::new("a", 1.0, PowerUncertainty::Unstated, Vec::new()).is_err(),
+        "a surface component that heats no face"
+    );
+    assert!(
+        SurfaceComponentPower::new("  ", 1.0, PowerUncertainty::Unstated, faces.clone()).is_err(),
+        "blank name"
+    );
+    assert!(
+        SurfaceComponentPower::new("a", -1.0, PowerUncertainty::Unstated, faces.clone()).is_err(),
+        "negative surface power"
+    );
+
+    // An out-of-range face slot is only detectable against a mesh.
+    let outside = mesh.boundary().len() + 3;
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("stray", 1.0, PowerUncertainty::Unstated, vec![outside])
+                .expect("component"),
+        ],
+        1.0,
+    )
+    .expect("map admits");
+    match map
+        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+        .expect_err("out-of-range slot")
+    {
+        ConductionError::ScenarioRow { region, .. } => assert_eq!(region, "stray"),
+        other => panic!("expected a scenario-row refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn surface_projection_is_deterministic_and_order_independent() {
+    let mesh = unit_mesh(3);
+    let all = faces_on_x(&mesh, 1.0);
+    let split = all.len() / 2;
+    let (left, right) = all.split_at(split);
+    let build = |reversed: bool| {
+        let mut components = vec![
+            SurfaceComponentPower::new("alpha", 2.0, PowerUncertainty::Unstated, left.to_vec())
+                .expect("alpha"),
+            SurfaceComponentPower::new("beta", 3.0, PowerUncertainty::Unstated, right.to_vec())
+                .expect("beta"),
+        ];
+        if reversed {
+            components.reverse();
+        }
+        SurfacePowerMap::new(components, 5.0)
+            .expect("map admits")
+            .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+            .expect("projection")
+    };
+    let (forward_field, forward_audit) = build(false);
+    let (reversed_field, reversed_audit) = build(true);
+    assert_eq!(forward_field, reversed_field);
+    assert_eq!(forward_audit, reversed_audit);
+    let names: Vec<&str> = forward_audit.rows().iter().map(|row| row.name()).collect();
+    assert_eq!(names, vec!["alpha", "beta"]);
+}

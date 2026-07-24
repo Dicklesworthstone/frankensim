@@ -92,6 +92,8 @@ diameter.
 | `ThermalResistanceTerm` / `SeriesThermalResistance` | named K/W terms and a deterministic series sum; stated half-widths combine conservatively by addition, while any unstated term keeps the complete band unknown |
 | `ComponentPower` / `PowerMap` | per-component dissipation in W bound to a mesh vertex set, plus the declared system total. Names are unique and sorted; bound vertices are sorted and deduplicated so a repeated binding cannot take a double share while the totals still balance |
 | `PowerMap::volumetric_source` | projects the map onto the nodal `W/m³` source AND returns the audit computed from that same field, so the reported delivered power is what the solve receives rather than a parallel estimate of it |
+| `SurfaceComponentPower` / `SurfacePowerMap` | the boundary analogue: dissipation bound to boundary-face SLOTS, projected onto a nodal OUTWARD-flux field for a `ThermalBc::Neumann` region. `region_selector(mesh)` hands back the matching face predicate so the flux and the region cannot describe different face sets |
+| `SurfacePowerAudit` / `SurfacePowerAuditRow` | the surface balance, reporting both the geometric `face_area_m2` and the map-wide `lumped_area_m2` the distribution actually divides by — they differ when footprints share vertices, and the lumped one is what keeps the total exact |
 | `PowerAudit` / `PowerAuditRow` | the retained three-number balance — declared total, component sum, delivered total — with a per-component table of bound volume, applied density, and delivered watts. `total_half_width_w()` sums stated bands conservatively and returns `None` if any component is `Unstated` |
 | `SurfaceEmissivity` | one dimensionless hemispherical-total emissivity selected from an `fs-matdb` material card; retains material state, card identity, exact property-use receipt, and the source uncertainty statement |
 | `LinearizedSurfaceRadiation` / `LinearizedRadiationPoint` | a declared `4 ε σ T_mean³` Robin coefficient with its validity domain, full `T⁴` comparison, measured point discrepancy, and first-order emissivity-width propagation |
@@ -219,6 +221,23 @@ producing solver's own typed claim is carried verbatim in
     refusal, so the reader sees which row is wrong. A forgotten component is
     the commonest data-entry error in a thermal model and the cheapest to
     catch. Evidence: `tests/power.rs`.
+13. **Surface power is delivered exactly too, by the same argument one
+    dimension down.** The exact P1 face load `∫λ_aλ_b dA = A(1+δ_ab)/12` has
+    row sum `A/3`, so the delivered surface power is `Σ_a q_a s_a` with the
+    lumped nodal AREA `s_a = (1/3) Σ_{f ∋ a} A_f`. The weight is computed over
+    the WHOLE map rather than per component, which is what keeps adjacent
+    footprints sharing a vertex exact: the assembled Neumann load integrates
+    over the whole region, so the distribution weight must too.
+    Evidence: `tests/power.rs`.
+14. **Boundary-face SLOTS and canonical FACE indices are different numbering
+    spaces.** A component binds slots into `ConductionMesh::boundary`; a
+    region predicate is handed a `BoundaryFace` whose `face` field indexes the
+    complex's canonical face table. Both are `usize`, so confusing them
+    compiles and silently selects the wrong faces.
+    `SurfacePowerMap::region_selector` takes the mesh precisely so it can do
+    that translation once, in one place. Evidence: `tests/power.rs` asserts
+    the selector reproduces exactly the claimed slots — it caught this
+    confusion during development.
 
 ## Error model
 
@@ -358,6 +377,14 @@ None. Everything here is `[S]` solid work on the default path.
   table; binary64 rounding admitted inside tolerance while a forgotten
   component refuses; one `Unstated` component making the total band `None`;
   the full admission-refusal surface; and declaration-order independence.
+  Surface coverage (`f85xj.5.14`): delivered surface power exact at `1e-12`
+  and across refinement; adjacent footprints sharing vertices still balancing,
+  with an assertion that the fixture genuinely exercises the shared-vertex
+  case; the analytic cross-check that a full-face map reproduces the
+  equivalent uniform `ThermalBc::Neumann` SOLVE, which also pins the sign
+  (heating must raise the body above its Dirichlet wall); the region selector
+  reproducing exactly the claimed slots; and refusals for a face claimed
+  twice, an out-of-range slot, and a total that does not add up.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -503,12 +530,21 @@ not promote any row beyond its registry authority.
   quarantine concern, not a physics one. The crate validates what it is handed
   and refuses what does not balance; it asserts nothing about where the
   numbers came from or whether the file they came from was well-formed.
-- SURFACE (boundary) POWER MAPS ARE NOT IMPLEMENTED. `PowerMap` projects onto
-  the VOLUMETRIC source only. A per-component surface dissipation would enter
-  through the Neumann flux path and needs its own face-area lumping and
-  boundary-partition integration; it is not provided and must not be
-  approximated by binding a surface component to its adjacent volume vertices,
-  which would place the heat in the solid rather than on the face.
+- A SURFACE POWER MAP IS A NEUMANN REGION, AND THE REGION MUST BE THE MAP'S
+  OWN. `SurfacePowerMap::neumann_flux` returns a nodal outward-flux field
+  whose lumping assumes the assembled load integrates over EXACTLY the faces
+  the map claims. Declaring it over any other face set delivers a power the
+  audit does not report, silently, because both halves still look
+  individually reasonable — so derive the region from
+  `SurfacePowerMap::region_selector`. Two components may not claim the same
+  face: a face carries one surface load. Adjacent footprints that share
+  VERTICES are fine and still balance, because the lumped nodal area is
+  map-wide rather than per-component.
+- SURFACE FLUX IS SIGNED POSITIVE-LEAVING, so a surface heat SOURCE produces a
+  NEGATIVE `outward_flux`. `SurfacePowerAuditRow::outward_flux_w_per_m2` is
+  therefore negative for a heater, while `declared_w` and `delivered_w` are
+  positive powers into the solid. The two conventions coexist deliberately;
+  the sign is pinned by a solve test rather than by comment.
 - A BALANCED POWER MAP IS NOT A VALIDATED ONE. The audit proves the declared,
   summed, and delivered totals agree — an internal consistency and correct
   discrete distribution claim. It says nothing about whether the declared

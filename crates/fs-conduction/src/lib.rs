@@ -79,7 +79,8 @@ pub use interface::{
 };
 pub use power::{
     COMPONENT_POWER_DIMS, ComponentPower, DEFAULT_POWER_TOLERANCE, MAX_COMPONENTS, PowerAudit,
-    PowerAuditRow, PowerMap, PowerUncertainty,
+    PowerAuditRow, PowerMap, PowerUncertainty, SurfaceComponentPower, SurfacePowerAudit,
+    SurfacePowerAuditRow, SurfacePowerMap,
 };
 pub use material::{
     CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,
