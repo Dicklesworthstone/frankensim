@@ -16,6 +16,7 @@ use fs_conduction::solve::{
 use fs_conduction::transient::{
     TransientConfig, TransientProblem, VolumetricHeatCapacity, assemble_capacitance, march,
 };
+use fs_mms::{LadderSide, ORDER_GATE_TOLERANCE, OrderGate, RefinementLadder};
 use fs_rep_mesh::TetComplex;
 use support::{with_cancelled_cx, with_cx};
 
@@ -258,78 +259,15 @@ fn an_initial_condition_inconsistent_with_the_boundary_is_corrected_not_carried(
 // Observed temporal order (self-convergence).
 // ---------------------------------------------------------------------------
 
-/// Richardson triple: three solutions at `dt`, `dt/2`, `dt/4` give the
-/// observed order without needing an external reference solution.
-fn observed_order(theta: f64) -> f64 {
-    let mesh = unit_mesh(2);
-    let boundary = cold_wall(&mesh);
-    let source = ScalarField::uniform("volumetric source", 2.0e5).expect("source");
-    let final_time = 4.0e4;
-
-    let at = |steps: usize| -> Vec<f64> {
-        let config =
-            TransientConfig::new(theta, final_time / (steps as f64), linear_config()).expect("cfg");
-        let initial = vec![T_COLD; mesh.vertex_count()];
-        with_cx(|cx| {
-            march(
-                cx,
-                TransientProblem {
-                    mesh: &mesh,
-                    boundary: &boundary,
-                    material: &material(),
-                    source: &source,
-                    capacity: capacity(),
-                },
-                &config,
-                &initial,
-                steps,
-            )
-            .expect("march")
-            .temperature
-        })
-    };
-
-    let coarse = at(8);
-    let medium = at(16);
-    let fine = at(32);
-
-    let diff = |a: &[f64], b: &[f64]| -> f64 {
-        a.iter()
-            .zip(b.iter())
-            .fold(0.0f64, |acc, (x, y)| acc.max((x - y).abs()))
-    };
-    let first = diff(&coarse, &medium);
-    let second = diff(&medium, &fine);
-    assert!(
-        second > 0.0,
-        "the refinement must actually change the answer"
-    );
-    (first / second).log2()
-}
-
-#[test]
-fn backward_euler_is_first_order_and_crank_nicolson_is_second() {
-    // Self-convergence, not comparison against an analytic solution: the
-    // semi-discrete system has no elementary closed form on a tet mesh, so
-    // the honest measurement is a Richardson triple. Bands are deliberately
-    // loose — the claim is "these are different orders and each is near its
-    // nominal one", not a tight order estimate.
-    let euler = observed_order(1.0);
-    assert!(
-        (0.8..1.3).contains(&euler),
-        "backward Euler observed order {euler}, expected near 1"
-    );
-
-    let nicolson = observed_order(0.5);
-    assert!(
-        (1.7..2.3).contains(&nicolson),
-        "Crank-Nicolson observed order {nicolson}, expected near 2"
-    );
-    assert!(
-        nicolson > euler + 0.5,
-        "Crank-Nicolson ({nicolson}) must be measurably higher order than backward Euler ({euler})"
-    );
-}
+// The Richardson triple that used to live here — `observed_order`, plus
+// `backward_euler_is_first_order_and_crank_nicolson_is_second` — was retired by
+// bead f85xj.5.15. It measured the same quantity as
+// `observed_temporal_order_passes_the_crate_order_gate` with hand-written bands
+// ((0.8..1.3) and (1.7..2.3)) and produced no structured record, so it was a
+// second, looser notion of "order was checked" living beside the crate's real
+// gate. The gate is STRICTER (ORDER_GATE_TOLERANCE is 0.2, so [0.8, 1.2] and
+// [1.8, 2.2]) and emits the same JSON-lines verdict a spatial ladder does, and
+// the scheme-separation assertion moved across with it. Nothing was lost.
 
 #[test]
 fn the_nominal_order_matches_the_declared_scheme() {
@@ -901,5 +839,298 @@ fn the_lumped_discrepancy_is_controlled_by_the_biot_number() {
         deep_regime < coarse_regime * 0.6,
         "quartering Biot barely moved the discrepancy ({coarse_regime:e} -> {deep_regime:e}); \
          that suggests the error is NOT the lumped approximation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Spatially resolved analytic transient: the 1-D slab step response
+// (bead `frankensim-extreal-program-f85xj.5.15`).
+// ---------------------------------------------------------------------------
+
+/// Thermal diffusivity of the fixture material, m^2/s.
+const ALPHA: f64 = K / RHO_CP;
+/// Slab thickness, m (the unit box spans x in [0, 1]).
+const SLAB_W: f64 = 1.0;
+/// Odd modes summed in the series. See `slab_truncation_bound`.
+const SLAB_MODES: usize = 41;
+
+/// Dimensionless slab step response `theta / theta_i` at position `x` and
+/// Fourier number `fo`, for a slab whose two faces are held at the step
+/// temperature and whose interior started uniform.
+///
+/// `theta/theta_i = sum over odd n of (4 / (n pi)) sin(n pi x / W) exp(-n^2 pi^2 Fo)`
+fn slab_series(x: f64, fo: f64) -> f64 {
+    let mut total = 0.0;
+    let mut n = 1usize;
+    while n <= SLAB_MODES {
+        let nf = n as f64;
+        let arg = nf * core::f64::consts::PI * x / SLAB_W;
+        total += (4.0 / (nf * core::f64::consts::PI))
+            * arg.sin()
+            * (-nf * nf * core::f64::consts::PI * core::f64::consts::PI * fo).exp();
+        n += 2;
+    }
+    total
+}
+
+/// A bound on what the truncated series discards at `fo`.
+///
+/// Every omitted term is at most `4 / (n pi)` in amplitude and carries
+/// `exp(-n^2 pi^2 Fo)`, so the tail is dominated by a geometric series in
+/// `exp(-pi^2 Fo)` whose first omitted term already bounds it generously.
+fn slab_truncation_bound(fo: f64) -> f64 {
+    let n = (SLAB_MODES + 2) as f64;
+    let first_omitted = (4.0 / (n * core::f64::consts::PI))
+        * (-n * n * core::f64::consts::PI * core::f64::consts::PI * fo).exp();
+    // The remaining terms decay far faster still; two times the first omitted
+    // term is a loose and safe envelope.
+    2.0 * first_omitted
+}
+
+/// Both `x` faces held at `T_COLD`, the other four adiabatic, so the problem
+/// is one-dimensional in `x`.
+fn slab_walls(mesh: &ConductionMesh) -> ThermalBoundary {
+    ThermalBoundaryBuilder::new(mesh)
+        .region(
+            "x-lo",
+            |face| on_box_face(face.centroid[0], 0.0),
+            ThermalBc::dirichlet(T_COLD).expect("cold"),
+        )
+        .expect("x-lo region")
+        .region(
+            "x-hi",
+            |face| on_box_face(face.centroid[0], SLAB_W),
+            ThermalBc::dirichlet(T_COLD).expect("cold"),
+        )
+        .expect("x-hi region")
+        .adiabatic_remainder()
+        .finish()
+        .expect("partition")
+}
+
+/// Peak initial excess over the wall, K.
+const SLAB_THETA_I: f64 = 100.0;
+/// Fourier number the march STARTS from. See the test's reasoning.
+const SLAB_FO_START: f64 = 0.02;
+/// Fourier number the march ends at.
+const SLAB_FO_END: f64 = 0.2;
+
+/// Max nodal error against the series at `SLAB_FO_END`, for a mesh of `n^3`
+/// cells marched with Crank-Nicolson.
+fn slab_error(n: usize, steps: usize) -> f64 {
+    let mesh = unit_mesh(n);
+    let boundary = slab_walls(&mesh);
+    let source = ScalarField::uniform("volumetric source", 0.0).expect("no source");
+
+    let exact_at = |fo: f64| -> Vec<f64> {
+        mesh.positions()
+            .iter()
+            .map(|p| T_COLD + SLAB_THETA_I * slab_series(p[0], fo))
+            .collect()
+    };
+
+    let initial = exact_at(SLAB_FO_START);
+    let duration = (SLAB_FO_END - SLAB_FO_START) * SLAB_W * SLAB_W / ALPHA;
+    let config =
+        TransientConfig::crank_nicolson(duration / (steps as f64), linear_config()).expect("cfg");
+
+    let marched = with_cx(|cx| {
+        march(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &initial,
+            steps,
+        )
+        .expect("slab march")
+        .temperature
+    });
+
+    let exact = exact_at(SLAB_FO_END);
+    marched
+        .iter()
+        .zip(&exact)
+        .fold(0.0f64, |acc, (got, want)| acc.max((got - want).abs()))
+}
+
+/// The spatially resolved analytic transient the lumped Level-A binding cannot
+/// provide.
+///
+/// The lumped row is spatially TRIVIAL by construction — small Biot means no
+/// internal gradient — so nothing before this exercised the coupling between
+/// the spatial operator and the time integrator against a closed form. Here
+/// the slab carries a real internal profile, and the observed convergence is
+/// the first evidence that the transient path inherits the P1 SPATIAL order
+/// rather than only its own temporal one.
+///
+/// # Why the march starts at a positive Fourier number
+///
+/// The textbook step response begins from a uniform interior against walls
+/// already at the step temperature — a DISCONTINUITY at `t = 0`. That state is
+/// not in the P1 finite element space at any mesh size, so its interpolation
+/// error would neither vanish nor converge cleanly, and it would dominate and
+/// contaminate exactly the measurement this test exists to make. The march
+/// therefore starts from the analytic solution at `SLAB_FO_START`, where the
+/// series has already smoothed and is consistent with the walls. It is the
+/// same step response; only the window excludes the instant the model cannot
+/// represent.
+#[test]
+fn the_slab_step_response_converges_at_the_p1_spatial_order() {
+    let ns = [6usize, 8, 10, 12];
+    let hs: Vec<f64> = ns.iter().map(|&n| 1.0 / (n as f64)).collect();
+    let errors: Vec<f64> = ns.iter().map(|&n| slab_error(n, 400)).collect();
+
+    // The series truncation must be DOMINATED, not merely small: the whole
+    // ladder is meaningless if the reference itself carries a comparable
+    // error. At these Fourier numbers the omitted tail is ~1e-160 against
+    // errors of order 1e-1, so the reference is exact for this purpose.
+    let smallest = errors.iter().copied().fold(f64::INFINITY, f64::min);
+    let truncation = slab_truncation_bound(SLAB_FO_START).max(slab_truncation_bound(SLAB_FO_END));
+    assert!(
+        truncation < smallest * 1e-6,
+        "series truncation {truncation:e} must be far below the smallest measured error \
+         {smallest:e}, or the ladder is measuring the reference rather than the solver"
+    );
+
+    let ladder = RefinementLadder::new(hs, errors).expect("a strictly refining ladder");
+    let verdict = OrderGate { theoretical: 2.0 }
+        .check("slab-step-response", LadderSide::Primal, &ladder)
+        .expect("the transient path must inherit the P1 spatial order");
+    println!("{}", verdict.json_line(true));
+    assert!(
+        verdict.deviation <= ORDER_GATE_TOLERANCE,
+        "observed {} against theoretical 2",
+        verdict.fit.observed
+    );
+}
+
+#[test]
+fn the_slab_ladder_measures_the_mesh_and_not_the_time_integrator() {
+    // A spatial ladder is only a spatial ladder if the temporal error is
+    // negligible at every rung. Doubling the steps on the finest-but-one mesh
+    // must barely move the error; if it does move, the ladder's slope is a
+    // blend of two discretizations and the reported order means nothing.
+    let coarse_steps = slab_error(10, 400);
+    let fine_steps = slab_error(10, 800);
+    let shift = (coarse_steps - fine_steps).abs();
+    assert!(
+        shift < coarse_steps * 1e-3,
+        "halving the step moved the error by {shift:e}, which is not negligible against \
+         {coarse_steps:e}; the spatial ladder would be contaminated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Temporal order through the crate's real gate.
+// ---------------------------------------------------------------------------
+
+/// Temporal ladder against a much finer reference on the SAME mesh.
+///
+/// Holding the mesh fixed makes the spatial error identical in every run, so
+/// it cancels in the difference and what remains is purely temporal. That is
+/// what lets a single gate speak about time refinement in the same vocabulary
+/// it uses for space.
+fn temporal_ladder(theta: f64) -> RefinementLadder {
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let source = ScalarField::uniform("volumetric source", 2.0e5).expect("source");
+    let final_time = 4.0e4;
+
+    let at = |steps: usize| -> Vec<f64> {
+        let config =
+            TransientConfig::new(theta, final_time / (steps as f64), linear_config()).expect("cfg");
+        let initial = vec![T_COLD; mesh.vertex_count()];
+        with_cx(|cx| {
+            march(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &initial,
+                steps,
+            )
+            .expect("march")
+            .temperature
+        })
+    };
+
+    let reference = at(2048);
+    let rungs = [8usize, 16, 32, 64];
+    let hs: Vec<f64> = rungs
+        .iter()
+        .map(|&steps| final_time / (steps as f64))
+        .collect();
+    let errors: Vec<f64> = rungs
+        .iter()
+        .map(|&steps| {
+            at(steps)
+                .iter()
+                .zip(&reference)
+                .fold(0.0f64, |acc, (got, want)| acc.max((got - want).abs()))
+        })
+        .collect();
+    RefinementLadder::new(hs, errors).expect("a strictly refining temporal ladder")
+}
+
+#[test]
+fn observed_temporal_order_passes_the_crate_order_gate() {
+    // Bead f85xj.5.15 item (b): before this, temporal order was checked by a
+    // Richardson triple with hand-written bands living beside the crate's real
+    // gate — two parallel notions of "order was checked". One gate is better
+    // than two, and routing it means a temporal regression is now reported in
+    // the same JSON-lines shape as a spatial one.
+    let euler = OrderGate { theoretical: 1.0 }
+        .check(
+            "transient-backward-euler",
+            LadderSide::Primal,
+            &temporal_ladder(1.0),
+        )
+        .expect("backward Euler must gate at first order");
+    println!("{}", euler.json_line(true));
+
+    let nicolson = OrderGate { theoretical: 2.0 }
+        .check(
+            "transient-crank-nicolson",
+            LadderSide::Primal,
+            &temporal_ladder(0.5),
+        )
+        .expect("Crank-Nicolson must gate at second order");
+    println!("{}", nicolson.json_line(true));
+
+    assert!(
+        nicolson.fit.observed > euler.fit.observed + 0.5,
+        "the two schemes must be measurably different orders, not merely each within tolerance \
+         of its own nominal: backward Euler {} vs Crank-Nicolson {}",
+        euler.fit.observed,
+        nicolson.fit.observed
+    );
+}
+
+#[test]
+fn the_temporal_gate_rejects_a_ladder_fitted_against_the_wrong_scheme() {
+    // The gate has to be able to FAIL, or routing through it proves nothing.
+    // Backward Euler's ladder gated as if it were second order must refuse.
+    let error = OrderGate { theoretical: 2.0 }
+        .check(
+            "transient-backward-euler-mislabelled",
+            LadderSide::Primal,
+            &temporal_ladder(1.0),
+        )
+        .expect_err("a first-order ladder cannot pass a second-order gate");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("mms-order-gate"),
+        "the refusal must come from the order gate itself: {rendered}"
     );
 }

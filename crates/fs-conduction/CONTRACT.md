@@ -392,12 +392,16 @@ None. Everything here is `[S]` solid work on the default path.
   mis-scaled mass matrix would drift; the capacitance row-sum equalling
   `rho c_p V` directly; marching to large time recovering the independently
   tested STEADY solution; a boundary-inconsistent initial condition being
-  lifted rather than carried; observed temporal order by Richardson triple
-  (backward Euler near 1, Crank-Nicolson near 2, and measurably separated —
-  self-convergence, since the semi-discrete system has no elementary closed
-  form on a tet mesh); refusals for `k(T)`, `theta < 0.5`, non-positive step
-  or capacity, and a mismatched initial vector; determinism across
-  independent runs; and a cancelled march publishing no partial solution.
+  lifted rather than carried; observed temporal order through
+  `fs_mms::OrderGate` (`f85xj.5.15`) on a ladder against a much finer
+  reference on the SAME mesh, so the spatial error cancels and what is fitted
+  is purely temporal — backward Euler observed 0.994 against a theoretical 1,
+  Crank-Nicolson 2.008 against 2, plus a negative control gating the
+  first-order ladder as second order and requiring the refusal; the 1-D slab
+  step response against its series solution (below); refusals for `k(T)`,
+  `theta < 0.5`, non-positive step or capacity, and a mismatched initial
+  vector; determinism across independent runs; and a cancelled march
+  publishing no partial solution.
   Adjoint coverage: the source-scale gradient passing the crate-wide
   `fs_adjoint::verify_gradient` gate under BOTH backward Euler and
   Crank-Nicolson — with `informative_directions` asserted so the pass cannot
@@ -643,8 +647,10 @@ not promote any row beyond its registry authority.
   closed-form APPROXIMATION inside that approximation's declared small-Biot
   context, and that the residual gap is controlled by Biot. It is not evidence
   against measured data, it says nothing about the solver outside small Biot,
-  and it does not make any capability L4. A spatially resolved transient
-  (a slab step response against its series solution) is still unbound.
+  and it does not make any capability L4. A spatially resolved transient is
+  now bound separately — see the slab step response below — but that is
+  VERIFICATION, not validation, and neither binding is evidence against
+  measured data.
 - CHECKPOINTING IS VACUOUS IN THE ADMITTED REGIME, AND IS THEREFORE NOT BUILT.
   The staged plan assumed the checkpointed pattern from `fs-adjoint::timedep`,
   which exists to avoid retaining the forward trajectory. Here `A = C/dt + θK`
@@ -873,3 +879,84 @@ energy — so the limitation comes with its own escape.
   solve, validates no envelope (that is
   `EnvelopeDutyCycle::validate_against`), and adds no evidence of any kind to
   the numbers it carries.
+
+## The slab step response and the temporal order gate (bead f85xj.5.15)
+
+Two verification items named by `f85xj.5.11` and left as prose caveats there.
+
+### A spatially resolved analytic transient
+
+The Level-A lumped binding is spatially TRIVIAL by construction: small Biot
+means no internal gradient, so nothing in it exercises the coupling between the
+spatial operator and the time integrator. The 1-D slab step response does. A
+unit box with both `x` faces held at the step temperature and the other four
+adiabatic is one-dimensional in `x`, and its closed form is the odd-mode series
+`theta/theta_i = sum (4/(n pi)) sin(n pi x / W) exp(-n^2 pi^2 Fo)`.
+
+Refining the MESH at a fixed Fourier number, the max nodal error against that
+series fits an observed order of **1.929** against the P1 theoretical **2**,
+inside `fs_mms::ORDER_GATE_TOLERANCE`. That is the first evidence that the
+transient path inherits the SPATIAL order rather than only its own temporal
+one.
+
+Three conditions make the measurement mean what it says, and each is asserted
+rather than assumed:
+
+- **The series truncation is dominated, not merely small.** Forty-one odd modes
+  at these Fourier numbers leave a tail bounded by ~1e-160 against measured
+  errors of order 1e-1. A ladder whose reference carries a comparable error
+  measures the reference.
+
+- **The temporal error is negligible at every rung.** Doubling the step count
+  on the finest-but-one mesh moves the error by about one part in 1e4. Without
+  that check the fitted slope would be a blend of two discretizations and the
+  reported order would mean nothing.
+
+- **The march starts at a POSITIVE Fourier number.** The textbook step response
+  begins from a uniform interior against walls already at the step temperature
+  — a discontinuity at `t = 0` which is not in the P1 finite element space at
+  ANY mesh size. Its interpolation error would neither vanish nor converge
+  cleanly, and it would dominate exactly the quantity being measured. The march
+  therefore starts from the analytic solution at `Fo = 0.02`, where the series
+  has already smoothed and is consistent with the walls. It is the same step
+  response; only the window excludes the instant the model cannot represent.
+  This is a general point about convergence studies, not a quirk of this
+  fixture: you cannot measure spatial order against an initial condition that
+  is not in the finite element space.
+
+### One order gate, not two
+
+Temporal order now routes through `fs_mms::OrderGate`, the same gate the
+spatial MMS ladders use. The ladder holds the MESH fixed and refines the step
+against a much finer reference on that same mesh, so the spatial error is
+identical in every run and cancels in the difference; what is fitted is purely
+temporal.
+
+The Richardson triple that previously measured this was retired. It computed
+the same quantity with hand-written bands and produced no structured record, so
+it amounted to a second, looser notion of "order was checked" living beside the
+crate's real gate. The gate is STRICTER — `ORDER_GATE_TOLERANCE` is 0.2, giving
+[0.8, 1.2] and [1.8, 2.2] against the old (0.8..1.3) and (1.7..2.3) — and emits
+the same JSON-lines verdict a spatial ladder does, so a temporal regression is
+now reported the same way a spatial one is. The scheme-separation assertion
+moved across unchanged.
+
+A negative control gates the backward-Euler ladder as if it were second order
+and requires the refusal, because routing through a gate proves nothing unless
+the gate can fail.
+
+### No-claim boundaries (f85xj.5.15)
+
+- This is VERIFICATION — the solver solving its own equations correctly —
+  and not validation against measured data. The Level-4 story still needs the
+  E04 corpus, and `f85xj.4.5`'s instrumented rig remains the blocker there.
+
+- The observed spatial order is measured on ONE analytic transient with
+  Dirichlet walls, no source, and constant properties. It is not evidence about
+  order under Robin boundaries, a spatially varying source, or anisotropic
+  conductivity.
+
+- The temporal ladder is SELF-convergence against a finer step of the same
+  scheme on the same mesh. It shows the scheme converges at its nominal rate;
+  it does not show the semi-discrete system it converges TO is the right one.
+  That is what the slab response and the steady-recovery test cover.
