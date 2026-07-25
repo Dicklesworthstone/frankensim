@@ -47,6 +47,13 @@ existing convection rung.
 - `OperatingPoint::correlation_handoff` converts one branch flow to typed mean
   velocity, computes Reynolds through role-tagged `fs-regime` dimensions, and
   produces `fs-convection::CorrelationInputs` without discarding evidence.
+- The test-only plate-fin fixture composes that public seam through two
+  Shah-London rectangular-channel cards and the real `fs-conduction` solve.
+  Its base plate and three fins are separate tetrahedral blocks joined by
+  three named, card-backed bondlines; internal fin flanks and channel floors
+  remain separately named Robin traces. Channel area, wetted perimeter,
+  hydraulic diameter, aspect ratio, and length ratio all derive from the same
+  mesh constants.
 - `qoi::extract_thermal_qois` consumes a `ConductionSolution`, its exact
   `ConductionMesh`, an `OperatingPoint`, declared junction/surface regions, a
   cited fan-efficiency interval, and a cited maximum-temperature requirement.
@@ -180,6 +187,14 @@ None.
 - clause-addressed fan-law authority and a pressure-corner falsifier that
   rejects cross-pairing each solved flow with the opposite resistance;
 - typed branch velocity/Reynolds handoff into `fs-convection`;
+- G0/G3 plate-fin end-to-end wiring at three fan-solved speed ratios:
+  card-backed base-to-fin bondlines, separately attributed fin-flank and
+  base-floor Robin heat, an explicit channel-mean bulk-temperature closure,
+  a wrong-hydraulic-diameter falsifier, and structured refusal of a
+  fan-solved Reynolds point above the laminar-card ceiling. The selected
+  fully developed rectangular limits correctly keep scalar `h` invariant
+  with Reynolds at fixed geometry and fluid properties while binding each
+  evaluated Reynolds point into distinct provenance;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
 - actual loss-card projection from an explicitly validated `LossElement`,
@@ -203,6 +218,21 @@ None.
 - Repeat replay proves the current scalar implementation is stable on the
   exercised same-ISA path. It does not claim an internal worker-count mode that
   the crate does not implement, or cross-ISA equality.
+- The plate-fin fixture is synthetic and one-way coupled. It does not solve
+  channel momentum or fluid energy: its mean bulk-air reference temperature
+  is the midpoint implied by declared base power, constant density/heat
+  capacity, and the solved branch flow. It is neither conjugate CFD nor
+  manufacturer or experimental validation.
+- The rectangular CWT/CHF rows are fully developed analytic limits. Reynolds
+  is a validity axis but not a formula variable, so their `Nu` and scalar `h`
+  must stay invariant when only fan speed changes. Evaluation provenance still
+  binds the changed Reynolds point, and a sufficiently high fan-solved point
+  refuses rather than extrapolating. Any future claim of flow-varying `h`
+  requires a separately sourced developing-channel or plate-fin-array card.
+- Summing named Robin heat rates back to the whole-domain Robin total is only
+  a boundary-wiring falsifier; both reductions use the same face quadrature.
+  The wrong-`D_h` case likewise proves the geometry handoff is load-bearing,
+  not that either hydraulic diameter produces validated hardware physics.
 - Piecewise-linear interpolation and quadratic loss coefficients do not model
   swirl, recirculation, acoustic interaction, thermal buoyancy, compressibility,
   fouling, or installation system effects.

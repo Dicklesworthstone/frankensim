@@ -20,5 +20,13 @@ fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+# Test-only authority for the declared base-to-fin bondline cards in the
+# plate-fin end-to-end fixture.
+fs-matdb = { path = "../fs-matdb" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+
 [lints]
 workspace = true
