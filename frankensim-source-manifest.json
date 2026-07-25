@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "b6ed14b7ae933a98822337a637dfd9bf77d537771c688f51af580d9b913a3551",
+  "manifest_identity": "46640b9c0ed62addb7f4a437a12c8af060c6c6bd5cac8c5613d55767fa3988a3",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "77a2a8eae33947be00ce665a959ff984076227f4a85bbcb833af390e73983d97",
+    "source_root": "387635f1f1603e25f6543c7c2bccc4f38166ec579646f4c0ccfae47eb4b4354b",
     "tracked_file_count": 1933,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -270,7 +270,7 @@
       {"path": "crates/fs-conduction/tests/mms.rs", "git_mode": "100644", "bytes": 31254, "content_blake3": "02e79ea662db5cd22d48c9a86ffdc25411f3f7e1d5ca0e77557276f3c33293e1"},
       {"path": "crates/fs-conduction/tests/pcb_homogenization.rs", "git_mode": "100644", "bytes": 8638, "content_blake3": "2808939b36c4250bd3bee00c481b16dad0cea10b793b7286d05e7bfd3ef2f21e"},
       {"path": "crates/fs-conduction/tests/power.rs", "git_mode": "100644", "bytes": 31019, "content_blake3": "2a6e27b45cd743ff120c79b4c4cb327d2d42e611541c46deba4c28033b871fe7"},
-      {"path": "crates/fs-conduction/tests/power_table_e2e.rs", "git_mode": "100644", "bytes": 20743, "content_blake3": "9b1e44af6911914ebd575fdb445e4b492704346f167ac3f3297b6951fdab95a3"},
+      {"path": "crates/fs-conduction/tests/power_table_e2e.rs", "git_mode": "100644", "bytes": 20765, "content_blake3": "d8ae572cb2496f4cc1b238a4c05a0e719538b31870a260040bfb9aceb6f8c71f"},
       {"path": "crates/fs-conduction/tests/radiation.rs", "git_mode": "100644", "bytes": 14780, "content_blake3": "32e84cd6949b2d383152a70a2f45d66128e3abfe8ec607a5581cc7c760511d4f"},
       {"path": "crates/fs-conduction/tests/support/mod.rs", "git_mode": "100644", "bytes": 13398, "content_blake3": "505d646f15abbe67991f6ec0ce1bcf04486c4e2c97dbe3141d492410ef1fa12b"},
       {"path": "crates/fs-conduction/tests/transient.rs", "git_mode": "100644", "bytes": 40703, "content_blake3": "00566fdb9eb6060921c3375db04909728257c55a6201e39498d5560c1a0b0a89"},
