@@ -7142,6 +7142,50 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
         ));
         return violations;
     };
+    // AUTHORITATIVE ROW COUNTS, parsed as real JSON (bead 6519u).
+    //
+    // The reader below is line-oriented and requires exactly one compact
+    // object per line. That format is deliberate — it keeps registry diffs
+    // reviewable — but it must not be the ONLY thing that decides how many
+    // rows exist. Reformatting this file with an ordinary pretty-printer is
+    // semantically identical JSON and used to make every row invisible to the
+    // reader, which then reported zero findings and looked like a clean run.
+    // A gate that cannot tell you it failed to read its own input is not a
+    // gate, so the declared counts are established independently and the
+    // reader is required to match them.
+    let declared_rows = match depgraph::JsonParser::new(&registry).finish() {
+        Ok(depgraph::JsonValue::Object(root_object)) => {
+            let count = |key: &str| match root_object.get(key) {
+                Some(depgraph::JsonValue::Array(items)) => Some(items.len()),
+                _ => None,
+            };
+            match (count("surfaces"), count("goldens")) {
+                (Some(surfaces), Some(goldens)) => Some((surfaces, goldens)),
+                _ => {
+                    violations.push(bail(
+                        "golden-couplings.json must declare `surfaces` and `goldens` as JSON \
+                         arrays at the document root"
+                            .to_string(),
+                    ));
+                    None
+                }
+            }
+        }
+        Ok(_) => {
+            violations.push(bail(
+                "golden-couplings.json root must be a JSON object".to_string(),
+            ));
+            None
+        }
+        Err(error) => {
+            violations.push(bail(format!(
+                "golden-couplings.json is not valid JSON: {error}"
+            )));
+            None
+        }
+    };
+    let mut seen_surface_rows = 0usize;
+    let mut seen_golden_rows = 0usize;
     let external_versions = if root.join("identity-authorities.json").is_file() {
         match identities::external_coupling_versions(root) {
             Ok(versions) => Some(versions),
@@ -7175,6 +7219,7 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
             continue;
         }
         if in_surfaces && line.trim_start().starts_with('{') {
+            seen_surface_rows += 1;
             let (Some(id), Some(file), Some(ver)) = (
                 field(line, "id"),
                 field(line, "file"),
@@ -7286,6 +7331,7 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
             surface_versions.push((id.to_string(), reg_ver));
         }
         if in_goldens && line.trim_start().starts_with('{') {
+            seen_golden_rows += 1;
             let (Some(g), Some(file), Some(name), Some(deps)) = (
                 field(line, "golden"),
                 field(line, "file"),
@@ -7307,6 +7353,28 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
                 name.to_string(),
                 deps.to_string(),
             ));
+        }
+    }
+    // The reader must have SEEN every row the file declares. A shortfall means
+    // the compact one-object-per-line format was broken and rows were skipped
+    // in silence; a surplus means the section markers matched something they
+    // should not have. Either way the rule passes below would be evaluating a
+    // subset of the registry while reporting like they had evaluated all of it.
+    if let Some((declared_surfaces, declared_goldens)) = declared_rows {
+        for (section, seen, declared) in [
+            ("surfaces", seen_surface_rows, declared_surfaces),
+            ("goldens", seen_golden_rows, declared_goldens),
+        ] {
+            if seen != declared {
+                violations.push(bail(format!(
+                    "golden-couplings.json declares {declared} `{section}` entries but the \
+                     registry reader recognised {seen}: the file must keep exactly one COMPACT \
+                     JSON object per line, with the `\"{section}\"` key unindented at the start \
+                     of its own line (docs/GOLDEN_POLICY.md). Re-indenting the registry is \
+                     semantically identical JSON and would otherwise silence this check \
+                     entirely rather than fail it"
+                )));
+            }
         }
     }
     for (g, file, name, deps) in &goldens {
@@ -10623,6 +10691,92 @@ path = "src/h\u0069dden.rs"
         let v = check_goldens(&root);
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].detail.contains("GOLDEN_POLICY"), "{}", v[0].detail);
+    }
+
+    /// Bead 6519u: re-indenting the registry must be a LOUD refusal, not a
+    /// quiet pass.
+    ///
+    /// `golden-couplings.json` is read by a line-oriented parser that needs
+    /// one compact object per line. Running the file through an ordinary
+    /// pretty-printer produces semantically identical JSON — same surfaces,
+    /// same goldens, still valid — and used to make every row invisible: the
+    /// section markers no longer started their lines, so the loop body never
+    /// ran, nothing was counted, and the check reported only the violations
+    /// sourced from the OTHER registry. It looked like a large improvement.
+    /// It was the check not running.
+    ///
+    /// A green result that means "not evaluated" is indistinguishable from
+    /// "evaluated and clean", which is the defect class this repo tracks.
+    #[test]
+    fn goldens_refuse_a_reformatted_registry_instead_of_silently_reading_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("xtask-goldens-reformatted-{}", std::process::id()));
+        let src_dir = root.join("crates/mini/src");
+        std::fs::create_dir_all(&src_dir).expect("fixture dirs");
+        std::fs::write(
+            root.join("crates/mini/src/lib.rs"),
+            "pub const MINI_SEMANTICS_VERSION: u32 = 1;\nconst GOLDEN_HASH: u64 = 7;\n",
+        )
+        .expect("fixture write");
+
+        let compact = "{\n\"surfaces\": [\n{\"id\":\"mini:semantics\",\"file\":\"crates/mini/src/lib.rs\",\"const\":\"MINI_SEMANTICS_VERSION\",\"version\":1}\n],\n\"goldens\": [\n{\"golden\":\"mini:golden\",\"file\":\"crates/mini/src/lib.rs\",\"const\":\"GOLDEN_HASH\",\"depends_on\":\"mini:semantics=1\",\"justification\":\"recorded at fixture landing, both modes, committed tree\"}\n]\n}\n";
+        std::fs::write(root.join("golden-couplings.json"), compact).expect("fixture write");
+        assert!(
+            check_goldens(&root).is_empty(),
+            "the compact fixture is the positive control and must pass: {:?}",
+            check_goldens(&root)
+        );
+
+        // Byte-for-byte the same registry, pretty-printed the way any JSON
+        // tool would write it.
+        let reformatted = concat!(
+            "{\n",
+            "  \"surfaces\": [\n",
+            "    {\n",
+            "      \"id\": \"mini:semantics\",\n",
+            "      \"file\": \"crates/mini/src/lib.rs\",\n",
+            "      \"const\": \"MINI_SEMANTICS_VERSION\",\n",
+            "      \"version\": 1\n",
+            "    }\n",
+            "  ],\n",
+            "  \"goldens\": [\n",
+            "    {\n",
+            "      \"golden\": \"mini:golden\",\n",
+            "      \"file\": \"crates/mini/src/lib.rs\",\n",
+            "      \"const\": \"GOLDEN_HASH\",\n",
+            "      \"depends_on\": \"mini:semantics=1\",\n",
+            "      \"justification\": \"recorded at fixture landing, both modes, committed tree\"\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        std::fs::write(root.join("golden-couplings.json"), reformatted).expect("fixture write");
+
+        let violations = check_goldens(&root);
+        assert!(
+            !violations.is_empty(),
+            "a registry the reader cannot read must REFUSE, not report zero findings"
+        );
+        for section in ["surfaces", "goldens"] {
+            assert!(
+                violations.iter().any(|v| {
+                    v.detail.contains(&format!("`{section}`"))
+                        && v.detail.contains("declares 1")
+                        && v.detail.contains("recognised 0")
+                }),
+                "the refusal must name the {section} section and BOTH counts, so the reader can \
+                 see it evaluated nothing rather than evaluating cleanly: {violations:?}"
+            );
+        }
+
+        // And a registry that is not JSON at all must refuse too, rather than
+        // falling through to a zero-row pass.
+        std::fs::write(root.join("golden-couplings.json"), "{ not json ").expect("fixture write");
+        let broken = check_goldens(&root);
+        assert!(
+            broken.iter().any(|v| v.detail.contains("not valid JSON")),
+            "unparseable JSON must be named as such: {broken:?}"
+        );
     }
 
     #[test]
