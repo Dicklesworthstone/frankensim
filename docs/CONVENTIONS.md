@@ -265,7 +265,8 @@ migration obligations live in `schema-policy.json`, with the doctrine in
 Two rules bind day-to-day work:
 
 - Bumping a frozen schema's version constant without updating its policy record
-  in the same commit fails `check-all`. The check reads the constant out of its
+  in the same commit fails `check-all`. The pre-commit guard warns about this
+  before you get that far. The check reads the constant out of its
   declared source file, so the registry cannot describe a format that no longer
   exists.
 - Adding a `pub const *_VERSION` integer to a product-boundary crate
@@ -273,6 +274,48 @@ Two rules bind day-to-day work:
   `fs-project`, `fs-scenario`) requires classifying it: `frozen` if it is a
   promise, `not_promised` with a reason class if it is internal. An
   unclassified constant is accretion and fails the gate.
+
+## Working in the shared tree (learned the hard way, 2026-07-24/25)
+
+RULE 2 forbids branches and worktrees, so every agent shares one working tree
+**and one index**. Reservations are advisory annotations on shared mutable
+state, not isolation. These rules are what actually prevents damage.
+
+**No commit form isolates a shared file.** `git add` + bare `git commit` takes
+the whole index, including other lanes' staged work. `git commit --only <paths>`
+ignores the index but takes the **worktree** state of the named paths, including
+other lanes' uncommitted edits to those same files. For a file several lanes
+touch — `xtask/src/main.rs`, `README.md`, `docs/CI_GATES.md`,
+`doc-facts-inventory.json` — neither form protects you.
+
+The only isolation on a shared file is **temporal**:
+
+1. **Run `git diff <shared-file>` immediately before committing it** and read
+   the hunks. Hunks you did not write mean someone else is mid-flight.
+2. **Commit promptly.** The exposure window is the whole risk. One 50-minute gap
+   between "my edit is done" and the commit swept another lane's dispatch wiring
+   into an unrelated commit.
+3. **Stage only at commit time.** Early staging pollutes the shared index for
+   everyone. `git add` immediately before `git commit --only`, in one action.
+
+**Reserve exact files, never directory globs.** An `xtask/src/**` lease for a
+two-file slice starved another lane for three hours. **Release at commit time**,
+not at session end — a lease that outlives its work is pure obstruction, and the
+holder is the last to notice. Poll the inbox on a timer; `ack_required` mail is
+someone telling you they are blocked.
+
+**Derived registries describe the commit, not the index.** See
+`generate-source-manifest [paths...]` below and in docs/CI_GATES.md.
+
+### The `GIT_INDEX_FILE` option (not adopted; recorded for the owner)
+
+Most of the above is a tax paid because agents share one index. That specific
+class — and only that class — disappears if each agent exports a private
+`GIT_INDEX_FILE`, which keeps the single `main` branch and the single worktree
+that RULE 2 requires while giving each agent its own staging area. It does
+**not** fix shared-*worktree* collisions (two agents editing `main.rs` still
+collide). Recorded as an option for the repository owner; not adopted
+unilaterally, because it changes how every agent's git behaves.
 
 ## Abstraction consolidation (bead f85xj.16.8, enforced: `check-consolidation`)
 

@@ -256,6 +256,35 @@ already using the PR/full split.
 | `check-consolidation` | a crate that no supported workflow exercises and no review has dispositioned, a `FREEZE`/`CONSOLIDATE`/`REPAIR-OR-QUARANTINE` disposition on a crate that has since gained a workflow consumer, a disposition without a rationale, or a usage sweep whose known-exercised control crate is itself unreached (`consolidation-review.json`, docs/CONSOLIDATION_REVIEW.md) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
+### Pre-commit guard (fires in milliseconds, not at check-all time)
+
+Two failures are cheap to see at commit time and expensive to discover a week
+later. `scripts/hooks/pre-commit` catches both:
+
+- **A sibling off its `constellation.lock` pin.** On 2026-07-24 asupersync moved
+  five times while the lock pinned 0.3.8; it surfaced hours later as
+  inscrutable `E0277`s three layers down in FrankenSQLite and cost the whole
+  fleet its build.
+- **A `*_VERSION` / `*_IDENTITY_VERSION` constant bumped without
+  `golden-couplings.json` in the same commit**, which is how fifteen surfaces
+  quietly accumulated into 33 violations.
+
+```bash
+scripts/hooks/install.sh           # install (never clobbers an existing hook)
+scripts/hooks/install.sh --status  # report what is installed
+```
+
+It is **pure shell** — no `cargo`, no build — because a hook that builds the
+workspace is a hook that gets bypassed with `--no-verify` on its second use, and
+a bypassed guard is worse than none. It **warns** by default and lets the commit
+through; `FRANKENSIM_HOOK_STRICT=1` turns warnings into refusals. Warn-by-default
+is deliberate: in a shared tree a blocking heuristic can wedge every agent at
+once, including whoever is trying to commit the fix.
+
+An existing hook is preserved as `pre-commit.local` and chained first, so Agent
+Mail's reservation guard keeps working. The authoritative checks remain
+`check-constellation` and `check-goldens`; the hook only front-runs them.
+
 ### Asking whether YOUR lane is clean
 
 `check-all` reports one verdict over thirty checks, so in a shared repository

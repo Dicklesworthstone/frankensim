@@ -1,0 +1,105 @@
+#!/bin/sh
+# FrankenSim pre-commit guard.
+#
+# Install with: scripts/hooks/install.sh
+#
+# WHY THIS IS PURE SHELL AND NOT `cargo run -p xtask`
+# ---------------------------------------------------
+# A pre-commit hook that builds the workspace is a hook that gets bypassed with
+# `--no-verify` on its second use, and a bypassed guard is worse than none —
+# it looks like coverage while providing nothing. Everything here is git plus
+# grep and finishes in milliseconds on a cold tree. The expensive, authoritative
+# versions of these checks remain `xtask check-constellation` and
+# `xtask check-goldens`; this only catches the two failures that are cheap to
+# see and expensive to discover late.
+#
+# BEHAVIOUR
+# ---------
+# Warns by default and lets the commit through. Set FRANKENSIM_HOOK_STRICT=1 to
+# turn warnings into refusals. Warn-by-default is deliberate: in a shared tree a
+# blocking heuristic can wedge every agent at once, including the agent trying
+# to commit the fix. Agents read command output, so a loud warning is effective
+# where it would be ignored by a human.
+#
+# COMPOSITION
+# -----------
+# If .git/hooks/pre-commit.local exists it runs first, and a non-zero exit from
+# it aborts the commit. That is the seam for Agent Mail's own reservation guard
+# or any other tool that wants the same hook.
+
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+status=0
+strict="${FRANKENSIM_HOOK_STRICT:-0}"
+
+note() {
+    if [ "$strict" = "1" ]; then
+        printf 'REFUSED: %s\n' "$1" >&2
+        status=1
+    else
+        printf 'warning: %s\n' "$1" >&2
+    fi
+}
+
+# Chain any locally installed hook first (Agent Mail guard, personal hooks).
+if [ -x .git/hooks/pre-commit.local ]; then
+    .git/hooks/pre-commit.local "$@" || exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Constellation pin drift.
+#
+# The 2026-07-24 outage: asupersync moved five times while constellation.lock
+# pinned 0.3.8, and it surfaced hours later as inscrutable E0277s three layers
+# down in a sibling. The pin and the sibling HEAD are both one command away.
+# ---------------------------------------------------------------------------
+if [ -f constellation.lock ]; then
+    # Rows look like: {"lib": "x", "version": "…", "git_head": "…", …, "path": "…"}
+    grep -o '"lib": *"[^"]*"[^}]*"git_head": *"[^"]*"[^}]*"path": *"[^"]*"' constellation.lock 2>/dev/null |
+    while IFS= read -r row; do
+        lib=$(printf '%s' "$row" | sed -n 's/.*"lib": *"\([^"]*\)".*/\1/p')
+        pinned=$(printf '%s' "$row" | sed -n 's/.*"git_head": *"\([^"]*\)".*/\1/p')
+        path=$(printf '%s' "$row" | sed -n 's/.*"path": *"\([^"]*\)".*/\1/p')
+        [ -d "$path/.git" ] || continue
+        actual=$(git -C "$path" rev-parse HEAD 2>/dev/null) || continue
+        if [ "$actual" != "$pinned" ]; then
+            printf 'warning: sibling %s is OFF-PIN: constellation.lock pins %.12s, checkout is at %.12s\n' \
+                "$lib" "$pinned" "$actual" >&2
+            printf '         a drifting sibling breaks this workspace in ways that surface as unrelated compile errors;\n' >&2
+            printf '         run: cargo run -p xtask -- check-constellation\n' >&2
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 2. A version/identity constant bumped without its golden coupling.
+#
+# The failure this catches: someone bumps a `*_VERSION` / `*_IDENTITY_VERSION`
+# constant and does not update golden-couplings.json in the same commit, per
+# docs/GOLDEN_POLICY.md. Fifteen surfaces accumulated that way and became 33 of
+# the repository's violations before anyone noticed.
+#
+# Heuristic on purpose: it looks only at ADDED lines in the staged diff, so it
+# cannot see a semantic change that leaves the literal untouched. The
+# authoritative check is `xtask check-goldens`.
+# ---------------------------------------------------------------------------
+staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)
+if printf '%s\n' "$staged" | grep -q '^crates/.*\.rs$'; then
+    bumped=$(git diff --cached -U0 -- 'crates/*.rs' 2>/dev/null |
+        grep -E '^\+.*(pub )?const [A-Z0-9_]*(VERSION|IDENTITY_VERSION)[A-Z0-9_]* *:' |
+        sed -E 's/.*const ([A-Z0-9_]+) *:.*/\1/' | sort -u)
+    if [ -n "$bumped" ]; then
+        if ! printf '%s\n' "$staged" | grep -q '^golden-couplings\.json$'; then
+            note "version constant(s) changed without golden-couplings.json in the same commit:
+$(printf '%s' "$bumped" | sed 's/^/           /')
+         docs/GOLDEN_POLICY.md requires the coupling row to move in the SAME commit.
+         If these are genuinely uncoupled, this is a false positive — commit again with
+         FRANKENSIM_HOOK_STRICT=0, or add the rows. Authoritative: xtask check-goldens"
+        fi
+    fi
+fi
+
+exit "$status"
