@@ -764,44 +764,109 @@ fn dev_only_siblings_are_required_only_when_they_move() {
     }));
 }
 
-/// The 2026-07-25 train: every registered surface EXECUTED and GREEN against
-/// the live pins, and the bump is still refused — on the golden obligation.
+/// Exact-head release-owner record for the 2026-07-25 constellation train.
 ///
-/// Measured, not synthetic. asupersync 25/25, franken_numpy 2/2,
-/// franken_networkx 8/8, frankenscipy 2/2, frankentorch 4/4, and frankensqlite
-/// 5/5 once its async-pager migration landed. frankenpandas moved but declares
-/// no claim and has no runtime consumer, so it requires no evidence.
+/// The registered compatibility selectors executed against these candidate
+/// heads. Their whole-target totals were asupersync 25/25, franken_networkx
+/// 8/8, franken_numpy 2/2, frankenscipy 4/4, frankensqlite 5/5, and
+/// frankentorch 4/4. Frankenpandas has no registered claim or runtime consumer,
+/// so moving it does not require a suite result.
 ///
-/// The refusal is the one obligation nobody had discharged: 24 semantic golden
-/// surfaces are owned by crates that consume the movers at runtime, so the
-/// attempt may not declare `NoGoldenSurface`. This is the rand_nla mis-pin
-/// lesson made executable — a pin may not move underneath a frozen golden
-/// without someone saying what happened to it.
+/// The 24 coupled golden surfaces are listed in full below rather than sampled.
+/// Their owner-crate identity batteries establish that sibling pin metadata is
+/// outside those semantic identities, so this train records an `Unaffected`
+/// disposition: no golden is re-frozen and no semantic identity is promoted by
+/// the pin movement itself.
 #[test]
-fn train_2026_07_25_is_green_but_refused_on_the_golden_obligation() {
+fn train_2026_07_25_exact_heads_are_admitted_after_golden_disposition() {
     let movers = [
-        "asupersync",
-        "franken_networkx",
-        "franken_numpy",
-        "frankenpandas",
-        "frankenscipy",
-        "frankensqlite",
-        "frankentorch",
+        (
+            "asupersync",
+            "0.3.8",
+            "5973b0ff31f405ae90fa9e6e2ef5f61a75c5b78b",
+            "0.3.9",
+            "0b8f5ba6f37c07e9421fad86bb3de3b16c4de699",
+        ),
+        (
+            "franken_networkx",
+            "0.2.0",
+            "4e72da0f0c98f32ee580c9bd62eb1745d400c4ea",
+            "0.2.0",
+            "8c450accefec6fe72cf9bbe3299418de738ce6fa",
+        ),
+        (
+            "franken_numpy",
+            "0.1.0",
+            "7fca9f6006c9f4ecdb6c7432318a0893f3a7bea1",
+            "0.2.0",
+            "f4d70a5e908f4bbae7ff4fb6fa2ab24a8fe27758",
+        ),
+        (
+            "frankenpandas",
+            "0.1.2",
+            "803efc1c6daed53e5305790f313133a26b41dd6b",
+            "0.1.2",
+            "4ce83aa2e929638bb8b4b9567c665a96ca4fd3e9",
+        ),
+        (
+            "frankenscipy",
+            "0.1.0",
+            "9e271fd734465e2b2ff755aa73ea66a7217d619b",
+            "0.1.0",
+            "51acf2b0dd8e6df45ee967a7653ae0218bc190a1",
+        ),
+        (
+            "frankensqlite",
+            "unversioned-workspace",
+            "987cfb97f86d3fca4d9b44e7871f427636b10126",
+            "unversioned-workspace",
+            "aed971b1251f9103b9b6af2c29b43f35dafb06c7",
+        ),
+        (
+            "frankentorch",
+            "0.1.0",
+            "f00c3ce79737ffd0e7c7e2f2e81540907ce26562",
+            "0.1.0",
+            "b67573a3c975793506170aea0bdffe0d7441c863",
+        ),
     ];
     let deltas: Vec<PinDelta> = movers
         .iter()
-        .map(|lib| PinDelta {
-            lib: (*lib).to_string(),
-            movement: PinMovement::Moved {
-                from_version: "recorded".to_string(),
-                from_head: "recorded".to_string(),
-                to_version: "live".to_string(),
-                to_head: "live".to_string(),
+        .map(
+            |(lib, from_version, from_head, to_version, to_head)| PinDelta {
+                lib: (*lib).to_string(),
+                movement: PinMovement::Moved {
+                    from_version: (*from_version).to_string(),
+                    from_head: (*from_head).to_string(),
+                    to_version: (*to_version).to_string(),
+                    to_head: (*to_head).to_string(),
+                },
             },
-        })
+        )
         .collect();
 
-    // Exactly the measured counts.
+    // Registry rows and whole-target totals are different quantities. Keep
+    // both executable so a supporting test added to a target cannot silently
+    // rewrite the declared compatibility surface.
+    for (lib, expected_rows) in [
+        ("asupersync", 6),
+        ("franken_networkx", 4),
+        ("franken_numpy", 2),
+        ("frankenscipy", 3),
+        ("frankensqlite", 5),
+        ("frankentorch", 4),
+    ] {
+        assert_eq!(
+            surface(lib)
+                .expect("moved sibling is registered")
+                .tests
+                .len(),
+            expected_rows,
+            "{lib} compatibility-row count drifted"
+        );
+    }
+
+    // These are measured whole-target totals, not registry-row counts.
     let results = vec![
         SuiteResult::new(
             "asupersync",
@@ -827,7 +892,7 @@ fn train_2026_07_25_is_green_but_refused_on_the_golden_obligation() {
         SuiteResult::new(
             "frankenscipy",
             SuiteOutcome::Executed {
-                passed: 2,
+                passed: 4,
                 failed: 0,
             },
         ),
@@ -847,55 +912,61 @@ fn train_2026_07_25_is_green_but_refused_on_the_golden_obligation() {
         ),
     ];
 
-    // Every surface is green, so no suite reason survives.
-    let suite_only = BumpAttempt {
-        kind: BumpKind::ReleaseTrain,
-        deltas: deltas.clone(),
-        results: results.clone(),
-        golden: GoldenDisposition::Unaffected {
-            justification: "hypothetical: goldens verified unchanged".to_string(),
-        },
-        coupled_goldens: Vec::new(),
-    };
-    assert!(
-        evaluate_bump(&suite_only).admitted(),
-        "with every surface green and the golden question answered, the train passes"
-    );
-
-    // But the goldens are NOT answered: 24 surfaces are owned by crates that
-    // consume the movers at runtime.
-    let coupled: Vec<String> = [
+    let coupled_ids = [
+        "fs-exec:gemm-tune-key",
+        "fs-exec:tilepool-placement",
         "fs-exec:tune-row",
+        "fs-exec:tuning-decision",
         "fs-ledger:artifact-content",
+        "fs-ledger:color-admission-policy",
+        "fs-ledger:color-node",
+        "fs-ledger:derived-color-waiver-subject",
+        "fs-ledger:physical-instance",
+        "fs-ledger:session-flush-batch",
+        "fs-ledger:session-mutation-claim",
+        "fs-ledger:session-terminal-events",
+        "fs-ledger:solver-checkpoint-receipt",
+        "fs-ledger:source-color-waiver-subject",
+        "fs-ledger:source-origin-request",
+        "fs-ledger:state-checkpoint-receipt",
+        "fs-ledger:vcs-commit-envelope",
+        "fs-ledger:vcs-commit-leaf",
         "fs-ledger:vcs-commit-root",
+        "fs-ledger:vcs-ledger-lineage",
+        "fs-plan:voi-audit-context",
         "fs-plan:voi-ranked-menu",
+        "fs-plan:voi-ranked-source",
         "fs-vskeleton:artifact-content",
-    ]
-    .iter()
-    .map(|id| (*id).to_string())
-    .collect();
+    ];
+    assert_eq!(coupled_ids.len(), 24);
+
+    // Prove that the complete list is the registry-derived union for these
+    // movers; this catches both omitted IDs and accidental prefix coupling.
+    let mut derived: Vec<&str> = movers
+        .iter()
+        .flat_map(|(lib, ..)| coupled_golden_surfaces(lib, &coupled_ids))
+        .collect();
+    derived.sort_unstable();
+    derived.dedup();
+    assert_eq!(derived.as_slice(), coupled_ids.as_slice());
+
     let real = BumpAttempt {
         kind: BumpKind::ReleaseTrain,
         deltas,
         results,
-        golden: GoldenDisposition::NoGoldenSurface,
-        coupled_goldens: coupled,
+        golden: GoldenDisposition::Unaffected {
+            justification: concat!(
+                "Exact-head compatibility selectors are green; fs-exec, fs-ledger, ",
+                "fs-plan, and fs-vskeleton identity mutation batteries establish that ",
+                "sibling pin metadata is outside the 24 named semantic identities. ",
+                "No golden bytes are re-frozen by this train."
+            )
+            .to_string(),
+        },
+        coupled_goldens: coupled_ids.iter().map(|id| (*id).to_string()).collect(),
     };
-    let BumpVerdict::Refused { reasons } = evaluate_bump(&real) else {
-        panic!("an undeclared golden obligation must refuse even a fully green train")
-    };
-    assert_eq!(
-        reasons.len(),
-        1,
-        "only the golden obligation remains: {reasons:?}"
-    );
-    assert!(matches!(
-        reasons[0],
-        BumpRefusal::UndeclaredGoldenImplication { .. }
-    ));
     assert!(
-        reasons[0]
-            .to_string()
-            .contains("fs-ledger:artifact-content")
+        evaluate_bump(&real).admitted(),
+        "the exact-head train is admissible only after the full golden implication is declared"
     );
 }

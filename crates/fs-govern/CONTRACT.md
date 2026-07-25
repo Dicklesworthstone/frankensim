@@ -1218,8 +1218,11 @@ test cites a claim its own surface declares; every uncovered surface records
 why; covered surfaces render a selector and uncovered ones do not), the real
 2026-07-24 seven-sibling drift as the delta fixture, added/removed reporting,
 and five negative bump cases — unrun, failing, zero-test execution, missing
-result, and a moved-but-uncovered sibling — plus the admitted path and
-render determinism.
+result, and a moved-but-uncovered sibling — plus the admitted path, render
+determinism, and the 2026-07-25 exact-head release-train record. That record
+binds the reported whole-target results to the candidate heads, derives the
+complete 24-surface golden implication from runtime-consumer ownership, and
+records the release owner's explicit `Unaffected` disposition.
 
 No-claim boundaries:
 
@@ -1230,5 +1233,8 @@ No-claim boundaries:
 - Registered coverage is not proof of adequacy. A surface can be green and
   still miss the behaviour a bump actually changed; the claim list states what
   is exercised, not what is sufficient.
-- The suite is currently registered but NOT executed. No pin bump has passed
-  the train, and none is claimed.
+- The 2026-07-25 fixture records exact candidate heads and outcomes from suites
+  executed outside this module after release-owner authorization. It does not
+  execute those commands or inspect the checkouts, so the fixture cannot prove
+  its own report. A green record is also not a published pin:
+  `constellation.lock` publication remains an external, fail-closed step.
