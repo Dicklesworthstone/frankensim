@@ -22,6 +22,13 @@ fn log(case: &str, verdict: &str, detail: &str) {
     );
 }
 
+fn feed_f64_hash(acc: &mut u64, value: f64) {
+    for byte in value.to_bits().to_le_bytes() {
+        *acc ^= u64::from(byte);
+        *acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
     let mut s = StreamKey {
         seed: 41,
@@ -379,28 +386,24 @@ const GOLDEN_HASH: u64 = 0xb28d_3cf4_99e8_9071; // recorded at 7tv.3 slice 1, fr
 #[test]
 fn ascent_golden_hash() {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |v: f64| {
-        for byte in v.to_bits().to_le_bytes() {
-            acc ^= u64::from(byte);
-            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
     // L-BFGS trajectory fingerprint.
     let mut fg = |x: &[f64]| rosenbrock(x);
     let mut st = LbfgsState::new(&[-1.2f64, 1.0, -1.2, 1.0, -1.2, 1.0], 8, &mut fg);
     st.run(&mut fg, &StopRule::GradNorm(1e-9), 400);
     for v in &st.x {
-        feed(*v);
+        feed_f64_hash(&mut acc, *v);
     }
-    feed(st.iters as f64);
+    feed_f64_hash(&mut acc, st.iters as f64);
+    log("ascent-golden-lbfgs-stage", "info", &format!("{acc:#018x}"));
     // TR fingerprint.
     let mut fg2 = |x: &[f64]| rosenbrock(x);
     let mut fg3 = |x: &[f64]| rosenbrock(x);
     let mut hv = |x: &[f64], v: &[f64]| hv_fd_of_gradients(&mut fg3, x, v, 1e-6);
     let rep = trust_region_newton(&[0.5f64, -0.5, 0.5, -0.5], &mut fg2, &mut hv, 1e-8, 200);
     for v in &rep.x {
-        feed(*v);
+        feed_f64_hash(&mut acc, *v);
     }
+    log("ascent-golden-trust-stage", "info", &format!("{acc:#018x}"));
     // Riemannian fingerprint (small sphere problem).
     let n = 6usize;
     let mut a = vec![0.0f64; n * n];
@@ -423,10 +426,27 @@ fn ascent_golden_hash() {
     };
     let x0: Vec<f64> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
     let mut str_ = RiemannianLbfgs::new(Manifold::Sphere { ambient: 6 }, &x0, 6, &mut fgr);
-    str_.run(&mut fgr, &StopRule::GradNorm(1e-10), 300);
+    let riemannian_report = str_.run(&mut fgr, &StopRule::GradNorm(1e-10), 300);
     for v in &str_.x {
-        feed(*v);
+        feed_f64_hash(&mut acc, *v);
     }
+    log(
+        "ascent-golden-riemannian-stage",
+        "info",
+        &format!(
+            "hash={acc:#018x} reason={:?} iters={} evals={} grad_inf={:.17e} grad_l2={:.17e} f={:.17e} x_bits={:?}",
+            riemannian_report.reason,
+            riemannian_report.iters,
+            riemannian_report.evals,
+            riemannian_report.grad_norm,
+            riemannian_report.grad_l2_norm,
+            riemannian_report.f,
+            str_.x
+                .iter()
+                .map(|value| format!("{:#018x}", value.to_bits()))
+                .collect::<Vec<_>>(),
+        ),
+    );
     log("ascent-golden", "info", &format!("{acc:#018x}"));
     assert_eq!(
         acc, GOLDEN_HASH,
