@@ -139,6 +139,74 @@ fn workspace_fs_members(manifest: &str) -> Option<BTreeSet<String>> {
     None
 }
 
+/// The containment rule for a hand-maintained tracked-path inventory:
+/// `HEAD ⊆ recorded ⊆ index`.
+///
+/// Deliberately NOT `recorded == index`. Equality made this check hostage to
+/// the shared tree — one other lane's staged test file rendered the inventory
+/// "stale" and, because the caller fails CLOSED, blocked `check-docs` for every
+/// agent until that lane committed. The two obligations that actually matter
+/// survive other agents staging anything:
+///
+/// - every COMMITTED path is inventoried (else the artifact under-describes the
+///   tree it claims to describe);
+/// - the inventory never names a path that exists neither in `HEAD` nor in the
+///   index (no phantom rows).
+///
+/// A path staged by someone else sits between the two bounds and is ignored,
+/// which is correct: it is not in this commit, and inventorying it would be a
+/// claim about a file that may never land.
+fn inventory_containment_violation(
+    group: &str,
+    recorded: &[String],
+    head: &[String],
+    index: &[String],
+) -> Option<String> {
+    let recorded_set: BTreeSet<&str> = recorded.iter().map(String::as_str).collect();
+    if let Some(missing) = head.iter().find(|p| !recorded_set.contains(p.as_str())) {
+        return Some(format!(
+            "{DOC_INVENTORY_FILE} {group} is missing committed path {missing:?}; every tracked \
+             file must be inventoried (recorded={}, HEAD={})",
+            recorded.len(),
+            head.len()
+        ));
+    }
+    let index_set: BTreeSet<&str> = index.iter().map(String::as_str).collect();
+    if let Some(phantom) = recorded.iter().find(|p| !index_set.contains(p.as_str())) {
+        return Some(format!(
+            "{DOC_INVENTORY_FILE} {group} records {phantom:?}, which is neither committed nor \
+             staged; remove the phantom row (recorded={}, index={})",
+            recorded.len(),
+            index.len()
+        ));
+    }
+    None
+}
+
+/// Paths matching `pathspec` in the `HEAD` commit, sorted.
+///
+/// `None` mirrors `git_tracked_files`: not a worktree, or no commit yet.
+fn git_head_files(root: &Path, pathspec: &str) -> Result<Option<Vec<String>>, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", pathspec])
+        .output()
+        .map_err(|error| format!("cannot execute git ls-tree for {pathspec:?}: {error}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("git ls-tree output is not UTF-8: {error}"))?;
+    let mut paths: Vec<String> = text
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    Ok(Some(paths))
+}
+
 fn git_tracked_files(root: &Path, pathspec: &str) -> Result<Option<Vec<String>>, String> {
     let repository = std::process::Command::new("git")
         .args(["-C"])
@@ -338,22 +406,29 @@ impl TrackedInventory {
             ),
         ];
         let mut git_index_verified = true;
+        // The inventory is checked as HEAD subset-of recorded subset-of index,
+        // not recorded equals index.
+        //
+        // Equality against the raw index made this check hostage to the shared
+        // tree: one other lane's staged `crates/fs-*/tests/*.rs` made the
+        // inventory "stale" and, because this path fails CLOSED with a hard
+        // error, blocked `check-docs` for every agent until that lane happened
+        // to commit. The obligation that actually matters is that everything
+        // COMMITTED is inventoried, and that the inventory never names a file
+        // which exists nowhere. Both survive other agents staging whatever they
+        // like.
         for (group, pathspec, recorded) in groups {
-            match git_tracked_files(root, pathspec)? {
-                Some(actual) if &actual == recorded => {}
-                Some(actual) => {
-                    let first_difference = actual
-                        .iter()
-                        .zip(recorded.iter())
-                        .position(|(left, right)| left != right)
-                        .unwrap_or_else(|| actual.len().min(recorded.len()));
-                    return Err(format!(
-                        "{DOC_INVENTORY_FILE} {group} is stale against the Git index at entry {first_difference}: recorded={} git={}",
-                        recorded.len(),
-                        actual.len()
-                    ));
-                }
-                None => git_index_verified = false,
+            let (Some(index_paths), Some(head_paths)) = (
+                git_tracked_files(root, pathspec)?,
+                git_head_files(root, pathspec)?,
+            ) else {
+                git_index_verified = false;
+                continue;
+            };
+            if let Some(problem) =
+                inventory_containment_violation(group, recorded, &head_paths, &index_paths)
+            {
+                return Err(problem);
             }
         }
         Ok(Self {
@@ -1024,6 +1099,112 @@ pub fn check_claims(root: &Path) -> Vec<Violation> {
     let mut violations = check_docs(root).violations;
     violations.extend(check_claim_language(root));
     violations
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+
+    fn v(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// The failure that blocked `check-docs` for every agent all session: one
+    /// other lane's staged test file, present in the index but in neither HEAD
+    /// nor the inventory. It must be ignored, not treated as staleness.
+    #[test]
+    fn a_foreign_staged_path_does_not_block_the_inventory() {
+        let problem = inventory_containment_violation(
+            "integration_tests",
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-other/tests/theirs.rs"].as_slice()),
+        );
+        assert!(
+            problem.is_none(),
+            "another lane's staged file must not make my inventory stale: {problem:?}"
+        );
+    }
+
+    /// The obligation that must survive: a COMMITTED file missing from the
+    /// inventory is a real defect and still fails.
+    #[test]
+    fn a_committed_path_missing_from_the_inventory_is_caught() {
+        let problem = inventory_containment_violation(
+            "integration_tests",
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-b/tests/b.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-b/tests/b.rs"].as_slice()),
+        );
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("missing committed path")),
+            "expected a missing-committed-path violation, got {problem:?}"
+        );
+    }
+
+    /// A phantom row — inventoried but neither committed nor staged — is still
+    /// caught, so the relaxed rule cannot be used to invent coverage.
+    #[test]
+    fn a_phantom_inventory_row_is_caught() {
+        let problem = inventory_containment_violation(
+            "integration_tests",
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-ghost/tests/gone.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+        );
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("phantom row")),
+            "expected a phantom-row violation, got {problem:?}"
+        );
+    }
+
+    /// My own new file, staged and inventoried but not yet committed, is the
+    /// normal pre-commit state and must pass.
+    #[test]
+    fn my_own_staged_and_inventoried_addition_passes_before_commit() {
+        let problem = inventory_containment_violation(
+            "integration_tests",
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-a/tests/new.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs"].as_slice()),
+            &v(["crates/fs-a/tests/a.rs", "crates/fs-a/tests/new.rs"].as_slice()),
+        );
+        assert!(problem.is_none(), "{problem:?}");
+    }
+
+    #[test]
+    fn the_live_inventory_satisfies_containment() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        for (group, pathspec) in [
+            ("manifests", "crates/fs-*/Cargo.toml"),
+            ("contracts", "crates/fs-*/CONTRACT.md"),
+            ("integration_tests", "crates/fs-*/tests/*.rs"),
+        ] {
+            let (Ok(Some(index)), Ok(Some(head))) = (
+                git_tracked_files(root, pathspec),
+                git_head_files(root, pathspec),
+            ) else {
+                continue;
+            };
+            let recorded = match TrackedInventory::read(root) {
+                Ok(inventory) => match group {
+                    "manifests" => inventory.manifests,
+                    "contracts" => inventory.contracts,
+                    _ => inventory.integration_tests,
+                },
+                Err(error) => panic!("live inventory must read: {error}"),
+            };
+            assert!(
+                inventory_containment_violation(group, &recorded, &head, &index).is_none(),
+                "live {group} inventory violates containment"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -489,10 +489,7 @@ fn indexed_paths(root: &Path) -> Result<Vec<IndexedPath>, String> {
     indexed_paths_scoped(root, &BTreeSet::new())
 }
 
-fn indexed_paths_scoped(
-    root: &Path,
-    scope: &BTreeSet<String>,
-) -> Result<Vec<IndexedPath>, String> {
+fn indexed_paths_scoped(root: &Path, scope: &BTreeSet<String>) -> Result<Vec<IndexedPath>, String> {
     let head = head_paths(root);
     match git_index_paths(root) {
         Ok(rows) => Ok(restrict_to_commit(rows, head.as_ref(), scope)),
@@ -507,7 +504,9 @@ fn indexed_paths_fallback(root: &Path, git_error: String) -> Result<Vec<IndexedP
         return Err(git_error);
     }
     let text = std::fs::read_to_string(root.join(MANIFEST_PATH)).map_err(|error| {
-        format!("{git_error}; cannot read {MANIFEST_PATH} as the archive inventory fallback: {error}")
+        format!(
+            "{git_error}; cannot read {MANIFEST_PATH} as the archive inventory fallback: {error}"
+        )
     })?;
     retained_index_paths_from_text(&text).map_err(|fallback_error| {
         format!("{git_error}; {MANIFEST_PATH} archive inventory fallback failed: {fallback_error}")
@@ -792,8 +791,8 @@ fn dirty_paths(root: &Path) -> BTreeSet<String> {
         ["diff", "--name-only", "-z", "HEAD"],
         ["diff", "--name-only", "-z", "--cached"],
     ] {
-        if let Ok(output) = super::constellation_cleanliness::sanitized_git_command(root, &args)
-            .output()
+        if let Ok(output) =
+            super::constellation_cleanliness::sanitized_git_command(root, &args).output()
             && output.status.success()
             && let Ok(text) = String::from_utf8(output.stdout)
         {
@@ -866,6 +865,21 @@ fn capture_source_files_scoped(
     Ok(files)
 }
 
+fn capture_source_files_with_scope(
+    root: &Path,
+    scope: &BTreeSet<String>,
+) -> Result<Vec<SourceFile>, String> {
+    let first = capture_source_files_scoped(root, scope)?;
+    let second = capture_source_files_scoped(root, scope)?;
+    if first != second {
+        return Err(
+            "tracked source changed between two complete source-manifest captures".to_string(),
+        );
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
 fn capture_source_files(root: &Path) -> Result<Vec<SourceFile>, String> {
     let first = capture_source_files_once(root)?;
     let second = capture_source_files_once(root)?;
@@ -1113,13 +1127,17 @@ fn sibling_rows(root: &Path) -> Result<(String, String, Vec<SiblingRow>), String
 }
 
 fn build_model(root: &Path) -> Result<ManifestModel, String> {
+    build_model_scoped(root, &BTreeSet::new())
+}
+
+fn build_model_scoped(root: &Path, scope: &BTreeSet<String>) -> Result<ManifestModel, String> {
     let root_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .map_err(|error| format!("cannot read root Cargo.toml: {error}"))?;
     if !root_manifest.contains(&format!("repository = \"{REPOSITORY}\"")) {
         return Err("workspace repository authority moved or is missing".to_string());
     }
     let workspace_version = workspace_version(&root_manifest)?;
-    let source_files = capture_source_files(root)?;
+    let source_files = capture_source_files_with_scope(root, scope)?;
     let source_root = source_root(&source_files);
     let capsules = capsule_summary(root)?;
     let crates = crate_inventory(root, &workspace_version, &capsules)?;
@@ -1878,7 +1896,14 @@ fn validate_spdx_rendering(
 }
 
 fn expected_artifacts(root: &Path) -> Result<(String, String), String> {
-    let model = build_model(root)?;
+    expected_artifacts_scoped(root, &BTreeSet::new())
+}
+
+fn expected_artifacts_scoped(
+    root: &Path,
+    scope: &BTreeSet<String>,
+) -> Result<(String, String), String> {
+    let model = build_model_scoped(root, scope)?;
     artifacts_from_model(&model)
 }
 
@@ -1890,8 +1915,16 @@ fn artifacts_from_model(model: &ManifestModel) -> Result<(String, String), Strin
     Ok((manifest, spdx))
 }
 
-pub(crate) fn generate(root: &Path) -> Result<(), String> {
-    let (manifest, spdx) = expected_artifacts(root)?;
+/// Regenerate the tracked manifest artifacts.
+///
+/// `scope` names the paths whose WORKTREE state belongs in the commit being
+/// built (exactly the paths you will pass to `git commit --only`). Every other
+/// tracked path is read from `HEAD`, so other lanes' staged or unstaged work
+/// cannot enter the artifact. An empty scope therefore regenerates the manifest
+/// that describes `HEAD` itself, which is the right default for repairing drift
+/// after a commit landed without regenerating.
+pub(crate) fn generate(root: &Path, scope: &BTreeSet<String>) -> Result<(), String> {
+    let (manifest, spdx) = expected_artifacts_scoped(root, scope)?;
     std::fs::write(root.join(MANIFEST_PATH), manifest)
         .map_err(|error| format!("cannot write {MANIFEST_PATH}: {error}"))?;
     std::fs::write(root.join(SPDX_PATH), spdx)
@@ -1943,6 +1976,96 @@ pub(crate) fn check(root: &Path) -> Vec<Violation> {
         std::fs::read_to_string(root.join(MANIFEST_PATH)),
         std::fs::read_to_string(root.join(SPDX_PATH)),
     )
+}
+
+#[cfg(test)]
+mod commit_scope_tests {
+    use super::*;
+
+    fn row(path: &str) -> IndexedPath {
+        IndexedPath {
+            path: path.to_string(),
+            git_mode: "100644".to_string(),
+            git_object: "0".repeat(40),
+        }
+    }
+
+    fn head(paths: &[&str]) -> BTreeSet<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// The bug this whole change exists to kill: another lane's staged NEW file
+    /// must not enter a manifest describing someone else's commit.
+    #[test]
+    fn a_foreign_staged_new_file_is_excluded_from_the_commit_inventory() {
+        let rows = vec![row("src/mine.rs"), row("crates/theirs/src/new.rs")];
+        let kept = restrict_to_commit(rows, Some(&head(&["src/mine.rs"])), &BTreeSet::new());
+        assert_eq!(
+            kept.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            ["src/mine.rs"],
+            "a path staged by another lane but absent from HEAD is not part of this commit"
+        );
+    }
+
+    /// The caller's own new file DOES belong, once declared — otherwise the
+    /// generator could never describe a commit that adds a file.
+    #[test]
+    fn a_declared_new_file_is_included() {
+        let rows = vec![row("src/mine.rs"), row("src/added.rs")];
+        let kept = restrict_to_commit(
+            rows,
+            Some(&head(&["src/mine.rs"])),
+            &head(&["src/added.rs"]),
+        );
+        assert_eq!(
+            kept.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            ["src/mine.rs", "src/added.rs"]
+        );
+    }
+
+    /// Scope does not resurrect a path that is neither in HEAD nor in the index:
+    /// the filter narrows the index, it never invents rows.
+    #[test]
+    fn scope_only_narrows_and_never_invents_rows() {
+        let rows = vec![row("src/mine.rs")];
+        let kept = restrict_to_commit(
+            rows,
+            Some(&head(&["src/mine.rs"])),
+            &head(&["src/never_existed.rs"]),
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "scope cannot add a row the index does not have"
+        );
+    }
+
+    /// Unborn branch / no HEAD: fall back to the unfiltered index rather than
+    /// silently producing an empty inventory, which would render a manifest
+    /// that claims the repository has no source at all.
+    #[test]
+    fn a_missing_head_falls_back_to_the_unfiltered_index() {
+        let rows = vec![row("src/a.rs"), row("src/b.rs")];
+        let kept = restrict_to_commit(rows, None, &BTreeSet::new());
+        assert_eq!(
+            kept.len(),
+            2,
+            "no HEAD means no filtering, not an empty tree"
+        );
+    }
+
+    /// A tracked path stays even when the caller did not declare it — the
+    /// manifest describes the whole commit, not only the changed part.
+    #[test]
+    fn undeclared_tracked_paths_remain_in_the_inventory() {
+        let rows = vec![row("src/a.rs"), row("src/b.rs")];
+        let kept = restrict_to_commit(
+            rows,
+            Some(&head(&["src/a.rs", "src/b.rs"])),
+            &head(&["src/a.rs"]),
+        );
+        assert_eq!(kept.len(), 2);
+    }
 }
 
 #[cfg(test)]

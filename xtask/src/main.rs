@@ -8260,7 +8260,9 @@ fn main() -> ExitCode {
             };
         }
         "generate-source-manifest" => {
-            return match source_manifest::generate(&root) {
+            let scope: std::collections::BTreeSet<String> =
+                std::env::args().skip(2).collect();
+            return match source_manifest::generate(&root, &scope) {
                 Ok(()) => {
                     eprintln!("structural source manifest and SPDX 2.3 rendering regenerated");
                     ExitCode::SUCCESS
