@@ -519,6 +519,21 @@ When reporting verification, include the exact DSR command, pass/fail status,
 and any run log or artifact path DSR prints. If DSR is unavailable, report the
 exact blocker and then use RCH or local Cargo only as a clearly labeled fallback.
 
+### Cargo-Independent Constellation Preflight
+
+Before attributing a workspace-wide Cargo failure to FrankenSim source, run:
+
+```bash
+scripts/ci/checkout_constellation.sh --verify-only
+```
+
+This validates the canonical `constellation.lock` and compares every sibling's
+live Git head and cleanliness without invoking Cargo or building `xtask`. A
+nonzero result is an authoritative drift/dirty-checkout refusal; report the
+expected and actual heads it prints. Never move a shared sibling checkout back
+to its pin to make this preflight green. Pin movement must instead follow the
+constellation governance and compatibility-train process.
+
 ---
 
 ## Testing Policy
