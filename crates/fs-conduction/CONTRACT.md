@@ -404,7 +404,12 @@ None. Everything here is `[S]` solid work on the default path.
   be vacuous — plus a closed-form check on the uniform adiabatic case where
   `d(mean T)/ds = f t / (rho c_p)` exactly, so any drift is adjoint algebra
   rather than discretization; and refusals for `k(T)` and mismatched
-  functional weights.
+  functional weights. G1 corpus binding: the `fs-vvreg` Level-A
+  `thermal-a-lumped-transient` row (`theta/theta0 = exp(-1)` at one time
+  constant) resolved at the row's DECLARED Biot ceiling, plus the check that
+  matters more — the discrepancy SHRINKS with Biot, so the agreement is
+  attributable to the regime the row declares rather than to a tolerance that
+  happened to fit.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -548,6 +553,13 @@ not promote any row beyond its registry authority.
   objective. A max-over-region functional is deliberately absent because it is
   not differentiable, and smoothing it silently would return the gradient of a
   different objective than the caller asked for.
+- THE LUMPED BINDING IS A REGIME CHECK, NOT A TRANSIENT VALIDATION. Resolving
+  the Level-A `thermal-a-lumped-transient` row shows this solver agrees with a
+  closed-form APPROXIMATION inside that approximation's declared small-Biot
+  context, and that the residual gap is controlled by Biot. It is not evidence
+  against measured data, it says nothing about the solver outside small Biot,
+  and it does not make any capability L4. A spatially resolved transient
+  (a slab step response against its series solution) is still unbound.
 - CHECKPOINTING IS VACUOUS IN THE ADMITTED REGIME, AND IS THEREFORE NOT BUILT.
   The staged plan assumed the checkpointed pattern from `fs-adjoint::timedep`,
   which exists to avoid retaining the forward trajectory. Here `A = C/dt + θK`

@@ -780,3 +780,126 @@ fn functional_admission_refuses_degenerate_declarations() {
         }
     ));
 }
+
+// ---------------------------------------------------------------------------
+// G1: the fs-vvreg Level-A lumped-transient binding.
+// ---------------------------------------------------------------------------
+
+use fs_vvreg::thermal_level_a::{ThermalLevelAKind, thermal_level_a_cases};
+
+/// The catalog row this fixture answers: theta/theta0 = exp(-t/tau) at
+/// t/tau = 1, admitted only for Biot <= 0.1.
+fn lumped_reference() -> (f64, f64) {
+    let case = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == "thermal-a-lumped-transient")
+        .expect("Level-A lumped row");
+    assert_eq!(case.kind, ThermalLevelAKind::AnalyticReference);
+    let biot_ceiling = case
+        .context
+        .iter()
+        .find(|entry| entry.name == "biot-number")
+        .map(|entry| entry.hi)
+        .expect("the row declares a Biot ceiling");
+    (case.reference_value_si, biot_ceiling)
+}
+
+/// Cool a unit cube from `T0` through Robin faces at the requested Biot
+/// number, and return the volume-mean normalized excess at exactly one time
+/// constant.
+///
+/// For a unit cube, `V = 1`, `A = 6`, so `Lc = V/A = 1/6`,
+/// `h = 6 k Bi`, and `tau = rho c_p V / (h A)`.
+fn normalized_excess_at_one_time_constant(biot: f64, n: usize) -> f64 {
+    let mesh = unit_mesh(n);
+    let htc = 6.0 * K * biot;
+    let area = 6.0f64;
+    let tau = RHO_CP / (htc * area);
+
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "ambient",
+            |_face| true,
+            ThermalBc::robin(htc, T_COLD).expect("robin"),
+        )
+        .expect("robin region")
+        .adiabatic_remainder()
+        .finish()
+        .expect("partition");
+
+    let excess0 = 100.0;
+    let initial = vec![T_COLD + excess0; mesh.vertex_count()];
+    let source = ScalarField::uniform("volumetric source", 0.0).expect("no source");
+    // Resolve time finely so the residual discrepancy is the LUMPED
+    // approximation, not the integrator.
+    let steps = 400;
+    let config =
+        TransientConfig::crank_nicolson(tau / (steps as f64), linear_config()).expect("config");
+
+    let solution = with_cx(|cx| {
+        march(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &initial,
+            steps,
+        )
+        .expect("march")
+    });
+
+    let mean: f64 = solution.temperature.iter().sum::<f64>() / (mesh.vertex_count() as f64);
+    (mean - T_COLD) / excess0
+}
+
+#[test]
+fn the_lumped_decay_matches_the_level_a_row_inside_its_declared_biot_regime() {
+    // The catalog row is an approximation with a DECLARED validity context,
+    // so the honest binding is not "agrees within a tolerance I chose" but
+    // "agrees within the regime the row declares".
+    let (reference, biot_ceiling) = lumped_reference();
+    assert!(
+        (reference - (-1.0f64).exp()).abs() < 1e-12,
+        "the row is exp(-1)"
+    );
+
+    let at_ceiling = normalized_excess_at_one_time_constant(biot_ceiling, 3);
+    let error = (at_ceiling - reference).abs() / reference;
+    assert!(
+        error < 0.05,
+        "at the declared Biot ceiling {biot_ceiling} the solve gave {at_ceiling} \
+         against the row's {reference} ({:.2}% off)",
+        error * 100.0
+    );
+}
+
+#[test]
+fn the_lumped_discrepancy_is_controlled_by_the_biot_number() {
+    // This is what makes the binding evidence rather than a coincidence: the
+    // lumped model ignores the internal gradient, so its error must SHRINK as
+    // Biot does. A fixture that merely landed inside a tolerance at one Biot
+    // could be passing for the wrong reason.
+    let (reference, biot_ceiling) = lumped_reference();
+
+    let coarse_regime = (normalized_excess_at_one_time_constant(biot_ceiling, 3) - reference).abs();
+    let deep_regime =
+        (normalized_excess_at_one_time_constant(biot_ceiling / 4.0, 3) - reference).abs();
+
+    assert!(
+        deep_regime < coarse_regime,
+        "the lumped discrepancy must shrink with Biot: {deep_regime:e} at Bi/4 \
+         is not below {coarse_regime:e} at Bi"
+    );
+    // Roughly first order in Biot, so a 4x reduction should buy most of a 4x
+    // error reduction. Loose, because the constant is geometry dependent.
+    assert!(
+        deep_regime < coarse_regime * 0.6,
+        "quartering Biot barely moved the discrepancy ({coarse_regime:e} -> {deep_regime:e}); \
+         that suggests the error is NOT the lumped approximation"
+    );
+}
