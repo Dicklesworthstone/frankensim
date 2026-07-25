@@ -366,7 +366,7 @@ impl ReceiptPayload {
         for &value_bits in &self.history_bits {
             builder = builder.u64("history-value-bits", value_bits);
         }
-        builder
+        builder = builder
             .u64("state-iterations", self.state_iterations as u64)
             .u64("state-evaluations", self.state_evaluations as u64)
             .str("stop-reason", self.stop_reason)
