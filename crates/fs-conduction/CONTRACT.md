@@ -410,6 +410,21 @@ None. Everything here is `[S]` solid work on the default path.
   matters more — the discrepancy SHRINKS with Biot, so the agreement is
   attributable to the regime the row declares rather than to a tolerance that
   happened to fit.
+- `tests/lumped.rs` — the reduced rung (`f85xj.5.13`): the closed-form
+  response checked against the ODE IT CLAIMS TO SOLVE by numerical
+  differentiation, rather than against the exponential formula it already is;
+  endpoint and time-constant properties; the crate's Biot ceiling asserted
+  equal to the corpus row so the duplication cannot drift; the gate admitting
+  inside and refusing outside, with the refusal required to point at
+  escalation; a loosened gate reporting its own ceiling; extraction
+  round-tripping the conductance that produced a rise; and THE PAIR THAT
+  JUSTIFIES THE GATE — the rungs agreeing within 5% inside the regime, and
+  DISAGREEING by more than 10% outside it (measured through a deliberately
+  loosened gate), with the physical direction asserted: a non-isothermal body
+  retains more heat than lumping predicts. Comparison uses a VOLUME-WEIGHTED
+  mean; a plain vertex average is dominated by boundary nodes on a coarse
+  cube (56 of 64 at n = 3) and would have made the comparison meaningless
+  while looking plausible.
 - `tests/duty.rs` — duty-cycle drivers (`f85xj.5.12`): the analytic per-segment
   energy integral; declared interpolation across constant and ramp segments;
   the past-the-window REFUSAL (with the refusal required to say why);
@@ -564,6 +579,28 @@ not promote any row beyond its registry authority.
   objective. A max-over-region functional is deliberately absent because it is
   not differentiable, and smoothing it silently would return the gradient of a
   different objective than the caller asked for.
+- THE LUMPED RUNG IS CHEAPER *AND* WEAKER, AND REFUSES OUTSIDE ITS REGIME.
+  `lumped` solves a first-order network ANALYTICALLY — no time stepping, so it
+  contributes no integration error of its own — and is gated on the Biot
+  number, the quantity that decides whether a body may be treated as
+  isothermal at all. `solve_gated` REFUSES above the ceiling rather than
+  returning a cheap wrong number, and the refusal points at escalating to the
+  full transient rather than at loosening the gate. A caller may loosen the
+  ceiling, and the verdict then reports the ceiling actually applied so a
+  loosened run is never mistaken for a corpus-gated one.
+- `LUMPED_BIOT_CEILING` DUPLICATES THE CORPUS ROW, ON PURPOSE. This crate must
+  not depend on `fs-vvreg`, so the `thermal-a-lumped-transient` Biot ceiling is
+  restated as a constant. `tests/lumped.rs` asserts the two agree, so the
+  duplication cannot drift silently — the test is the mechanism that makes the
+  duplication safe, not a nicety.
+- NODE CONDUCTANCE EXTRACTED FROM A STEADY RISE IS MODEL-FORM EVIDENCE, NOT A
+  MEASURED PROPERTY. `extract_node_from_steady_rise` computes `hA = P / dT`,
+  which assumes the observed rise is dominated by the surface path the reduced
+  model represents and inherits every assumption of the run it came from.
+- THE REDUCED RUNG HAS ONE AMBIENT AND NO NODE-TO-NODE COUPLING. Each node has
+  its own surface path to a single ambient, so the network is diagonal and its
+  nodes do not exchange heat with each other. A genuine multi-node network
+  with inter-node conductances is not implemented.
 - A DUTY CYCLE IS A SCALE ON AN EXISTING POWER MAP, AND ITS WINDOW IS CLOSED.
   `duty::DutyCycle` declares a piecewise multiplier on the volumetric source,
   not a second description of the hardware, so the cycle cannot disagree with

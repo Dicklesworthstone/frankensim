@@ -60,6 +60,9 @@ pub mod duty;
 pub mod field;
 pub mod fixtures;
 pub mod interface;
+/// The lumped-network reduced transient rung: the cheap fidelity tier, gated
+/// on the Biot number that decides whether lumping is admissible at all.
+pub mod lumped;
 pub mod material;
 pub mod mesh;
 pub mod power;
