@@ -794,6 +794,18 @@ The tabular reading itself reuses `catalog::Schema`, so column typing, ranges,
 budgets and quoting are the crate's existing hardened path rather than a second
 CSV parser.
 
+The composition is proven downstream rather than asserted here.
+`fs-conduction/tests/power_table_e2e.rs` reads a tracked budget export FROM
+DISK, lowers it through an explicit name-to-region catalog into a `PowerMap`,
+and solves; it pins the exact delivered-equals-declared identity, the refusal
+that a disagreeing total is `PowerMap`'s and not the parser's, and the refusal
+that an unplaced component cannot be skipped. `fs-io` is a DEV-dependency of
+that crate only, so the production graph stays free of the importer. The same
+test measures what the unit directive prevents: identical digits declared `mW`
+instead of `W` solve to a temperature rise smaller by exactly 1000, because
+`fs-conduction` reads no dimension (`COMPONENT_POWER_DIMS` exists and is
+consumed nowhere).
+
 Determinism: parsing is a pure function of the input bytes. The receipt binds
 `fnv1a64` of the exact source, so a single changed digit is a different source
 even when the parsed values are unchanged.

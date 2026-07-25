@@ -1015,6 +1015,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-feec",
+ "fs-io",
  "fs-matdb",
  "fs-math",
  "fs-mms",

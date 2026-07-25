@@ -385,6 +385,25 @@ None. Everything here is `[S]` solid work on the default path.
   (heating must raise the body above its Dirichlet wall); the region selector
   reproducing exactly the claimed slots; and refusals for a face claimed
   twice, an out-of-range slot, and a total that does not add up.
+- `tests/power_table_e2e.rs` — file-to-solve ingestion (`f85xj.11.7`), the only
+  battery in this crate that crosses a crate boundary: a tracked power-budget
+  export is read FROM DISK, parsed by `fs_io::power_table` (a DEV-dependency,
+  so the production graph stays free of the importer), lowered through an
+  explicit name-to-region catalog, and solved. It pins delivered power equal to
+  the file's declared total at `1e-12`, the per-row wattage surviving the parse
+  bit for bit, the deterministic by-name component order regardless of
+  spreadsheet row order, one `Unstated` row still making the aggregate band
+  `None`, the assembled `EnergyBalance` agreeing with the audit including the
+  SIGN of the Dirichlet rail, and the hot spot landing inside the largest
+  dissipator's footprint — which is what a mis-bound name-to-region seam would
+  break and a balance check alone cannot catch. G3: identical digits declared
+  `mW` instead of `W` move every nodal temperature RISE by exactly 1000, which
+  measures what the ingestion-boundary unit directive prevents, since this
+  crate reads no dimension (`COMPONENT_POWER_DIMS` is consumed nowhere).
+  Refusals: a declared total disagreeing with its rows must surface `PowerMap`'s
+  balance refusal rather than being corrected at parse time, and a component
+  with no footprint refuses rather than being skipped — skipping would remove
+  real dissipation and still balance.
 - `tests/transient.rs` — theta-method marching (`f85xj.5.11`): the EXACT
   uniform-adiabatic-heating identity `dT/dt = f/(rho c_p)` at machine
   precision across four (theta, step) combinations, which pins the
