@@ -215,6 +215,24 @@ This is the protocol working as intended: a green surface does not launder the
 refusal for the others, and the outcome of a real train may legitimately be
 "reject".
 
+Adjudicating a PROPOSED pin set rather than whatever happens to be checked out
+uses `compatibility-report --candidate <lock>`. The candidate is parsed by the
+same canonical reader as the tracked lock, so a malformed or hash-inconsistent
+proposal is refused rather than half-read.
+
+Known limitation: there is no tool that MINTS a candidate lock.
+`lock-constellation` writes the lock from the live checkouts and refuses when
+any tree is dirty, so today a candidate is produced either by checking the
+proposed pins out first or by hand-editing the lock and recomputing its
+FNV-1a-64 `lock_hash`. Until a minting command exists, "candidate" and "live"
+coincide more often than the protocol intends.
+
+Note also that because every `P1` surface must be green on every train, no bump
+can be admitted at all while FrankenSQLite does not compile — including a
+proposal that touches only asupersync, for which green evidence already exists.
+That is deliberate: a tree whose durability surface cannot be verified is not a
+tree in which any pin change should be accepted.
+
 Known limitation: `fs-govern`'s dev-dependencies include `fs-ledger`, so
 `cargo test -p fs-govern` cannot run during a FrankenSQLite outage even though
 the library itself stays sibling-free and `xtask` keeps building. The adjudicator

@@ -27,7 +27,7 @@
 //! - `check-schemas`  — frozen public schema versions, migration obligations, and accretion control.
 //! - `check-consolidation` — crates no supported workflow exercises must carry a recorded disposition.
 //! - `check-program-metrics` — the program outcome-metrics dashboard is a checked deterministic artifact.
-//! - `compatibility-report` — names which sibling is off-pin and which compatibility surface must go green.
+//! - `compatibility-report [--candidate <lock>]` — names which sibling is off-pin (or would move) and which compatibility surface must go green.
 //! - `check-docs`     — README facts and capability matrix exactly match tracked authorities.
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
@@ -8313,7 +8313,27 @@ fn main() -> ExitCode {
             };
         }
         "compatibility-report" => {
-            return match compatibility::report(&root) {
+            // `--candidate <lock>` adjudicates a PROPOSED pin set; without it the
+            // comparison is against the live checkouts.
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let candidate = match args.split_first() {
+                None => None,
+                Some((flag, rest)) if flag == "--candidate" => match rest.first() {
+                    Some(path) => Some(std::path::PathBuf::from(path)),
+                    None => {
+                        eprintln!("error: --candidate needs a path to a candidate constellation.lock");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                Some((other, _)) => {
+                    eprintln!(
+                        "error: unknown compatibility-report argument `{other}`; expected \
+                         `--candidate <lock>`"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            return match compatibility::report(&root, candidate.as_deref()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("error: {error}");

@@ -18,25 +18,55 @@ use fs_govern::compatibility::{PinRow, SURFACES, moved, pin_delta, render_regist
 pub(crate) const CHECK: &str = "compatibility-report";
 
 /// Print the registry, the per-sibling pin delta, and the suite selectors.
-pub(crate) fn report(root: &Path) -> Result<(), String> {
+///
+/// With `candidate = None` the comparison is against the LIVE checkouts, which
+/// answers "what has drifted?". With a candidate lock path it is against a
+/// PROPOSED pin set, which answers "what would this bump change, and what must
+/// go green first?" — the question a release train actually asks. A candidate
+/// lock is parsed by the same canonical reader as the tracked one, so a
+/// malformed proposal is refused rather than silently half-read.
+pub(crate) fn report(root: &Path, candidate: Option<&Path>) -> Result<(), String> {
     let lock_text = super::read_constellation_lock(&root.join("constellation.lock"))?;
     let (_lock_hash, rows) = super::parse_lock_rows(&lock_text)?;
-    let entries = super::constellation_entries(root)?;
 
     let recorded: Vec<PinRow> = rows
         .iter()
         .map(|row| PinRow::new(&row.lib, &row.version, &row.git_head))
         .collect();
-    let live: Vec<PinRow> = entries
-        .iter()
-        .map(|entry| PinRow::new(&entry.lib, &entry.version, &entry.git_head))
-        .collect();
 
-    let deltas = pin_delta(&recorded, &live);
+    let (against, basis) = match candidate {
+        Some(path) => {
+            let text = super::read_constellation_lock(path).map_err(|error| {
+                format!("candidate lock {} is unreadable: {error}", path.display())
+            })?;
+            let (_hash, candidate_rows) = super::parse_lock_rows(&text).map_err(|error| {
+                format!(
+                    "candidate lock {} is not a canonical constellation lock: {error}",
+                    path.display()
+                )
+            })?;
+            (
+                candidate_rows
+                    .iter()
+                    .map(|row| PinRow::new(&row.lib, &row.version, &row.git_head))
+                    .collect::<Vec<PinRow>>(),
+                format!("candidate lock {}", path.display()),
+            )
+        }
+        None => (
+            super::constellation_entries(root)?
+                .iter()
+                .map(|entry| PinRow::new(&entry.lib, &entry.version, &entry.git_head))
+                .collect::<Vec<PinRow>>(),
+            "live checkouts".to_string(),
+        ),
+    };
+
+    let deltas = pin_delta(&recorded, &against);
     let movers = moved(&deltas);
 
     println!("# Constellation compatibility report\n");
-    println!("## Pin delta (recorded lock versus live checkouts)\n");
+    println!("## Pin delta (recorded lock versus {basis})\n");
     for delta in &deltas {
         println!("- {}", delta.describe());
     }
