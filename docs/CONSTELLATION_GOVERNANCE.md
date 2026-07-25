@@ -152,6 +152,20 @@ The registry deliberately records **uncovered** surfaces as well as covered
 ones, each with the reason it carries no test. An uncovered surface is a
 standing gap that the report shows every run; it is never a blank.
 
+Six of the seven siblings carry boundary coverage. Several sit behind
+NON-DEFAULT features (`fnp-interop`, `fnx-interop`, `torch-bridge`) and several
+are unit tests inside `src/` rather than integration tests, so each registered
+test records its kind and its required features — a selector that omits the
+feature compiles the boundary out and reports a vacuous pass. Only
+`frankenpandas` is uncovered, correctly: it is pinned-unused and FrankenSim
+makes no claim that depends on it.
+
+An unmoved sibling is required on every train only when it is high priority AND
+sits in the runtime graph. That rule exists because one sibling's move can
+break another's surface, which can only propagate through runtime consumption;
+a dev-only oracle such as `frankenscipy` is outside it, and is required when it
+moves itself.
+
 ### The bump protocol
 
 A pin change is adjudicated by `evaluate_bump`, which is fail-closed. A bump is
@@ -197,21 +211,30 @@ a `franken_numpy` MINOR move (`0.1.0` to `0.2.0`). The previously understood
 single-sibling drift was an artifact of the aggregate lock hash, which reports
 that *a* repository moved without naming it.
 
-Stage 2, suite. Two P1 surfaces were executed against the live pins:
+Stage 2, suite. The surfaces were executed against the live pins:
 
 - `asupersync` at `0.3.9@054cff23` — **GREEN, 25/25** (`fs-exec` conformance 14,
   `constellation_smoke` 1, `lease_battery` 10, 0 failed). FrankenSim's bounded
   cancellation, drain, budget-propagation and latency-lane contracts hold on
   the new commit.
-- `frankensqlite` at `31fc4a3b` — **DID NOT BUILD**. `fsqlite-btree` is mid
-  async-pager migration: seven errors where synchronous callers `?` a future.
-  The surface therefore recorded `NotRun`. A dependency that fails to compile
-  is an absence of evidence, never an absence of a problem.
+- `franken_numpy` at `0.2.0@c5b6339f` — **GREEN 2/2**, `franken_networkx`
+  **8/8**, `frankentorch` **4/4**, `frankenscipy` **2/2**.
+- `frankensqlite` at `31fc4a3b` — **DID NOT BUILD**. `fsqlite-btree` fails
+  under the `async-api` feature that `fs-ledger`'s dev-dependency enables; the
+  production graph compiles. The surface therefore recorded `NotRun`. A
+  dependency that fails to compile is an absence of evidence, never an absence
+  of a problem.
 
-Stage 3, adjudication. **REFUSED**, for two independent reasons: the
-`frankensqlite` P1 durability surface never executed, and `franken_numpy` moved
-across a minor version into a surface with NO compatibility coverage, so no
-evidence exists that could admit it.
+Stage 3, adjudication. **REFUSED**, on one reason: the `frankensqlite` P1
+durability surface never executed.
+
+This corrects an earlier recording of the same train, which also refused
+`franken_numpy` as an uncovered surface. That was wrong — dedicated round-trip
+and refusal tests existed in `fs-sparse/src/interop_fnp.rs` all along, as unit
+tests behind a non-default feature, and they run green on the new pin. The
+verdict is unchanged but now rests on one true reason instead of one true and
+one false one. The registry has been corrected for all four siblings whose
+coverage it understated.
 
 Stage 4, disposition. The bump is rejected and the recorded lock stands as the
 rollback reference. No pin was moved and no train is claimed to have passed.

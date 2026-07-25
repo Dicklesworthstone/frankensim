@@ -30,6 +30,16 @@ fn recorded() -> Vec<PinRow> {
     ]
 }
 
+/// Green results for every surface that is required on EVERY train: the
+/// P1/P2 siblings that sit in the runtime graph.
+fn fully_evidenced() -> Vec<SuiteResult> {
+    vec![
+        green("asupersync"),
+        green("franken_numpy"),
+        green("frankensqlite"),
+    ]
+}
+
 fn green(lib: &str) -> SuiteResult {
     SuiteResult::new(
         lib,
@@ -76,7 +86,7 @@ fn registry_is_structurally_consistent() {
                 entry.lib
             );
             assert!(
-                entry.selector().is_none(),
+                entry.selectors().is_empty(),
                 "{} must not render a runnable selector with no tests",
                 entry.lib
             );
@@ -86,10 +96,35 @@ fn registry_is_structurally_consistent() {
                 "{} has tests, so a no-test reason is contradictory",
                 entry.lib
             );
-            let selector = entry.selector().expect("covered surface has a selector");
-            assert!(selector.starts_with("cargo test --locked"));
-            assert!(selector.contains("-p "));
-            assert!(selector.contains("--test "));
+            let selectors = entry.selectors();
+            assert!(!selectors.is_empty(), "{} renders a selector", entry.lib);
+            for selector in &selectors {
+                assert!(selector.starts_with("cargo test --locked -p "));
+                // A unit-test surface selects with --lib; an integration one
+                // with --test. Every group must do one or the other, or the
+                // invocation silently runs the whole crate.
+                assert!(
+                    selector.contains(" --lib ") || selector.contains(" --test "),
+                    "{} selector runs the whole crate: {selector}",
+                    entry.lib
+                );
+            }
+            // A feature-gated boundary MUST carry --features, or the selector
+            // compiles the surface out and reports a vacuous pass.
+            for test in entry.tests {
+                if !test.required_features.is_empty() {
+                    assert!(
+                        selectors.iter().any(|selector| test
+                            .required_features
+                            .iter()
+                            .all(|feature| selector.contains(feature))),
+                        "{} test {} needs features {:?} that no selector enables",
+                        entry.lib,
+                        test.test_name,
+                        test.required_features
+                    );
+                }
+            }
         }
     }
 
@@ -103,6 +138,18 @@ fn registry_is_structurally_consistent() {
             entry.test_count()
         );
     }
+
+    // Exactly one surface is uncovered, and it is the pinned-unused one.
+    let uncovered: Vec<&str> = SURFACES
+        .iter()
+        .filter(|entry| entry.tests.is_empty())
+        .map(|entry| entry.lib)
+        .collect();
+    assert_eq!(
+        uncovered,
+        vec!["frankenpandas"],
+        "every sibling with a consumer must carry boundary coverage"
+    );
 
     // A pinned-unused sibling makes no claim at all.
     let pandas = surface("frankenpandas").expect("registered");
@@ -310,12 +357,12 @@ fn unmoved_critical_surfaces_are_still_required() {
 /// waved through: an uncovered surface cannot supply evidence.
 #[test]
 fn moved_but_uncovered_sibling_is_refused() {
-    let mut attempt = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    let mut attempt = attempt_with(fully_evidenced());
     attempt.deltas.push(PinDelta {
-        lib: "frankentorch".to_string(),
+        lib: "frankenpandas".to_string(),
         movement: PinMovement::Moved {
-            from_version: "0.1.0".to_string(),
-            from_head: "f00c3ce".to_string(),
+            from_version: "0.1.2".to_string(),
+            from_head: "803efc1c".to_string(),
             to_version: "0.2.0".to_string(),
             to_head: "deadbee".to_string(),
         },
@@ -325,12 +372,12 @@ fn moved_but_uncovered_sibling_is_refused() {
     };
     let uncovered = reasons
         .iter()
-        .find(|reason| matches!(reason, BumpRefusal::UncoveredSurface { lib, .. } if lib == "frankentorch"))
+        .find(|reason| matches!(reason, BumpRefusal::UncoveredSurface { lib, .. } if lib == "frankenpandas"))
         .expect("uncovered surface is reported");
-    assert!(uncovered.to_string().contains("feature-gated"));
+    assert!(uncovered.to_string().contains("pinned-unused"));
 
     // A sibling nobody registered cannot be adjudicated at all.
-    let mut unknown = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    let mut unknown = attempt_with(fully_evidenced());
     unknown.deltas.push(PinDelta {
         lib: "mystery-lib".to_string(),
         movement: PinMovement::Added,
@@ -353,7 +400,7 @@ fn a_bump_with_no_movement_is_refused() {
             lib: "asupersync".to_string(),
             movement: PinMovement::Unchanged,
         }],
-        results: vec![green("asupersync"), green("frankensqlite")],
+        results: fully_evidenced(),
         golden: GoldenDisposition::NoGoldenSurface,
         coupled_goldens: Vec::new(),
     };
@@ -366,10 +413,7 @@ fn a_bump_with_no_movement_is_refused() {
 /// The admitted path, and the fact that refusal reports EVERY reason at once.
 #[test]
 fn a_fully_evidenced_bump_is_admitted_and_refusals_are_complete() {
-    let verdict = evaluate_bump(&attempt_with(vec![
-        green("asupersync"),
-        green("frankensqlite"),
-    ]));
+    let verdict = evaluate_bump(&attempt_with(fully_evidenced()));
     let BumpVerdict::Admitted {
         moved: movers,
         green_surfaces,
@@ -438,18 +482,26 @@ fn registry_renders_deterministically_and_shows_gaps() {
         "uncovered surfaces must be visible, not blank: {first}"
     );
     assert!(first.contains("cargo test --locked -p fs-exec"));
+    // Feature-gated boundaries render their features in the selector.
+    assert!(first.contains("--features fnp-interop"), "{first}");
 }
 
-/// The 2026-07-24 rehearsed bump, as an executable transcript.
+/// The 2026-07-24/25 rehearsed bump, as an executable transcript.
 ///
-/// This is not a synthetic drill. It records the real seven-sibling drift,
-/// the real executed outcomes — the asupersync surface ran 25/25 green
-/// (conformance 14, constellation_smoke 1, lease_battery 10) against
-/// `0.3.9@054cff23`, while the frankensqlite surface could not even build
-/// because `fsqlite-btree` is mid async-pager migration — and the verdict the
-/// protocol actually returns. A surface that fails to compile is `NotRun`:
-/// there is no execution to report, and an unbuildable dependency must never
-/// read as an absent problem.
+/// Not a synthetic drill. Every outcome below was measured against the live
+/// checkouts: asupersync ran 25/25 green (`fs-exec` conformance 14,
+/// constellation_smoke 1, lease_battery 10) at `0.3.9@054cff23`, and
+/// franken_numpy ran 2/2 green at `0.2.0@c5b6339f` once its boundary tests
+/// were correctly registered. The frankensqlite surface still could not build,
+/// because `fsqlite-btree` fails under the `async-api` feature that
+/// `fs-ledger`'s dev-dependency enables.
+///
+/// This transcript CORRECTS an earlier version of itself. The first recording
+/// refused franken_numpy as an uncovered surface; that was wrong — dedicated
+/// round-trip and refusal tests existed in `fs-sparse/src/interop_fnp.rs` all
+/// along, as unit tests behind a non-default feature. The overall verdict is
+/// unchanged, but it now rests on one true reason instead of one true and one
+/// false one.
 #[test]
 fn rehearsed_bump_2026_07_24_is_refused() {
     let recorded = vec![
@@ -475,7 +527,6 @@ fn rehearsed_bump_2026_07_24_is_refused() {
             "0.3.9",
             "054cff2356fc525e38d54100749ff3fa33e89d7a",
         ),
-        // A MINOR version move, into a surface with no coverage at all.
         PinRow::new(
             "franken_numpy",
             "0.2.0",
@@ -503,6 +554,14 @@ fn rehearsed_bump_2026_07_24_is_refused() {
                     failed: 0,
                 },
             ),
+            // Measured with --features fnp-interop --lib interop_fnp.
+            SuiteResult::new(
+                "franken_numpy",
+                SuiteOutcome::Executed {
+                    passed: 2,
+                    failed: 0,
+                },
+            ),
             // The surface did not build, so nothing executed.
             SuiteResult::new("frankensqlite", SuiteOutcome::NotRun),
         ],
@@ -518,17 +577,23 @@ fn rehearsed_bump_2026_07_24_is_refused() {
     assert!(reasons.contains(&BumpRefusal::NotExecuted {
         lib: "frankensqlite".to_string()
     }));
-    // franken_numpy moved a minor version into a surface with no coverage.
-    assert!(reasons.iter().any(|reason| matches!(
-        reason,
-        BumpRefusal::UncoveredSurface { lib, .. } if lib == "franken_numpy"
-    )));
-    // A green surface does not launder the refusal for the others.
-    assert!(!reasons.iter().any(|reason| matches!(
-        reason,
-        BumpRefusal::NotExecuted { lib } | BumpRefusal::FailingSurface { lib, .. }
-            if lib == "asupersync"
-    )));
+    // Green surfaces do not launder the refusal, and are not themselves faulted.
+    for lib in ["asupersync", "franken_numpy"] {
+        assert!(!reasons.iter().any(|reason| matches!(
+            reason,
+            BumpRefusal::NotExecuted { lib: name }
+                | BumpRefusal::FailingSurface { lib: name, .. }
+                | BumpRefusal::MissingResult { lib: name }
+                | BumpRefusal::UncoveredSurface { lib: name, .. }
+                if name == lib
+        )));
+    }
+    // The whole refusal now rests on the one surface that genuinely could not run.
+    assert_eq!(
+        reasons.len(),
+        1,
+        "expected exactly the frankensqlite refusal, got {reasons:?}"
+    );
 }
 
 /// Pins and semantic goldens move together. A golden surface is coupled to a
@@ -572,7 +637,7 @@ fn coupled_goldens_must_be_declared() {
     assert!(coupled_golden_surfaces("not-a-sibling", &all).is_empty());
 
     // Declaring no golden surface while coupled goldens exist is refused.
-    let mut attempt = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    let mut attempt = attempt_with(fully_evidenced());
     attempt.coupled_goldens = asup.iter().map(|id| (*id).to_string()).collect();
     let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
         panic!("an undeclared golden implication must refuse")
@@ -595,7 +660,7 @@ fn coupled_goldens_must_be_declared() {
     assert!(evaluate_bump(&attempt).admitted());
 
     // And with no coupled goldens, NoGoldenSurface stays consistent.
-    let clean = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    let clean = attempt_with(fully_evidenced());
     assert!(evaluate_bump(&clean).admitted());
 }
 
@@ -627,4 +692,40 @@ fn runtime_consumers_match_the_trust_assessment() {
             .runtime_consumers
             .is_empty()
     );
+}
+
+/// A dev-only sibling is required only when it MOVES. The "required even when
+/// unmoved" rule exists because one sibling's move can break another's
+/// surface, and that can only propagate through the runtime graph — so a
+/// sibling with no runtime consumer is outside it.
+#[test]
+fn dev_only_siblings_are_required_only_when_they_move() {
+    let scipy = surface("frankenscipy").expect("registered");
+    assert_eq!(scipy.priority, ReviewPriority::P2);
+    assert!(scipy.priority.required_every_train());
+    assert!(scipy.runtime_consumers.is_empty(), "dev-only oracle");
+    assert!(!scipy.tests.is_empty(), "and it IS covered");
+
+    // Unmoved: an asupersync-only bump does not demand frankenscipy evidence.
+    let unmoved = attempt_with(fully_evidenced());
+    assert!(evaluate_bump(&unmoved).admitted());
+
+    // Moved: now it must report, because a drifting oracle invalidates every
+    // casebook comparison built on it.
+    let mut moved_scipy = attempt_with(fully_evidenced());
+    moved_scipy.deltas.push(PinDelta {
+        lib: "frankenscipy".to_string(),
+        movement: PinMovement::Moved {
+            from_version: "0.1.0".to_string(),
+            from_head: "9e271fd7".to_string(),
+            to_version: "0.1.0".to_string(),
+            to_head: "a133c3c8".to_string(),
+        },
+    });
+    let BumpVerdict::Refused { reasons } = evaluate_bump(&moved_scipy) else {
+        panic!("a moved oracle must report evidence")
+    };
+    assert!(reasons.contains(&BumpRefusal::MissingResult {
+        lib: "frankenscipy".to_string()
+    }));
 }

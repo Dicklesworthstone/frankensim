@@ -88,18 +88,19 @@ pub(crate) fn report(root: &Path, candidate: Option<&Path>) -> Result<(), String
                 );
                 continue;
             };
-            match surface.selector() {
-                Some(selector) => println!(
-                    "- {} ({}): `{selector}`",
-                    delta.lib,
-                    surface.priority.slug()
-                ),
-                None => println!(
+            let selectors = surface.selectors();
+            if selectors.is_empty() {
+                println!(
                     "- {} ({}): NO COVERAGE — {}",
                     delta.lib,
                     surface.priority.slug(),
                     surface.no_test_reason.unwrap_or("no reason recorded")
-                ),
+                );
+            } else {
+                println!("- {} ({}):", delta.lib, surface.priority.slug());
+                for selector in selectors {
+                    println!("    `{selector}`");
+                }
             }
         }
         println!();

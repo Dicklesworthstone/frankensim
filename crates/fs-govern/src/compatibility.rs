@@ -71,15 +71,32 @@ impl ReviewPriority {
     }
 }
 
+/// Where a compatibility test lives, which decides how it is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TestKind {
+    /// A `#[cfg(test)]` test inside `src/`, selected with `--lib`.
+    Unit,
+    /// An integration test under `tests/`, selected with `--test <target>`.
+    Integration,
+}
+
 /// One FrankenSim test that exercises a sibling's load-bearing surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceTest {
     /// FrankenSim crate hosting the test.
     pub crate_name: &'static str,
-    /// Integration-test target name (the file stem under `tests/`).
+    /// Unit test in `src/`, or integration test under `tests/`.
+    pub kind: TestKind,
+    /// Module path for a unit test, or the `tests/` file stem for an
+    /// integration test.
     pub test_target: &'static str,
     /// Exact test function name.
     pub test_name: &'static str,
+    /// Cargo features required to compile this test.
+    ///
+    /// Several sibling boundaries are behind non-default features, so a
+    /// selector that omits them silently runs nothing.
+    pub required_features: &'static [&'static str],
     /// The claim this test exercises.
     pub claim: &'static str,
 }
@@ -107,29 +124,67 @@ pub struct SiblingSurface {
 }
 
 impl SiblingSurface {
-    /// The exact `cargo test` selector for this surface.
+    /// The exact `cargo test` selectors for this surface.
     ///
-    /// Returns `None` for a surface with no tests, so a caller cannot render a
-    /// runnable command for a sibling that has no compatibility coverage.
+    /// One invocation per `(crate, feature set)` group, because a boundary can
+    /// span crates and sit behind different features. Empty for a surface with
+    /// no tests, so no runnable command can be shown for one with no coverage.
     #[must_use]
-    pub fn selector(&self) -> Option<String> {
-        if self.tests.is_empty() {
-            return None;
+    pub fn selectors(&self) -> Vec<String> {
+        let mut groups: Vec<(&str, &'static [&'static str])> = Vec::new();
+        for test in self.tests {
+            let key = (test.crate_name, test.required_features);
+            if !groups.iter().any(|(name, features)| {
+                *name == key.0 && features.len() == key.1.len() && features.iter().eq(key.1.iter())
+            }) {
+                groups.push(key);
+            }
         }
-        let mut crates: Vec<&str> = self.tests.iter().map(|test| test.crate_name).collect();
-        crates.sort_unstable();
-        crates.dedup();
-        let mut out = String::from("cargo test --locked");
-        for name in crates {
-            let _ = write!(out, " -p {name}");
-        }
-        let mut targets: Vec<&str> = self.tests.iter().map(|test| test.test_target).collect();
-        targets.sort_unstable();
-        targets.dedup();
-        for target in targets {
-            let _ = write!(out, " --test {target}");
-        }
-        Some(out)
+        groups.sort_unstable_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(right.1)));
+
+        groups
+            .into_iter()
+            .map(|(crate_name, features)| {
+                let mut out = format!("cargo test --locked -p {crate_name}");
+                if !features.is_empty() {
+                    let _ = write!(out, " --features {}", features.join(","));
+                }
+                let mut units: Vec<&str> = self
+                    .tests
+                    .iter()
+                    .filter(|test| {
+                        test.crate_name == crate_name
+                            && test.required_features == features
+                            && test.kind == TestKind::Unit
+                    })
+                    .map(|test| test.test_target)
+                    .collect();
+                units.sort_unstable();
+                units.dedup();
+                if !units.is_empty() {
+                    let _ = write!(out, " --lib");
+                    for module in units {
+                        let _ = write!(out, " {module}");
+                    }
+                }
+                let mut targets: Vec<&str> = self
+                    .tests
+                    .iter()
+                    .filter(|test| {
+                        test.crate_name == crate_name
+                            && test.required_features == features
+                            && test.kind == TestKind::Integration
+                    })
+                    .map(|test| test.test_target)
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                for target in targets {
+                    let _ = write!(out, " --test {target}");
+                }
+                out
+            })
+            .collect()
     }
 
     /// Number of tests registered for this surface.
@@ -157,38 +212,50 @@ pub const SURFACES: &[SiblingSurface] = &[
         tests: &[
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "exec_004_external_cancellation_drains_and_ledgers_latency",
+                required_features: &[],
                 claim: "bounded cancellation with request -> drain -> finalize",
             },
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "exec_005_g4_storm_random_cancels_and_panics_stay_structured",
+                required_features: &[],
                 claim: "bounded cancellation with request -> drain -> finalize",
             },
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "exec_007_latency_lane_stays_responsive_under_tile_load",
+                required_features: &[],
                 claim: "task-scoped capability and budget propagation",
             },
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "exec_010_race_winner_is_deterministic_and_losers_fully_drain",
+                required_features: &[],
                 claim: "deterministic pause/drain/replay boundaries",
             },
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "lease_battery",
                 test_name: "cancellation_releases_all_charges",
+                required_features: &[],
                 claim: "bounded cancellation with request -> drain -> finalize",
             },
             SurfaceTest {
                 crate_name: "fs-exec",
+                kind: TestKind::Integration,
                 test_target: "constellation_smoke",
                 test_name: "asupersync_links_and_budget_vocabulary_holds",
+                required_features: &[],
                 claim: "task-scoped capability and budget propagation",
             },
         ],
@@ -197,27 +264,71 @@ pub const SURFACES: &[SiblingSurface] = &[
     },
     SiblingSurface {
         lib: "franken_networkx",
-        role: "graph algorithms behind voxel, sparse, and truss structure",
+        role: "graph algorithms behind voxel lattices, sparse structure, and truss ground structures",
         priority: ReviewPriority::P3,
-        claims: &["graph traversal and connectivity results are deterministic"],
-        tests: &[],
+        claims: &["Csr <-> graph-snapshot conversion is bitwise round-trip stable"],
+        tests: &[
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop",
+                test_name: "csr_to_snapshot_shape_and_weights",
+                required_features: &["fnx-interop"],
+                claim: "Csr <-> graph-snapshot conversion is bitwise round-trip stable",
+            },
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop",
+                test_name: "round_trip_is_bitwise_identity",
+                required_features: &["fnx-interop"],
+                claim: "Csr <-> graph-snapshot conversion is bitwise round-trip stable",
+            },
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop",
+                test_name: "unknown_node_key_errors",
+                required_features: &["fnx-interop"],
+                claim: "Csr <-> graph-snapshot conversion is bitwise round-trip stable",
+            },
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop",
+                test_name: "non_square_csr_refused",
+                required_features: &["fnx-interop"],
+                claim: "Csr <-> graph-snapshot conversion is bitwise round-trip stable",
+            },
+        ],
         runtime_consumers: &["fs-rep-voxel", "fs-sparse", "fs-truss"],
-        no_test_reason: Some(
-            "no test isolates the franken_networkx boundary from FrankenSim's own graph logic; \
-             coverage is incidental inside fs-sparse/fs-truss suites and is not claimed here",
-        ),
+        no_test_reason: None,
     },
     SiblingSurface {
         lib: "franken_numpy",
-        role: "array primitives used by sparse assembly",
+        role: "owned dense array type behind the sparse interop boundary",
         priority: ReviewPriority::P2,
-        claims: &["dense array semantics used by sparse assembly are stable"],
-        tests: &[],
+        claims: &["Csr <-> dense array conversion is bitwise round-trip stable"],
+        tests: &[
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop_fnp",
+                test_name: "round_trip_is_identity_without_explicit_zeros",
+                required_features: &["fnp-interop"],
+                claim: "Csr <-> dense array conversion is bitwise round-trip stable",
+            },
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Unit,
+                test_target: "interop_fnp",
+                test_name: "refusals_are_structured_and_fail_closed",
+                required_features: &["fnp-interop"],
+                claim: "Csr <-> dense array conversion is bitwise round-trip stable",
+            },
+        ],
         runtime_consumers: &["fs-sparse"],
-        no_test_reason: Some(
-            "no boundary-isolating test exists yet; fs-sparse exercises it only incidentally, so \
-             this surface is an explicit gap rather than a covered one",
-        ),
+        no_test_reason: None,
     },
     SiblingSurface {
         lib: "frankenpandas",
@@ -235,13 +346,37 @@ pub const SURFACES: &[SiblingSurface] = &[
         lib: "frankenscipy",
         role: "development-only differential oracle",
         priority: ReviewPriority::P2,
-        claims: &["oracle casebook values are stable across the pin"],
-        tests: &[],
+        claims: &[
+            "oracle reference values are stable, and a corrupted reference turns the suite red",
+        ],
+        tests: &[
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Integration,
+                test_target: "frankenscipy_oracle_casebook",
+                test_name: "frankenscipy_sparse_oracle_suite_emits_replay_complete_green_records",
+                required_features: &[],
+                claim: "oracle reference values are stable, and a corrupted reference turns the suite red",
+            },
+            SurfaceTest {
+                crate_name: "fs-sparse",
+                kind: TestKind::Integration,
+                test_target: "frankenscipy_oracle_casebook",
+                test_name: "disclosed_seeded_oracle_reference_corruption_turns_the_suite_red",
+                required_features: &[],
+                claim: "oracle reference values are stable, and a corrupted reference turns the suite red",
+            },
+            SurfaceTest {
+                crate_name: "fs-math",
+                kind: TestKind::Integration,
+                test_target: "frankenscipy_special_oracle_casebook",
+                test_name: "disclosed_seeded_special_reference_corruption_turns_suite_red",
+                required_features: &[],
+                claim: "oracle reference values are stable, and a corrupted reference turns the suite red",
+            },
+        ],
         runtime_consumers: &[],
-        no_test_reason: Some(
-            "oracle casebooks are dev-only comparisons spread across seven crates; they are not \
-             yet consolidated into a selectable compatibility target",
-        ),
+        no_test_reason: None,
     },
     SiblingSurface {
         lib: "frankensqlite",
@@ -255,32 +390,42 @@ pub const SURFACES: &[SiblingSurface] = &[
         tests: &[
             SurfaceTest {
                 crate_name: "fs-ledger",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "ledger_003_schema_migration_versioned",
+                required_features: &[],
                 claim: "schema migration and refusal semantics",
             },
             SurfaceTest {
                 crate_name: "fs-ledger",
+                kind: TestKind::Integration,
                 test_target: "conformance",
                 test_name: "ledger_007_crash_kill9_battery",
+                required_features: &[],
                 claim: "artifact and lineage durability across crash and reopen",
             },
             SurfaceTest {
                 crate_name: "fs-ledger",
+                kind: TestKind::Integration,
                 test_target: "travel",
                 test_name: "tt_006_crash_kill9_during_fork_traffic",
+                required_features: &[],
                 claim: "artifact and lineage durability across crash and reopen",
             },
             SurfaceTest {
                 crate_name: "fs-ledger",
+                kind: TestKind::Integration,
                 test_target: "state_checkpoint",
                 test_name: "committed_checkpoint_prefix_survives_kill_and_real_file_reopen",
+                required_features: &[],
                 claim: "transaction and checkpoint boundaries hold under interruption",
             },
             SurfaceTest {
                 crate_name: "fs-ledger",
+                kind: TestKind::Integration,
                 test_target: "ambient_cx",
                 test_name: "latency_lane_ambient_context_reaches_fsqlite_waiters",
+                required_features: &[],
                 claim: "transaction and checkpoint boundaries hold under interruption",
             },
         ],
@@ -289,15 +434,45 @@ pub const SURFACES: &[SiblingSurface] = &[
     },
     SiblingSurface {
         lib: "frankentorch",
-        role: "tensor bridge behind the feature-gated AD path",
+        role: "reverse-mode scalar tape behind the feature-gated AD bridge",
         priority: ReviewPriority::P3,
-        claims: &["the feature-gated tape bridge preserves gradient values"],
-        tests: &[],
+        claims: &["the reverse-mode tape bridge reproduces forward-dual gradients"],
+        tests: &[
+            SurfaceTest {
+                crate_name: "fs-ad",
+                kind: TestKind::Unit,
+                test_target: "bridge",
+                test_name: "bridge_gradient_matches_forward_duals",
+                required_features: &["torch-bridge"],
+                claim: "the reverse-mode tape bridge reproduces forward-dual gradients",
+            },
+            SurfaceTest {
+                crate_name: "fs-ad",
+                kind: TestKind::Unit,
+                test_target: "bridge",
+                test_name: "bridge_scales_reverse_one_pass",
+                required_features: &["torch-bridge"],
+                claim: "the reverse-mode tape bridge reproduces forward-dual gradients",
+            },
+            SurfaceTest {
+                crate_name: "fs-ad",
+                kind: TestKind::Unit,
+                test_target: "bridge",
+                test_name: "taped_segments_compose_with_revolve",
+                required_features: &["torch-bridge"],
+                claim: "the reverse-mode tape bridge reproduces forward-dual gradients",
+            },
+            SurfaceTest {
+                crate_name: "fs-ad",
+                kind: TestKind::Unit,
+                test_target: "bridge",
+                test_name: "use_outside_scope_is_loud",
+                required_features: &["torch-bridge"],
+                claim: "the reverse-mode tape bridge reproduces forward-dual gradients",
+            },
+        ],
         runtime_consumers: &["fs-ad"],
-        no_test_reason: Some(
-            "the bridge is feature-gated and off by default; no default-path test exercises it, \
-             so no compatibility claim is made",
-        ),
+        no_test_reason: None,
     },
 ];
 
@@ -724,13 +899,22 @@ impl BumpVerdict {
     }
 }
 
+/// Whether this surface must report green evidence for this attempt.
+///
+/// A moved sibling always requires evidence. An UNMOVED sibling requires it
+/// only when it is high priority AND sits in the runtime graph — that rule
+/// exists because one sibling's move can break another's surface, and that
+/// can only happen through runtime consumption. A dev-only oracle such as
+/// frankenscipy has no runtime consumer, so it cannot be broken by an
+/// unrelated pin move and demanding it every train would be noise. When it
+/// moves itself, it is required like anything else: a drifting oracle
+/// silently invalidates every casebook comparison built on it.
 fn coverage_required(deltas: &[PinDelta], surface: &SiblingSurface) -> bool {
-    if surface.priority.required_every_train() {
-        return true;
-    }
-    deltas
+    let moved_itself = deltas
         .iter()
-        .any(|delta| delta.lib == surface.lib && delta.movement.is_movement())
+        .any(|delta| delta.lib == surface.lib && delta.movement.is_movement());
+    moved_itself
+        || (surface.priority.required_every_train() && !surface.runtime_consumers.is_empty())
 }
 
 /// Adjudicate a bump attempt fail-closed.
@@ -837,9 +1021,12 @@ pub fn render_registry() -> String {
     out.push_str("| sibling | priority | claims | tests | selector |\n");
     out.push_str("| --- | --- | --- | --- | --- |\n");
     for entry in SURFACES {
-        let selector = entry
-            .selector()
-            .unwrap_or_else(|| "NO COVERAGE".to_string());
+        let selectors = entry.selectors();
+        let selector = if selectors.is_empty() {
+            "NO COVERAGE".to_string()
+        } else {
+            selectors.join(" && ")
+        };
         let _ = writeln!(
             out,
             "| {} | {} | {} | {} | `{}` |",
