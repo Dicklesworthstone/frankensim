@@ -533,6 +533,7 @@
     "crates/fs-io/tests/selection.rs",
     "crates/fs-io/tests/step.rs",
     "crates/fs-io/tests/step_faceted.rs",
+    "crates/fs-io/tests/supplier_corpus.rs",
     "crates/fs-io/tests/step_faceted_export.rs",
     "crates/fs-io/tests/step_import.rs",
     "crates/fs-ir/tests/admission.rs",
