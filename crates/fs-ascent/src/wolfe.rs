@@ -71,9 +71,14 @@ pub(crate) fn strong_wolfe_with_budget(
         let (f_a, d_a) = phi(alpha);
         evals += 1;
         assert!(
-            f_a.is_finite() && d_a.is_finite(),
-            "line-search callback must return finite value and derivative"
+            admissible_probe(f_a, d_a),
+            "line-search callback must return a finite or +inf value and a finite derivative"
         );
+        // `f_a == +inf` lands here and is necessarily greater than the finite
+        // sufficient-decrease threshold, so an infeasible probe is bracketed
+        // into [alpha_prev, alpha] rather than accepted. `f_prev` therefore
+        // never becomes infinite: this branch returns before the `f_prev = f_a`
+        // update below, which keeps zoom's `lo` endpoint finite.
         if f_a > c1.mul_add(alpha * dphi0, f0) || (i > 0 && f_a >= f_prev) {
             return zoom(
                 phi, f0, dphi0, alpha_prev, f_prev, alpha, c1, c2, evals, max_evals,
@@ -100,6 +105,26 @@ pub(crate) fn strong_wolfe_with_budget(
         }
     }
     failed(f0, evals)
+}
+
+/// Whether a probe `(φ(α), φ′(α))` is an admissible line-search observation.
+///
+/// `φ(α) = +∞` IS admissible and means "this trial step is outside the
+/// objective's domain, so it is too long". That is the documented barrier
+/// convention: [`crate::interior::interior_point`] returns `+∞` with a finite
+/// all-zero gradient for an infeasible sample precisely so the search shrinks
+/// back into the interior. Both probe sites below then reject `+∞` on the
+/// sufficient-decrease test and bisect toward the feasible endpoint, which is
+/// the behaviour that comment already promises.
+///
+/// `NaN` and `-∞` are NOT admissible and still panic. Neither carries
+/// "too long" information: `NaN` poisons every ordering comparison the bracket
+/// and zoom logic depend on, and `-∞` asserts an objective unbounded below,
+/// which is a modelling error rather than a step-length one. A non-finite
+/// derivative is likewise refused — a broken callback must fail loudly instead
+/// of steering the search.
+fn admissible_probe(f_a: f64, d_a: f64) -> bool {
+    (f_a.is_finite() || f_a == f64::INFINITY) && d_a.is_finite()
 }
 
 fn failed(f0: f64, evals: usize) -> WolfeOutcome {
@@ -132,9 +157,12 @@ fn zoom(
         let (f_a, d_a) = phi(alpha);
         evals += 1;
         assert!(
-            f_a.is_finite() && d_a.is_finite(),
-            "line-search callback must return finite value and derivative"
+            admissible_probe(f_a, d_a),
+            "line-search callback must return a finite or +inf value and a finite derivative"
         );
+        // An infeasible (`+inf`) midpoint takes this branch, moving `hi` down to
+        // it and bisecting back toward the feasible `lo`. `f_lo` is only ever
+        // assigned in the `else` arm, so the interval keeps one finite endpoint.
         if f_a > c1.mul_add(alpha * dphi0, f0) || f_a >= f_lo {
             hi = alpha;
         } else {
@@ -190,16 +218,105 @@ mod tests {
         assert_eq!(calls, 3);
     }
 
+    /// A log-barrier-shaped curve: a smooth quadratic on the feasible side and
+    /// `+inf` once the trial step leaves the domain at `alpha >= 0.5`. This is
+    /// the exact shape `interior::interior_point` presents (bead frankensim-35yeu).
+    ///
+    /// `phi(a) = 0.5*(a - 0.25)^2`, so `phi(0) = 0.03125` and `phi'(0) = -0.25`.
+    fn barrier_curve(alpha: f64) -> (f64, f64) {
+        if alpha >= 0.5 {
+            return (f64::INFINITY, 0.0);
+        }
+        let shifted = alpha - 0.25;
+        (0.5 * shifted * shifted, shifted)
+    }
+
+    #[test]
+    fn infeasible_probe_backtracks_into_the_interior_instead_of_panicking() {
+        let mut calls = Vec::new();
+        let mut phi = |alpha: f64| {
+            calls.push(alpha);
+            barrier_curve(alpha)
+        };
+        // The initial step is deliberately infeasible.
+        let outcome =
+            strong_wolfe_with_budget(&mut phi, 0.03125, -0.25, 1.0, 1e-4, 0.9, usize::MAX);
+
+        // Not merely "did not panic": the search must certify a step strictly
+        // inside the feasible region, at the curve's interior minimiser.
+        assert!(
+            outcome.success,
+            "infeasible bracket must still certify a step"
+        );
+        assert!(
+            outcome.alpha > 0.0 && outcome.alpha < 0.5,
+            "accepted step must be strictly feasible, got {}",
+            outcome.alpha
+        );
+        assert_eq!(outcome.alpha, 0.25);
+        assert_eq!(outcome.f_new, 0.0);
+        // alpha=1.0 (+inf) brackets, zoom bisects to 0.5 (+inf), then 0.25.
+        assert_eq!(calls, vec![1.0, 0.5, 0.25]);
+        assert_eq!(outcome.evals, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite or +inf value and a finite derivative")]
+    fn nan_probe_value_still_refuses() {
+        let mut phi = |_alpha: f64| (f64::NAN, -1.0);
+        let _ = strong_wolfe_with_budget(&mut phi, 1.0, -1.0, 1.0, 1e-4, 0.9, usize::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite or +inf value and a finite derivative")]
+    fn negative_infinite_probe_value_still_refuses() {
+        let mut phi = |_alpha: f64| (f64::NEG_INFINITY, -1.0);
+        let _ = strong_wolfe_with_budget(&mut phi, 1.0, -1.0, 1.0, 1e-4, 0.9, usize::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite or +inf value and a finite derivative")]
+    fn nonfinite_probe_derivative_still_refuses() {
+        let mut phi = |_alpha: f64| (0.0, f64::NAN);
+        let _ = strong_wolfe_with_budget(&mut phi, 1.0, -1.0, 1.0, 1e-4, 0.9, usize::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite or +inf value and a finite derivative")]
+    fn nan_probe_inside_zoom_still_refuses() {
+        // Feasible-looking bracket, then a poisoned midpoint once zoom starts.
+        let mut probes = 0usize;
+        let mut phi = |_alpha: f64| {
+            probes += 1;
+            if probes == 1 {
+                (5.0, -1.0)
+            } else {
+                (f64::NAN, -1.0)
+            }
+        };
+        let _ = strong_wolfe_with_budget(&mut phi, 1.0, -1.0, 1.0, 1e-4, 0.9, usize::MAX);
+    }
+
     #[test]
     fn expansion_overflow_fails_before_exposing_nonfinite_alpha() {
         let mut calls = 0usize;
+        // The probe value must be low enough to PASS sufficient decrease at
+        // `alpha = f64::MAX`, or the bracket zooms instead of expanding and this
+        // test never reaches the overflow path it is named for. The threshold
+        // there is `c1 * (f64::MAX * -1.0) + 1.0`, about -1.8e304, so a modest
+        // value like `0.0` fails the test's own premise: it exceeds the
+        // threshold, triggers zoom, and burns the whole eval budget on
+        // bisection. `-f64::MAX` clears it, while `d_a = -1.0` keeps curvature
+        // unsatisfied and the direction descending, so the loop expands.
         let mut phi = |alpha: f64| {
-            assert!(alpha.is_finite());
+            assert!(alpha.is_finite(), "phi must never see a non-finite step");
             calls += 1;
-            (0.0, -1.0)
+            (-f64::MAX, -1.0)
         };
         let outcome = strong_wolfe_with_budget(&mut phi, 1.0, -1.0, f64::MAX, 1e-4, 0.9, 10);
         assert!(!outcome.success);
+        // One probe, then `alpha *= 2.0` overflows to +inf and the search bails
+        // out rather than handing a non-finite step to the callback.
         assert_eq!(outcome.evals, 1);
         assert_eq!(calls, 1);
     }
