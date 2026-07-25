@@ -379,6 +379,7 @@
     "crates/fs-conduction/tests/power.rs",
     "crates/fs-conduction/tests/radiation.rs",
     "crates/fs-conduction/tests/support/mod.rs",
+    "crates/fs-conduction/tests/transient.rs",
     "crates/fs-conform/tests/conform.rs",
     "crates/fs-constraint/tests/conformance.rs",
     "crates/fs-contact/tests/contact.rs",

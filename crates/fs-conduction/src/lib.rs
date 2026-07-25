@@ -61,6 +61,9 @@ pub mod material;
 pub mod mesh;
 pub mod power;
 pub mod radiation;
+/// Transient conduction by the method of lines: declared volumetric heat
+/// capacity, the exact P1 capacitance matrix, and theta-method stepping.
+pub mod transient;
 pub mod solve;
 
 use core::fmt;

@@ -385,6 +385,19 @@ None. Everything here is `[S]` solid work on the default path.
   (heating must raise the body above its Dirichlet wall); the region selector
   reproducing exactly the claimed slots; and refusals for a face claimed
   twice, an out-of-range slot, and a total that does not add up.
+- `tests/transient.rs` — theta-method marching (`f85xj.5.11`): the EXACT
+  uniform-adiabatic-heating identity `dT/dt = f/(rho c_p)` at machine
+  precision across four (theta, step) combinations, which pins the
+  capacitance assembly and the stepping algebra together — a lumped or
+  mis-scaled mass matrix would drift; the capacitance row-sum equalling
+  `rho c_p V` directly; marching to large time recovering the independently
+  tested STEADY solution; a boundary-inconsistent initial condition being
+  lifted rather than carried; observed temporal order by Richardson triple
+  (backward Euler near 1, Crank-Nicolson near 2, and measurably separated —
+  self-convergence, since the semi-discrete system has no elementary closed
+  form on a tet mesh); refusals for `k(T)`, `theta < 0.5`, non-positive step
+  or capacity, and a mismatched initial vector; determinism across
+  independent runs; and a cancelled march publishing no partial solution.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -509,20 +522,29 @@ not promote any row beyond its registry authority.
   the caller supplies an uncertainty describing the supplied value, and
   `Unstated` stays an honest unknown. A measured map entering a solve does not
   make the solve validated.
-- STEADY STATE ONLY. THE TRANSIENT PATH IS STAGED, NOT FORGOTTEN — this is the
-  explicit staging decision record for bead `f85xj.5.9`. This crate solves the
-  steady problem; there is no time integration, no capacitance term, no
-  duty-cycle driver, and no transient adjoint here, and none is implied by the
-  presence of a power map. Component dissipation is modelled NOW because it is
-  the primary excitation and its data model must be right from the start; the
-  time dimension is deferred DELIBERATELY so that the architecture is planned
-  against `fs-time` and the checkpointed `fs-adjoint::timedep` pattern rather
-  than discovered later. Each staged item carries its own follow-on bead:
-  `f85xj.5.11` (method-of-lines transient solve on fs-time primitives with the
-  checkpointed adjoint), `f85xj.5.12` (duty-cycle drivers from the E17 envelope
-  objects), and `f85xj.5.13` (the lumped-network reduced transient rung for the
-  fidelity graph). Until those land, any transient claim about this crate is
-  unsupported: no API surface here accepts a time step or a thermal mass.
+- THE TRANSIENT PATH IS LINEAR, FIXED-STEP, AND ADJOINT-FREE. `transient`
+  (bead `f85xj.5.11`) advances `C dT/dt + K T = b` by the theta method over
+  the SAME `K` and `b` the steady path assembles, so a transient run cannot
+  drift from the steady physics — it is the steady physics with one extra
+  term, and `tests/transient.rs` pins that by marching to the steady solution.
+  What is NOT here: a temperature-dependent `k(T)`, which is REFUSED rather
+  than frozen across a step (freezing is a different scheme with its own error
+  behaviour, and adopting it silently would make the observed time order
+  depend on how strongly `k` varies); adaptive step control; any transient
+  ADJOINT, so no transient design gradient exists and none may be inferred
+  from the steady adjoint; and duty-cycle drivers. Those remain staged as
+  `f85xj.5.12` (E17 duty cycles) and `f85xj.5.13` (lumped reduced rung), with
+  the checkpointed transient adjoint still open on `f85xj.5.11` itself.
+- ONLY UNCONDITIONALLY STABLE SCHEMES ARE ADMITTED. `theta` is restricted to
+  `[0.5, 1]`. Below one half the scheme is only conditionally stable and the
+  limiting step depends on the mesh, so an explicit-leaning theta would hand
+  callers a configuration that looks fine on a coarse mesh and oscillates on a
+  refined one. That is a refusal, not a default.
+- VOLUMETRIC HEAT CAPACITY IS DECLARED, NOT CARD-BACKED. `rho·c_p` carries no
+  material card, no property-use receipt, and no provenance class — unlike
+  conductivity, which does. A transient result therefore has strictly weaker
+  material provenance than the steady result it settles onto, and that gap is
+  real rather than cosmetic.
 - POWER-MAP INGESTION IS THE CALLER'S. `PowerMap` admits already-parsed typed
   rows. Reading a component power table off disk — CSV/tabular ingestion
   through the `fs-io` quarantine and catalog path — is NOT implemented here,
