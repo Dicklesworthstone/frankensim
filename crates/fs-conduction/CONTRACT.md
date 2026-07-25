@@ -410,6 +410,17 @@ None. Everything here is `[S]` solid work on the default path.
   matters more — the discrepancy SHRINKS with Biot, so the agreement is
   attributable to the regime the row declares rather than to a tolerance that
   happened to fit.
+- `tests/duty.rs` — duty-cycle drivers (`f85xj.5.12`): the analytic per-segment
+  energy integral; declared interpolation across constant and ramp segments;
+  the past-the-window REFUSAL (with the refusal required to say why);
+  Crank-Nicolson with aligned steps delivering the declared energy EXACTLY;
+  backward Euler showing a real first-order residual that halves with the
+  step; the deliberate counter-case where a SYMMETRIC cycle cancels that error
+  to zero, pinned so a zero residual is never read as proof of exactness; a
+  ragged window refusing; constant load integrating exactly under either
+  scheme; the sampled peak lagging the burst (thermal mass doing its job);
+  step-quantized time-above-limit monotone in the limit; and refusals,
+  determinism, and cancellation.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -553,6 +564,43 @@ not promote any row beyond its registry authority.
   objective. A max-over-region functional is deliberately absent because it is
   not differentiable, and smoothing it silently would return the gradient of a
   different objective than the caller asked for.
+- A DUTY CYCLE IS A SCALE ON AN EXISTING POWER MAP, AND ITS WINDOW IS CLOSED.
+  `duty::DutyCycle` declares a piecewise multiplier on the volumetric source,
+  not a second description of the hardware, so the cycle cannot disagree with
+  the map about which components exist. Segments TILE the window by
+  construction, and asking for a scale past the window REFUSES rather than
+  holding the last value — extending a finished schedule invents load history
+  nobody declared. A window that is not a whole number of steps refuses for
+  the same reason: a step straddling the end injects undeclared load.
+- THE WINDOWED ENERGY AUDIT IS EXACT ONLY UNDER A STATED CONDITION. The theta
+  method's load weighting `θ s^{n+1} + (1−θ) s^n` is the TRAPEZOID rule at
+  `theta = 0.5`, which reproduces a piecewise-linear profile exactly when no
+  step straddles a segment boundary — so Crank-Nicolson with aligned steps
+  delivers the declared cycle energy to floating point, and
+  `WindowedEnergyAudit::steps_aligned` reports whether that condition held. At
+  `theta = 1` it is the right-endpoint rule and the residual is real. The
+  audit reports declared, delivered, and residual WITHOUT normalizing one to
+  the other: the gap is the integration error the caller chose.
+- A ZERO ENERGY RESIDUAL IS NOT EVIDENCE THAT THE INTEGRATION IS EXACT. On a
+  cycle whose ramps mirror each other, backward Euler over-integrates the
+  rising ramp by exactly what it under-integrates the falling one, so the
+  windowed residual vanishes while every individual step is still first-order
+  wrong. Symmetric duty cycles are an extremely common shape, so this
+  cancellation is likely rather than exotic. `tests/duty.rs` pins both sides
+  of it deliberately.
+- CYCLE SUMMARY QUANTITIES ARE STEP-SAMPLED. `CycleSummary::peak_temperature_k`
+  is the maximum over recorded STEP ENDS; the true continuous peak can fall
+  between steps and is not resolved. `time_above_limit_s` is counted in whole
+  steps, so it is quantized and can be off by up to one step at each crossing.
+  `excursion_k` is an amplitude, NOT a fatigue quantity: cycle counting,
+  damage models, and acceleration factors are out of scope and must not be
+  inferred from it. These are plain reported values; binding them to the
+  evidence discipline of the thermal QoIs waits on `f85xj.5.10`.
+- THE E17 SEAM IS NOT WIRED. `DutyCycle` is declared directly in this crate's
+  own types. Consuming an `fs-scenario` operating-envelope or duty-cycle
+  scenario object — the actual intent of `f85xj.5.12`'s (a) — waits on
+  `f85xj.17.5`, which defines those objects. What exists here is the driver
+  and the audit, not the scenario adapter.
 - THE LUMPED BINDING IS A REGIME CHECK, NOT A TRANSIENT VALIDATION. Resolving
   the Level-A `thermal-a-lumped-transient` row shows this solver agrees with a
   closed-form APPROXIMATION inside that approximation's declared small-Biot

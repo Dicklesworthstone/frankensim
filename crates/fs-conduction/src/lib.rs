@@ -54,6 +54,9 @@
 pub mod adjoint;
 pub mod assemble;
 pub mod bc;
+/// Duty cycles: a declared power-versus-time schedule driving the transient
+/// march, with a windowed energy audit.
+pub mod duty;
 pub mod field;
 pub mod fixtures;
 pub mod interface;

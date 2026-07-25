@@ -209,6 +209,18 @@ impl TransientConfig {
         self.dt_s
     }
 
+    /// The declared linear-solve tolerance.
+    #[must_use]
+    pub const fn linear_tolerance(&self) -> f64 {
+        self.linear.tolerance
+    }
+
+    /// The declared Krylov iteration budget.
+    #[must_use]
+    pub const fn linear_max_iterations(&self) -> usize {
+        self.linear.max_iterations
+    }
+
     /// The scheme's nominal temporal order: 2 at Crank-Nicolson, else 1.
     ///
     /// Nominal, not measured. `tests/transient.rs` measures the observed

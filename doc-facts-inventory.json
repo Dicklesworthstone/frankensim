@@ -373,6 +373,7 @@
     "crates/fs-conduction/tests/analytic.rs",
     "crates/fs-conduction/tests/conformance.rs",
     "crates/fs-conduction/tests/contact.rs",
+    "crates/fs-conduction/tests/duty.rs",
     "crates/fs-conduction/tests/level_b_crosscode.rs",
     "crates/fs-conduction/tests/mms.rs",
     "crates/fs-conduction/tests/pcb_homogenization.rs",
