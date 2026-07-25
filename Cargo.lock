@@ -1554,6 +1554,7 @@ dependencies = [
  "fs-qty",
  "fs-regime",
  "fsqlite",
+ "fsqlite-ext-json",
  "fsqlite-types",
 ]
 

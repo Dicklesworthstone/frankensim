@@ -186,6 +186,72 @@ missing_panics_doc = "allow"
 missing_errors_doc = "allow"
 module_name_repetitions = "allow"
 
+# Cargo ignores profile settings declared by path dependencies. Preserve
+# FrankenSQLite's own opt-level=1 development contract for its engine crates so
+# FrankenSim's debug Gauntlet measures ledger behavior rather than the
+# pathological cost of a fully unoptimized recursive SQL/trigger interpreter.
+# FrankenSim workspace crates and asupersync remain at Cargo's default opt-level
+# 0, keeping ordinary edit/compile cycles unchanged.
+[profile.dev.package.fsqlite]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ast]
+opt-level = 1
+
+[profile.dev.package.fsqlite-btree]
+opt-level = 1
+
+[profile.dev.package.fsqlite-core]
+opt-level = 1
+
+[profile.dev.package.fsqlite-error]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ext-fts5]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ext-icu]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ext-json]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ext-misc]
+opt-level = 1
+
+[profile.dev.package.fsqlite-ext-rtree]
+opt-level = 1
+
+[profile.dev.package.fsqlite-func]
+opt-level = 1
+
+[profile.dev.package.fsqlite-mvcc]
+opt-level = 1
+
+[profile.dev.package.fsqlite-observability]
+opt-level = 1
+
+[profile.dev.package.fsqlite-pager]
+opt-level = 1
+
+[profile.dev.package.fsqlite-parser]
+opt-level = 1
+
+[profile.dev.package.fsqlite-planner]
+opt-level = 1
+
+[profile.dev.package.fsqlite-types]
+opt-level = 1
+
+[profile.dev.package.fsqlite-vdbe]
+opt-level = 1
+
+[profile.dev.package.fsqlite-vfs]
+opt-level = 1
+
+[profile.dev.package.fsqlite-wal]
+opt-level = 1
+
 [profile.release]
 # Deterministic-friendly, performance-honest defaults; changes to this profile
 # must justify performance/determinism/cancellation tradeoffs (AGENTS.md).

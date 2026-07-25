@@ -3923,24 +3923,16 @@ impl Ledger {
         }
     }
 
-    /// `json_valid` check through the same engine that enforces the schema
-    /// CHECKs, so pre-validation and enforcement can never disagree.
-    fn json_valid(&self, s: &str) -> Result<bool, LedgerError> {
-        let rows = self
-            .conn
-            .query_with_params("SELECT json_valid(?1)", &[text_param(s)])
-            .map_err(|e| sql_err("json_valid", &e))?;
-        let row = rows.first().ok_or_else(|| LedgerError::Sql {
-            context: "json_valid".to_string(),
-            detail: "no row returned".to_string(),
-        })?;
-        Ok(row_i64(row, 0, "json_valid")? == 1)
+    /// Call the exact implementation registered as SQL `json_valid`, avoiding
+    /// a worker round trip while preserving agreement with schema `CHECK`s.
+    fn json_valid(s: &str) -> bool {
+        fsqlite_ext_json::json_valid(s, None) == 1
     }
 
     fn require_json(&self, field: &str, value: &str, explicit: bool) -> Result<(), LedgerError> {
         let problem = if value.trim().is_empty() {
             Some("empty string; supply a JSON value".to_string())
-        } else if !self.json_valid(value)? {
+        } else if !Self::json_valid(value) {
             Some(format!(
                 "not valid JSON: {:?}",
                 value.get(..40).unwrap_or(value)
@@ -5733,9 +5725,25 @@ impl Ledger {
     /// Append one event-stream row; returns its rowid.
     ///
     /// # Errors
-    /// [`LedgerError::Invalid`] for malformed payload JSON or a reserved
-    /// internal event kind; engine errors.
+    /// [`LedgerError::Invalid`] for malformed payload JSON or an empty or
+    /// reserved event kind; engine errors.
     pub fn append_event(&self, event: &EventRow<'_>) -> Result<i64, LedgerError> {
+        self.validate_public_event(event)?;
+        self.append_event_validated(event)
+    }
+
+    fn validate_public_event(&self, event: &EventRow<'_>) -> Result<(), LedgerError> {
+        self.validate_public_event_kind(event)?;
+        self.validate_event_payload(event)
+    }
+
+    fn validate_public_event_kind(&self, event: &EventRow<'_>) -> Result<(), LedgerError> {
+        if event.kind.is_empty() {
+            return Err(LedgerError::Invalid {
+                field: "kind".to_string(),
+                problem: "empty; supply a stable event kind".to_string(),
+            });
+        }
         if event.kind == VCS_IDENTITY_EVENT_KIND {
             return Err(LedgerError::Invalid {
                 field: "kind".to_string(),
@@ -5744,7 +5752,7 @@ impl Ledger {
                 ),
             });
         }
-        self.append_event_unchecked(event)
+        Ok(())
     }
 
     pub(crate) fn append_vcs_identity_event(
@@ -5758,13 +5766,18 @@ impl Ledger {
                     .to_string(),
             });
         }
-        self.append_event_unchecked(event)
+        self.validate_event_payload(event)?;
+        self.append_event_validated(event)
     }
 
-    fn append_event_unchecked(&self, event: &EventRow<'_>) -> Result<i64, LedgerError> {
+    fn validate_event_payload(&self, event: &EventRow<'_>) -> Result<(), LedgerError> {
         if let Some(p) = event.payload {
             self.require_json("payload", p, false)?;
         }
+        Ok(())
+    }
+
+    fn append_event_validated(&self, event: &EventRow<'_>) -> Result<i64, LedgerError> {
         self.conn
             .prepare("INSERT INTO events(session, t, kind, payload) VALUES (?1, ?2, ?3, ?4)")
             .map_err(|e| sql_err("event insert prepare", &e))?
@@ -5785,20 +5798,73 @@ impl Ledger {
     ///
     /// # Errors
     /// On any failure the whole batch rolls back (when this call owns the
-    /// transaction).
+    /// transaction). When called inside an existing transaction, the caller
+    /// owns rollback after an engine error.
     pub fn append_events(&self, batch: &[EventRow<'_>]) -> Result<(), LedgerError> {
+        // Four parameters per row keeps each generated statement at 4,000
+        // variables, comfortably below FrankenSQLite's 32,766-variable limit.
+        // The enclosing transaction—not a statement chunk—is the atomic batch.
+        const ROWS_PER_STATEMENT: usize = 1_000;
+        const INSERT_PREFIX: &str = "INSERT INTO events(session, t, kind, payload) VALUES ";
+
+        let mut validated_payloads = std::collections::BTreeSet::new();
+        for event in batch {
+            self.validate_public_event_kind(event)?;
+            if let Some(payload) = event.payload
+                && validated_payloads.insert(payload)
+            {
+                self.validate_event_payload(event)?;
+            }
+        }
+        if batch.is_empty() {
+            return Ok(());
+        }
+
         let owns_txn = !self.conn.in_transaction();
         if owns_txn {
             self.begin()?;
         }
-        for event in batch {
-            if let Err(e) = self.append_event(event) {
+
+        for events in batch.chunks(ROWS_PER_STATEMENT) {
+            let mut sql = String::with_capacity(INSERT_PREFIX.len() + events.len() * 32);
+            sql.push_str(INSERT_PREFIX);
+            for row_index in 0..events.len() {
+                if row_index != 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('(');
+                for column_index in 0..4 {
+                    if column_index != 0 {
+                        sql.push_str(", ");
+                    }
+                    let parameter_index = row_index * 4 + column_index + 1;
+                    sql.push('?');
+                    sql.push_str(&parameter_index.to_string());
+                }
+                sql.push(')');
+            }
+
+            let mut params = Vec::with_capacity(events.len() * 4);
+            for event in events {
+                params.extend([
+                    opt_blob_param(event.session),
+                    SqliteValue::Integer(event.t),
+                    text_param(event.kind),
+                    opt_text_param(event.payload),
+                ]);
+            }
+            if let Err(error) = self
+                .conn
+                .execute_with_params(&sql, &params)
+                .map_err(|error| sql_err("event batch insert", &error))
+            {
                 if owns_txn {
                     let _ = self.rollback();
                 }
-                return Err(e);
+                return Err(error);
             }
         }
+
         if owns_txn && let Err(e) = self.commit() {
             let _ = self.rollback();
             return Err(e);
@@ -9586,6 +9652,9 @@ mod tests {
     #[test]
     fn events_batch_is_atomic() {
         let l = mem();
+        l.append_events(&[]).unwrap();
+        assert_eq!(l.table_count("events").unwrap(), 0);
+
         let good = EventRow {
             session: None,
             t: 1,
@@ -9600,8 +9669,72 @@ mod tests {
         };
         let err = l.append_events(&[good, bad]).unwrap_err();
         assert_eq!(err.code(), "LedgerInvalid");
-        assert_eq!(l.table_count("events").unwrap(), 0, "batch rolled back");
-        l.append_events(&[good, good]).unwrap();
+        assert_eq!(
+            l.table_count("events").unwrap(),
+            0,
+            "prevalidation failure must not begin the batch"
+        );
+
+        let empty_kind = EventRow {
+            session: None,
+            t: 2,
+            kind: "",
+            payload: None,
+        };
+        let err = l.append_events(&[good, empty_kind]).unwrap_err();
+        assert_eq!(err.code(), "LedgerInvalid");
+        assert_eq!(
+            l.table_count("events").unwrap(),
+            0,
+            "kind prevalidation failure must not begin the batch"
+        );
+
+        l.conn
+            .execute("CREATE UNIQUE INDEX test_events_unique_t ON events(t)")
+            .unwrap();
+        let duplicate_t = EventRow {
+            session: None,
+            t: 1,
+            kind: "other",
+            payload: None,
+        };
+        let err = l.append_events(&[good, duplicate_t]).unwrap_err();
+        assert_eq!(err.code(), "LedgerSql");
+        assert_eq!(
+            l.table_count("events").unwrap(),
+            0,
+            "worker failure must roll back earlier parameter sets"
+        );
+
+        let mut cross_chunk_batch: Vec<_> = (0_i64..1_000)
+            .map(|t| EventRow {
+                session: None,
+                t,
+                kind: "chunk-boundary",
+                payload: None,
+            })
+            .collect();
+        cross_chunk_batch.push(EventRow {
+            session: None,
+            t: 0,
+            kind: "duplicate-after-first-chunk",
+            payload: None,
+        });
+        let err = l.append_events(&cross_chunk_batch).unwrap_err();
+        assert_eq!(err.code(), "LedgerSql");
+        assert_eq!(
+            l.table_count("events").unwrap(),
+            0,
+            "a failure after the first statement chunk must roll back the whole owned transaction"
+        );
+
+        let second_good = EventRow {
+            session: None,
+            t: 2,
+            kind: "tile_complete",
+            payload: None,
+        };
+        l.append_events(&[good, second_good]).unwrap();
         assert_eq!(l.table_count("events").unwrap(), 2);
     }
 

@@ -17,6 +17,7 @@ fs-exec = { path = "../fs-exec" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite", features = ["async-api"] }
+fsqlite-ext-json = { path = "../../../frankensqlite/crates/fsqlite-ext-json" }
 
 [dev-dependencies]
 fsqlite-types = { path = "../../../frankensqlite/crates/fsqlite-types" }

@@ -12,8 +12,10 @@ The Design Ledger (plan §11.2, Bet 10): FrankenSQLite-backed system of record
 for content-addressed artifacts, event-sourced ops with the frozen Five
 Explicits, lineage edges, metric time series, the autotuner cache, and the
 fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std`, `fsqlite`,
-and the lower-layer Franken crates declared in `Cargo.toml`, including
-`fs-exec` for opaque drain/finalize reports and snapshot-envelope validation.
+the exact `fsqlite-ext-json` validator registered by FrankenSQLite's SQL
+`json_valid`, and the lower-layer Franken crates declared in `Cargo.toml`,
+including `fs-exec` for opaque drain/finalize reports and snapshot-envelope
+validation.
 
 ## Public types and semantics
 
@@ -132,9 +134,11 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   revalidating their complete bounded historic lineage; conflicting seals are
   immutable and must fail closed.
 - Streams: `record_metric` (finite REAL only), `append_event` /
-  `append_events` (batched, atomic), `tune_put`/`tune_get` (one row upsert keyed
-  by kernel × shape-class × exact machine fingerprint; schema-v19 writers
-  publish its typed raw-content sidecar in the same transaction),
+  `append_events` (full-batch kind/payload prevalidation followed by bounded
+  1,000-row SQL statements; atomic when it owns the transaction, while a
+  nested caller owns rollback after an engine error), `tune_put`/`tune_get`
+  (one row upsert keyed by kernel × shape-class × exact machine fingerprint;
+  schema-v19 writers publish its typed raw-content sidecar in the same transaction),
   `tune_put_if_absent` (insert-only conflict preservation for evidence-ledger
   adoption), `tune_content_identity` (independently re-hashes all five exact
   key/value fields), and `tune_rows` (deterministic `(shape_class, machine)` order).
