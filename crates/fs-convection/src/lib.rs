@@ -4,8 +4,10 @@
 //! This crate implements the inexpensive correlation rung below resolved
 //! airflow. Every formula has one [`CorrelationCard`], uses the shared
 //! [`fs_evidence::ValidityDomain`], refuses missing or out-of-domain groups,
-//! and returns `Evidence<HeatTransferCoefficient>`. A naked, unitless `h`
-//! cannot cross this API.
+//! and retains its model evidence through the typed coefficient conversion.
+//! The optional Robin lowering keeps that evidence beside a downstream
+//! conduction row; the row accessor exposes the downstream raw coherent-SI
+//! representation and does not give a detached row correlation authority.
 //!
 //! Formula implementation can be numerically verified; physical prediction
 //! quality cannot. Empirical-card discrepancy allowances remain model-form
@@ -45,7 +47,7 @@ pub enum CorrelationId {
     Gnielinski,
     /// Isothermal laminar flat plate, average coefficient.
     FlatPlateLaminarAverage,
-    /// Isothermal turbulent flat plate with leading-edge correction.
+    /// Isothermal mixed laminar-to-turbulent flat plate with leading-edge correction.
     FlatPlateTurbulentAverage,
     /// Circular cylinder in crossflow, Churchill-Bernstein relation.
     ChurchillBernsteinCylinder,
@@ -375,8 +377,9 @@ pub struct NusseltEvaluation {
 /// A conduction Robin row paired with the exact correlation evidence that
 /// produced its coefficient.
 ///
-/// Fields are private so the boundary condition and evidence cannot drift
-/// after construction.
+/// Fields are private so the pair cannot drift while held as this type.
+/// Callers can inspect and clone the downstream boundary row, so a detached
+/// [`fs_conduction::ThermalBc`] must not be treated as correlation evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorrelationRobinBoundary {
     coefficient: Evidence<HeatTransferCoefficient>,
@@ -397,8 +400,11 @@ impl CorrelationRobinBoundary {
         self.reference_temperature
     }
 
-    /// Conduction boundary row whose raw scalar is pinned to
-    /// [`Self::coefficient`].
+    /// Inspect the conduction boundary row created from [`Self::coefficient`].
+    ///
+    /// The downstream type stores its heat-transfer coefficient as a raw
+    /// coherent-SI scalar. A cloned or otherwise detached row does not carry
+    /// this crate's source, validity, or model evidence.
     #[must_use]
     pub const fn boundary_condition(&self) -> &fs_conduction::ThermalBc {
         &self.boundary
@@ -684,9 +690,13 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
         citation: "V. Gnielinski, New Equations for Heat and Mass Transfer in Turbulent Pipe and Channel Flow, International Chemical Engineering 16(2), 1976, 359-368",
         identifier: "ISSN 0020-6318; volume 16 issue 2 pages 359-368",
     };
-    const FLAT_PLATE: SourceProvenance = SourceProvenance {
+    const FLAT_PLATE_LAMINAR: SourceProvenance = SourceProvenance {
         citation: "E. Pohlhausen, Der Waermeaustausch zwischen festen Koerpern und Fluessigkeiten mit kleiner Reibung und kleiner Waermeleitung, ZAMM 1, 1921, 115-121",
         identifier: "ZAMM 1 (1921) 115-121",
+    };
+    const FLAT_PLATE_MIXED: SourceProvenance = SourceProvenance {
+        citation: "HoSung Lee, Thermal Design: Heat Sinks, Thermoelectrics, Heat Pipes, Compact Heat Exchangers, and Solar Cells, 2nd ed., Wiley, 2022, Eq. (1.62)",
+        identifier: "doi:10.1002/9781119686040; ISBN 978-1-119-68597-5",
     };
     const CHURCHILL_BERNSTEIN: SourceProvenance = SourceProvenance {
         citation: "S. W. Churchill and M. Bernstein, A Correlating Equation for Forced Convection from Gases and Liquids to a Circular Cylinder in Crossflow, Journal of Heat Transfer 99(2), 1977, 300-306",
@@ -835,7 +845,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             DiscrepancyBasis::EngineeringAllowance,
         ),
         CorrelationId::FlatPlateLaminarAverage => (
-            FLAT_PLATE,
+            FLAT_PLATE_LAMINAR,
             ValidityDomain::unconstrained()
                 .with("Pr", 0.6, 50.0)
                 .with("Re", 1.0, 5.0e5),
@@ -855,18 +865,18 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             DiscrepancyBasis::EngineeringAllowance,
         ),
         CorrelationId::FlatPlateTurbulentAverage => (
-            FLAT_PLATE,
+            FLAT_PLATE_MIXED,
             ValidityDomain::unconstrained()
                 .with("Pr", 0.6, 60.0)
                 .with("Re", 5.0e5, 1.0e7),
             vec![
                 "isothermal smooth flat plate",
                 "zero pressure gradient",
-                "turbulent attached boundary layer",
-                "leading-edge correction retained",
+                "laminar leading edge followed by attached turbulent flow",
+                "transition Reynolds number fixed at Re_x = 5e5 by the leading-edge correction",
             ],
             vec![
-                "laminar or transitional plate",
+                "transition Reynolds number materially different from 5e5",
                 "separation",
                 "finite-width edge effects",
                 "surface roughness",

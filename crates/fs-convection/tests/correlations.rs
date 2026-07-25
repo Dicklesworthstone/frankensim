@@ -14,11 +14,11 @@ use fs_vvreg::thermal_level_a::{
 const LEVEL_A_CONVECTION_BINDINGS: [(&str, &str); 2] = [
     (
         "thermal-a-duct-nu-cwt",
-        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen",
+        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_square_values_are_frozen",
     ),
     (
         "thermal-a-duct-nu-chf",
-        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen",
+        "tests/correlations.rs::level_a_fully_developed_limits_and_rectangular_square_values_are_frozen",
     ),
 ];
 
@@ -112,7 +112,42 @@ fn catalog_has_eleven_sourced_cards_and_no_unlabeled_discrepancy() {
 }
 
 #[test]
-fn level_a_fully_developed_limits_and_rectangular_endpoints_are_frozen() {
+fn flat_plate_cards_retain_distinct_formula_authorities() {
+    let catalog = correlation_catalog();
+    let laminar = catalog
+        .iter()
+        .find(|card| card.id == CorrelationId::FlatPlateLaminarAverage)
+        .expect("laminar flat-plate card");
+    let mixed = catalog
+        .iter()
+        .find(|card| card.id == CorrelationId::FlatPlateTurbulentAverage)
+        .expect("mixed flat-plate card");
+
+    assert_ne!(laminar.source, mixed.source);
+    assert!(laminar.source.citation.contains("Pohlhausen"));
+    assert_eq!(
+        mixed.source.identifier,
+        "doi:10.1002/9781119686040; ISBN 978-1-119-68597-5"
+    );
+    assert!(mixed.source.citation.contains("Eq. (1.62)"));
+    assert!(
+        mixed
+            .model
+            .assumptions
+            .iter()
+            .any(|assumption| assumption.contains("laminar leading edge"))
+    );
+    assert!(
+        mixed
+            .model
+            .known_failures
+            .iter()
+            .any(|failure| failure.contains("transition Reynolds number"))
+    );
+}
+
+#[test]
+fn level_a_fully_developed_limits_and_rectangular_square_values_are_frozen() {
     let cwt = evaluate(CorrelationId::CircularDuctLaminarCwt, duct_inputs()).expect("CWT");
     let chf = evaluate(CorrelationId::CircularDuctLaminarChf, duct_inputs()).expect("CHF");
     assert_level_a_convection_limit("thermal-a-duct-nu-cwt", cwt.evidence().value);

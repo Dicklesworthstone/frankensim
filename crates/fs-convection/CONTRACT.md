@@ -24,7 +24,8 @@ correlation.
 - `CorrelationId` names eleven implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; Dittus-Boelter;
-  Gnielinski; laminar and turbulent average flat-plate relations;
+  Gnielinski; laminar and leading-edge-corrected mixed average flat-plate
+  relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
   natural convection.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
@@ -40,12 +41,16 @@ correlation.
 - `NusseltEvaluation::robin_boundary` returns a `CorrelationRobinBoundary`
   that owns both the evidence-bearing coefficient and the exact
   `fs-conduction::ThermalBc` row lowered from it. Private fields prevent the
-  pair from drifting.
+  held pair from drifting, but the row accessor exposes the downstream raw
+  coherent-SI representation for interoperability.
 
 ## Invariants
 
-1. No unitless heat-transfer coefficient leaves the crate. The only public
-   conversion returns `Evidence<HeatTransferCoefficient>`.
+1. The standalone coefficient conversion returns
+   `Evidence<HeatTransferCoefficient>`. Robin lowering is an explicit
+   interoperability boundary: its accessor exposes the downstream
+   `ThermalBc` raw coherent-SI row, which has no standalone `fs-convection`
+   authority if cloned or detached from `CorrelationRobinBoundary`.
 2. Missing, non-finite, non-positive, or out-of-domain dimensionless inputs
    refuse; there is no silent extrapolation.
 3. Every successful value carries exactly the selected model card, its
@@ -95,7 +100,7 @@ None.
 - catalog completeness, source presence, and shared-domain integrity;
 - direct `fs-vvreg` execution bindings for both Level-A circular-duct limits,
   with a complete two-row family partition, JSON comparison verdicts, and
-  rectangular square/parallel-plate endpoint checks;
+  frozen rectangular-duct square values;
 - per-formula frozen spot values;
 - inclusive boundary acceptance plus missing/outside/non-finite refusals;
 - G3 unit-rescaling invariance of the dimensioned `Nu k/L` conversion;
@@ -122,8 +127,13 @@ None.
 - Plate-fin behavior is represented only by smooth rectangular-channel
   limiting rows; interrupted-fin, louver, offset-strip, and full array effects
   remain outside v1.
+- The rectangular-duct cards admit aspect ratios from 0.001 through 1.0. The
+  exact parallel-plate limit at aspect ratio zero is outside that domain and
+  is not executed; current tests freeze the admitted square value at 1.0.
 - Cylinder crossflow is an isolated-pin baseline. Tube-bank and heatsink-array
   interference require separate cards and validation.
 - The Robin integration test proves the coefficient-to-conduction seam on a
   small deterministic fixture. It is not conjugate CFD and does not promote
-  the correlation prediction beyond its model evidence.
+  the correlation prediction beyond its model evidence. A downstream
+  `ThermalBc` row cloned through the public accessor is detachable raw
+  coherent-SI data and does not independently carry that evidence.
