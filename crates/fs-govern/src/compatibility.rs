@@ -97,6 +97,11 @@ pub struct SiblingSurface {
     pub claims: &'static [&'static str],
     /// FrankenSim tests exercising those claims.
     pub tests: &'static [SurfaceTest],
+    /// FrankenSim crates that consume this sibling at RUNTIME.
+    ///
+    /// Golden surfaces are identified as `crate:surface`, so this is what
+    /// couples a pin move to the semantic goldens it can move underneath.
+    pub runtime_consumers: &'static [&'static str],
     /// Why a surface carries no tests, when it carries none.
     pub no_test_reason: Option<&'static str>,
 }
@@ -187,6 +192,7 @@ pub const SURFACES: &[SiblingSurface] = &[
                 claim: "task-scoped capability and budget propagation",
             },
         ],
+        runtime_consumers: &["fs-exec", "fs-plan", "fs-surrogate"],
         no_test_reason: None,
     },
     SiblingSurface {
@@ -195,6 +201,7 @@ pub const SURFACES: &[SiblingSurface] = &[
         priority: ReviewPriority::P3,
         claims: &["graph traversal and connectivity results are deterministic"],
         tests: &[],
+        runtime_consumers: &["fs-rep-voxel", "fs-sparse", "fs-truss"],
         no_test_reason: Some(
             "no test isolates the franken_networkx boundary from FrankenSim's own graph logic; \
              coverage is incidental inside fs-sparse/fs-truss suites and is not claimed here",
@@ -206,6 +213,7 @@ pub const SURFACES: &[SiblingSurface] = &[
         priority: ReviewPriority::P2,
         claims: &["dense array semantics used by sparse assembly are stable"],
         tests: &[],
+        runtime_consumers: &["fs-sparse"],
         no_test_reason: Some(
             "no boundary-isolating test exists yet; fs-sparse exercises it only incidentally, so \
              this surface is an explicit gap rather than a covered one",
@@ -217,6 +225,7 @@ pub const SURFACES: &[SiblingSurface] = &[
         priority: ReviewPriority::P4,
         claims: &[],
         tests: &[],
+        runtime_consumers: &[],
         no_test_reason: Some(
             "pinned-unused: no runtime or dev consumer exists, so FrankenSim makes no claim that \
              depends on it and none is tested",
@@ -228,6 +237,7 @@ pub const SURFACES: &[SiblingSurface] = &[
         priority: ReviewPriority::P2,
         claims: &["oracle casebook values are stable across the pin"],
         tests: &[],
+        runtime_consumers: &[],
         no_test_reason: Some(
             "oracle casebooks are dev-only comparisons spread across seven crates; they are not \
              yet consolidated into a selectable compatibility target",
@@ -274,6 +284,7 @@ pub const SURFACES: &[SiblingSurface] = &[
                 claim: "transaction and checkpoint boundaries hold under interruption",
             },
         ],
+        runtime_consumers: &["fs-ledger", "fs-vskeleton"],
         no_test_reason: None,
     },
     SiblingSurface {
@@ -282,12 +293,41 @@ pub const SURFACES: &[SiblingSurface] = &[
         priority: ReviewPriority::P3,
         claims: &["the feature-gated tape bridge preserves gradient values"],
         tests: &[],
+        runtime_consumers: &["fs-ad"],
         no_test_reason: Some(
             "the bridge is feature-gated and off by default; no default-path test exercises it, \
              so no compatibility claim is made",
         ),
     },
 ];
+
+/// Golden surfaces coupled to one sibling, out of a caller-supplied set.
+///
+/// Golden ids are `crate:surface`, so a golden is coupled to a sibling exactly
+/// when its owning crate consumes that sibling at runtime. Passing the golden
+/// set in keeps this module free of I/O: the caller reads the coupling
+/// registry, this decides the relationship.
+#[must_use]
+pub fn coupled_golden_surfaces<'a>(lib: &str, golden_surface_ids: &[&'a str]) -> Vec<&'a str> {
+    let Some(entry) = surface(lib) else {
+        return Vec::new();
+    };
+    let mut coupled: Vec<&'a str> = golden_surface_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            id.split_once(':').is_some_and(|(owner, _)| {
+                entry
+                    .runtime_consumers
+                    .iter()
+                    .any(|consumer| *consumer == owner)
+            })
+        })
+        .collect();
+    coupled.sort_unstable();
+    coupled.dedup();
+    coupled
+}
 
 /// The registered surface for one sibling.
 #[must_use]
@@ -562,6 +602,12 @@ pub struct BumpAttempt {
     pub results: Vec<SuiteResult>,
     /// Declared golden implication.
     pub golden: GoldenDisposition,
+    /// Golden surfaces the caller determined are coupled to the movers.
+    ///
+    /// Supplied rather than derived so this module performs no I/O. An empty
+    /// list with a `NoGoldenSurface` disposition is consistent; a non-empty
+    /// list with that disposition is a refusal.
+    pub coupled_goldens: Vec<String>,
 }
 
 /// Why a bump was refused.
@@ -595,6 +641,11 @@ pub enum BumpRefusal {
     UnregisteredSibling {
         /// The unknown sibling.
         lib: String,
+    },
+    /// Goldens are coupled to a mover but the attempt declared none.
+    UndeclaredGoldenImplication {
+        /// Coupled golden surfaces the attempt failed to account for.
+        surfaces: Vec<String>,
     },
     /// A moved sibling is registered but carries no tests.
     UncoveredSurface {
@@ -632,6 +683,13 @@ impl fmt::Display for BumpRefusal {
             Self::UnregisteredSibling { lib } => write!(
                 formatter,
                 "`{lib}` moved but has no registered compatibility surface"
+            ),
+            Self::UndeclaredGoldenImplication { surfaces } => write!(
+                formatter,
+                "the bump moves siblings feeding {} semantic golden surface(s) ({}) but declares \
+                 no golden implication; pins and goldens move together",
+                surfaces.len(),
+                surfaces.join(", ")
             ),
             Self::UncoveredSurface { lib, reason } => write!(
                 formatter,
@@ -746,6 +804,15 @@ pub fn evaluate_bump(attempt: &BumpAttempt) -> BumpVerdict {
             }
             SuiteOutcome::Executed { .. } => {}
         }
+    }
+
+    if !attempt.coupled_goldens.is_empty()
+        && matches!(attempt.golden, GoldenDisposition::NoGoldenSurface)
+    {
+        let mut surfaces = attempt.coupled_goldens.clone();
+        surfaces.sort();
+        surfaces.dedup();
+        reasons.push(BumpRefusal::UndeclaredGoldenImplication { surfaces });
     }
 
     if reasons.is_empty() {

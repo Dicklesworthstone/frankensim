@@ -1199,6 +1199,16 @@ but uncovered, is refused rather than admitted by default. `EmergencyClass` is
 a closed set, so convenience, upstream features, and version freshness are
 unrepresentable as emergency justification.
 
+`coupled_golden_surfaces` makes the pin-versus-golden discipline enforceable
+instead of advisory. Golden ids are `crate:surface`, so a golden is coupled to
+a sibling exactly when its owning crate consumes that sibling at runtime;
+`SiblingSurface::runtime_consumers` carries that measured mapping. Ownership is
+matched on the whole segment before the colon, so `fs-ad` (frankentorch's
+consumer) does not capture `fs-adjoint`. The golden set is supplied by the
+caller rather than read here, keeping the module free of I/O; a non-empty
+coupled set with a `NoGoldenSurface` disposition is a refusal that names the
+surfaces.
+
 This module is hosted here rather than in a higher-layer crate for a
 load-bearing reason: `fs-govern`'s cone is sibling-free, so the machinery that
 adjudicates a sibling bump keeps building while a sibling is broken.

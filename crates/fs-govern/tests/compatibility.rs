@@ -10,8 +10,8 @@
 
 use fs_govern::compatibility::{
     BumpAttempt, BumpKind, BumpRefusal, BumpVerdict, EmergencyClass, GoldenDisposition, PinDelta,
-    PinMovement, PinRow, ReviewPriority, SURFACES, SuiteOutcome, SuiteResult, evaluate_bump, moved,
-    pin_delta, render_registry, surface,
+    PinMovement, PinRow, ReviewPriority, SURFACES, SuiteOutcome, SuiteResult,
+    coupled_golden_surfaces, evaluate_bump, moved, pin_delta, render_registry, surface,
 };
 
 /// The recorded lock as of 2026-07-24.
@@ -219,6 +219,7 @@ fn attempt_with(results: Vec<SuiteResult>) -> BumpAttempt {
         }],
         results,
         golden: GoldenDisposition::NoGoldenSurface,
+        coupled_goldens: Vec::new(),
     }
 }
 
@@ -354,6 +355,7 @@ fn a_bump_with_no_movement_is_refused() {
         }],
         results: vec![green("asupersync"), green("frankensqlite")],
         golden: GoldenDisposition::NoGoldenSurface,
+        coupled_goldens: Vec::new(),
     };
     let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
         panic!("expected refusal")
@@ -389,6 +391,7 @@ fn a_fully_evidenced_bump_is_admitted_and_refusals_are_complete() {
         golden: GoldenDisposition::Rebased {
             justification: "surface moved".to_string(),
         },
+        coupled_goldens: Vec::new(),
     });
     let BumpVerdict::Refused { reasons } = verdict else {
         panic!("expected refusal")
@@ -504,6 +507,7 @@ fn rehearsed_bump_2026_07_24_is_refused() {
             SuiteResult::new("frankensqlite", SuiteOutcome::NotRun),
         ],
         golden: GoldenDisposition::NoGoldenSurface,
+        coupled_goldens: Vec::new(),
     };
 
     let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
@@ -525,4 +529,102 @@ fn rehearsed_bump_2026_07_24_is_refused() {
         BumpRefusal::NotExecuted { lib } | BumpRefusal::FailingSurface { lib, .. }
             if lib == "asupersync"
     )));
+}
+
+/// Pins and semantic goldens move together. A golden surface is coupled to a
+/// sibling exactly when its owning crate consumes that sibling at runtime, and
+/// declaring "no golden surface" while coupled goldens exist is a refusal.
+#[test]
+fn coupled_goldens_must_be_declared() {
+    let all = [
+        "fs-exec:solver-resume",
+        "fs-exec:tile-reduction",
+        "fs-ledger:artifact-envelope",
+        "fs-adjoint:dwr-accept",
+        "malformed-no-colon",
+    ];
+
+    let asup = coupled_golden_surfaces("asupersync", &all);
+    assert_eq!(
+        asup,
+        vec!["fs-exec:solver-resume", "fs-exec:tile-reduction"]
+    );
+    assert_eq!(
+        coupled_golden_surfaces("frankensqlite", &all),
+        vec!["fs-ledger:artifact-envelope"]
+    );
+    // PREFIX-COLLISION GUARD: frankentorch's runtime consumer is `fs-ad`, and
+    // `fs-adjoint` is a DIFFERENT crate. A naive `starts_with` would wrongly
+    // couple every fs-adjoint golden to frankentorch; ownership is matched
+    // whole, on the segment before the colon.
+    assert!(
+        coupled_golden_surfaces("frankentorch", &all).is_empty(),
+        "fs-ad must not match fs-adjoint"
+    );
+    assert_eq!(
+        coupled_golden_surfaces("frankentorch", &["fs-ad:tape-bridge"]),
+        vec!["fs-ad:tape-bridge"]
+    );
+    // A pinned-unused sibling couples to nothing, and a malformed id is ignored
+    // rather than matched by accident.
+    assert!(coupled_golden_surfaces("frankenpandas", &all).is_empty());
+    assert!(!asup.contains(&"malformed-no-colon"));
+    assert!(coupled_golden_surfaces("not-a-sibling", &all).is_empty());
+
+    // Declaring no golden surface while coupled goldens exist is refused.
+    let mut attempt = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    attempt.coupled_goldens = asup.iter().map(|id| (*id).to_string()).collect();
+    let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
+        panic!("an undeclared golden implication must refuse")
+    };
+    let refusal = reasons
+        .iter()
+        .find(|reason| matches!(reason, BumpRefusal::UndeclaredGoldenImplication { .. }))
+        .expect("the golden implication is reported");
+    assert!(refusal.to_string().contains("fs-exec:solver-resume"));
+    assert!(
+        refusal
+            .to_string()
+            .contains("pins and goldens move together")
+    );
+
+    // Declaring the implication admits it.
+    attempt.golden = GoldenDisposition::Unaffected {
+        justification: "re-ran both modes; the coupled goldens are byte-identical".to_string(),
+    };
+    assert!(evaluate_bump(&attempt).admitted());
+
+    // And with no coupled goldens, NoGoldenSurface stays consistent.
+    let clean = attempt_with(vec![green("asupersync"), green("frankensqlite")]);
+    assert!(evaluate_bump(&clean).admitted());
+}
+
+/// Runtime-consumer data is present wherever the sibling is actually used, and
+/// absent exactly where the trust assessment records no runtime consumer.
+#[test]
+fn runtime_consumers_match_the_trust_assessment() {
+    assert_eq!(
+        surface("asupersync").expect("registered").runtime_consumers,
+        &["fs-exec", "fs-plan", "fs-surrogate"]
+    );
+    assert_eq!(
+        surface("frankensqlite")
+            .expect("registered")
+            .runtime_consumers,
+        &["fs-ledger", "fs-vskeleton"]
+    );
+    // frankenscipy is a DEV-only oracle and frankenpandas is pinned-unused, so
+    // neither has a runtime consumer and neither can couple a golden.
+    assert!(
+        surface("frankenscipy")
+            .expect("registered")
+            .runtime_consumers
+            .is_empty()
+    );
+    assert!(
+        surface("frankenpandas")
+            .expect("registered")
+            .runtime_consumers
+            .is_empty()
+    );
 }

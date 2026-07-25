@@ -170,8 +170,13 @@ condition at once rather than one per attempt:
 5. Each required result is EXECUTED. `NotRun` is never a pass, and an executed
    result reporting zero tests is refused as well: a selector that matched
    nothing is not evidence.
-6. The golden implication is declared. Pins and semantic goldens move together;
-   an undeclared implication is a refusal, not a default-pass.
+6. The golden implication is declared, and this is now ENFORCED rather than
+   advisory. A semantic golden is identified as `crate:surface`, so it is
+   coupled to a sibling exactly when its owning crate consumes that sibling at
+   runtime (`coupled_golden_surfaces`). Declaring "no golden surface" while
+   coupled goldens exist is a refusal that names them. Ownership is matched on
+   the whole segment before the colon, so `fs-ad` does not capture
+   `fs-adjoint`.
 
 Emergency justification is a closed classification, so an out-of-train bump
 must name one of: reachable security defect, credible corruption, false
