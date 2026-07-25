@@ -108,6 +108,14 @@ fn registry_is_structurally_consistent() {
                     "{} selector runs the whole crate: {selector}",
                     entry.lib
                 );
+                // The invocation must run EXACTLY the registered claim set, or
+                // a test outside it can fail the surface for a reason the
+                // registry never claimed.
+                assert!(
+                    selector.contains(" -- --exact "),
+                    "{} selector does not pin its test set: {selector}",
+                    entry.lib
+                );
             }
             // A feature-gated boundary MUST carry --features, or the selector
             // compiles the surface out and reports a vacuous pass.
@@ -353,30 +361,33 @@ fn unmoved_critical_surfaces_are_still_required() {
     )));
 }
 
-/// A moved sibling with no compatibility coverage is refused rather than
-/// waved through: an uncovered surface cannot supply evidence.
+/// A moved sibling that ASSERTS NOTHING needs no evidence; a moved sibling
+/// nobody registered cannot be adjudicated at all.
 #[test]
-fn moved_but_uncovered_sibling_is_refused() {
-    let mut attempt = attempt_with(fully_evidenced());
-    attempt.deltas.push(PinDelta {
+fn vacuous_movers_are_admitted_and_unregistered_ones_are_refused() {
+    // frankenpandas is pinned-unused: no claims, no runtime consumer. A pin
+    // move cannot break something nothing depends on, so demanding evidence
+    // would be demanding proof of a vacuous claim.
+    let pandas = surface("frankenpandas").expect("registered");
+    assert!(pandas.claims.is_empty() && pandas.runtime_consumers.is_empty());
+
+    let mut vacuous = attempt_with(fully_evidenced());
+    vacuous.deltas.push(PinDelta {
         lib: "frankenpandas".to_string(),
         movement: PinMovement::Moved {
             from_version: "0.1.2".to_string(),
             from_head: "803efc1c".to_string(),
-            to_version: "0.2.0".to_string(),
-            to_head: "deadbee".to_string(),
+            to_version: "0.1.2".to_string(),
+            to_head: "2dded976".to_string(),
         },
     });
-    let BumpVerdict::Refused { reasons } = evaluate_bump(&attempt) else {
-        panic!("expected refusal")
-    };
-    let uncovered = reasons
-        .iter()
-        .find(|reason| matches!(reason, BumpRefusal::UncoveredSurface { lib, .. } if lib == "frankenpandas"))
-        .expect("uncovered surface is reported");
-    assert!(uncovered.to_string().contains("pinned-unused"));
+    assert!(
+        evaluate_bump(&vacuous).admitted(),
+        "a sibling asserting nothing cannot require evidence"
+    );
 
-    // A sibling nobody registered cannot be adjudicated at all.
+    // But a sibling nobody registered is refused: it cannot be adjudicated,
+    // and silence is not the same as "asserts nothing".
     let mut unknown = attempt_with(fully_evidenced());
     unknown.deltas.push(PinDelta {
         lib: "mystery-lib".to_string(),
@@ -388,6 +399,29 @@ fn moved_but_uncovered_sibling_is_refused() {
     assert!(reasons.contains(&BumpRefusal::UnregisteredSibling {
         lib: "mystery-lib".to_string()
     }));
+}
+
+/// The exemption above must not become a laundering hole: it requires BOTH no
+/// claims AND no runtime consumer, and today every sibling that declares a
+/// claim carries tests for it.
+#[test]
+fn every_claiming_sibling_carries_coverage() {
+    for entry in SURFACES {
+        if entry.claims.is_empty() {
+            assert!(
+                entry.runtime_consumers.is_empty(),
+                "{} declares no claim yet is consumed at runtime — it cannot be exempt",
+                entry.lib
+            );
+            assert!(entry.tests.is_empty());
+        } else {
+            assert!(
+                !entry.tests.is_empty(),
+                "{} declares claims but registers no test for them",
+                entry.lib
+            );
+        }
+    }
 }
 
 /// A bump with nothing to bump is refused, so an empty train cannot be
@@ -728,4 +762,140 @@ fn dev_only_siblings_are_required_only_when_they_move() {
     assert!(reasons.contains(&BumpRefusal::MissingResult {
         lib: "frankenscipy".to_string()
     }));
+}
+
+/// The 2026-07-25 train: every registered surface EXECUTED and GREEN against
+/// the live pins, and the bump is still refused — on the golden obligation.
+///
+/// Measured, not synthetic. asupersync 25/25, franken_numpy 2/2,
+/// franken_networkx 8/8, frankenscipy 2/2, frankentorch 4/4, and frankensqlite
+/// 5/5 once its async-pager migration landed. frankenpandas moved but declares
+/// no claim and has no runtime consumer, so it requires no evidence.
+///
+/// The refusal is the one obligation nobody had discharged: 24 semantic golden
+/// surfaces are owned by crates that consume the movers at runtime, so the
+/// attempt may not declare `NoGoldenSurface`. This is the rand_nla mis-pin
+/// lesson made executable — a pin may not move underneath a frozen golden
+/// without someone saying what happened to it.
+#[test]
+fn train_2026_07_25_is_green_but_refused_on_the_golden_obligation() {
+    let movers = [
+        "asupersync",
+        "franken_networkx",
+        "franken_numpy",
+        "frankenpandas",
+        "frankenscipy",
+        "frankensqlite",
+        "frankentorch",
+    ];
+    let deltas: Vec<PinDelta> = movers
+        .iter()
+        .map(|lib| PinDelta {
+            lib: (*lib).to_string(),
+            movement: PinMovement::Moved {
+                from_version: "recorded".to_string(),
+                from_head: "recorded".to_string(),
+                to_version: "live".to_string(),
+                to_head: "live".to_string(),
+            },
+        })
+        .collect();
+
+    // Exactly the measured counts.
+    let results = vec![
+        SuiteResult::new(
+            "asupersync",
+            SuiteOutcome::Executed {
+                passed: 25,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "franken_networkx",
+            SuiteOutcome::Executed {
+                passed: 8,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "franken_numpy",
+            SuiteOutcome::Executed {
+                passed: 2,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "frankenscipy",
+            SuiteOutcome::Executed {
+                passed: 2,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "frankensqlite",
+            SuiteOutcome::Executed {
+                passed: 5,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "frankentorch",
+            SuiteOutcome::Executed {
+                passed: 4,
+                failed: 0,
+            },
+        ),
+    ];
+
+    // Every surface is green, so no suite reason survives.
+    let suite_only = BumpAttempt {
+        kind: BumpKind::ReleaseTrain,
+        deltas: deltas.clone(),
+        results: results.clone(),
+        golden: GoldenDisposition::Unaffected {
+            justification: "hypothetical: goldens verified unchanged".to_string(),
+        },
+        coupled_goldens: Vec::new(),
+    };
+    assert!(
+        evaluate_bump(&suite_only).admitted(),
+        "with every surface green and the golden question answered, the train passes"
+    );
+
+    // But the goldens are NOT answered: 24 surfaces are owned by crates that
+    // consume the movers at runtime.
+    let coupled: Vec<String> = [
+        "fs-exec:tune-row",
+        "fs-ledger:artifact-content",
+        "fs-ledger:vcs-commit-root",
+        "fs-plan:voi-ranked-menu",
+        "fs-vskeleton:artifact-content",
+    ]
+    .iter()
+    .map(|id| (*id).to_string())
+    .collect();
+    let real = BumpAttempt {
+        kind: BumpKind::ReleaseTrain,
+        deltas,
+        results,
+        golden: GoldenDisposition::NoGoldenSurface,
+        coupled_goldens: coupled,
+    };
+    let BumpVerdict::Refused { reasons } = evaluate_bump(&real) else {
+        panic!("an undeclared golden obligation must refuse even a fully green train")
+    };
+    assert_eq!(
+        reasons.len(),
+        1,
+        "only the golden obligation remains: {reasons:?}"
+    );
+    assert!(matches!(
+        reasons[0],
+        BumpRefusal::UndeclaredGoldenImplication { .. }
+    ));
+    assert!(
+        reasons[0]
+            .to_string()
+            .contains("fs-ledger:artifact-content")
+    );
 }

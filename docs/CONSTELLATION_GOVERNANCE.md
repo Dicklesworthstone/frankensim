@@ -199,72 +199,54 @@ or a critical sibling becoming unavailable. Convenience, new upstream features,
 and version freshness are not merely discouraged — they are unrepresentable in
 the type, so they cannot be argued into an emergency.
 
-### Current state (2026-07-24): one rehearsed bump, REJECTED
+### Current state: two trains run, both refused, for different reasons
 
-The protocol has been exercised once, end to end, against the live pins. It was
-not a synthetic drill — the constellation had genuinely drifted, and the
-transcript below is the real outcome. It is pinned as an executable test
-(`rehearsed_bump_2026_07_24_is_refused`) so the verdict cannot quietly change.
+The protocol has now been exercised twice end to end against live pins. Neither
+was a synthetic drill, and both transcripts are pinned as executable tests so
+their verdicts cannot quietly change.
 
-Stage 1, candidate. All SEVEN siblings were off their recorded pins, including
-a `franken_numpy` MINOR move (`0.1.0` to `0.2.0`). The previously understood
-single-sibling drift was an artifact of the aggregate lock hash, which reports
-that *a* repository moved without naming it.
+**Train 1 (2026-07-24) — refused, evidence missing.** All seven siblings were
+off-pin. `asupersync 0.3.9@054cff23` ran GREEN 25/25, but `frankensqlite` could
+not build: `fsqlite-btree` failed under the `async-api` feature that
+`fs-ledger`'s dev-dependency enables, so the P1 durability surface recorded
+`NotRun` and the bump was refused. A dependency that fails to compile is an
+absence of evidence, never an absence of a problem.
 
-Stage 2, suite. The surfaces were executed against the live pins:
+**Train 2 (2026-07-25) — every surface GREEN, refused on the golden
+obligation.** Once the sibling's async-pager migration landed, every registered
+surface executed and passed against the live pins:
 
-- `asupersync` at `0.3.9@054cff23` — **GREEN, 25/25** (`fs-exec` conformance 14,
-  `constellation_smoke` 1, `lease_battery` 10, 0 failed). FrankenSim's bounded
-  cancellation, drain, budget-propagation and latency-lane contracts hold on
-  the new commit.
-- `franken_numpy` at `0.2.0@c5b6339f` — **GREEN 2/2**, `franken_networkx`
-  **8/8**, `frankentorch` **4/4**, `frankenscipy` **2/2**.
-- `frankensqlite` at `31fc4a3b` — **DID NOT BUILD**. `fsqlite-btree` fails
-  under the `async-api` feature that `fs-ledger`'s dev-dependency enables; the
-  production graph compiles. The surface therefore recorded `NotRun`. A
-  dependency that fails to compile is an absence of evidence, never an absence
-  of a problem.
+| sibling | measured |
+|---|---|
+| asupersync | 25/25 |
+| franken_networkx | 8/8 |
+| franken_numpy | 2/2 |
+| frankenscipy | 2/2 |
+| frankensqlite | 5/5 |
+| frankentorch | 4/4 |
+| frankenpandas | no claim, no runtime consumer — no evidence required |
 
-Stage 3, adjudication. **REFUSED**, on one reason: the `frankensqlite` P1
-durability surface never executed.
+So on suite evidence the whole seven-sibling drift is compatible. The bump is
+nonetheless REFUSED, on the one obligation nobody had discharged: **24 semantic
+golden surfaces are owned by crates that consume the movers at runtime**
+(`fs-exec:*`, `fs-ledger:*`, `fs-plan:*`, `fs-vskeleton:*`), so the attempt may
+not declare `NoGoldenSurface`. Someone must state what happened to those
+goldens before the pins move under them. That is the rand_nla mis-pin lesson
+made executable rather than remembered.
 
-This corrects an earlier recording of the same train, which also refused
-`franken_numpy` as an uncovered surface. That was wrong — dedicated round-trip
-and refusal tests existed in `fs-sparse/src/interop_fnp.rs` all along, as unit
-tests behind a non-default feature, and they run green on the new pin. The
-verdict is unchanged but now rests on one true reason instead of one true and
-one false one. The registry has been corrected for all four siblings whose
-coverage it understated.
+Two boundaries this exposed and fixed:
 
-Stage 4, disposition. The bump is rejected and the recorded lock stands as the
-rollback reference. No pin was moved and no train is claimed to have passed.
-
-This is the protocol working as intended: a green surface does not launder the
-refusal for the others, and the outcome of a real train may legitimately be
-"reject".
-
-Adjudicating a PROPOSED pin set rather than whatever happens to be checked out
-uses `compatibility-report --candidate <lock>`. The candidate is parsed by the
-same canonical reader as the tracked lock, so a malformed or hash-inconsistent
-proposal is refused rather than half-read.
-
-Known limitation: there is no tool that MINTS a candidate lock.
-`lock-constellation` writes the lock from the live checkouts and refuses when
-any tree is dirty, so today a candidate is produced either by checking the
-proposed pins out first or by hand-editing the lock and recomputing its
-FNV-1a-64 `lock_hash`. Until a minting command exists, "candidate" and "live"
-coincide more often than the protocol intends.
-
-Note also that because every `P1` surface must be green on every train, no bump
-can be admitted at all while FrankenSQLite does not compile — including a
-proposal that touches only asupersync, for which green evidence already exists.
-That is deliberate: a tree whose durability surface cannot be verified is not a
-tree in which any pin change should be accepted.
-
-Known limitation: `fs-govern`'s dev-dependencies include `fs-ledger`, so
-`cargo test -p fs-govern` cannot run during a FrankenSQLite outage even though
-the library itself stays sibling-free and `xtask` keeps building. The adjudicator
-is available when it matters; its own test target is not.
+- A surface selector must run EXACTLY the registered claim set (`-- --exact`).
+  Running whole targets meant an unregistered test could fail a surface for a
+  reason the registry never claimed — during train 2 a throughput floor
+  (`ledger_008_event_throughput_ledgered`, a perf smoke test) failed on a
+  contended shared host while all five registered frankensqlite tests passed.
+  Machine contention must not be indistinguishable from sibling
+  incompatibility.
+- A moved sibling that declares no claim AND has no runtime consumer requires
+  no evidence, because a pin move cannot break something nothing depends on.
+  Both conditions are required, so "no claims" cannot become a way to dodge
+  evidence for something that is actually consumed.
 
 ## Archival, escrow, and retention
 

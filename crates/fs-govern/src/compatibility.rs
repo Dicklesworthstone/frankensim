@@ -182,6 +182,25 @@ impl SiblingSurface {
                 for target in targets {
                     let _ = write!(out, " --test {target}");
                 }
+                // Run EXACTLY the registered tests. Without this the invocation
+                // runs whole targets, so a test outside the claim set — a
+                // throughput floor, say — can fail a surface for a reason the
+                // registry never claimed, and machine contention becomes
+                // indistinguishable from sibling incompatibility.
+                let mut names: Vec<&str> = self
+                    .tests
+                    .iter()
+                    .filter(|test| {
+                        test.crate_name == crate_name && test.required_features == features
+                    })
+                    .map(|test| test.test_name)
+                    .collect();
+                names.sort_unstable();
+                names.dedup();
+                out.push_str(" -- --exact");
+                for name in names {
+                    let _ = write!(out, " {name}");
+                }
                 out
             })
             .collect()
@@ -947,6 +966,14 @@ pub fn evaluate_bump(attempt: &BumpAttempt) -> BumpVerdict {
         }
         let sibling_moved = movers.iter().any(|delta| delta.lib == entry.lib);
         if entry.tests.is_empty() {
+            // A sibling that declares NO claims and has NO runtime consumer
+            // asserts nothing that a pin move could break, so demanding
+            // evidence would be demanding proof of a vacuous claim. Both
+            // conditions are required: "no claims" alone must not become a way
+            // to dodge evidence for something that is actually consumed.
+            if entry.claims.is_empty() && entry.runtime_consumers.is_empty() {
+                continue;
+            }
             // An uncovered surface only blocks when that sibling actually moved;
             // otherwise it is a standing gap recorded by the registry, not a
             // reason to refuse an unrelated bump.
