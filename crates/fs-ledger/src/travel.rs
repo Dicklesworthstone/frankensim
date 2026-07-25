@@ -335,7 +335,10 @@ impl Ledger {
                 SqliteValue::Integer(crate::now_wall_ns()),
             ]);
         match insert {
-            Ok(_) => Ok(self.conn.last_insert_rowid()),
+            Ok(_) => self
+                .conn
+                .last_insert_rowid()
+                .map_err(|e| sql_err("branch id", &e)),
             Err(e) if crate::is_duplicate_key(&e) => Err(LedgerError::Invalid {
                 field: "name".to_string(),
                 problem: format!("branch {name:?} already exists; branch names are unique"),
@@ -468,7 +471,10 @@ impl Ledger {
                     text_param(mode.as_str()),
                 ])
                 .map_err(|e| sql_err("op insert", &e))?;
-            let op = self.conn.last_insert_rowid();
+            let op = self
+                .conn
+                .last_insert_rowid()
+                .map_err(|e| sql_err("op id", &e))?;
             self.insert_op_content_identity(op, session, ir, explicits)?;
             Ok(op)
         })();

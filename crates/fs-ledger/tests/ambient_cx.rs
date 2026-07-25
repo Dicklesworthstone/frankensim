@@ -4,7 +4,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use fs_exec::{Budget, LatencyLane};
-use fsqlite::{AsyncConnection, Connection, FrankenError};
+use fsqlite::{AsyncConnection, FrankenError};
+use fsqlite_types::cx::Cx as LocalCx;
 
 const MARKER_POLL_QUOTA: u32 = 10_000;
 const MARKER_COST_QUOTA: u64 = 7_919;
@@ -12,11 +13,10 @@ const MARKER_PRIORITY: u8 = 211;
 
 #[test]
 fn latency_lane_ambient_context_reaches_fsqlite_waiters() {
-    // Take a local FrankenSQLite context from outside any asupersync task. It
+    // Mint a local FrankenSQLite context outside any asupersync task. It
     // deliberately has no attached native context, so the async facade can
     // proceed only by observing the latency task's ambient native Cx.
-    let seed = Connection::open(":memory:").expect("create detached FrankenSQLite context");
-    let local_cx = seed.root_cx().clone();
+    let local_cx = LocalCx::new();
     assert!(
         local_cx.attached_native_cx().is_none(),
         "proof requires a detached local context"
@@ -67,23 +67,34 @@ fn latency_lane_ambient_context_reaches_fsqlite_waiters() {
                 ));
             }
 
-            // Keep the second blocking slot occupied so the response
-            // waiter cannot publish the worker's value before the
-            // cancelled Cx is polled. The already-dispatched statement is
-            // read-only; this assertion is about response-wait
-            // cancellation, not preemption or rollback.
-            let (started_tx, started_rx) = mpsc::sync_channel(1);
-            let (release_tx, release_rx) = mpsc::channel();
-            let blocker = blocking_pool.spawn(move || {
-                let _ = started_tx.send(());
-                // Self-release bounds the failure path if ambient
-                // cancellation regresses and the query remains pending.
-                let _ = release_rx.recv_timeout(Duration::from_secs(5));
-            });
-            if started_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-                let _ = release_tx.send(());
-                let _ = blocker.wait_timeout(Duration::from_secs(5));
-                return Err("second blocking slot did not start its proof gate".into());
+            // Occupy both response-waiter slots. The raw engine owns a
+            // separate large-stack thread, so this also proves it does not
+            // consume caller-runtime blocking capacity. A new waiter cannot
+            // publish the worker's value before the cancelled Cx is polled.
+            // The already-dispatched statement is read-only; this assertion
+            // is about response-wait cancellation, not preemption or rollback.
+            let mut blockers: Vec<(mpsc::Sender<()>, mpsc::Receiver<()>)> = Vec::with_capacity(2);
+            for slot in 0..2 {
+                let (started_tx, started_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let (drained_tx, drained_rx) = mpsc::sync_channel(1);
+                let _ = blocking_pool.spawn(move || {
+                    let _ = started_tx.send(());
+                    // Self-release bounds the failure path if ambient
+                    // cancellation regresses and the query remains pending.
+                    let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                    let _ = drained_tx.send(());
+                });
+                if started_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    let _ = release_tx.send(());
+                    let _ = drained_rx.recv_timeout(Duration::from_secs(5));
+                    for (release, drained) in blockers {
+                        let _ = release.send(());
+                        let _ = drained.recv_timeout(Duration::from_secs(5));
+                    }
+                    return Err(format!("blocking slot {slot} did not start its proof gate"));
+                }
+                blockers.push((release_tx, drained_rx));
             }
 
             child_cx.set_cancel_requested(true);
@@ -92,9 +103,11 @@ fn latency_lane_ambient_context_reaches_fsqlite_waiters() {
                 .query(&local_cx, "SELECT value FROM ambient_probe")
                 .await;
             child_cx.set_cancel_requested(false);
-            let _ = release_tx.send(());
-            if !blocker.wait_timeout(Duration::from_secs(5)) {
-                return Err("proof gate did not drain after release".into());
+            for (slot, (release, drained)) in blockers.into_iter().enumerate() {
+                let _ = release.send(());
+                if drained.recv_timeout(Duration::from_secs(5)).is_err() {
+                    return Err(format!("proof gate {slot} did not drain after release"));
+                }
             }
             if !local_stayed_healthy {
                 return Err("detached FrankenSQLite context was unexpectedly cancelled".into());
@@ -134,7 +147,6 @@ fn latency_lane_ambient_context_reaches_fsqlite_waiters() {
     let outcome = result_rx
         .recv_timeout(Duration::from_secs(15))
         .expect("ambient proof task did not finish within 15 seconds");
-    drop(seed);
     if let Err(error) = outcome {
         panic!("ambient context proof failed: {error}");
     }

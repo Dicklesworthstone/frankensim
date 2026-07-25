@@ -14,6 +14,9 @@
 //! depends on. It is NOT a review of FrankenSQLite's pager, WAL, or B-tree
 //! internals, and green drills here do not certify the engine.
 
+mod common;
+
+use common::SyncConnection;
 use fs_ledger::{EdgeRole, FiveExplicits, Ledger, LedgerError, OpOutcome};
 
 const FX: FiveExplicits<'static> = FiveExplicits {
@@ -33,7 +36,7 @@ const FX: FiveExplicits<'static> = FiveExplicits {
 /// future-schema file is accepted, which would be a false defect report. The
 /// stamp must go through the engine so it lands wherever the engine will look.
 fn stamp_user_version(path: &str, version: u32) {
-    let conn = fsqlite::Connection::open(path).expect("raw open for version stamp");
+    let conn = SyncConnection::open(path).expect("raw open for version stamp");
     conn.execute_batch(&format!("PRAGMA user_version = {version};"))
         .expect("stamp user_version");
     drop(conn);

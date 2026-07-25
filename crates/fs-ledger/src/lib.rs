@@ -77,10 +77,126 @@ pub use travel::{
     ReplayMismatch, ReplayVerdict, ViewSnapshot,
 };
 
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fsqlite::{Connection, FrankenError, SqliteValue};
+use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
+
+/// Synchronous, single-thread-owned embedding of FrankenSQLite's async
+/// worker surface.
+///
+/// The engine's deeply composed storage futures execute on FrankenSQLite's
+/// dedicated worker rather than the caller or libtest stack. This preserves
+/// `Ledger`'s synchronous public contract without claiming cancellation for
+/// synchronous calls. The separate async cancellation witness remains
+/// `tests/ambient_cx.rs`.
+struct Connection {
+    inner: AsyncConnection,
+    _single_thread: PhantomData<Rc<()>>,
+}
+
+impl Connection {
+    fn open(path: impl Into<String>) -> Result<Self, FrankenError> {
+        AsyncConnection::open_sync(path).map(|inner| Self {
+            inner,
+            _single_thread: PhantomData,
+        })
+    }
+
+    fn prepare(&self, sql: &str) -> Result<PreparedStatement<'_>, FrankenError> {
+        self.inner.prepare_sync(sql)?;
+        Ok(PreparedStatement {
+            connection: self,
+            sql: sql.to_owned(),
+        })
+    }
+
+    fn query(&self, sql: &str) -> Result<Vec<Row>, FrankenError> {
+        self.inner.query_sync(sql)
+    }
+
+    fn query_with_params(
+        &self,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Result<Vec<Row>, FrankenError> {
+        self.inner.query_with_params_sync(sql, params)
+    }
+
+    fn query_with_params_for_each<F>(
+        &self,
+        sql: &str,
+        params: &[SqliteValue],
+        f: F,
+    ) -> Result<(), FrankenError>
+    where
+        F: FnMut(&Row) -> Result<(), FrankenError>,
+    {
+        self.inner.query_with_params_for_each_sync(sql, params, f)
+    }
+
+    fn query_row(&self, sql: &str) -> Result<Row, FrankenError> {
+        self.inner.query_row_sync(sql)
+    }
+
+    fn query_row_with_params(
+        &self,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Result<Row, FrankenError> {
+        self.inner.query_row_with_params_sync(sql, params)
+    }
+
+    fn execute(&self, sql: &str) -> Result<usize, FrankenError> {
+        self.inner.execute_sync(sql)
+    }
+
+    fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Result<usize, FrankenError> {
+        self.inner.execute_with_params_sync(sql, params)
+    }
+
+    fn begin_transaction(&self) -> Result<(), FrankenError> {
+        self.inner.begin_transaction_sync()
+    }
+
+    fn commit_transaction(&self) -> Result<(), FrankenError> {
+        self.inner.commit_transaction_sync()
+    }
+
+    fn rollback_transaction(&self) -> Result<(), FrankenError> {
+        self.inner.rollback_transaction_sync()
+    }
+
+    fn in_transaction(&self) -> bool {
+        self.inner.in_transaction()
+    }
+
+    fn last_insert_rowid(&self) -> Result<i64, FrankenError> {
+        self.inner.last_insert_rowid_sync()
+    }
+}
+
+/// Synchronous prepared SQL descriptor borrowed from [`Connection`].
+struct PreparedStatement<'conn> {
+    connection: &'conn Connection,
+    sql: String,
+}
+
+impl PreparedStatement<'_> {
+    fn query_with_params(&self, params: &[SqliteValue]) -> Result<Vec<Row>, FrankenError> {
+        self.connection.query_with_params(&self.sql, params)
+    }
+
+    fn execute_with_params(&self, params: &[SqliteValue]) -> Result<usize, FrankenError> {
+        self.connection.execute_with_params(&self.sql, params)
+    }
+}
 
 /// Maximum UTF-8 byte length of an artifact kind admitted or materialized.
 pub const MAX_ARTIFACT_KIND_BYTES: usize = 256;
@@ -5659,7 +5775,9 @@ impl Ledger {
                 opt_text_param(event.payload),
             ])
             .map_err(|e| sql_err("event insert", &e))?;
-        Ok(self.conn.last_insert_rowid())
+        self.conn
+            .last_insert_rowid()
+            .map_err(|e| sql_err("event id", &e))
     }
 
     /// Append a batch of events in one transaction (the append-heavy write

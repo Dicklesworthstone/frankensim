@@ -10,11 +10,14 @@
 //! Every case emits a JSON-lines verdict (seeds and fixture data inline) so
 //! failures are reproducible from the log alone (docs/CONVENTIONS.md).
 
+mod common;
+
 use std::sync::{
     Arc, Barrier,
     atomic::{AtomicU32, Ordering},
 };
 
+use common::SyncConnection;
 use fs_ledger::{
     Blake3, EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, SCHEMA_VERSION,
     STORAGE_CHUNK_LEN, hash_bytes,
@@ -263,7 +266,7 @@ fn ledger_003_schema_migration_versioned() {
     }
     {
         // A file from the future is refused, not clobbered.
-        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        let raw = SyncConnection::open(&db).expect("raw open");
         raw.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 40))
             .unwrap();
         drop(raw);
@@ -365,7 +368,7 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
 
     let old = temp_db("instance-id-v3");
     {
-        let raw = fsqlite::Connection::open(&old).expect("raw v3 ledger");
+        let raw = SyncConnection::open(&old).expect("raw v3 ledger");
         for batch in [
             fs_ledger::schema::V1,
             fs_ledger::schema::V2,
@@ -398,7 +401,7 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
         0xff,
     ];
     {
-        let raw = fsqlite::Connection::open(&old_v4).expect("raw v4 ledger");
+        let raw = SyncConnection::open(&old_v4).expect("raw v4 ledger");
         for batch in [
             fs_ledger::schema::V1,
             fs_ledger::schema::V2,
@@ -428,7 +431,7 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
         migrated_v4.instance_id()
     );
     {
-        let raw = fsqlite::Connection::open(&old_v4).expect("raw immutable identity check");
+        let raw = SyncConnection::open(&old_v4).expect("raw immutable identity check");
         assert!(
             raw.execute(
                 "UPDATE ledger_identity SET instance_id = \
@@ -471,7 +474,7 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
 fn ledger_003c_missing_persisted_identity_fails_closed() {
     let db = temp_db("missing-instance-id");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw missing-identity v4 ledger");
+        let raw = SyncConnection::open(&db).expect("raw missing-identity v4 ledger");
         for batch in [
             fs_ledger::schema::V1,
             fs_ledger::schema::V2,
@@ -490,7 +493,7 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
         Err(LedgerError::InstanceIdentityCorrupt { .. })
     ));
     {
-        let raw = fsqlite::Connection::open(&db).expect("inspect refused v4 migration");
+        let raw = SyncConnection::open(&db).expect("inspect refused v4 migration");
         assert_eq!(
             raw.query_row("PRAGMA user_version")
                 .expect("version")
@@ -502,7 +505,7 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
 
     let malformed = temp_db("malformed-instance-id");
     {
-        let raw = fsqlite::Connection::open(&malformed).expect("raw malformed v4 ledger");
+        let raw = SyncConnection::open(&malformed).expect("raw malformed v4 ledger");
         for batch in [
             fs_ledger::schema::V1,
             fs_ledger::schema::V2,
@@ -529,7 +532,7 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
 
     let premature = temp_db("premature-malformed-instance-id");
     {
-        let raw = fsqlite::Connection::open(&premature).expect("raw premature v4 ledger");
+        let raw = SyncConnection::open(&premature).expect("raw premature v4 ledger");
         for batch in [
             fs_ledger::schema::V1,
             fs_ledger::schema::V2,
@@ -553,7 +556,7 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
         Err(LedgerError::InstanceIdentityCorrupt { .. })
     ));
     {
-        let raw = fsqlite::Connection::open(&premature).expect("reopen refused migration");
+        let raw = SyncConnection::open(&premature).expect("reopen refused migration");
         assert_eq!(
             raw.query_row("PRAGMA user_version")
                 .expect("version")
@@ -579,7 +582,7 @@ fn ledger_003d_checked_identity_detects_stale_open_handles() {
     assert_eq!(peer.instance_id(), original);
 
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw DDL bypass fixture");
+        let raw = SyncConnection::open(&db).expect("raw DDL bypass fixture");
         raw.execute("DROP TRIGGER trg_ledger_identity_immutable_update")
             .expect("remove update guard for out-of-band fixture");
         assert!(matches!(
@@ -636,7 +639,7 @@ fn ledger_003e_checked_identity_re_attests_exact_mutation_guards() {
         "trg_ledger_identity_immutable_delete",
         "trg_ledger_identity_immutable_reinsert",
     ];
-    let raw = fsqlite::Connection::open(&db).expect("raw identity-guard fixture");
+    let raw = SyncConnection::open(&db).expect("raw identity-guard fixture");
 
     for (index, name) in guards.into_iter().enumerate() {
         raw.execute(&format!("DROP TRIGGER {name}"))
@@ -1052,7 +1055,7 @@ fn ledger_011_schema_attestation_gauntlet() {
     // unversioned file refuses initialization (fail closed, file intact).
     let db = temp_db("attest-conflict");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         raw.execute("CREATE TABLE ops(x TEXT)").expect("alien ops");
     }
     let Err(err) = Ledger::open(&db) else {
@@ -1065,7 +1068,7 @@ fn ledger_011_schema_attestation_gauntlet() {
     );
     {
         // Fail closed means UNTOUCHED: still v0, alien table intact.
-        let raw = fsqlite::Connection::open(&db).expect("raw reopen");
+        let raw = SyncConnection::open(&db).expect("raw reopen");
         assert_eq!(
             raw.query_row("PRAGMA user_version").expect("v").get(0),
             Some(&fsqlite::SqliteValue::Integer(0))
@@ -1078,7 +1081,7 @@ fn ledger_011_schema_attestation_gauntlet() {
     // this table even though only the literal `sqlite_` prefix is reserved.
     let db = temp_db("attest-internal-lookalike");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         raw.execute("CREATE TABLE sqlitex_hidden(x TEXT)")
             .expect("legal user table");
     }
@@ -1097,7 +1100,7 @@ fn ledger_011_schema_attestation_gauntlet() {
     // refuses with the missing objects named.
     let db = temp_db("attest-partial");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         for ddl in fs_ledger::schema::V1.iter().take(4) {
             raw.execute(ddl).expect("partial v1");
         }
@@ -1124,7 +1127,7 @@ fn ledger_011b_schema_attestation_mangled_definitions() {
     // (same name) is not the shipped definition.
     let db = temp_db("attest-wrongcol");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         for ddl in fs_ledger::schema::V1 {
             if !ddl.contains("EXISTS metrics") {
                 raw.execute(ddl).expect("v1 ddl");
@@ -1147,7 +1150,7 @@ fn ledger_011b_schema_attestation_mangled_definitions() {
     // (5) wrong-affinity: same column names, one declared type changed.
     let db = temp_db("attest-affinity");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         for ddl in fs_ledger::schema::V1 {
             if ddl.contains("EXISTS edges") {
                 raw.execute(&ddl.replace("op INTEGER NOT NULL", "op TEXT NOT NULL"))
@@ -1170,7 +1173,7 @@ fn ledger_011b_schema_attestation_mangled_definitions() {
     {
         let l = Ledger::open(&db).expect("initialize");
         drop(l);
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         raw.execute("DROP INDEX idx_ops_session")
             .expect("drop index");
     }

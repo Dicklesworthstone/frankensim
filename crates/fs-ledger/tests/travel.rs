@@ -6,8 +6,11 @@
 //! orphan inputs; at(t) views are consistent at arbitrary interior
 //! instants; kill -9 during fork traffic recovers to a lint-clean state.
 
+mod common;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use common::SyncConnection;
 use fs_ledger::{
     ContentHash, EdgeRole, ExecMode, FiveExplicits, Ledger, LedgerError, MAIN_BRANCH, OpOutcome,
     SCHEMA_VERSION,
@@ -72,7 +75,7 @@ fn tt_001_v1_database_migrates_to_v2_with_history_intact() {
     let db = temp_db("migrate");
     {
         // Construct a GENUINE v1 database: v1 DDL only, one op, version 1.
-        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        let raw = SyncConnection::open(&db).expect("raw open");
         for ddl in fs_ledger::schema::V1 {
             raw.execute(ddl).expect("v1 ddl");
         }
@@ -107,7 +110,7 @@ fn tt_001b_v1_marker_with_committed_v2_ddl_recovers() {
     {
         // Reproduce the old migrator's crash window exactly: v2 DDL committed,
         // but the separately-written user_version marker remains at v1.
-        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        let raw = SyncConnection::open(&db).expect("raw open");
         for ddl in fs_ledger::schema::V1 {
             raw.execute(ddl).expect("v1 ddl");
         }
@@ -150,7 +153,7 @@ fn tt_001b_v1_marker_with_committed_v2_ddl_recovers() {
 fn tt_001c_v1_marker_with_incompatible_v2_column_fails_closed() {
     let db = temp_db("migrate-v2-incompatible-column");
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        let raw = SyncConnection::open(&db).expect("raw open");
         for ddl in fs_ledger::schema::V1 {
             raw.execute(ddl).expect("v1 ddl");
         }
@@ -172,7 +175,7 @@ fn tt_001c_v1_marker_with_incompatible_v2_column_fails_closed() {
     );
 
     // Refusal rolls back the attempted v2 batch and leaves the marker unchanged.
-    let raw = fsqlite::Connection::open(&db).expect("reopen refused database");
+    let raw = SyncConnection::open(&db).expect("reopen refused database");
     assert_eq!(
         raw.query_row("PRAGMA user_version")
             .expect("read marker after refusal")
@@ -401,7 +404,7 @@ fn tt_004_explain_reconstructs_full_lineage() {
     assert!(shallow.produced_by[0].inputs[0].truncated);
     // Orphan input (artifact deleted behind the ledger's back) fails LOUDLY.
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
+        let raw = SyncConnection::open(&db).expect("raw");
         raw.query("PRAGMA foreign_keys=OFF").expect("fk off");
         raw.execute_with_params(
             "DELETE FROM artifacts WHERE hash = ?1",

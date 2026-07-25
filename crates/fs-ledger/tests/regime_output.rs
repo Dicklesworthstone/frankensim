@@ -10,7 +10,7 @@ fn receipt(qoi: &str, distance: f64) -> OutputClaimReceipt {
     OutputClaimReceipt {
         qoi: qoi.to_string(),
         original_color: Color::Validated {
-            regime: ValidityDomain::new().with_bound("re", 0.0, 100.0),
+            regime: ValidityDomain::unconstrained().with("re", 0.0, 100.0),
             dataset: "wind-tunnel/reference".to_string(),
         },
         effective_color: Color::Estimated {

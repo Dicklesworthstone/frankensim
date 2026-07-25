@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use fsqlite::PreparedStatement;
+use crate::PreparedStatement;
 
 use super::*;
 

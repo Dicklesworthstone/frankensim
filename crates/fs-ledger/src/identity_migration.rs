@@ -26,8 +26,8 @@ use fsqlite::SqliteValue;
 use crate::{
     ContentHash, EdgeRole, FiveExplicits, Ledger, LedgerError, LedgerInstanceId,
     MAX_TUNE_KERNEL_BYTES, MAX_TUNE_MACHINE_BYTES, MAX_TUNE_MEASURED_BYTES, MAX_TUNE_PARAMS_BYTES,
-    MAX_TUNE_SHAPE_CLASS_BYTES, SCHEMA_VERSION, TuneRow, blob_param, now_wall_ns, row_i64,
-    row_text, sql_err, text_param, tune_corrupt,
+    MAX_TUNE_SHAPE_CLASS_BYTES, SCHEMA_VERSION, blob_param, now_wall_ns, row_i64, row_text,
+    sql_err, text_param, tune_corrupt,
 };
 
 /// Schema version of one artifact compatibility-hash to typed-content-ID row.
@@ -5589,7 +5589,10 @@ mod tests {
                 SqliteValue::Integer(1),
             ])
             .expect("insert compatibility operation without v18 sidecar");
-        let op = ledger.conn.last_insert_rowid();
+        let op = ledger
+            .conn
+            .last_insert_rowid()
+            .expect("read compatibility operation id");
         assert!(matches!(
             ledger.op_content_identity(op),
             Err(LedgerError::OpCorrupt { op: rejected, detail })
@@ -5630,7 +5633,10 @@ mod tests {
             .expect("prepare transactional old-writer operation")
             .execute_with_params(&[blob_param(b"transactional-old-writer-seed")])
             .expect("insert transactional compatibility operation");
-        let rolled_back = ledger.conn.last_insert_rowid();
+        let rolled_back = ledger
+            .conn
+            .last_insert_rowid()
+            .expect("read transactional compatibility operation id");
         assert!(
             ledger
                 .reconcile_op_content_identity(rolled_back)
@@ -5935,7 +5941,10 @@ mod tests {
                 .expect("prepare old operation")
                 .execute_with_params(&[blob_param(seed), SqliteValue::Integer(t_start)])
                 .expect("insert old operation without sidecar");
-            ledger.conn.last_insert_rowid()
+            ledger
+                .conn
+                .last_insert_rowid()
+                .expect("read old operation id")
         };
         let insert_old_tune = |kernel: &'static str| {
             ledger
