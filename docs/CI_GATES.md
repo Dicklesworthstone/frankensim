@@ -256,6 +256,28 @@ already using the PR/full split.
 | `check-consolidation` | a crate that no supported workflow exercises and no review has dispositioned, a `FREEZE`/`CONSOLIDATE`/`REPAIR-OR-QUARANTINE` disposition on a crate that has since gained a workflow consumer, a disposition without a rationale, or a usage sweep whose known-exercised control crate is itself unreached (`consolidation-review.json`, docs/CONSOLIDATION_REVIEW.md) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
+### Asking whether YOUR lane is clean
+
+`check-all` reports one verdict over thirty checks, so in a shared repository
+another lane's accumulated debt drowns your signal. Restrict the verdict:
+
+```bash
+cargo run -p xtask -- check-all --only schema-policy,consolidation-review
+```
+
+The exit code then reflects **only** the named checks: `0` if your lane is
+clean, `1` if it is not, and `2` if you named a check that did not run (a typo
+is refused rather than quietly reporting success). Every check still executes —
+this filters the verdict, not the work, so a violation outside your selection is
+still found, just not charged to you.
+
+A full run also emits a per-check tally before the summary, so ownership is
+readable at a glance:
+
+```json
+{"check":"golden-couplings","verdict":"tally","violations":33}
+```
+
 Each is also runnable alone (same names). Golden re-pins follow
 docs/GOLDEN_POLICY.md: committed tree, BOTH build modes, plausible root
 cause, coupling row updated in the same commit.

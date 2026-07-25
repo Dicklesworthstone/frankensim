@@ -242,6 +242,7 @@ FrankenSim ships an initial strict validation CLI. Its solve, report, and packag
 | `cargo run -p xtask -- check-source-manifest` | Verify the canonical structural source/SBOM inventory and its SPDX 2.3 JSON projection |
 | `cargo run -p xtask -- check-schemas` | Verify the frozen public schema set, its migration obligations, and accretion control |
 | `cargo run -p xtask -- check-all` | Run the implemented `xtask` policy checks together |
+| `cargo run -p xtask -- check-all --only <checks>` | Restrict the verdict and exit code to the named checks ("is my lane clean?") |
 | `dsr quality --tool frankensim` | Run the configured repo-level DSR quality gate when DSR is available |
 | `dsr build frankensim --target darwin/arm64` | Run the configured native DSR build lane |
 

@@ -33,6 +33,7 @@
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
 //! - `check-citable-producers` — exhaustively inventory authority-gated `citation_eligible` sinks.
 //! - `check-all`      — all of the above; non-zero exit on any violation.
+//!                      `--only <a,b>` restricts the verdict/exit code to named checks.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //! - `matdb-pack`     — compile licensed material TSV or NASA-9 sources into normalized packs.
 //!
@@ -47,9 +48,9 @@
 
 mod bootstrap_provenance;
 mod claim_integrity_gate;
-mod compatibility;
 mod claims;
 mod closures;
+mod compatibility;
 mod consolidation;
 pub mod constellation_admission;
 mod constellation_assessment;
@@ -7073,6 +7074,20 @@ fn emit(
             json_escape(&v.detail)
         );
     }
+    // Per-check tally before the summary. A run reporting a single total across
+    // thirty checks cannot tell a lane whether the damage is theirs; this makes
+    // ownership readable at a glance and greppable by name.
+    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+    for violation in violations {
+        *tally.entry(violation.check).or_insert(0) += 1;
+    }
+    for (check, count) in &tally {
+        println!(
+            "{{\"check\":\"{}\",\"verdict\":\"tally\",\"violations\":{}}}",
+            json_escape(check),
+            count
+        );
+    }
     println!(
         "{{\"check\":\"summary\",\"checks\":\"{}\",\"crates\":{},\"violations\":{}}}",
         json_escape(&checks_run.join("+")),
@@ -8260,8 +8275,7 @@ fn main() -> ExitCode {
             };
         }
         "generate-source-manifest" => {
-            let scope: std::collections::BTreeSet<String> =
-                std::env::args().skip(2).collect();
+            let scope: std::collections::BTreeSet<String> = std::env::args().skip(2).collect();
             return match source_manifest::generate(&root, &scope) {
                 Ok(()) => {
                     eprintln!("structural source manifest and SPDX 2.3 rendering regenerated");
@@ -8323,7 +8337,9 @@ fn main() -> ExitCode {
                 Some((flag, rest)) if flag == "--candidate" => match rest.first() {
                     Some(path) => Some(std::path::PathBuf::from(path)),
                     None => {
-                        eprintln!("error: --candidate needs a path to a candidate constellation.lock");
+                        eprintln!(
+                            "error: --candidate needs a path to a candidate constellation.lock"
+                        );
                         return ExitCode::FAILURE;
                     }
                 },
@@ -8444,10 +8460,7 @@ fn main() -> ExitCode {
             policy_notes = report.decisions;
             (report.violations, vec![consolidation::CHECK])
         }
-        "check-program-metrics" => (
-            program_metrics::check(&root),
-            vec![program_metrics::CHECK],
-        ),
+        "check-program-metrics" => (program_metrics::check(&root), vec![program_metrics::CHECK]),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
@@ -8544,6 +8557,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let lane = LaneFilter::from_args();
+    let (violations, policy_notes, checks) = lane.apply(violations, policy_notes, checks);
     emit(
         &violations,
         &dev_dep_notes(&manifests),
@@ -8551,6 +8566,180 @@ fn main() -> ExitCode {
         &checks,
         manifests.len(),
     )
+}
+
+/// `--only <check>[,<check>...]` restricts reporting — and therefore the exit
+/// code — to the named checks.
+///
+/// In a shared repository one lane's accumulated debt drowns every other lane's
+/// signal: a run reporting 60 violations across ten checks cannot answer "is MY
+/// slice clean?" without hand-filtering the JSON, which is exactly what the
+/// author of this flag ended up doing with `jq`. Restricting the verdict makes
+/// that question answerable directly.
+///
+/// This filters the VERDICT, not the work: every check still runs, so a
+/// violation outside the selection is still found, just not charged to this
+/// lane. An unknown name is refused rather than silently matching nothing,
+/// because a typo that quietly reports success is worse than no flag at all.
+struct LaneFilter {
+    only: Option<BTreeSet<String>>,
+}
+
+impl LaneFilter {
+    fn from_args() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let mut only: Option<BTreeSet<String>> = None;
+        for (index, arg) in args.iter().enumerate() {
+            let selection = if let Some(rest) = arg.strip_prefix("--only=") {
+                Some(rest.to_string())
+            } else if arg == "--only" {
+                args.get(index + 1).cloned()
+            } else {
+                None
+            };
+            if let Some(selection) = selection {
+                only = Some(
+                    selection
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
+        }
+        Self { only }
+    }
+
+    fn apply<'a>(
+        &self,
+        violations: Vec<Violation>,
+        policy_notes: Vec<PolicyNote>,
+        checks: Vec<&'a str>,
+    ) -> (Vec<Violation>, Vec<PolicyNote>, Vec<&'a str>) {
+        let Some(only) = self.only.as_ref() else {
+            return (violations, policy_notes, checks);
+        };
+        let known: BTreeSet<&str> = checks.iter().copied().collect();
+        let unknown: Vec<&str> = only
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !known.contains(name))
+            .collect();
+        if !unknown.is_empty() {
+            eprintln!(
+                "error: --only names check(s) that did not run: {}; available: {}",
+                unknown.join(", "),
+                checks.join(", ")
+            );
+            std::process::exit(2);
+        }
+        (
+            violations
+                .into_iter()
+                .filter(|violation| only.contains(violation.check))
+                .collect(),
+            policy_notes
+                .into_iter()
+                .filter(|note| only.contains(note.check))
+                .collect(),
+            checks
+                .into_iter()
+                .filter(|check| only.contains(*check))
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod lane_filter_tests {
+    use super::*;
+
+    fn filter(names: &[&str]) -> LaneFilter {
+        LaneFilter {
+            only: Some(names.iter().map(|n| (*n).to_string()).collect()),
+        }
+    }
+
+    fn violation(check: &'static str) -> Violation {
+        Violation {
+            check,
+            crate_name: "x".to_string(),
+            detail: "d".to_string(),
+        }
+    }
+
+    #[test]
+    fn no_selection_passes_everything_through() {
+        let lane = LaneFilter { only: None };
+        let (violations, _, checks) = lane.apply(
+            vec![violation("a"), violation("b")],
+            Vec::new(),
+            vec!["a", "b"],
+        );
+        assert_eq!(violations.len(), 2);
+        assert_eq!(checks, vec!["a", "b"]);
+    }
+
+    /// The question the flag exists to answer: my lane is clean even though the
+    /// repository is not.
+    #[test]
+    fn a_selection_reports_only_the_named_checks() {
+        let (violations, _, checks) = filter(&["mine"]).apply(
+            vec![violation("theirs"), violation("theirs")],
+            Vec::new(),
+            vec!["mine", "theirs"],
+        );
+        assert!(
+            violations.is_empty(),
+            "another lane's violations must not be charged to mine"
+        );
+        assert_eq!(checks, vec!["mine"]);
+    }
+
+    #[test]
+    fn a_selection_still_reports_its_own_violations() {
+        let (violations, _, _) = filter(&["mine"]).apply(
+            vec![violation("mine"), violation("theirs")],
+            Vec::new(),
+            vec!["mine", "theirs"],
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].check, "mine");
+    }
+
+    #[test]
+    fn policy_notes_are_filtered_alongside_violations() {
+        let notes = vec![
+            PolicyNote {
+                check: "mine",
+                crate_name: "x".to_string(),
+                verdict: "note",
+                detail: "d".to_string(),
+            },
+            PolicyNote {
+                check: "theirs",
+                crate_name: "x".to_string(),
+                verdict: "note",
+                detail: "d".to_string(),
+            },
+        ];
+        let (_, kept, _) = filter(&["mine"]).apply(Vec::new(), notes, vec!["mine", "theirs"]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].check, "mine");
+    }
+
+    #[test]
+    fn parsing_accepts_both_spellings_and_trims() {
+        // `--only=a,b` and `--only a, b` must produce the same selection.
+        let joined: BTreeSet<String> = "a,b".split(',').map(str::to_string).collect();
+        let spaced: BTreeSet<String> = "a, b"
+            .split(',')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(joined, spaced);
+    }
 }
 
 #[cfg(test)]
