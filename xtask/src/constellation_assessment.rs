@@ -223,7 +223,7 @@ const POLICIES: &[Policy] = &[
         correctness_risk: "critical",
         availability_risk: "high",
         security_surface: "SQL, schema migration, database-file, blob, transaction, and recovery inputs.",
-        review_status: "Pinned and heavily exercised through fs-ledger; independent durability review remains pending.",
+        review_status: "Pinned and heavily exercised through fs-ledger. Independent review SREV-2026-07-B (bead f85xj.13.5, docs/SIBLING_REVIEW_FRANKENSQLITE.md) drilled the durability and refusal contract at the fs-ledger adapter boundary contract-first and found no defect: FutureSchema refusal leaves the whole database (main file plus WAL sidecars) byte-identical, a valid seal is observably persisted rather than silently dropped, a refused seal and an unknown artifact leave no dangling row, and a rolled-back transaction leaves no trace. Reviewer independence is the bead's MINIMUM bar, not a genuinely external audit. The review recorded one method defect of its own: patching the header byte for user_version is invisible under WAL mode and nearly produced a FALSE defect report. Torn-write recovery, mid-transaction kill, lock-contention storms, Busy/write-conflict retry, and checkpoint/WAL-truncation behaviour remain UNREVIEWED: they need process-level orchestration.",
         verification: &[
             "constellation.lock pin and clean-tree verification",
             "fs-ledger conformance, migration, time-travel, identity-guard, and artifact batteries",

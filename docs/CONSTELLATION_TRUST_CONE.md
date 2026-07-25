@@ -15,7 +15,7 @@ Operational ownership, incident response, archival, and support are governed by 
 | `franken_numpy` | active | 1 | 0 | 4 | 0 | high | medium | P2 |
 | `frankenpandas` | pinned-unused | 0 | 0 | 0 | 0 | medium | medium | P4 |
 | `frankenscipy` | active | 0 | 7 | 0 | 13 | high | medium | P2 |
-| `frankensqlite` | active | 2 | 1 | 29 | 35 | critical | high | P1 |
+| `frankensqlite` | active | 2 | 1 | 29 | 36 | critical | high | P1 |
 | `frankentorch` | active | 1 | 0 | 2 | 0 | high | medium | P3 |
 
 `pinned-unused` means the sibling is governed by the lock but no manifest dependency or tokenized `crate_name::...` reference was measured. It is an explicit no-claim state, not evidence that the planned role exists.
@@ -124,7 +124,7 @@ Operational ownership, incident response, archival, and support are governed by 
 - **Role:** Durable storage engine under the Design Ledger, session receipts, checkpoints, and replay metadata.
 - **Layers:** L6 HELM; ledger-backed cross-layer evidence
 - **Load-bearing claims:** artifact and lineage durability; session and idempotency receipt persistence; schema migration, crash recovery, and time-travel state
-- **Measured usage:** `active`; runtime consumers: fs-ledger, fs-vskeleton; dev consumers: fs-ledger; production/test references: 29/35
+- **Measured usage:** `active`; runtime consumers: fs-ledger, fs-vskeleton; dev consumers: fs-ledger; production/test references: 29/36
 - **Sampled API references:**
   - `fsqlite` at `crates/fs-ledger/src/crosswalk.rs`:14
   - `fsqlite` at `crates/fs-ledger/src/identity_migration.rs`:24
@@ -132,7 +132,7 @@ Operational ownership, incident response, archival, and support are governed by 
   - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2598
   - `fsqlite` at `crates/fs-ledger/src/lib.rs`:2624
 - **Risk:** correctness `critical`, availability `high`; security surface: SQL, schema migration, database-file, blob, transaction, and recovery inputs.
-- **Review status:** Pinned and heavily exercised through fs-ledger; independent durability review remains pending.
+- **Review status:** Pinned and heavily exercised through fs-ledger. Independent review SREV-2026-07-B (bead f85xj.13.5, docs/SIBLING_REVIEW_FRANKENSQLITE.md) drilled the durability and refusal contract at the fs-ledger adapter boundary contract-first and found no defect: FutureSchema refusal leaves the whole database (main file plus WAL sidecars) byte-identical, a valid seal is observably persisted rather than silently dropped, a refused seal and an unknown artifact leave no dangling row, and a rolled-back transaction leaves no trace. Reviewer independence is the bead's MINIMUM bar, not a genuinely external audit. The review recorded one method defect of its own: patching the header byte for user_version is invisible under WAL mode and nearly produced a FALSE defect report. Torn-write recovery, mid-transaction kill, lock-contention storms, Busy/write-conflict retry, and checkpoint/WAL-truncation behaviour remain UNREVIEWED: they need process-level orchestration.
 - **Current verification:** constellation.lock pin and clean-tree verification; fs-ledger conformance, migration, time-travel, identity-guard, and artifact batteries; fs-vskeleton ledger integration and reopen tests
 - **Gaps/no-claim boundary:** no independent cross-repo WAL, power-loss, and checkpoint adjudication backs FrankenSim durability claims; multi-GiB artifact and long-running concurrent-reader stress remains outside routine focused tests
 - **Review priority P1:** WAL durability; transaction boundaries; migration refusal; blob and checkpoint behavior

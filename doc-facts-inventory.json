@@ -607,6 +607,7 @@
     "crates/fs-ledger/tests/identity_migration.rs",
     "crates/fs-ledger/tests/regime_output.rs",
     "crates/fs-ledger/tests/session_registry.rs",
+    "crates/fs-ledger/tests/sibling_review_durability.rs",
     "crates/fs-ledger/tests/state_checkpoint.rs",
     "crates/fs-ledger/tests/tombstone.rs",
     "crates/fs-ledger/tests/travel.rs",
