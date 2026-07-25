@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod export;
 pub mod obj;
 pub mod ply;
+pub mod power_table;
 pub mod quarantine;
 pub mod selection;
 pub mod step;

@@ -757,3 +757,56 @@ import identically in both ASCII and binary (conformance-tested).
   have no internal cancellation-latency claim. No source-custody, complete
   live-byte, or ledger-promotion claim is made until those proof-pending
   portions of `frankensim-svlo8` land.
+
+## Tabular component-power ingestion (`power_table` module, bead f85xj.11.7)
+
+`parse_power_table` turns a declared component-power table into rows in WATTS
+plus a quarantine receipt. `fs-conduction` deliberately takes no `fs-io`
+dependency — file parsing is a quarantine concern, not a physics one — so this
+module supplies the rows that `ComponentPower::new` consumes.
+
+Four decisions are load-bearing.
+
+**The unit is declared, checked, and recorded.** A `#power-unit:` directive is
+mandatory and drawn from a closed set (`W`, `mW`, `kW`); an absent, repeated,
+or unrecognized declaration REFUSES. A die table in milliwatts is ordinary, and
+inferring watts from a column header is a silent factor-of-1000 error. The
+declared unit and the exact applied factor are both recorded in the receipt, so
+the conversion is auditable rather than invisible. Half widths and the declared
+total convert with the same factor as the values they bound.
+
+**Refusals carry the physical line AND the data-row ordinal.** The catalog
+reader reports a record ordinal with the header excluded; a human editing a
+spreadsheet export needs the line. Directive, comment and blank lines all
+advance the line counter, and a duplicate component names the line of the
+FIRST occurrence so the fix is obvious.
+
+**The parser resolves nothing to geometry.** It produces names and watts.
+Binding a name to a vertex set belongs to the scenario layer that owns
+persistent entity identity; a parser that resolved names would need a mesh.
+
+**The parser does not audit the total.** A declared total is carried through
+verbatim, even when it disagrees with its rows, because `PowerMap` already owns
+the balance refusal and a second implementation would drift from it. A
+malformed or negative total IS a parse fault; a disagreeing one is not.
+
+The tabular reading itself reuses `catalog::Schema`, so column typing, ranges,
+budgets and quoting are the crate's existing hardened path rather than a second
+CSV parser.
+
+Determinism: parsing is a pure function of the input bytes. The receipt binds
+`fnv1a64` of the exact source, so a single changed digit is a different source
+even when the parsed values are unchanged.
+
+No-claim boundaries:
+
+- Ingesting a file does not validate its contents. A parsed power table is a
+  caller declaration with quarantine provenance, exactly like the mesh import
+  path: it says the bytes were well-formed and the declared unit was applied,
+  never that the watts are real.
+- A declared unit is a claim by the file's author. The module checks that the
+  claim is expressible and applies it exactly; it cannot detect a table that
+  declares `W` and contains milliwatt numbers.
+- Admitting rows makes no statement about whether they balance, cover the
+  design, or bind to anything. The balance refusal is `PowerMap`'s, and the
+  name-to-region resolution is the scenario layer's.

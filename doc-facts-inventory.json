@@ -529,6 +529,7 @@
     "crates/fs-img/tests/conformance.rs",
     "crates/fs-io/tests/association.rs",
     "crates/fs-io/tests/conformance.rs",
+    "crates/fs-io/tests/power_table.rs",
     "crates/fs-io/tests/quarantine_extended.rs",
     "crates/fs-io/tests/selection.rs",
     "crates/fs-io/tests/step.rs",
