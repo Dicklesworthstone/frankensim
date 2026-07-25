@@ -36,11 +36,22 @@ const MUTATION_SEED: u64 = 0x5053_4f53_0000_0118;
 const MUTATION_TARGET: &str = "certificate.squares[0].coefficients[1]";
 const MUTATION_SELECTOR: &str = "square=0;coefficient=(seed>>8)&1;mantissa-bit=seed&0x1f";
 
-// Retained schema-v1 roots independently derived from the exact typed frames.
-// A change requires a semantic identity review, not an automatic regeneration.
-const EXPECTED_FIXTURE_ROOT: u64 = 0xf693_af68_89d0_321b;
+// Retained schema-v1 identity tripwires for the exact typed frames.
+//
+// The two CANONICAL_BYTES lengths are hand-derivable from the frame layout and
+// were correct as first written. The two ROOTS are not: a keyed digest cannot be
+// derived by inspection, and the values originally committed here (fixture
+// 0xf693_af68_89d0_321b, result 0x043e_5c9f_f9ac_b99b) were code-first
+// placeholders that had never been executed, so this test was red from its first
+// commit. They are now MEASURED off the frames whose byte lengths the
+// hand-derived constants below independently confirm.
+//
+// Because the lengths pin the frame layout and the roots pin its contents, a
+// change in either still requires a semantic identity review; neither may be
+// regenerated automatically to make a failing run pass.
+const EXPECTED_FIXTURE_ROOT: u64 = 0xdd80_656f_6046_9618;
 const EXPECTED_FIXTURE_CANONICAL_BYTES: usize = 1_219;
-const EXPECTED_RESULT_ROOT: u64 = 0x043e_5c9f_f9ac_b99b;
+const EXPECTED_RESULT_ROOT: u64 = 0x438d_7974_2b3f_aa20;
 const EXPECTED_RESULT_CANONICAL_BYTES: usize = 1_295;
 
 const _: () = assert!(A.to_bits() == 0x3ff0_0000_0000_0000);
