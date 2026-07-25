@@ -434,23 +434,84 @@ fn retained_index_paths_from_text(text: &str) -> Result<Vec<IndexedPath>, String
     Ok(rows)
 }
 
-fn indexed_paths(root: &Path) -> Result<Vec<IndexedPath>, String> {
-    match git_index_paths(root) {
-        Ok(rows) => Ok(rows),
-        Err(git_error) if !root.join(".git").exists() => {
-            let text = std::fs::read_to_string(root.join(MANIFEST_PATH)).map_err(|error| {
-                format!(
-                    "{git_error}; cannot read {MANIFEST_PATH} as the archive inventory fallback: {error}"
-                )
-            })?;
-            retained_index_paths_from_text(&text).map_err(|fallback_error| {
-                format!(
-                    "{git_error}; {MANIFEST_PATH} archive inventory fallback failed: {fallback_error}"
-                )
-            })
-        }
-        Err(error) => Err(error),
+/// Paths present in the `HEAD` commit.
+///
+/// `None` means the question does not apply — an unborn branch, or a tree
+/// without Git at all — and callers must then fall back to the unfiltered
+/// index rather than silently producing an empty inventory.
+fn head_paths(root: &Path) -> Option<BTreeSet<String>> {
+    let output = super::constellation_cleanliness::sanitized_git_command(
+        root,
+        &["ls-tree", "-r", "--name-only", "-z", "HEAD"],
+    )
+    .output()
+    .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(
+        text.split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Restrict index rows to what the pending commit will actually contain.
+///
+/// The generators historically enumerated the raw Git index. That was
+/// correct-by-accident under `git add` + bare `git commit`, and it is wrong
+/// under this repository's mandated `git commit --only <paths>` form, which
+/// bypasses the index and commits `HEAD` plus the worktree state of the named
+/// paths. In a shared tree the index routinely carries several other agents'
+/// staged files, so an index-derived manifest asserts that files which are not
+/// in the commit are part of the source closure — a confidently wrong
+/// provenance artifact, which is worse than a stale one.
+///
+/// A row therefore survives when it is already in `HEAD` (it is genuinely
+/// tracked) or when the caller explicitly declared it as part of the commit
+/// being built. Everything else is another lane's staged work and is ignored.
+fn restrict_to_commit(
+    rows: Vec<IndexedPath>,
+    head: Option<&BTreeSet<String>>,
+    scope: &BTreeSet<String>,
+) -> Vec<IndexedPath> {
+    let Some(head) = head else {
+        return rows;
+    };
+    rows.into_iter()
+        .filter(|row| head.contains(&row.path) || scope.contains(&row.path))
+        .collect()
+}
+
+fn indexed_paths(root: &Path) -> Result<Vec<IndexedPath>, String> {
+    indexed_paths_scoped(root, &BTreeSet::new())
+}
+
+fn indexed_paths_scoped(
+    root: &Path,
+    scope: &BTreeSet<String>,
+) -> Result<Vec<IndexedPath>, String> {
+    let head = head_paths(root);
+    match git_index_paths(root) {
+        Ok(rows) => Ok(restrict_to_commit(rows, head.as_ref(), scope)),
+        Err(error) => indexed_paths_fallback(root, error),
+    }
+}
+
+/// Source-snapshot mode: an extracted tree without `.git` validates against the
+/// retained manifest's own path inventory instead of the index. Unchanged.
+fn indexed_paths_fallback(root: &Path, git_error: String) -> Result<Vec<IndexedPath>, String> {
+    if root.join(".git").exists() {
+        return Err(git_error);
+    }
+    let text = std::fs::read_to_string(root.join(MANIFEST_PATH)).map_err(|error| {
+        format!("{git_error}; cannot read {MANIFEST_PATH} as the archive inventory fallback: {error}")
+    })?;
+    retained_index_paths_from_text(&text).map_err(|fallback_error| {
+        format!("{git_error}; {MANIFEST_PATH} archive inventory fallback failed: {fallback_error}")
+    })
 }
 
 fn capture_worktree_file(root: &Path, indexed: &IndexedPath) -> Result<SourceFile, String> {
@@ -721,9 +782,88 @@ fn capture_indexed_source(root: &Path, indexed: &[IndexedPath]) -> Result<Vec<So
     captured
 }
 
+/// Paths whose worktree or index state differs from `HEAD`.
+///
+/// Everything else has worktree content byte-identical to `HEAD`, so the fast
+/// worktree read is already the committed content and needs no special care.
+fn dirty_paths(root: &Path) -> BTreeSet<String> {
+    let mut dirty = BTreeSet::new();
+    for args in [
+        ["diff", "--name-only", "-z", "HEAD"],
+        ["diff", "--name-only", "-z", "--cached"],
+    ] {
+        if let Ok(output) = super::constellation_cleanliness::sanitized_git_command(root, &args)
+            .output()
+            && output.status.success()
+            && let Ok(text) = String::from_utf8(output.stdout)
+        {
+            dirty.extend(
+                text.split('\0')
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    dirty
+}
+
+/// The `HEAD` content of one tracked path.
+fn head_blob(root: &Path, path: &str) -> Result<Vec<u8>, String> {
+    let spec = format!("HEAD:{path}");
+    let output = super::constellation_cleanliness::sanitized_git_command(
+        root,
+        &["show", "--textconv", spec.as_str()],
+    )
+    .output()
+    .map_err(|error| format!("cannot read HEAD content for {path}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git show failed for HEAD:{path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
 fn capture_source_files_once(root: &Path) -> Result<Vec<SourceFile>, String> {
-    let indexed = indexed_paths(root)?;
-    capture_indexed_source(root, &indexed)
+    capture_source_files_scoped(root, &BTreeSet::new())
+}
+
+/// Capture the source closure of the commit being described.
+///
+/// Paths the caller declared in `scope` are read from the worktree, because
+/// those are the changes about to be committed. Every other path is read from
+/// `HEAD`, so another lane's uncommitted edit to a shared tracked file cannot
+/// leak into this manifest. Only paths that actually differ from `HEAD` pay the
+/// extra read; the rest are already byte-identical.
+fn capture_source_files_scoped(
+    root: &Path,
+    scope: &BTreeSet<String>,
+) -> Result<Vec<SourceFile>, String> {
+    let indexed = indexed_paths_scoped(root, scope)?;
+    let dirty = if root.join(".git").exists() {
+        dirty_paths(root)
+    } else {
+        BTreeSet::new()
+    };
+    let mut files = Vec::with_capacity(indexed.len());
+    for row in &indexed {
+        if dirty.contains(&row.path) && !scope.contains(&row.path) {
+            let bytes = head_blob(root, &row.path)?;
+            let byte_count = u64::try_from(bytes.len())
+                .map_err(|_| format!("byte count does not fit u64 for {}", row.path))?;
+            files.push(SourceFile {
+                path: row.path.clone(),
+                git_mode: row.git_mode.clone(),
+                bytes: byte_count,
+                content_blake3: blake3(&bytes),
+                content_sha1: sha1(&bytes)?,
+            });
+        } else {
+            files.push(capture_worktree_file(root, row)?);
+        }
+    }
+    Ok(files)
 }
 
 fn capture_source_files(root: &Path) -> Result<Vec<SourceFile>, String> {
