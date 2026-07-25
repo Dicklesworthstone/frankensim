@@ -1,11 +1,11 @@
 # FrankenSim program metrics dashboard
 
 schema: 1
-metrics: 19
-measured: 8
-no_data: 11
+metrics: 22
+measured: 9
+no_data: 13
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 9def37aadb7283f3b8b5b788a0c030fc6b7ef8bb6155ea55a8c6f46320906404
+source_identity: 5b84556213c3ce7c7504ea333c71ef453a6a9912e16322d1253ee98f91854f40
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -20,7 +20,10 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | Empirical coverage of predicted uncertainty intervals | NO-DATA (needs f85xj.7.2) | no prior generation | higher-is-better | - |
 | Share of user-facing outputs carrying a complete error budget | NO-DATA (needs f85xj.8.7) | no prior generation | higher-is-better | - |
 | Rate at which adversarial challenges were wrongly accepted | NO-DATA (needs f85xj.7.5) | no prior generation | lower-is-better | - |
-| Supplier CAD import: clean, repaired, and refused rates | NO-DATA (needs f85xj.11.6) | no prior generation | higher-is-better | - |
+| Human-reviewed supplier CAD files admitted cleanly | NO-DATA (needs f85xj.11.6) | no prior generation | higher-is-better | - |
+| Human-locked supplier import annotations that disagree with current observations | 0 | no prior generation | lower-is-better | fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json} |
+| Human-reviewed supplier CAD files refused by the standing import policy | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
+| Human-reviewed supplier CAD files admitted after repair | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
 | Datasets reproduced by an independent team or implementation lineage | 0 of 28 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
 | Correctness of certify-or-escalate decisions by learned components | NO-DATA (needs f85xj.14.2) | no prior generation | higher-is-better | - |
 | Time to explain a surprising result through ledger lineage | NO-DATA | no prior generation | lower-is-better | - |
@@ -52,7 +55,10 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 - `empirical-interval-coverage` — coverage measured on the calibration population says nothing about coverage under the distribution shift a real design study introduces
 - `error-budget-completeness` — a complete budget means every term the model KNOWS about is present; it cannot count terms nobody has identified yet
 - `false-acceptance-rate` — a false-acceptance rate only covers the failure modes someone thought to write a challenge for; it is silent about unimagined ones
-- `import-admission-rate` — import success measures admission, not fidelity: a file that imports cleanly can still carry geometry that means something different downstream
+- `import-admission-rate` — this rate covers only the retained, human-reviewed population; clean admission is not geometry fidelity, and a file can import cleanly while meaning something different downstream
+- `import-annotation-regressions` — this is an absolute locked-annotation mismatch count; zero while reviewed is zero means no reviewed regression exposure, not a validated importer
+- `import-refusal-rate` — refusal depends on both corpus difficulty and policy strictness; lowering it by weakening quarantine would not be an improvement
+- `import-repair-rate` — repair is neither inherently good nor bad: it records that the standing structural policy changed an input before promotion, not that the repaired geometry is equivalent to the supplier's intent
 - `independent-reproduction` — this counts datasets DECLARING the independent-reproduction axis; the declaration is a registry fact, and the current value is a genuine zero rather than an unmeasured one
 - `surrogate-escalation-correctness` — escalation correctness is measured against cases where the truth is known, which are systematically the easier ones
 - `time-to-explain` — even when live this measures the tool's explain path, not whether the explanation actually convinced the engineer reading it
@@ -74,7 +80,9 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 - `empirical-interval-coverage` — the empirical coverage machinery is not live; nominal coverage is never extrapolated into an empirical claim (tracked: f85xj.7.2)
 - `error-budget-completeness` — no audit enumerates user-facing outputs against their budget terms (tracked: f85xj.8.7)
 - `false-acceptance-rate` — zero registered adversarial challenges have been executed, so the rate's denominator is empty; a rate over zero trials is unrepresentable, not zero (tracked: f85xj.7.5)
-- `import-admission-rate` — no retained real supplier CAD corpus exists, and rates measured on fixtures we authored would be self-graded (tracked: f85xj.11.6)
+- `import-admission-rate` — no supplier import annotation is human-locked yet; proposed outcomes are not a rate denominator (tracked: f85xj.11.6)
+- `import-refusal-rate` — no supplier import annotation is human-locked yet; proposed outcomes are not a rate denominator (tracked: f85xj.11.6)
+- `import-repair-rate` — no supplier import annotation is human-locked yet; proposed outcomes are not a rate denominator (tracked: f85xj.11.6)
 - `surrogate-escalation-correctness` — no decisive-metrics instrumentation exists for learned components (tracked: f85xj.14.2)
 - `time-to-explain` — the ledger exposes no explain-query session instrumentation, so no timing surface exists to read
 - `user-study-measurements` — no user-study measurement exists; the nearest current proxies are quickstart timings and the external-reproduction friction log, neither of which is a user study (tracked: f85xj.7.6)
@@ -88,4 +96,4 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
 - open issue counts — the beads store churns on every unrelated issue edit, which would make this checked artifact stale for every agent in the repository
 
-identity: 34e416f8795b5d53bd283e59e6aed8784890f26c4571b716184b940c4de381e4
+identity: 9b6b65486822c4ea7c214305ed9872e58928579adc7731202f7e67f3187b077c

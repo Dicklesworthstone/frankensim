@@ -132,6 +132,13 @@ pub enum DashboardError {
         /// The offending value.
         value: String,
     },
+    /// A typed source carried counts that cannot describe one population.
+    InconsistentSourceCounts {
+        /// Stable machine name of the source.
+        source: &'static str,
+        /// The violated relationship.
+        detail: &'static str,
+    },
     /// The projection was handed a corpus that is not the seeded public one.
     UnseededCorpus,
 }
@@ -167,6 +174,10 @@ impl fmt::Display for DashboardError {
             Self::UninterpretableSource { source, value } => write!(
                 formatter,
                 "source registry `{source}` carries uninterpretable value `{value}`"
+            ),
+            Self::InconsistentSourceCounts { source, detail } => write!(
+                formatter,
+                "source registry `{source}` carries inconsistent counts: {detail}"
             ),
             Self::UnseededCorpus => write!(
                 formatter,
@@ -1329,6 +1340,108 @@ fn no_data(reason: &str, unblocked_by: Option<&str>) -> MetricCell {
     }
 }
 
+/// Validated plain-data projection of the retained supplier import scorecard.
+///
+/// This type deliberately owns counts rather than an `fs-io` value. The
+/// dashboard lives in the sibling-free `fs-govern` dependency cone; `xtask`
+/// verifies the tracked scorecard summary and manifest identity before
+/// constructing this source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportScorecardSource {
+    total: usize,
+    reviewed: usize,
+    clean: usize,
+    repaired: usize,
+    refused: usize,
+    annotation_mismatches: usize,
+}
+
+impl ImportScorecardSource {
+    /// Validate one authority-aware scorecard projection.
+    ///
+    /// # Errors
+    ///
+    /// [`DashboardError::InconsistentSourceCounts`] when reviewed rows exceed
+    /// the retained population, the three reviewed outcomes do not partition
+    /// the reviewed rows, or mismatches exceed the reviewed population.
+    pub fn try_new(
+        total: usize,
+        reviewed: usize,
+        clean: usize,
+        repaired: usize,
+        refused: usize,
+        annotation_mismatches: usize,
+    ) -> Result<Self, DashboardError> {
+        const SOURCE: &str = "supplier-import-scorecard";
+        if reviewed > total {
+            return Err(DashboardError::InconsistentSourceCounts {
+                source: SOURCE,
+                detail: "reviewed rows exceed the retained population",
+            });
+        }
+        if clean
+            .checked_add(repaired)
+            .and_then(|subtotal| subtotal.checked_add(refused))
+            != Some(reviewed)
+        {
+            return Err(DashboardError::InconsistentSourceCounts {
+                source: SOURCE,
+                detail: "clean, repaired, and refused rows do not partition reviewed rows",
+            });
+        }
+        if annotation_mismatches > reviewed {
+            return Err(DashboardError::InconsistentSourceCounts {
+                source: SOURCE,
+                detail: "annotation mismatches exceed reviewed rows",
+            });
+        }
+        Ok(Self {
+            total,
+            reviewed,
+            clean,
+            repaired,
+            refused,
+            annotation_mismatches,
+        })
+    }
+
+    /// Total retained files, including annotations still awaiting review.
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.total
+    }
+
+    /// Files whose expected outcome has human-locked review authority.
+    #[must_use]
+    pub const fn reviewed(self) -> usize {
+        self.reviewed
+    }
+
+    /// Human-reviewed files observed to import cleanly.
+    #[must_use]
+    pub const fn clean(self) -> usize {
+        self.clean
+    }
+
+    /// Human-reviewed files observed to import after repair.
+    #[must_use]
+    pub const fn repaired(self) -> usize {
+        self.repaired
+    }
+
+    /// Human-reviewed files observed to be refused.
+    #[must_use]
+    pub const fn refused(self) -> usize {
+        self.refused
+    }
+
+    /// Observations disagreeing with a human-locked expected outcome.
+    #[must_use]
+    pub const fn annotation_mismatches(self) -> usize {
+        self.annotation_mismatches
+    }
+}
+
 /// Registry values the FrankenSim projection reads.
 ///
 /// Deliberately a typed struct rather than paths: the projection cannot reach
@@ -1361,6 +1474,18 @@ pub struct ProgramSources {
     pub capabilities_verified: usize,
     /// Capabilities at L3 or above.
     pub capabilities_integrated: usize,
+    /// Retained supplier import files, including proposed annotations.
+    pub import_total: usize,
+    /// Supplier import files with human-locked annotation authority.
+    pub import_reviewed: usize,
+    /// Human-reviewed supplier files observed to import cleanly.
+    pub import_clean: usize,
+    /// Human-reviewed supplier files observed to import after repair.
+    pub import_repaired: usize,
+    /// Human-reviewed supplier files observed to be refused.
+    pub import_refused: usize,
+    /// Observations disagreeing with a human-locked expected outcome.
+    pub import_annotation_mismatches: usize,
 }
 
 impl ProgramSources {
@@ -1413,6 +1538,7 @@ impl ProgramSources {
         corpus: &CorpusRegistry,
         adversarial: &AdversarialRegistry,
         scorecard: &VvScorecard,
+        import_scorecard: ImportScorecardSource,
         capability_levels: &BTreeMap<String, String>,
     ) -> Result<Self, DashboardError> {
         let (capabilities_verified, capabilities_integrated) =
@@ -1450,6 +1576,12 @@ impl ProgramSources {
             capabilities: capability_levels.len(),
             capabilities_verified,
             capabilities_integrated,
+            import_total: import_scorecard.total(),
+            import_reviewed: import_scorecard.reviewed(),
+            import_clean: import_scorecard.clean(),
+            import_repaired: import_scorecard.repaired(),
+            import_refused: import_scorecard.refused(),
+            import_annotation_mismatches: import_scorecard.annotation_mismatches(),
         })
     }
 }
@@ -1458,6 +1590,8 @@ const CORPUS_SOURCE: &str = "fs_vvreg::corpus seeded validation registry";
 const SCORECARD_SOURCE: &str = "vv-scorecard.json (fs_vvreg::scorecard)";
 const ADVERSARIAL_SOURCE: &str = "fs_vvreg::adversarial registry";
 const MATURITY_SOURCE: &str = "capability-maturity.json";
+const IMPORT_SOURCE: &str =
+    "fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json}";
 
 /// Project the FrankenSim program metric set from registry values.
 ///
@@ -1480,6 +1614,13 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
             source: "vv-corpus",
         });
     }
+    let import_rate_sources: &[&str] = if sources.import_reviewed == 0 {
+        &[]
+    } else {
+        &[IMPORT_SOURCE]
+    };
+    let import_no_data = "no supplier import annotation is human-locked yet; proposed outcomes are not a rate \
+         denominator";
 
     let rows = vec![
         // ---- Outcome ----
@@ -1554,17 +1695,62 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
         )?,
         MetricRow::try_new(
             "import-admission-rate",
-            "Supplier CAD import: clean, repaired, and refused rates",
+            "Human-reviewed supplier CAD files admitted cleanly",
             MetricFamily::Outcome,
             MetricDirection::HigherIsBetter,
-            no_data(
-                "no retained real supplier CAD corpus exists, and rates measured on fixtures we \
-                 authored would be self-graded",
+            ratio_or_no_data(
+                sources.import_clean,
+                sources.import_reviewed,
+                import_no_data,
                 Some("f85xj.11.6"),
             ),
-            &[],
-            "import success measures admission, not fidelity: a file that imports cleanly can \
-             still carry geometry that means something different downstream",
+            import_rate_sources,
+            "this rate covers only the retained, human-reviewed population; clean admission is \
+             not geometry fidelity, and a file can import cleanly while meaning something \
+             different downstream",
+        )?,
+        MetricRow::try_new(
+            "import-repair-rate",
+            "Human-reviewed supplier CAD files admitted after repair",
+            MetricFamily::Outcome,
+            MetricDirection::Neutral,
+            ratio_or_no_data(
+                sources.import_repaired,
+                sources.import_reviewed,
+                import_no_data,
+                Some("f85xj.11.6"),
+            ),
+            import_rate_sources,
+            "repair is neither inherently good nor bad: it records that the standing structural \
+             policy changed an input before promotion, not that the repaired geometry is \
+             equivalent to the supplier's intent",
+        )?,
+        MetricRow::try_new(
+            "import-refusal-rate",
+            "Human-reviewed supplier CAD files refused by the standing import policy",
+            MetricFamily::Outcome,
+            MetricDirection::Neutral,
+            ratio_or_no_data(
+                sources.import_refused,
+                sources.import_reviewed,
+                import_no_data,
+                Some("f85xj.11.6"),
+            ),
+            import_rate_sources,
+            "refusal depends on both corpus difficulty and policy strictness; lowering it by \
+             weakening quarantine would not be an improvement",
+        )?,
+        MetricRow::try_new(
+            "import-annotation-regressions",
+            "Human-locked supplier import annotations that disagree with current observations",
+            MetricFamily::Outcome,
+            MetricDirection::LowerIsBetter,
+            MetricCell::Measured(MetricObservation::count(
+                u64::try_from(sources.import_annotation_mismatches).unwrap_or(u64::MAX),
+            )),
+            &[IMPORT_SOURCE],
+            "this is an absolute locked-annotation mismatch count; zero while reviewed is zero \
+             means no reviewed regression exposure, not a validated importer",
         )?,
         MetricRow::try_new(
             "surrogate-escalation-correctness",

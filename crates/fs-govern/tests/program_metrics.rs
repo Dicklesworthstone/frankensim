@@ -518,7 +518,7 @@ fn honesty_and_exclusions_are_always_rendered() {
 /// the point — they must be visible, not hidden behind `NO-DATA`.
 #[test]
 fn real_registries_project_the_program_metric_set() {
-    use fs_govern::program_metrics::{ProgramSources, frankensim_rows};
+    use fs_govern::program_metrics::{ImportScorecardSource, ProgramSources, frankensim_rows};
     use fs_vvreg::adversarial::adversarial_registry;
     use fs_vvreg::corpus::corpus;
     use fs_vvreg::scorecard::build_scorecard;
@@ -529,9 +529,16 @@ fn real_registries_project_the_program_metric_set() {
         .iter()
         .map(|(id, level)| ((*id).to_string(), (*level).to_string()))
         .collect();
-    let sources =
-        ProgramSources::from_registries(corpus(), adversarial_registry(), &scorecard, &levels)
-            .expect("the real registries project cleanly");
+    let import_scorecard = ImportScorecardSource::try_new(21, 0, 0, 0, 0, 0)
+        .expect("the retained unreviewed import scorecard is internally consistent");
+    let sources = ProgramSources::from_registries(
+        corpus(),
+        adversarial_registry(),
+        &scorecard,
+        import_scorecard,
+        &levels,
+    )
+    .expect("the real registries project cleanly");
 
     assert!(sources.corpus_seeded, "the public corpus must be seeded");
     assert_eq!(sources.corpus_datasets, scorecard_dataset_total());
@@ -549,9 +556,73 @@ fn real_registries_project_the_program_metric_set() {
     assert_eq!(sources.capabilities_integrated, 1, "only L3 is >= L3");
 
     let rows = frankensim_rows(sources).expect("the metric set projects");
+    let metric_cell = |id: &str| {
+        rows.iter()
+            .find(|row| row.id() == id)
+            .unwrap_or_else(|| panic!("metric `{id}` exists"))
+            .cell()
+    };
+    assert!(matches!(
+        metric_cell("import-admission-rate"),
+        MetricCell::NoData { .. }
+    ));
+    assert!(matches!(
+        metric_cell("import-repair-rate"),
+        MetricCell::NoData { .. }
+    ));
+    assert!(matches!(
+        metric_cell("import-refusal-rate"),
+        MetricCell::NoData { .. }
+    ));
+    assert_eq!(metric_cell("import-annotation-regressions"), &count(0));
     let dashboard = build_dashboard(&rows, &MetricHistory::empty()).expect("dashboard builds");
     assert!(dashboard.measured_count() >= 5);
     assert!(dashboard.no_data_count() > 0);
+
+    let reviewed = ImportScorecardSource::try_new(21, 4, 1, 2, 1, 1)
+        .expect("the reviewed source is internally consistent");
+    let reviewed_sources = ProgramSources::from_registries(
+        corpus(),
+        adversarial_registry(),
+        &scorecard,
+        reviewed,
+        &levels,
+    )
+    .expect("the reviewed source projects");
+    let reviewed_rows = frankensim_rows(reviewed_sources).expect("reviewed rows project");
+    let reviewed_cell = |id: &str| {
+        reviewed_rows
+            .iter()
+            .find(|row| row.id() == id)
+            .unwrap_or_else(|| panic!("metric `{id}` exists"))
+            .cell()
+    };
+    assert_eq!(reviewed_cell("import-admission-rate"), &ratio(1, 4));
+    assert_eq!(reviewed_cell("import-repair-rate"), &ratio(2, 4));
+    assert_eq!(reviewed_cell("import-refusal-rate"), &ratio(1, 4));
+    assert_eq!(reviewed_cell("import-annotation-regressions"), &count(1));
+
+    assert_eq!(
+        ImportScorecardSource::try_new(21, 22, 7, 7, 8, 0),
+        Err(DashboardError::InconsistentSourceCounts {
+            source: "supplier-import-scorecard",
+            detail: "reviewed rows exceed the retained population",
+        })
+    );
+    assert_eq!(
+        ImportScorecardSource::try_new(21, 4, 1, 1, 1, 0),
+        Err(DashboardError::InconsistentSourceCounts {
+            source: "supplier-import-scorecard",
+            detail: "clean, repaired, and refused rows do not partition reviewed rows",
+        })
+    );
+    assert_eq!(
+        ImportScorecardSource::try_new(21, 4, 1, 2, 1, 5),
+        Err(DashboardError::InconsistentSourceCounts {
+            source: "supplier-import-scorecard",
+            detail: "annotation mismatches exceed reviewed rows",
+        })
+    );
 
     // A caller-built corpus may never masquerade as the public program state.
     let mut synthetic = sources;

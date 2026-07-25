@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use fs_govern::program_metrics::{
-    HistoryGeneration, MetricCell, MetricHistory, MetricObservation, ProgramDashboard,
-    ProgramSources, build_dashboard, frankensim_rows,
+    HistoryGeneration, ImportScorecardSource, MetricCell, MetricHistory, MetricObservation,
+    ProgramDashboard, ProgramSources, build_dashboard, frankensim_rows,
 };
 use fs_vvreg::ContentHash;
 use fs_vvreg::adversarial::adversarial_registry;
@@ -32,6 +32,13 @@ const MARKDOWN_PATH: &str = "program-metrics.md";
 const JSON_PATH: &str = "program-metrics.json";
 const HISTORY_PATH: &str = "program-metrics-history.jsonl";
 const MAX_HISTORY_BYTES: u64 = 8 * 1024 * 1024;
+const IMPORT_SUMMARY_PATH: &str = "data/cad-import-corpus/scorecard-summary-v1.json";
+const IMPORT_MANIFEST_PATH: &str = "data/cad-import-corpus/corpus-v1.tsv";
+const IMPORT_SUMMARY_SEMANTICS: &str = "fs-io-supplier-corpus-summary-v1";
+const IMPORT_MANIFEST_IDENTITY_DOMAIN: &str = "fs-io supplier corpus manifest bytes v1";
+const IMPORT_AUTHORITY: &str = "human-locked-only-dashboard-denominator";
+const MAX_IMPORT_SUMMARY_BYTES: u64 = 64 * 1024;
+const MAX_IMPORT_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
 fn obj(value: &JsonValue) -> Option<&BTreeMap<String, JsonValue>> {
     match value {
@@ -64,6 +71,203 @@ fn content_hash(hex: &str) -> Option<ContentHash> {
         bytes[index] = u8::from_str_radix(pair, 16).ok()?;
     }
     Some(ContentHash(bytes))
+}
+
+fn object_field<'a>(
+    map: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<&'a BTreeMap<String, JsonValue>, String> {
+    map.get(key)
+        .and_then(obj)
+        .ok_or_else(|| format!("{context} has no `{key}` object"))
+}
+
+fn text_field<'a>(
+    map: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<&'a str, String> {
+    map.get(key)
+        .and_then(text)
+        .ok_or_else(|| format!("{context} has no `{key}` string"))
+}
+
+fn count_field(
+    map: &BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<usize, String> {
+    let value = map
+        .get(key)
+        .and_then(number)
+        .ok_or_else(|| format!("{context} has no non-negative integer `{key}`"))?;
+    usize::try_from(value).map_err(|_| format!("{context} `{key}` does not fit usize"))
+}
+
+fn is_canonical_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn checked_sum(parts: &[usize], context: &str) -> Result<usize, String> {
+    parts.iter().try_fold(0_usize, |total, part| {
+        total
+            .checked_add(*part)
+            .ok_or_else(|| format!("{context} count sum overflows usize"))
+    })
+}
+
+fn retained_manifest_population(manifest_bytes: &[u8]) -> Result<usize, String> {
+    let manifest = std::str::from_utf8(manifest_bytes)
+        .map_err(|error| format!("{IMPORT_MANIFEST_PATH} is not UTF-8: {error}"))?;
+    let records = manifest.lines().filter(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    });
+    records
+        .count()
+        .checked_sub(1)
+        .ok_or_else(|| format!("{IMPORT_MANIFEST_PATH} has no non-comment header"))
+}
+
+/// Parse and cross-check the sibling-free supplier-scorecard projection.
+///
+/// The summary is not trusted merely because it is tracked: its manifest
+/// identity is recomputed from the exact live TSV bytes, and every population
+/// relationship is revalidated before the counts reach `fs-govern`.
+fn parse_import_scorecard_summary(
+    source: &str,
+    manifest_bytes: &[u8],
+) -> Result<ImportScorecardSource, String> {
+    let parsed = JsonParser::new(source)
+        .finish()
+        .map_err(|error| format!("{IMPORT_SUMMARY_PATH} is not valid JSON: {error}"))?;
+    let map = obj(&parsed).ok_or_else(|| format!("{IMPORT_SUMMARY_PATH} is not a JSON object"))?;
+    if map.get("schema").and_then(number) != Some(1) {
+        return Err(format!("{IMPORT_SUMMARY_PATH} has unsupported schema"));
+    }
+    for (field, expected) in [
+        ("semantics", IMPORT_SUMMARY_SEMANTICS),
+        ("manifest_identity_domain", IMPORT_MANIFEST_IDENTITY_DOMAIN),
+        ("authority", IMPORT_AUTHORITY),
+    ] {
+        let observed = text_field(map, field, IMPORT_SUMMARY_PATH)?;
+        if observed != expected {
+            return Err(format!(
+                "{IMPORT_SUMMARY_PATH} `{field}` is `{observed}`, expected `{expected}`"
+            ));
+        }
+    }
+
+    let manifest_identity = text_field(map, "manifest_identity", IMPORT_SUMMARY_PATH)?;
+    if !is_canonical_hash(manifest_identity) {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} `manifest_identity` is not 32-byte lowercase hexadecimal"
+        ));
+    }
+    let scorecard_identity = text_field(map, "scorecard_identity", IMPORT_SUMMARY_PATH)?;
+    if !is_canonical_hash(scorecard_identity) {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} `scorecard_identity` is not 32-byte lowercase hexadecimal"
+        ));
+    }
+    let observed_manifest_identity =
+        fs_blake3::hash_domain(IMPORT_MANIFEST_IDENTITY_DOMAIN, manifest_bytes).to_string();
+    if manifest_identity != observed_manifest_identity {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} is stale: manifest identity {manifest_identity} does not match \
+             live {IMPORT_MANIFEST_PATH} identity {observed_manifest_identity}"
+        ));
+    }
+
+    let population = object_field(map, "population", IMPORT_SUMMARY_PATH)?;
+    let reviewed = object_field(map, "reviewed", IMPORT_SUMMARY_PATH)?;
+    let population_total = count_field(population, "total", "population")?;
+    let retained_population = retained_manifest_population(manifest_bytes)?;
+    if population_total != retained_population {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} population total {population_total} does not match the \
+             {retained_population} retained rows in {IMPORT_MANIFEST_PATH}"
+        ));
+    }
+    let population_clean = count_field(population, "clean", "population")?;
+    let population_repaired = count_field(population, "repaired", "population")?;
+    let population_refused = count_field(population, "refused", "population")?;
+    let population_unreviewed = count_field(population, "unreviewed", "population")?;
+    let population_mismatches = count_field(population, "annotation_mismatch", "population")?;
+    let proposal_mismatches = count_field(population, "proposal_mismatch", "population")?;
+    if checked_sum(
+        &[population_clean, population_repaired, population_refused],
+        "population outcomes",
+    )? != population_total
+    {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} population outcomes do not partition total"
+        ));
+    }
+
+    let reviewed_total = count_field(reviewed, "total", "reviewed")?;
+    let reviewed_clean = count_field(reviewed, "clean", "reviewed")?;
+    let reviewed_repaired = count_field(reviewed, "repaired", "reviewed")?;
+    let reviewed_refused = count_field(reviewed, "refused", "reviewed")?;
+    let reviewed_mismatches = count_field(reviewed, "annotation_mismatch", "reviewed")?;
+    if reviewed_total
+        .checked_add(population_unreviewed)
+        .ok_or_else(|| format!("{IMPORT_SUMMARY_PATH} review counts overflow usize"))?
+        != population_total
+    {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} reviewed and unreviewed rows do not partition total"
+        ));
+    }
+    if population_mismatches != reviewed_mismatches {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} population and reviewed annotation-mismatch counts disagree"
+        ));
+    }
+    if proposal_mismatches > population_unreviewed {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} proposal mismatches exceed unreviewed rows"
+        ));
+    }
+
+    ImportScorecardSource::try_new(
+        population_total,
+        reviewed_total,
+        reviewed_clean,
+        reviewed_repaired,
+        reviewed_refused,
+        reviewed_mismatches,
+    )
+    .map_err(|error| format!("{IMPORT_SUMMARY_PATH} carries invalid reviewed counts: {error}"))
+}
+
+fn read_import_scorecard(root: &Path) -> Result<ImportScorecardSource, String> {
+    let summary_path = root.join(IMPORT_SUMMARY_PATH);
+    let summary_metadata = std::fs::metadata(&summary_path)
+        .map_err(|error| format!("cannot stat {IMPORT_SUMMARY_PATH}: {error}"))?;
+    if summary_metadata.len() > MAX_IMPORT_SUMMARY_BYTES {
+        return Err(format!(
+            "{IMPORT_SUMMARY_PATH} exceeds the admitted {MAX_IMPORT_SUMMARY_BYTES}-byte bound"
+        ));
+    }
+    let summary = std::fs::read_to_string(&summary_path)
+        .map_err(|error| format!("cannot read {IMPORT_SUMMARY_PATH}: {error}"))?;
+
+    let manifest_path = root.join(IMPORT_MANIFEST_PATH);
+    let manifest_metadata = std::fs::metadata(&manifest_path)
+        .map_err(|error| format!("cannot stat {IMPORT_MANIFEST_PATH}: {error}"))?;
+    if manifest_metadata.len() > MAX_IMPORT_MANIFEST_BYTES {
+        return Err(format!(
+            "{IMPORT_MANIFEST_PATH} exceeds the admitted {MAX_IMPORT_MANIFEST_BYTES}-byte bound"
+        ));
+    }
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|error| format!("cannot read {IMPORT_MANIFEST_PATH}: {error}"))?;
+    parse_import_scorecard_summary(&summary, &manifest_bytes)
 }
 
 /// One recorded metric value. An unrecognized shape is a refusal, never a
@@ -179,9 +383,15 @@ fn dashboard(root: &Path) -> Result<ProgramDashboard, String> {
     let scorecard = build_scorecard(corpus(), adversarial_registry(), &[], &[])
         .map_err(|error| format!("cannot build the V&V scorecard: {error}"))?;
     let levels = maturity::capability_levels(root)?.current;
-    let sources =
-        ProgramSources::from_registries(corpus(), adversarial_registry(), &scorecard, &levels)
-            .map_err(|error| format!("cannot read the program sources: {error}"))?;
+    let import_scorecard = read_import_scorecard(root)?;
+    let sources = ProgramSources::from_registries(
+        corpus(),
+        adversarial_registry(),
+        &scorecard,
+        import_scorecard,
+        &levels,
+    )
+    .map_err(|error| format!("cannot read the program sources: {error}"))?;
     let rows = frankensim_rows(sources)
         .map_err(|error| format!("cannot project the program metrics: {error}"))?;
     let history = read_history(root)?;
@@ -274,6 +484,15 @@ mod tests {
             dir.join("capability-maturity.json"),
         )
         .expect("the real maturity registry is readable");
+        let corpus_dir = dir.join("data/cad-import-corpus");
+        std::fs::create_dir_all(&corpus_dir).expect("corpus artifact directory is creatable");
+        for path in [IMPORT_SUMMARY_PATH, IMPORT_MANIFEST_PATH] {
+            let file_name = std::path::Path::new(path)
+                .file_name()
+                .expect("artifact path has a file name");
+            std::fs::copy(root.join(path), corpus_dir.join(file_name))
+                .expect("the retained import scorecard source is readable");
+        }
         dir
     }
 
@@ -288,6 +507,15 @@ mod tests {
     /// sources, so a reviewer can see what the dashboard actually read.
     #[test]
     fn real_registry_e2e_logs_every_row_and_its_sources() {
+        let import_scorecard =
+            read_import_scorecard(&repo_root()).expect("the import scorecard source validates");
+        assert_eq!(import_scorecard.total(), 21);
+        assert_eq!(import_scorecard.reviewed(), 0);
+        assert_eq!(import_scorecard.clean(), 0);
+        assert_eq!(import_scorecard.repaired(), 0);
+        assert_eq!(import_scorecard.refused(), 0);
+        assert_eq!(import_scorecard.annotation_mismatches(), 0);
+
         let dashboard = dashboard(&repo_root()).expect("the real dashboard builds");
         for entry in dashboard.rows() {
             let metric = entry.metric();
@@ -336,6 +564,83 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The tracked compact projection is not trusted across manifest drift.
+    /// This is a pure negative test: it mutates only an in-memory copy.
+    #[test]
+    fn import_summary_refuses_manifest_identity_drift() {
+        let root = repo_root();
+        let source =
+            std::fs::read_to_string(root.join(IMPORT_SUMMARY_PATH)).expect("summary is readable");
+        let manifest =
+            std::fs::read(root.join(IMPORT_MANIFEST_PATH)).expect("manifest is readable");
+        let identity =
+            fs_blake3::hash_domain(IMPORT_MANIFEST_IDENTITY_DOMAIN, &manifest).to_string();
+        let stale = source.replacen(&identity, &"0".repeat(64), 1);
+        let error = parse_import_scorecard_summary(&stale, &manifest)
+            .expect_err("a stale manifest identity must be refused");
+        assert!(error.contains("does not match live"), "{error}");
+    }
+
+    /// A valid manifest identity cannot bless summary counts that describe a
+    /// different retained population.
+    #[test]
+    fn import_summary_refuses_population_drift() {
+        let root = repo_root();
+        let source =
+            std::fs::read_to_string(root.join(IMPORT_SUMMARY_PATH)).expect("summary is readable");
+        let manifest =
+            std::fs::read(root.join(IMPORT_MANIFEST_PATH)).expect("manifest is readable");
+        let stale = source.replacen("\"total\":21", "\"total\":20", 1);
+        let error = parse_import_scorecard_summary(&stale, &manifest)
+            .expect_err("a stale population total must be refused");
+        assert!(
+            error.contains("does not match the 21 retained rows"),
+            "{error}"
+        );
+    }
+
+    /// The reviewed-data branch is exercised outside fs-govern's broad
+    /// integration-test dev-dependency cone.
+    #[test]
+    fn reviewed_import_counts_render_three_rates_and_a_mismatch_count() {
+        let scorecard = build_scorecard(corpus(), adversarial_registry(), &[], &[])
+            .expect("the seeded V&V scorecard builds");
+        let levels = maturity::capability_levels(&repo_root())
+            .expect("the maturity registry parses")
+            .current;
+        let import_scorecard = ImportScorecardSource::try_new(21, 4, 1, 2, 1, 1)
+            .expect("the reviewed fixture partitions its population");
+        let sources = ProgramSources::from_registries(
+            corpus(),
+            adversarial_registry(),
+            &scorecard,
+            import_scorecard,
+            &levels,
+        )
+        .expect("the reviewed fixture projects");
+        let rows = frankensim_rows(sources).expect("the metric rows build");
+        let cell = |id: &str| {
+            rows.iter()
+                .find(|row| row.id() == id)
+                .unwrap_or_else(|| panic!("metric `{id}` exists"))
+                .cell()
+        };
+        let ratio = |id: &str| match cell(id) {
+            MetricCell::Measured(MetricObservation::Ratio {
+                numerator,
+                denominator,
+            }) => (*numerator, denominator.get()),
+            other => panic!("metric `{id}` is not a ratio: {other:?}"),
+        };
+        assert_eq!(ratio("import-admission-rate"), (1, 4));
+        assert_eq!(ratio("import-repair-rate"), (2, 4));
+        assert_eq!(ratio("import-refusal-rate"), (1, 4));
+        assert_eq!(
+            cell("import-annotation-regressions"),
+            &MetricCell::Measured(MetricObservation::count(1))
+        );
     }
 
     /// A stale artifact is caught, and a regenerated one is accepted. This is
