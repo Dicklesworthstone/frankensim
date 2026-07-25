@@ -582,6 +582,12 @@
       "reason": "content-hash domain separator"
     },
     {
+      "constant": "DESIGN_EXTENSION_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/design.rs",
+      "reason_class": "internal-wire",
+      "reason": "design declaration sidecar landed at bead f85xj.17.8 with no registered maturity claim; it is a separate content-addressed artifact bound to a scenario by hash, so it does not ride inside the frozen scenario.ir encoding and is not promised through it"
+    },
+    {
       "constant": "PAYLOAD_WIRE_VERSION",
       "location": "crates/fs-scenario/src/payload.rs",
       "reason_class": "internal-wire",
