@@ -41,6 +41,8 @@ pub enum CorrelationId {
     RectangularDuctLaminarCwt,
     /// Rectangular duct, fully developed laminar, constant wall heat flux.
     RectangularDuctLaminarChf,
+    /// Rectangular duct, simultaneously developing laminar flow, Pr = 0.72.
+    RectangularDuctLaminarCwtDevelopingPr072,
     /// Smooth turbulent tube, Dittus-Boelter relation.
     DittusBoelter,
     /// Smooth turbulent tube, Gnielinski relation.
@@ -58,7 +60,7 @@ pub enum CorrelationId {
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 11] = [
+    pub const ALL: [CorrelationId; 12] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -70,6 +72,7 @@ impl CorrelationId {
         Self::FlatPlateTurbulentAverage,
         Self::ChurchillBernsteinCylinder,
         Self::ChurchillChuVerticalPlate,
+        Self::RectangularDuctLaminarCwtDevelopingPr072,
     ];
 
     /// Stable model-card identifier.
@@ -81,6 +84,9 @@ impl CorrelationId {
             Self::CircularDuctHausen => "convection.circular-duct-hausen-developing",
             Self::RectangularDuctLaminarCwt => "convection.rectangular-duct-laminar-cwt",
             Self::RectangularDuctLaminarChf => "convection.rectangular-duct-laminar-chf",
+            Self::RectangularDuctLaminarCwtDevelopingPr072 => {
+                "convection.rectangular-duct-laminar-cwt-developing-pr072"
+            }
             Self::DittusBoelter => "convection.dittus-boelter",
             Self::Gnielinski => "convection.gnielinski",
             Self::FlatPlateLaminarAverage => "convection.flat-plate-laminar-average",
@@ -104,6 +110,9 @@ impl CorrelationId {
             }
             Self::RectangularDuctLaminarChf => {
                 "Nu = 8.235(1 - 2.0421a + 3.0853a2 - 2.4765a3 + 1.0578a4 - 0.1861a5)"
+            }
+            Self::RectangularDuctLaminarCwtDevelopingPr072 => {
+                "piecewise-linear Nu_m,T(Gz) from Shah-London Ch. VII Table 52 at a=0.5, Pr=0.72; Gz=Re Pr/(L/Dh), anchored to the CWT limit at Gz=0"
             }
             Self::DittusBoelter => "Nu = 0.023 Re^0.8 Pr^n; n=0.4 heating, 0.3 cooling",
             Self::Gnielinski => {
@@ -247,6 +256,13 @@ impl CorrelationInputs {
         }
         if let (Some(re), Some(pr)) = (self.reynolds, self.prandtl) {
             insert_group(&mut groups, "Pe", re * pr)?;
+        }
+        if let (Some(re), Some(pr), Some(length_ratio)) = (
+            self.reynolds,
+            self.prandtl,
+            self.length_over_hydraulic_diameter,
+        ) {
+            insert_group(&mut groups, "Gz", re * pr / length_ratio)?;
         }
         Ok(groups)
     }
@@ -614,28 +630,13 @@ fn evaluate_formula(
         CorrelationId::CircularDuctLaminarCwt => 3.66,
         CorrelationId::CircularDuctLaminarChf => 4.36,
         CorrelationId::CircularDuctHausen => {
-            let graetz = group("Re") * group("Pr") / group("L_over_Dh");
+            let graetz = group("Gz");
             3.66 + 0.0668 * graetz / (1.0 + 0.04 * det::pow(graetz, 2.0 / 3.0))
         }
-        CorrelationId::RectangularDuctLaminarCwt => {
-            let a = group("aspect_ratio");
-            let shape = (-0.548f64)
-                .mul_add(a, 2.702)
-                .mul_add(a, -5.119)
-                .mul_add(a, 4.970)
-                .mul_add(a, -2.610)
-                .mul_add(a, 1.0);
-            7.541 * shape
-        }
-        CorrelationId::RectangularDuctLaminarChf => {
-            let a = group("aspect_ratio");
-            let shape = (-0.1861f64)
-                .mul_add(a, 1.0578)
-                .mul_add(a, -2.4765)
-                .mul_add(a, 3.0853)
-                .mul_add(a, -2.0421)
-                .mul_add(a, 1.0);
-            8.235 * shape
+        CorrelationId::RectangularDuctLaminarCwt => rectangular_laminar_cwt(group("aspect_ratio")),
+        CorrelationId::RectangularDuctLaminarChf => rectangular_laminar_chf(group("aspect_ratio")),
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => {
+            rectangular_laminar_cwt_developing_pr072(group("Gz"))
         }
         CorrelationId::DittusBoelter => {
             let exponent = match inputs.direction {
@@ -677,10 +678,57 @@ fn evaluate_formula(
     }
 }
 
+fn rectangular_laminar_cwt(aspect_ratio: f64) -> f64 {
+    let shape = (-0.548f64)
+        .mul_add(aspect_ratio, 2.702)
+        .mul_add(aspect_ratio, -5.119)
+        .mul_add(aspect_ratio, 4.970)
+        .mul_add(aspect_ratio, -2.610)
+        .mul_add(aspect_ratio, 1.0);
+    7.541 * shape
+}
+
+fn rectangular_laminar_chf(aspect_ratio: f64) -> f64 {
+    let shape = (-0.1861f64)
+        .mul_add(aspect_ratio, 1.0578)
+        .mul_add(aspect_ratio, -2.4765)
+        .mul_add(aspect_ratio, 3.0853)
+        .mul_add(aspect_ratio, -2.0421)
+        .mul_add(aspect_ratio, 1.0);
+    8.235 * shape
+}
+
+fn rectangular_laminar_cwt_developing_pr072(graetz: f64) -> f64 {
+    const GRAETZ_KNOTS: [f64; 14] = [
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 180.0, 200.0, 220.0,
+    ];
+    const NUSSELT_KNOTS: [f64; 14] = [
+        4.20, 4.79, 5.23, 5.61, 5.95, 6.27, 6.88, 7.42, 7.91, 8.37, 8.80, 9.20, 9.60, 10.00,
+    ];
+
+    if graetz <= GRAETZ_KNOTS[0] {
+        let fully_developed = rectangular_laminar_cwt(0.5);
+        return fully_developed + (NUSSELT_KNOTS[0] - fully_developed) * graetz / GRAETZ_KNOTS[0];
+    }
+    for index in 1..GRAETZ_KNOTS.len() {
+        if graetz <= GRAETZ_KNOTS[index] {
+            let fraction = (graetz - GRAETZ_KNOTS[index - 1])
+                / (GRAETZ_KNOTS[index] - GRAETZ_KNOTS[index - 1]);
+            return NUSSELT_KNOTS[index - 1]
+                + fraction * (NUSSELT_KNOTS[index] - NUSSELT_KNOTS[index - 1]);
+        }
+    }
+    NUSSELT_KNOTS[NUSSELT_KNOTS.len() - 1]
+}
+
 fn card_for(id: CorrelationId) -> CorrelationCard {
     const SHAH_LONDON: SourceProvenance = SourceProvenance {
         citation: "R. K. Shah and A. L. London, Laminar Flow Forced Convection in Ducts, Academic Press, 1978",
         identifier: "ISBN 978-0-12-020051-1",
+    };
+    const SHAH_LONDON_TABLE_52: SourceProvenance = SourceProvenance {
+        citation: "R. K. Shah and A. L. London, Laminar Flow Forced Convection in Ducts, Academic Press, 1978, Chapter VII, Table 52 (Nu_m,T, alpha*=0.5, Pr=0.72)",
+        identifier: "doi:10.1016/C2013-0-06152-X; ISBN 978-0-12-020051-1",
     };
     const DITTUS_BOELTER: SourceProvenance = SourceProvenance {
         citation: "F. W. Dittus and L. M. K. Boelter, Heat Transfer in Automobile Radiators of the Tubular Type, University of California Publications in Engineering 2(13), 1930, 443-461",
@@ -802,6 +850,32 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             ],
             0.0,
             DiscrepancyBasis::AnalyticIdealLimit,
+        ),
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => (
+            SHAH_LONDON_TABLE_52,
+            ValidityDomain::unconstrained()
+                .with("Gz", 0.01, 220.0)
+                .with("Pr", 0.72, 0.72)
+                .with("Re", 1.0, 2_300.0)
+                .with("aspect_ratio", 0.5, 0.5),
+            vec![
+                "smooth rectangular duct",
+                "simultaneously developing velocity and thermal fields",
+                "constant wall temperature on all four walls",
+                "constant properties with Pr = 0.72",
+                "aspect ratio is minor side over major side and equals 0.5",
+                "channel-average Nusselt number",
+                "Gz below 10 uses a declared linear bridge from the fully developed CWT limit to the first Table 52 row",
+            ],
+            vec![
+                "hydrodynamically developed inlet",
+                "axial conduction, buoyancy, or viscous dissipation",
+                "strong property variation",
+                "rough or interrupted fins",
+                "shroud, bypass, or array-interference effects",
+            ],
+            0.15,
+            DiscrepancyBasis::EngineeringAllowance,
         ),
         CorrelationId::DittusBoelter => (
             DITTUS_BOELTER,

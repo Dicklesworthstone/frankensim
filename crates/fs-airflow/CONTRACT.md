@@ -47,8 +47,11 @@ existing convection rung.
 - `OperatingPoint::correlation_handoff` converts one branch flow to typed mean
   velocity, computes Reynolds through role-tagged `fs-regime` dimensions, and
   produces `fs-convection::CorrelationInputs` without discarding evidence.
-- The test-only plate-fin fixture composes that public seam through two
-  Shah-London rectangular-channel cards and the real `fs-conduction` solve.
+- The test-only plate-fin fixture composes that public seam through three
+  Shah-London rectangular-channel cards and the real `fs-conduction` solve:
+  one narrow simultaneously developing CWT table slice drives fin flanks,
+  while the fully developed CWT/CHF limits provide companion checks and the
+  CHF base-floor row.
   Its base plate and three fins are separate tetrahedral blocks joined by
   three named, card-backed bondlines; internal fin flanks and channel floors
   remain separately named Robin traces. Channel area, wetted perimeter,
@@ -191,10 +194,11 @@ None.
   card-backed base-to-fin bondlines, separately attributed fin-flank and
   base-floor Robin heat, an explicit channel-mean bulk-temperature closure,
   a wrong-hydraulic-diameter falsifier, and structured refusal of a
-  fan-solved Reynolds point above the laminar-card ceiling. The selected
-  fully developed rectangular limits correctly keep scalar `h` invariant
-  with Reynolds at fixed geometry and fluid properties while binding each
-  evaluated Reynolds point into distinct provenance;
+  fan-solved Reynolds point above the laminar-card ceiling. At fixed geometry
+  and fluid properties, the developing source-table row makes fin-flank Nu
+  and scalar `h` increase with each solved Reynolds point, while the companion
+  fully developed limits correctly keep scalar `h` invariant. Evaluation
+  provenance binds every changed point;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
 - actual loss-card projection from an explicitly validated `LossElement`,
@@ -223,16 +227,20 @@ None.
   is the midpoint implied by declared base power, constant density/heat
   capacity, and the solved branch flow. It is neither conjugate CFD nor
   manufacturer or experimental validation.
-- The rectangular CWT/CHF rows are fully developed analytic limits. Reynolds
-  is a validity axis but not a formula variable, so their `Nu` and scalar `h`
-  must stay invariant when only fan speed changes. Evaluation provenance still
-  binds the changed Reynolds point, and a sufficiently high fan-solved point
-  refuses rather than extrapolating. Any future claim of flow-varying `h`
-  requires a separately sourced developing-channel or plate-fin-array card.
+- The fin-flank row is the narrow Shah-London Chapter VII, Table 52 slice for
+  smooth simultaneously developing rectangular flow at `alpha*=0.5` and
+  `Pr=0.72`. Its lower-`Gz` bridge is a declared engineering interpolation,
+  not a published curve. It does not model a commercial plate-fin array,
+  shroud/bypass flow, conjugate heat transfer, or interrupted-fin effects.
+- The companion rectangular CWT/CHF rows are fully developed analytic limits.
+  Reynolds is a validity axis but not a formula variable for those rows, so
+  their `Nu` and scalar `h` stay invariant when only fan speed changes.
+  Evaluation provenance still binds the changed Reynolds point, and a
+  sufficiently high fan-solved point refuses rather than extrapolating.
 - Summing named Robin heat rates back to the whole-domain Robin total is only
   a boundary-wiring falsifier; both reductions use the same face quadrature.
   The wrong-`D_h` case likewise proves the geometry handoff is load-bearing,
-  not that either hydraulic diameter produces validated hardware physics.
+  not that any hydraulic diameter produces validated hardware physics.
 - Piecewise-linear interpolation and quadratic loss coefficients do not model
   swirl, recirculation, acoustic interaction, thermal buoyancy, compressibility,
   fouling, or installation system effects.

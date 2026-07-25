@@ -21,18 +21,20 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names eleven implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twelve implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
-  duct constant-temperature and constant-flux limits; Dittus-Boelter;
-  Gnielinski; laminar and leading-edge-corrected mixed average flat-plate
-  relations;
+  duct constant-temperature and constant-flux limits; one simultaneously
+  developing constant-temperature rectangular-duct table slice at
+  `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; laminar and
+  leading-edge-corrected mixed average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
   natural convection.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, and the
   heating/cooling convention explicit. Pe is deterministically derived from
-  Re and Pr when both exist.
+  Re and Pr when both exist; Gz is deterministically derived as
+  `Re Pr/(L/Dh)` when all three inputs exist.
 - `evaluate` returns `NusseltEvaluation` only after every shared
   `ValidityDomain` axis is present and inside its inclusive bounds.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
@@ -57,12 +59,19 @@ correlation.
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
 4. Card order and validity diagnostics are deterministic.
-5. The 3.66/4.36 and Shah-London rectangular rows are analytic ideal limits.
-   Their zero discrepancy denotes no empirical fit residual under the stated
-   idealization; it is not a zero-error claim for hardware.
-6. Other v1 discrepancy bands are conservative engineering allowances,
-   explicitly labeled as such. They are not fabricated source-published
-   confidence intervals and cannot earn a validation color.
+5. The 3.66/4.36 and fully developed Shah-London rectangular rows are
+   analytic ideal limits. Their zero discrepancy denotes no empirical fit
+   residual under the stated idealization; it is not a zero-error claim for
+   hardware.
+6. The developing rectangular card executes only the Chapter VII, Table 52
+   `alpha*=0.5`, `Pr=0.72` row for `Gz` in `[10, 220]`. Its `Gz` interval
+   `[0.01, 10]` is a declared linear bridge between the analytic CWT limit at
+   zero and the first source row; it is not represented as a source-published
+   curve.
+7. Other v1 discrepancy bands, including that developing table card, are
+   conservative engineering allowances, explicitly labeled as such. They are
+   not fabricated source-published confidence intervals and cannot earn a
+   validation color.
 
 ## Error model
 
@@ -85,7 +94,8 @@ card id, direction convention, sorted group names, and exact float bits.
 ## Cancellation behavior
 
 Each evaluation is bounded O(number of validity axes), currently at most four,
-plus straight-line scalar arithmetic. No cancellation poll is required.
+plus straight-line scalar arithmetic or one bounded 14-knot lookup. No
+cancellation poll is required.
 
 ## Unsafe boundary
 
@@ -102,6 +112,10 @@ None.
   with a complete two-row family partition, JSON comparison verdicts, and
   frozen rectangular-duct square values;
 - per-formula frozen spot values;
+- independent test-owned transcriptions of four Shah-London Table 52 points,
+  including one interpolation midpoint, plus exact source metadata checks;
+- narrow developing-rectangular refusal checks for `Gz`, `Pr`, `Re`, and
+  aspect ratio;
 - limiting-behavior checks for the nonconstant cards, each asserting a
   relation derivable from the cards' own published coefficients rather than
   from this implementation's output:
@@ -110,6 +124,9 @@ None.
     against `CircularDuctLaminarCwt` at points admitted by both cards
     (`L_over_Dh` in `[50, 1000]`), with a strictly positive gap, the analytic
     bracket `gap <= 0.0668 Gz`, and first-order halving of the residual;
+  - the developing rectangular card approaches the matching aspect-0.5 CWT
+    limit through the declared lower-`Gz` bridge, and a fixed-geometry
+    Reynolds perturbation changes Nu and evaluation provenance;
   - the two flat-plate cards are continuous across `Re = 5e5`, which is
     simultaneously the inclusive upper bound of the laminar card and the
     inclusive lower bound of the mixed card; the relative disagreement is
@@ -131,9 +148,10 @@ None.
 
 ## No-claim boundaries
 
-- Source citations identify formula authority; the repository does not yet
-  retain licensed copies of every source table or a cross-code validation
-  dataset for these correlations.
+- Source citations identify formula authority; the repository does not retain
+  a licensed copy of Shah-London or a cross-code validation dataset. The
+  developing rectangular card manually encodes only its declared Table 52
+  numeric slice.
 - The two Level-A duct limits are resolved from `fs-vvreg` while the tests
   execute, but no comparison receipt or machine fingerprint is persisted into
   the corpus. This is a test-time binding, not a registry authority promotion.
@@ -144,10 +162,10 @@ None.
   limiting-behavior authority for `3.66` is the Hausen convergence check,
   which is the only test that fails when the developing-flow relation drifts
   away from that constant.
-- The per-formula frozen spot values are outputs of this implementation, not
-  source-published table entries. They detect drift; they do not validate any
-  card against its source. No external or published-table oracle exists for
-  any nonconstant card.
+- Except for the separately labeled Table 52 spot checks, the per-formula
+  frozen spot values are outputs of this implementation, not source-published
+  table entries. They detect drift; they do not validate any card against its
+  source. No broader external or published-table oracle exists.
 - The limiting-behavior checks verify internal consistency between formulas
   and their own published coefficients. Agreement between two cards at a
   shared domain edge constrains the constants that relate them; it is not
@@ -160,11 +178,13 @@ None.
   transition regimes, solve a boundary layer, compute pressure drop, or model
   fan operating points.
 - Plate-fin behavior is represented only by smooth rectangular-channel
-  limiting rows; interrupted-fin, louver, offset-strip, and full array effects
+  limiting rows and one narrow simultaneously developing source-table slice.
+  Interrupted-fin, louver, offset-strip, shroud, bypass, and full-array effects
   remain outside v1.
-- The rectangular-duct cards admit aspect ratios from 0.001 through 1.0. The
-  exact parallel-plate limit at aspect ratio zero is outside that domain and
-  is not executed; current tests freeze the admitted square value at 1.0.
+- The fully developed rectangular-duct cards admit aspect ratios from 0.001
+  through 1.0; the developing table card admits exactly 0.5. The exact
+  parallel-plate limit at aspect ratio zero is outside those domains and is
+  not executed; current tests freeze the admitted square value at 1.0.
   Unlike the Churchill-Chu intercept, this endpoint is not recovered by
   extrapolation: the shape function is a quintic in the aspect ratio, so no
   two-point affine fit reaches it, and no such test is claimed here.

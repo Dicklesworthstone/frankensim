@@ -5,7 +5,9 @@
 //! validity-gated convection rows reach separately named heatsink surfaces,
 //! and that declared base-to-fin bondlines participate in the actual
 //! conduction solve. It does not validate a commercial fan, a plate-fin
-//! correlation, or conjugate fluid physics.
+//! array, commercial hardware, or conjugate fluid physics. Its fin-flank
+//! coefficient executes one narrow source-table slice for a smooth
+//! simultaneously developing rectangular duct.
 
 use fs_airflow::{
     EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
@@ -51,7 +53,7 @@ const AIR_DENSITY_KG_M3: f64 = 1.2;
 const AIR_DYNAMIC_VISCOSITY_PA_S: f64 = 1.8e-5;
 const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.026;
 const AIR_SPECIFIC_HEAT_J_KG_K: f64 = 1_005.0;
-const AIR_PRANDTL: f64 = 0.71;
+const AIR_PRANDTL: f64 = 0.72;
 const INLET_TEMPERATURE_K: f64 = 300.0;
 
 const CHANNEL_BRANCH: &str = "fin-channels";
@@ -94,9 +96,11 @@ struct PlateFinRun {
     speed_ratio: f64,
     branch_flow_m3_s: f64,
     reynolds: f64,
-    cwt_provenance: ProvenanceHash,
+    developing_cwt_provenance: ProvenanceHash,
     chf_provenance: ProvenanceHash,
-    cwt_h_w_m2_k: f64,
+    developing_cwt_nusselt: f64,
+    developing_cwt_h_w_m2_k: f64,
+    cwt_limit_h_w_m2_k: f64,
     chf_h_w_m2_k: f64,
     mean_bulk_temperature_k: f64,
     mean_base_temperature_k: f64,
@@ -415,13 +419,19 @@ fn solve_plate_fin(
         .correlation_inputs
         .with_aspect_ratio(geometry.aspect_ratio)
         .with_length_ratio(CHANNEL_LENGTH_M / hydraulic_diameter_m);
-    let cwt = evaluate(CorrelationId::RectangularDuctLaminarCwt, correlation_inputs)
+    let cwt_limit = evaluate(CorrelationId::RectangularDuctLaminarCwt, correlation_inputs)
         .expect("constant-wall-temperature rectangular limit admits");
-    let chf = evaluate(CorrelationId::RectangularDuctLaminarChf, correlation_inputs)
+    let developing_cwt = evaluate(
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+        correlation_inputs,
+    )
+    .expect("developing constant-wall-temperature source table admits");
+    let chf_limit = evaluate(CorrelationId::RectangularDuctLaminarChf, correlation_inputs)
         .expect("constant-heat-flux rectangular limit admits");
 
-    assert!(cwt.evidence().model.in_domain);
-    assert!(chf.evidence().model.in_domain);
+    assert!(cwt_limit.evidence().model.in_domain);
+    assert!(developing_cwt.evidence().model.in_domain);
+    assert!(chf_limit.evidence().model.in_domain);
     let branch_flow_m3_s = handoff.branch_flow.value.value();
     // One-way fixture closure: for a declared base power and constant cp, the
     // channel-mean bulk temperature is the midpoint of the inlet/outlet
@@ -429,21 +439,29 @@ fn solve_plate_fin(
     let mean_bulk_temperature_k = INLET_TEMPERATURE_K
         + declared_base_power_w()
             / (2.0 * AIR_DENSITY_KG_M3 * AIR_SPECIFIC_HEAT_J_KG_K * branch_flow_m3_s);
-    let fin_coupling = cwt
+    let fin_coupling = developing_cwt
         .robin_boundary(
             ThermalConductivity::new(AIR_THERMAL_CONDUCTIVITY_W_M_K),
             Length::new(hydraulic_diameter_m),
             Temperature::new(mean_bulk_temperature_k),
         )
         .expect("fin-flank Robin lowering");
-    let base_coupling = chf
+    let base_coupling = chf_limit
         .robin_boundary(
             ThermalConductivity::new(AIR_THERMAL_CONDUCTIVITY_W_M_K),
             Length::new(hydraulic_diameter_m),
             Temperature::new(mean_bulk_temperature_k),
         )
         .expect("base-floor Robin lowering");
-    let cwt_h_w_m2_k = fin_coupling.coefficient().value.value();
+    let developing_cwt_h_w_m2_k = fin_coupling.coefficient().value.value();
+    let cwt_limit_h_w_m2_k = cwt_limit
+        .heat_transfer_coefficient(
+            ThermalConductivity::new(AIR_THERMAL_CONDUCTIVITY_W_M_K),
+            Length::new(hydraulic_diameter_m),
+        )
+        .expect("CWT limit coefficient")
+        .value
+        .value();
     let chf_h_w_m2_k = base_coupling.coefficient().value.value();
     let boundary = thermal_boundary(
         &mesh.mesh,
@@ -477,9 +495,11 @@ fn solve_plate_fin(
         speed_ratio,
         branch_flow_m3_s,
         reynolds: handoff.reynolds,
-        cwt_provenance: cwt.evidence().provenance,
-        chf_provenance: chf.evidence().provenance,
-        cwt_h_w_m2_k,
+        developing_cwt_provenance: developing_cwt.evidence().provenance,
+        chf_provenance: chf_limit.evidence().provenance,
+        developing_cwt_nusselt: developing_cwt.evidence().value,
+        developing_cwt_h_w_m2_k,
+        cwt_limit_h_w_m2_k,
         chf_h_w_m2_k,
         mean_bulk_temperature_k,
         mean_base_temperature_k,
@@ -509,8 +529,19 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         assert!(pair[1].speed_ratio > pair[0].speed_ratio);
         assert!(pair[1].branch_flow_m3_s > pair[0].branch_flow_m3_s);
         assert!(pair[1].reynolds > pair[0].reynolds);
-        assert_ne!(pair[1].cwt_provenance, pair[0].cwt_provenance);
+        assert_ne!(
+            pair[1].developing_cwt_provenance,
+            pair[0].developing_cwt_provenance
+        );
         assert_ne!(pair[1].chf_provenance, pair[0].chf_provenance);
+        assert!(
+            pair[1].developing_cwt_nusselt > pair[0].developing_cwt_nusselt,
+            "the source-table flow term must increase Nu with solved Reynolds"
+        );
+        assert!(
+            pair[1].developing_cwt_h_w_m2_k > pair[0].developing_cwt_h_w_m2_k,
+            "fixed geometry and fluid properties make the developing Nu change reach h"
+        );
         assert!(
             pair[1].mean_bulk_temperature_k < pair[0].mean_bulk_temperature_k,
             "more solved mass flow lowers the declared channel-mean bulk temperature"
@@ -520,13 +551,13 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
             "the solved airflow change must reach the solid temperature field"
         );
 
-        // These are fully-developed Shah-London LIMITS. Reynolds is a
-        // validity axis, not a formula input; claiming that speed changes h
-        // would falsify the selected card. The evaluation provenance above
-        // still changes because it binds the actual Re point.
+        // The companion Shah-London CWT/CHF rows are fully-developed LIMITS.
+        // Reynolds is only a validity axis for those rows, so they provide a
+        // falsifier against accidentally attributing the developing-card
+        // behavior to the shared Nu-to-h lowering.
         assert_eq!(
-            pair[1].cwt_h_w_m2_k.to_bits(),
-            pair[0].cwt_h_w_m2_k.to_bits()
+            pair[1].cwt_limit_h_w_m2_k.to_bits(),
+            pair[0].cwt_limit_h_w_m2_k.to_bits()
         );
         assert_eq!(
             pair[1].chf_h_w_m2_k.to_bits(),
@@ -555,12 +586,14 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         // The report reconstructs each uniform h as Σ(A_f h)/ΣA_f. Bound
         // the two reductions and final division by a small multiple of the
         // participating face count instead of requiring a bitwise round trip.
-        let cwt_htc_error =
-            (rows[0].mean_htc_w_per_m2_k - run.cwt_h_w_m2_k).abs() / run.cwt_h_w_m2_k;
-        let cwt_reduction_bound = 4.0 * rows[0].faces as f64 * f64::EPSILON;
+        let developing_cwt_htc_error = (rows[0].mean_htc_w_per_m2_k - run.developing_cwt_h_w_m2_k)
+            .abs()
+            / run.developing_cwt_h_w_m2_k;
+        let developing_cwt_reduction_bound = 4.0 * rows[0].faces as f64 * f64::EPSILON;
         assert!(
-            cwt_htc_error <= cwt_reduction_bound,
-            "fin-flank mean h relative error {cwt_htc_error} exceeds {cwt_reduction_bound}"
+            developing_cwt_htc_error <= developing_cwt_reduction_bound,
+            "fin-flank mean h relative error {developing_cwt_htc_error} exceeds \
+             {developing_cwt_reduction_bound}"
         );
         let chf_htc_error =
             (rows[1].mean_htc_w_per_m2_k - run.chf_h_w_m2_k).abs() / run.chf_h_w_m2_k;
@@ -609,12 +642,25 @@ fn a_hydraulic_diameter_misbinding_changes_h_and_the_solved_temperature() {
         (0.5 * nominal.hydraulic_diameter_m).to_bits()
     );
     assert_eq!(
-        wrong.cwt_h_w_m2_k.to_bits(),
-        (2.0 * nominal.cwt_h_w_m2_k).to_bits()
+        wrong.cwt_limit_h_w_m2_k.to_bits(),
+        (2.0 * nominal.cwt_limit_h_w_m2_k).to_bits()
     );
     assert_eq!(
         wrong.chf_h_w_m2_k.to_bits(),
         (2.0 * nominal.chf_h_w_m2_k).to_bits()
+    );
+    assert!(
+        wrong.developing_cwt_nusselt < nominal.developing_cwt_nusselt,
+        "halving D_h must reduce Gz and the developing Nusselt number"
+    );
+    assert!(
+        wrong.developing_cwt_h_w_m2_k > nominal.developing_cwt_h_w_m2_k
+            && wrong.developing_cwt_h_w_m2_k < 2.0 * nominal.developing_cwt_h_w_m2_k,
+        "the wrong-D_h source-table coefficient must change through both Nu(Gz) and 1/D_h"
+    );
+    assert_ne!(
+        wrong.developing_cwt_provenance,
+        nominal.developing_cwt_provenance
     );
     assert!(
         wrong.mean_base_temperature_k < nominal.mean_base_temperature_k - 1.0,
@@ -650,6 +696,7 @@ fn a_fan_solved_out_of_domain_flow_refuses_instead_of_extrapolating() {
     for correlation in [
         CorrelationId::RectangularDuctLaminarCwt,
         CorrelationId::RectangularDuctLaminarChf,
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
     ] {
         let error = evaluate(correlation, inputs).expect_err("laminar extrapolation must refuse");
         assert!(

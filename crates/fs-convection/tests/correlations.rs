@@ -35,6 +35,14 @@ fn duct_inputs() -> CorrelationInputs {
     CorrelationInputs::forced(1_000.0, 0.7).with_length_ratio(100.0)
 }
 
+fn rectangular_developing_inputs(graetz: f64) -> CorrelationInputs {
+    const REYNOLDS: f64 = 1_000.0;
+    const PRANDTL: f64 = 0.72;
+    CorrelationInputs::forced(REYNOLDS, PRANDTL)
+        .with_length_ratio(REYNOLDS * PRANDTL / graetz)
+        .with_aspect_ratio(0.5)
+}
+
 fn level_a_convection_case(case_id: &str) -> &'static ThermalLevelACase {
     let case = thermal_level_a_cases()
         .iter()
@@ -83,9 +91,9 @@ fn assert_level_a_convection_limit(case_id: &str, observed: f64) {
 }
 
 #[test]
-fn catalog_has_eleven_sourced_cards_and_no_unlabeled_discrepancy() {
+fn catalog_has_twelve_sourced_cards_and_no_unlabeled_discrepancy() {
     let catalog = correlation_catalog();
-    assert_eq!(catalog.len(), 11);
+    assert_eq!(catalog.len(), 12);
     assert_eq!(catalog.len(), CorrelationId::ALL.len());
 
     let mut names = std::collections::BTreeSet::new();
@@ -219,6 +227,11 @@ fn every_nonconstant_formula_has_a_frozen_source_formula_spot_value() {
             4.125_812_203_124_999,
         ),
         (
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            rectangular_developing_inputs(20.0),
+            4.79,
+        ),
+        (
             CorrelationId::DittusBoelter,
             CorrelationInputs::forced(100_000.0, 0.7).with_length_ratio(100.0),
             199.419_237_807_658_48,
@@ -254,6 +267,167 @@ fn every_nonconstant_formula_has_a_frozen_source_formula_spot_value() {
         let observed = evaluate(id, inputs).unwrap_or_else(|error| panic!("{id:?}: {error}"));
         close(observed.evidence().value, expected, 3.0e-13);
     }
+}
+
+#[test]
+fn rectangular_developing_card_retains_its_narrow_source_authority() {
+    let card = correlation_catalog()
+        .into_iter()
+        .find(|card| card.id == CorrelationId::RectangularDuctLaminarCwtDevelopingPr072)
+        .expect("rectangular developing card");
+
+    assert_eq!(
+        card.discrepancy_basis,
+        DiscrepancyBasis::EngineeringAllowance
+    );
+    assert!(card.source.citation.contains("Chapter VII, Table 52"));
+    assert!(card.source.citation.contains("alpha*=0.5, Pr=0.72"));
+    assert_eq!(
+        card.source.identifier,
+        "doi:10.1016/C2013-0-06152-X; ISBN 978-0-12-020051-1"
+    );
+    assert!(
+        card.model
+            .assumptions
+            .iter()
+            .any(|assumption| assumption.contains("simultaneously developing"))
+    );
+    assert!(
+        card.model
+            .assumptions
+            .iter()
+            .any(|assumption| assumption.contains("channel-average"))
+    );
+    assert!(
+        card.model
+            .known_failures
+            .iter()
+            .any(|failure| failure.contains("array-interference"))
+    );
+}
+
+#[test]
+fn rectangular_developing_source_knots_and_interpolation_are_spot_checked() {
+    // Test-owned transcriptions from Shah & London, Chapter VII, Table 52,
+    // alpha*=0.5 and Pr=0.72. The Gz=15 row is the independently calculated
+    // midpoint between the published Gz=10 and Gz=20 values.
+    for (graetz, expected_nusselt) in [(10.0, 4.20), (15.0, 4.495), (20.0, 4.79), (100.0, 7.42)] {
+        let evaluated = evaluate(
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            rectangular_developing_inputs(graetz),
+        )
+        .expect("source point is admitted");
+        close(evaluated.groups()["Gz"], graetz, 3.0e-15);
+        close(evaluated.evidence().value, expected_nusselt, 3.0e-15);
+    }
+}
+
+#[test]
+fn rectangular_developing_card_converges_to_cwt_and_reynolds_is_load_bearing() {
+    let mut previous_gap = None;
+    for graetz in [8.0, 4.0, 2.0, 1.0] {
+        let inputs = rectangular_developing_inputs(graetz);
+        let developed = evaluate(CorrelationId::RectangularDuctLaminarCwt, inputs)
+            .expect("fully developed limit admits shared point");
+        let developing = evaluate(
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            inputs,
+        )
+        .expect("developing table card admits shared point");
+        let gap = developing.evidence().value - developed.evidence().value;
+        assert!(gap > 0.0);
+        if let Some(previous) = previous_gap {
+            close(gap / previous, 0.5, 2.0e-14);
+        }
+        previous_gap = Some(gap);
+    }
+
+    let lower_re = CorrelationInputs::forced(500.0, 0.72)
+        .with_length_ratio(36.0)
+        .with_aspect_ratio(0.5);
+    let higher_re = CorrelationInputs::forced(1_000.0, 0.72)
+        .with_length_ratio(36.0)
+        .with_aspect_ratio(0.5);
+    let lower = evaluate(
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+        lower_re,
+    )
+    .expect("Gz=10");
+    let higher = evaluate(
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+        higher_re,
+    )
+    .expect("Gz=20");
+    close(lower.evidence().value, 4.20, 3.0e-15);
+    close(higher.evidence().value, 4.79, 3.0e-15);
+    assert_ne!(lower.evidence().provenance, higher.evidence().provenance);
+}
+
+#[test]
+fn rectangular_developing_card_refuses_outside_its_source_slice() {
+    fn refused_axes(inputs: CorrelationInputs) -> Vec<String> {
+        let error = evaluate(
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            inputs,
+        )
+        .expect_err("point outside the source slice must refuse");
+        let CorrelationError::OutOfDomain { violations, .. } = error else {
+            panic!("expected structured domain refusal, got {error:?}");
+        };
+        violations
+            .into_iter()
+            .map(|violation| violation.axis)
+            .collect()
+    }
+
+    let at_pr = |prandtl| {
+        CorrelationInputs::forced(1_000.0, prandtl)
+            .with_length_ratio(36.0)
+            .with_aspect_ratio(0.5)
+    };
+    assert_eq!(refused_axes(at_pr(0.719)), ["Pr"]);
+    assert_eq!(refused_axes(at_pr(0.721)), ["Pr"]);
+
+    let at_aspect = |aspect_ratio| {
+        CorrelationInputs::forced(1_000.0, 0.72)
+            .with_length_ratio(36.0)
+            .with_aspect_ratio(aspect_ratio)
+    };
+    assert_eq!(refused_axes(at_aspect(0.49)), ["aspect_ratio"]);
+    assert_eq!(refused_axes(at_aspect(0.51)), ["aspect_ratio"]);
+
+    assert_eq!(
+        refused_axes(
+            CorrelationInputs::forced(1.0, 0.72)
+                .with_length_ratio(100.0)
+                .with_aspect_ratio(0.5)
+        ),
+        ["Gz"]
+    );
+    assert_eq!(
+        refused_axes(
+            CorrelationInputs::forced(1_000.0, 0.72)
+                .with_length_ratio(3.0)
+                .with_aspect_ratio(0.5)
+        ),
+        ["Gz"]
+    );
+    assert_eq!(
+        refused_axes(CorrelationInputs::forced(1_000.0, 0.72).with_aspect_ratio(0.5)),
+        ["Gz"]
+    );
+    assert_eq!(
+        refused_axes(CorrelationInputs::forced(1_000.0, 0.72).with_length_ratio(36.0)),
+        ["aspect_ratio"]
+    );
+    assert_eq!(
+        refused_axes(
+            CorrelationInputs::forced(2_400.0, 0.72)
+                .with_length_ratio(86.4)
+                .with_aspect_ratio(0.5)
+        ),
+        ["Re"]
+    );
 }
 
 #[test]
