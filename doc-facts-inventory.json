@@ -746,6 +746,7 @@
     "crates/fs-scenario/tests/conformance.rs",
     "crates/fs-scenario/tests/design.rs",
     "crates/fs-scenario/tests/entity_identity.rs",
+    "crates/fs-scenario/tests/envelope.rs",
     "crates/fs-scenario/tests/motion_lowering.rs",
     "crates/fs-scenario/tests/payloads.rs",
     "crates/fs-scenario/tests/sensors.rs",

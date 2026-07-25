@@ -937,3 +937,138 @@ No-claim boundaries:
   a useful design space.
 - Entity targets are resolved against the supplied catalog at validation time
   only. A block validated against one catalog says nothing about another.
+
+## Operating envelopes (`envelope` module, bead f85xj.17.5)
+
+`scenario` DECLARES load cases and factored combinations; it does not run
+them. The `envelope` module is the evaluation half: operating envelopes,
+duty cycles, compiled case sets, and governing-case reporting.
+
+### What an envelope is
+
+An `OperatingEnvelope` is a declared SUPPORT — the set of operating points the
+author asserts the system may be required to occupy. It is not a probability
+distribution, and a corner is not a likelihood. Corner enumeration answers
+"what are the extreme admissible points", which is a worst-case question; it
+says nothing about how often any of them occurs.
+
+Axes are `Continuous { low, high }` in the axis's own dimensions, or
+`Discrete { states }` over named states each classed `Nominal`, `Degraded`, or
+`Failed`. A pinned axis (`low == high`) is REFUSED: it is a declared constant,
+not an axis, and the fix directs it to where it acts. Exactly one `Nominal`
+state is required per discrete axis, because a report that cannot tell a design
+condition from a fault condition is misleading about what sized the design.
+
+### Co-occurrence limits are not correlation coefficients
+
+A correlation coefficient constrains MOMENTS; it does not constrain the
+SUPPORT. Two axes can be strongly correlated and still jointly attain every
+corner of their box. A declared `rho` therefore cannot license dropping a
+corner, and no API here accepts one.
+
+The only relation that shrinks a corner set is
+`CouplingRelation::CoOccurrenceLimit { a_coeff, b_coeff, bound, rationale }`,
+an explicit statement that `a_coeff*a + b_coeff*b <= bound` bounds the
+reachable region. The half-space is CLOSED, so a point exactly on the limit is
+admissible — treating it as strict would silently exclude the worst attainable
+operating point. Coefficients carry dimensions and every term must share one
+dimension with the bound; the check is exact, and there is no normalisation
+step that could go stale when an axis range moves. An empty `rationale` is
+refused: a limit that removes worst-case corners without a stated physical
+reason is an unaudited assumption.
+
+`CouplingRelation::Unknown` is first-class and is the honest declaration when
+nobody has characterised the pair. It drops NO corners — ignorance is not
+evidence of infeasibility. `DeclaredIndependent` and `Unknown` produce the
+IDENTICAL corner set; only the emitted caveat distinguishes them, which is why
+the distinction is typed rather than commented.
+
+### Corner enumeration
+
+The envelope decomposes into independent blocks — an uncoupled axis, a coupled
+continuous pair, or a discrete axis — and the corner set is the Cartesian
+product of the blocks' extreme points. A coupled pair contributes the vertices
+of its box clipped by the limit, found by candidate-and-filter: the box corners
+satisfying the limit, plus the limit line's crossings of the box edges.
+
+Clipping a corner off a rectangle ADDS vertices. The worked reference envelope
+goes from four box corners to five. "The corners of a correlated envelope are
+not the naive hypercube corners" is therefore NOT the weaker claim that they
+are a subset — the count need not even move in that direction.
+
+### Invariants (envelope module)
+
+E1. An axis may appear in at most ONE coupling. With a shared axis the feasible
+    set is a general polytope rather than a product of independent blocks, and
+    this enumerator only does the latter exactly. Chained couplings are
+    REFUSED, naming general polytope vertex enumeration as the missing
+    machinery so a reader can tell a limitation from a bug.
+
+E2. The corner LIST is canonical: coordinates in declared axis order, corners
+    ordered by continuous value and by declared discrete-state position. A
+    corner's INDEX is what a compiled case cites as provenance, so swapping the
+    two names in a coupling declaration must not permute the list and silently
+    renumber every case in every report while changing nothing physical.
+
+E3. Corner and case products are bounded BEFORE allocation. Exceeding
+    `EnvelopeBudget` is a refusal that names the count, not an out-of-memory.
+
+E4. A vertex landing a rounding step outside a box edge is clamped onto the
+    edge (`EDGE_SPAN_TOLERANCE`) rather than dropped. Admitting it keeps a real
+    extreme operating point; dropping it would lose one, which is the unsafe
+    direction.
+
+E5. Vertices are merged on EXACT equality after a canonical sort. Vertices
+    coincident only to within rounding are NOT merged; the consequence is a
+    duplicated corner case, which is wasteful and never unsound.
+
+E6. Duty-cycle weights are declared ONCE. In `Dwells` weighting the weights are
+    durations and the fractions are DERIVED; in `Fractions` weighting they are
+    dimensionless and must sum to one. There is no representation in which a
+    duration and a fraction can disagree.
+
+E7. Ties in `governing_case` report EVERY attaining case. A report that
+    silently picked the first would hide that two conditions size the design
+    equally — the same discipline as `AmbiguousImportMatch` in the `entity`
+    module.
+
+### No-claim boundaries (envelope module)
+
+- An envelope is a declared support and NOT a distribution. Corner enumeration
+  is a worst-case question; no corner carries a probability, and nothing in
+  this module derives a joint distribution from per-axis marginals. The
+  `Unknown` caveat states the constraint any future consumer must honour: the
+  corner set of an uncharacterised pair is a SUPERSET of the reachable set,
+  which is conservative for worst-case and inadmissible as the basis for any
+  probability-weighted statement.
+
+- `weighted_aggregate` is a dwell-weighted mean of per-point STEADY results,
+  labelled `AggregationBasis::SteadyApproximation`. It equals the true time
+  average only where every dwell is long compared with the system's thermal
+  time constant. This module integrates NOTHING; transient evaluation of a duty
+  cycle is `fs_conduction::duty`. The caveat is emitted unconditionally.
+
+- `quasi_steady_check` MEASURES that premise rather than asserting it, and is
+  available only under `Dwells` weighting. Under `Fractions` weighting the
+  condition is not merely unmet but UNMEASURABLE — no absolute time exists to
+  compare against a time constant — and the refusal says so.
+
+- `compile_case_set` is not the authority on declaration validity;
+  `Scenario::validate` is. Compilation re-resolves only what it must in order
+  to build provenance, and reports what it finds using the same violation
+  codes.
+
+- A governing case is the worst value in a DECLARED sense over the supplied
+  case values. It carries no evidence about the values themselves: this module
+  performs no solve and holds no physics.
+
+- `single_failure_axis` produces `n + 1` states, never `2^n`. Exhaustive
+  multi-unit failure enumeration is deliberately absent: the count is
+  exponential in a quantity nobody bounds at declaration time, and which
+  multi-failure combinations are worth analysing is a judgement about
+  redundancy, not a product. Multi-unit failure states must be declared
+  explicitly.
+
+- `reference_cooling_envelope` is REPRESENTATIVE, not canonical. No repo-wide
+  "reference cooling scenario" artifact exists; the same honest boundary the
+  `entity` module records for its own fixture applies here.

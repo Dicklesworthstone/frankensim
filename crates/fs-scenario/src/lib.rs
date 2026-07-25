@@ -19,6 +19,7 @@ pub mod bc;
 pub mod design;
 pub mod ensemble;
 pub mod entity;
+pub mod envelope;
 pub mod frame;
 pub mod ir;
 pub mod payload;
