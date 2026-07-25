@@ -52,6 +52,21 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   deltas, residuals, and an E08-facing diagnostic geometry-budget input.
   Residual slivers may therefore promote under an explicit scoping profile
   while a validation profile refuses the same geometry.
+- **Retained supplier corpus** (`supplier_corpus` module, bead
+  `f85xj.11.6`): a strict bounded TSV manifest binds each real STEP/STL/OBJ/PLY
+  snapshot to normalized local path, BLAKE3 bytes, upstream Git commit/blob or
+  versioned HTTPS snapshot/SHA-256 identity, redistribution record, proposed or
+  human-locked quality tier, and expected clean/repair/refusal outcome.
+  `run_supplier_corpus` executes the ordinary bounded import → quarantine →
+  census/repair → promotion path and publishes one canonical full scorecard
+  only after every case completes. Exact locked mismatches fail the lane;
+  mismatches against proposed annotations are advisory and the unreviewed
+  population keeps the lane fail-closed. `ImportScorecardMetrics` is the
+  authority-aware program-metric projection: clean, repaired, and refused
+  counts include only human-locked rows, so `reviewed` is their sole valid
+  denominator. `summary_json` binds the exact manifest and full-scorecard
+  identities while keeping whole-population diagnostics separate from those
+  reviewed counts.
 - **Persistent surface assignment** (`selection` module, bead
   `f85xj.6.3`): `resolve_mesh_assignments` consumes an already promoted
   finite triangle soup, a caller-supplied source-artifact identity hook and
@@ -371,6 +386,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     before comparison, so index-compatible replacement geometry or mutated
     public rows cannot borrow an old receipt. Every mesh, face-reference,
     edge, and candidate bound is admitted before report publication.
+23. **Proposed annotations never manufacture standing rates**: source tiers and
+    expected outcomes have no pass/fail or dashboard authority until an
+    identified human locks them at a positive annotation revision. Reviewed
+    clean, repaired, and refused counts partition exactly the reviewed
+    population; locked mismatches cannot exceed it. The retained compact
+    summary carries both manifest and full-scorecard BLAKE3 identities, and a
+    sibling-free consumer must reject it when the live manifest identity moves.
+    Duplicate source paths, case IDs, or retained byte identities refuse
+    manifest admission rather than inflating the population.
 
 ## Error model
 
@@ -453,6 +477,12 @@ frame, policy, and deterministic `Cx` state yield identical decisions and
 JSON/Markdown on one target. Face count and exact local FNV roots remain
 provenance-sensitive under re-tessellation; association authority comes from
 receipted tolerance comparisons, not equality of those roots.
+Supplier-corpus manifests preserve required case-ID order, and every scorecard
+row follows manifest order. Finding classes are sorted, receipt JSON is
+canonical, and the domain-separated manifest, full-scorecard, and compact
+summary identities move with their governed inputs. Identical retained bytes,
+manifest, standing policy, and deterministic `Cx` yield byte-identical full and
+compact scorecards.
 
 ## Cancellation behavior
 
@@ -508,6 +538,10 @@ candidate, addition, and output-fingerprint loops. Cancellation atomically
 returns `mesh-association-cancelled` and publishes no report. Standard-library
 sorts, binary searches, allocation internals, floating-point square roots, and
 short disjoint-set walks are separately cap-bounded but have no internal poll.
+Supplier-corpus execution polls the caller's `Cx` at scorecard entry, every
+case boundary, inside owned STEP materialization/import loops, and immediately
+before publication. Cancellation returns `CorpusRunError::Cancelled` and
+publishes neither a partial full scorecard nor a compact summary.
 
 ## Unsafe boundary
 
@@ -621,6 +655,13 @@ receipt-to-soup and receipt-to-row rebinding refusals; many-source/one-target
 fallback ambiguity; canonical JSON/Markdown artifacts; unit/frame/resource
 refusals; and pre-requested cancellation.
 
+`tests/supplier_corpus.rs` plus module tests (G0/G2/G4/G5): strict review and
+upstream-identity schemas; duplicate-byte population refusal; real retained
+source BLAKE3 agreement; STEP/mesh and four-tier coverage; a seeded parser fault
+that becomes a locked annotation mismatch; proposed rows excluded from reviewed
+rate counts; cancellation with no partial publication; and byte-identical
+double-run full/compact scorecards over the retained population.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -676,6 +717,13 @@ import identically in both ASCII and binary (conformance-tested).
   freedom: indexed-adjacent pairs are excluded, f64 predicates are not exact,
   and a sampled/incomplete pass is only diagnostic evidence. Exact
   self-intersection certification remains validity-certificates work.
+- **Supplier-corpus rates describe only the retained population.** Source
+  provenance and independent annotation authority prevent self-authored fixture
+  grading, but they do not establish a universal supplier-CAD success
+  probability, market representativeness, CAD semantic fidelity, or complete
+  self-intersection freedom. A compact summary with zero reviewed rows
+  authorizes `NO-DATA`, not `0%`; the whole-population three-way verdict
+  distribution remains diagnostic until human review locks its denominator.
 - **Receipts hash with FNV-1a**; HELM upgrades to the BLAKE3-class
   content address when writing the `imports` row (same field, stated in
   the receipt schema).

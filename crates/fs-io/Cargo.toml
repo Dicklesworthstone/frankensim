@@ -11,6 +11,7 @@ description = "The world boundary: hardened mesh and bounded STEP interchange wi
 layer = "L2"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-geom = { path = "../fs-geom" }

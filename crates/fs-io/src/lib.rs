@@ -23,6 +23,7 @@ pub mod step_faceted;
 pub mod step_faceted_export;
 pub mod step_import;
 pub mod stl;
+pub mod supplier_corpus;
 
 pub use association::{
     AddedRegion, AssociationDecision, AssociationDrift, AssociationPolicy, AssociationReceipt,
@@ -72,6 +73,15 @@ pub use step_import::{
     STEP_IMPORT_SEMANTICS_VERSION, STEP_TESSELLATION_FINGERPRINT_DOMAIN, StepImportOutcome,
     StepImportReceipt, StepImportRefusal, StepMeshDefect, StepMeshDefectKind,
     StepTessellatorIdentity, import_step_tessellation,
+};
+pub use supplier_corpus::{
+    AnnotationAgreement, CorpusAnnotationAuthority, CorpusExpectedFinding, CorpusExpectedOutcome,
+    CorpusManifest, CorpusManifestError, CorpusObservation, CorpusQualityTier, CorpusRunError,
+    CorpusScorecard, CorpusScorecardRow, CorpusSourceKind, CorpusVerdict, ImportScorecardMetrics,
+    MINIMUM_RETAINED_SUPPLIER_CASES, SUPPLIER_CORPUS_MANIFEST_HEADER,
+    SUPPLIER_CORPUS_MANIFEST_IDENTITY_DOMAIN, SUPPLIER_CORPUS_SEMANTICS_VERSION,
+    SUPPLIER_CORPUS_SUMMARY_SEMANTICS_VERSION, SupplierCadFormat, SupplierCorpusCase,
+    SupplierCorpusPolicy, parse_supplier_corpus_manifest, run_supplier_corpus,
 };
 
 use core::fmt;
