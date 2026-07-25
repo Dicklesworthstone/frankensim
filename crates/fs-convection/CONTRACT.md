@@ -102,6 +102,26 @@ None.
   with a complete two-row family partition, JSON comparison verdicts, and
   frozen rectangular-duct square values;
 - per-formula frozen spot values;
+- limiting-behavior checks for the nonconstant cards, each asserting a
+  relation derivable from the cards' own published coefficients rather than
+  from this implementation's output:
+  - the developing-flow Hausen card converges to the fully-developed
+    constant-wall-temperature limit as the Graetz number vanishes, evaluated
+    against `CircularDuctLaminarCwt` at points admitted by both cards
+    (`L_over_Dh` in `[50, 1000]`), with a strictly positive gap, the analytic
+    bracket `gap <= 0.0668 Gz`, and first-order halving of the residual;
+  - the two flat-plate cards are continuous across `Re = 5e5`, which is
+    simultaneously the inclusive upper bound of the laminar card and the
+    inclusive lower bound of the mixed card; the relative disagreement is
+    below 0.1% and is exactly Prandtl-independent, and the raw difference at
+    `Pr = 1` pins the rounding residue of the published `871` constant;
+  - the Dittus-Boelter direction exponents degenerate bitwise at `Pr = 1`
+    while provenance still records the declared direction;
+  - the Gnielinski correction denominator collapses exactly at `Pr = 1`,
+    reducing the relation to its Prandtl-free form;
+  - the Churchill-Chu `Ra -> 0` intercept, which is outside the admitted
+    domain and unreachable through `evaluate`, is recovered by affine
+    extrapolation in `Ra^(1/6)` from two in-domain points;
 - inclusive boundary acceptance plus missing/outside/non-finite refusals;
 - G3 unit-rescaling invariance of the dimensioned `Nu k/L` conversion;
 - evidence attachment and non-certification of empirical predictions;
@@ -117,6 +137,21 @@ None.
 - The two Level-A duct limits are resolved from `fs-vvreg` while the tests
   execute, but no comparison receipt or machine fingerprint is persisted into
   the corpus. This is a test-time binding, not a registry authority promotion.
+- Those two rows compare a card that returns its literal unconditionally
+  against an equal registry literal, so they exercise no arithmetic. They
+  establish that the domain gate admits the point and that the two crates
+  agree on the constant; they are not evidence of limiting behavior. The
+  limiting-behavior authority for `3.66` is the Hausen convergence check,
+  which is the only test that fails when the developing-flow relation drifts
+  away from that constant.
+- The per-formula frozen spot values are outputs of this implementation, not
+  source-published table entries. They detect drift; they do not validate any
+  card against its source. No external or published-table oracle exists for
+  any nonconstant card.
+- The limiting-behavior checks verify internal consistency between formulas
+  and their own published coefficients. Agreement between two cards at a
+  shared domain edge constrains the constants that relate them; it is not
+  experimental validation and does not upgrade either card's evidence colour.
 - `EngineeringAllowance` is a declared design band, not a statistical
   confidence interval and not L4 experimental validation.
 - The formula arithmetic is an `Estimate`, not an outward-rounded numerical
@@ -130,6 +165,13 @@ None.
 - The rectangular-duct cards admit aspect ratios from 0.001 through 1.0. The
   exact parallel-plate limit at aspect ratio zero is outside that domain and
   is not executed; current tests freeze the admitted square value at 1.0.
+  Unlike the Churchill-Chu intercept, this endpoint is not recovered by
+  extrapolation: the shape function is a quintic in the aspect ratio, so no
+  two-point affine fit reaches it, and no such test is claimed here.
+- The Churchill-Bernstein `Re -> 0` conduction limit of `0.3` is neither
+  admitted nor approachable: the `Pe >= 0.2` floor forces `Pr >= 0.2` at
+  `Re = 1`, where the card still returns roughly twice that value. No test
+  constrains it.
 - Cylinder crossflow is an isolated-pin baseline. Tube-bank and heatsink-array
   interference require separate cards and validation.
 - The Robin integration test proves the coefficient-to-conduction seam on a
