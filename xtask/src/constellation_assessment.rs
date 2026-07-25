@@ -89,7 +89,7 @@ const POLICIES: &[Policy] = &[
         correctness_risk: "critical",
         availability_risk: "high",
         security_surface: "Capability, deadline, cancellation, executor, and fault-propagation inputs; no FrankenSim network parser is delegated to it.",
-        review_status: "Pinned and exercised; independent review of load-bearing protocols is pending.",
+        review_status: "Pinned and exercised. Independent review SREV-2026-07-A (bead f85xj.13.5, docs/SIBLING_REVIEW_ASUPERSYNC.md) drilled the cancellation contract at the fs-exec adapter boundary contract-first and found no defect: idempotence, first-timestamp retention, checkpoint masking, monotonicity across 10k polls, caller-owned gates with a negative control, and downward propagation all hold. Reviewer independence is the bead's MINIMUM bar (no authorship history on the target), not a genuinely external audit. Obligation leaks, loser drain, cleanup-budget bounding, bounded cancel fairness, the no-receipt-past-deadline assumption, and all crash/panic drills remain UNREVIEWED: they need a driven runtime.",
         verification: &[
             "constellation.lock pin and clean-tree verification",
             "fs-exec unit, conformance, cancellation, race, and constellation-smoke batteries",

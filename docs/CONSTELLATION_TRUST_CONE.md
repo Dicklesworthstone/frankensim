@@ -10,7 +10,7 @@ Operational ownership, incident response, archival, and support are governed by 
 
 | Sibling | State | Runtime consumers | Dev consumers | Production refs | Test refs | Correctness | Availability | Review priority |
 | --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: |
-| `asupersync` | active | 3 | 21 | 50 | 53 | critical | high | P1 |
+| `asupersync` | active | 3 | 21 | 50 | 59 | critical | high | P1 |
 | `franken_networkx` | active | 3 | 0 | 11 | 0 | high | medium | P3 |
 | `franken_numpy` | active | 1 | 0 | 4 | 0 | high | medium | P2 |
 | `frankenpandas` | pinned-unused | 0 | 0 | 0 | 0 | medium | medium | P4 |
@@ -35,7 +35,7 @@ Operational ownership, incident response, archival, and support are governed by 
 - **Role:** Structured-concurrency, cancellation, scope, clock, and latency-lane substrate.
 - **Layers:** L0 SUBSTRATE; all cancellable kernels through fs-exec
 - **Load-bearing claims:** bounded cancellation and request-drain-finalize semantics; task-scoped capability and budget propagation; deterministic pause, drain, and replay boundaries
-- **Measured usage:** `active`; runtime consumers: fs-exec, fs-plan, fs-surrogate; dev consumers: fs-cheb, fs-constraint, fs-contact, fs-flywheel-e2e, fs-geocon, fs-geom, fs-marquee, fs-mesh, fs-opdsl, fs-opt, fs-plan, fs-query, fs-render, fs-rep-frep, fs-rep-mesh, fs-rep-nurbs, fs-rep-sdf, fs-rep-voxel, fs-selfknow-e2e, fs-surrogate, fs-topo; production/test references: 50/53
+- **Measured usage:** `active`; runtime consumers: fs-exec, fs-plan, fs-surrogate; dev consumers: fs-cheb, fs-constraint, fs-contact, fs-flywheel-e2e, fs-geocon, fs-geom, fs-marquee, fs-mesh, fs-opdsl, fs-opt, fs-plan, fs-query, fs-render, fs-rep-frep, fs-rep-mesh, fs-rep-nurbs, fs-rep-sdf, fs-rep-voxel, fs-selfknow-e2e, fs-surrogate, fs-topo; production/test references: 50/59
 - **Sampled API references:**
   - `asupersync` at `crates/fs-cheb/tests/budget_battery.rs`:10
   - `asupersync` at `crates/fs-constraint/tests/conformance.rs`:12
@@ -43,7 +43,7 @@ Operational ownership, incident response, archival, and support are governed by 
   - `asupersync` at `crates/fs-exec/src/budget_accountant.rs`:34
   - `asupersync` at `crates/fs-exec/src/budget_accountant.rs`:35
 - **Risk:** correctness `critical`, availability `high`; security surface: Capability, deadline, cancellation, executor, and fault-propagation inputs; no FrankenSim network parser is delegated to it.
-- **Review status:** Pinned and exercised; independent review of load-bearing protocols is pending.
+- **Review status:** Pinned and exercised. Independent review SREV-2026-07-A (bead f85xj.13.5, docs/SIBLING_REVIEW_ASUPERSYNC.md) drilled the cancellation contract at the fs-exec adapter boundary contract-first and found no defect: idempotence, first-timestamp retention, checkpoint masking, monotonicity across 10k polls, caller-owned gates with a negative control, and downward propagation all hold. Reviewer independence is the bead's MINIMUM bar (no authorship history on the target), not a genuinely external audit. Obligation leaks, loser drain, cleanup-budget bounding, bounded cancel fairness, the no-receipt-past-deadline assumption, and all crash/panic drills remain UNREVIEWED: they need a driven runtime.
 - **Current verification:** constellation.lock pin and clean-tree verification; fs-exec unit, conformance, cancellation, race, and constellation-smoke batteries; consumer tests construct real asupersync Cx and Budget values
 - **Gaps/no-claim boundary:** asupersync model checks do not prove FrankenSim TilePool, arena-lease, parked-crew, or injected-fault protocols; no independently adjudicated cancellation-latency and drain proof spans both repositories
 - **Review priority P1:** scope cancellation; deadline propagation; runtime shutdown; fs-exec adapter boundary

@@ -451,6 +451,7 @@
     "crates/fs-exec/tests/fault_storm.rs",
     "crates/fs-exec/tests/lease_battery.rs",
     "crates/fs-exec/tests/pool_pin_ab.rs",
+    "crates/fs-exec/tests/sibling_review_cancellation.rs",
     "crates/fs-exec/tests/steal_stability.rs",
     "crates/fs-exec/tests/tune_machine_ab.rs",
     "crates/fs-fab/tests/fab.rs",
