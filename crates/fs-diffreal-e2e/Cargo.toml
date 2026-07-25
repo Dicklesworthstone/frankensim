@@ -27,6 +27,14 @@ fs-alloc = { path = "../fs-alloc" }
 # dev-dependencies because this crate's LIBRARY composes neither.
 fs-report = { path = "../fs-report" }
 fs-scenario = { path = "../fs-scenario" }
+# Test-only: the physics stage of the as-built chain (bead f85xj.12.10) drives
+# a conduction solve from an extracted thickness field. `fs-conduction` (L3)
+# and its material/mesh vocabulary are dev-only for the same reason: this
+# crate's LIBRARY composes no solver, so these edges stay out of the
+# production dependency graph.
+fs-conduction = { path = "../fs-conduction" }
+fs-matdb = { path = "../fs-matdb" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 [lints]
 workspace = true

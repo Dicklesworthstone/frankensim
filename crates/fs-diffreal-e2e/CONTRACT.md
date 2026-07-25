@@ -288,6 +288,32 @@ A second case pins determinism: two independent runs produce the same
 registration identity and the same propagation record, and the binding
 transports that identity unchanged.
 
+The same file adds a physics stage (bead
+`frankensim-extreal-program-f85xj.12.10`) that closes the loop from a scan to a
+solve. It builds paired opposing-face bond-line stations through the fitted
+pose, extracts an `fs_asbuilt::field::ThicknessField`, converts each station to
+an area-specific resistance `R''_i = t_i / k` with `k` implied by the material
+card at nominal thickness, binds them through
+`InterfaceSurface::new_mapped` + `InterfaceResistance::with_measured_value`,
+and runs `fs_conduction::solve::solve_with_interfaces` over a ladder of three
+wedge severities. It asserts: no station is refused, so the station-to-face
+index mapping is sound; every per-face value reports
+`ResistanceValueOrigin::CallerSupplied` and retains the one card identity; the
+thickness field driving the solve cites the SAME registration the scenario was
+bound to; the reported interface flux cites that one card; the integrated
+interface heat rate equals the driven wall power and the energy balance closes
+at every rung; an undeformed bond line recovers both its nominal thickness and
+the card's own conductance; and a thicker measured bond line conducts less,
+jumps more, and raises the hot side, monotonically across the ladder. A final
+assertion pins that a MAP is not its own average — a wedge's conductance
+exceeds that of a uniform surface at the same mean thickness by a margin far
+above float noise — which is what makes the per-face map load-bearing rather
+than decorative. Both new assertions were confirmed by falsification: dropping
+the measured field, and collapsing the map to its mean, each fail the battery.
+A third determinism case pins the physics stage bitwise: the same recovered
+thickness stations, field identity, interface conductance, and hot-side
+temperature across independent runs.
+
 `tests/e2e.rs` covers the shared tape/VJP result, a perturbed-VJP kill test,
 dual-number gradient agreement, the coarse/fine FD study, sealed-receipt
 replay/integrity, valid/invalid unit rescaling, NaN, both infinities,
@@ -318,16 +344,32 @@ misfits, full allocation/GD&T rows and totals, and the robustness verdict.
 
 ## No-claim boundaries
 
-- `tests/as_built_chain.rs` proves that ONE identity survives the five-stage
-  as-built product chain: the registration's `model_identity()` is what the
-  scenario cites, and the propagation record's identity is what every geometry
-  term and the rendered correlation line agree on. Its "solve" is a LINEAR QoI
-  evaluator, not a physics solve. The battery therefore establishes that the
-  seams compose and the identities flow; it does not establish that any thermal
-  or structural result is correct, does not exercise a real solver consuming
-  `PlacementBasis::AsBuilt`, and does not validate the registration against any
-  measured artifact. The fiducial scan is synthetic with fixed literal
-  perturbations.
+- `tests/as_built_chain.rs` proves that ONE identity survives the as-built
+  product chain: the registration's `model_identity()` is what the scenario
+  cites, what the propagation record is about, and what the thickness field
+  driving the conduction solve reports as its `registration_ref()`. The
+  evaluator behind the propagate/budget/render stages is a LINEAR QoI
+  evaluator, not a physics solve; those stages establish that the seams
+  compose and the identities flow, not that any QoI value is correct.
+- The physics stage IS a real `fs-conduction` solve, and that changes what is
+  proven — but not by as much as it may look. It is synthetic throughout:
+  literal-noise fiducials, a declared interface card, an injected wedge, and
+  the conduction crate's G1 two-slab geometry at metre scale rather than any
+  electronics package. It establishes that a measured field reaches the
+  operator, that the identity chain is unbroken from scan to flux, and that
+  the result moves in the physically required direction and magnitude order.
+  It validates NO magnitude against anything external, and the registration is
+  still not validated against a measured artifact.
+- Every thickness value carried into the solve is Estimate-class and inherits
+  `fs-asbuilt`'s no-claims unchanged: supplied correspondence (never
+  discovered), unfiltered roughness, a first-order pose linearisation, and a
+  composed half-width that is a declared decomposition rather than a
+  confidence interval. `fs-conduction` does not validate a caller-supplied
+  `R''` and does not compose the metrology and material uncertainties for the
+  caller. A measured map entering a solve does not make the solve validated,
+  and no capability may infer an L3 integration claim or an L4 validation
+  claim from this battery. `f85xj.12.3`'s DONE-WHEN 2 — a real or rig-derived
+  scan — remains open and blocked on Level-E hardware (`f85xj.4.5`).
 - "Production" here means the shared `fs-adjoint` `Tape`/`VjpRegistry`
   implementation. The names `sdf`, `spline`, and `solve` denote crate-local
   affine, square, and identity scalar fixtures. This battery does not execute
