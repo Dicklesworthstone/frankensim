@@ -308,6 +308,17 @@ impl ThermalBoundary {
         self.face_region[boundary_face_slot].map(|r| &self.conditions[r])
     }
 
+    /// The index into [`ThermalBoundary::region_names`] owning a
+    /// boundary-face slot, or `None` for a face in the declared adiabatic
+    /// remainder.
+    ///
+    /// This is what lets a caller attribute a boundary integral to the
+    /// named trace that produced it instead of to the whole domain.
+    #[must_use]
+    pub fn region_for(&self, boundary_face_slot: usize) -> Option<usize> {
+        self.face_region[boundary_face_slot]
+    }
+
     /// The prescribed `(vertex, temperature)` pairs, ascending by vertex.
     #[must_use]
     pub fn dirichlet(&self) -> &[(usize, f64)] {

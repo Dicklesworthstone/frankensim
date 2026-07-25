@@ -381,6 +381,7 @@
     "crates/fs-conduction/tests/power.rs",
     "crates/fs-conduction/tests/power_table_e2e.rs",
     "crates/fs-conduction/tests/radiation.rs",
+    "crates/fs-conduction/tests/robin_flux.rs",
     "crates/fs-conduction/tests/support/mod.rs",
     "crates/fs-conduction/tests/transient.rs",
     "crates/fs-conform/tests/conform.rs",

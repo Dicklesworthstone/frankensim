@@ -126,6 +126,7 @@ fn mesh_and_solution() -> (ConductionMesh, ConductionSolution) {
             material_provenance: ProvenanceClass::MatdbReceipts,
             material_receipts: 3,
             interface_fluxes: Vec::new(),
+            robin_fluxes: Vec::new(),
             free_dofs: 8,
             elements: mesh.element_count(),
         },

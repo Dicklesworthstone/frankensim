@@ -105,6 +105,8 @@ diameter.
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
 | `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |
+| `RobinFlux` | `EnergyBalance::robin_out_w` restricted to ONE declared Robin region: face count, area, area-weighted mean `h` / wall temperature / `T_ref`, and the integrated heat rate. This is what lets a conjugate driver attribute heat to a named convective trace instead of to the whole domain |
+| `ThermalBoundary::region_for` | the region index owning a boundary-face slot, or `None` in the declared adiabatic remainder — the attribution the `RobinFlux` decomposition is built on |
 | `ConductivityDesign` | the IFT adjoint hook for the LINEAR case: `dJ/dρ` over per-element conductivity multipliers |
 | `ConductionError` | the total typed refusal set; `rule()` gives a stable slug |
 
@@ -238,6 +240,23 @@ producing solver's own typed claim is carried verbatim in
     that translation once, in one place. Evidence: `tests/power.rs` asserts
     the selector reproduces exactly the claimed slots — it caught this
     confusion during development.
+15. **The Robin decomposition partitions the convective total without
+    redefining it.** `report.robin_fluxes` carries one row per declared Robin
+    region owning at least one boundary face, in declaration order, each
+    integrating `∫ h (T_h − T_ref) dA` over that region's faces with the SAME
+    per-face rule the balance uses. `EnergyBalance::robin_out_w` keeps its
+    historical running-accumulator value bit-for-bit — it is NOT re-derived as
+    a sum of these parts — so the whole and the sum of parts agree only up to
+    floating-point summation order, and the test pins that gap rather than
+    asserting it away. A Robin region matching no face emits no row: it moves
+    no heat and has no area to average over, so inventing zero-valued means
+    for it would be a fabricated measurement. Evidence:
+    `tests/robin_flux.rs::each_robin_region_matches_its_own_closed_form_heat_rate`
+    (per-region closed forms on a doubly-convected generating slab whose two
+    ends differ by ~20x, so a swapped attribution fails by magnitude),
+    `::the_two_end_heat_rates_account_for_the_whole_generated_power`,
+    `::the_decomposition_sums_to_the_whole_domain_total_up_to_summation_order`,
+    and `::the_rows_cover_exactly_the_faces_whose_condition_is_robin`.
 
 ## Error model
 
@@ -743,6 +762,18 @@ not promote any row beyond its registry authority.
 - Internal contact contributions cancel from the global energy balance. The
   report exposes each interface's integrated A-to-B heat rate, but that is not
   a local flux-conservation certificate or an interface-error estimator.
+- `RobinFlux` is an ATTRIBUTION of the convective total, not a local error
+  bound. Restricting the balance's own post-integration to one trace inherits
+  exactly that rule's exactness — face-constant `h`, linear `T_ref` — and
+  nothing stronger. In particular, `mean_htc · area · (mean_wall −
+  mean_reference)` is NOT `heat_rate_w` when `h` varies over the region: the
+  heat rate is the integral, the means are area-weighted diagnostics, and the
+  two coincide only in the uniform-`h` case. A downstream consumer that
+  reconstructs heat from the means is computing a different quantity.
+- A per-surface heat rate is not a conjugate coupling. Nothing here solves a
+  fluid side, raises a downstream `T_ref` by the heat a trace removed, or
+  closes a solid-to-air balance; `T_ref` remains declared data. Those are
+  bead `f85xj.5.7`.
 - The series uncertainty budget is a conservative sum of stated symmetric
   half-widths, not a probabilistic convolution and not a confidence
   certificate. Correlation among terms is not modeled; one `Unstated` term

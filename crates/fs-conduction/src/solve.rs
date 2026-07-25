@@ -335,6 +335,39 @@ impl EnergyBalance {
     }
 }
 
+/// The integrated convective heat rate leaving the solid through ONE
+/// named Robin region.
+///
+/// [`EnergyBalance::robin_out_w`] is the whole-domain total. This is the
+/// same integral restricted to a single declared trace, which is what a
+/// conjugate driver needs in order to hand a specific surface's heat to
+/// a specific air path instead of attributing it to the domain.
+///
+/// Sign convention matches the balance: positive is heat LEAVING the
+/// solid.
+///
+/// The means are AREA-WEIGHTED over the region's faces, each face
+/// contributing its own vertex mean — the same per-face reduction the
+/// balance uses, so `heat_rate_w` and the means describe one quadrature
+/// rather than two.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RobinFlux {
+    /// The declared region name.
+    pub region: String,
+    /// Boundary faces the region owns.
+    pub faces: usize,
+    /// `∫ dA` over the region, m².
+    pub area_m2: f64,
+    /// Area-weighted mean `h`, W/(m²·K).
+    pub mean_htc_w_per_m2_k: f64,
+    /// Area-weighted mean wall temperature `T_h`, K.
+    pub mean_wall_temperature_k: f64,
+    /// Area-weighted mean `T_ref`, K.
+    pub mean_reference_temperature_k: f64,
+    /// `∫ h (T_h − T_ref) dA` over the region, W (positive = leaving).
+    pub heat_rate_w: f64,
+}
+
 /// The report a solve returns alongside the field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConductionReport {
@@ -358,6 +391,16 @@ pub struct ConductionReport {
     pub material_receipts: usize,
     /// One evidence-bearing integrated heat rate per named interface.
     pub interface_fluxes: Vec<InterfaceFlux>,
+    /// One integrated convective heat rate per named Robin region that
+    /// owns at least one boundary face, in region-declaration order.
+    ///
+    /// A Robin region matching no face is legal and emits no row: it
+    /// contributes nothing to the balance and has no area to average
+    /// over. Summing `heat_rate_w` reproduces
+    /// [`EnergyBalance::robin_out_w`] up to floating-point summation
+    /// order — the total is NOT re-derived from these parts, so its
+    /// value is unchanged by this decomposition.
+    pub robin_fluxes: Vec<RobinFlux>,
     /// Free degrees of freedom.
     pub free_dofs: usize,
     /// Element count.
@@ -948,7 +991,7 @@ impl<'m> ConductionSolver<'m> {
             .as_ref()
             .expect("a converged step caches its assembled system");
         let temperature = self.dofs.scatter(&self.state.free_temperature);
-        let energy = energy_balance(
+        let (energy, robin_fluxes) = energy_balance(
             self.problem.mesh,
             self.problem.boundary,
             self.problem.source,
@@ -977,6 +1020,7 @@ impl<'m> ConductionSolver<'m> {
                 material_provenance: self.problem.material.provenance(),
                 material_receipts: self.problem.material.receipts().len(),
                 interface_fluxes,
+                robin_fluxes,
                 free_dofs: self.dofs.n(),
                 elements: self.problem.mesh.element_count(),
             },
@@ -1023,6 +1067,47 @@ fn initial_free(
     }
 }
 
+/// Per-region Robin accumulators, kept beside the running whole-domain
+/// total rather than replacing it: re-deriving `robin_out_w` as a sum of
+/// these parts would change its last bits for no gain.
+#[derive(Debug, Clone, Copy, Default)]
+struct RobinAccumulator {
+    faces: usize,
+    area: f64,
+    h_area: f64,
+    wall_area: f64,
+    ref_area: f64,
+    heat: f64,
+}
+
+/// Project the per-region accumulators onto report rows, in region
+/// declaration order, skipping regions that own no boundary face.
+fn robin_region_fluxes(
+    boundary: &ThermalBoundary,
+    accumulators: &[RobinAccumulator],
+) -> Vec<RobinFlux> {
+    boundary
+        .region_names()
+        .iter()
+        .zip(accumulators.iter())
+        .filter(|(_, acc)| acc.faces > 0)
+        .map(|(name, acc)| {
+            // A region whose faces all have zero area is a degenerate
+            // mesh, not a division to perform blindly.
+            let inv_area = if acc.area > 0.0 { 1.0 / acc.area } else { 0.0 };
+            RobinFlux {
+                region: name.clone(),
+                faces: acc.faces,
+                area_m2: acc.area,
+                mean_htc_w_per_m2_k: acc.h_area * inv_area,
+                mean_wall_temperature_k: acc.wall_area * inv_area,
+                mean_reference_temperature_k: acc.ref_area * inv_area,
+                heat_rate_w: acc.heat,
+            }
+        })
+        .collect()
+}
+
 fn energy_balance(
     mesh: &ConductionMesh,
     boundary: &ThermalBoundary,
@@ -1030,7 +1115,7 @@ fn energy_balance(
     system: &AssembledSystem,
     dofs: &DofMap,
     temperature: &[f64],
-) -> EnergyBalance {
+) -> (EnergyBalance, Vec<RobinFlux>) {
     let mut source_w = 0.0f64;
     for (e, tet) in mesh.complex().tets.iter().enumerate() {
         let volume = mesh.element_volume(e);
@@ -1043,6 +1128,7 @@ fn energy_balance(
 
     let mut neumann_out_w = 0.0f64;
     let mut robin_out_w = 0.0f64;
+    let mut robin_regions = vec![RobinAccumulator::default(); boundary.region_names().len()];
     for (slot, face) in mesh.boundary().iter().enumerate() {
         let Some(condition) = boundary.condition_for(slot) else {
             continue;
@@ -1066,9 +1152,22 @@ fn energy_balance(
                     .sum::<f64>()
                     / 3.0;
                 robin_out_w = (h_bar * face.area).mul_add(delta, robin_out_w);
+                if let Some(region) = boundary.region_for(slot) {
+                    let wall_bar = verts.iter().map(|&v| temperature[v]).sum::<f64>() / 3.0;
+                    let ref_bar = verts.iter().map(|&v| t_ref.at(v)).sum::<f64>() / 3.0;
+                    let acc = &mut robin_regions[region];
+                    acc.faces += 1;
+                    acc.area += face.area;
+                    acc.h_area = face.area.mul_add(h_bar, acc.h_area);
+                    acc.wall_area = face.area.mul_add(wall_bar, acc.wall_area);
+                    acc.ref_area = face.area.mul_add(ref_bar, acc.ref_area);
+                    acc.heat = (h_bar * face.area).mul_add(delta, acc.heat);
+                }
             }
         }
     }
+
+    let robin_fluxes = robin_region_fluxes(boundary, &robin_regions);
 
     let r = full_residual(system, temperature);
     let dirichlet_in_w: f64 = dofs.fixed().iter().map(|&v| r[v]).sum();
@@ -1079,14 +1178,17 @@ fn energy_balance(
         .max(robin_out_w.abs())
         .max(dirichlet_in_w.abs())
         .max(f64::MIN_POSITIVE);
-    EnergyBalance {
-        source_w,
-        neumann_out_w,
-        robin_out_w,
-        dirichlet_in_w,
-        closure_w,
-        scale_w,
-    }
+    (
+        EnergyBalance {
+            source_w,
+            neumann_out_w,
+            robin_out_w,
+            dirichlet_in_w,
+            closure_w,
+            scale_w,
+        },
+        robin_fluxes,
+    )
 }
 
 /// Recover the per-element heat-flux vector `q_e = −K(T̄_e) ∇T_h`, W/m².
