@@ -502,3 +502,281 @@ fn a_cancelled_march_publishes_no_partial_solution() {
     });
     assert!(matches!(error, ConductionError::Cancelled { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// The transient adjoint.
+// ---------------------------------------------------------------------------
+
+use fs_adjoint::verify_gradient;
+use fs_conduction::transient::{FinalStateFunctional, source_scale_gradient};
+
+/// Forward objective as a function of the source scale, for the independent
+/// finite-difference check.
+fn objective_at(
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    base_density: f64,
+    functional: &FinalStateFunctional,
+    config: &TransientConfig,
+    steps: usize,
+    scale: f64,
+) -> f64 {
+    let source =
+        ScalarField::uniform("volumetric source", base_density * scale).expect("scaled source");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let solution = with_cx(|cx| {
+        march(
+            cx,
+            TransientProblem {
+                mesh,
+                boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            config,
+            &initial,
+            steps,
+        )
+        .expect("march")
+    });
+    functional.evaluate(&solution.temperature)
+}
+
+#[test]
+fn the_transient_adjoint_passes_the_crate_gradient_gate() {
+    // Finite differences are the INDEPENDENT check, through the same
+    // `fs_adjoint::verify_gradient` gate the steady adjoint uses — not a
+    // bespoke comparison whose tolerance I could tune until it passed.
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let base_density = 2.0e5;
+    let steps = 6;
+    let config = TransientConfig::backward_euler(2.0e4, linear_config()).expect("config");
+
+    // Probe the vertex farthest from the cold wall, where the source actually
+    // moves the answer.
+    let probe = mesh
+        .positions()
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1[0].total_cmp(&b.1[0]))
+        .map(|(index, _)| index)
+        .expect("a vertex");
+    let functional =
+        FinalStateFunctional::probe(mesh.vertex_count(), probe).expect("probe functional");
+
+    let source = ScalarField::uniform("volumetric source", base_density).expect("source");
+    let gradient = with_cx(|cx| {
+        source_scale_gradient(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &functional,
+            steps,
+        )
+        .expect("adjoint gradient")
+    });
+    assert!(
+        gradient > 0.0,
+        "more source must raise the probe temperature, got {gradient}"
+    );
+
+    let objective = |p: &[f64]| -> f64 {
+        objective_at(
+            &mesh,
+            &boundary,
+            base_density,
+            &functional,
+            &config,
+            steps,
+            p[0],
+        )
+    };
+    let verdict = verify_gradient(&objective, &[1.0], &[gradient], &[vec![1.0]], 1e-4, 1e-6);
+    assert!(
+        verdict.pass,
+        "the transient adjoint must agree with finite differences: max_rel_err={:e} pairs={:?}",
+        verdict.max_rel_err, verdict.pairs
+    );
+    assert_eq!(
+        verdict.informative_directions, 1,
+        "the probe direction must carry signal, else the pass is vacuous"
+    );
+}
+
+#[test]
+fn the_adjoint_agrees_with_finite_differences_under_crank_nicolson_too() {
+    // The adjoint is derived from the theta-method operators, so it must track
+    // theta rather than being right only for backward Euler.
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let base_density = 1.5e5;
+    let steps = 5;
+    let config = TransientConfig::crank_nicolson(1.5e4, linear_config()).expect("config");
+    let functional = FinalStateFunctional::new(vec![
+        1.0 / (mesh.vertex_count() as f64);
+        mesh.vertex_count()
+    ])
+    .expect("mean functional");
+
+    let source = ScalarField::uniform("volumetric source", base_density).expect("source");
+    let gradient = with_cx(|cx| {
+        source_scale_gradient(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &functional,
+            steps,
+        )
+        .expect("adjoint gradient")
+    });
+
+    let objective = |p: &[f64]| -> f64 {
+        objective_at(
+            &mesh,
+            &boundary,
+            base_density,
+            &functional,
+            &config,
+            steps,
+            p[0],
+        )
+    };
+    let verdict = verify_gradient(&objective, &[1.0], &[gradient], &[vec![1.0]], 1e-4, 1e-6);
+    assert!(
+        verdict.pass,
+        "Crank-Nicolson adjoint disagreed with finite differences: max_rel_err={:e} pairs={:?}",
+        verdict.max_rel_err, verdict.pairs
+    );
+    assert_eq!(verdict.informative_directions, 1);
+}
+
+#[test]
+fn the_adjoint_is_exact_for_the_uniform_adiabatic_case() {
+    // The one case with a closed form: with no loss, the mean temperature
+    // rises by (s * f / rho c_p) * t, so d(mean)/ds = f * t / (rho c_p)
+    // exactly. Any drift here is the adjoint algebra, not discretization.
+    let mesh = unit_mesh(2);
+    let boundary = adiabatic(&mesh);
+    let base_density = 3.0e5;
+    let dt = 1.0;
+    let steps = 7;
+    let config = TransientConfig::backward_euler(dt, linear_config()).expect("config");
+    let functional = FinalStateFunctional::new(vec![
+        1.0 / (mesh.vertex_count() as f64);
+        mesh.vertex_count()
+    ])
+    .expect("mean functional");
+
+    let source = ScalarField::uniform("volumetric source", base_density).expect("source");
+    let gradient = with_cx(|cx| {
+        source_scale_gradient(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &functional,
+            steps,
+        )
+        .expect("adjoint gradient")
+    });
+
+    let expected = base_density * dt * (steps as f64) / RHO_CP;
+    assert!(
+        (gradient - expected).abs() < 1e-9 * expected,
+        "adjoint gradient {gradient} != closed form {expected}"
+    );
+}
+
+#[test]
+fn the_adjoint_refuses_a_temperature_dependent_material() {
+    // The state-independent-operator argument that removes checkpointing does
+    // not hold for k(T), so the adjoint must refuse rather than return a
+    // gradient whose derivation no longer applies.
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let source = ScalarField::uniform("volumetric source", 1.0e5).expect("source");
+    let curve = ConductivityTable::declared_curve(vec![(280.0, 9.0), (360.0, 12.0)])
+        .expect("varying table");
+    let varying = ConductivityModel::isotropic(curve);
+    let config = TransientConfig::backward_euler(1.0e3, linear_config()).expect("config");
+    let functional = FinalStateFunctional::probe(mesh.vertex_count(), 0).expect("probe functional");
+
+    let error = with_cx(|cx| {
+        source_scale_gradient(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &varying,
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &functional,
+            2,
+        )
+        .expect_err("k(T) must refuse")
+    });
+    assert!(matches!(
+        error,
+        ConductionError::Config {
+            parameter: "conductivity",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn functional_admission_refuses_degenerate_declarations() {
+    assert!(FinalStateFunctional::new(vec![1.0, f64::NAN]).is_err());
+    assert!(FinalStateFunctional::probe(4, 4).is_err(), "out of range");
+    assert!(FinalStateFunctional::probe(4, 3).is_ok());
+
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let source = ScalarField::uniform("volumetric source", 1.0).expect("source");
+    let config = TransientConfig::backward_euler(1.0, linear_config()).expect("config");
+    let short = FinalStateFunctional::new(vec![1.0, 1.0]).expect("short functional");
+    let error = with_cx(|cx| {
+        source_scale_gradient(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material(),
+                source: &source,
+                capacity: capacity(),
+            },
+            &config,
+            &short,
+            1,
+        )
+        .expect_err("mismatched weights")
+    });
+    assert!(matches!(
+        error,
+        ConductionError::FieldLength {
+            field: "functional weights",
+            ..
+        }
+    ));
+}

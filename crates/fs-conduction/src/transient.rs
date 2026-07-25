@@ -417,6 +417,202 @@ pub fn march(
     })
 }
 
+/// A linear functional of the FINAL nodal temperature, `J = w · T^N`.
+///
+/// General enough for the questions a transient actually answers — a probe
+/// temperature is one weight, a region mean is a normalized set of them — and
+/// narrow enough that its derivative is exact rather than estimated. A
+/// max-over-region functional is deliberately NOT offered: it is not
+/// differentiable, and smoothing it silently would hand back a gradient of a
+/// different objective than the caller asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinalStateFunctional {
+    weights: Vec<f64>,
+}
+
+impl FinalStateFunctional {
+    /// Declare the weights, one per mesh vertex.
+    ///
+    /// # Errors
+    /// [`ConductionError::NonFinite`] for a non-finite weight.
+    pub fn new(weights: Vec<f64>) -> Result<Self, ConductionError> {
+        for &value in &weights {
+            crate::require_finite("functional weight", value)?;
+        }
+        Ok(Self { weights })
+    }
+
+    /// A unit weight on one vertex: the temperature probe.
+    ///
+    /// # Errors
+    /// [`ConductionError::FieldLength`] when the vertex is out of range.
+    pub fn probe(vertex_count: usize, vertex: usize) -> Result<Self, ConductionError> {
+        if vertex >= vertex_count {
+            return Err(ConductionError::FieldLength {
+                field: "probe vertex",
+                expected: vertex_count,
+                found: vertex,
+            });
+        }
+        let mut weights = vec![0.0f64; vertex_count];
+        weights[vertex] = 1.0;
+        Ok(Self { weights })
+    }
+
+    /// Evaluate against a full nodal temperature.
+    #[must_use]
+    pub fn evaluate(&self, temperature: &[f64]) -> f64 {
+        self.weights
+            .iter()
+            .zip(temperature.iter())
+            .fold(0.0f64, |acc, (w, t)| w.mul_add(*t, acc))
+    }
+
+    /// The declared weights.
+    #[must_use]
+    pub fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+}
+
+/// The derivative of `J = w · T^N` with respect to a UNIFORM SCALE on the
+/// volumetric source, by the discrete adjoint.
+///
+/// The forward march is `A T^{n+1} = B T^n + b` with `A = C/dt + θK` and
+/// `B = C/dt − (1−θ)K`. Differentiating with respect to a scale `s` on `b`
+/// and collecting terms gives
+///
+/// ```text
+///   dJ/ds = Σ_{n=1..N} μ^n · (db/ds),    μ^n = A^{-T} λ^n,
+///           λ^N = w,   λ^{n} = B^T μ^{n+1}
+/// ```
+///
+/// so the adjoint is a BACKWARD march of the same size as the forward one.
+///
+/// # No checkpointing is required, and that is a property, not an omission
+///
+/// The staged plan for this bead assumed the checkpointed pattern from
+/// `fs-adjoint::timedep`, which exists to avoid storing the forward
+/// trajectory. In the regime this crate admits there is nothing to store: `A`
+/// and `B` are STATE INDEPENDENT because conductivity is temperature
+/// independent (`k(T)` is refused), so the adjoint march never consults the
+/// forward states at all. Checkpointing becomes necessary exactly when `k(T)`
+/// is admitted — building the machinery now would add a mechanism that does
+/// nothing and imply a generality the solver does not have.
+///
+/// # Errors
+/// Every refusal [`march`] can produce, plus
+/// [`ConductionError::LinearSolveFailed`] on a non-converging adjoint solve.
+pub fn source_scale_gradient(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    config: &TransientConfig,
+    functional: &FinalStateFunctional,
+    steps: usize,
+) -> Result<f64, ConductionError> {
+    let TransientProblem {
+        mesh,
+        boundary,
+        material,
+        source,
+        capacity,
+    } = problem;
+    if material.is_temperature_dependent() {
+        return Err(ConductionError::Config {
+            parameter: "conductivity",
+            what: "the transient adjoint received a temperature-dependent conductivity; the state-independent-operator argument that removes checkpointing does not hold for k(T)".to_string(),
+        });
+    }
+    let n = mesh.vertex_count();
+    if functional.weights.len() != n {
+        return Err(ConductionError::FieldLength {
+            field: "functional weights",
+            expected: n,
+            found: functional.weights.len(),
+        });
+    }
+
+    let dofs = DofMap::new(boundary, n)?;
+    let capacitance = assemble_capacitance(cx, mesh, capacity)?;
+    let reference = vec![0.0f64; n];
+    let system = assemble_operator(cx, mesh, boundary, material, source, &reference)?;
+
+    let inverse_dt = 1.0 / config.dt_s;
+    let theta = config.theta;
+    let lhs = axpy_csr(&capacitance, inverse_dt, &system.operator, theta);
+    let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
+    let rhs_matrix = axpy_csr(&capacitance, inverse_dt, &system.operator, -(1.0 - theta));
+    let (b_ff, _) = reduce_matrix_and_lift(&rhs_matrix, &dofs);
+    let precond = spd_preconditioner(&a_ff);
+
+    // db/ds over free dofs. The Dirichlet lift does not depend on the source
+    // scale, so it contributes nothing to this derivative.
+    let mut load_sensitivity = Vec::with_capacity(dofs.n());
+    for &vertex in dofs.free() {
+        load_sensitivity.push(system.load[vertex]);
+    }
+
+    let mut lambda = Vec::with_capacity(dofs.n());
+    for &vertex in dofs.free() {
+        lambda.push(functional.weights[vertex]);
+    }
+
+    let mut gradient = 0.0f64;
+    for step in 0..steps {
+        cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+            stage: "transient-adjoint",
+            at: step,
+        })?;
+        // A is symmetric, so A^{-T} = A^{-1}.
+        let mu = solve_spd(&a_ff, &precond, &lambda, config, step)?;
+        gradient += mu
+            .iter()
+            .zip(load_sensitivity.iter())
+            .fold(0.0f64, |acc, (m, d)| m.mul_add(*d, acc));
+        if step + 1 < steps {
+            // lambda <- B^T mu; B is symmetric here too.
+            let mut next = vec![0.0f64; dofs.n()];
+            b_ff.spmv(&mu, &mut next);
+            lambda = next;
+        }
+    }
+
+    if !gradient.is_finite() {
+        return Err(ConductionError::NonFinite {
+            field: "transient source-scale gradient",
+            bits: gradient.to_bits(),
+        });
+    }
+    Ok(gradient)
+}
+
+fn solve_spd(
+    a: &Csr,
+    precond: &impl fs_sparse::precond::Precond,
+    b: &[f64],
+    config: &TransientConfig,
+    step: usize,
+) -> Result<Vec<f64>, ConductionError> {
+    let op = CsrOp::symmetric(a.clone());
+    let mut cg = CgState::new(&op, precond, b);
+    let report = cg.run(
+        &op,
+        precond,
+        config.linear.tolerance,
+        config.linear.max_iterations,
+    );
+    let truth = true_relative_residual(a, b, &cg.x);
+    if truth.is_nan() || truth >= config.linear.tolerance {
+        return Err(ConductionError::LinearSolveFailed {
+            iteration: step,
+            krylov_iterations: report.iters,
+            true_relative_residual: truth,
+            tolerance: config.linear.tolerance,
+        });
+    }
+    Ok(cg.x)
+}
+
 /// `alpha·A + beta·B` for two same-shaped CSR matrices, via the crate's
 /// deterministic COO assembly.
 fn axpy_csr(a: &Csr, alpha: f64, b: &Csr, beta: f64) -> Csr {

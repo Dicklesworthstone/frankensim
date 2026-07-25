@@ -398,6 +398,13 @@ None. Everything here is `[S]` solid work on the default path.
   form on a tet mesh); refusals for `k(T)`, `theta < 0.5`, non-positive step
   or capacity, and a mismatched initial vector; determinism across
   independent runs; and a cancelled march publishing no partial solution.
+  Adjoint coverage: the source-scale gradient passing the crate-wide
+  `fs_adjoint::verify_gradient` gate under BOTH backward Euler and
+  Crank-Nicolson — with `informative_directions` asserted so the pass cannot
+  be vacuous — plus a closed-form check on the uniform adiabatic case where
+  `d(mean T)/ds = f t / (rho c_p)` exactly, so any drift is adjoint algebra
+  rather than discretization; and refusals for `k(T)` and mismatched
+  functional weights.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
   deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
   radiosity and a two-solid outer conduction-radiation fixed point.
@@ -530,11 +537,26 @@ not promote any row beyond its registry authority.
   What is NOT here: a temperature-dependent `k(T)`, which is REFUSED rather
   than frozen across a step (freezing is a different scheme with its own error
   behaviour, and adopting it silently would make the observed time order
-  depend on how strongly `k` varies); adaptive step control; any transient
-  ADJOINT, so no transient design gradient exists and none may be inferred
-  from the steady adjoint; and duty-cycle drivers. Those remain staged as
-  `f85xj.5.12` (E17 duty cycles) and `f85xj.5.13` (lumped reduced rung), with
-  the checkpointed transient adjoint still open on `f85xj.5.11` itself.
+  depend on how strongly `k` varies); adaptive step control; and duty-cycle
+  drivers, which remain staged as `f85xj.5.12` (E17 duty cycles) and
+  `f85xj.5.13` (lumped reduced rung).
+- THE TRANSIENT ADJOINT COVERS ONE PARAMETER AND ONE FUNCTIONAL FAMILY.
+  `source_scale_gradient` differentiates `J = w · T^N` with respect to a
+  UNIFORM SCALE on the volumetric source, and nothing else: there is no
+  gradient with respect to conductivity, capacity, boundary values, per-
+  component power, or step size, and no path-integrated (time-windowed)
+  objective. A max-over-region functional is deliberately absent because it is
+  not differentiable, and smoothing it silently would return the gradient of a
+  different objective than the caller asked for.
+- CHECKPOINTING IS VACUOUS IN THE ADMITTED REGIME, AND IS THEREFORE NOT BUILT.
+  The staged plan assumed the checkpointed pattern from `fs-adjoint::timedep`,
+  which exists to avoid retaining the forward trajectory. Here `A = C/dt + θK`
+  and `B = C/dt − (1−θ)K` are STATE INDEPENDENT, because `k(T)` is refused, so
+  the backward march never consults a forward state and there is nothing to
+  checkpoint. Adding the machinery would install a mechanism that does nothing
+  and imply a generality the solver does not have. Checkpointing becomes
+  necessary exactly when `k(T)` is admitted, and that is the point at which it
+  should be built.
 - ONLY UNCONDITIONALLY STABLE SCHEMES ARE ADMITTED. `theta` is restricted to
   `[0.5, 1]`. Below one half the scheme is only conditionally stable and the
   limiting step depends on the mesh, so an explicit-leaning theta would hand
