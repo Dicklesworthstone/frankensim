@@ -47,6 +47,8 @@ use crate::ConductionError;
 use crate::assemble::{DofMap, assemble_operator, reduce_matrix_and_lift};
 use crate::transient::{TransientConfig, TransientProblem, assemble_capacitance};
 use fs_exec::Cx;
+use fs_qty::Dims;
+use fs_scenario::envelope::{AxisPoint, DutyWeighting, EnvelopeDutyCycle};
 use fs_solver::CsrOp;
 use fs_solver::krylov::CgState;
 use fs_sparse::Csr;
@@ -434,6 +436,7 @@ pub struct DutyCycleSolution {
 /// mismatched initial vector, [`ConductionError::LinearSolveFailed`] on a
 /// non-converging step, and [`ConductionError::Cancelled`] at a step
 /// boundary.
+#[allow(clippy::too_many_lines)]
 pub fn march_duty_cycle(
     cx: &Cx<'_>,
     problem: TransientProblem<'_>,
@@ -645,5 +648,189 @@ fn duty_error(field: &str, what: String) -> ConductionError {
         region: field.to_string(),
         what,
         fix: "correct the declared duty cycle; a schedule is a declaration, not a hint".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The E17 seam: lowering a scenario duty cycle onto this crate's schedule
+// ---------------------------------------------------------------------------
+
+/// Power dimensions (W = m^2 kg s^-3).
+const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
+
+/// A scenario duty cycle lowered onto a [`DutyCycle`].
+///
+/// Carries what the caller needs to drive [`march_duty_cycle`] correctly, plus
+/// the record of which envelope axes were HELD rather than applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredDutyCycle {
+    /// The schedule, ready to scale a full-load power map.
+    pub cycle: DutyCycle,
+    /// The reference power the scales are relative to, W. Pass this as
+    /// `base_power_w` to [`march_duty_cycle`]; it must be the total delivered
+    /// power of the map that produced `problem.source`.
+    pub base_power_w: f64,
+    /// `(axis, value)` for every envelope axis other than the power axis,
+    /// each of which took ONE value across the whole cycle. Recorded so the
+    /// caller can check that the boundary conditions they built match the
+    /// conditions the cycle was declared at.
+    pub held_axes: Vec<(String, String)>,
+}
+
+/// Lower an [`EnvelopeDutyCycle`] onto a [`DutyCycle`] scaling a power map.
+///
+/// This is the E17 seam: `fs_scenario` declares operating envelopes and duty
+/// cycles; this function turns one into the power-versus-time schedule the
+/// transient march consumes. The scenario object stays the single declaration
+/// of the operating history, and this crate keeps the single declaration of
+/// the spatial power distribution.
+///
+/// # Only the power axis is applied
+///
+/// A [`DutyCycle`] is a scale on a volumetric source, so the only envelope
+/// coordinate it can carry is power. Ambient temperature, pressure and
+/// discrete states act on BOUNDARY CONDITIONS, which are assembled once and
+/// are not re-assembled per segment. Rather than apply the power axis and
+/// silently ignore the rest — which would march a varying-ambient cycle at a
+/// fixed ambient and report a confidently wrong peak — this REFUSES when any
+/// other axis takes more than one value across the cycle, and records the
+/// held values when it does not.
+///
+/// # The lowered schedule is DISCONTINUOUS, and that costs exactness
+///
+/// A scenario duty cycle declares dwells AT points, not transitions BETWEEN
+/// them, so it lowers to piecewise-CONSTANT segments — no implicit smoothing,
+/// because a step load is real and rounding it off changes the peak.
+///
+/// The consequence is worth stating plainly, because it reverses a property
+/// this module otherwise has. The theta load weighting is the trapezoid rule
+/// at `theta = 0.5`, which is exact for a piecewise-LINEAR schedule with no
+/// step straddling a boundary — but a jump is not piecewise-linear. Across a
+/// segment boundary where the scale jumps by `ds`, the weighting misses
+/// exactly `(ds / 2) * dt` scale-seconds, first order in the step and
+/// independent of where the jump sits.
+///
+/// So a scenario-declared cycle does NOT deliver its declared energy exactly,
+/// and [`WindowedEnergyAudit::residual_j`] will report that gap rather than
+/// zero. The residual is analytic, not numerical noise: it is a step-resolution
+/// artifact of representing a discontinuity, it halves when the step halves,
+/// and it is the honest price of refusing to smooth a declared step. Callers
+/// who need an exact windowed balance must declare the transitions — a ramp is
+/// continuous, and the trapezoid rule integrates it exactly.
+///
+/// # Errors
+/// [`ConductionError::ScenarioRow`] when the cycle declares dimensionless
+/// fractions rather than dwells (a transient march needs absolute time), when
+/// the named axis is missing from a point or is not a power-dimensioned
+/// continuous coordinate, when `base_power_w` is not positive and finite, or
+/// when any non-power axis varies across the cycle.
+pub fn lower_envelope_duty_cycle(
+    cycle: &EnvelopeDutyCycle,
+    power_axis: &str,
+    base_power_w: f64,
+) -> Result<LoweredDutyCycle, ConductionError> {
+    if cycle.weighting != DutyWeighting::Dwells {
+        return Err(duty_error(
+            "weighting",
+            format!(
+                "scenario duty cycle `{}` declares dimensionless fractions, so no absolute dwell \
+                 duration exists; a transient march needs one",
+                cycle.name
+            ),
+        ));
+    }
+    if !base_power_w.is_finite() || base_power_w <= 0.0 {
+        return Err(duty_error(
+            "base_power_w",
+            format!("the reference power {base_power_w} is not positive and finite"),
+        ));
+    }
+    if cycle.points.is_empty() {
+        return Err(duty_error(
+            "points",
+            format!("scenario duty cycle `{}` declares no dwells", cycle.name),
+        ));
+    }
+
+    // Resolve the power axis BEFORE scanning the other axes. Otherwise a
+    // misspelled axis name makes the power axis look like just another held
+    // axis, and since power is the one axis that is SUPPOSED to vary, the
+    // caller would be told "total-power varies across the cycle" — a true
+    // statement that sends them to fix entirely the wrong thing.
+    let mut powers = Vec::with_capacity(cycle.points.len());
+    for dwell in &cycle.points {
+        let Some(power) = dwell.point.continuous(power_axis) else {
+            return Err(duty_error(
+                power_axis,
+                format!(
+                    "duty point `{}` of cycle `{}` has no continuous coordinate on power axis \
+                     `{power_axis}`",
+                    dwell.name, cycle.name
+                ),
+            ));
+        };
+        if power.dims != POWER_DIMS {
+            return Err(duty_error(
+                power_axis,
+                format!(
+                    "axis `{power_axis}` has dimensions {:?}, which is not power {:?}",
+                    power.dims.0, POWER_DIMS.0
+                ),
+            ));
+        }
+        powers.push(power.value);
+    }
+
+    // Every axis other than the power axis must be constant across the cycle,
+    // because nothing downstream re-assembles boundary conditions per segment.
+    let first = &cycle.points[0];
+    let mut held: Vec<(String, String)> = Vec::new();
+    for (axis, value) in &first.point.coordinates {
+        if axis == power_axis {
+            continue;
+        }
+        let rendered = render_axis_point(value);
+        for dwell in &cycle.points[1..] {
+            let other = dwell.point.get(axis).map(render_axis_point);
+            if other.as_deref() != Some(rendered.as_str()) {
+                return Err(duty_error(
+                    axis,
+                    format!(
+                        "axis `{axis}` takes more than one value across duty cycle `{}` \
+                         (`{rendered}` at `{}`, `{}` at `{}`), but only the power axis is lowered \
+                         onto the schedule; the rest act on boundary conditions that are \
+                         assembled once",
+                        cycle.name,
+                        first.name,
+                        other.as_deref().unwrap_or("<absent>"),
+                        dwell.name
+                    ),
+                ));
+            }
+        }
+        held.push((axis.clone(), rendered));
+    }
+
+    let mut segments = Vec::with_capacity(cycle.points.len());
+    for (dwell, power_w) in cycle.points.iter().zip(&powers) {
+        // The dwell is a duration in seconds: `EnvelopeDutyCycle::validate_against`
+        // enforces that under Dwells weighting, and the value is used directly.
+        segments.push(DutySegment::constant(
+            dwell.weight.value,
+            power_w / base_power_w,
+        )?);
+    }
+
+    Ok(LoweredDutyCycle {
+        cycle: DutyCycle::new(segments)?,
+        base_power_w,
+        held_axes: held,
+    })
+}
+
+fn render_axis_point(value: &AxisPoint) -> String {
+    match value {
+        AxisPoint::Continuous(q) => format!("{}:{:?}", q.value, q.dims.0),
+        AxisPoint::Discrete(state) => state.clone(),
     }
 }

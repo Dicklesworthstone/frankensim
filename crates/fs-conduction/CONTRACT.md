@@ -798,3 +798,78 @@ This crate pins NO golden or replay hash, so it has no row in
 `golden-couplings.json`. Adding one is the precondition for a G5 golden-replay
 claim; until then the determinism evidence is the self-consistency lane
 described above.
+
+## The E17 duty-cycle seam (`duty::lower_envelope_duty_cycle`, bead f85xj.5.12)
+
+`fs_scenario::envelope` declares operating envelopes and duty cycles;
+`lower_envelope_duty_cycle` turns one into the power-versus-time schedule the
+transient march consumes. The scenario object stays the single declaration of
+the operating history, and this crate keeps the single declaration of the
+spatial power distribution. Neither can restate the other.
+
+### Only the power axis is applied, and the rest must not vary
+
+A `DutyCycle` is a scale on a volumetric source, so the only envelope
+coordinate it can carry is power. Ambient temperature, pressure and discrete
+states act on BOUNDARY CONDITIONS, which are assembled once and are not
+re-assembled per segment.
+
+Applying the power axis and silently ignoring the others would march a
+varying-ambient cycle at a fixed ambient and report a confidently wrong peak
+junction temperature, with nothing downstream able to detect it. The lowering
+therefore REFUSES when any non-power axis takes more than one value across the
+cycle, naming the axis and both disagreeing dwells, and records the held values
+in `LoweredDutyCycle::held_axes` when it does not. A caller can check those
+against the boundary they built.
+
+The power axis is resolved BEFORE the other axes are scanned. Otherwise a
+misspelled axis name makes the power axis look like just another held axis, and
+since power is the one axis that is SUPPOSED to vary, the caller would be told
+"total-power varies across the cycle" — true, and a diagnosis of entirely the
+wrong problem.
+
+Fraction-weighted scenario cycles are refused: a transient march needs absolute
+time, and dimensionless fractions carry none.
+
+### The lowered schedule is DISCONTINUOUS, and that reverses an exactness claim
+
+A scenario duty cycle declares dwells AT points, not transitions BETWEEN them,
+so it lowers to piecewise-CONSTANT segments. No implicit smoothing: a step load
+is real and common, and rounding it off changes the peak.
+
+The consequence must be stated because it reverses a property this crate
+otherwise advertises. The theta load weighting is the trapezoid rule at
+`theta = 0.5`, which is exact for a piecewise-LINEAR schedule when no step
+straddles a boundary — but a jump is not piecewise-linear. Across a boundary
+where the scale jumps by `ds`, the endpoint weighting misses exactly
+`(ds / 2) * dt` scale-seconds, first order in the step and independent of where
+the jump sits.
+
+So a scenario-declared cycle does NOT deliver its declared energy exactly, and
+`WindowedEnergyAudit::residual_j` reports that gap rather than zero. The
+existing exactness result was demonstrated on a CONTINUOUS fixture (constant ->
+ramp -> constant -> ramp) and does not carry across the seam.
+
+The residual is analytic, not numerical noise, and the tests pin it as such:
+one asserts it equals the predicted `(ds / 2) * dt * base_power` to 1e-6 rather
+than merely being small, and another asserts that halving the step halves it
+EXACTLY, which is what makes it a step-resolution artifact of representing a
+discontinuity rather than a defect in the lowering. A third shows the remedy —
+declaring the transition as a ramp restores exact balance at the same total
+energy — so the limitation comes with its own escape.
+
+### No-claim boundaries (E17 seam)
+
+- `held_axes` records that an axis was CONSTANT across the cycle. It does not
+  check that the caller's boundary conditions correspond to those values;
+  nothing at this layer can, because the boundary is built independently.
+
+- A scale above one is admitted and means the declared envelope draws more than
+  the reference map's total. The SPATIAL DISTRIBUTION is assumed unchanged
+  under that scaling, which is a modelling assumption the caller owns: real
+  hardware at higher load often redistributes as well as increases.
+
+- The lowering is a pure re-expression of a declared schedule. It performs no
+  solve, validates no envelope (that is
+  `EnvelopeDutyCycle::validate_against`), and adds no evidence of any kind to
+  the numbers it carries.
