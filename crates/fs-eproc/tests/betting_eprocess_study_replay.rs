@@ -118,15 +118,36 @@ struct RetainedGolden {
     first_crossing_ordinals: [Option<u64>; ALPHAS.len()],
 }
 
-// Re-pinned from the first centralized v2 runtime after this static repair.
-// The all-sentinel value deliberately keeps the code-first snapshot from being
-// mistaken for retained semantic proof before that batch run occurs.
+// Re-pinned from the first centralized v2 runtime, 2026-07-25 (bead 7tv.21.52),
+// superseding the deliberate all-sentinel code-first snapshot
+// (`u64::MAX` roots, `None` ordinals) that kept this from being mistaken for
+// retained semantic proof before that batch run occurred.
+//
+// The four roots are keyed digests and can only be measured. The ordinals are
+// not taken on trust: `observe_checkpoint` re-derives them every step from the
+// independent test-local `ShadowEProcess` (which never calls
+// `BettingEProcess`) and asserts equality, so these values are a retained
+// tripwire layered on an already-independent check. Their shape is also
+// semantically constrained -- `ALPHAS` is the dyadic lattice 2^-1 .. 2^-10, so
+// a stricter level needs strictly more evidence and must be crossed no earlier
+// than a looser one; the sequence below is nondecreasing as required.
 const EXPECTED_RETAINED_GOLDEN: RetainedGolden = RetainedGolden {
-    config_root: u64::MAX,
-    result_root: u64::MAX,
-    mutant_root: u64::MAX,
-    red_event_content_hash: u64::MAX,
-    first_crossing_ordinals: [None; ALPHAS.len()],
+    config_root: 0xb384_356a_5b5f_c8dd,
+    result_root: 0x2210_18be_c37d_8742,
+    mutant_root: 0x91e4_67bb_a6b9_f751,
+    red_event_content_hash: 0xb839_38c9_adfe_0dd9,
+    first_crossing_ordinals: [
+        Some(12),
+        Some(14),
+        Some(16),
+        Some(18),
+        Some(19),
+        Some(21),
+        Some(23),
+        Some(24),
+        Some(26),
+        Some(28),
+    ],
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
