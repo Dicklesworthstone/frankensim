@@ -1,157 +1,1260 @@
 {
-"schema": "frankensim-golden-couplings-v1",
-"note": "Every golden/replay hash declares the upstream SEMANTIC SURFACES it depends on and the surface version it was frozen against (bead y4pt). Surfaces declare a version const in source; xtask check-goldens fails when a source const drifts from this registry or a golden's pin drifts from a surface row - an upstream semantic change must point at every downstream golden to re-freeze deliberately, never surprise it. Re-pins follow docs/GOLDEN_POLICY.md (committed tree, BOTH debug and release, plausible root cause).",
-"surfaces": [
-{"id":"fs-adjoint:dwr-accept","file":"crates/fs-adjoint/src/dwr_accept.rs","const":"DWR_EVIDENCE_IDENTITY_VERSION","version":6,"domain_const":"DWR_ACCEPT_IDENTITY_DOMAIN","domain":"fs-adjoint-dwr-accept-identity-v6","schema_fingerprint":"v6-ae65033fd6f5dd9ad67885a3e79c8158626b87c4c35ae4960026e41c0196e85f"},
-{"id":"fs-adjoint:dwr-bracket","file":"crates/fs-adjoint/src/dwr_accept.rs","const":"DWR_EVIDENCE_IDENTITY_VERSION","version":6,"domain_const":"DWR_BRACKET_IDENTITY_DOMAIN","domain":"fs-adjoint-dwr-bracket-identity-v6","schema_fingerprint":"v6-9b180f9719a8076e7dbb9346246d17617d99121112193d91b1dce303637642d7"},
-{"id":"fs-adjoint:dwr-output","file":"crates/fs-adjoint/src/dwr_accept.rs","const":"DWR_EVIDENCE_IDENTITY_VERSION","version":6,"domain_const":"DWR_OUTPUT_IDENTITY_DOMAIN","domain":"fs-adjoint-dwr-output-identity-v6","schema_fingerprint":"v6-d08ff0b02f89372d62d22b4d8cfc89fe90ff7125dd90e4f733ca845ea4fac1d3"},
-{"id":"fs-adjoint:explanation-node","file":"crates/fs-adjoint/src/explain.rs","const":"EXPLANATION_FINGERPRINT_VERSION","version":2,"domain_const":"EXPLANATION_FINGERPRINT_DOMAIN","domain":"org.frankensim.fs-adjoint.explanation-node.v2","schema_fingerprint":"v2-5d28d013085d1e7b78212f2c6b926ffa7ebc2d380b5a14b8c4a12e96cdff8da8"},
-{"id":"fs-adjoint:explanation-receipt","file":"crates/fs-adjoint/src/explain.rs","const":"EXPLANATION_RECEIPT_VERSION","version":1,"domain_const":"EXPLANATION_RECEIPT_DOMAIN","domain":"org.frankensim.fs-adjoint.explanation-receipt.v1","schema_fingerprint":"v1-9c37e1cc8e98c81c05d7c47ee11287de70ed5e705f8b47779ae8c7385038c3c7"},
-{"id":"fs-alloc:hugepage-decision","file":"crates/fs-alloc/src/hugepage.rs","const":"HUGEPAGE_DECISION_IDENTITY_VERSION","version":1,"domain_const":"HUGEPAGE_DECISION_IDENTITY_DOMAIN","domain":"org.frankensim.fs-alloc.hugepage-decision.v1","schema_fingerprint":"v1-6d2cee81499c38b6ac695359188c85482972d39bf72e9ce2387489f61e567ea1"},
-{"id":"fs-bisect:compound-canon","file":"crates/fs-bisect/src/compound.rs","const":"COMPOUND_CANON_VERSION","version":3,"domain_const":"COMPOUND_FAMILY_HASH_DOMAIN","domain":"org.frankensim.fs-bisect.compound-family.v3","schema_fingerprint":"v3-339c3b1af12bc00d1b87c15cd9763aac30c385e8d86db2b661973010932f198e"},
-{"id":"fs-blake3:canonical-identity-frame","file":"crates/fs-blake3/src/identity.rs","const":"CANONICAL_FRAME_VERSION","version":1,"domain_const":"CANONICAL_IDENTITY_HASH_DOMAIN","domain":"org.frankensim.fs-blake3.canonical-identity-frame.v1","schema_fingerprint":"v1-ae588b53d409424157582059edbe2e26cee02e1895410d02a41cb0aa3b65eec1"},
-{"id":"fs-blake3:schema-id","file":"crates/fs-blake3/src/identity.rs","const":"CANONICAL_FRAME_VERSION","version":1,"domain_const":"SCHEMA_ID_HASH_DOMAIN","domain":"org.frankensim.fs-blake3.schema-id.v1","schema_fingerprint":"v1-da34e5b8adc516c03dff1bfbc445f5064479609963372c097b2fe86bf3b03cf9"},
-{"id":"fs-checker:decision-report","file":"crates/fs-checker/src/lib.rs","const":"CHECKER_DECISION_IDENTITY_VERSION","version":8,"domain_const":"crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN","domain":"fs-package:v8:checker-decision","schema_fingerprint":"v8-4ec67a816fd11014eea14e43b1863fece909396e9e829f9656df7ee4866e1916"},
-{"id":"fs-checker:semantic-plugin","file":"crates/fs-checker/src/semantic.rs","const":"SEMANTIC_PLUGIN_IDENTITY_VERSION","version":1,"domain_const":"SEMANTIC_PLUGIN_IDENTITY_DOMAIN","domain":"fs-checker:semantic-plugin:v1","schema_fingerprint":"v1-bd57ce54af8403769fcccd52b9715317d5997285d7b5db974ffd252e7716785b"},
-{"id":"fs-checker:semantic-registry","file":"crates/fs-checker/src/semantic.rs","const":"SEMANTIC_REGISTRY_IDENTITY_VERSION","version":1,"domain_const":"SEMANTIC_REGISTRY_IDENTITY_DOMAIN","domain":"fs-checker:semantic-registry:v1","schema_fingerprint":"v1-761b04c733a786f164ab6774a62deeed6d93ae51f9a869c41f98c71131da78e8"},
-{"id":"fs-checker:semantic-report","file":"crates/fs-checker/src/semantic.rs","const":"SEMANTIC_REPORT_IDENTITY_VERSION","version":1,"domain_const":"SEMANTIC_REPORT_IDENTITY_DOMAIN","domain":"fs-checker:semantic-report:v1","schema_fingerprint":"v1-b3eaad7705b13d97088119bdaa19e3a485e1cc941935fdfb1b268205731472b9"},
-{"id":"fs-evidence:observation-manifest","file":"crates/fs-evidence/src/vv/model.rs","const":"VV_OBSERVATION_MANIFEST_IDENTITY_VERSION","version":3,"domain_const":"VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN","domain":"org.frankensim.fs-evidence.vv-observation-manifest.v3","schema_fingerprint":"v3-9c86dcd52af0818d2357923219d594b33b0931cd8fd6742627ab9b032c555f78"},
-{"id":"fs-evidence:vv-artifact","file":"crates/fs-evidence/src/vv/model.rs","const":"VV_ARTIFACT_IDENTITY_VERSION","version":3,"domain_const":"VV_ARTIFACT_FAMILY","domain":"org.frankensim.fs-evidence.vv-artifact.v3","schema_fingerprint":"v3-a19af094c1affa9f15c186a773572687638e9cf1409cbdb320810e7ef2003168"},
-{"id":"fs-evidence:vv-blind-holdout","file":"crates/fs-evidence/src/vv/model.rs","const":"VV_BLIND_HOLDOUT_IDENTITY_VERSION","version":2,"domain_const":"VV_BLIND_HOLDOUT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-evidence.vv-blind-holdout.v2","schema_fingerprint":"v2-fbc7384c6a9fffb3f4dcbe9c5cb619ff315877e2756d8918b13f74779ed0e94b"},
-{"id":"fs-evidence:vv-case","file":"crates/fs-evidence/src/vv/model.rs","const":"VV_CASE_IDENTITY_VERSION","version":3,"domain_const":"VV_CASE_FAMILY","domain":"org.frankensim.fs-evidence.vv-case.v3","schema_fingerprint":"v3-1dac9a2cc37fe4eb8c7e409f1d15d2c9364ddf8d78992dbd66bf18cbce9058ae"},
-{"id":"fs-evidence:vv-schema-admission-receipt","file":"crates/fs-evidence/src/vv/model.rs","const":"VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_VERSION","version":2,"domain_const":"VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-evidence.vv-schema-admission-receipt.v2","schema_fingerprint":"v2-ff5b834e2d8a25b295d85ea43fe51c83e04fd8143d341389f5bcf09953fce217"},
-{"id":"fs-exec:gemm-tune-key","file":"crates/fs-exec/src/tune.rs","const":"GEMM_TUNE_KEY_IDENTITY_VERSION","version":4,"domain_const":"GEMM_TUNE_KEY_IDENTITY_DOMAIN","domain":"org.frankensim.fs-exec.gemm-tune-key.v4","schema_fingerprint":"v4-4e39adbb7f4fdaf20ca979cd267a9f72ad222c8686b3940def0c468b1826edf6"},
-{"id":"fs-exec:tilepool-placement","file":"crates/fs-exec/src/pool.rs","const":"TILEPOOL_PLACEMENT_IDENTITY_VERSION","version":2,"domain_const":"TILEPOOL_PLACEMENT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-exec.tilepool-placement.v2","schema_fingerprint":"v2-7a5ab778d489732b2ef9894e57046463a2f1f2a4eccdffbef5cfddefd096aec6"},
-{"id":"fs-exec:tune-row","file":"crates/fs-exec/src/tune.rs","const":"TUNE_ROW_IDENTITY_VERSION","version":2,"domain_const":"TUNE_ROW_IDENTITY_DOMAIN","domain":"org.frankensim.fs-exec.tune-row.v2","schema_fingerprint":"v2-4f204cb89c79aad15367781fb8cd044ebb3536e41ac60e8d65d64646ad47a405"},
-{"id":"fs-exec:tuning-decision","file":"crates/fs-exec/src/tune.rs","const":"TUNING_DECISION_IDENTITY_VERSION","version":1,"domain_const":"TUNING_DECISION_IDENTITY_DOMAIN","domain":"org.frankensim.fs-exec.tuning-decision.v1","schema_fingerprint":"v1-6072b9cd746c941e2a08eb835ecd9a8842ebcd88e4c9cb8cebab5be2e262049b"},
-{"id":"fs-govern:lane-request-digest","file":"crates/fs-govern/src/lanes.rs","const":"LANE_REQUEST_DIGEST_VERSION","version":1,"domain_const":"REQUEST_DIGEST_DOMAIN","domain":"frankensim.fs-govern.lane-request.v1","schema_fingerprint":"v1-36023992f37016d21bbcb7ed2fc9675019a5e507de36ba69668ca7308d1255a1"},
-{"id":"fs-ir:planner-cache-key","file":"crates/fs-ir/src/planner.rs","const":"PLANNER_CACHE_KEY_VERSION","version":3,"domain_const":"PLANNER_CACHE_KEY_DOMAIN","domain":"fs-ir-ladder:v3:","schema_fingerprint":"v3-d7b7d9fbad8024dbb4e340a8f237b3a8d8ba80c473caad35a40768b9ee597832"},
-{"id":"fs-la:depgraph-receipt","file":"crates/fs-la/depgraph_receipt_format.rs","const":"DEPGRAPH_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"DEPGRAPH_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-la.depgraph-receipt.v1","schema_fingerprint":"v1-8e6c31cdb1e19a09d7507fb9719daf17f3692a88e56e3d007acf6af7346052c1"},
-{"id":"fs-la:gemm-build-fingerprint","file":"crates/fs-la/build_identity_support.rs","const":"GEMM_BUILD_FINGERPRINT_IDENTITY_VERSION","version":2,"domain_const":"GEMM_BUILD_FINGERPRINT_IDENTITY_DOMAIN","domain":"frankensim.fs-la.gemm-build-fingerprint.v2","schema_fingerprint":"v2-4f6a988e574b08a60459b9cc6d491071da40dce9f8970c2f8cc5987475fe9415"},
-{"id":"fs-ledger:artifact-content","file":"crates/fs-ledger/src/lib.rs","const":"ARTIFACT_CONTENT_IDENTITY_VERSION","version":1,"domain_const":"ARTIFACT_CONTENT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.artifact-content.v1","schema_fingerprint":"v1-3293dbbbef5e82be288797f7c385eead7e0a6f5efa71f96c8eb527148b4b2fa6"},
-{"id":"fs-ledger:color-admission-policy","file":"crates/fs-ledger/src/lib.rs","const":"COLOR_ADMISSION_POLICY_IDENTITY_VERSION","version":1,"domain_const":"COLOR_ADMISSION_POLICY_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.color-admission-policy.v1","schema_fingerprint":"v1-2d9a611d715997465f814b712271b6a3549b64a7c9e6cbe8ead864c886797627"},
-{"id":"fs-ledger:color-node","file":"crates/fs-ledger/src/lib.rs","const":"COLOR_NODE_IDENTITY_VERSION","version":9,"domain_const":"COLOR_NODE_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.color-node.v9","schema_fingerprint":"v9-7fc9b25e7ba0f79a25e3657530a042cd2d919ac134d9d36fe99b8c0a6d4294b8"},
-{"id":"fs-ledger:derived-color-waiver-subject","file":"crates/fs-ledger/src/lib.rs","const":"DERIVED_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION","version":3,"domain_const":"DERIVED_COLOR_WAIVER_SUBJECT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.derived-color-waiver-subject.v3","schema_fingerprint":"v3-a53dcb60b8126ffa6ededa6d3f1f32176b859579fa5334683534196d089081cb"},
-{"id":"fs-ledger:physical-instance","file":"crates/fs-ledger/src/lib.rs","const":"PHYSICAL_INSTANCE_IDENTITY_VERSION","version":1,"domain_const":"PHYSICAL_INSTANCE_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.physical-instance.v1","schema_fingerprint":"v1-02a32e35271e4abc0d798f731bbdb15fc5e7e6a06b888d4004fcd0050502acaf"},
-{"id":"fs-ledger:session-flush-batch","file":"crates/fs-ledger/src/lib.rs","const":"SESSION_FLUSH_BATCH_IDENTITY_VERSION","version":2,"domain_const":"SESSION_FLUSH_BATCH_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.session-flush-batch.v2","schema_fingerprint":"v2-77697279a46a22f39546673033fd09bc652066bffbc419943e814aa343f84bd1"},
-{"id":"fs-ledger:session-mutation-claim","file":"crates/fs-ledger/src/lib.rs","const":"SESSION_MUTATION_CLAIM_IDENTITY_VERSION","version":1,"domain_const":"SESSION_MUTATION_CLAIM_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.session-mutation-claim.v1","schema_fingerprint":"v1-f4453b14d8e68de8552c540df5d3ed38d4bc5cff067a48fa1b8317e392f0101b"},
-{"id":"fs-ledger:session-terminal-events","file":"crates/fs-ledger/src/lib.rs","const":"SESSION_TERMINAL_EVENTS_IDENTITY_VERSION","version":2,"domain_const":"SESSION_TERMINAL_EVENTS_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.session-terminal-events.v2","schema_fingerprint":"v2-63e903c4ba7a36ee0398d183b3722f628925f564692c66ab019ef8cac6a6d48c"},
-{"id":"fs-ledger:solver-checkpoint-receipt","file":"crates/fs-ledger/src/session_registry.rs","const":"SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.solver-checkpoint-receipt.v1","schema_fingerprint":"v1-f22c4dacb1ccae7e22213851d1f0603c981ee5b1c8e6d28ff3b8ec969859e9bf"},
-{"id":"fs-ledger:source-color-waiver-subject","file":"crates/fs-ledger/src/lib.rs","const":"SOURCE_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION","version":4,"domain_const":"SOURCE_COLOR_WAIVER_SUBJECT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.source-color-waiver-subject.v4","schema_fingerprint":"v4-a71d029cb700b99334e8265dd148bc3206574e0d2051d3a40eeb3318af0a2da1"},
-{"id":"fs-ledger:source-origin-request","file":"crates/fs-ledger/src/lib.rs","const":"SOURCE_ORIGIN_REQUEST_IDENTITY_VERSION","version":1,"domain_const":"SOURCE_ORIGIN_REQUEST_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.source-origin-request.v1","schema_fingerprint":"v1-849a2cf97453a71d88fc202b12d67d393ca30b36205ab5478e8d7c3cbca7775c"},
-{"id":"fs-ledger:state-checkpoint-receipt","file":"crates/fs-ledger/src/state_checkpoint.rs","const":"STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.state-checkpoint-receipt.v1","schema_fingerprint":"v1-43d8d44c1c747247eb71f57383b87b1345ccf57fe27ca5b191628b820d098acd"},
-{"id":"fs-ledger:vcs-commit-envelope","file":"crates/fs-ledger/src/lib.rs","const":"VCS_COMMIT_ENVELOPE_IDENTITY_VERSION","version":1,"domain_const":"VCS_COMMIT_ENVELOPE_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.vcs-commit-envelope.v1","schema_fingerprint":"v1-18198c089784b934dd72aeb0e16d9443d8bbc5f6cb1426d57395eb4764d64841"},
-{"id":"fs-ledger:vcs-commit-leaf","file":"crates/fs-ledger/src/lib.rs","const":"VCS_COMMIT_LEAF_IDENTITY_VERSION","version":2,"domain_const":"VCS_COMMIT_LEAF_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.vcs-commit-leaf.v2","schema_fingerprint":"v2-b27d49c0c84fdedd263a97f0b47e197b663e234274e5b2741587cbf9ad4e696c"},
-{"id":"fs-ledger:vcs-commit-root","file":"crates/fs-ledger/src/lib.rs","const":"VCS_COMMIT_ROOT_IDENTITY_VERSION","version":2,"domain_const":"VCS_COMMIT_ROOT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.vcs-commit-root.v2","schema_fingerprint":"v2-72c7fedd48e9e51c4f2dad688ecc8a288ffe630598ad05b43f84f26aeac83e60"},
-{"id":"fs-ledger:vcs-ledger-lineage","file":"crates/fs-ledger/src/lib.rs","const":"VCS_LEDGER_LINEAGE_IDENTITY_VERSION","version":1,"domain_const":"VCS_LEDGER_LINEAGE_IDENTITY_DOMAIN","domain":"org.frankensim.fs-ledger.vcs-ledger-lineage.v1","schema_fingerprint":"v1-e62677fa9127bb7df0d2708e051c433413ad5e64914c39822a3ba8a375b2ae87"},
-{"id":"fs-matdb:canonical-parameter-block","file":"crates/fs-matdb/src/cards.rs","const":"CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION","version":1,"domain_const":"CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN","domain":"org.frankensim.fs-matdb.canonical-parameter-block.v1","schema_fingerprint":"v1-555fa5360006309e5fa410e284e5380f31bb35faa4d8f5b02e2bad55ed8fd859"},
-{"id":"fs-matdb:normalized-interface-pack","file":"crates/fs-matdb/src/interface_pack.rs","const":"INTERFACE_PACK_SCHEMA_VERSION","version":1,"domain_const":"INTERFACE_PACK_HASH_DOMAIN","domain":"org.frankensim.fs-matdb.normalized-interface-pack.v1"},
-{"id":"fs-matdb:normalized-model-pack","file":"crates/fs-matdb/src/model_pack.rs","const":"MODEL_PACK_SCHEMA_VERSION","version":1,"domain_const":"MODEL_PACK_HASH_DOMAIN","domain":"org.frankensim.fs-matdb.normalized-model-pack.v1"},
-{"id":"fs-matdb:normalized-species-pack","file":"crates/fs-matdb/src/species_pack.rs","const":"SPECIES_PACK_SCHEMA_VERSION","version":1,"domain_const":"SPECIES_PACK_HASH_DOMAIN","domain":"org.frankensim.fs-matdb.normalized-species-pack.v1"},
-{"id":"fs-matdb:normalized-pack","file":"crates/fs-matdb/src/pack.rs","const":"MATDB_PACK_SCHEMA_VERSION","version":1,"domain_const":"PACK_HASH_DOMAIN","domain":"org.frankensim.fs-matdb.normalized-pack.v1"},
-{"id":"fs-matdb:property-usage-receipt","file":"crates/fs-matdb/src/query.rs","const":"PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION","version":2,"domain_const":"PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-matdb.property-usage-receipt.v2","schema_fingerprint":"v2-0be2f9d0e7e212db93e3125ebbe9559b1b1030161331fdf4789bedd0a91082c5"},
-{"id":"fs-matdb:joint-usage-receipt","file":"crates/fs-matdb/src/pack.rs","const":"JOINT_USAGE_RECEIPT_SCHEMA_VERSION","version":1,"domain_const":"JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-matdb.joint-usage-receipt.v1"},
-{"id":"fs-material:identifiability-assessment","file":"crates/fs-material/src/identifiability/authoritative.rs","const":"IDENTIFIABILITY_ASSESSMENT_IDENTITY_VERSION","version":3,"domain_const":"IDENTIFIABILITY_ASSESSMENT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-material.identifiability-assessment.v3","schema_fingerprint":"v3-87d2c24a6fcdc07715f0647f2f66cdd8467089dda243c8f2c124b5a6f2e0b4a6"},
-{"id":"fs-material:identifiability-execution","file":"crates/fs-material/src/identifiability/authoritative.rs","const":"IDENTIFIABILITY_EXECUTION_IDENTITY_VERSION","version":3,"domain_const":"IDENTIFIABILITY_EXECUTION_IDENTITY_DOMAIN","domain":"org.frankensim.fs-material.identifiability-execution.v3","schema_fingerprint":"v3-b7b0ae4924282e1903e45321e2a9d7b6fdf34aa21bd436a26a70fb70a3068cfa"},
-{"id":"fs-material:identifiability-problem","file":"crates/fs-material/src/identifiability/authoritative.rs","const":"IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION","version":3,"domain_const":"IDENTIFIABILITY_PROBLEM_IDENTITY_DOMAIN","domain":"org.frankensim.fs-material.identifiability-problem.v3","schema_fingerprint":"v3-f1401f72bccdef05a0bc959ed79acef164f926f6b3a603b15a93a7da83ae5670"},
-{"id":"fs-material:identifiability-source-admission","file":"crates/fs-material/src/identifiability/authoritative.rs","const":"IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_VERSION","version":3,"domain_const":"IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_DOMAIN","domain":"org.frankensim.fs-material.identifiability-source-admission.v3","schema_fingerprint":"v3-a6524d533dfbb6c053dd1bfb0a669258bfd08a8a73cb773872fc03e6fede089d"},
-{"id":"fs-obs:event-content-identity","file":"crates/fs-obs/src/lib.rs","const":"EVENT_CONTENT_IDENTITY_VERSION","version":9,"domain_const":"EVENT_CONTENT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-obs.event-content.v9","schema_fingerprint":"v9-217e83d2ecb689366bb42cdb828900a9fc8b16c37c1b84bdab4bc518714f31a8"},
-{"id":"fs-obs:replay-identity-frame","file":"crates/fs-obs/src/ident.rs","const":"IDENT_SCHEMA_VERSION","version":1,"domain_const":"REPLAY_IDENTITY_DOMAIN","domain":"fsid","schema_fingerprint":"v1-747c55b7812d1dd837181da26e74062eb2602e8fa728e2f2516608ccc544c46a"},
-{"id":"fs-package:claim-declaration","file":"crates/fs-package/src/lib.rs","const":"CLAIM_DECLARATION_IDENTITY_VERSION","version":8,"domain_const":"CLAIM_DECLARATION_IDENTITY_DOMAIN","domain":"fs-package:v8:claim","schema_fingerprint":"v8-c7e0da80bf40b044124f7ba7003dcb93c59dcc18ac021adf43fb6b2737c4f807"},
-{"id":"fs-package:claim-verification-subject","file":"crates/fs-package/src/lib.rs","const":"CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION","version":8,"domain_const":"CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN","domain":"fs-package:v8:claim-verification-subject","schema_fingerprint":"v8-68222081b4b37a2ea0adbcf373a4ddc01ee0802137fdf14928bb68529e6c8492"},
-{"id":"fs-package:coverage-decision","file":"crates/fs-package/src/coverage.rs","const":"COVERAGE_DECISION_IDENTITY_VERSION","version":8,"domain_const":"COVERAGE_DECISION_IDENTITY_DOMAIN","domain":"fs-package:v8:coverage-decision","schema_fingerprint":"v8-221ad38e2def2d2cc2f686eab7c4f7aae8d0a2c7c73e26bb48b23a34303baef1"},
-{"id":"fs-package:package-root","file":"crates/fs-package/src/lib.rs","const":"PACKAGE_ROOT_IDENTITY_VERSION","version":8,"domain_const":"PACKAGE_ROOT_IDENTITY_DOMAIN","domain":"fs-package:v8:header","schema_fingerprint":"v8-554ce19766c7ee1aa74e9beef439580fe939c112a43b17361b8e15295c849517"},
-{"id":"fs-package:presence-decision","file":"crates/fs-package/src/coverage.rs","const":"PRESENCE_DECISION_IDENTITY_VERSION","version":8,"domain_const":"PRESENCE_DECISION_IDENTITY_DOMAIN","domain":"fs-package:v8:presence-decision","schema_fingerprint":"v8-80ef1bb68c699314edb53239ba4888ca9011345f5d3c8cc52433ec163c58190a"},
-{"id":"fs-package:receipt-schema-catalog","file":"crates/fs-package/src/receipt_catalog.rs","const":"RECEIPT_SCHEMA_CATALOG_IDENTITY_VERSION","version":1,"domain_const":"RECEIPT_SCHEMA_CATALOG_IDENTITY_DOMAIN","domain":"org.frankensim.fs-package.receipt-schema-catalog.v1","schema_fingerprint":"v1-680d25d25705078ea0681c7091459acc96b0a15e677e21d2116fbf394d803f52"},
-{"id":"fs-package:receipt-schema-descriptor","file":"crates/fs-package/src/receipt_catalog.rs","const":"RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_VERSION","version":1,"domain_const":"RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_DOMAIN","domain":"org.frankensim.fs-package.receipt-schema-descriptor.v1","schema_fingerprint":"v1-2947a0ec80d678dacb29b511fdf816027a6675d5a62ce949b0a30e8e01a6d557"},
-{"id":"fs-package:release-admission-context","file":"crates/fs-package/src/lib.rs","const":"RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION","version":8,"domain_const":"RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN","domain":"fs-package:v8:release-admission-context","schema_fingerprint":"v8-e1598beccb9ce1a2d91f8d1f9b6727df855cff521773d31d8442f6e81b549f31"},
-{"id":"fs-package:semantic-witness","file":"crates/fs-package/src/lib.rs","const":"SEMANTIC_WITNESS_IDENTITY_VERSION","version":8,"domain_const":"SEMANTIC_WITNESS_IDENTITY_DOMAIN","domain":"fs-package:v8:semantic-witness","schema_fingerprint":"v8-b41c4ee088ab45e66011dacb051f062b38af7e0f5b3f3a2900ca5f83886f0b28"},
-{"id":"fs-package:signature-subject","file":"crates/fs-package/src/origin.rs","const":"SIGNATURE_SUBJECT_IDENTITY_VERSION","version":8,"domain_const":"SIGNATURE_SUBJECT_IDENTITY_DOMAIN","domain":"fs-package:v8:signature-subject","schema_fingerprint":"v8-3782c2fa9539cccf116177b5105dd07f9726090e943ca65d68d64d22eaf6e0bc"},
-{"id":"fs-package:source-certificate-subject","file":"crates/fs-package/src/lib.rs","const":"SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION","version":8,"domain_const":"SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN","domain":"fs-package:v8:source-certificate-subject","schema_fingerprint":"v8-56f0df6f72ec9a96124995652588f8d81213efa1c6aebf2d3e869829330d9e1f"},
-{"id":"fs-package:verification-receipt","file":"crates/fs-package/src/lib.rs","const":"VERIFICATION_RECEIPT_IDENTITY_VERSION","version":8,"domain_const":"VERIFICATION_RECEIPT_IDENTITY_DOMAIN","domain":"fs-package:v8:verification-receipt","schema_fingerprint":"v8-16d0320c78350656a21a585ca54ae851233b9b2c3f63e3d082639c6e5e940d3f"},
-{"id":"fs-package:waiver-authorization-subject","file":"crates/fs-package/src/lib.rs","const":"WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION","version":8,"domain_const":"WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN","domain":"fs-package:v8:waiver-authorization","schema_fingerprint":"v8-97a51bf89c69650f434cde3dc04264f4f20b638b4809351d06511e1158f16765"},
-{"id":"fs-plan:voi-audit-context","file":"crates/fs-plan/src/voi.rs","const":"VOI_AUDIT_CONTEXT_IDENTITY_VERSION","version":2,"domain_const":"AUDIT_CONTEXT_DOMAIN","domain":"frankensim.fs-plan.voi-audit.v2","schema_fingerprint":"v2-833a0f295b7a2443951ef91bb8e914f5d70f4c7a50d7d0021353e4424c9150de"},
-{"id":"fs-plan:voi-ranked-menu","file":"crates/fs-plan/src/voi.rs","const":"VOI_RANKED_MENU_IDENTITY_VERSION","version":2,"domain_const":"RANKED_MENU_CONTEXT_DOMAIN","domain":"frankensim.fs-plan.voi-ranked-menu.v2","schema_fingerprint":"v2-a89ed37f6edde3abb2ca24c45f5ba48013c0ebd0af8fb43b4961282838dd2815"},
-{"id":"fs-plan:voi-ranked-source","file":"crates/fs-plan/src/voi.rs","const":"VOI_RANKED_SOURCE_IDENTITY_VERSION","version":2,"domain_const":"RANKED_MENU_SOURCE_DOMAIN","domain":"frankensim.fs-plan.voi-ranked-source.v2","schema_fingerprint":"v2-24ed0a6a8a837910a5a565f83eee31e65f3f49d8bf88e50924285318cee8d1f7"},
-{"id":"fs-rand:stream-checkpoint","file":"crates/fs-rand/src/lib.rs","const":"STREAM_CHECKPOINT_VERSION","version":1,"domain_const":"STREAM_CHECKPOINT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-rand.stream-checkpoint.v1","schema_fingerprint":"v1-5c3f0c475a56a3a84dadc8f1d6613e90409fc737c000d413200a686dbb0f48c3"},
-{"id":"fs-rand:stream-semantics","file":"crates/fs-rand/src/lib.rs","const":"STREAM_SEMANTICS_VERSION","version":1,"domain_const":"STREAM_POSITION_IDENTITY_DOMAIN","domain":"org.frankensim.fs-rand.stream-position.v1","schema_fingerprint":"v1-5d7fc9e36971913b0f35d9a4f0f40ce4d4319b1bb8a574a3c67e65925dfbffaa"},
-{"id":"fs-recompute:artifact-content","file":"crates/fs-recompute/src/lib.rs","const":"ARTIFACT_CONTENT_IDENTITY_VERSION","version":1,"domain_const":"ARTIFACT_CONTENT_IDENTITY_DOMAIN","domain":"org.frankensim.fs-recompute.artifact-content.v1","schema_fingerprint":"v1-1b67e37b1886620399ff4dfde5e9c616a2af90bee4ba136aefe4466b3dce5224"},
-{"id":"fs-recompute:node-record","file":"crates/fs-recompute/src/lib.rs","const":"NODE_RECORD_IDENTITY_VERSION","version":2,"domain_const":"NODE_RECORD_IDENTITY_DOMAIN","domain":"fs-recompute-node-v2","schema_fingerprint":"v2-f83fb9718bdde377d80cea05f287b75b91fb1851dd36984ac381b8ea05fdb699"},
-{"id":"fs-roofline:baseline-record","file":"crates/fs-roofline/src/baseline.rs","const":"BASELINE_SCHEMA_VERSION","version":1,"domain_const":"BASELINE_HASH_DOMAIN","domain":"frankensim.fs-roofline.baseline.v1","schema_fingerprint":"v1-9bbec0a062fca15365799f567103de05dafe9b4b3244ad840248bb7ef7d4fb9d"},
-{"id":"fs-roofline:dependency-authority-policy","file":"crates/fs-roofline/src/production.rs","const":"DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION","version":1,"domain_const":"DEPENDENCY_AUTHORITY_POLICY_DOMAIN","domain":"frankensim.fs-roofline.dependency-authority-policy.v1","schema_fingerprint":"v1-f731a3ea86cf74f0653487316317e510767dfaa60fc5b109c63887f1929fc4d4"},
-{"id":"fs-roofline:executable-build","file":"crates/fs-roofline/src/lib.rs","const":"EXECUTABLE_BUILD_IDENTITY_VERSION","version":1,"domain_const":"ROOFLINE_EXECUTABLE_DOMAIN","domain":"org.frankensim.fs-roofline.executable.v1","schema_fingerprint":"v1-3592307d7223b2f6de2abeab549379e7e017c82e8c39a36766353a65cb394133"},
-{"id":"fs-roofline:execution-binding","file":"crates/fs-roofline/src/lib.rs","const":"EXECUTION_BINDING_IDENTITY_VERSION","version":4,"domain_const":"EXECUTION_BINDING_DOMAIN","domain":"org.frankensim.fs-roofline.execution-binding.v4","schema_fingerprint":"v4-5511db00d00d1331a200694662bb0c78d4c318057afd25546d2539e0a7d396bb"},
-{"id":"fs-roofline:finalized-run","file":"crates/fs-roofline/src/lib.rs","const":"FINALIZED_RUN_IDENTITY_VERSION","version":3,"domain_const":"FINALIZED_RUN_DOMAIN","domain":"org.frankensim.fs-roofline.finalized-run.v3","schema_fingerprint":"v3-42bd61dd1f3b14b6eab9c39c4dbe2ac5db1b907f7077234c2d3cb307c6178983"},
-{"id":"fs-roofline:production-axes-receipt","file":"crates/fs-roofline/src/production.rs","const":"PRODUCTION_AXES_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"PRODUCTION_AXES_RECEIPT_DOMAIN","domain":"org.frankensim.fs-roofline.production-axes-receipt.v1","schema_fingerprint":"v1-47994ec7f6b5d975a8629e06950f6c52ab88b6dd5a9aabcf0e466f7877415fa3"},
-{"id":"fs-roofline:promotion-authority-policy","file":"crates/fs-roofline/src/authority.rs","const":"PROMOTION_AUTHORITY_POLICY_IDENTITY_VERSION","version":1,"domain_const":"PROMOTION_AUTHORITY_POLICY_DOMAIN","domain":"frankensim.fs-roofline.promotion-authority-policy.v1","schema_fingerprint":"v1-64e9f3ab669029d6a0c79f2cfe4c7f1c46f26a252a76002581753aa7489ffd0c"},
-{"id":"fs-roofline:staleness-checkpoint-chain","file":"crates/fs-roofline/src/checkpoint.rs","const":"STALENESS_CHECKPOINT_CHAIN_IDENTITY_VERSION","version":2,"domain_const":"CHECKPOINT_CHAIN_DOMAIN","domain":"org.frankensim.fs-roofline.staleness-checkpoint-chain.v2","schema_fingerprint":"v2-d2efa0e6e9534aa0f515b45ae84179e471c29c3a3185bb7cca9a28af775364ae"},
-{"id":"fs-roofline:staleness-row-content","file":"crates/fs-roofline/src/checkpoint.rs","const":"STALENESS_ROW_CONTENT_IDENTITY_VERSION","version":1,"domain_const":"ROW_CONTENT_DOMAIN","domain":"org.frankensim.fs-roofline.staleness-row-content.v1","schema_fingerprint":"v1-2acf8931d27c9a4e107ba095ff28b105fdd1a11d9441b8031f01bdeb98fb59c1"},
-{"id":"fs-session:durable-governor-id","file":"crates/fs-session/src/governor.rs","const":"DURABLE_GOVERNOR_IDENTITY_VERSION","version":1,"domain_const":"DURABLE_GOVERNOR_ID_DOMAIN","domain":"org.frankensim.fs-session.durable-governor-id.v1","schema_fingerprint":"v1-5c5032a76c421401d8386a3202b77d5bd6c4c1740fd057817ad9b9ef8082bb28"},
-{"id":"fs-session:gate-binding-id","file":"crates/fs-session/src/governor.rs","const":"GATE_BINDING_IDENTITY_VERSION","version":1,"domain_const":"GATE_BINDING_ID_DOMAIN","domain":"org.frankensim.fs-session.gate-binding-id.v1","schema_fingerprint":"v1-882779401962a45a36131dd8e084ceb9bea715062b5bd3b6a069befa153df7bc"},
-{"id":"fs-session:gemm-execution-receipt","file":"crates/fs-session/src/gemm_tune.rs","const":"GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"GEMM_EXECUTION_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.gemm-execution-receipt.v1","schema_fingerprint":"v1-03ea5f5615dd4d6b726f950ccf8286fa919e044bdc6f8f8e0f861758489c0a69"},
-{"id":"fs-session:gemm-tune-row-receipt","file":"crates/fs-session/src/gemm_tune.rs","const":"GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION","version":2,"domain_const":"GEMM_TUNE_ROW_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.gemm-tune-row-receipt.v2","schema_fingerprint":"v2-088b0b6c86da3376d817d328a6f3f03210ab601509f76267cd3094854f506f20"},
-{"id":"fs-session:long-job-request","file":"crates/fs-session/src/long_job.rs","const":"LONG_JOB_REQUEST_IDENTITY_VERSION","version":1,"domain_const":"LONG_JOB_REQUEST_IDENTITY_DOMAIN","domain":"org.frankensim.fs-session.long-job-request.v1","schema_fingerprint":"v1-5ca53cfb97436b98a12ce02fab3d946248ea6fba05c310dd263dfcd5930d6b1c"},
-{"id":"fs-session:meter-receipt","file":"crates/fs-session/src/governor.rs","const":"METER_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"METER_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.meter-receipt.v1","schema_fingerprint":"v1-d4a5ad4649db82dbcb89af9d6fee9d2779bdd10e50eb4d107cf224996f747c4b"},
-{"id":"fs-session:meter-report-id","file":"crates/fs-session/src/governor.rs","const":"METER_REPORT_IDENTITY_VERSION","version":2,"domain_const":"METER_REPORT_ID_DOMAIN","domain":"org.frankensim.fs-session.meter-report-id.v2","schema_fingerprint":"v2-89d7d060e452f49dc3a9924e3eb352ca1a00f3e74fc13802fddcd79dc4179435"},
-{"id":"fs-session:pause-acknowledgement-id","file":"crates/fs-session/src/governor.rs","const":"PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION","version":1,"domain_const":"PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN","domain":"org.frankensim.fs-session.pause-acknowledgement-id.v1","schema_fingerprint":"v1-7de9bdb2b34ca35291bca6695eb18aa82bf855abe0a89ecbfde00e148f8eb61a"},
-{"id":"fs-session:pause-acknowledgement-receipt","file":"crates/fs-session/src/governor.rs","const":"PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.pause-acknowledgement-receipt.v1","schema_fingerprint":"v1-f7536e2ecafe78335e6c6d9fe02f43924f6a154d37f0c18a472fd66c8c0b9f31"},
-{"id":"fs-session:pressure-action-id","file":"crates/fs-session/src/governor.rs","const":"PRESSURE_ACTION_IDENTITY_VERSION","version":2,"domain_const":"PRESSURE_ACTION_ID_DOMAIN","domain":"org.frankensim.fs-session.pressure-action-id.v2","schema_fingerprint":"v2-c70ea5008a68586a949930820e1f8bdba5464365c1e9a9a293a4edd0473c3660"},
-{"id":"fs-session:pressure-receipt","file":"crates/fs-session/src/governor.rs","const":"PRESSURE_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"PRESSURE_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.pressure-receipt.v1","schema_fingerprint":"v1-632003474d588d860df571ffa2f7cb0dc1af1c3f8a5a48ab27b080c0ad773ed1"},
-{"id":"fs-session:program-risk-report-id","file":"crates/fs-session/src/program_risk.rs","const":"PROGRAM_RISK_REPORT_IDENTITY_VERSION","version":2,"domain_const":"PROGRAM_RISK_REPORT_ID_DOMAIN","domain":"org.frankensim.fs-session.program-risk-report-id.v2","schema_fingerprint":"v2-3251e231cb4b781fc32a4ed00c0b7b713c335aba4e1775c6f1646bb95bd9da14"},
-{"id":"fs-session:resume-activation-id","file":"crates/fs-session/src/governor.rs","const":"RESUME_ACTIVATION_IDENTITY_VERSION","version":1,"domain_const":"RESUME_ACTIVATION_ID_DOMAIN","domain":"org.frankensim.fs-session.resume-activation-id.v1","schema_fingerprint":"v1-f2659017ef097d939fc8a0c5c3b450ad238dce7022bbcddd1e2445a2d69940fc"},
-{"id":"fs-session:resume-activation-receipt","file":"crates/fs-session/src/governor.rs","const":"RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"RESUME_ACTIVATION_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.resume-activation-receipt.v1","schema_fingerprint":"v1-81149b6e0c3eb4a0897ebf14baa678a67d1158e9408a860c368abc4a8756b357"},
-{"id":"fs-session:retained-evidence","file":"crates/fs-session/src/governor.rs","const":"RETAINED_EVIDENCE_IDENTITY_VERSION","version":1,"domain_const":"RETAINED_EVIDENCE_DOMAIN","domain":"org.frankensim.fs-session.retained-evidence.v1","schema_fingerprint":"v1-a70ac88f54c306a259f69ec11c85f527014aaa4c33253a61d79b865e6a4ecbe4"},
-{"id":"fs-session:session-open-id","file":"crates/fs-session/src/governor.rs","const":"SESSION_OPEN_IDENTITY_VERSION","version":2,"domain_const":"SESSION_OPEN_ID_DOMAIN","domain":"org.frankensim.fs-session.open-id.v2","schema_fingerprint":"v2-edd17bdb38ee5bdd8b7ddc973d3cd719ea82deac3923eb9f9829cf032ad74f9a"},
-{"id":"fs-session:session-open-receipt","file":"crates/fs-session/src/governor.rs","const":"SESSION_OPEN_RECEIPT_IDENTITY_VERSION","version":1,"domain_const":"SESSION_OPEN_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.open-receipt.v1","schema_fingerprint":"v1-7f77cc5057e03af01ecd88a3c0a74238778f6b3fef3a66de671013444a901fbc"},
-{"id":"fs-session:session-token-identity","file":"crates/fs-session/src/governor.rs","const":"SESSION_TOKEN_IDENTITY_VERSION","version":1,"domain_const":"SESSION_TOKEN_IDENTITY_DOMAIN","domain":"org.frankensim.fs-session.token-identity.v1","schema_fingerprint":"v1-c867ca6b313972adb8eab5ed5e58fa1dfdc77be09c1cdbfd2c2ae574f5ba66ce"},
-{"id":"fs-session:submission-agent-key","file":"crates/fs-session/src/governor.rs","const":"SUBMISSION_AGENT_KEY_IDENTITY_VERSION","version":1,"domain_const":"IDEMPOTENCY_AGENT_DOMAIN","domain":"org.frankensim.fs-session.idempotency-agent.v1","schema_fingerprint":"v1-dde7d759503f432f7eb2f9fc42022ff8d578693525850923b1a8627b782a85d2"},
-{"id":"fs-session:submission-program","file":"crates/fs-session/src/governor.rs","const":"SUBMISSION_PROGRAM_IDENTITY_VERSION","version":1,"domain_const":"IDEMPOTENCY_PROGRAM_DOMAIN","domain":"org.frankensim.fs-session.idempotency-program.v1","schema_fingerprint":"v1-afb382959a218a6733a3017b0abf4361025263f84c42895399b6066d707d762b"},
-{"id":"fs-session:submission-receipt","file":"crates/fs-session/src/governor.rs","const":"SUBMISSION_RECEIPT_IDENTITY_VERSION","version":3,"domain_const":"SUBMISSION_RECEIPT_DOMAIN","domain":"org.frankensim.fs-session.submission-receipt.v3","schema_fingerprint":"v3-80cc53dbfa5ecbeee3479c472567bf3f80f6cde4943594a44e71506b940dc54f"},
-{"id":"fs-session:submission-request-id","file":"crates/fs-session/src/governor.rs","const":"SUBMISSION_REQUEST_IDENTITY_VERSION","version":2,"domain_const":"SUBMISSION_REQUEST_ID_DOMAIN","domain":"org.frankensim.fs-session.submission-request-id.v2","schema_fingerprint":"v2-55227f8c93b6bee3b3f9a48d0ce7a643aee8da3f9a0b1d3b2838f684b72486bf"},
-{"id":"fs-verify:fem1d-mms-class","file":"crates/fs-verify/src/fem1d.rs","const":"MMS_CLASS_IDENTITY_VERSION","version":2,"domain_const":"MMS_CLASS_IDENTITY_DOMAIN","domain":"fs-verify/fem1d-mms-class.v2","schema_fingerprint":"v2-ffc3f49b35785042d4cec6fc4fa49abe796d19e38a1cb21c9033b1c4d8a34097"},
-{"id":"fs-verify:fem1d-mms-problem","file":"crates/fs-verify/src/fem1d.rs","const":"MMS_PROBLEM_IDENTITY_VERSION","version":2,"domain_const":"MMS_PROBLEM_IDENTITY_DOMAIN","domain":"fs-verify/fem1d-mms-problem.v2","schema_fingerprint":"v2-9a71c6eece9d2ade14ca101a756f342665c6debedade7fd15b1ec94c74359f86"},
-{"id":"fs-verify:verifier-receipt","file":"crates/fs-verify/src/estimator.rs","const":"VERIFIER_RECEIPT_SCHEMA_VERSION","version":1,"domain_const":"VERIFIER_RECEIPT_HASH_DOMAIN","domain":"fs-verify:verifier-receipt:v1","schema_fingerprint":"v1-1ebd8fddb53278b8fdbe2ccba08d0f3d886e117d95173a12dea742aab6836ad1"},
-{"id":"fs-vskeleton:artifact-content","file":"crates/fs-vskeleton/src/ledger.rs","const":"ARTIFACT_CONTENT_IDENTITY_VERSION","version":2,"domain_const":"ARTIFACT_CONTENT_IDENTITY_DOMAIN","domain":"frankensim.fs-vskeleton.artifact.v2","schema_fingerprint":"v2-dae32f4224c876288adeec87c4465e385550677aaad4628c823e3c28d6e32207"},
-{"id":"ci:content-snapshot","file":"scripts/ci/checkout_constellation.sh","symbol":"snapshot_identity","version":3,"domain":"org.frankensim.ci.content-snapshot.v3","schema_fingerprint":"v3-311b040882dce1a3918cc0e1679c5b04e9c9829b5708169e7ef1b8c6bb6ca2f7"},
-{"id":"ci:quality-proof-record","file":"scripts/ci/quality_lanes.sh","symbol":"emit_proof_seal","version":2,"domain":"org.frankensim.ci.quality-proof-record.v2","schema_fingerprint":"v2-accae4a4b09ac3a1e767adeedecc38f0cddc52990302a4fbe91a9458d64a09d0"},
-{"id":"ci:x86-cross-verdict","file":"scripts/ci/x86_cross_check.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-cross-verdict.v1","schema_fingerprint":"v1-026933d59d654623d0e12e7783eb6cb9e68f2333f4aa1111a73cb3e872f1fe77"},
-{"id":"ci:x86-runtime-verdict","file":"scripts/ci/x86_runtime_sweep.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-runtime-verdict.v1","schema_fingerprint":"v1-b21df0135bcfc46c8d5e62183b3d17b300a026edca12bf5b561f41b6130f7be6"},
-{"id":"xtask:constellation-bootstrap-provenance","file":"xtask/src/bootstrap_provenance.rs","symbol":"write_bootstrap_provenance","version":3,"domain":"org.frankensim.xtask.constellation-bootstrap-provenance.v3","schema_fingerprint":"v3-f9a67aa6b4140e22cd68247ab423bfdfc6cf51350d28f0566729257263c0ed80"},
-{"id":"xtask:constellation-lock","file":"xtask/src/main.rs","symbol":"write_constellation_lock","version":2,"domain":"org.frankensim.xtask.constellation-lock-writer.v2","schema_fingerprint":"v2-33ec39fde7adf9ce622133b72c8a5c025ce684a5f1b67b1bc0b0e6996e6fb469"},
-{"id":"xtask:matdb-pack-compiler","file":"xtask/src/matdb_pack.rs","const":"MATDB_PACK_COMPILER_SEMANTICS_VERSION","version":4},
-{"id":"fs-la:factor-bits","file":"crates/fs-la/src/factor.rs","const":"FACTOR_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-la:gemm-bits","file":"crates/fs-la/src/gemm.rs","const":"GEMM_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-la:gemm-scalar-bits","file":"crates/fs-la/src/gemm.rs","const":"GEMM_SCALAR_SEMANTICS_VERSION","version":1},
-{"id":"fs-flagship-e2e:metric-stream-encoding","file":"crates/fs-flagship-e2e/src/lib.rs","const":"METRIC_STREAM_ENCODING_VERSION","version":2},
-{"id":"fs-bem:panel-bits","file":"crates/fs-bem/src/panel2d.rs","const":"PANEL_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-la:batched-f64-bits","file":"crates/fs-la/src/batched.rs","const":"BATCHED_F64_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-la:batched-f32-bits","file":"crates/fs-la/src/batched_f32.rs","const":"BATCHED_F32_BIT_SEMANTICS_VERSION","version":2},
-{"id":"fs-fft:transform-bits","file":"crates/fs-fft/src/lib.rs","const":"TRANSFORM_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-lbm:d3q19-bits","file":"crates/fs-lbm/src/d3q19.rs","const":"D3Q19_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-render:tracer-bits","file":"crates/fs-render/src/tracer.rs","const":"TRACER_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-render:chart-backend-bits","file":"crates/fs-render/src/charts.rs","const":"CHART_BACKEND_BIT_SEMANTICS_VERSION","version":8}
-],
-"goldens": [
-{"golden": "xtask:matdb-pack-fixture", "file": "xtask/src/matdb_pack.rs", "const": "MATDB_PACK_FIXTURE_V1_CONTENT_HASH_GOLDEN", "depends_on": "fs-matdb:normalized-pack=1,xtask:matdb-pack-compiler=4", "justification": "The licensed material-tsv-v1 scalar, curve, frame, uncertainty, validity, and joint covariance/correlation fixture encodes to exactly 3177 FSMATPK v1 bytes with content hash c1fb2f443708d297423179f4ac6024ee26b1d0c940a229d1d9084726ccbd2bc5. Compiler semantics v2 retains deterministic admission rows earned before a later typed refusal without changing successful pack bytes. Compiler semantics v3 binds each decision row and case ID to the selected material, NASA-9, kinetics, or species compiler while leaving artifact bytes and content hashes unchanged. Compiler semantics v4 adds a separately identified interface-tsv-v1 profile that wraps the unchanged material claim artifact with ordered surface and context identity; it does not change material-tsv-v1 bytes. RCH discovery job j-29933316048158836 established the value and committed debug job j-29933316048158837 passed 1/1 at semantics v1. The v2, v3, and v4 changes remain code-first and batch-verification pending. Release job j-29933316048158838 is not proof: RCH-E410 rejected the remote dependency closure because sibling path crates/fs-opdsl/tests/constitutive.rs was absent, and the local fallback was immediately canceled."},
-{"golden": "fs-rand:distribution-stream", "file": "crates/fs-rand/tests/dist_battery.rs", "const": "DIST_STREAM_V1_AGGREGATE_FNV1A64_GOLDEN", "depends_on": "fs-rand:stream-semantics=1", "justification": "0x4224_6e28_56de_673c is the existing aggregate over exact distribution output bits. Registered 2026-07-13 for iu5l without changing the value so stream semantic/domain changes point at this retained replay oracle; current-tree debug/release and cross-ISA reproduction remain pending and are not newly claimed by this registry-only annotation."},
-{"golden": "fs-rand:ziggurat-stream", "file": "crates/fs-rand/tests/ziggurat.rs", "const": "ZIGGURAT_STREAM_V1_SEED_17A9_TILE_7_100K_FNV1A64_GOLDEN", "depends_on": "fs-rand:stream-semantics=1", "justification": "0x9959_60fe_709f_00bc is the existing FNV-1a root over 100000 ziggurat draws for the declared stream key. Registered under a unique symbol 2026-07-13 for iu5l without re-pinning; current-tree debug/release and cross-ISA reproduction remain pending and are not newly claimed by this annotation."},
-{"golden": "fs-la:rand-nla", "file": "crates/fs-la/tests/rand_nla_battery.rs", "const": "GOLDEN_HASH", "depends_on": "fs-rand:stream-semantics=1,fs-la:factor-bits=1,fs-la:gemm-bits=1", "justification": "0xeef1_0550_7daf_c0d5 frozen 2026-07-09 after the powi build-mode fix (bead 4xnt); verified four quadrants (debug+release x aarch64+x86-64) at the committed tree. HISTORY: the 2026-07-09 re-pin to f3dcb63b wrongly blamed fs-rand d9ba0b6 (u64::MAX-boundary-only change) - the mover was optimization-dependent f64::powi in the fixture; that incident motivated this registry."},
-{"golden": "fs-la:gemm", "file": "crates/fs-la/src/gemm.rs", "const": "GOLDEN_HASH", "depends_on": "fs-la:gemm-bits=1", "justification": "0x1d7a_a3c6_b631_7ef0 recorded at 6ys.3 landing, M4 Pro + trj; tier-invariant across the xdgf NEON capsule (bitwise-equal microkernel, verified). KC is part of the bit contract - retuning KC bumps fs-la:gemm-bits and re-freezes this."},
-{"golden": "fs-bisect:compound-content", "file": "crates/fs-bisect/tests/compound_battery.rs", "const": "POWI_FAMILY_CONTENT_HASH", "depends_on": "fs-bisect:compound-canon=3", "justification": "6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f deliberately re-frozen 2026-07-11 for bead j3q2 schema v3. The content preimage now binds stable member codec id/version/schema, bounded construction-time payload snapshots, provenance, labels, tracking, and admission. Replay re-canonicalizes every live value before predicate work. Reproduced in debug and release on aarch64 Apple M4 Pro; post-v3 x86-64 reproduction remains pending and is not claimed."},
-{"golden": "fs-bisect:compound-manifest", "file": "crates/fs-bisect/tests/compound_battery.rs", "const": "POWI_FAMILY_MANIFEST_HASH", "depends_on": "fs-bisect:compound-canon=3", "justification": "43bd1ebddb606eb5a156ca06c642cf03ddd06770223584c5ea45ae031d0cf6b2 deliberately re-frozen 2026-07-11 for bead j3q2 schema v3; the complete JSON-lines manifest now has its own sentinel, while content identity 6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f binds the stable member codec id/version/schema and bounded payload snapshots. Replay re-canonicalizes all live members before predicate work, permanent families require converged minimization, and the aggregate predicate ceiling includes the seed call. Reproduced in debug and release on aarch64 Apple M4 Pro; post-v3 x86-64 reproduction remains pending and is not claimed."},
-{"golden": "fs-la:batched-f64", "file": "crates/fs-la/tests/batched_battery.rs", "const": "GOLDEN_HASH", "depends_on": "fs-la:batched-f64-bits=1", "justification": "0x0377_a8c9_5992_aee9 originally frozen at 6ys.4 and registered 2026-07-10 for bug bead 9ry9. The semantic surface includes fixed per-element reduction order, beta-zero overwrite, alpha-zero no-read behavior, and batch-membership invariance; the frozen fixture uses nonzero alpha and remained unchanged in debug and release."},
-{"golden": "fs-la:batched-f32", "file": "crates/fs-la/tests/batched_f32_battery.rs", "const": "GOLDEN_HASH", "depends_on": "fs-la:batched-f32-bits=2", "justification": "0x5600_7cfe_6a6d_1f9a rechecked unchanged 2026-07-10 for bug bead 9ry9: semantics v2 makes the already-promised alpha-zero path scale or overwrite C without reading poisoned A/B; the frozen fixture uses nonzero alpha, so its bits remain unchanged. The f32 and mixed chains retain the narrow-once contract; cross-ISA empirical proof remains pending the next x86 lane."},
-{"golden": "fs-fft:stage-path", "file": "crates/fs-fft/src/lib.rs", "const": "GOLDEN_HASH", "depends_on": "fs-fft:transform-bits=1", "justification": "0x22dd_b617_266e_a792 (n=128, stage walk) frozen at the radix-8/4/2 bump (bead 27d3), verified four quadrants (M4 + ts2 x debug + release). UNTOUCHED by the six-step slice: dispatch is a pure function of n (asserted in-suite) and n=128 stays on the stage path. HISTORY: radix-2 0xbd55_68d2_33f4_b4bc; radix-4/2 0x0506_a4a0_955d_cf8e."},
-{"golden": "fs-fft:sixstep-path", "file": "crates/fs-fft/tests/sixstep.rs", "const": "SIXSTEP_GOLDEN_HASH", "depends_on": "fs-fft:transform-bits=1", "justification": "0x79aa_108f_a517_012f frozen 2026-07-10 (bead 27d3 six-step slice): n=2^16 through the radix-8/4/2 six-step arithmetic. The 2026-07-11 implementation fuses the logical three transposes, two sweeps, and copy-back into TWO parent-size full-array passes (stage A data columns -> first sweep + w^(kj) -> scratch columns; stage B scratch rows -> second sweep -> output columns) and uses twin-gated exact-move gather/scatter capsules. The storage rewrite preserved the hash on aarch64 M4 Pro in debug and release. The original arithmetic freeze was reproduced on M4 and x86-64 ts2 in debug and release; current post-fusion x86 execution remains pending and is not claimed. [F] remains default-OFF: the fully fused/vectorized path still lost to stages on M4 at n=2^22 (ratio 0.64-0.67); current x86 performance verdict pending. New bit territory, not a bump."},
-{"golden": "fs-cheb:aggregate", "file": "crates/fs-cheb/tests/cheb_battery.rs", "const": "GOLDEN_HASH", "depends_on": "fs-fft:transform-bits=1", "justification": "0x5d2f_e305_ce90_06fb re-frozen 2026-07-16 (bead sj31i.55 repair) after 6ee7267 intentionally moved reference-coordinate root-refinement and exceptional-integral bits (declared armed-red in its own golden comment); d93fa29 completed the finite-term-overflow integral fallback touching only a previously-panicking path. Independent DCT oracle, recovery, calculus, root, and eigenvalue checks stayed green throughout. FOUR-QUADRANT VERIFICATION at 0fba65d: aarch64 M4 Pro debug+release and x86-64 ts1 5975WX debug+release all bit-identical. HISTORY: radix-2 0xaee4_8002_1eea_9097 (M4 + trj); radix-4/2 0x22e7_ea21_58c9_e587 (M4 only); radix-8/4/2 pre-root-refinement 0xeea0_4b0a_01de_46cd (M4 + ts1 + ts2, bead obq0)."},
-{"golden": "fs-flagship-e2e:vessel-smoke", "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs", "const": "GOLDEN_VESSEL_SMOKE", "depends_on": "fs-flagship-e2e:metric-stream-encoding=2,fs-fft:transform-bits=1", "justification": "0x4541_d7f3_2926_1082 re-frozen 2026-07-11 after fs-fft commit 535aa839 moved the DCT substrate from radix-4/2 to radix-8/4/2 Stockham. Only robust_offband moved, from 0xbf3c9a988956ba53 to 0xbf3c9a98894a2018; substituting those exact fields reconstructs the prior 0x4e42_4a53_6a63_ce8b and current aggregate, while the other five metric bits, physical envelopes, replay equality, and independent vessel/FFT checks remain unchanged. Reproduced in debug and release on aarch64 M4 Pro. The upstream FFT stage path is verified four quadrants; this downstream x86-64 row remains pending. HISTORY: radix-2 v1 0xe621_48d4_490c_a887; radix-4/2 v1 0xd70b_9ac9_0828_ae86; v2 pre-pour repair 0xdabd_6fd3_6315_31fe; radix-4/2 v2 post-repair 0x4e42_4a53_6a63_ce8b."},
-{"golden": "fs-flagship-e2e:ornith-smoke", "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs", "const": "GOLDEN_ORNITH_SMOKE", "depends_on": "fs-flagship-e2e:metric-stream-encoding=2,fs-bem:panel-bits=1", "justification": "0xae56_945a_312e_0378 re-frozen 2026-07-10 at 6ure CLOSE: the ~1e-9 aarch64-vs-x86-64 roa divergence was platform libm (macOS vs glibc) in the fs-bem panel kernel feeding the ROA adjoint lift slope; the whole fs-bem surface (panel2d influence atan2/ln, cosine spacing, freestream trig, wake2d, panel3d probe) now routes through fs_math::det:: (surface fs-bem:panel-bits=1), so bits legitimately moved on every platform and roa (0x3fe4c1ee0bb8f1e8, identical debug+release on aarch64) is RESTORED to the hashed stream (6 metrics). Cross-ISA reproduction on ts2 recorded in the 6ure close comment. HISTORY: 5-metric envelope interim 0x1b03_ae9f_66cd_b548; divergent 6-metric v2 0xd750_e1bb_a8d7_e76a; v1 0xf513_eaf8_22d2_7813."},
-{"golden": "fs-flagship-e2e:frame-smoke", "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs", "const": "GOLDEN_FRAME_SMOKE", "depends_on": "fs-flagship-e2e:metric-stream-encoding=2", "justification": "0x9c09_b06a_7883_57fc re-frozen 2026-07-10 for the gp3.14 metric-stream encoding migration v1->v2 (canonical typed length-prefixed replay identity); every metric bit pattern in the stage evidence is unchanged from the v1 freeze, verified in the battery output; debug+release both green at the committed tree."},
-{"golden": "fs-flagship-e2e:lbm-core", "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs", "const": "GOLDEN_LBM_CORE", "depends_on": "fs-flagship-e2e:metric-stream-encoding=2", "justification": "0x1539_430c_dae4_7762 re-frozen 2026-07-10 for the gp3.14 metric-stream encoding migration v1->v2 (canonical typed length-prefixed replay identity); every metric bit pattern in the stage evidence is unchanged from the v1 freeze, verified in the battery output; debug+release both green at the committed tree."},
-{"golden": "fs-lbm:d3q19-core", "file": "crates/fs-lbm/tests/d3q19_battery.rs", "const": "GOLDEN_HASH", "depends_on": "fs-lbm:d3q19-bits=1", "justification": "0xd548_9283_1f0a_6d71 frozen 2026-07-12 at the 84hv landing (D3Q19 core: BGK + Guo forcing, pull streaming, halfway bounce-back, SoA tile-major, pinned single-thread traversal). Seeded 8x8x16 fixture, 100 steps, density/velocity probes + total mass. Verified debug+release on aarch64 M4 Pro; x86-64 (ts2) verification recorded in the 84hv close comment. Single-thread golden by design until WS1-D lands the parallel sweep — worker-count invariance then becomes part of this surface."},
-{"golden": "fs-lbm:d3q19-boundary-bits", "file": "crates/fs-lbm/tests/d3q19_boundaries.rs", "const": "BOUNDARY_GOLDEN_HASH", "depends_on": "fs-lbm:d3q19-bits=1", "justification": "0x6683_0bf8_5cbb_3750 frozen 2026-07-17 closing the 40p2 policy gap (WS1 3-D boundaries: halfway bounce-back on axis-aligned and SDF-voxelized links, D3Q19 velocity inlet / pressure outlet). Preimage: link masks, densities, velocities, and total mass over a voxelized-sphere lid cavity (64 steps) and a velocity/pressure duct (32 steps), FNV-1a over exact bits. All four policy quadrants reproduced bit-identically on committed trees: aarch64 M4 Pro debug+release at d99f5a60 and x86-64 ts1 debug+release at 2919144, with an empty fs-lbm diff between the two commits. Release acceptance at the same freeze: 10k-step closed-domain relative mass leak 2.621e-13 planar / 2.297e-13 voxel, below the 1e-11 bar."},
-{"golden": "fs-lbm:d3q19-sparse", "file": "crates/fs-lbm/tests/d3q19_sparse.rs", "const": "SPARSE_GOLDEN_HASH", "depends_on": "fs-lbm:d3q19-bits=1", "justification": "0x4c00_8876_e576_a332 frozen 2026-07-17 at the sjro landing (sparse active-tile D3Q19: Morton-ordered active list, two-pass collide/pull-stream sweeps with inactive-space bounce-back, KernelRunner-pooled path bitwise-identical to serial across worker counts 1/2/7 by construction). Preimage: exact state bits after activation of the L-shaped ~10%-active set in a 32^3 box (tau 0.7, x-force 1e-6, splitmix64 seeded perturbation), 25 sweeps, one mass-ledgered tile retirement, 5 more sweeps, plus the ledger value and total mass, FNV-1a over exact bits. All four policy quadrants reproduced bit-identically on the committed tree e33b74de: aarch64 M4 Pro debug+release and x86-64 ts1 debug+release. Worker-count invariance is separately pinned by the G5 battery test on the same fixture, so this surface covers serial and pooled sweeps alike."},
-{"golden": "fs-lbm:d3q19-pour", "file": "crates/fs-lbm/tests/d3q19_freesurface3.rs", "const": "POUR_GOLDEN_HASH", "depends_on": "fs-lbm:d3q19-bits=1", "justification": "0xb0f1_90d6_126b_3ccc frozen 2026-07-17 at the sxnm landing (3-D free surface on sparse tiles: Koerner VOF port with advance-driven activation invariant, solid tank tiles, exact-mass retirement). Preimage: exact population state bits plus the ledger-mass bits after the lbm3-106 minimal pour — 800 steps of a tile-granular tank with a two-tile lip in a 64^3 domain, 789.6 mass units poured, partition defect 6.6e-14 against the bead 1e-9 bar. All four policy quadrants reproduced bit-identically on the committed tree 1926b1cf: aarch64 M4 Pro debug+release and x86-64 ts1 debug+release. Deterministic fixture (no RNG; construction is the seed schedule)."},
-{"golden": "fs-render:cornell", "file": "crates/fs-render/tests/tracer_battery.rs", "const": "CORNELL_GOLDEN", "depends_on": "fs-render:tracer-bits=1,fs-render:chart-backend-bits=2", "justification": "0x6ed8_706b_08d1_642e frozen 2026-07-12 at the 872c landing - the first shaded COLOR image (Cornell-class fixture: hero-wavelength MIS path tracing, GGX F-rep sphere via the certified sphere tracer, area light, 24x24 @ 8spp, seed 7, FNV over the EXR bytes). The 8ll9 hardening declares chart-backend-bits as a separate causative surface; v2 classifies outward-rounded working limits through a validated caller-endpoint sample and epsilon-clear safe-ball bridge. Current-tree four-quadrant replay is required before 8ll9 close and is not yet claimed here. The original hash was debug/release identical on aarch64 M4 Pro and x86-64 ts2 at the 872c tree."}
-]
+  "schema": "frankensim-golden-couplings-v1",
+  "note": "Every golden/replay hash declares the upstream SEMANTIC SURFACES it depends on and the surface version it was frozen against (bead y4pt). Surfaces declare a version const in source; xtask check-goldens fails when a source const drifts from this registry or a golden's pin drifts from a surface row - an upstream semantic change must point at every downstream golden to re-freeze deliberately, never surprise it. Re-pins follow docs/GOLDEN_POLICY.md (committed tree, BOTH debug and release, plausible root cause).",
+  "surfaces": [
+    {
+      "id": "fs-adjoint:dwr-accept",
+      "file": "crates/fs-adjoint/src/dwr_accept.rs",
+      "const": "DWR_EVIDENCE_IDENTITY_VERSION",
+      "version": 7,
+      "domain_const": "DWR_ACCEPT_IDENTITY_DOMAIN",
+      "domain": "fs-adjoint-dwr-accept-identity-v7",
+      "schema_fingerprint": "v7-ae65033fd6f5dd9ad67885a3e79c8158626b87c4c35ae4960026e41c0196e85f"
+    },
+    {
+      "id": "fs-adjoint:dwr-bracket",
+      "file": "crates/fs-adjoint/src/dwr_accept.rs",
+      "const": "DWR_EVIDENCE_IDENTITY_VERSION",
+      "version": 7,
+      "domain_const": "DWR_BRACKET_IDENTITY_DOMAIN",
+      "domain": "fs-adjoint-dwr-bracket-identity-v7",
+      "schema_fingerprint": "v7-9b180f9719a8076e7dbb9346246d17617d99121112193d91b1dce303637642d7"
+    },
+    {
+      "id": "fs-adjoint:dwr-output",
+      "file": "crates/fs-adjoint/src/dwr_accept.rs",
+      "const": "DWR_EVIDENCE_IDENTITY_VERSION",
+      "version": 7,
+      "domain_const": "DWR_OUTPUT_IDENTITY_DOMAIN",
+      "domain": "fs-adjoint-dwr-output-identity-v7",
+      "schema_fingerprint": "v7-d08ff0b02f89372d62d22b4d8cfc89fe90ff7125dd90e4f733ca845ea4fac1d3"
+    },
+    {
+      "id": "fs-adjoint:explanation-node",
+      "file": "crates/fs-adjoint/src/explain.rs",
+      "const": "EXPLANATION_FINGERPRINT_VERSION",
+      "version": 2,
+      "domain_const": "EXPLANATION_FINGERPRINT_DOMAIN",
+      "domain": "org.frankensim.fs-adjoint.explanation-node.v2",
+      "schema_fingerprint": "v2-5d28d013085d1e7b78212f2c6b926ffa7ebc2d380b5a14b8c4a12e96cdff8da8"
+    },
+    {
+      "id": "fs-adjoint:explanation-receipt",
+      "file": "crates/fs-adjoint/src/explain.rs",
+      "const": "EXPLANATION_RECEIPT_VERSION",
+      "version": 1,
+      "domain_const": "EXPLANATION_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-adjoint.explanation-receipt.v1",
+      "schema_fingerprint": "v1-9c37e1cc8e98c81c05d7c47ee11287de70ed5e705f8b47779ae8c7385038c3c7"
+    },
+    {
+      "id": "fs-alloc:hugepage-decision",
+      "file": "crates/fs-alloc/src/hugepage.rs",
+      "const": "HUGEPAGE_DECISION_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "HUGEPAGE_DECISION_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-alloc.hugepage-decision.v1",
+      "schema_fingerprint": "v1-6d2cee81499c38b6ac695359188c85482972d39bf72e9ce2387489f61e567ea1"
+    },
+    {
+      "id": "fs-bisect:compound-canon",
+      "file": "crates/fs-bisect/src/compound.rs",
+      "const": "COMPOUND_CANON_VERSION",
+      "version": 3,
+      "domain_const": "COMPOUND_FAMILY_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-bisect.compound-family.v3",
+      "schema_fingerprint": "v3-339c3b1af12bc00d1b87c15cd9763aac30c385e8d86db2b661973010932f198e"
+    },
+    {
+      "id": "fs-blake3:canonical-identity-frame",
+      "file": "crates/fs-blake3/src/identity.rs",
+      "const": "CANONICAL_FRAME_VERSION",
+      "version": 1,
+      "domain_const": "CANONICAL_IDENTITY_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-blake3.canonical-identity-frame.v1",
+      "schema_fingerprint": "v1-ae588b53d409424157582059edbe2e26cee02e1895410d02a41cb0aa3b65eec1"
+    },
+    {
+      "id": "fs-blake3:schema-id",
+      "file": "crates/fs-blake3/src/identity.rs",
+      "const": "CANONICAL_FRAME_VERSION",
+      "version": 1,
+      "domain_const": "SCHEMA_ID_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-blake3.schema-id.v1",
+      "schema_fingerprint": "v1-da34e5b8adc516c03dff1bfbc445f5064479609963372c097b2fe86bf3b03cf9"
+    },
+    {
+      "id": "fs-checker:decision-report",
+      "file": "crates/fs-checker/src/lib.rs",
+      "const": "CHECKER_DECISION_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN",
+      "domain": "fs-package:v8:checker-decision",
+      "schema_fingerprint": "v9-4ec67a816fd11014eea14e43b1863fece909396e9e829f9656df7ee4866e1916"
+    },
+    {
+      "id": "fs-checker:semantic-plugin",
+      "file": "crates/fs-checker/src/semantic.rs",
+      "const": "SEMANTIC_PLUGIN_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SEMANTIC_PLUGIN_IDENTITY_DOMAIN",
+      "domain": "fs-checker:semantic-plugin:v2",
+      "schema_fingerprint": "v2-bd57ce54af8403769fcccd52b9715317d5997285d7b5db974ffd252e7716785b"
+    },
+    {
+      "id": "fs-checker:semantic-registry",
+      "file": "crates/fs-checker/src/semantic.rs",
+      "const": "SEMANTIC_REGISTRY_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SEMANTIC_REGISTRY_IDENTITY_DOMAIN",
+      "domain": "fs-checker:semantic-registry:v2",
+      "schema_fingerprint": "v2-761b04c733a786f164ab6774a62deeed6d93ae51f9a869c41f98c71131da78e8"
+    },
+    {
+      "id": "fs-checker:semantic-report",
+      "file": "crates/fs-checker/src/semantic.rs",
+      "const": "SEMANTIC_REPORT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SEMANTIC_REPORT_IDENTITY_DOMAIN",
+      "domain": "fs-checker:semantic-report:v2",
+      "schema_fingerprint": "v2-b3eaad7705b13d97088119bdaa19e3a485e1cc941935fdfb1b268205731472b9"
+    },
+    {
+      "id": "fs-evidence:observation-manifest",
+      "file": "crates/fs-evidence/src/vv/model.rs",
+      "const": "VV_OBSERVATION_MANIFEST_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-evidence.vv-observation-manifest.v3",
+      "schema_fingerprint": "v3-9c86dcd52af0818d2357923219d594b33b0931cd8fd6742627ab9b032c555f78"
+    },
+    {
+      "id": "fs-evidence:vv-artifact",
+      "file": "crates/fs-evidence/src/vv/model.rs",
+      "const": "VV_ARTIFACT_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "VV_ARTIFACT_FAMILY",
+      "domain": "org.frankensim.fs-evidence.vv-artifact.v3",
+      "schema_fingerprint": "v3-a19af094c1affa9f15c186a773572687638e9cf1409cbdb320810e7ef2003168"
+    },
+    {
+      "id": "fs-evidence:vv-blind-holdout",
+      "file": "crates/fs-evidence/src/vv/model.rs",
+      "const": "VV_BLIND_HOLDOUT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "VV_BLIND_HOLDOUT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-evidence.vv-blind-holdout.v2",
+      "schema_fingerprint": "v2-fbc7384c6a9fffb3f4dcbe9c5cb619ff315877e2756d8918b13f74779ed0e94b"
+    },
+    {
+      "id": "fs-evidence:vv-case",
+      "file": "crates/fs-evidence/src/vv/model.rs",
+      "const": "VV_CASE_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "VV_CASE_FAMILY",
+      "domain": "org.frankensim.fs-evidence.vv-case.v3",
+      "schema_fingerprint": "v3-1dac9a2cc37fe4eb8c7e409f1d15d2c9364ddf8d78992dbd66bf18cbce9058ae"
+    },
+    {
+      "id": "fs-evidence:vv-schema-admission-receipt",
+      "file": "crates/fs-evidence/src/vv/model.rs",
+      "const": "VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-evidence.vv-schema-admission-receipt.v2",
+      "schema_fingerprint": "v2-ff5b834e2d8a25b295d85ea43fe51c83e04fd8143d341389f5bcf09953fce217"
+    },
+    {
+      "id": "fs-exec:gemm-tune-key",
+      "file": "crates/fs-exec/src/tune.rs",
+      "const": "GEMM_TUNE_KEY_IDENTITY_VERSION",
+      "version": 4,
+      "domain_const": "GEMM_TUNE_KEY_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-exec.gemm-tune-key.v4",
+      "schema_fingerprint": "v4-4e39adbb7f4fdaf20ca979cd267a9f72ad222c8686b3940def0c468b1826edf6"
+    },
+    {
+      "id": "fs-exec:tilepool-placement",
+      "file": "crates/fs-exec/src/pool.rs",
+      "const": "TILEPOOL_PLACEMENT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "TILEPOOL_PLACEMENT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-exec.tilepool-placement.v2",
+      "schema_fingerprint": "v2-7a5ab778d489732b2ef9894e57046463a2f1f2a4eccdffbef5cfddefd096aec6"
+    },
+    {
+      "id": "fs-exec:tune-row",
+      "file": "crates/fs-exec/src/tune.rs",
+      "const": "TUNE_ROW_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "TUNE_ROW_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-exec.tune-row.v2",
+      "schema_fingerprint": "v2-4f204cb89c79aad15367781fb8cd044ebb3536e41ac60e8d65d64646ad47a405"
+    },
+    {
+      "id": "fs-exec:tuning-decision",
+      "file": "crates/fs-exec/src/tune.rs",
+      "const": "TUNING_DECISION_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "TUNING_DECISION_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-exec.tuning-decision.v1",
+      "schema_fingerprint": "v1-6072b9cd746c941e2a08eb835ecd9a8842ebcd88e4c9cb8cebab5be2e262049b"
+    },
+    {
+      "id": "fs-govern:lane-request-digest",
+      "file": "crates/fs-govern/src/lanes.rs",
+      "const": "LANE_REQUEST_DIGEST_VERSION",
+      "version": 1,
+      "domain_const": "REQUEST_DIGEST_DOMAIN",
+      "domain": "frankensim.fs-govern.lane-request.v1",
+      "schema_fingerprint": "v1-36023992f37016d21bbcb7ed2fc9675019a5e507de36ba69668ca7308d1255a1"
+    },
+    {
+      "id": "fs-ir:planner-cache-key",
+      "file": "crates/fs-ir/src/planner.rs",
+      "const": "PLANNER_CACHE_KEY_VERSION",
+      "version": 3,
+      "domain_const": "PLANNER_CACHE_KEY_DOMAIN",
+      "domain": "fs-ir-ladder:v3:",
+      "schema_fingerprint": "v3-d7b7d9fbad8024dbb4e340a8f237b3a8d8ba80c473caad35a40768b9ee597832"
+    },
+    {
+      "id": "fs-la:depgraph-receipt",
+      "file": "crates/fs-la/depgraph_receipt_format.rs",
+      "const": "DEPGRAPH_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "DEPGRAPH_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-la.depgraph-receipt.v1",
+      "schema_fingerprint": "v1-8e6c31cdb1e19a09d7507fb9719daf17f3692a88e56e3d007acf6af7346052c1"
+    },
+    {
+      "id": "fs-la:gemm-build-fingerprint",
+      "file": "crates/fs-la/build_identity_support.rs",
+      "const": "GEMM_BUILD_FINGERPRINT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "GEMM_BUILD_FINGERPRINT_IDENTITY_DOMAIN",
+      "domain": "frankensim.fs-la.gemm-build-fingerprint.v2",
+      "schema_fingerprint": "v2-4f6a988e574b08a60459b9cc6d491071da40dce9f8970c2f8cc5987475fe9415"
+    },
+    {
+      "id": "fs-ledger:artifact-content",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "ARTIFACT_CONTENT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "ARTIFACT_CONTENT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.artifact-content.v1",
+      "schema_fingerprint": "v1-3293dbbbef5e82be288797f7c385eead7e0a6f5efa71f96c8eb527148b4b2fa6"
+    },
+    {
+      "id": "fs-ledger:color-admission-policy",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "COLOR_ADMISSION_POLICY_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "COLOR_ADMISSION_POLICY_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.color-admission-policy.v1",
+      "schema_fingerprint": "v1-2d9a611d715997465f814b712271b6a3549b64a7c9e6cbe8ead864c886797627"
+    },
+    {
+      "id": "fs-ledger:color-node",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "COLOR_NODE_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "COLOR_NODE_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.color-node.v9",
+      "schema_fingerprint": "v9-7fc9b25e7ba0f79a25e3657530a042cd2d919ac134d9d36fe99b8c0a6d4294b8"
+    },
+    {
+      "id": "fs-ledger:derived-color-waiver-subject",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "DERIVED_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "DERIVED_COLOR_WAIVER_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.derived-color-waiver-subject.v3",
+      "schema_fingerprint": "v3-a53dcb60b8126ffa6ededa6d3f1f32176b859579fa5334683534196d089081cb"
+    },
+    {
+      "id": "fs-ledger:physical-instance",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "PHYSICAL_INSTANCE_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PHYSICAL_INSTANCE_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.physical-instance.v1",
+      "schema_fingerprint": "v1-02a32e35271e4abc0d798f731bbdb15fc5e7e6a06b888d4004fcd0050502acaf"
+    },
+    {
+      "id": "fs-ledger:session-flush-batch",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "SESSION_FLUSH_BATCH_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SESSION_FLUSH_BATCH_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.session-flush-batch.v2",
+      "schema_fingerprint": "v2-77697279a46a22f39546673033fd09bc652066bffbc419943e814aa343f84bd1"
+    },
+    {
+      "id": "fs-ledger:session-mutation-claim",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "SESSION_MUTATION_CLAIM_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "SESSION_MUTATION_CLAIM_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.session-mutation-claim.v1",
+      "schema_fingerprint": "v1-f4453b14d8e68de8552c540df5d3ed38d4bc5cff067a48fa1b8317e392f0101b"
+    },
+    {
+      "id": "fs-ledger:session-terminal-events",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "SESSION_TERMINAL_EVENTS_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SESSION_TERMINAL_EVENTS_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.session-terminal-events.v2",
+      "schema_fingerprint": "v2-63e903c4ba7a36ee0398d183b3722f628925f564692c66ab019ef8cac6a6d48c"
+    },
+    {
+      "id": "fs-ledger:solver-checkpoint-receipt",
+      "file": "crates/fs-ledger/src/session_registry.rs",
+      "const": "SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.solver-checkpoint-receipt.v1",
+      "schema_fingerprint": "v1-f22c4dacb1ccae7e22213851d1f0603c981ee5b1c8e6d28ff3b8ec969859e9bf"
+    },
+    {
+      "id": "fs-ledger:source-color-waiver-subject",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "SOURCE_COLOR_WAIVER_SUBJECT_IDENTITY_VERSION",
+      "version": 4,
+      "domain_const": "SOURCE_COLOR_WAIVER_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.source-color-waiver-subject.v4",
+      "schema_fingerprint": "v4-a71d029cb700b99334e8265dd148bc3206574e0d2051d3a40eeb3318af0a2da1"
+    },
+    {
+      "id": "fs-ledger:source-origin-request",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "SOURCE_ORIGIN_REQUEST_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "SOURCE_ORIGIN_REQUEST_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.source-origin-request.v1",
+      "schema_fingerprint": "v1-849a2cf97453a71d88fc202b12d67d393ca30b36205ab5478e8d7c3cbca7775c"
+    },
+    {
+      "id": "fs-ledger:state-checkpoint-receipt",
+      "file": "crates/fs-ledger/src/state_checkpoint.rs",
+      "const": "STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.state-checkpoint-receipt.v1",
+      "schema_fingerprint": "v1-43d8d44c1c747247eb71f57383b87b1345ccf57fe27ca5b191628b820d098acd"
+    },
+    {
+      "id": "fs-ledger:vcs-commit-envelope",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "VCS_COMMIT_ENVELOPE_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "VCS_COMMIT_ENVELOPE_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.vcs-commit-envelope.v1",
+      "schema_fingerprint": "v1-18198c089784b934dd72aeb0e16d9443d8bbc5f6cb1426d57395eb4764d64841"
+    },
+    {
+      "id": "fs-ledger:vcs-commit-leaf",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "VCS_COMMIT_LEAF_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "VCS_COMMIT_LEAF_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.vcs-commit-leaf.v2",
+      "schema_fingerprint": "v2-b27d49c0c84fdedd263a97f0b47e197b663e234274e5b2741587cbf9ad4e696c"
+    },
+    {
+      "id": "fs-ledger:vcs-commit-root",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "VCS_COMMIT_ROOT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "VCS_COMMIT_ROOT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.vcs-commit-root.v2",
+      "schema_fingerprint": "v2-72c7fedd48e9e51c4f2dad688ecc8a288ffe630598ad05b43f84f26aeac83e60"
+    },
+    {
+      "id": "fs-ledger:vcs-ledger-lineage",
+      "file": "crates/fs-ledger/src/lib.rs",
+      "const": "VCS_LEDGER_LINEAGE_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "VCS_LEDGER_LINEAGE_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-ledger.vcs-ledger-lineage.v1",
+      "schema_fingerprint": "v1-e62677fa9127bb7df0d2708e051c433413ad5e64914c39822a3ba8a375b2ae87"
+    },
+    {
+      "id": "fs-matdb:canonical-parameter-block",
+      "file": "crates/fs-matdb/src/cards.rs",
+      "const": "CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.canonical-parameter-block.v1",
+      "schema_fingerprint": "v1-555fa5360006309e5fa410e284e5380f31bb35faa4d8f5b02e2bad55ed8fd859"
+    },
+    {
+      "id": "fs-matdb:normalized-interface-pack",
+      "file": "crates/fs-matdb/src/interface_pack.rs",
+      "const": "INTERFACE_PACK_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "INTERFACE_PACK_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.normalized-interface-pack.v1"
+    },
+    {
+      "id": "fs-matdb:normalized-model-pack",
+      "file": "crates/fs-matdb/src/model_pack.rs",
+      "const": "MODEL_PACK_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "MODEL_PACK_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.normalized-model-pack.v1"
+    },
+    {
+      "id": "fs-matdb:normalized-species-pack",
+      "file": "crates/fs-matdb/src/species_pack.rs",
+      "const": "SPECIES_PACK_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "SPECIES_PACK_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.normalized-species-pack.v1"
+    },
+    {
+      "id": "fs-matdb:normalized-pack",
+      "file": "crates/fs-matdb/src/pack.rs",
+      "const": "MATDB_PACK_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "PACK_HASH_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.normalized-pack.v1"
+    },
+    {
+      "id": "fs-matdb:property-usage-receipt",
+      "file": "crates/fs-matdb/src/query.rs",
+      "const": "PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.property-usage-receipt.v2",
+      "schema_fingerprint": "v2-0be2f9d0e7e212db93e3125ebbe9559b1b1030161331fdf4789bedd0a91082c5"
+    },
+    {
+      "id": "fs-matdb:joint-usage-receipt",
+      "file": "crates/fs-matdb/src/pack.rs",
+      "const": "JOINT_USAGE_RECEIPT_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-matdb.joint-usage-receipt.v1"
+    },
+    {
+      "id": "fs-material:identifiability-assessment",
+      "file": "crates/fs-material/src/identifiability/authoritative.rs",
+      "const": "IDENTIFIABILITY_ASSESSMENT_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "IDENTIFIABILITY_ASSESSMENT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-material.identifiability-assessment.v3",
+      "schema_fingerprint": "v3-87d2c24a6fcdc07715f0647f2f66cdd8467089dda243c8f2c124b5a6f2e0b4a6"
+    },
+    {
+      "id": "fs-material:identifiability-execution",
+      "file": "crates/fs-material/src/identifiability/authoritative.rs",
+      "const": "IDENTIFIABILITY_EXECUTION_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "IDENTIFIABILITY_EXECUTION_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-material.identifiability-execution.v3",
+      "schema_fingerprint": "v3-b7b0ae4924282e1903e45321e2a9d7b6fdf34aa21bd436a26a70fb70a3068cfa"
+    },
+    {
+      "id": "fs-material:identifiability-problem",
+      "file": "crates/fs-material/src/identifiability/authoritative.rs",
+      "const": "IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "IDENTIFIABILITY_PROBLEM_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-material.identifiability-problem.v3",
+      "schema_fingerprint": "v3-f1401f72bccdef05a0bc959ed79acef164f926f6b3a603b15a93a7da83ae5670"
+    },
+    {
+      "id": "fs-material:identifiability-source-admission",
+      "file": "crates/fs-material/src/identifiability/authoritative.rs",
+      "const": "IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-material.identifiability-source-admission.v3",
+      "schema_fingerprint": "v3-a6524d533dfbb6c053dd1bfb0a669258bfd08a8a73cb773872fc03e6fede089d"
+    },
+    {
+      "id": "fs-obs:event-content-identity",
+      "file": "crates/fs-obs/src/lib.rs",
+      "const": "EVENT_CONTENT_IDENTITY_VERSION",
+      "version": 10,
+      "domain_const": "EVENT_CONTENT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-obs.event-content.v10",
+      "schema_fingerprint": "v10-217e83d2ecb689366bb42cdb828900a9fc8b16c37c1b84bdab4bc518714f31a8"
+    },
+    {
+      "id": "fs-obs:replay-identity-frame",
+      "file": "crates/fs-obs/src/ident.rs",
+      "const": "IDENT_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "REPLAY_IDENTITY_DOMAIN",
+      "domain": "fsid",
+      "schema_fingerprint": "v1-747c55b7812d1dd837181da26e74062eb2602e8fa728e2f2516608ccc544c46a"
+    },
+    {
+      "id": "fs-package:claim-declaration",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "CLAIM_DECLARATION_IDENTITY_VERSION",
+      "version": 8,
+      "domain_const": "CLAIM_DECLARATION_IDENTITY_DOMAIN",
+      "domain": "fs-package:v8:claim",
+      "schema_fingerprint": "v8-c7e0da80bf40b044124f7ba7003dcb93c59dcc18ac021adf43fb6b2737c4f807"
+    },
+    {
+      "id": "fs-package:claim-verification-subject",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION",
+      "version": 8,
+      "domain_const": "CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v8:claim-verification-subject",
+      "schema_fingerprint": "v8-68222081b4b37a2ea0adbcf373a4ddc01ee0802137fdf14928bb68529e6c8492"
+    },
+    {
+      "id": "fs-package:coverage-decision",
+      "file": "crates/fs-package/src/coverage.rs",
+      "const": "COVERAGE_DECISION_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "COVERAGE_DECISION_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:coverage-decision",
+      "schema_fingerprint": "v9-221ad38e2def2d2cc2f686eab7c4f7aae8d0a2c7c73e26bb48b23a34303baef1"
+    },
+    {
+      "id": "fs-package:package-root",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "PACKAGE_ROOT_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "PACKAGE_ROOT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:header",
+      "schema_fingerprint": "v9-554ce19766c7ee1aa74e9beef439580fe939c112a43b17361b8e15295c849517"
+    },
+    {
+      "id": "fs-package:presence-decision",
+      "file": "crates/fs-package/src/coverage.rs",
+      "const": "PRESENCE_DECISION_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "PRESENCE_DECISION_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:presence-decision",
+      "schema_fingerprint": "v9-80ef1bb68c699314edb53239ba4888ca9011345f5d3c8cc52433ec163c58190a"
+    },
+    {
+      "id": "fs-package:receipt-schema-catalog",
+      "file": "crates/fs-package/src/receipt_catalog.rs",
+      "const": "RECEIPT_SCHEMA_CATALOG_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "RECEIPT_SCHEMA_CATALOG_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-package.receipt-schema-catalog.v1",
+      "schema_fingerprint": "v1-680d25d25705078ea0681c7091459acc96b0a15e677e21d2116fbf394d803f52"
+    },
+    {
+      "id": "fs-package:receipt-schema-descriptor",
+      "file": "crates/fs-package/src/receipt_catalog.rs",
+      "const": "RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-package.receipt-schema-descriptor.v1",
+      "schema_fingerprint": "v1-2947a0ec80d678dacb29b511fdf816027a6675d5a62ce949b0a30e8e01a6d557"
+    },
+    {
+      "id": "fs-package:release-admission-context",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:release-admission-context",
+      "schema_fingerprint": "v9-e1598beccb9ce1a2d91f8d1f9b6727df855cff521773d31d8442f6e81b549f31"
+    },
+    {
+      "id": "fs-package:semantic-witness",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "SEMANTIC_WITNESS_IDENTITY_VERSION",
+      "version": 8,
+      "domain_const": "SEMANTIC_WITNESS_IDENTITY_DOMAIN",
+      "domain": "fs-package:v8:semantic-witness",
+      "schema_fingerprint": "v8-b41c4ee088ab45e66011dacb051f062b38af7e0f5b3f3a2900ca5f83886f0b28"
+    },
+    {
+      "id": "fs-package:signature-subject",
+      "file": "crates/fs-package/src/origin.rs",
+      "const": "SIGNATURE_SUBJECT_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "SIGNATURE_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:signature-subject",
+      "schema_fingerprint": "v9-3782c2fa9539cccf116177b5105dd07f9726090e943ca65d68d64d22eaf6e0bc"
+    },
+    {
+      "id": "fs-package:source-certificate-subject",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION",
+      "version": 8,
+      "domain_const": "SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v8:source-certificate-subject",
+      "schema_fingerprint": "v8-56f0df6f72ec9a96124995652588f8d81213efa1c6aebf2d3e869829330d9e1f"
+    },
+    {
+      "id": "fs-package:verification-receipt",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "VERIFICATION_RECEIPT_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "VERIFICATION_RECEIPT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:verification-receipt",
+      "schema_fingerprint": "v9-16d0320c78350656a21a585ca54ae851233b9b2c3f63e3d082639c6e5e940d3f"
+    },
+    {
+      "id": "fs-package:waiver-authorization-subject",
+      "file": "crates/fs-package/src/lib.rs",
+      "const": "WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION",
+      "version": 9,
+      "domain_const": "WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN",
+      "domain": "fs-package:v9:waiver-authorization",
+      "schema_fingerprint": "v9-97a51bf89c69650f434cde3dc04264f4f20b638b4809351d06511e1158f16765"
+    },
+    {
+      "id": "fs-plan:voi-audit-context",
+      "file": "crates/fs-plan/src/voi.rs",
+      "const": "VOI_AUDIT_CONTEXT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "AUDIT_CONTEXT_DOMAIN",
+      "domain": "frankensim.fs-plan.voi-audit.v2",
+      "schema_fingerprint": "v2-833a0f295b7a2443951ef91bb8e914f5d70f4c7a50d7d0021353e4424c9150de"
+    },
+    {
+      "id": "fs-plan:voi-ranked-menu",
+      "file": "crates/fs-plan/src/voi.rs",
+      "const": "VOI_RANKED_MENU_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "RANKED_MENU_CONTEXT_DOMAIN",
+      "domain": "frankensim.fs-plan.voi-ranked-menu.v2",
+      "schema_fingerprint": "v2-a89ed37f6edde3abb2ca24c45f5ba48013c0ebd0af8fb43b4961282838dd2815"
+    },
+    {
+      "id": "fs-plan:voi-ranked-source",
+      "file": "crates/fs-plan/src/voi.rs",
+      "const": "VOI_RANKED_SOURCE_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "RANKED_MENU_SOURCE_DOMAIN",
+      "domain": "frankensim.fs-plan.voi-ranked-source.v2",
+      "schema_fingerprint": "v2-24ed0a6a8a837910a5a565f83eee31e65f3f49d8bf88e50924285318cee8d1f7"
+    },
+    {
+      "id": "fs-rand:stream-checkpoint",
+      "file": "crates/fs-rand/src/lib.rs",
+      "const": "STREAM_CHECKPOINT_VERSION",
+      "version": 1,
+      "domain_const": "STREAM_CHECKPOINT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-rand.stream-checkpoint.v1",
+      "schema_fingerprint": "v1-5c3f0c475a56a3a84dadc8f1d6613e90409fc737c000d413200a686dbb0f48c3"
+    },
+    {
+      "id": "fs-rand:stream-semantics",
+      "file": "crates/fs-rand/src/lib.rs",
+      "const": "STREAM_SEMANTICS_VERSION",
+      "version": 1,
+      "domain_const": "STREAM_POSITION_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-rand.stream-position.v1",
+      "schema_fingerprint": "v1-5d7fc9e36971913b0f35d9a4f0f40ce4d4319b1bb8a574a3c67e65925dfbffaa"
+    },
+    {
+      "id": "fs-recompute:artifact-content",
+      "file": "crates/fs-recompute/src/lib.rs",
+      "const": "ARTIFACT_CONTENT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "ARTIFACT_CONTENT_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-recompute.artifact-content.v1",
+      "schema_fingerprint": "v1-1b67e37b1886620399ff4dfde5e9c616a2af90bee4ba136aefe4466b3dce5224"
+    },
+    {
+      "id": "fs-recompute:node-record",
+      "file": "crates/fs-recompute/src/lib.rs",
+      "const": "NODE_RECORD_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "NODE_RECORD_IDENTITY_DOMAIN",
+      "domain": "fs-recompute-node-v2",
+      "schema_fingerprint": "v2-f83fb9718bdde377d80cea05f287b75b91fb1851dd36984ac381b8ea05fdb699"
+    },
+    {
+      "id": "fs-roofline:baseline-record",
+      "file": "crates/fs-roofline/src/baseline.rs",
+      "const": "BASELINE_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "BASELINE_HASH_DOMAIN",
+      "domain": "frankensim.fs-roofline.baseline.v1",
+      "schema_fingerprint": "v1-9bbec0a062fca15365799f567103de05dafe9b4b3244ad840248bb7ef7d4fb9d"
+    },
+    {
+      "id": "fs-roofline:dependency-authority-policy",
+      "file": "crates/fs-roofline/src/production.rs",
+      "const": "DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "DEPENDENCY_AUTHORITY_POLICY_DOMAIN",
+      "domain": "frankensim.fs-roofline.dependency-authority-policy.v1",
+      "schema_fingerprint": "v1-f731a3ea86cf74f0653487316317e510767dfaa60fc5b109c63887f1929fc4d4"
+    },
+    {
+      "id": "fs-roofline:executable-build",
+      "file": "crates/fs-roofline/src/lib.rs",
+      "const": "EXECUTABLE_BUILD_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "ROOFLINE_EXECUTABLE_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.executable.v1",
+      "schema_fingerprint": "v1-3592307d7223b2f6de2abeab549379e7e017c82e8c39a36766353a65cb394133"
+    },
+    {
+      "id": "fs-roofline:execution-binding",
+      "file": "crates/fs-roofline/src/lib.rs",
+      "const": "EXECUTION_BINDING_IDENTITY_VERSION",
+      "version": 4,
+      "domain_const": "EXECUTION_BINDING_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.execution-binding.v4",
+      "schema_fingerprint": "v4-5511db00d00d1331a200694662bb0c78d4c318057afd25546d2539e0a7d396bb"
+    },
+    {
+      "id": "fs-roofline:finalized-run",
+      "file": "crates/fs-roofline/src/lib.rs",
+      "const": "FINALIZED_RUN_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "FINALIZED_RUN_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.finalized-run.v3",
+      "schema_fingerprint": "v3-42bd61dd1f3b14b6eab9c39c4dbe2ac5db1b907f7077234c2d3cb307c6178983"
+    },
+    {
+      "id": "fs-roofline:production-axes-receipt",
+      "file": "crates/fs-roofline/src/production.rs",
+      "const": "PRODUCTION_AXES_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PRODUCTION_AXES_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.production-axes-receipt.v1",
+      "schema_fingerprint": "v1-47994ec7f6b5d975a8629e06950f6c52ab88b6dd5a9aabcf0e466f7877415fa3"
+    },
+    {
+      "id": "fs-roofline:promotion-authority-policy",
+      "file": "crates/fs-roofline/src/authority.rs",
+      "const": "PROMOTION_AUTHORITY_POLICY_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PROMOTION_AUTHORITY_POLICY_DOMAIN",
+      "domain": "frankensim.fs-roofline.promotion-authority-policy.v1",
+      "schema_fingerprint": "v1-64e9f3ab669029d6a0c79f2cfe4c7f1c46f26a252a76002581753aa7489ffd0c"
+    },
+    {
+      "id": "fs-roofline:staleness-checkpoint-chain",
+      "file": "crates/fs-roofline/src/checkpoint.rs",
+      "const": "STALENESS_CHECKPOINT_CHAIN_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "CHECKPOINT_CHAIN_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.staleness-checkpoint-chain.v2",
+      "schema_fingerprint": "v2-d2efa0e6e9534aa0f515b45ae84179e471c29c3a3185bb7cca9a28af775364ae"
+    },
+    {
+      "id": "fs-roofline:staleness-row-content",
+      "file": "crates/fs-roofline/src/checkpoint.rs",
+      "const": "STALENESS_ROW_CONTENT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "ROW_CONTENT_DOMAIN",
+      "domain": "org.frankensim.fs-roofline.staleness-row-content.v1",
+      "schema_fingerprint": "v1-2acf8931d27c9a4e107ba095ff28b105fdd1a11d9441b8031f01bdeb98fb59c1"
+    },
+    {
+      "id": "fs-session:durable-governor-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "DURABLE_GOVERNOR_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "DURABLE_GOVERNOR_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.durable-governor-id.v1",
+      "schema_fingerprint": "v1-5c5032a76c421401d8386a3202b77d5bd6c4c1740fd057817ad9b9ef8082bb28"
+    },
+    {
+      "id": "fs-session:gate-binding-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "GATE_BINDING_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "GATE_BINDING_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.gate-binding-id.v1",
+      "schema_fingerprint": "v1-882779401962a45a36131dd8e084ceb9bea715062b5bd3b6a069befa153df7bc"
+    },
+    {
+      "id": "fs-session:gemm-execution-receipt",
+      "file": "crates/fs-session/src/gemm_tune.rs",
+      "const": "GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "GEMM_EXECUTION_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.gemm-execution-receipt.v1",
+      "schema_fingerprint": "v1-03ea5f5615dd4d6b726f950ccf8286fa919e044bdc6f8f8e0f861758489c0a69"
+    },
+    {
+      "id": "fs-session:gemm-tune-row-receipt",
+      "file": "crates/fs-session/src/gemm_tune.rs",
+      "const": "GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "GEMM_TUNE_ROW_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.gemm-tune-row-receipt.v2",
+      "schema_fingerprint": "v2-088b0b6c86da3376d817d328a6f3f03210ab601509f76267cd3094854f506f20"
+    },
+    {
+      "id": "fs-session:long-job-request",
+      "file": "crates/fs-session/src/long_job.rs",
+      "const": "LONG_JOB_REQUEST_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "LONG_JOB_REQUEST_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-session.long-job-request.v1",
+      "schema_fingerprint": "v1-5ca53cfb97436b98a12ce02fab3d946248ea6fba05c310dd263dfcd5930d6b1c"
+    },
+    {
+      "id": "fs-session:meter-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "METER_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "METER_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.meter-receipt.v1",
+      "schema_fingerprint": "v1-d4a5ad4649db82dbcb89af9d6fee9d2779bdd10e50eb4d107cf224996f747c4b"
+    },
+    {
+      "id": "fs-session:meter-report-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "METER_REPORT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "METER_REPORT_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.meter-report-id.v2",
+      "schema_fingerprint": "v2-89d7d060e452f49dc3a9924e3eb352ca1a00f3e74fc13802fddcd79dc4179435"
+    },
+    {
+      "id": "fs-session:pause-acknowledgement-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.pause-acknowledgement-id.v1",
+      "schema_fingerprint": "v1-7de9bdb2b34ca35291bca6695eb18aa82bf855abe0a89ecbfde00e148f8eb61a"
+    },
+    {
+      "id": "fs-session:pause-acknowledgement-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.pause-acknowledgement-receipt.v1",
+      "schema_fingerprint": "v1-f7536e2ecafe78335e6c6d9fe02f43924f6a154d37f0c18a472fd66c8c0b9f31"
+    },
+    {
+      "id": "fs-session:pressure-action-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "PRESSURE_ACTION_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "PRESSURE_ACTION_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.pressure-action-id.v2",
+      "schema_fingerprint": "v2-c70ea5008a68586a949930820e1f8bdba5464365c1e9a9a293a4edd0473c3660"
+    },
+    {
+      "id": "fs-session:pressure-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "PRESSURE_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "PRESSURE_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.pressure-receipt.v1",
+      "schema_fingerprint": "v1-632003474d588d860df571ffa2f7cb0dc1af1c3f8a5a48ab27b080c0ad773ed1"
+    },
+    {
+      "id": "fs-session:program-risk-report-id",
+      "file": "crates/fs-session/src/program_risk.rs",
+      "const": "PROGRAM_RISK_REPORT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "PROGRAM_RISK_REPORT_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.program-risk-report-id.v2",
+      "schema_fingerprint": "v2-3251e231cb4b781fc32a4ed00c0b7b713c335aba4e1775c6f1646bb95bd9da14"
+    },
+    {
+      "id": "fs-session:resume-activation-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "RESUME_ACTIVATION_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "RESUME_ACTIVATION_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.resume-activation-id.v1",
+      "schema_fingerprint": "v1-f2659017ef097d939fc8a0c5c3b450ad238dce7022bbcddd1e2445a2d69940fc"
+    },
+    {
+      "id": "fs-session:resume-activation-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "RESUME_ACTIVATION_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.resume-activation-receipt.v1",
+      "schema_fingerprint": "v1-81149b6e0c3eb4a0897ebf14baa678a67d1158e9408a860c368abc4a8756b357"
+    },
+    {
+      "id": "fs-session:retained-evidence",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "RETAINED_EVIDENCE_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "RETAINED_EVIDENCE_DOMAIN",
+      "domain": "org.frankensim.fs-session.retained-evidence.v1",
+      "schema_fingerprint": "v1-a70ac88f54c306a259f69ec11c85f527014aaa4c33253a61d79b865e6a4ecbe4"
+    },
+    {
+      "id": "fs-session:session-open-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SESSION_OPEN_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SESSION_OPEN_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.open-id.v2",
+      "schema_fingerprint": "v2-edd17bdb38ee5bdd8b7ddc973d3cd719ea82deac3923eb9f9829cf032ad74f9a"
+    },
+    {
+      "id": "fs-session:session-open-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SESSION_OPEN_RECEIPT_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "SESSION_OPEN_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.open-receipt.v1",
+      "schema_fingerprint": "v1-7f77cc5057e03af01ecd88a3c0a74238778f6b3fef3a66de671013444a901fbc"
+    },
+    {
+      "id": "fs-session:session-token-identity",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SESSION_TOKEN_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "SESSION_TOKEN_IDENTITY_DOMAIN",
+      "domain": "org.frankensim.fs-session.token-identity.v1",
+      "schema_fingerprint": "v1-c867ca6b313972adb8eab5ed5e58fa1dfdc77be09c1cdbfd2c2ae574f5ba66ce"
+    },
+    {
+      "id": "fs-session:submission-agent-key",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SUBMISSION_AGENT_KEY_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "IDEMPOTENCY_AGENT_DOMAIN",
+      "domain": "org.frankensim.fs-session.idempotency-agent.v1",
+      "schema_fingerprint": "v1-dde7d759503f432f7eb2f9fc42022ff8d578693525850923b1a8627b782a85d2"
+    },
+    {
+      "id": "fs-session:submission-program",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SUBMISSION_PROGRAM_IDENTITY_VERSION",
+      "version": 1,
+      "domain_const": "IDEMPOTENCY_PROGRAM_DOMAIN",
+      "domain": "org.frankensim.fs-session.idempotency-program.v1",
+      "schema_fingerprint": "v1-afb382959a218a6733a3017b0abf4361025263f84c42895399b6066d707d762b"
+    },
+    {
+      "id": "fs-session:submission-receipt",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SUBMISSION_RECEIPT_IDENTITY_VERSION",
+      "version": 3,
+      "domain_const": "SUBMISSION_RECEIPT_DOMAIN",
+      "domain": "org.frankensim.fs-session.submission-receipt.v3",
+      "schema_fingerprint": "v3-80cc53dbfa5ecbeee3479c472567bf3f80f6cde4943594a44e71506b940dc54f"
+    },
+    {
+      "id": "fs-session:submission-request-id",
+      "file": "crates/fs-session/src/governor.rs",
+      "const": "SUBMISSION_REQUEST_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "SUBMISSION_REQUEST_ID_DOMAIN",
+      "domain": "org.frankensim.fs-session.submission-request-id.v2",
+      "schema_fingerprint": "v2-55227f8c93b6bee3b3f9a48d0ce7a643aee8da3f9a0b1d3b2838f684b72486bf"
+    },
+    {
+      "id": "fs-verify:fem1d-mms-class",
+      "file": "crates/fs-verify/src/fem1d.rs",
+      "const": "MMS_CLASS_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "MMS_CLASS_IDENTITY_DOMAIN",
+      "domain": "fs-verify/fem1d-mms-class.v2",
+      "schema_fingerprint": "v2-ffc3f49b35785042d4cec6fc4fa49abe796d19e38a1cb21c9033b1c4d8a34097"
+    },
+    {
+      "id": "fs-verify:fem1d-mms-problem",
+      "file": "crates/fs-verify/src/fem1d.rs",
+      "const": "MMS_PROBLEM_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "MMS_PROBLEM_IDENTITY_DOMAIN",
+      "domain": "fs-verify/fem1d-mms-problem.v2",
+      "schema_fingerprint": "v2-9a71c6eece9d2ade14ca101a756f342665c6debedade7fd15b1ec94c74359f86"
+    },
+    {
+      "id": "fs-verify:verifier-receipt",
+      "file": "crates/fs-verify/src/estimator.rs",
+      "const": "VERIFIER_RECEIPT_SCHEMA_VERSION",
+      "version": 1,
+      "domain_const": "VERIFIER_RECEIPT_HASH_DOMAIN",
+      "domain": "fs-verify:verifier-receipt:v1",
+      "schema_fingerprint": "v1-1ebd8fddb53278b8fdbe2ccba08d0f3d886e117d95173a12dea742aab6836ad1"
+    },
+    {
+      "id": "fs-vskeleton:artifact-content",
+      "file": "crates/fs-vskeleton/src/ledger.rs",
+      "const": "ARTIFACT_CONTENT_IDENTITY_VERSION",
+      "version": 2,
+      "domain_const": "ARTIFACT_CONTENT_IDENTITY_DOMAIN",
+      "domain": "frankensim.fs-vskeleton.artifact.v2",
+      "schema_fingerprint": "v2-dae32f4224c876288adeec87c4465e385550677aaad4628c823e3c28d6e32207"
+    },
+    {
+      "id": "ci:content-snapshot",
+      "file": "scripts/ci/checkout_constellation.sh",
+      "symbol": "snapshot_identity",
+      "version": 3,
+      "domain": "org.frankensim.ci.content-snapshot.v3",
+      "schema_fingerprint": "v3-311b040882dce1a3918cc0e1679c5b04e9c9829b5708169e7ef1b8c6bb6ca2f7"
+    },
+    {
+      "id": "ci:quality-proof-record",
+      "file": "scripts/ci/quality_lanes.sh",
+      "symbol": "emit_proof_seal",
+      "version": 2,
+      "domain": "org.frankensim.ci.quality-proof-record.v2",
+      "schema_fingerprint": "v2-accae4a4b09ac3a1e767adeedecc38f0cddc52990302a4fbe91a9458d64a09d0"
+    },
+    {
+      "id": "ci:x86-cross-verdict",
+      "file": "scripts/ci/x86_cross_check.sh",
+      "symbol": "row",
+      "version": 1,
+      "domain": "org.frankensim.ci.x86-cross-verdict.v1",
+      "schema_fingerprint": "v1-026933d59d654623d0e12e7783eb6cb9e68f2333f4aa1111a73cb3e872f1fe77"
+    },
+    {
+      "id": "ci:x86-runtime-verdict",
+      "file": "scripts/ci/x86_runtime_sweep.sh",
+      "symbol": "row",
+      "version": 1,
+      "domain": "org.frankensim.ci.x86-runtime-verdict.v1",
+      "schema_fingerprint": "v1-b21df0135bcfc46c8d5e62183b3d17b300a026edca12bf5b561f41b6130f7be6"
+    },
+    {
+      "id": "xtask:constellation-bootstrap-provenance",
+      "file": "xtask/src/bootstrap_provenance.rs",
+      "symbol": "write_bootstrap_provenance",
+      "version": 3,
+      "domain": "org.frankensim.xtask.constellation-bootstrap-provenance.v3",
+      "schema_fingerprint": "v3-f9a67aa6b4140e22cd68247ab423bfdfc6cf51350d28f0566729257263c0ed80"
+    },
+    {
+      "id": "xtask:constellation-lock",
+      "file": "xtask/src/main.rs",
+      "symbol": "write_constellation_lock",
+      "version": 2,
+      "domain": "org.frankensim.xtask.constellation-lock-writer.v2",
+      "schema_fingerprint": "v2-33ec39fde7adf9ce622133b72c8a5c025ce684a5f1b67b1bc0b0e6996e6fb469"
+    },
+    {
+      "id": "xtask:matdb-pack-compiler",
+      "file": "xtask/src/matdb_pack.rs",
+      "const": "MATDB_PACK_COMPILER_SEMANTICS_VERSION",
+      "version": 4
+    },
+    {
+      "id": "fs-la:factor-bits",
+      "file": "crates/fs-la/src/factor.rs",
+      "const": "FACTOR_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-la:gemm-bits",
+      "file": "crates/fs-la/src/gemm.rs",
+      "const": "GEMM_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-la:gemm-scalar-bits",
+      "file": "crates/fs-la/src/gemm.rs",
+      "const": "GEMM_SCALAR_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-flagship-e2e:metric-stream-encoding",
+      "file": "crates/fs-flagship-e2e/src/lib.rs",
+      "const": "METRIC_STREAM_ENCODING_VERSION",
+      "version": 2
+    },
+    {
+      "id": "fs-bem:panel-bits",
+      "file": "crates/fs-bem/src/panel2d.rs",
+      "const": "PANEL_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-la:batched-f64-bits",
+      "file": "crates/fs-la/src/batched.rs",
+      "const": "BATCHED_F64_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-la:batched-f32-bits",
+      "file": "crates/fs-la/src/batched_f32.rs",
+      "const": "BATCHED_F32_BIT_SEMANTICS_VERSION",
+      "version": 2
+    },
+    {
+      "id": "fs-fft:transform-bits",
+      "file": "crates/fs-fft/src/lib.rs",
+      "const": "TRANSFORM_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-lbm:d3q19-bits",
+      "file": "crates/fs-lbm/src/d3q19.rs",
+      "const": "D3Q19_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-render:tracer-bits",
+      "file": "crates/fs-render/src/tracer.rs",
+      "const": "TRACER_BIT_SEMANTICS_VERSION",
+      "version": 1
+    },
+    {
+      "id": "fs-render:chart-backend-bits",
+      "file": "crates/fs-render/src/charts.rs",
+      "const": "CHART_BACKEND_BIT_SEMANTICS_VERSION",
+      "version": 8
+    }
+  ],
+  "goldens": [
+    {
+      "golden": "xtask:matdb-pack-fixture",
+      "file": "xtask/src/matdb_pack.rs",
+      "const": "MATDB_PACK_FIXTURE_V1_CONTENT_HASH_GOLDEN",
+      "depends_on": "fs-matdb:normalized-pack=1,xtask:matdb-pack-compiler=4",
+      "justification": "The licensed material-tsv-v1 scalar, curve, frame, uncertainty, validity, and joint covariance/correlation fixture encodes to exactly 3177 FSMATPK v1 bytes with content hash c1fb2f443708d297423179f4ac6024ee26b1d0c940a229d1d9084726ccbd2bc5. Compiler semantics v2 retains deterministic admission rows earned before a later typed refusal without changing successful pack bytes. Compiler semantics v3 binds each decision row and case ID to the selected material, NASA-9, kinetics, or species compiler while leaving artifact bytes and content hashes unchanged. Compiler semantics v4 adds a separately identified interface-tsv-v1 profile that wraps the unchanged material claim artifact with ordered surface and context identity; it does not change material-tsv-v1 bytes. RCH discovery job j-29933316048158836 established the value and committed debug job j-29933316048158837 passed 1/1 at semantics v1. The v2, v3, and v4 changes remain code-first and batch-verification pending. Release job j-29933316048158838 is not proof: RCH-E410 rejected the remote dependency closure because sibling path crates/fs-opdsl/tests/constitutive.rs was absent, and the local fallback was immediately canceled."
+    },
+    {
+      "golden": "fs-rand:distribution-stream",
+      "file": "crates/fs-rand/tests/dist_battery.rs",
+      "const": "DIST_STREAM_V1_AGGREGATE_FNV1A64_GOLDEN",
+      "depends_on": "fs-rand:stream-semantics=1",
+      "justification": "0x4224_6e28_56de_673c is the existing aggregate over exact distribution output bits. Registered 2026-07-13 for iu5l without changing the value so stream semantic/domain changes point at this retained replay oracle; current-tree debug/release and cross-ISA reproduction remain pending and are not newly claimed by this registry-only annotation."
+    },
+    {
+      "golden": "fs-rand:ziggurat-stream",
+      "file": "crates/fs-rand/tests/ziggurat.rs",
+      "const": "ZIGGURAT_STREAM_V1_SEED_17A9_TILE_7_100K_FNV1A64_GOLDEN",
+      "depends_on": "fs-rand:stream-semantics=1",
+      "justification": "0x9959_60fe_709f_00bc is the existing FNV-1a root over 100000 ziggurat draws for the declared stream key. Registered under a unique symbol 2026-07-13 for iu5l without re-pinning; current-tree debug/release and cross-ISA reproduction remain pending and are not newly claimed by this annotation."
+    },
+    {
+      "golden": "fs-la:rand-nla",
+      "file": "crates/fs-la/tests/rand_nla_battery.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-rand:stream-semantics=1,fs-la:factor-bits=1,fs-la:gemm-bits=1",
+      "justification": "0xeef1_0550_7daf_c0d5 frozen 2026-07-09 after the powi build-mode fix (bead 4xnt); verified four quadrants (debug+release x aarch64+x86-64) at the committed tree. HISTORY: the 2026-07-09 re-pin to f3dcb63b wrongly blamed fs-rand d9ba0b6 (u64::MAX-boundary-only change) - the mover was optimization-dependent f64::powi in the fixture; that incident motivated this registry."
+    },
+    {
+      "golden": "fs-la:gemm",
+      "file": "crates/fs-la/src/gemm.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-la:gemm-bits=1",
+      "justification": "0x1d7a_a3c6_b631_7ef0 recorded at 6ys.3 landing, M4 Pro + trj; tier-invariant across the xdgf NEON capsule (bitwise-equal microkernel, verified). KC is part of the bit contract - retuning KC bumps fs-la:gemm-bits and re-freezes this."
+    },
+    {
+      "golden": "fs-bisect:compound-content",
+      "file": "crates/fs-bisect/tests/compound_battery.rs",
+      "const": "POWI_FAMILY_CONTENT_HASH",
+      "depends_on": "fs-bisect:compound-canon=3",
+      "justification": "6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f deliberately re-frozen 2026-07-11 for bead j3q2 schema v3. The content preimage now binds stable member codec id/version/schema, bounded construction-time payload snapshots, provenance, labels, tracking, and admission. Replay re-canonicalizes every live value before predicate work. Reproduced in debug and release on aarch64 Apple M4 Pro; post-v3 x86-64 reproduction remains pending and is not claimed."
+    },
+    {
+      "golden": "fs-bisect:compound-manifest",
+      "file": "crates/fs-bisect/tests/compound_battery.rs",
+      "const": "POWI_FAMILY_MANIFEST_HASH",
+      "depends_on": "fs-bisect:compound-canon=3",
+      "justification": "43bd1ebddb606eb5a156ca06c642cf03ddd06770223584c5ea45ae031d0cf6b2 deliberately re-frozen 2026-07-11 for bead j3q2 schema v3; the complete JSON-lines manifest now has its own sentinel, while content identity 6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f binds the stable member codec id/version/schema and bounded payload snapshots. Replay re-canonicalizes all live members before predicate work, permanent families require converged minimization, and the aggregate predicate ceiling includes the seed call. Reproduced in debug and release on aarch64 Apple M4 Pro; post-v3 x86-64 reproduction remains pending and is not claimed."
+    },
+    {
+      "golden": "fs-la:batched-f64",
+      "file": "crates/fs-la/tests/batched_battery.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-la:batched-f64-bits=1",
+      "justification": "0x0377_a8c9_5992_aee9 originally frozen at 6ys.4 and registered 2026-07-10 for bug bead 9ry9. The semantic surface includes fixed per-element reduction order, beta-zero overwrite, alpha-zero no-read behavior, and batch-membership invariance; the frozen fixture uses nonzero alpha and remained unchanged in debug and release."
+    },
+    {
+      "golden": "fs-la:batched-f32",
+      "file": "crates/fs-la/tests/batched_f32_battery.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-la:batched-f32-bits=2",
+      "justification": "0x5600_7cfe_6a6d_1f9a rechecked unchanged 2026-07-10 for bug bead 9ry9: semantics v2 makes the already-promised alpha-zero path scale or overwrite C without reading poisoned A/B; the frozen fixture uses nonzero alpha, so its bits remain unchanged. The f32 and mixed chains retain the narrow-once contract; cross-ISA empirical proof remains pending the next x86 lane."
+    },
+    {
+      "golden": "fs-fft:stage-path",
+      "file": "crates/fs-fft/src/lib.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-fft:transform-bits=1",
+      "justification": "0x22dd_b617_266e_a792 (n=128, stage walk) frozen at the radix-8/4/2 bump (bead 27d3), verified four quadrants (M4 + ts2 x debug + release). UNTOUCHED by the six-step slice: dispatch is a pure function of n (asserted in-suite) and n=128 stays on the stage path. HISTORY: radix-2 0xbd55_68d2_33f4_b4bc; radix-4/2 0x0506_a4a0_955d_cf8e."
+    },
+    {
+      "golden": "fs-fft:sixstep-path",
+      "file": "crates/fs-fft/tests/sixstep.rs",
+      "const": "SIXSTEP_GOLDEN_HASH",
+      "depends_on": "fs-fft:transform-bits=1",
+      "justification": "0x79aa_108f_a517_012f frozen 2026-07-10 (bead 27d3 six-step slice): n=2^16 through the radix-8/4/2 six-step arithmetic. The 2026-07-11 implementation fuses the logical three transposes, two sweeps, and copy-back into TWO parent-size full-array passes (stage A data columns -> first sweep + w^(kj) -> scratch columns; stage B scratch rows -> second sweep -> output columns) and uses twin-gated exact-move gather/scatter capsules. The storage rewrite preserved the hash on aarch64 M4 Pro in debug and release. The original arithmetic freeze was reproduced on M4 and x86-64 ts2 in debug and release; current post-fusion x86 execution remains pending and is not claimed. [F] remains default-OFF: the fully fused/vectorized path still lost to stages on M4 at n=2^22 (ratio 0.64-0.67); current x86 performance verdict pending. New bit territory, not a bump."
+    },
+    {
+      "golden": "fs-cheb:aggregate",
+      "file": "crates/fs-cheb/tests/cheb_battery.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-fft:transform-bits=1",
+      "justification": "0x5d2f_e305_ce90_06fb re-frozen 2026-07-16 (bead sj31i.55 repair) after 6ee7267 intentionally moved reference-coordinate root-refinement and exceptional-integral bits (declared armed-red in its own golden comment); d93fa29 completed the finite-term-overflow integral fallback touching only a previously-panicking path. Independent DCT oracle, recovery, calculus, root, and eigenvalue checks stayed green throughout. FOUR-QUADRANT VERIFICATION at 0fba65d: aarch64 M4 Pro debug+release and x86-64 ts1 5975WX debug+release all bit-identical. HISTORY: radix-2 0xaee4_8002_1eea_9097 (M4 + trj); radix-4/2 0x22e7_ea21_58c9_e587 (M4 only); radix-8/4/2 pre-root-refinement 0xeea0_4b0a_01de_46cd (M4 + ts1 + ts2, bead obq0)."
+    },
+    {
+      "golden": "fs-flagship-e2e:vessel-smoke",
+      "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs",
+      "const": "GOLDEN_VESSEL_SMOKE",
+      "depends_on": "fs-flagship-e2e:metric-stream-encoding=2,fs-fft:transform-bits=1",
+      "justification": "0x4541_d7f3_2926_1082 re-frozen 2026-07-11 after fs-fft commit 535aa839 moved the DCT substrate from radix-4/2 to radix-8/4/2 Stockham. Only robust_offband moved, from 0xbf3c9a988956ba53 to 0xbf3c9a98894a2018; substituting those exact fields reconstructs the prior 0x4e42_4a53_6a63_ce8b and current aggregate, while the other five metric bits, physical envelopes, replay equality, and independent vessel/FFT checks remain unchanged. Reproduced in debug and release on aarch64 M4 Pro. The upstream FFT stage path is verified four quadrants; this downstream x86-64 row remains pending. HISTORY: radix-2 v1 0xe621_48d4_490c_a887; radix-4/2 v1 0xd70b_9ac9_0828_ae86; v2 pre-pour repair 0xdabd_6fd3_6315_31fe; radix-4/2 v2 post-repair 0x4e42_4a53_6a63_ce8b."
+    },
+    {
+      "golden": "fs-flagship-e2e:ornith-smoke",
+      "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs",
+      "const": "GOLDEN_ORNITH_SMOKE",
+      "depends_on": "fs-flagship-e2e:metric-stream-encoding=2,fs-bem:panel-bits=1",
+      "justification": "0xae56_945a_312e_0378 re-frozen 2026-07-10 at 6ure CLOSE: the ~1e-9 aarch64-vs-x86-64 roa divergence was platform libm (macOS vs glibc) in the fs-bem panel kernel feeding the ROA adjoint lift slope; the whole fs-bem surface (panel2d influence atan2/ln, cosine spacing, freestream trig, wake2d, panel3d probe) now routes through fs_math::det:: (surface fs-bem:panel-bits=1), so bits legitimately moved on every platform and roa (0x3fe4c1ee0bb8f1e8, identical debug+release on aarch64) is RESTORED to the hashed stream (6 metrics). Cross-ISA reproduction on ts2 recorded in the 6ure close comment. HISTORY: 5-metric envelope interim 0x1b03_ae9f_66cd_b548; divergent 6-metric v2 0xd750_e1bb_a8d7_e76a; v1 0xf513_eaf8_22d2_7813."
+    },
+    {
+      "golden": "fs-flagship-e2e:frame-smoke",
+      "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs",
+      "const": "GOLDEN_FRAME_SMOKE",
+      "depends_on": "fs-flagship-e2e:metric-stream-encoding=2",
+      "justification": "0x9c09_b06a_7883_57fc re-frozen 2026-07-10 for the gp3.14 metric-stream encoding migration v1->v2 (canonical typed length-prefixed replay identity); every metric bit pattern in the stage evidence is unchanged from the v1 freeze, verified in the battery output; debug+release both green at the committed tree."
+    },
+    {
+      "golden": "fs-flagship-e2e:lbm-core",
+      "file": "crates/fs-flagship-e2e/tests/e2e_battery.rs",
+      "const": "GOLDEN_LBM_CORE",
+      "depends_on": "fs-flagship-e2e:metric-stream-encoding=2",
+      "justification": "0x1539_430c_dae4_7762 re-frozen 2026-07-10 for the gp3.14 metric-stream encoding migration v1->v2 (canonical typed length-prefixed replay identity); every metric bit pattern in the stage evidence is unchanged from the v1 freeze, verified in the battery output; debug+release both green at the committed tree."
+    },
+    {
+      "golden": "fs-lbm:d3q19-core",
+      "file": "crates/fs-lbm/tests/d3q19_battery.rs",
+      "const": "GOLDEN_HASH",
+      "depends_on": "fs-lbm:d3q19-bits=1",
+      "justification": "0xd548_9283_1f0a_6d71 frozen 2026-07-12 at the 84hv landing (D3Q19 core: BGK + Guo forcing, pull streaming, halfway bounce-back, SoA tile-major, pinned single-thread traversal). Seeded 8x8x16 fixture, 100 steps, density/velocity probes + total mass. Verified debug+release on aarch64 M4 Pro; x86-64 (ts2) verification recorded in the 84hv close comment. Single-thread golden by design until WS1-D lands the parallel sweep \u2014 worker-count invariance then becomes part of this surface."
+    },
+    {
+      "golden": "fs-lbm:d3q19-boundary-bits",
+      "file": "crates/fs-lbm/tests/d3q19_boundaries.rs",
+      "const": "BOUNDARY_GOLDEN_HASH",
+      "depends_on": "fs-lbm:d3q19-bits=1",
+      "justification": "0x6683_0bf8_5cbb_3750 frozen 2026-07-17 closing the 40p2 policy gap (WS1 3-D boundaries: halfway bounce-back on axis-aligned and SDF-voxelized links, D3Q19 velocity inlet / pressure outlet). Preimage: link masks, densities, velocities, and total mass over a voxelized-sphere lid cavity (64 steps) and a velocity/pressure duct (32 steps), FNV-1a over exact bits. All four policy quadrants reproduced bit-identically on committed trees: aarch64 M4 Pro debug+release at d99f5a60 and x86-64 ts1 debug+release at 2919144, with an empty fs-lbm diff between the two commits. Release acceptance at the same freeze: 10k-step closed-domain relative mass leak 2.621e-13 planar / 2.297e-13 voxel, below the 1e-11 bar."
+    },
+    {
+      "golden": "fs-lbm:d3q19-sparse",
+      "file": "crates/fs-lbm/tests/d3q19_sparse.rs",
+      "const": "SPARSE_GOLDEN_HASH",
+      "depends_on": "fs-lbm:d3q19-bits=1",
+      "justification": "0x4c00_8876_e576_a332 frozen 2026-07-17 at the sjro landing (sparse active-tile D3Q19: Morton-ordered active list, two-pass collide/pull-stream sweeps with inactive-space bounce-back, KernelRunner-pooled path bitwise-identical to serial across worker counts 1/2/7 by construction). Preimage: exact state bits after activation of the L-shaped ~10%-active set in a 32^3 box (tau 0.7, x-force 1e-6, splitmix64 seeded perturbation), 25 sweeps, one mass-ledgered tile retirement, 5 more sweeps, plus the ledger value and total mass, FNV-1a over exact bits. All four policy quadrants reproduced bit-identically on the committed tree e33b74de: aarch64 M4 Pro debug+release and x86-64 ts1 debug+release. Worker-count invariance is separately pinned by the G5 battery test on the same fixture, so this surface covers serial and pooled sweeps alike."
+    },
+    {
+      "golden": "fs-lbm:d3q19-pour",
+      "file": "crates/fs-lbm/tests/d3q19_freesurface3.rs",
+      "const": "POUR_GOLDEN_HASH",
+      "depends_on": "fs-lbm:d3q19-bits=1",
+      "justification": "0xb0f1_90d6_126b_3ccc frozen 2026-07-17 at the sxnm landing (3-D free surface on sparse tiles: Koerner VOF port with advance-driven activation invariant, solid tank tiles, exact-mass retirement). Preimage: exact population state bits plus the ledger-mass bits after the lbm3-106 minimal pour \u2014 800 steps of a tile-granular tank with a two-tile lip in a 64^3 domain, 789.6 mass units poured, partition defect 6.6e-14 against the bead 1e-9 bar. All four policy quadrants reproduced bit-identically on the committed tree 1926b1cf: aarch64 M4 Pro debug+release and x86-64 ts1 debug+release. Deterministic fixture (no RNG; construction is the seed schedule)."
+    },
+    {
+      "golden": "fs-render:cornell",
+      "file": "crates/fs-render/tests/tracer_battery.rs",
+      "const": "CORNELL_GOLDEN",
+      "depends_on": "fs-render:tracer-bits=1,fs-render:chart-backend-bits=2",
+      "justification": "0x6ed8_706b_08d1_642e frozen 2026-07-12 at the 872c landing - the first shaded COLOR image (Cornell-class fixture: hero-wavelength MIS path tracing, GGX F-rep sphere via the certified sphere tracer, area light, 24x24 @ 8spp, seed 7, FNV over the EXR bytes). The 8ll9 hardening declares chart-backend-bits as a separate causative surface; v2 classifies outward-rounded working limits through a validated caller-endpoint sample and epsilon-clear safe-ball bridge. Current-tree four-quadrant replay is required before 8ll9 close and is not yet claimed here. The original hash was debug/release identical on aarch64 M4 Pro and x86-64 ts2 at the 872c tree."
+    }
+  ]
 }
