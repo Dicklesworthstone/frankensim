@@ -198,17 +198,20 @@ fn pre_v2_ledger_is_version_refused_with_teaching_error() {
     {
         // Forge a v1-shaped ledger: schema without the meta stamp, one
         // FNV-style artifact row.
-        let raw = fsqlite::Connection::open(&db).expect("raw open");
-        raw.execute("CREATE TABLE artifacts(hash TEXT PRIMARY KEY, kind TEXT, bytes BLOB)")
+        let raw = fsqlite::AsyncConnection::open_sync(&db).expect("raw open");
+        raw.execute_sync("CREATE TABLE artifacts(hash TEXT PRIMARY KEY, kind TEXT, bytes BLOB)")
             .expect("v1 ddl");
-        raw.prepare("INSERT INTO artifacts(hash, kind, bytes) VALUES (?1, ?2, ?3)")
-            .expect("prepare")
-            .execute_with_params(&[
+        let sql = "INSERT INTO artifacts(hash, kind, bytes) VALUES (?1, ?2, ?3)";
+        raw.prepare_sync(sql).expect("prepare");
+        raw.execute_with_params_sync(
+            sql,
+            &[
                 fsqlite::SqliteValue::Text("00000000cbf29ce4".into()),
                 fsqlite::SqliteValue::Text("field".into()),
                 fsqlite::SqliteValue::Blob(b"legacy".to_vec().into()),
-            ])
-            .expect("v1 row");
+            ],
+        )
+        .expect("v1 row");
     }
     let err = fs_vskeleton::ledger::MiniLedger::open(&db)
         .err()
@@ -238,8 +241,8 @@ fn future_format_ledger_is_version_refused() {
         l.put_artifact("field", b"bytes").expect("put");
     }
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw");
-        raw.execute("UPDATE vskeleton_meta SET value = '99' WHERE key = 'format_version'")
+        let raw = fsqlite::AsyncConnection::open_sync(&db).expect("raw");
+        raw.execute_sync("UPDATE vskeleton_meta SET value = '99' WHERE key = 'format_version'")
             .expect("forge future version");
     }
     let err = fs_vskeleton::ledger::MiniLedger::open(&db)

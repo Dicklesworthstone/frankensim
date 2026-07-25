@@ -14,7 +14,7 @@ layer = "L6"
 fs-blake3 = { path = "../fs-blake3" }
 fs-qty = { path = "../fs-qty" }
 fs-obs = { path = "../fs-obs" }
-fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }
+fsqlite = { path = "../../../frankensqlite/crates/fsqlite", features = ["async-api"] }
 
 [dev-dependencies]
 fs-propcheck = { path = "../fs-propcheck" }

@@ -9,7 +9,9 @@
 //! files carry a FORMAT VERSION; pre-BLAKE3 (v1/FNV) files are
 //! version-refused with a teaching error, never silently misread.
 
-use fsqlite::{Connection, SqliteValue};
+use fsqlite::{AsyncConnection, SqliteValue};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 /// The ledger format this crate writes and reads. v1 was the FNV-1a era
 /// (16-hex hashes, no meta table); v2 is domain-separated BLAKE3.
@@ -110,7 +112,8 @@ fn classify_artifact_content_identity_fields(input: &ArtifactContentIdentityInpu
 
 /// A thin ledger over one fsqlite database file.
 pub struct MiniLedger {
-    conn: Connection,
+    conn: AsyncConnection,
+    _single_thread: PhantomData<Rc<()>>,
 }
 
 impl MiniLedger {
@@ -119,14 +122,16 @@ impl MiniLedger {
     /// # Errors
     /// Returns a message if the database cannot be opened or migrated.
     pub fn open(path: &str) -> Result<MiniLedger, String> {
-        let conn = Connection::open(path).map_err(|e| format!("ledger open {path}: {e}"))?;
+        let conn =
+            AsyncConnection::open_sync(path).map_err(|e| format!("ledger open {path}: {e}"))?;
         for ddl in [
             "CREATE TABLE IF NOT EXISTS artifacts(hash TEXT PRIMARY KEY, kind TEXT, bytes BLOB)",
             "CREATE TABLE IF NOT EXISTS ops(id INTEGER PRIMARY KEY, kind TEXT, ir TEXT, seed TEXT)",
             "CREATE TABLE IF NOT EXISTS edges(op INTEGER, artifact TEXT, role TEXT)",
             "CREATE TABLE IF NOT EXISTS vskeleton_meta(key TEXT PRIMARY KEY, value TEXT)",
         ] {
-            conn.execute(ddl).map_err(|e| format!("ledger DDL: {e}"))?;
+            conn.execute_sync(ddl)
+                .map_err(|e| format!("ledger DDL: {e}"))?;
         }
         // FORMAT ATTESTATION (the gp3.18 doctrine at embryo scale): a
         // version row is stamped on first use of an EMPTY ledger; a file
@@ -134,7 +139,7 @@ impl MiniLedger {
         // format's data and is refused with the migration named — never
         // silently misread under a new hash function.
         let version = conn
-            .query("SELECT value FROM vskeleton_meta WHERE key = 'format_version'")
+            .query_sync("SELECT value FROM vskeleton_meta WHERE key = 'format_version'")
             .map_err(|e| format!("ledger version read: {e}"))?;
         match version.first().and_then(|row| row.get(0)) {
             Some(SqliteValue::Text(v)) if v.as_str() == LEDGER_FORMAT_VERSION => {}
@@ -148,7 +153,7 @@ impl MiniLedger {
             }
             _ => {
                 let artifacts = conn
-                    .query("SELECT hash FROM artifacts LIMIT 1")
+                    .query_sync("SELECT hash FROM artifacts LIMIT 1")
                     .map_err(|e| format!("ledger census: {e}"))?;
                 if !artifacts.is_empty() {
                     return Err(format!(
@@ -158,15 +163,20 @@ impl MiniLedger {
                          into a fresh ledger instead of migrating hashes in place"
                     ));
                 }
-                conn.prepare(
-                    "INSERT INTO vskeleton_meta(key, value) VALUES ('format_version', ?1)",
+                let sql = "INSERT INTO vskeleton_meta(key, value) VALUES ('format_version', ?1)";
+                conn.prepare_sync(sql)
+                    .map_err(|e| format!("ledger version stamp prepare: {e}"))?;
+                conn.execute_with_params_sync(
+                    sql,
+                    &[SqliteValue::Text(LEDGER_FORMAT_VERSION.into())],
                 )
-                .map_err(|e| format!("ledger version stamp prepare: {e}"))?
-                .execute_with_params(&[SqliteValue::Text(LEDGER_FORMAT_VERSION.into())])
                 .map_err(|e| format!("ledger version stamp: {e}"))?;
             }
         }
-        Ok(MiniLedger { conn })
+        Ok(MiniLedger {
+            conn,
+            _single_thread: PhantomData,
+        })
     }
 
     /// Store an artifact (content-addressed; identical bytes dedupe).
@@ -177,20 +187,25 @@ impl MiniLedger {
         let hash = content_hash(bytes);
         let existing = self
             .conn
-            .query_with_params(
+            .query_with_params_sync(
                 "SELECT hash FROM artifacts WHERE hash = ?1",
                 &[SqliteValue::Text(hash.clone().into())],
             )
             .map_err(|e| format!("artifact lookup: {e}"))?;
         if existing.is_empty() {
+            let sql = "INSERT INTO artifacts(hash, kind, bytes) VALUES (?1, ?2, ?3)";
             self.conn
-                .prepare("INSERT INTO artifacts(hash, kind, bytes) VALUES (?1, ?2, ?3)")
-                .map_err(|e| format!("artifact insert prepare: {e}"))?
-                .execute_with_params(&[
-                    SqliteValue::Text(hash.clone().into()),
-                    SqliteValue::Text(kind.into()),
-                    SqliteValue::Blob(bytes.to_vec().into()),
-                ])
+                .prepare_sync(sql)
+                .map_err(|e| format!("artifact insert prepare: {e}"))?;
+            self.conn
+                .execute_with_params_sync(
+                    sql,
+                    &[
+                        SqliteValue::Text(hash.clone().into()),
+                        SqliteValue::Text(kind.into()),
+                        SqliteValue::Blob(bytes.to_vec().into()),
+                    ],
+                )
                 .map_err(|e| format!("artifact insert: {e}"))?;
         }
         Ok(hash)
@@ -201,18 +216,23 @@ impl MiniLedger {
     /// # Errors
     /// Returns a message on write failure.
     pub fn record_op(&self, kind: &str, ir: &str, seed_hex: &str) -> Result<i64, String> {
+        let sql = "INSERT INTO ops(kind, ir, seed) VALUES (?1, ?2, ?3)";
         self.conn
-            .prepare("INSERT INTO ops(kind, ir, seed) VALUES (?1, ?2, ?3)")
-            .map_err(|e| format!("op prepare: {e}"))?
-            .execute_with_params(&[
-                SqliteValue::Text(kind.into()),
-                SqliteValue::Text(ir.into()),
-                SqliteValue::Text(seed_hex.into()),
-            ])
+            .prepare_sync(sql)
+            .map_err(|e| format!("op prepare: {e}"))?;
+        self.conn
+            .execute_with_params_sync(
+                sql,
+                &[
+                    SqliteValue::Text(kind.into()),
+                    SqliteValue::Text(ir.into()),
+                    SqliteValue::Text(seed_hex.into()),
+                ],
+            )
             .map_err(|e| format!("op insert: {e}"))?;
         let row = self
             .conn
-            .query_row("SELECT MAX(id) FROM ops")
+            .query_row_sync("SELECT MAX(id) FROM ops")
             .map_err(|e| format!("op id: {e}"))?;
         match row.get(0) {
             Some(SqliteValue::Integer(id)) => Ok(*id),
@@ -225,14 +245,19 @@ impl MiniLedger {
     /// # Errors
     /// Returns a message on write failure.
     pub fn link(&self, op: i64, artifact: &str, role: &str) -> Result<(), String> {
+        let sql = "INSERT INTO edges(op, artifact, role) VALUES (?1, ?2, ?3)";
         self.conn
-            .prepare("INSERT INTO edges(op, artifact, role) VALUES (?1, ?2, ?3)")
-            .map_err(|e| format!("edge prepare: {e}"))?
-            .execute_with_params(&[
-                SqliteValue::Integer(op),
-                SqliteValue::Text(artifact.into()),
-                SqliteValue::Text(role.into()),
-            ])
+            .prepare_sync(sql)
+            .map_err(|e| format!("edge prepare: {e}"))?;
+        self.conn
+            .execute_with_params_sync(
+                sql,
+                &[
+                    SqliteValue::Integer(op),
+                    SqliteValue::Text(artifact.into()),
+                    SqliteValue::Text(role.into()),
+                ],
+            )
             .map_err(|e| format!("edge insert: {e}"))?;
         Ok(())
     }
@@ -244,7 +269,7 @@ impl MiniLedger {
     pub fn get_study_ir(&self) -> Result<String, String> {
         let rows = self
             .conn
-            .query("SELECT bytes FROM artifacts WHERE kind = 'study-ir'")
+            .query_sync("SELECT bytes FROM artifacts WHERE kind = 'study-ir'")
             .map_err(|e| format!("study lookup: {e}"))?;
         let row = rows
             .first()
@@ -264,7 +289,7 @@ impl MiniLedger {
     pub fn verify_artifact_integrity(&self) -> Result<(), String> {
         let rows = self
             .conn
-            .query("SELECT hash, bytes FROM artifacts")
+            .query_sync("SELECT hash, bytes FROM artifacts")
             .map_err(|e| format!("integrity scan: {e}"))?;
         for row in &rows {
             let (Some(SqliteValue::Text(h)), Some(SqliteValue::Blob(b))) = (row.get(0), row.get(1))
@@ -291,7 +316,7 @@ impl MiniLedger {
     pub fn artifact_hashes_excluding_study(&self) -> Result<Vec<String>, String> {
         let rows = self
             .conn
-            .query("SELECT hash FROM artifacts WHERE kind != 'study-ir'")
+            .query_sync("SELECT hash FROM artifacts WHERE kind != 'study-ir'")
             .map_err(|e| format!("hash scan: {e}"))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -310,7 +335,7 @@ impl MiniLedger {
     /// Returns a message on write failure.
     pub fn corrupt_first_artifact_for_test(&self) -> Result<(), String> {
         self.conn
-            .execute("UPDATE artifacts SET bytes = X'DEADBEEF' WHERE kind != 'study-ir'")
+            .execute_sync("UPDATE artifacts SET bytes = X'DEADBEEF' WHERE kind != 'study-ir'")
             .map_err(|e| format!("corruption hook: {e}"))?;
         Ok(())
     }
