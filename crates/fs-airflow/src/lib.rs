@@ -24,8 +24,12 @@ use fs_regime::{RegimeAuditCard, Role, RoleInput, standard_groups};
 /// Quadratic pressure-loss resistance in Pa/(m^3/s)^2.
 pub type LossResistance = Qty<-7, 1, 0, 0, 0, 0>;
 
-/// Current standard identity for the fan-law scaling relation.
-pub const FAN_LAW_SOURCE_IDENTIFIER: &str = "ANSI/AMCA 210-25; ANSI/ASHRAE 51-25";
+/// Human-readable authority for the fan-law speed-scaling relation.
+pub const FAN_LAW_SOURCE_CITATION: &str =
+    "AMCA Publication 201-02 (R2011), Fans and Systems, section 6.5.1";
+
+/// Stable publication-and-clause identity for the fan-law speed-scaling relation.
+pub const FAN_LAW_SOURCE_IDENTIFIER: &str = "AMCA-201-02-R2011:6.5.1";
 
 /// Bibliographic or dataset identity retained by an airflow model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +49,12 @@ impl SourceProvenance {
             identifier: identifier.into(),
         }
     }
+}
+
+/// Structured authority retained for fan-law speed scaling.
+#[must_use]
+pub fn fan_law_source() -> SourceProvenance {
+    SourceProvenance::new(FAN_LAW_SOURCE_CITATION, FAN_LAW_SOURCE_IDENTIFIER)
 }
 
 /// Authority behind a declared relative tolerance.
@@ -250,6 +260,7 @@ impl FanCurve {
             }
             ToleranceBasis::Analytic => "analytic pressure curve",
         };
+        let fan_law_source = fan_law_source();
         ModelCard::new(
             format!("airflow.fan.{}", self.name),
             "1",
@@ -257,6 +268,10 @@ impl FanCurve {
             vec![
                 "monotone piecewise-linear interpolation".to_string(),
                 basis.to_string(),
+                format!(
+                    "fan-law speed scaling uses {} ({})",
+                    fan_law_source.citation, fan_law_source.identifier
+                ),
             ],
             ValidityDomain::unconstrained()
                 .with("flow_m3_s", self.domain().0, self.domain().1)
@@ -856,18 +871,31 @@ pub fn solve_operating_point(
     let fan_rel = fan.curve.pressure_tolerance_rel;
     let resistance_low = network.full.equivalent_scalar(ResistanceBound::Low);
     let resistance_high = network.full.equivalent_scalar(ResistanceBound::High);
-    let low_flow = certified_root(fan, resistance_high, 1.0 - fan_rel)?
+    let fan_scale_low = 1.0 - fan_rel;
+    let fan_scale_high = 1.0 + fan_rel;
+    let low_flow = certified_root(fan, resistance_high, fan_scale_low)?
         .flow
         .lo();
-    let high_flow = certified_root(fan, resistance_low, 1.0 + fan_rel)?
+    let high_flow = certified_root(fan, resistance_low, fan_scale_high)?
+        .flow
+        .hi();
+    let low_pressure_flow = certified_root(fan, resistance_low, fan_scale_low)?
+        .flow
+        .lo();
+    let high_pressure_flow = certified_root(fan, resistance_high, fan_scale_high)?
         .flow
         .hi();
     let nominal_flow = nominal.flow.midpoint();
 
     let mut cards = vec![fan.curve.model_card().name];
+    let fan_law_source = fan_law_source();
     let mut assumptions = vec![format!(
-        "{} identical fans in {:?} at speed ratio {} using {}",
-        fan.count, fan.arrangement, fan.speed_ratio, FAN_LAW_SOURCE_IDENTIFIER
+        "{} identical fans in {:?} at speed ratio {} using {} ({})",
+        fan.count,
+        fan.arrangement,
+        fan.speed_ratio,
+        fan_law_source.citation,
+        fan_law_source.identifier
     )];
     let mut network_rel = 0.0;
     network
@@ -902,8 +930,8 @@ pub fn solve_operating_point(
         adjoint_ref: None,
     };
     let pressure_value = resistance * nominal_flow * nominal_flow;
-    let pressure_low = resistance_low * low_flow * low_flow;
-    let pressure_high = resistance_high * high_flow * high_flow;
+    let pressure_low = resistance_low * low_pressure_flow * low_pressure_flow;
+    let pressure_high = resistance_high * high_pressure_flow * high_pressure_flow;
     let pressure = Evidence {
         value: Pressure::new(pressure_value),
         qoi: pressure_value,

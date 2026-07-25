@@ -25,6 +25,9 @@ existing convection rung.
 - `FanBank` represents identical fans in series or parallel. At speed ratio
   `s`, flow scales as `s` and pressure as `s^2`; series pressure adds and
   parallel flow adds.
+- `fan_law_source` exposes the scaling authority as structured
+  `SourceProvenance`: AMCA Publication 201-02 (R2011), section 6.5.1, rather
+  than the AMCA 210 / ASHRAE 51 laboratory test-method standard.
 - `LossElement` uses a typed `LossResistance` in Pa/(m^3/s)^2. `LossNetwork`
   composes quadratic elements recursively in series and parallel. A loss
   element remains cardless unless its owner explicitly attaches a finite,
@@ -36,7 +39,11 @@ existing convection rung.
   `LeakageElement`; leakage is not an implicit constant.
 - `solve_operating_point` returns an `OperatingPoint` with an interval-Newton
   unique-root bracket for the nominal model, weaker physical uncertainty
-  estimates, per-terminal flows, and nominal leakage fraction.
+  estimates, per-terminal flows, and nominal leakage fraction. Flow bounds use
+  the low-fan/high-resistance and high-fan/low-resistance corners. Pressure
+  bounds separately solve the low-fan/low-resistance and
+  high-fan/high-resistance corners, then evaluate each root with the same
+  resistance that produced it.
 - `OperatingPoint::correlation_handoff` converts one branch flow to typed mean
   velocity, computes Reynolds through role-tagged `fs-regime` dimensions, and
   produces `fs-convection::CorrelationInputs` without discarding evidence.
@@ -123,6 +130,10 @@ existing convection rung.
     `NumericalKind::NoClaim` until an admitted DWR/refinement-to-QoI map exists.
     A conduction residual measured in watts is not converted into kelvin by
     dimensional wishful thinking.
+11. Pressure uncertainty endpoints come from the independently solved
+    low-fan/low-resistance and high-fan/high-resistance corners. A flow root is
+    never recombined with the opposite resistance bound to manufacture a wider
+    but physically unreachable band.
 
 ## Error model
 
@@ -137,8 +148,11 @@ input does not panic.
 
 Interpolation and network traversal have fixed order. Square roots use
 `fs-math::det`; the numerical root uses deterministic `fs-ivl` subdivision.
-Results are intended to be bit-stable on the same ISA. Cross-ISA G5 evidence is
-not yet retained.
+Repeated execution is checked against the complete public `OperatingPoint`
+artifact, with explicit bit checks on the nominal values and certified root
+endpoints. Results are intended to be bit-stable on the same ISA. The solver
+has no internal parallel scheduler, so worker-count invariance is not a
+separate execution mode. Cross-ISA G5 evidence is not yet retained.
 
 ## Cancellation behavior
 
@@ -161,7 +175,10 @@ None.
   composition;
 - G0 identical-fan series/parallel affinity identities;
 - explicit stall refusal and a sign-changing, unique interval root bracket;
-- three declared fan speeds and leakage-resistance sensitivity;
+- three declared fan speeds, complete-artifact repeat replay, and
+  leakage-resistance sensitivity;
+- clause-addressed fan-law authority and a pressure-corner falsifier that
+  rejects cross-pairing each solved flow with the opposite resistance;
 - typed branch velocity/Reynolds handoff into `fs-convection`;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
@@ -180,8 +197,12 @@ None.
 
 - Fan points and tolerances are caller-supplied. Synthetic fixtures prove API
   and algebra behavior, not a manufacturer product's performance.
-- AMCA/ASHRAE fan laws justify similarity scaling, not arbitrary operation:
-  the curve's declared speed-ratio domain remains binding.
+- AMCA Publication 201-02 (R2011), section 6.5.1, justifies the retained
+  speed-scaling relation, not arbitrary operation: the curve's declared
+  speed-ratio domain remains binding.
+- Repeat replay proves the current scalar implementation is stable on the
+  exercised same-ISA path. It does not claim an internal worker-count mode that
+  the crate does not implement, or cross-ISA equality.
 - Piecewise-linear interpolation and quadratic loss coefficients do not model
   swirl, recirculation, acoustic interaction, thermal buoyancy, compressibility,
   fouling, or installation system effects.

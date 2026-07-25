@@ -2,7 +2,7 @@
 
 use fs_airflow::{
     AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
-    LossElement, LossNetwork, LossResistance, SourceProvenance, ToleranceBasis,
+    LossElement, LossNetwork, LossResistance, SourceProvenance, ToleranceBasis, fan_law_source,
     solve_operating_point,
 };
 use fs_evidence::{NumericalKind, ProvenanceHash, ValidityDomain};
@@ -16,16 +16,33 @@ fn synthetic_source(id: &str) -> SourceProvenance {
 }
 
 fn fan_curve(stall_flow: f64) -> FanCurve {
+    fan_curve_with_pressure_scale(stall_flow, 1.0, 0.08)
+}
+
+fn fan_curve_with_pressure_scale(
+    stall_flow: f64,
+    pressure_scale: f64,
+    pressure_tolerance_rel: f64,
+) -> FanCurve {
     FanCurve::new(
         "synthetic-reference-fan",
         vec![
-            FanPoint::new(VolumetricFlowRate::new(0.00), Pressure::new(160.0)),
-            FanPoint::new(VolumetricFlowRate::new(0.04), Pressure::new(130.0)),
-            FanPoint::new(VolumetricFlowRate::new(0.08), Pressure::new(70.0)),
+            FanPoint::new(
+                VolumetricFlowRate::new(0.00),
+                Pressure::new(160.0 * pressure_scale),
+            ),
+            FanPoint::new(
+                VolumetricFlowRate::new(0.04),
+                Pressure::new(130.0 * pressure_scale),
+            ),
+            FanPoint::new(
+                VolumetricFlowRate::new(0.08),
+                Pressure::new(70.0 * pressure_scale),
+            ),
             FanPoint::new(VolumetricFlowRate::new(0.12), Pressure::new(0.0)),
         ],
         synthetic_source("synthetic-fan-v1"),
-        0.08,
+        pressure_tolerance_rel,
         ToleranceBasis::EngineeringAllowance,
         VolumetricFlowRate::new(stall_flow),
         (0.7, 1.3),
@@ -121,6 +138,27 @@ fn identical_fans_obey_series_pressure_and_parallel_flow_laws() {
 }
 
 #[test]
+fn fan_law_source_is_clause_addressed() {
+    let source = fan_law_source();
+    assert_eq!(source.identifier, "AMCA-201-02-R2011:6.5.1");
+    assert_eq!(
+        source.citation,
+        "AMCA Publication 201-02 (R2011), Fans and Systems, section 6.5.1"
+    );
+    assert!(
+        !source.citation.contains("AMCA 210"),
+        "the laboratory test-method standard is not the fan-law authority"
+    );
+    let card = fan_curve(0.01).model_card();
+    assert!(
+        card.assumptions.iter().any(|assumption| {
+            assumption.contains(&source.citation) && assumption.contains(&source.identifier)
+        }),
+        "the consumed model card must retain both source fields"
+    );
+}
+
+#[test]
 fn operating_point_has_unique_sign_changing_nominal_bracket() {
     let fan = FanBank::new(fan_curve(0.01), 1, FanArrangement::Series, 1.0).expect("bank");
     let system = network(180_000.0);
@@ -150,7 +188,7 @@ fn declared_stall_region_refuses() {
 }
 
 #[test]
-fn three_speed_points_follow_affinity_and_solve_deterministically() {
+fn three_speed_points_follow_affinity_ordering() {
     let system = network(180_000.0);
     let mut flows = Vec::new();
     for speed in [0.8, 1.0, 1.2] {
@@ -165,6 +203,107 @@ fn three_speed_points_follow_affinity_and_solve_deterministically() {
         );
     }
     assert!(flows[0] < flows[1] && flows[1] < flows[2], "{flows:?}");
+}
+
+#[test]
+fn repeated_operating_point_solve_replays_the_complete_artifact() {
+    let fan = FanBank::new(fan_curve(0.01), 1, FanArrangement::Series, 1.0).expect("bank");
+    let system = network(180_000.0);
+    let first = solve_operating_point(&fan, &system).expect("first solve");
+
+    for replay_index in 0..4 {
+        let replay = solve_operating_point(&fan, &system).expect("replay");
+        assert_eq!(
+            first, replay,
+            "complete OperatingPoint changed on replay {replay_index}"
+        );
+        assert_eq!(
+            first.flow.value.value().to_bits(),
+            replay.flow.value.value().to_bits()
+        );
+        assert_eq!(
+            first.pressure.value.value().to_bits(),
+            replay.pressure.value.value().to_bits()
+        );
+        assert_eq!(
+            first.nominal_root.flow.lo().to_bits(),
+            replay.nominal_root.flow.lo().to_bits()
+        );
+        assert_eq!(
+            first.nominal_root.flow.hi().to_bits(),
+            replay.nominal_root.flow.hi().to_bits()
+        );
+    }
+}
+
+#[test]
+fn pressure_estimate_uses_reachable_paired_tolerance_corners() {
+    // Equal parallel branches with R=25_000 and u=0.6 have exact equivalent
+    // resistance bounds 2_500 and 10_000. Zero-tolerance replicas of the
+    // low-fan/low-resistance and high-fan/high-resistance corners expose their
+    // certified roots independently, so the old cross-pairing is falsifiable
+    // without hard-coding an output golden.
+    let fan = FanBank::new(fan_curve(0.01), 1, FanArrangement::Series, 1.0).expect("bank");
+    let system = EnclosureNetwork::new(
+        LossNetwork::Element(loss("primary", 25_000.0, 0.6)),
+        LeakageElement::new(loss("leakage", 25_000.0, 0.6)),
+    );
+    let point = solve_operating_point(&fan, &system).expect("solve");
+
+    let low_corner_fan = FanBank::new(
+        fan_curve_with_pressure_scale(0.01, 0.92, 0.0),
+        1,
+        FanArrangement::Series,
+        1.0,
+    )
+    .expect("low-pressure fan corner");
+    let low_corner_system = EnclosureNetwork::new(
+        LossNetwork::Element(loss("primary", 10_000.0, 0.0)),
+        LeakageElement::new(loss("leakage", 10_000.0, 0.0)),
+    );
+    let low_corner =
+        solve_operating_point(&low_corner_fan, &low_corner_system).expect("low corner");
+    let low_corner_flow = low_corner.nominal_root.flow.lo();
+    let expected_low = 2_500.0 * low_corner_flow * low_corner_flow;
+
+    let high_corner_fan = FanBank::new(
+        fan_curve_with_pressure_scale(0.01, 1.08, 0.0),
+        1,
+        FanArrangement::Series,
+        1.0,
+    )
+    .expect("high-pressure fan corner");
+    let high_corner_system = EnclosureNetwork::new(
+        LossNetwork::Element(loss("primary", 40_000.0, 0.0)),
+        LeakageElement::new(loss("leakage", 40_000.0, 0.0)),
+    );
+    let high_corner =
+        solve_operating_point(&high_corner_fan, &high_corner_system).expect("high corner");
+    let high_corner_flow = high_corner.nominal_root.flow.hi();
+    let expected_high = 10_000.0 * high_corner_flow * high_corner_flow;
+
+    assert_eq!(
+        point.pressure.numerical.lo.to_bits(),
+        expected_low.to_bits()
+    );
+    assert_eq!(
+        point.pressure.numerical.hi.to_bits(),
+        expected_high.to_bits()
+    );
+
+    let impossible_mixed_low = 2_500.0 * point.flow.numerical.lo * point.flow.numerical.lo;
+    let impossible_mixed_high = 10_000.0 * point.flow.numerical.hi * point.flow.numerical.hi;
+    assert_ne!(
+        (
+            point.pressure.numerical.lo.to_bits(),
+            point.pressure.numerical.hi.to_bits()
+        ),
+        (
+            impossible_mixed_low.to_bits(),
+            impossible_mixed_high.to_bits()
+        ),
+        "pressure bounds must not mix roots and resistance corners"
+    );
 }
 
 #[test]
