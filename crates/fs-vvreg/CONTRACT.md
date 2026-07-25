@@ -248,6 +248,27 @@ body.
   per-axis dataset counts, and a sorted KNOWN GAPS list naming every
   (QoI, regime) cell — plus every scoped cooling QoI with no dataset at
   all — that has zero external coverage.
+- `rig::RigSpec` / `rig::InstrumentSpec` are the Level-E rig SPECIFICATION AS
+  DATA: an identified rig, declared coolant properties, and an instrument set
+  in which each channel binds a corpus `SensorRecord` to a `rig::ChannelRole`.
+  Reusing `SensorRecord` is deliberate — calibration, placement and
+  uncertainty then have ONE representation shared with the corpus, so an
+  ingested run cannot describe its metrology differently from the dataset it
+  becomes. Admission requires unique sensor ids, a calibration certificate on
+  every channel, role-compatible dimensions, and exactly one of each
+  `ChannelRole::balance_roles()`.
+- `rig::ingest` is a GATE, not a converter. It refuses an unknown, missing,
+  duplicated or non-finite reading by sensor name; refuses an uncalibrated
+  channel; and refuses a run whose measured energy does not close. It returns
+  a `rig::IngestedRun` carrying the partition, the seal status, the retained
+  `rig::EnergyBalance` verdict, the verified calibrated-channel count, and a
+  domain-separated identity.
+- `rig::EnergyBalance` is the physical closure verdict on the DATA:
+  `P_in ≈ rho · c_p · Q · (T_out − T_in)`, adjudicated against the
+  instruments' own stated half-widths summed conservatively. No solver and no
+  model is involved — it catches mis-scaled flow channels, swapped
+  inlet/outlet thermocouples, unlogged secondary heat paths, and decimal
+  errors in declared power.
 
 ## Invariants
 
@@ -599,8 +620,51 @@ fail-closed refusals for non-finite values, negative half-widths, blank ids,
 unknown datasets/metrics, the run-record resource limit, and foreign or
 duplicate assessments.
 
+`tests/rig.rs` (bead `f85xj.4.5`, SYNTHETIC fixtures throughout): a closing
+run ingesting and retaining its balance; a non-closing run refusing with every
+channel and band named; a residual INSIDE the stated band admitted, because a
+gate that refused what the metrology already allows would be unusable on real
+data; an `Unstated` channel band refusing as unadjudicable rather than
+passing; a zero coolant rise refusing; channel mismatch refusals (unknown,
+missing, duplicated, non-finite) each by sensor name; an uncalibrated sensor
+refusing at specification with its reason preserved; a role/dimension mismatch
+refusing; missing, duplicated and repeated-id instrument sets refusing;
+auxiliary channels carried without joining the closure; a blind-holdout run
+GATED THEN SEALED, with a companion case proving sealing cannot smuggle in
+unbalanced data; and declaration-order-independent determinism with identity
+movement on a 10 mW change and on a partition change.
+
 ## No-claim boundaries
 
+- NO PHYSICAL RIG EXISTS. Everything in `rig` is exercised against SYNTHETIC
+  runs. The module is the software half of bead `f85xj.4.5`, landed first
+  under that bead's explicit caveat that procurement must not block the
+  pipeline; no measurement campaign has been ingested, no calibration
+  certificate names a real instrument, and the corpus therefore gains no
+  Level-E dataset from this module's existence. Until real runs are ingested,
+  `rig` is a validated INGEST PATH, not evidence.
+- A BALANCED RUN IS NOT A VALIDATED ONE. The energy-balance gate proves the
+  measured channels are mutually consistent under their own declared
+  uncertainty. It does not prove any channel is accurate, that the
+  instruments measure what their roles claim, that the rig matches its
+  specification, or that a model predicting these values is right. It is a
+  sanity gate on the DATA, and passing it is a precondition for evidence
+  rather than evidence itself.
+- The closure model is first-order and single-stream: one heater, one coolant
+  stream, steady conditions, no radiative or conductive loss path to ambient,
+  and constant declared coolant properties. A rig with meaningful case losses
+  will fail the gate CORRECTLY — that is the gate working, not a defect — and
+  such a rig needs a loss term declared before its runs can be admitted.
+- Uncertainty is propagated conservatively (relative half-widths ADDED, never
+  in quadrature) and `CovarianceDiagonal` is read as a one-sigma half-width.
+  Neither is a coverage-interval claim, and no correlation between channels
+  is modelled.
+- SEALING IS A RETENTION DISCIPLINE, NOT ACCESS CONTROL. A `BlindHoldout` run
+  withholds its measured values from the retained verdict; it does not
+  encrypt anything, and nothing prevents a caller who holds the original
+  `RigRun` from reading it. The seal keeps blind values out of ordinary
+  validation records, which is a different guarantee from keeping them
+  secret.
 - Admission proves the ENTRY is fully pinned; it does not prove any solver
   result, and it does not verify that an external deck's bytes exist or
   match their registered digest — artifact retrieval/verification is the

@@ -47,6 +47,10 @@ pub mod partition;
 /// Claim-scoped external-evidence axes and fail-closed portfolio admission.
 pub mod portfolio;
 
+/// Level-E instrumented rig: specification as data, and a fail-closed ingest
+/// gated on channel match, calibration, and a measured energy balance.
+pub mod rig;
+
 /// Deterministic public V&V scorecard: per-QoI/regime outcome cells with
 /// loud NO-DATA semantics and byte-identical renders.
 pub mod scorecard;
