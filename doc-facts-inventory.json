@@ -741,6 +741,7 @@
     "crates/fs-roofline/tests/regress.rs",
     "crates/fs-scenario/tests/bc_role_refusal.rs",
     "crates/fs-scenario/tests/conformance.rs",
+    "crates/fs-scenario/tests/design.rs",
     "crates/fs-scenario/tests/entity_identity.rs",
     "crates/fs-scenario/tests/motion_lowering.rs",
     "crates/fs-scenario/tests/payloads.rs",

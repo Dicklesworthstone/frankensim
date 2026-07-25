@@ -16,6 +16,7 @@
 //! (exercised here via a dev-dependency in conformance tests).
 
 pub mod bc;
+pub mod design;
 pub mod ensemble;
 pub mod entity;
 pub mod frame;

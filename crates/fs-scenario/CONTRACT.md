@@ -246,6 +246,24 @@ flagships.
   both the path and span; typed-payload hex nibble offsets are translated back
   to absolute scenario-source bytes rather than reported relative to the
   embedded string.
+- `design::DesignBlock` — the declared design block: `DesignVariable` (what may
+  change), `ManufacturingConstraint` (what changes are buildable),
+  `OptimizationObjective` (what is being optimized, with a REQUIRED
+  `RobustnessPosture`), and `FailureMode` (what counts as failure, ordered by
+  `DesignSeverity`). Every one carries a `DesignSource`; there is no unsourced
+  declaration, mirroring the crate's tolerance rule. Declarations are budgeted
+  (`DesignBudget`) and `declare_*` assigns the row, never the caller.
+  `validate` reports every structural, dimensional and provenance fault at once
+  as `Violation { code, what, fix }`. `optimization_request` is the fail-closed
+  gate: it refuses, totally and with every reason, when no objective, no
+  variable, or no manufacturing constraint is declared.
+- `design::ScenarioDesignExtension` — a content-addressed sidecar binding a
+  block to one scenario by the hash of its canonical IR, with its own schema
+  version, identity domain and artifact kind. `verifies_scenario` is the check
+  a caller must perform: a sidecar that does not verify is not evidence about
+  that scenario. `design_identity` binds typed fields over a length-prefixed,
+  domain-separated preimage — never a rendered string — so provenance is part
+  of the declaration rather than decoration.
 
 ## Invariants
 
@@ -874,3 +892,48 @@ None.
   every term finding, but other diagnostic fields and each final `String`
   allocation are not yet byte-metered. A global diagnostic-byte budget remains
   active work under `frankensim-sj31i.24`.
+
+## Design declarations (`design` module, bead f85xj.17.8)
+
+These types land the SCHEMA for a later optimization phase; nothing here
+optimizes anything, and the execution that consumes them is `f85xj.6.14` scope.
+
+Two decisions are load-bearing.
+
+**Persistence is a sidecar, not an IR section.** The scenario form is strictly
+positional with fixed arity, so adding a section would change every canonical
+byte string, move all pinned canonical hashes — including the `fs-ir` machine
+lowering that asserts byte equality — and force `SCENARIO_IR_VERSION` to 3 with
+a new crosswalk rule. `ScenarioDesignExtension` follows the sensor-extension
+precedent instead: bound by hash to the scenario, versioned independently, and
+`SCENARIO_IR_VERSION` stays at 2. The full crate battery passing with every
+pinned hash unmoved is the evidence.
+
+**Selections are citations, not resolutions.** A material or fan choice is
+recorded as a `ContentHash`. This crate is L3 and cannot reach the material
+database or any catalogue, so resolving one is not merely unimplemented — it is
+outside this layer. A citation proves that a specific identity was declared,
+and nothing more.
+
+Determinism: `design_identity` is a domain-separated BLAKE3 over
+length-prefixed typed fields in declaration order. Every text field is
+length-prefixed, so two different declarations cannot share a preimage. Floats
+are absorbed as IEEE-754 bits. Identity moves when any declared field moves,
+including the source.
+
+No-claim boundaries:
+
+- A design variable NAMES what may change. It does not prove the named
+  parameter exists in any geometry kernel, that a cited material card resolves,
+  or that a cited fan is purchasable.
+- A manufacturing constraint is a sourced DECLARATION, not a manufacturability
+  proof. Satisfying every declared constraint means no declared rule was
+  violated — not that the part can be built.
+- A failure mode is a named threshold with a consequence class. It is not a
+  physics model and predicts no occurrence rate.
+- `optimization_request` admitting a request means the declarations are
+  present and internally consistent. It makes no claim that the objective is
+  achievable, that the constraints are sufficient, or that the variables span
+  a useful design space.
+- Entity targets are resolved against the supplied catalog at validation time
+  only. A block validated against one catalog says nothing about another.
