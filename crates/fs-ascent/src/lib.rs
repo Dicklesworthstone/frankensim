@@ -53,5 +53,14 @@ pub type FnConstraints<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
 /// Jacobian-transpose action: (x, w) ↦ (∂c/∂x)ᵀ·w.
 pub type FnJacobianTranspose<'a> = &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>;
 
+/// Version of the deterministic trajectory-bit surface exercised by
+/// `tests/ascent_battery.rs::ascent_golden_hash`.
+///
+/// This surface includes the L-BFGS, trust-region, and Riemannian engine
+/// trajectories plus the authoritative `fs-opt` manifold operations consumed
+/// by the Riemannian stage. Any semantic change that can move those exact bits
+/// must bump this version and deliberately re-freeze the coupled golden.
+pub const TRAJECTORY_BIT_SEMANTICS_VERSION: u32 = 1;
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

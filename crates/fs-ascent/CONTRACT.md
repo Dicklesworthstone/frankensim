@@ -156,9 +156,18 @@ REPORTED outcome (reason + certificate), never a panic.
 
 ## Determinism class
 
-Bit-deterministic across runs; golden FNV-64 over L-BFGS, trust-
-region, and Riemannian trajectories: `0xb28d_3cf4_99e8_9071`,
-recorded on Apple M4 Pro, verified on Threadripper (x86_64).
+Bit-deterministic across runs on the same execution surface; golden FNV-64
+over L-BFGS, trust-region, and Riemannian trajectories:
+`0xe185_4f98_a25e_3663`. The re-freeze for `frankensim-nrhii` is registered
+against `TRAJECTORY_BIT_SEMANTICS_VERSION = 1` and reproduced in debug and
+release on an x86_64 RCH worker with the relevant source and lockfile blobs
+frozen at committed HEAD `724eddd8`. The previous `0xb28d_3cf4_99e8_9071` pin
+had historical Apple M4 Pro and Threadripper evidence, but that evidence does
+not transfer across the intentional Riemannian strong-Wolfe/transport and
+authoritative `fs-opt` manifold-runtime semantic migrations. A shared-tree
+overlay prevented clean-whole-tree promotion proof during the re-freeze;
+current clean-tree and arm64 reproduction remain pending, so the new constant
+alone makes no cross-ISA equality claim.
 
 ## Cancellation behavior
 

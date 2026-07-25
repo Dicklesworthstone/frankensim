@@ -381,7 +381,8 @@ fn stop_rules_attribute_correctly() {
     log("stop-rules", "pass", "budget + stall attributed");
 }
 
-const GOLDEN_HASH: u64 = 0xb28d_3cf4_99e8_9071; // recorded at 7tv.3 slice 1, frozen
+// Re-frozen for trajectory-bit semantics v1 under bead `frankensim-nrhii`.
+const GOLDEN_HASH: u64 = 0xe185_4f98_a25e_3663;
 
 #[test]
 fn ascent_golden_hash() {
