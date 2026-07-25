@@ -100,8 +100,17 @@ existing convection rung.
    evidence. It is never relabeled as a rigorous physical enclosure.
 7. Terminal branch order follows deterministic network traversal, and all
    provenance hashes are order-stable and bind the complete fan curve, source,
-   tolerance, fan-bank configuration, recursive network topology, loss data,
-   and explicit leakage identity.
+   tolerance, fan-bank configuration, recursive network topology, loss data
+   — INCLUDING each element's declared `regime_validity`, axis names and
+   bounds together, with absence encoded as a state distinct from any declared
+   domain — and explicit leakage identity. Equivalently: two `LossElement`
+   values that compare unequal never share an operating identity, which
+   `loss_elements_that_compare_unequal_never_share_an_identity` checks
+   exhaustively over the constructible variants. The `regime_validity` clause
+   is called out by name because omitting it silently falsified this invariant
+   (bead `frankensim-yq435`): that field is the sole input to
+   `regime_audit_cards`, so two networks differing only there reach a reviewer
+   as an admitted result and a demoted one while hashing identically.
 8. Junction and surface declarations canonicalize index order and reject
    duplicates. Equal junction maxima choose the lowest canonical vertex index.
 9. Every thermal QoI budget has exactly eight terms. Widening a valid upstream

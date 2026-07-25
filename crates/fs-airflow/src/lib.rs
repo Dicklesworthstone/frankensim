@@ -1067,6 +1067,7 @@ fn push_network_identity(bytes: &mut Vec<u8>, network: &LossNetwork) {
             bytes.extend_from_slice(&element.uncertainty_rel.to_bits().to_le_bytes());
             push_source_identity(bytes, &element.source);
             push_tolerance_identity(bytes, element.tolerance_basis);
+            push_validity_identity(bytes, element.regime_validity.as_ref());
         }
         LossNetwork::Series(children) => {
             bytes.push(1);
@@ -1082,6 +1083,38 @@ fn push_network_identity(bytes: &mut Vec<u8>, network: &LossNetwork) {
                 push_network_identity(bytes, child);
             }
         }
+    }
+}
+
+/// Encode a loss element's declared regime validity into the provenance bytes.
+///
+/// Invariant 7 requires the identity to bind the complete loss data, and
+/// `regime_validity` is the field that decides product admission: it is the
+/// sole input to `regime_audit_cards`, so two networks differing only here
+/// reach a reviewer as a demoted result and an admitted one. Omitting it gave
+/// those two runs a single identity (bead `frankensim-yq435`).
+///
+/// ABSENCE IS A DISTINCT STATE, not an empty domain. A cardless element is
+/// tagged `0`; a declared domain is tagged `1`. The rule this preserves is
+/// that absence must stay cardless rather than widen into an unconstrained
+/// claim. The zero-axis case under tag `1` is unreachable today —
+/// [`LossElement::with_regime_validity`] refuses an empty domain — so the
+/// length prefix is defensive rather than a live distinction.
+///
+/// The axis map is a `BTreeMap`, so iteration is already in sorted key order
+/// and the encoding is canonical without an explicit sort.
+fn push_validity_identity(bytes: &mut Vec<u8>, validity: Option<&ValidityDomain>) {
+    let Some(domain) = validity else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    let bounds = domain.bounds();
+    bytes.extend_from_slice(&(bounds.len() as u64).to_le_bytes());
+    for (axis, (lo, hi)) in bounds {
+        push_string_identity(bytes, axis);
+        bytes.extend_from_slice(&lo.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&hi.to_bits().to_le_bytes());
     }
 }
 
