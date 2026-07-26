@@ -497,3 +497,101 @@ fn an_element_with_a_declared_domain_still_solves_to_the_same_numbers() {
     );
     assert_ne!(cardless.flow.provenance, carded.flow.provenance);
 }
+
+#[test]
+fn the_operating_point_is_bit_identical_across_worker_counts() {
+    // f85xj.5.5's fourth DONE-WHEN is "network solve deterministic across
+    // thread counts". The neighbouring replay test proves REPEAT identity on
+    // one thread, which is a different property: it cannot observe a
+    // thread-local cache, a lazily-initialised shared table, or a global the
+    // solver mutates. This crate spawns no threads of its own, so the claim is
+    // structurally true -- but "structurally true" is an argument, and the
+    // clause asks for evidence. Running the same solve CONCURRENTLY at several
+    // worker counts and requiring bitwise agreement with a single-threaded
+    // reference is that evidence, and it is what would actually fail if hidden
+    // shared state were ever introduced beneath `solve_operating_point`.
+    //
+    // Everything compared here is derived from the interval-Newton bracket, so
+    // an agreement that held only in the reported scalars while the bracket
+    // endpoints drifted would not pass.
+    let fan = FanBank::new(fan_curve(0.01), 1, FanArrangement::Series, 1.0).expect("bank");
+    let system = network(180_000.0);
+    let reference = solve_operating_point(&fan, &system).expect("single-threaded reference");
+
+    for workers in [1usize, 2, 4, 8] {
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let fan = FanBank::new(fan_curve(0.01), 1, FanArrangement::Series, 1.0)
+                            .expect("bank");
+                        let system = network(180_000.0);
+                        solve_operating_point(&fan, &system).expect("concurrent solve")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("worker did not panic"))
+                .collect()
+        });
+
+        assert_eq!(results.len(), workers);
+        for (worker, observed) in results.iter().enumerate() {
+            assert_eq!(
+                &reference, observed,
+                "worker {worker} of {workers} produced a different OperatingPoint"
+            );
+            assert_eq!(
+                reference.flow.value.value().to_bits(),
+                observed.flow.value.value().to_bits(),
+                "worker {worker} of {workers}: flow drifted"
+            );
+            assert_eq!(
+                reference.pressure.value.value().to_bits(),
+                observed.pressure.value.value().to_bits(),
+                "worker {worker} of {workers}: pressure drifted"
+            );
+            assert_eq!(
+                reference.nominal_root.flow.lo().to_bits(),
+                observed.nominal_root.flow.lo().to_bits(),
+                "worker {worker} of {workers}: certified bracket lower endpoint drifted"
+            );
+            assert_eq!(
+                reference.nominal_root.flow.hi().to_bits(),
+                observed.nominal_root.flow.hi().to_bits(),
+                "worker {worker} of {workers}: certified bracket upper endpoint drifted"
+            );
+            assert_eq!(
+                reference.nominal_root.boxes_examined, observed.nominal_root.boxes_examined,
+                "worker {worker} of {workers}: interval-Newton search path differed"
+            );
+            assert_eq!(
+                reference.branches.len(),
+                observed.branches.len(),
+                "worker {worker} of {workers}: branch count differed"
+            );
+            for (branch, (want, got)) in reference
+                .branches
+                .iter()
+                .zip(observed.branches.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    want.path, got.path,
+                    "worker {worker} of {workers}: branch {branch} traversal order differed"
+                );
+                assert_eq!(
+                    want.flow.value.value().to_bits(),
+                    got.flow.value.value().to_bits(),
+                    "worker {worker} of {workers}: branch {branch} ({}) flow drifted",
+                    want.path
+                );
+                assert_eq!(
+                    want.flow.provenance, got.flow.provenance,
+                    "worker {worker} of {workers}: branch {branch} provenance drifted"
+                );
+            }
+        }
+    }
+}
