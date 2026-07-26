@@ -37,7 +37,11 @@ use fs_qty::{Area, Density, DynViscosity, Length, Pressure, Temperature, Volumet
 use fs_rep_mesh::TetComplex;
 
 const GRID_PITCH_M: f64 = 1.0 / 2_048.0;
-const CHANNEL_LENGTH_M: f64 = 5.0 / 64.0;
+// 174 pitches = 87/1024 m, exactly representable. This length is chosen to
+// maximise the SMALLER of the fixture's two validity margins; see
+// FULLY_DEVELOPED_FLOOR and GRAETZ_TABLE_FLOOR below. The former 5/64 put
+// L/D_h at exactly 50.0, sitting on a bound one ULP from refusal.
+const CHANNEL_LENGTH_M: f64 = 174.0 * GRID_PITCH_M;
 const BASE_WIDTH_M: f64 = 9.0 * GRID_PITCH_M;
 const BASE_THICKNESS_M: f64 = GRID_PITCH_M;
 const FIN_THICKNESS_M: f64 = GRID_PITCH_M;
@@ -62,6 +66,35 @@ const INLET_TEMPERATURE_K: f64 = 300.0;
 const CHANNEL_BRANCH: &str = "fin-channels";
 const SPEED_RATIOS: [f64; 3] = [0.75, 1.0, 1.25];
 
+/// The `L_over_Dh` lower bound the fully-developed CWT/CHF cards declare
+/// (`fs-convection`'s `fully_developed()` domain). It is INCLUSIVE, so a
+/// fixture sitting exactly on it is admitted -- and is one ULP from refusal.
+const FULLY_DEVELOPED_FLOOR: f64 = 50.0;
+/// The Graetz number below which the developing card leaves its Shah-London
+/// table slice for the declared engineering bridge
+/// (`RECTANGULAR_DEVELOPING_FIRST_TABLE_GRAETZ`).
+const GRAETZ_TABLE_FLOOR: f64 = 10.0;
+/// How far above BOTH floors this fixture is required to sit.
+///
+/// The two bounds pull in opposite directions -- `Gz = Re·Pr/(L/D_h)`, so
+/// lengthening the channel buys margin on the fully-developed floor and
+/// spends it on the Graetz floor. With this fixture's slowest solved
+/// Reynolds number the admissible window is roughly `L/D_h ∈ [50, 59.3]`,
+/// and the equal-margin optimum is `sqrt(Re·Pr·50/10) ≈ 54.5`. The chosen
+/// length lands at `L/D_h = 54.375`: 8.75% clear of the floor and 9.15%
+/// clear of the table cliff.
+const VALIDITY_MARGIN: f64 = 0.08;
+
+/// Boundary triangles each named Robin trace must own, derived from the mesh
+/// parameters rather than pinned as a magic number. Existence-only coverage
+/// (`faces > 0`) is not enough: a predicate that silently matched HALF the fin
+/// flanks passes every other assertion in this file, because the energy
+/// closure compares the region sum against a total that drops by the same
+/// amount and no absolute temperature is pinned.
+const CHANNEL_GAP_CELLS: usize = 2;
+const EXPECTED_FLANK_FACES: usize = INTERNAL_CHANNEL_COUNT * 2 * CELLS_X * CELLS_FIN_Z * 2;
+const EXPECTED_FLOOR_FACES: usize = INTERNAL_CHANNEL_COUNT * CHANNEL_GAP_CELLS * CELLS_X * 2;
+
 #[derive(Debug, Clone, Copy)]
 struct ChannelGeometry {
     flow_area_m2: f64,
@@ -77,6 +110,22 @@ impl ChannelGeometry {
         // A plate-fin passage is open at the top in this fixture. Its wetted
         // perimeter is the base floor plus two fin flanks, not the perimeter
         // of an invented shroud.
+        //
+        // MODEL MISMATCH, stated rather than left for a reader to derive: this
+        // D_h describes a THREE-SIDED OPEN channel, while every card it feeds
+        // is declared for a FOUR-WALL CLOSED duct with its condition on all
+        // four walls. The `aspect_ratio` handed to those cards, 0.5, is the
+        // closed 2p x 4p rectangle -- whose own D_h would be 2.667p, not the
+        // 3.2p computed here. So the (D_h, aspect_ratio) PAIR describes no
+        // single duct. The fixture additionally applies CWT to the flanks and
+        // CHF to the floor of the SAME passage, which are two mutually
+        // exclusive four-wall idealizations held at once.
+        //
+        // That is defensible for a WIRING fixture -- it exercises the solved
+        // flow -> Re -> card -> h -> Robin -> solve chain, and the falsifier
+        // tests below move real solved quantities. It is NOT a claim that
+        // these h values describe this passage, and nothing here may be read
+        // as validating the correlation against plate-fin hardware.
         let one_channel_wetted_perimeter = gap + 2.0 * FIN_HEIGHT_M;
         let flow_area_m2 = INTERNAL_CHANNEL_COUNT as f64 * one_channel_area;
         let wetted_perimeter_m = INTERNAL_CHANNEL_COUNT as f64 * one_channel_wetted_perimeter;
@@ -146,10 +195,20 @@ fn solve_config() -> SolveConfig {
         },
         linear: LinearConfig {
             // The slender, disconnected blocks joined by finite bondline
-            // conductance settle at ~1.1e-11 true relative residual on this
-            // mesh. Keep the fail-closed gate above that measured floor while
-            // remaining three orders tighter than the thermal assertions.
-            tolerance: 2.0e-11,
+            // conductance leave this operator badly conditioned, and the
+            // achievable true relative residual is SENSITIVE TO THE GEOMETRY:
+            // measured 1.98e-11 / 1.82e-11 / 1.85e-11 at speed ratios
+            // 0.75 / 1.00 / 1.25 on the current mesh, where the previous
+            // 5/64 channel reached ~1.1e-11.
+            //
+            // The old 2.0e-11 gate was set just above that older floor, which
+            // left the slowest run 1.2% under its own fail-closed threshold.
+            // Perturbing the geometry by as little as 0.1% pushed it over
+            // (observed 2.007e-11) -- so the gate was reporting "the mesh
+            // changed" as "the solve failed". Keep roughly 5x headroom over
+            // the measured worst case instead; this is still two orders
+            // tighter than the 1e-8 energy-closure assertion it feeds.
+            tolerance: 1.0e-10,
             max_iterations: 60_000,
             restart: 80,
         },
@@ -517,13 +576,20 @@ fn solve_plate_fin(
 fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
     let mesh = plate_fin_mesh();
     let geometry = ChannelGeometry::from_mesh_constants();
-    assert_eq!(
-        geometry.hydraulic_diameter_m.to_bits(),
-        (4.0 * geometry.flow_area_m2 / geometry.wetted_perimeter_m).to_bits(),
-        "D_h is derived from the same channel area and wetted perimeter as the mesh"
-    );
     assert_eq!(geometry.aspect_ratio.to_bits(), 0.5f64.to_bits());
-    assert!(CHANNEL_LENGTH_M / geometry.hydraulic_diameter_m >= 50.0);
+
+    // The fully-developed CWT/CHF cards bound L/D_h at 50.0 INCLUSIVE, and
+    // `evaluate().expect()` already enforces it. Asserting `>= 50.0` here
+    // therefore proved nothing the solve did not already prove -- and the
+    // fixture used to sit on that bound bit-exactly, so one ULP of drift in
+    // D_h turned three passing tests into three panics. Assert the MARGIN
+    // instead, which is the property that actually keeps the fixture alive.
+    let length_over_hydraulic_diameter = CHANNEL_LENGTH_M / geometry.hydraulic_diameter_m;
+    assert!(
+        length_over_hydraulic_diameter >= FULLY_DEVELOPED_FLOOR * (1.0 + VALIDITY_MARGIN),
+        "L/D_h = {length_over_hydraulic_diameter} leaves no margin above the \
+         fully-developed floor {FULLY_DEVELOPED_FLOOR}"
+    );
 
     let runs: Vec<_> = SPEED_RATIOS
         .into_iter()
@@ -533,6 +599,21 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
     assert!(runs.iter().all(|run| {
         run.developing_cwt_source_region == EvaluationSourceRegion::TableSliceInterpolation
     }));
+
+    // The other side of the squeeze. The source-region assertion above already
+    // FAILS if Gz crosses the table floor, but it fails AT the cliff; this
+    // fails while there is still room to move, which is the difference between
+    // a diagnosable fixture and a surprising one. The slowest run is the
+    // binding case because Gz rises with Reynolds.
+    let slowest_graetz = runs
+        .iter()
+        .map(|run| run.reynolds * AIR_PRANDTL / length_over_hydraulic_diameter)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        slowest_graetz >= GRAETZ_TABLE_FLOOR * (1.0 + VALIDITY_MARGIN),
+        "slowest solved Gz = {slowest_graetz} leaves no margin above the \
+         table-slice floor {GRAETZ_TABLE_FLOOR}"
+    );
 
     for pair in runs.windows(2) {
         assert!(pair[1].speed_ratio > pair[0].speed_ratio);
@@ -558,6 +639,31 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         assert!(
             pair[1].mean_base_temperature_k < pair[0].mean_base_temperature_k,
             "the solved airflow change must reach the solid temperature field"
+        );
+
+        // The assertion above is NECESSARY but not sufficient, and on its own
+        // it wears physics phrasing over a t_ref-wiring check: both Robin rows
+        // take `mean_bulk_temperature_k` as their reference, so a base
+        // temperature that merely tracked the declared bulk shift would
+        // satisfy it while h did nothing at all.
+        //
+        // Separate the two paths. The excess of the base over the bulk is the
+        // part the CONVECTIVE COEFFICIENT owns: it depends on the flank h and
+        // not on the reference temperature. Requiring it to fall is a claim
+        // about the developing card reaching the solid, and it is falsifiable
+        // in exactly the case the phrasing above is not -- freeze h and this
+        // difference becomes constant, because the problem is linear in
+        // `t_ref` and the mesh, power, and floor card are all unchanged.
+        let previous_excess_k = pair[0].mean_base_temperature_k - pair[0].mean_bulk_temperature_k;
+        let next_excess_k = pair[1].mean_base_temperature_k - pair[1].mean_bulk_temperature_k;
+        assert!(
+            next_excess_k < previous_excess_k,
+            "a higher solved flank h must shrink the base-over-bulk excess: \
+             {previous_excess_k} K -> {next_excess_k} K"
+        );
+        assert!(
+            previous_excess_k > 0.0 && next_excess_k > 0.0,
+            "a heated base sits above its coolant: {previous_excess_k} K, {next_excess_k} K"
         );
 
         // The companion Shah-London CWT/CHF rows are fully-developed LIMITS.
@@ -588,9 +694,34 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].region, "fin-flanks");
         assert_eq!(rows[1].region, "base-channel-floors");
+        assert!(rows.iter().all(|row| row.heat_rate_w > 0.0));
+
+        // Coverage by COUNT, not existence. See EXPECTED_*_FACES above for
+        // why `faces > 0` cannot catch a half-matching region predicate.
+        assert_eq!(
+            rows[0].faces, EXPECTED_FLANK_FACES,
+            "fin-flank trace must own every flank triangle"
+        );
+        assert_eq!(
+            rows[1].faces, EXPECTED_FLOOR_FACES,
+            "channel-floor trace must own every floor triangle"
+        );
+
+        // The binding that D_h's derivation actually needs: the hand-computed
+        // wetted perimeter must be the perimeter the MESH exposes to the air.
+        // Comparing D_h against `4A/P` instead only restates the initializer
+        // in `from_mesh_constants` -- same tokens, same operands -- and cannot
+        // fail. This can: it fails if either region predicate misses a face,
+        // if the perimeter formula counts a surface the mesh does not have,
+        // or if the channel length and the mesh extent disagree.
+        let meshed_wetted_area_m2 = rows[0].area_m2 + rows[1].area_m2;
+        let declared_wetted_area_m2 = CHANNEL_LENGTH_M * geometry.wetted_perimeter_m;
+        let wetted_area_error =
+            (meshed_wetted_area_m2 - declared_wetted_area_m2).abs() / declared_wetted_area_m2;
         assert!(
-            rows.iter()
-                .all(|row| row.faces > 0 && row.heat_rate_w > 0.0)
+            wetted_area_error < 1.0e-12,
+            "meshed wetted area {meshed_wetted_area_m2} m² vs the perimeter D_h was \
+             built from {declared_wetted_area_m2} m², relative {wetted_area_error}"
         );
         // The report reconstructs each uniform h as Σ(A_f h)/ΣA_f. Bound
         // the two reductions and final division by a small multiple of the
