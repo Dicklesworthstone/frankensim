@@ -11,8 +11,9 @@ use fs_blake3::identity::{
     Field, FieldSpec, IdentityAdjudication, IdentityRole, KeyPolicyId, LimitKind, ModelId,
     NeverCancel, NoClaimState, ObservedIdentity, OrderedBytesStreamDisposition,
     OrderedBytesStreamError, OrderedBytesStreamPhase, Presence, ProblemSemanticId,
-    SCHEMA_ID_HASH_DOMAIN, SchemaId, SemanticId, SourceByteId, SourceId, StrongIdentity,
-    TrustState, VerifierId, WireContentId, WireType, adjudicate, legacy::LegacyProvenanceV1,
+    SCHEMA_ID_HASH_DOMAIN, SchemaDescriptorKind, SchemaId, SemanticId, SourceByteId, SourceId,
+    StrongIdentity, TrustState, VerifierId, WireContentId, WireType, adjudicate,
+    legacy::LegacyProvenanceV1,
 };
 use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 
@@ -166,6 +167,69 @@ impl CanonicalSchema for BytesLeaf {
     const VERSION: u32 = 1;
     const CONTEXT: &'static str = "G0 streaming bytes fixture";
     const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("payload", WireType::Bytes)];
+}
+
+enum DescriptorDomainFloor {}
+impl CanonicalSchema for DescriptorDomainFloor {
+    const DOMAIN: &'static str =
+        "org.frankensim.test.identity.schema-descriptor-domain-is-the-binding-floor.v1";
+    const NAME: &'static str = "domain-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 domain floor";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("value", WireType::U64)];
+}
+
+enum DescriptorNameFloor {}
+impl CanonicalSchema for DescriptorNameFloor {
+    const DOMAIN: &'static str = "org.frankensim.test.floor.name.v1";
+    const NAME: &'static str = "schema-name-is-the-unique-longest-descriptor-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 name floor";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("value", WireType::U64)];
+}
+
+enum DescriptorContextFloor {}
+impl CanonicalSchema for DescriptorContextFloor {
+    const DOMAIN: &'static str = "org.frankensim.test.floor.context.v1";
+    const NAME: &'static str = "context-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 context is the unique longest schema descriptor floor";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("value", WireType::U64)];
+}
+
+enum DescriptorFieldNameFloor {}
+impl CanonicalSchema for DescriptorFieldNameFloor {
+    const DOMAIN: &'static str = "org.frankensim.test.floor.field-name.v1";
+    const NAME: &'static str = "field-name-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 field-name floor";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required(
+        "field_name_is_the_unique_longest_schema_descriptor_floor",
+        WireType::U64,
+    )];
+}
+
+enum DescriptorNestedChildFloor {}
+impl CanonicalSchema for DescriptorNestedChildFloor {
+    const DOMAIN: &'static str = "org.frankensim.test.floor.nested-child.v1";
+    const NAME: &'static str = "nested-child-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str =
+        "G0 nested child context is the unique longest recursive schema descriptor floor";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("value", WireType::U64)];
+}
+
+static DESCRIPTOR_NESTED_CHILD_SPEC: ChildSpec =
+    ChildSpec::for_identity::<SemanticId<DescriptorNestedChildFloor>>();
+
+enum DescriptorNestedParent {}
+impl CanonicalSchema for DescriptorNestedParent {
+    const DOMAIN: &'static str = "org.frankensim.test.floor.nested-parent.v1";
+    const NAME: &'static str = "nested-parent-floor";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 nested parent";
+    const FIELDS: &'static [FieldSpec] =
+        &[FieldSpec::child_of("child", &DESCRIPTOR_NESTED_CHILD_SPEC)];
 }
 
 enum OtherSourceBytes {}
@@ -466,6 +530,103 @@ impl CanonicalSchema for Branch05Schema {
         FieldSpec::child_of("left", &BRANCH_04_SPEC),
         FieldSpec::child_of("right", &BRANCH_04_SPEC),
     ];
+}
+
+fn limits_with_max_field_bytes(max_field_bytes: u64) -> CanonicalLimits {
+    CanonicalLimits::new(
+        LIMITS.max_canonical_bytes(),
+        max_field_bytes,
+        LIMITS.max_fields(),
+        LIMITS.max_collection_items(),
+        LIMITS.cancellation_poll_bytes(),
+    )
+}
+
+fn top_level_descriptor_floor<D: CanonicalSchema>() -> (SchemaDescriptorKind, u64) {
+    let longest_field_name = D::FIELDS
+        .iter()
+        .copied()
+        .map(|field| field.name().len())
+        .max()
+        .unwrap_or(0);
+    let candidates = [
+        (SchemaDescriptorKind::Domain, D::DOMAIN.len()),
+        (SchemaDescriptorKind::Name, D::NAME.len()),
+        (SchemaDescriptorKind::Context, D::CONTEXT.len()),
+        (SchemaDescriptorKind::FieldName, longest_field_name),
+    ];
+    let mut binding = SchemaDescriptorKind::Domain;
+    let mut floor = 0usize;
+    let mut binding_count = 0usize;
+    for (candidate, bytes) in candidates {
+        if bytes > floor {
+            binding = candidate;
+            floor = bytes;
+            binding_count = 1;
+        } else if bytes == floor {
+            binding_count += 1;
+        }
+    }
+    assert_eq!(
+        binding_count, 1,
+        "the fixture must have one unique binding descriptor term"
+    );
+    (
+        binding,
+        u64::try_from(floor).expect("static descriptor length fits u64"),
+    )
+}
+
+fn descriptor_floor_receipt<D: CanonicalSchema>(
+    max_field_bytes: u64,
+) -> Result<fs_blake3::identity::IdentityReceipt<SemanticId<D>>, CanonicalError> {
+    CanonicalEncoder::<SemanticId<D>, _>::new(
+        limits_with_max_field_bytes(max_field_bytes),
+        NeverCancel,
+    )?
+    .u64(Field::new(0, D::FIELDS[0].name()), 17)?
+    .finish()
+}
+
+fn assert_descriptor_floor_boundaries<D: CanonicalSchema>(expected_binding: SchemaDescriptorKind) {
+    let (binding, floor) = top_level_descriptor_floor::<D>();
+    assert_eq!(binding, expected_binding);
+    let supplied = floor.checked_sub(1).expect("descriptor floor is positive");
+    let error = CanonicalEncoder::<SemanticId<D>, _>::new(
+        limits_with_max_field_bytes(supplied),
+        NeverCancel,
+    )
+    .expect_err("one-under the schema descriptor floor must refuse construction");
+    assert_eq!(
+        error,
+        CanonicalError::MaxFieldBytesBelowSchemaFloor {
+            binding,
+            floor,
+            supplied,
+        }
+    );
+    assert!(
+        !matches!(error, CanonicalError::LimitExceeded { .. }),
+        "schema admission and payload-limit refusals must remain distinct"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "canonical identity max_field_bytes {supplied} is below schema-descriptor \
+             floor {floor}, bound by {binding:?}"
+        )
+    );
+
+    let exact = descriptor_floor_receipt::<D>(floor).expect("exact descriptor floor admits");
+    let one_over =
+        descriptor_floor_receipt::<D>(floor + 1).expect("one over descriptor floor admits");
+    let baseline = descriptor_floor_receipt::<D>(LIMITS.max_field_bytes())
+        .expect("baseline descriptor limit admits");
+    for admitted in [one_over, baseline] {
+        assert_eq!(exact.id(), admitted.id());
+        assert_eq!(exact.canonical_preimage(), admitted.canonical_preimage());
+        assert_eq!(exact.canonical_bytes(), admitted.canonical_bytes());
+    }
 }
 
 fn leaf(value: u64) -> fs_blake3::identity::IdentityReceipt<SemanticId<LeafV1>> {
@@ -2378,6 +2539,62 @@ fn ordered_row_stream_limits_refuse_before_hostile_producers() {
 }
 
 #[test]
+fn schema_descriptor_floor_is_typed_recursive_and_identity_neutral() {
+    assert_descriptor_floor_boundaries::<DescriptorDomainFloor>(SchemaDescriptorKind::Domain);
+    assert_descriptor_floor_boundaries::<DescriptorNameFloor>(SchemaDescriptorKind::Name);
+    assert_descriptor_floor_boundaries::<DescriptorContextFloor>(SchemaDescriptorKind::Context);
+    assert_descriptor_floor_boundaries::<DescriptorFieldNameFloor>(SchemaDescriptorKind::FieldName);
+
+    let recursive_floor = u64::try_from(DescriptorNestedChildFloor::CONTEXT.len())
+        .expect("static child descriptor length fits u64");
+    let supplied = recursive_floor
+        .checked_sub(1)
+        .expect("recursive descriptor floor is positive");
+    let recursive_error = CanonicalEncoder::<SemanticId<DescriptorNestedParent>, _>::new(
+        limits_with_max_field_bytes(supplied),
+        NeverCancel,
+    )
+    .expect_err("one-under a nested descriptor floor must refuse construction");
+    assert_eq!(
+        recursive_error,
+        CanonicalError::MaxFieldBytesBelowSchemaFloor {
+            binding: SchemaDescriptorKind::Context,
+            floor: recursive_floor,
+            supplied,
+        }
+    );
+    CanonicalEncoder::<SemanticId<DescriptorNestedParent>, _>::new(
+        limits_with_max_field_bytes(recursive_floor),
+        NeverCancel,
+    )
+    .expect("the exact recursive descriptor floor admits construction");
+}
+
+#[test]
+fn field_bytes_limit_exceeded_is_reserved_for_payloads_after_schema_admission() {
+    let (_, descriptor_floor) = top_level_descriptor_floor::<BytesLeaf>();
+    let payload_bytes = descriptor_floor
+        .checked_add(1)
+        .expect("fixture descriptor floor plus one fits u64");
+    let payload_len = usize::try_from(payload_bytes).expect("fixture payload length fits usize");
+    let payload = vec![0x5au8; payload_len];
+    let refusal = CanonicalEncoder::<SemanticId<BytesLeaf>, _>::new(
+        limits_with_max_field_bytes(descriptor_floor),
+        NeverCancel,
+    )
+    .expect("the exact schema descriptor floor admits construction")
+    .bytes(Field::new(0, "payload"), &payload);
+    assert!(matches!(
+        refusal,
+        Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested,
+            limit,
+        }) if requested == payload_bytes && limit == descriptor_floor
+    ));
+}
+
+#[test]
 fn invalid_parent_and_child_schema_descriptors_refuse_before_publication() {
     let invalid_limits = CanonicalLimits::new(1024, 256, 4, 4, 0);
     assert!(matches!(
@@ -2522,6 +2739,7 @@ fn budgets_do_not_move_an_admitted_identity() {
             .unwrap();
         assert_eq!(baseline.id(), admitted.id());
         assert_eq!(baseline.canonical_preimage(), admitted.canonical_preimage());
+        assert_eq!(baseline.canonical_bytes(), admitted.canonical_bytes());
     }
     let below = CanonicalLimits::new(
         baseline.canonical_bytes() - 1,

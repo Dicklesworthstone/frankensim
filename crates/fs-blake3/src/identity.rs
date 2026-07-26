@@ -1018,6 +1018,10 @@ pub struct CanonicalLimits {
 
 impl CanonicalLimits {
     /// Construct an explicit resource envelope.
+    ///
+    /// `max_field_bytes` must admit the longest domain, schema name, context,
+    /// or field name in the complete recursive schema descriptor. The encoder
+    /// checks that schema-specific floor before returning a usable value.
     #[must_use]
     pub const fn new(
         max_canonical_bytes: u64,
@@ -1041,7 +1045,11 @@ impl CanonicalLimits {
         self.max_canonical_bytes
     }
 
-    /// Maximum payload bytes for one field or collection item.
+    /// Maximum bytes for one schema-descriptor string, encoded field payload,
+    /// or collection item.
+    ///
+    /// Encoder construction refuses with a typed schema-descriptor error when
+    /// this value is below the binding descriptor-string length.
     #[must_use]
     pub const fn max_field_bytes(self) -> u64 {
         self.max_field_bytes
@@ -1078,7 +1086,7 @@ impl Default for CanonicalLimits {
 pub enum LimitKind {
     /// Complete canonical frame.
     CanonicalBytes,
-    /// One field or collection item.
+    /// One encoded field payload or collection item.
     FieldBytes,
     /// Fields in one schema descriptor or its bounded recursive expansion.
     Fields,
@@ -1086,6 +1094,48 @@ pub enum LimitKind {
     CollectionItems,
     /// Non-semantic chunk count in one streamed byte field.
     StreamChunks,
+}
+
+/// Static schema-descriptor term that binds the `max_field_bytes` floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchemaDescriptorKind {
+    /// [`CanonicalSchema::DOMAIN`].
+    Domain,
+    /// [`CanonicalSchema::NAME`].
+    Name,
+    /// [`CanonicalSchema::CONTEXT`].
+    Context,
+    /// One [`FieldSpec::name`].
+    FieldName,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SchemaDescriptorFloor {
+    kind: SchemaDescriptorKind,
+    required: u64,
+}
+
+impl SchemaDescriptorFloor {
+    fn observe(&mut self, kind: SchemaDescriptorKind, bytes: usize) -> Result<(), CanonicalError> {
+        let required = as_u64(bytes)?;
+        if required > self.required {
+            self.kind = kind;
+            self.required = required;
+        }
+        Ok(())
+    }
+
+    fn enforce(self, supplied: u64) -> Result<(), CanonicalError> {
+        if supplied < self.required {
+            Err(CanonicalError::MaxFieldBytesBelowSchemaFloor {
+                binding: self.kind,
+                floor: self.required,
+                supplied,
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Fail-closed canonical construction error.
@@ -1096,6 +1146,15 @@ pub enum LimitKind {
 pub enum CanonicalError {
     /// A resource envelope is internally invalid.
     InvalidLimits(&'static str),
+    /// `max_field_bytes` is below the complete schema descriptor's floor.
+    MaxFieldBytesBelowSchemaFloor {
+        /// Binding schema-descriptor term.
+        binding: SchemaDescriptorKind,
+        /// Minimum bytes required to admit that descriptor term.
+        floor: u64,
+        /// Caller-supplied `max_field_bytes`.
+        supplied: u64,
+    },
     /// A schema descriptor is empty or otherwise invalid.
     InvalidSchemaDescriptor(&'static str),
     /// Checked length arithmetic overflowed.
@@ -1177,6 +1236,15 @@ impl fmt::Display for CanonicalError {
             Self::InvalidLimits(reason) => {
                 write!(f, "invalid canonical identity limits: {reason}")
             }
+            Self::MaxFieldBytesBelowSchemaFloor {
+                binding,
+                floor,
+                supplied,
+            } => write!(
+                f,
+                "canonical identity max_field_bytes {supplied} is below schema-descriptor \
+                 floor {floor}, bound by {binding:?}"
+            ),
             Self::InvalidSchemaDescriptor(reason) => {
                 write!(f, "invalid canonical identity schema: {reason}")
             }
@@ -1828,7 +1896,12 @@ where
             fields: D::FIELDS,
         };
         let mut field_entries = 0u64;
-        self.validate_schema_descriptor(&source, 0, &mut field_entries)
+        let mut descriptor_floor = SchemaDescriptorFloor {
+            kind: SchemaDescriptorKind::Domain,
+            required: 0,
+        };
+        self.validate_schema_descriptor(&source, 0, &mut field_entries, &mut descriptor_floor)?;
+        descriptor_floor.enforce(self.limits.max_field_bytes)
     }
 
     fn validate_schema_descriptor(
@@ -1836,6 +1909,7 @@ where
         source: &SchemaDescriptorSource<'_>,
         depth: u32,
         field_entries: &mut u64,
+        descriptor_floor: &mut SchemaDescriptorFloor,
     ) -> Result<(), CanonicalError> {
         self.checkpoint()?;
         if source.domain.is_empty() || source.name.is_empty() || source.context.is_empty() {
@@ -1859,13 +1933,13 @@ where
             .checked_mul(u64::from(MAX_SCHEMA_CHILD_DEPTH) + 1)
             .ok_or(CanonicalError::LengthOverflow)?;
         enforce_limit(LimitKind::Fields, *field_entries, expansion_limit)?;
-        for descriptor in [source.domain, source.name, source.context] {
+        for (kind, descriptor) in [
+            (SchemaDescriptorKind::Domain, source.domain),
+            (SchemaDescriptorKind::Name, source.name),
+            (SchemaDescriptorKind::Context, source.context),
+        ] {
             self.checkpoint()?;
-            enforce_limit(
-                LimitKind::FieldBytes,
-                as_u64(descriptor.len())?,
-                self.limits.max_field_bytes,
-            )?;
+            descriptor_floor.observe(kind, descriptor.len())?;
         }
         for (index, field) in source.fields.iter().copied().enumerate() {
             self.checkpoint()?;
@@ -1874,11 +1948,7 @@ where
                     "field names must be non-empty",
                 ));
             }
-            enforce_limit(
-                LimitKind::FieldBytes,
-                as_u64(field.name.len())?,
-                self.limits.max_field_bytes,
-            )?;
+            descriptor_floor.observe(SchemaDescriptorKind::FieldName, field.name.len())?;
             for previous in &source.fields[..index] {
                 if self.compare_canonical_slices(previous.name.as_bytes(), field.name.as_bytes())?
                     == core::cmp::Ordering::Equal
@@ -1905,6 +1975,7 @@ where
                         },
                         depth + 1,
                         field_entries,
+                        descriptor_floor,
                     )?;
                 }
                 (WireType::Child | WireType::OrderedChildren, None) => {

@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use fs_blake3::identity::{
     CancellationProbe, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field,
-    FieldSpec, NoClaimState, SchemaId, SemanticId, SourceId, StrongIdentity, TrustState, WireType,
+    FieldSpec, NoClaimState, SchemaDescriptorKind, SchemaId, SemanticId, SourceId, StrongIdentity,
+    TrustState, WireType,
 };
 use fs_evidence::{
     Ambition, CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1, COLOR_ALGEBRA_VERSION,
@@ -4965,15 +4966,16 @@ fn sourced_certified_f64_identity_enforces_resources_and_cancellation() {
         .map(|field| field.name().len())
         .max()
         .unwrap_or(0);
-    let exact_field_len = [
-        SourceSchema::DOMAIN.len(),
-        SourceSchema::NAME.len(),
-        SourceSchema::CONTEXT.len(),
-        longest_declared_field,
-    ]
-    .into_iter()
-    .max()
-    .expect("source schema has descriptor fields");
+    let descriptor_terms = [
+        (SchemaDescriptorKind::Domain, SourceSchema::DOMAIN.len()),
+        (SchemaDescriptorKind::Name, SourceSchema::NAME.len()),
+        (SchemaDescriptorKind::Context, SourceSchema::CONTEXT.len()),
+        (SchemaDescriptorKind::FieldName, longest_declared_field),
+    ];
+    let (binding, exact_field_len) = descriptor_terms
+        .into_iter()
+        .max_by_key(|(_, bytes)| *bytes)
+        .expect("source schema has descriptor fields");
     let exact_field_bytes =
         u64::try_from(exact_field_len).expect("static schema descriptor length fits u64");
     let one_less_field_bytes = exact_field_bytes
@@ -5004,12 +5006,14 @@ fn sourced_certified_f64_identity_enforces_resources_and_cancellation() {
             || false,
         ),
         Err(CertifiedF64SourceIdentityError::Canonical(
-            CanonicalError::LimitExceeded {
-                kind: fs_blake3::identity::LimitKind::FieldBytes,
-                requested,
-                limit,
+            CanonicalError::MaxFieldBytesBelowSchemaFloor {
+                binding: refused_binding,
+                floor,
+                supplied,
             }
-        )) if requested == exact_field_bytes && limit == one_less_field_bytes
+        )) if refused_binding == binding
+            && floor == exact_field_bytes
+            && supplied == one_less_field_bytes
     ));
     assert!(matches!(
         identify_certified_f64_source_v1(

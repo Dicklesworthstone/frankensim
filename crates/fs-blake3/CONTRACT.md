@@ -45,9 +45,14 @@ without gaining solver, geometry, FFI, or license surface.
   non-interchangeable. Strict parsing checks byte shape only and adds no trust.
   In v1, explicit optional encoding is exposed only for `Bytes` through
   `optional_bytes`.
-- `CanonicalEncoder`, `CanonicalLimits`, and `CanonicalError` — streaming,
-  fail-closed construction under explicit frame, field, per-schema field-count,
-  recursive schema-expansion, collection/chunk, and cancellation-poll budgets.
+- `CanonicalEncoder`, `CanonicalLimits`, `SchemaDescriptorKind`, and
+  `CanonicalError` — streaming, fail-closed construction under explicit frame,
+  field, per-schema field-count, recursive schema-expansion, collection/chunk,
+  and cancellation-poll budgets. `max_field_bytes` must admit the longest
+  domain, name, context, or field name across the complete recursively bound
+  schema descriptor. A one-under cap returns a distinct typed construction
+  error naming the binding term, exact floor, and supplied cap; payload
+  overruns remain `LimitExceeded { kind: FieldBytes, .. }`.
   Defaults are a 1 MiB frame, 256 KiB field, 256 fields per descriptor, 16,384
   items per collection or chunks per streamed byte field, and a 4,096-byte
   cancellation poll stride. `CanonicalEncoder` admission of a recursive
@@ -170,6 +175,16 @@ without gaining solver, geometry, FFI, or license surface.
   32 digest bytes.
 - Finite `f64` values are encoded by exact IEEE-754 bits. Signed zero remains
   distinct. NaN and infinities refuse before publication.
+- Schema admission computes the global descriptor-string floor across the
+  complete depth-capped child-binding graph in the same bounded,
+  cancellation-polled traversal that validates its structure. Cancellation,
+  malformed descriptors, and schema-expansion budget refusals remain
+  authoritative during that traversal. For a structurally admitted schema, a
+  `max_field_bytes` value equal to the floor admits; a value below it refuses
+  before header or caller payload absorption through
+  `MaxFieldBytesBelowSchemaFloor`. Once the descriptor is admitted,
+  `LimitExceeded { kind: FieldBytes, .. }` is reserved for actual encoded
+  field, row, or collection-item payload limits.
 - Successful construction publishes both a derive-key typed ID and a plain
   BLAKE3 root of the complete canonical frame. Resource budgets are retained
   receipt metadata. Neither budgets nor a successful cancellation schedule are
@@ -255,9 +270,12 @@ without gaining solver, geometry, FFI, or license surface.
 
 Compatibility parsers (`from_hex`, `from_slice`) return `Option` and refuse
 malformed input with `None`. Canonical construction returns `CanonicalError`
-for invalid limits or schemas, arithmetic overflow, resource limits, field
-mismatch or incompleteness, declared-length mismatch, nonfinite floats,
-invalid set order or duplicates, and cancellation. No partial identity is
+for invalid limits or schemas, a schema-specific `max_field_bytes` value below
+the recursive descriptor floor, arithmetic overflow, resource limits, field
+mismatch or incompleteness, declared-length mismatch, nonfinite floats, invalid
+set order or duplicates, and cancellation. The descriptor-floor refusal
+retains `SchemaDescriptorKind`, the exact required floor, and the supplied cap;
+it is never reported as a caller-payload overrun. No partial identity is
 published on any of these paths. `ordered_bytes_stream` instead returns
 `OrderedBytesStreamError<E>` so exact length-source and row-producer errors
 remain distinct from canonical failures; both variants carry structured
@@ -351,9 +369,12 @@ multi-chunk / multi-level tree vectors continue to run in fs-ledger's
 `tests/identity.rs` covers independent manual frame/schema parity and mutation
 sensitivity; explicit tags and roles; field, schema, role, and child
 non-confusability; exact-finite float policy; ordered/set/stream encodings;
-hostile bounds and invalid schemas; collision refusal; authority transitions
-and refusals; bounded audit records; typed parsing; legacy quarantine; and
-compatibility behavior. Cancellation regression cases include
+hostile bounds and invalid schemas; four-way plus recursive-child
+schema-descriptor floor admission at one-under/exact/one-over boundaries;
+typed separation of descriptor admission from payload `FieldBytes` refusal;
+identity stability across admitted floors; collision refusal; authority
+transitions and refusals; bounded audit records; typed parsing; legacy
+quarantine; and compatibility behavior. Cancellation regression cases include
 `cancellation_at_every_checkpoint_publishes_no_partial_identity` and
 `cancellation_covers_schema_validation_and_long_set_comparisons`. Ordered-row
 G0/G3/G4/G5 cases compare whole receipts and an independent manual frame;
