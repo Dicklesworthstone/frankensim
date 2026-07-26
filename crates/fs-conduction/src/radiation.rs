@@ -83,6 +83,7 @@ pub struct SurfaceEmissivity {
     value: f64,
     uncertainty: UncertaintyModel,
     temperature_k: f64,
+    temperature_validity_k: Option<(f64, f64)>,
     card_identity: ContentHash,
     material_state: String,
     receipt: PropertyUsageReceipt,
@@ -150,6 +151,7 @@ impl SurfaceEmissivity {
             value: sample.value,
             uncertainty: sample.uncertainty.clone(),
             temperature_k,
+            temperature_validity_k: answer.evidence.model.validity.bound(TEMPERATURE_AXIS),
             card_identity: card.content_hash(),
             material_state: card.id().to_string(),
             receipt: answer.receipt,
@@ -166,6 +168,14 @@ impl SurfaceEmissivity {
     #[must_use]
     pub const fn temperature_k(&self) -> f64 {
         self.temperature_k
+    }
+
+    /// Selected claim's closed temperature-validity interval, K.
+    ///
+    /// `None` means the selected claim did not constrain temperature.
+    #[must_use]
+    pub const fn temperature_validity_k(&self) -> Option<(f64, f64)> {
+        self.temperature_validity_k
     }
 
     /// Source uncertainty; `Unstated` remains an explicit unknown.
@@ -190,6 +200,28 @@ impl SurfaceEmissivity {
     #[must_use]
     pub const fn receipt(&self) -> &PropertyUsageReceipt {
         &self.receipt
+    }
+
+    fn validate_temperature(
+        &self,
+        surface_name: &str,
+        field: &'static str,
+        temperature_k: f64,
+    ) -> Result<(), ConductionError> {
+        require_temperature(surface_name, field, temperature_k)?;
+        if let Some((lower_k, upper_k)) = self.temperature_validity_k
+            && !(lower_k..=upper_k).contains(&temperature_k)
+        {
+            return Err(radiation_error(
+                surface_name,
+                format!(
+                    "{field} {temperature_k} K is outside the selected emissivity claim's \
+                     retained validity [{lower_k}, {upper_k}] K"
+                ),
+                "supply an in-domain surface temperature or resolve a different emissivity claim",
+            ));
+        }
+        Ok(())
     }
 
     fn half_width(&self) -> Option<(f64, f64)> {
@@ -258,12 +290,16 @@ impl LinearizedSurfaceRadiation {
                 "name the linearized radiation model",
             ));
         }
-        require_temperature(
+        emissivity.validate_temperature(
             &surface_name,
             "linearization mean temperature",
             mean_temperature_k,
         )?;
-        require_temperature(&surface_name, "ambient temperature", ambient_temperature_k)?;
+        emissivity.validate_temperature(
+            &surface_name,
+            "ambient temperature",
+            ambient_temperature_k,
+        )?;
         if !(max_abs_departure_k.is_finite() && max_abs_departure_k > 0.0) {
             return Err(radiation_error(
                 &surface_name,
@@ -294,7 +330,7 @@ impl LinearizedSurfaceRadiation {
         &self,
         surface_temperature_k: f64,
     ) -> Result<LinearizedRadiationPoint, ConductionError> {
-        require_temperature(
+        self.emissivity.validate_temperature(
             &self.surface_name,
             "surface temperature",
             surface_temperature_k,
@@ -885,7 +921,7 @@ impl GrayDiffuseEnclosure {
                 stage: "radiation-radiosity-assemble",
                 at: i,
             })?;
-            require_temperature(
+            self.surfaces[i].emissivity.validate_temperature(
                 self.surfaces[i].name(),
                 "gray-diffuse surface temperature",
                 surface_temperatures_k[i],
@@ -1110,6 +1146,13 @@ pub fn solve_with_gray_diffuse_enclosure(
         let next = run_conduction(cx, next_problem, interfaces, next_config)?;
         let actual_temperatures =
             enclosure.surface_temperatures(problem.mesh, &next.temperature)?;
+        for (surface, &temperature_k) in enclosure.surfaces.iter().zip(&actual_temperatures) {
+            surface.emissivity.validate_temperature(
+                surface.name(),
+                "coupled surface temperature",
+                temperature_k,
+            )?;
+        }
         let update = actual_temperatures
             .iter()
             .zip(&driving_temperatures)

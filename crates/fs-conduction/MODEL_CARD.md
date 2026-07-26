@@ -57,17 +57,20 @@ detail:
 8. **Contact is never implicit.** A coincident duplicated P1 trace must be
    bound to one positive card-backed area-specific resistance; otherwise the
    contact solve refuses. Perfect contact is not inferred.
-9. **Gray-diffuse radiation is surface-only.** Each named trace has one
-   hemispherical-total emissivity, surfaces are opaque and diffuse, and the
-   enclosure matrix is fixed. Participating media, spectral/specular effects,
-   and geometry-derived visibility are outside this model.
+9. **Gray-diffuse radiation is surface-only and isothermal per named trace.**
+   Each trace has one hemispherical-total emissivity, surfaces are opaque and
+   diffuse, and the enclosure matrix is fixed. The implementation replaces the
+   P₁ trace field by its exact area-mean temperature and applies
+   `T_surface_mean⁴` uniformly. It does not estimate the generally nonzero gap
+   `area_mean(T⁴) - area_mean(T)⁴`. Participating media, spectral/specular
+   effects, and geometry-derived visibility are outside this model.
 
 ## Validity domain
 
 | axis | bound | set by |
 | --- | --- | --- |
 | `T` | the sampled conductivity span `[low, high]` K | `ConductivityTable::from_claims`, from the declared grid; the intersection over components is `ConductivityModel::temperature_span()` |
-| radiation `T` | the emissivity card's validity domain; for a linearized row, additionally `|T_s - T_mean| <= max_departure` | `SurfaceEmissivity::from_card` and `LinearizedSurfaceRadiation` |
+| radiation `T` | the selected emissivity claim's retained validity interval; for a linearized row, additionally `|T_s - T_mean| <= max_departure` | `SurfaceEmissivity::from_card` retains the interval; linearized construction/evaluation and every radiosity/coupled surface temperature check it |
 | view factors | each row closes within its admitted absolute tolerance and `A_i F_ij = A_j F_ji` within its admitted relative tolerance | `ViewFactorMatrix::admit` |
 | everything else | unconstrained | no other axis is constrained by this crate |
 
@@ -81,6 +84,12 @@ claims' own `ValidityDomain`: a grid point outside it never produces a knot,
 because the query refuses first. The retained receipts record exactly which
 claims were considered, which was selected under which policy, and how each
 value was evaluated.
+
+Radiation follows the same fail-closed rule after the initial property query.
+`SurfaceEmissivity` retains the selected claim's `T` interval. Linearization
+mean, ambient, and evaluated surface temperatures must remain inside it; a
+gray-diffuse solve checks every driving temperature, and the coupled path also
+checks each newly solved surface mean before accepting or relaxing it.
 
 ## Known failure modes
 
@@ -108,9 +117,12 @@ value was evaluated.
    cannot resolve a thermal boundary layer thinner than an element. Nothing in
    the report detects this; the residual will be small and the answer wrong.
 7. **A linearized radiation row used too far from its mean.** The constructor
-   requires a finite departure budget and evaluation outside it refuses. Inside
-   the domain, the report still exposes the measured difference from the full
-   `T⁴` law; the linearization is not silently relabelled exact.
+   requires a finite caller-declared departure budget and evaluation outside it
+   refuses. That budget is an admission choice, not a derived accuracy bound:
+   a caller can declare a very wide interval whose linearized and full `T⁴`
+   fluxes differ by orders of magnitude. Every admitted point therefore reports
+   their measured difference; the linearization is not silently relabelled
+   accurate or exact.
 8. **An invalid enclosure matrix or exhausted outer fixed point.** Non-finite,
    out-of-range, non-closing, nonreciprocal, or area-mismatched view factors
    refuse before solving. Coupled conduction refuses if its declared
@@ -146,12 +158,19 @@ INTERPOLATION error rather than of the scheme.
 
 | tier | status | where |
 | --- | --- | --- |
-| G0 algebraic laws | green | `tests/conformance.rs` plus `tests/contact.rs` and `tests/radiation.rs` (card receipts, view-factor row/reciprocity admission, unequal-area three-surface enclosure balance, typed refusals) |
+| G0 algebraic laws | green | `tests/conformance.rs` plus `tests/contact.rs` and `tests/radiation.rs` (card/validity retention, view-factor row/reciprocity/area admission, unequal-area three-surface enclosure balance, singular-system, occupied-row, cancellation, and exhausted-budget refusals) |
 | G1 manufactured solutions | green, 5 ladders | `tests/mms.rs` |
-| G2 canonical benchmarks | partial | `tests/analytic.rs` and `tests/radiation.rs`: slab, slab+source, Dirichlet–Robin slab, cylindrical/spherical shells, straight fin, and two-surface radiosity with a caller-declared limiting matrix — closed forms, not a community benchmark suite; no geometry kernel computes the parallel-plate view factor |
+| G2 canonical benchmarks | partial | `tests/analytic.rs`: slab, slab+source, Dirichlet–Robin slab, cylindrical/spherical shells, and straight fin — closed forms, not a community benchmark suite |
 | G3 metamorphic | not run | no metamorphic battery exists for this crate |
 | G4 cancellation | green | `tests/conformance.rs` cancellation drills plus radiation radiosity/coupling refusal checks |
 | G5 determinism | partial | same-ISA conduction replay and snapshot-resume are bitwise; calling the pure radiosity solve twice is not separate determinism evidence, and there is no registered golden or cross-ISA audit |
+
+The two-surface radiation cases are algebra and coupling harnesses, not G2
+geometry benchmarks. One binds opposite exterior faces of a solid cube to the
+literal `F₁₂ = F₂₁ = 1`; the other binds separated finite slabs to that same
+matrix. Those view factors are deliberately not derived from, and are false for,
+the fixture geometries. The tests exercise the caller-declared radiosity
+operator and outer fixed point only.
 
 ## Maturity
 

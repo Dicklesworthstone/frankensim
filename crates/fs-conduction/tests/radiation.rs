@@ -2,7 +2,7 @@
 
 mod support;
 
-use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
+use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::material::ConductivityModel;
@@ -25,6 +25,16 @@ use fs_rep_mesh::TetComplex;
 use support::{with_cancelled_cx, with_cx};
 
 fn emissivity_card(value: f64, uncertainty: UncertaintyModel, finish: &str) -> MaterialCard {
+    emissivity_card_with_temperature_domain(value, uncertainty, finish, 250.0, 500.0)
+}
+
+fn emissivity_card_with_temperature_domain(
+    value: f64,
+    uncertainty: UncertaintyModel,
+    finish: &str,
+    lower_temperature_k: f64,
+    upper_temperature_k: f64,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -33,7 +43,11 @@ fn emissivity_card(value: f64, uncertainty: UncertaintyModel, finish: &str) -> M
                 value,
                 dims: EMISSIVITY_DIMS,
             },
-            validity: ValidityDomain::unconstrained().with("T", 250.0, 500.0),
+            validity: ValidityDomain::unconstrained().with(
+                "T",
+                lower_temperature_k,
+                upper_temperature_k,
+            ),
             uncertainty,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: Vec::new(),
@@ -58,17 +72,39 @@ fn emissivity_card(value: f64, uncertainty: UncertaintyModel, finish: &str) -> M
 }
 
 fn emissivity(name: &str, value: f64, finish: &str) -> SurfaceEmissivity {
+    emissivity_with_temperature_domain(
+        name,
+        value,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.01,
+            confidence: 0.95,
+        },
+        finish,
+        350.0,
+        250.0,
+        500.0,
+    )
+}
+
+fn emissivity_with_temperature_domain(
+    name: &str,
+    value: f64,
+    uncertainty: UncertaintyModel,
+    finish: &str,
+    query_temperature_k: f64,
+    lower_temperature_k: f64,
+    upper_temperature_k: f64,
+) -> SurfaceEmissivity {
     SurfaceEmissivity::from_card(
         name,
-        &emissivity_card(
+        &emissivity_card_with_temperature_domain(
             value,
-            UncertaintyModel::HalfWidth {
-                half_width: 0.01,
-                confidence: 0.95,
-            },
+            uncertainty,
             finish,
+            lower_temperature_k,
+            upper_temperature_k,
         ),
-        350.0,
+        query_temperature_k,
         SelectionPolicy::SingleClaimOnly,
     )
     .expect("emissivity resolves")
@@ -106,10 +142,10 @@ fn fourth_power(value: f64) -> f64 {
 
 /// Independent scalar reference for the two-slab fixture.
 ///
-/// `overlay_gain = 1` is the physical coupling. `overlay_gain = 2` is the
+/// `overlay_gain = 1` is the declared algebraic coupling. `overlay_gain = 2` is the
 /// previously surviving production mutant that doubled the radiosity flux
 /// before applying it to conduction.
-fn analytic_two_slab_equilibrium(overlay_gain: f64) -> (f64, f64, f64) {
+fn independent_two_slab_equilibrium(overlay_gain: f64) -> (f64, f64, f64) {
     const HOT_RESERVOIR_K: f64 = 400.0;
     const COLD_RESERVOIR_K: f64 = 300.0;
     const SLAB_CONDUCTANCE_W_K: f64 = 20.0;
@@ -200,6 +236,36 @@ fn linearized_robin_retains_card_and_measures_t4_discrepancy() {
 }
 
 #[test]
+fn linearization_departure_is_a_caller_budget_not_an_accuracy_bound() {
+    let card = emissivity_card_with_temperature_domain(
+        0.8,
+        UncertaintyModel::Unstated,
+        "deliberately-wide-linearization",
+        1.0,
+        10_000.0,
+    );
+    let emissivity = SurfaceEmissivity::from_card(
+        "wide-budget",
+        &card,
+        320.0,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("broad card query");
+    assert_eq!(emissivity.temperature_validity_k(), Some((1.0, 10_000.0)));
+    let model = LinearizedSurfaceRadiation::new("wide-budget", emissivity, 320.0, 310.0, 5_000.0)
+        .expect("the caller may declare a wide departure budget");
+    let point = model
+        .evaluate(5_000.0)
+        .expect("evaluation lies inside both caller and material domains");
+
+    assert!(point.discrepancy_w_m2 > 1.0e6);
+    assert!(
+        point.nonlinear_outward_flux_w_m2.abs() > 100.0 * point.linearized_outward_flux_w_m2.abs(),
+        "admission by the caller's departure budget must not imply accuracy"
+    );
+}
+
+#[test]
 fn parallel_plate_literal_constructor_is_admitted_but_not_an_execution_binding() {
     let matrix = ViewFactorMatrix::infinite_parallel_plates(2.5).expect("analytic matrix");
     assert_eq!(matrix.factors(), &[vec![0.0, 1.0], vec![1.0, 0.0]]);
@@ -242,6 +308,26 @@ fn parallel_plate_literal_constructor_is_admitted_but_not_an_execution_binding()
         incomplete_qmc,
         Err(ConductionError::Radiation { .. })
     ));
+}
+
+#[test]
+fn view_factor_admission_refuses_a_non_closing_row() {
+    let refusal = ViewFactorMatrix::admit(
+        vec![1.0, 1.0],
+        vec![vec![0.0, 0.9], vec![1.0, 0.0]],
+        ViewFactorEvidence::Analytic {
+            geometry: "deliberately-non-closing-algebra-fixture".to_string(),
+        },
+        ViewFactorTolerance::default(),
+    );
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "a non-closing row must refuse through the radiation boundary"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "view-factor-row-0");
+        assert!(what.contains("row sum"));
+    }
 }
 
 #[test]
@@ -333,27 +419,126 @@ fn three_surface_unequal_area_radiosity_has_nontrivial_energy_closure() {
 }
 
 fn opposite_surfaces() -> (ConductionMesh, RadiationSurface, RadiationSurface) {
+    opposite_surfaces_with_emissivities(
+        emissivity("left", 0.8, "matte-left"),
+        emissivity("right", 0.6, "matte-right"),
+    )
+}
+
+// These cube faces are mesh/trace carriers for radiosity algebra only. Binding
+// them later to literal infinite-plate factors is deliberately not a geometric
+// view-factor claim for the solid cube.
+fn opposite_surfaces_with_emissivities(
+    left_emissivity: SurfaceEmissivity,
+    right_emissivity: SurfaceEmissivity,
+) -> (ConductionMesh, RadiationSurface, RadiationSurface) {
     let (complex, positions) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
     let mesh = ConductionMesh::new(complex, positions).expect("mesh");
     let left = RadiationSurface::new(
         &mesh,
         "left",
         |face| on_box_face(face.centroid[0], 0.0),
-        emissivity("left", 0.8, "matte-left"),
+        left_emissivity,
     )
     .expect("left surface");
     let right = RadiationSurface::new(
         &mesh,
         "right",
         |face| on_box_face(face.centroid[0], 1.0),
-        emissivity("right", 0.6, "matte-right"),
+        right_emissivity,
     )
     .expect("right surface");
     (mesh, left, right)
 }
 
 #[test]
-fn two_surface_gray_diffuse_radiosity_matches_closed_form_and_replays() {
+fn enclosure_binding_refuses_view_factor_area_mismatch() {
+    let (_mesh, left, right) = opposite_surfaces();
+    let matrix = ViewFactorMatrix::infinite_parallel_plates(1.01 * left.area_m2()).expect("matrix");
+    let refusal = GrayDiffuseEnclosure::new(vec![left, right], matrix);
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "matrix and trace areas must bind exactly within admission tolerance"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "left");
+        assert!(what.contains("view-factor area"));
+        assert!(what.contains("mesh trace area"));
+    }
+}
+
+#[test]
+fn radiosity_refuses_the_near_zero_emissivity_singular_limit() {
+    let left = emissivity_with_temperature_domain(
+        "left",
+        f64::MIN_POSITIVE,
+        UncertaintyModel::Unstated,
+        "near-zero-left",
+        350.0,
+        250.0,
+        500.0,
+    );
+    let right = emissivity_with_temperature_domain(
+        "right",
+        f64::MIN_POSITIVE,
+        UncertaintyModel::Unstated,
+        "near-zero-right",
+        350.0,
+        250.0,
+        500.0,
+    );
+    let (_mesh, left, right) = opposite_surfaces_with_emissivities(left, right);
+    let matrix = ViewFactorMatrix::infinite_parallel_plates(left.area_m2()).expect("matrix");
+    let enclosure = GrayDiffuseEnclosure::new(vec![left, right], matrix).expect("enclosure");
+    let refusal = with_cx(|cx| enclosure.solve(cx, &[400.0, 300.0]));
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "the emissivity-to-zero limiting operator must refuse as singular"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "radiosity-system");
+        assert!(what.contains("pivot 1"));
+    }
+}
+
+#[test]
+fn radiosity_refuses_temperatures_outside_retained_emissivity_validity() {
+    let left = emissivity_with_temperature_domain(
+        "left",
+        0.8,
+        UncertaintyModel::Unstated,
+        "narrow-left",
+        350.0,
+        340.0,
+        360.0,
+    );
+    assert_eq!(left.temperature_validity_k(), Some((340.0, 360.0)));
+    let right = emissivity_with_temperature_domain(
+        "right",
+        0.6,
+        UncertaintyModel::Unstated,
+        "narrow-right",
+        350.0,
+        340.0,
+        360.0,
+    );
+    let (_mesh, left, right) = opposite_surfaces_with_emissivities(left, right);
+    let matrix = ViewFactorMatrix::infinite_parallel_plates(left.area_m2()).expect("matrix");
+    let enclosure = GrayDiffuseEnclosure::new(vec![left, right], matrix).expect("enclosure");
+    let refusal = with_cx(|cx| enclosure.solve(cx, &[365.0, 350.0]));
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "radiosity must not extrapolate retained emissivity"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "left");
+        assert!(what.contains("365 K"));
+        assert!(what.contains("[340, 360] K"));
+    }
+}
+
+#[test]
+fn two_surface_gray_diffuse_radiosity_algebra_matches_closed_form_and_replays() {
     let (_mesh, left, right) = opposite_surfaces();
     assert_eq!(left.area_m2().to_bits(), right.area_m2().to_bits());
     let matrix = ViewFactorMatrix::infinite_parallel_plates(left.area_m2()).expect("matrix");
@@ -400,27 +585,29 @@ fn two_disconnected_slabs() -> ConductionMesh {
     ConductionMesh::new(TetComplex::from_tets(positions_a.len(), tets), positions_a).expect("mesh")
 }
 
-#[test]
-fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
-    let mesh = two_disconnected_slabs();
+fn two_slab_enclosure(mesh: &ConductionMesh) -> GrayDiffuseEnclosure {
     let hot_surface = RadiationSurface::new(
-        &mesh,
+        mesh,
         "hot-facing",
         |face| on_box_face(face.centroid[0], 0.5),
         emissivity("hot-facing", 0.8, "oxidized-hot"),
     )
     .expect("hot surface");
     let cold_surface = RadiationSurface::new(
-        &mesh,
+        mesh,
         "cold-facing",
         |face| on_box_face(face.centroid[0], 1.5),
         emissivity("cold-facing", 0.8, "oxidized-cold"),
     )
     .expect("cold surface");
+    // The finite, separated slab faces are trace carriers. F12 = F21 = 1 is a
+    // caller-declared algebra fixture and is geometrically false for them.
     let matrix = ViewFactorMatrix::infinite_parallel_plates(hot_surface.area_m2()).expect("matrix");
-    let enclosure =
-        GrayDiffuseEnclosure::new(vec![hot_surface, cold_surface], matrix).expect("enclosure");
-    let boundary = ThermalBoundaryBuilder::new(&mesh)
+    GrayDiffuseEnclosure::new(vec![hot_surface, cold_surface], matrix).expect("enclosure")
+}
+
+fn two_slab_boundary(mesh: &ConductionMesh, occupy_hot_radiation_face: bool) -> ThermalBoundary {
+    let builder = ThermalBoundaryBuilder::new(mesh)
         .region(
             "hot-reservoir",
             |face| on_box_face(face.centroid[0], 0.0),
@@ -432,10 +619,26 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
             |face| on_box_face(face.centroid[0], 2.0),
             ThermalBc::dirichlet(300.0).expect("cold bc"),
         )
-        .expect("cold region")
-        .adiabatic_remainder()
-        .finish()
-        .expect("boundary");
+        .expect("cold region");
+    let builder = if occupy_hot_radiation_face {
+        builder
+            .region(
+                "preexisting-hot-facing-robin",
+                |face| on_box_face(face.centroid[0], 0.5),
+                ThermalBc::robin(5.0, 300.0).expect("occupied Robin row"),
+            )
+            .expect("occupied radiation face")
+    } else {
+        builder
+    };
+    builder.adiabatic_remainder().finish().expect("boundary")
+}
+
+#[test]
+fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
+    let mesh = two_disconnected_slabs();
+    let enclosure = two_slab_enclosure(&mesh);
+    let boundary = two_slab_boundary(&mesh, false);
     let material = ConductivityModel::isotropic_declared(10.0).expect("material");
     let source = ScalarField::Uniform(0.0);
     let solution = with_cx(|cx| {
@@ -466,7 +669,7 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
         .expect("outer update");
     assert!(update <= solution.radiation.final_threshold_k);
     let (expected_hot_surface_k, expected_cold_surface_k, expected_heat_w) =
-        analytic_two_slab_equilibrium(1.0);
+        independent_two_slab_equilibrium(1.0);
     let actual_surface_temperatures = enclosure
         .surfaces()
         .iter()
@@ -508,8 +711,8 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
 
     // Executable negative control for the exact mutant that previously
     // survived: applying twice the radiosity flux moves both equilibrium
-    // temperatures far beyond the accepted analytic envelope.
-    let (doubled_hot_surface_k, doubled_cold_surface_k, _) = analytic_two_slab_equilibrium(2.0);
+    // temperatures far beyond the accepted declared scalar-model envelope.
+    let (doubled_hot_surface_k, doubled_cold_surface_k, _) = independent_two_slab_equilibrium(2.0);
     assert!(
         (doubled_hot_surface_k - expected_hot_surface_k).abs() > 1_000.0 * temperature_tolerance_k
     );
@@ -532,6 +735,77 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
         solution.radiation.radiosity.net_outward_heat_w[0],
         coupled_energy_closure
     );
+}
+
+#[test]
+fn gray_diffuse_outer_fixed_point_refuses_an_exhausted_budget() {
+    let mesh = two_disconnected_slabs();
+    let enclosure = two_slab_enclosure(&mesh);
+    let boundary = two_slab_boundary(&mesh, false);
+    let material = ConductivityModel::isotropic_declared(10.0).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let refusal = with_cx(|cx| {
+        solve_with_gray_diffuse_enclosure(
+            cx,
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            None,
+            &enclosure,
+            config(),
+            CoupledRadiationConfig {
+                surface_temperature_rtol: 0.0,
+                surface_temperature_atol_k: 0.0,
+                relaxation: 0.1,
+                max_iterations: 1,
+            },
+        )
+    });
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "one deliberately under-relaxed iteration must exhaust its outer budget"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "coupling");
+        assert!(what.contains("did not converge in 1 iterations"));
+        assert!(what.contains("final update"));
+    }
+}
+
+#[test]
+fn radiation_overlay_refuses_a_preexisting_robin_row() {
+    let mesh = two_disconnected_slabs();
+    let enclosure = two_slab_enclosure(&mesh);
+    let boundary = two_slab_boundary(&mesh, true);
+    let material = ConductivityModel::isotropic_declared(10.0).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let refusal = with_cx(|cx| {
+        solve_with_gray_diffuse_enclosure(
+            cx,
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            None,
+            &enclosure,
+            config(),
+            CoupledRadiationConfig::default(),
+        )
+    });
+    assert!(
+        matches!(&refusal, Err(ConductionError::Radiation { .. })),
+        "radiation must never overwrite a preexisting physical boundary row"
+    );
+    if let Err(ConductionError::Radiation { surface, what, .. }) = refusal {
+        assert_eq!(surface, "hot-facing");
+        assert!(what.contains("already carries region"));
+        assert!(what.contains("preexisting-hot-facing-robin"));
+    }
 }
 
 #[test]

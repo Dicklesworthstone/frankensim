@@ -264,8 +264,10 @@ workstream.
 
 - Added card-backed hemispherical-total emissivity with an explicit material
   state, immutable card identity, exact property-use receipt, validity-domain
-  query temperature, and source uncertainty statement. Missing, ambiguous,
-  dimensionally wrong, non-physical, or out-of-domain properties refuse.
+  query temperature, retained selected-claim temperature interval, and source
+  uncertainty statement. Linearized and gray-diffuse use outside that retained
+  interval now refuses. Missing, ambiguous, dimensionally wrong, non-physical,
+  or out-of-domain properties refuse.
 - Added a validity-bounded surface-to-ambient linearization
   `h_rad = 4 ε σ T_mean³`. Each evaluation returns the exact Robin row consumed
   by conduction, the full `ε σ (T_s⁴ - T_a⁴)` comparison, their pointwise
@@ -280,9 +282,11 @@ workstream.
   under-relaxed conduction coupling. Surface bindings retain an exact mesh
   identity, flux overlays may replace only explicit adiabatic-remainder faces,
   and the reports expose radiosity residuals, enclosure heat closure, fixed-point
-  updates, and convergence thresholds. The two-surface analytic fixture
-  produced `517.7298382565217 W/m²` with zero measured enclosure-energy
-  residual in the focused remote run.
+  updates, and convergence thresholds. The two-surface radiosity algebra
+  harness, with caller-declared `F₁₂ = F₂₁ = 1` that is geometrically false for
+  its cube-face trace carriers, produced `517.7298382565217 W/m²` with zero
+  measured enclosure-energy residual in the focused remote run. It is not an
+  analytic view-factor or G2 geometry benchmark.
 - Bound `thermal-a-parallel-plate-view-factor` to the executing radiation
   battery and raised aggregate Level-A execution coverage from 14/19 to 15/19.
   Four gaps remain: P2 primal, combined anisotropic-nonlinear MMS, and the P1/P2
