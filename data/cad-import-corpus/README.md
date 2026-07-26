@@ -77,6 +77,54 @@ mismatch count remains a separate regression signal. Do not edit this artifact
 by hand: regenerate it from the sweep whenever the manifest, retained bytes,
 import implementation, or annotation authority changes.
 
+## Human annotation review runbook
+
+The reviewer must judge the retained bytes, source provenance, importer receipt,
+quality tier, and expected outcome independently. The importer's observed
+outcome is evidence for that judgment, not authority to approve itself. An AI
+agent may prepare receipts or propose manifest text, but it must not identify
+itself as the human reviewer or change `review_state` to `human-locked`.
+
+From a stable checkout, replay the deterministic sweep with its canonical
+machine-readable output visible:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test" \
+  cargo test -j 2 --locked -p fs-io --test supplier_corpus -- --nocapture
+```
+
+The test prints one `supplier_corpus_scorecard=` line containing the full
+per-file receipts and one `supplier_corpus_summary=` line containing the exact
+compact projection. The output is emitted before the assertions that pin the
+current annotation phase, so it remains available when a deliberate authority
+transition makes those assertions or the tracked summary stale.
+
+For every row the reviewer accepts:
+
+1. confirm or correct `quality_tier`, `expected_outcome`, and
+   `expected_detail` from the evidence;
+2. set `review_state` to `human-locked`;
+3. record an identified human in `reviewer`, a calendar-valid `YYYY-MM-DD` in
+   `reviewed_at`, and a positive `annotation_revision`;
+4. replace the proposal note with a justification that explains the reviewed
+   judgment and any changed tier or golden outcome.
+
+After review, replay the sweep. Update the phase-specific assertions in
+`crates/fs-io/tests/supplier_corpus.rs` only to describe the independently
+reviewed state, and replace `scorecard-summary-v1.json` only with the exact JSON
+from the emitted `supplier_corpus_summary=` line. Replay until the focused test
+passes, then regenerate and check the dashboard consumer:
+
+```bash
+cargo run --locked -p xtask -- generate-program-metrics
+cargo run --locked -p xtask -- check-program-metrics
+```
+
+Review the manifest, focused-test assertion changes, compact summary, and
+dashboard diff together. A passing replay cannot substitute for identified
+human judgment, and a dashboard update cannot broaden this corpus's authority.
+
 This retained population measures only itself. Its clean, repaired, and refused
 rates are not universal supplier-CAD success probabilities, and its sampled
 intersection census is diagnostic evidence rather than a certificate of

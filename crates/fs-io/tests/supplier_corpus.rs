@@ -121,6 +121,7 @@ fn g2_g5_real_supplier_sweep_is_population_complete_and_deterministic() {
     let first = run();
     let second = run();
     println!("supplier_corpus_scorecard={}", first.to_json());
+    println!("supplier_corpus_summary={}", first.summary_json());
     assert_eq!(first, second);
     assert_eq!(first.artifact_identity(), second.artifact_identity());
     assert_eq!(first.to_json(), second.to_json());
