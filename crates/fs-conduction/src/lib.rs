@@ -67,10 +67,10 @@ pub mod material;
 pub mod mesh;
 pub mod power;
 pub mod radiation;
+pub mod solve;
 /// Transient conduction by the method of lines: declared volumetric heat
 /// capacity, the exact P1 capacitance matrix, and theta-method stepping.
 pub mod transient;
-pub mod solve;
 
 use core::fmt;
 
@@ -86,15 +86,15 @@ pub use interface::{
     ResistanceUncertainty, ResistanceValueOrigin, SeriesResistanceBudget, SeriesThermalResistance,
     ThermalInterfaces, ThermalResistanceTerm,
 };
+pub use material::{
+    CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,
+};
+pub use mesh::{BoundaryFace, ConductionMesh};
 pub use power::{
     COMPONENT_POWER_DIMS, ComponentPower, DEFAULT_POWER_TOLERANCE, MAX_COMPONENTS, PowerAudit,
     PowerAuditRow, PowerMap, PowerUncertainty, SurfaceComponentPower, SurfacePowerAudit,
     SurfacePowerAuditRow, SurfacePowerMap,
 };
-pub use material::{
-    CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,
-};
-pub use mesh::{BoundaryFace, ConductionMesh};
 pub use radiation::{
     CoupledRadiationConfig, CoupledRadiationReport, CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
