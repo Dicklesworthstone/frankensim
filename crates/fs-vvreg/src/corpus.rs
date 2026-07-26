@@ -47,6 +47,11 @@ pub const MAX_DATASET_CANONICAL_BYTES: usize = 16 * 1024 * 1024;
 const DATASET_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-dataset.v3";
 const REGISTRY_DOMAIN: &str = "org.frankensim.fs-vvreg.corpus-registry.v3";
 const MAGIC: &[u8; 8] = b"FSVVCRP\0";
+/// Canonical nested sensor-row schema used by evidence-bearing consumers in
+/// this crate. This is deliberately separate from the corpus dataset schema:
+/// a rig run can retain the exact metrology row without pretending to be a
+/// complete [`CorpusDataset`].
+pub(crate) const SENSOR_RECORD_SCHEMA_VERSION: u32 = 1;
 const RAW_CHT_FIXTURE: &[u8] =
     include_bytes!("../../../data/vv-corpus/fs-benchmark-cht-query-v1/raw-sensors.csv");
 const MARTIN_MOYCE_FIXTURE: &[u8] =
@@ -1899,62 +1904,11 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
     check_count("sensors", dataset.sensors.len(), MAX_DATASET_SENSORS)?;
     let mut sensor_ids = BTreeSet::new();
     for sensor in &dataset.sensors {
-        if !valid_slug(&sensor.id) {
-            return Err(invalid(
-                DatasetField::Sensors,
-                "sensor ids must be bounded lowercase ASCII slugs",
-            ));
-        }
+        validate_sensor_record(sensor)?;
         if !sensor_ids.insert(sensor.id.as_str()) {
             return Err(CorpusError::DuplicateSensorId {
                 id: sensor.id.clone(),
             });
-        }
-        validate_availability_text(&sensor.instrument_id, DatasetField::Sensors)?;
-        validate_text(&sensor.raw_channel, DatasetField::Sensors)?;
-        match &sensor.calibration {
-            Availability::Available(calibration) => validate_calibration(calibration)?,
-            Availability::Unavailable { reason } => {
-                validate_text(reason, DatasetField::Sensors)?;
-            }
-        }
-        match &sensor.placement {
-            Availability::Available(placement) => validate_placement(placement)?,
-            Availability::Unavailable { reason } => {
-                validate_text(reason, DatasetField::Sensors)?;
-            }
-        }
-        match sensor.uncertainty {
-            MeasurementUncertainty::Bounded { half_width } => {
-                if half_width.dims != sensor.quantity_dims
-                    || !half_width.value.is_finite()
-                    || half_width.value < 0.0
-                {
-                    return Err(invalid(
-                        DatasetField::Sensors,
-                        "bounded uncertainty must be finite, non-negative, and match quantity dimensions",
-                    ));
-                }
-            }
-            MeasurementUncertainty::CovarianceDiagonal { variance } => {
-                let expected = sensor
-                    .quantity_dims
-                    .checked_plus(sensor.quantity_dims)
-                    .ok_or_else(|| {
-                        invalid(
-                            DatasetField::Sensors,
-                            "measurement dimensions overflow when squared for covariance",
-                        )
-                    })?;
-                if variance.dims != expected || !variance.value.is_finite() || variance.value < 0.0
-                {
-                    return Err(invalid(
-                        DatasetField::Sensors,
-                        "covariance diagonal must be finite, non-negative, and have squared quantity dimensions",
-                    ));
-                }
-            }
-            MeasurementUncertainty::Unstated => {}
         }
     }
 
@@ -2195,6 +2149,66 @@ fn validate_calibration(calibration: &CalibrationRecord) -> Result<(), CorpusErr
     Ok(())
 }
 
+/// Validate one sensor row through the same boundary used by complete corpus
+/// admission.
+///
+/// This stays crate-private because it proves schema well-formedness only; it
+/// does not authenticate a calibration certificate or mint corpus authority.
+pub(crate) fn validate_sensor_record(sensor: &SensorRecord) -> Result<(), CorpusError> {
+    if !valid_slug(&sensor.id) {
+        return Err(invalid(
+            DatasetField::Sensors,
+            "sensor ids must be bounded lowercase ASCII slugs",
+        ));
+    }
+    validate_availability_text(&sensor.instrument_id, DatasetField::Sensors)?;
+    validate_text(&sensor.raw_channel, DatasetField::Sensors)?;
+    match &sensor.calibration {
+        Availability::Available(calibration) => validate_calibration(calibration)?,
+        Availability::Unavailable { reason } => {
+            validate_text(reason, DatasetField::Sensors)?;
+        }
+    }
+    match &sensor.placement {
+        Availability::Available(placement) => validate_placement(placement)?,
+        Availability::Unavailable { reason } => {
+            validate_text(reason, DatasetField::Sensors)?;
+        }
+    }
+    match sensor.uncertainty {
+        MeasurementUncertainty::Bounded { half_width } => {
+            if half_width.dims != sensor.quantity_dims
+                || !half_width.value.is_finite()
+                || half_width.value < 0.0
+            {
+                return Err(invalid(
+                    DatasetField::Sensors,
+                    "bounded uncertainty must be finite, non-negative, and match quantity dimensions",
+                ));
+            }
+        }
+        MeasurementUncertainty::CovarianceDiagonal { variance } => {
+            let expected = sensor
+                .quantity_dims
+                .checked_plus(sensor.quantity_dims)
+                .ok_or_else(|| {
+                    invalid(
+                        DatasetField::Sensors,
+                        "measurement dimensions overflow when squared for covariance",
+                    )
+                })?;
+            if variance.dims != expected || !variance.value.is_finite() || variance.value < 0.0 {
+                return Err(invalid(
+                    DatasetField::Sensors,
+                    "covariance diagonal must be finite, non-negative, and have squared quantity dimensions",
+                ));
+            }
+        }
+        MeasurementUncertainty::Unstated => {}
+    }
+    Ok(())
+}
+
 fn validate_availability_text(
     value: &Availability<String>,
     field: DatasetField,
@@ -2336,7 +2350,7 @@ fn check_count(resource: &'static str, observed: usize, limit: usize) -> Result<
     }
 }
 
-fn valid_slug(value: &str) -> bool {
+pub(crate) fn valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_CORPUS_TEXT_BYTES
         && value.as_bytes()[0].is_ascii_lowercase()
@@ -2345,7 +2359,7 @@ fn valid_slug(value: &str) -> bool {
         })
 }
 
-fn valid_date(value: &str) -> bool {
+pub(crate) fn valid_date(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 10
         || bytes[4] != b'-'
@@ -2450,23 +2464,7 @@ impl CorpusDataset {
 
         push_u32(&mut out, self.sensors.len());
         for sensor in &self.sensors {
-            push_text(&mut out, &sensor.id);
-            push_availability_text(&mut out, &sensor.instrument_id);
-            push_text(&mut out, &sensor.raw_channel);
-            push_dims(&mut out, sensor.quantity_dims);
-            push_availability_calibration(&mut out, &sensor.calibration);
-            push_availability_placement(&mut out, &sensor.placement);
-            match &sensor.uncertainty {
-                MeasurementUncertainty::Bounded { half_width } => {
-                    out.push(1);
-                    push_qty(&mut out, *half_width);
-                }
-                MeasurementUncertainty::CovarianceDiagonal { variance } => {
-                    out.push(2);
-                    push_qty(&mut out, *variance);
-                }
-                MeasurementUncertainty::Unstated => out.push(3),
-            }
+            push_sensor_record(&mut out, sensor);
         }
 
         match &self.geometry {
@@ -2620,67 +2618,7 @@ impl CorpusDataset {
         let sensor_count = reader.count("sensors", MAX_DATASET_SENSORS)?;
         let mut sensors = Vec::with_capacity(sensor_count);
         for _ in 0..sensor_count {
-            let sensor_id = reader.text()?;
-            let instrument_id = reader.availability_text("sensor instrument")?;
-            let raw_channel = reader.text()?;
-            let quantity_dims = reader.dims()?;
-            let calibration = match reader.u8()? {
-                1 => Availability::Available(CalibrationRecord {
-                    certificate_id: reader.text()?,
-                    certificate_hash: reader.hash()?,
-                    issued_on: reader.text()?,
-                    valid_through: reader.option_text()?,
-                }),
-                2 => Availability::Unavailable {
-                    reason: reader.text()?,
-                },
-                tag => {
-                    return Err(CorpusError::InvalidTag {
-                        kind: "sensor calibration availability",
-                        tag,
-                    });
-                }
-            };
-            let placement = match reader.u8()? {
-                1 => Availability::Available(SensorPlacement {
-                    frame: reader.text()?,
-                    coordinates: [reader.qty()?, reader.qty()?, reader.qty()?],
-                    uncertainty: [reader.qty()?, reader.qty()?, reader.qty()?],
-                }),
-                2 => Availability::Unavailable {
-                    reason: reader.text()?,
-                },
-                tag => {
-                    return Err(CorpusError::InvalidTag {
-                        kind: "sensor placement availability",
-                        tag,
-                    });
-                }
-            };
-            let uncertainty = match reader.u8()? {
-                1 => MeasurementUncertainty::Bounded {
-                    half_width: reader.qty()?,
-                },
-                2 => MeasurementUncertainty::CovarianceDiagonal {
-                    variance: reader.qty()?,
-                },
-                3 => MeasurementUncertainty::Unstated,
-                tag => {
-                    return Err(CorpusError::InvalidTag {
-                        kind: "measurement uncertainty",
-                        tag,
-                    });
-                }
-            };
-            sensors.push(SensorRecord {
-                id: sensor_id,
-                instrument_id,
-                raw_channel,
-                quantity_dims,
-                calibration,
-                placement,
-                uncertainty,
-            });
+            sensors.push(reader.sensor_record()?);
         }
 
         let geometry = match reader.u8()? {
@@ -2870,6 +2808,41 @@ impl CorpusDataset {
     }
 }
 
+/// Canonical nested representation of one validated sensor row.
+///
+/// The caller supplies the surrounding schema/version frame. Keeping this
+/// payload helper shared prevents rig evidence from drifting away from the
+/// corpus representation it is supposed to retain.
+pub(crate) fn encode_sensor_record(sensor: &SensorRecord) -> Result<Vec<u8>, CorpusError> {
+    validate_sensor_record(sensor)?;
+    let mut out = Vec::new();
+    push_sensor_record(&mut out, sensor);
+    Ok(out)
+}
+
+/// Decode and canonical-byte-check one nested sensor row.
+pub(crate) fn decode_sensor_record(bytes: &[u8]) -> Result<SensorRecord, CorpusError> {
+    if bytes.len() > MAX_DATASET_CANONICAL_BYTES {
+        return Err(CorpusError::ResourceLimit {
+            resource: "canonical sensor bytes",
+            limit: MAX_DATASET_CANONICAL_BYTES,
+            observed: bytes.len(),
+        });
+    }
+    let mut reader = Reader::new(bytes);
+    let sensor = reader.sensor_record()?;
+    if reader.remaining() != 0 {
+        return Err(CorpusError::TrailingBytes {
+            count: reader.remaining(),
+        });
+    }
+    validate_sensor_record(&sensor)?;
+    if encode_sensor_record(&sensor)? != bytes {
+        return Err(CorpusError::NonCanonicalEncoding);
+    }
+    Ok(sensor)
+}
+
 fn push_u32(out: &mut Vec<u8>, value: usize) {
     out.extend_from_slice(&(value as u32).to_le_bytes());
 }
@@ -2934,6 +2907,26 @@ fn push_availability_placement(out: &mut Vec<u8>, value: &Availability<SensorPla
             out.push(2);
             push_text(out, reason);
         }
+    }
+}
+
+fn push_sensor_record(out: &mut Vec<u8>, sensor: &SensorRecord) {
+    push_text(out, &sensor.id);
+    push_availability_text(out, &sensor.instrument_id);
+    push_text(out, &sensor.raw_channel);
+    push_dims(out, sensor.quantity_dims);
+    push_availability_calibration(out, &sensor.calibration);
+    push_availability_placement(out, &sensor.placement);
+    match &sensor.uncertainty {
+        MeasurementUncertainty::Bounded { half_width } => {
+            out.push(1);
+            push_qty(out, *half_width);
+        }
+        MeasurementUncertainty::CovarianceDiagonal { variance } => {
+            out.push(2);
+            push_qty(out, *variance);
+        }
+        MeasurementUncertainty::Unstated => out.push(3),
     }
 }
 
@@ -3140,6 +3133,70 @@ impl<'a> Reader<'a> {
             }),
             tag => Err(CorpusError::InvalidTag { kind, tag }),
         }
+    }
+
+    fn sensor_record(&mut self) -> Result<SensorRecord, CorpusError> {
+        let id = self.text()?;
+        let instrument_id = self.availability_text("sensor instrument")?;
+        let raw_channel = self.text()?;
+        let quantity_dims = self.dims()?;
+        let calibration = match self.u8()? {
+            1 => Availability::Available(CalibrationRecord {
+                certificate_id: self.text()?,
+                certificate_hash: self.hash()?,
+                issued_on: self.text()?,
+                valid_through: self.option_text()?,
+            }),
+            2 => Availability::Unavailable {
+                reason: self.text()?,
+            },
+            tag => {
+                return Err(CorpusError::InvalidTag {
+                    kind: "sensor calibration availability",
+                    tag,
+                });
+            }
+        };
+        let placement = match self.u8()? {
+            1 => Availability::Available(SensorPlacement {
+                frame: self.text()?,
+                coordinates: [self.qty()?, self.qty()?, self.qty()?],
+                uncertainty: [self.qty()?, self.qty()?, self.qty()?],
+            }),
+            2 => Availability::Unavailable {
+                reason: self.text()?,
+            },
+            tag => {
+                return Err(CorpusError::InvalidTag {
+                    kind: "sensor placement availability",
+                    tag,
+                });
+            }
+        };
+        let uncertainty = match self.u8()? {
+            1 => MeasurementUncertainty::Bounded {
+                half_width: self.qty()?,
+            },
+            2 => MeasurementUncertainty::CovarianceDiagonal {
+                variance: self.qty()?,
+            },
+            3 => MeasurementUncertainty::Unstated,
+            tag => {
+                return Err(CorpusError::InvalidTag {
+                    kind: "measurement uncertainty",
+                    tag,
+                });
+            }
+        };
+        Ok(SensorRecord {
+            id,
+            instrument_id,
+            raw_channel,
+            quantity_dims,
+            calibration,
+            placement,
+            uncertainty,
+        })
     }
 
     fn hash(&mut self) -> Result<ContentHash, CorpusError> {
