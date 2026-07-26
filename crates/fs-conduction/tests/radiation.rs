@@ -22,7 +22,6 @@ use fs_matdb::{
     PropertyValue, Provenance, SelectionPolicy, UncertaintyModel,
 };
 use fs_rep_mesh::TetComplex;
-use fs_vvreg::thermal_level_a::{ThermalLevelAKind, thermal_level_a_cases};
 use support::{with_cancelled_cx, with_cx};
 
 fn emissivity_card(value: f64, uncertainty: UncertaintyModel, finish: &str) -> MaterialCard {
@@ -96,6 +95,56 @@ fn config() -> SolveConfig {
     }
 }
 
+fn cube(value: f64) -> f64 {
+    value * value * value
+}
+
+fn fourth_power(value: f64) -> f64 {
+    let square = value * value;
+    square * square
+}
+
+/// Independent scalar reference for the two-slab fixture.
+///
+/// `overlay_gain = 1` is the physical coupling. `overlay_gain = 2` is the
+/// previously surviving production mutant that doubled the radiosity flux
+/// before applying it to conduction.
+fn analytic_two_slab_equilibrium(overlay_gain: f64) -> (f64, f64, f64) {
+    const HOT_RESERVOIR_K: f64 = 400.0;
+    const COLD_RESERVOIR_K: f64 = 300.0;
+    const SLAB_CONDUCTANCE_W_K: f64 = 20.0;
+    const RADIATIVE_RESISTANCE_FACTOR: f64 = 1.5;
+
+    let mut conductive_heat_w = 400.0;
+    for _ in 0..32 {
+        let hot_surface_k = HOT_RESERVOIR_K - conductive_heat_w / SLAB_CONDUCTANCE_W_K;
+        let cold_surface_k = COLD_RESERVOIR_K + conductive_heat_w / SLAB_CONDUCTANCE_W_K;
+        let radiative_heat_w = STEFAN_BOLTZMANN_W_M2_K4
+            * (fourth_power(hot_surface_k) - fourth_power(cold_surface_k))
+            / RADIATIVE_RESISTANCE_FACTOR;
+        let residual_w = conductive_heat_w - overlay_gain * radiative_heat_w;
+        let derivative = 1.0
+            + overlay_gain * 4.0 * STEFAN_BOLTZMANN_W_M2_K4
+                / (RADIATIVE_RESISTANCE_FACTOR * SLAB_CONDUCTANCE_W_K)
+                * (cube(hot_surface_k) + cube(cold_surface_k));
+        conductive_heat_w -= residual_w / derivative;
+        if residual_w.abs() <= 1.0e-13 * conductive_heat_w.abs().max(1.0) {
+            break;
+        }
+    }
+    let hot_surface_k = HOT_RESERVOIR_K - conductive_heat_w / SLAB_CONDUCTANCE_W_K;
+    let cold_surface_k = COLD_RESERVOIR_K + conductive_heat_w / SLAB_CONDUCTANCE_W_K;
+    let radiative_heat_w = STEFAN_BOLTZMANN_W_M2_K4
+        * (fourth_power(hot_surface_k) - fourth_power(cold_surface_k))
+        / RADIATIVE_RESISTANCE_FACTOR;
+    let residual_w = conductive_heat_w - overlay_gain * radiative_heat_w;
+    assert!(
+        residual_w.abs() <= 2.0e-12 * conductive_heat_w.abs().max(1.0),
+        "independent scalar Newton reference did not converge: residual={residual_w:e} W"
+    );
+    (hot_surface_k, cold_surface_k, conductive_heat_w)
+}
+
 #[test]
 fn linearized_robin_retains_card_and_measures_t4_discrepancy() {
     let card = emissivity_card(
@@ -151,17 +200,15 @@ fn linearized_robin_retains_card_and_measures_t4_discrepancy() {
 }
 
 #[test]
-fn parallel_plate_view_factor_binds_level_a_and_reciprocity_laws() {
-    let reference = thermal_level_a_cases()
-        .iter()
-        .find(|case| case.id == "thermal-a-parallel-plate-view-factor")
-        .expect("catalog row");
-    assert_eq!(reference.kind, ThermalLevelAKind::AnalyticReference);
+fn parallel_plate_literal_constructor_is_admitted_but_not_an_execution_binding() {
     let matrix = ViewFactorMatrix::infinite_parallel_plates(2.5).expect("analytic matrix");
-    assert_eq!(matrix.factors()[0][1], reference.reference_value_si);
-    assert_eq!(matrix.factors()[1][0], reference.reference_value_si);
+    assert_eq!(matrix.factors(), &[vec![0.0, 1.0], vec![1.0, 0.0]]);
     assert_eq!(matrix.row_sums(), &[1.0, 1.0]);
     assert_eq!(matrix.max_reciprocity_residual(), 0.0);
+    assert!(matches!(
+        matrix.evidence(),
+        ViewFactorEvidence::Analytic { geometry } if geometry == "infinite-parallel-plates"
+    ));
     assert_eq!(
         matrix.identity(),
         ViewFactorMatrix::infinite_parallel_plates(2.5)
@@ -195,6 +242,94 @@ fn parallel_plate_view_factor_binds_level_a_and_reciprocity_laws() {
         incomplete_qmc,
         Err(ConductionError::Radiation { .. })
     ));
+}
+
+#[test]
+fn three_surface_unequal_area_radiosity_has_nontrivial_energy_closure() {
+    let (complex, positions) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let first = RadiationSurface::new(
+        &mesh,
+        "first-full-face",
+        |face| on_box_face(face.centroid[0], 0.0),
+        emissivity("first-full-face", 0.01, "low-e-first"),
+    )
+    .expect("first surface");
+    let second = RadiationSurface::new(
+        &mesh,
+        "second-full-face",
+        |face| on_box_face(face.centroid[0], 1.0),
+        emissivity("second-full-face", 0.6, "medium-e-second"),
+    )
+    .expect("second surface");
+    let third = RadiationSurface::new(
+        &mesh,
+        "third-half-face",
+        |face| on_box_face(face.centroid[1], 0.0) && face.centroid[0] < 0.5,
+        emissivity("third-half-face", 0.1, "low-e-third"),
+    )
+    .expect("third surface");
+    assert_eq!(first.area_m2().to_bits(), 1.0f64.to_bits());
+    assert_eq!(second.area_m2().to_bits(), 1.0f64.to_bits());
+    assert_eq!(third.area_m2().to_bits(), 0.5f64.to_bits());
+
+    // Reciprocal exchange weights are A_i F_ij = A_j F_ji. The deliberately
+    // large F_20 combined with low emissivities makes row 2 the first pivot,
+    // so this fixture reaches both row swapping and three-term back-substitution.
+    let factors = vec![
+        vec![0.9, 0.0, 0.1],
+        vec![0.0, 0.7, 0.3],
+        vec![0.2, 0.6, 0.2],
+    ];
+    let first_diagonal = 1.0 - (1.0 - 0.01) * factors[0][0];
+    let third_first_column = (1.0_f64 - 0.1) * factors[2][0];
+    assert!(
+        third_first_column.abs() > first_diagonal.abs(),
+        "fixture must force a first-column pivot swap"
+    );
+    let matrix = ViewFactorMatrix::admit(
+        vec![first.area_m2(), second.area_m2(), third.area_m2()],
+        factors,
+        ViewFactorEvidence::Analytic {
+            geometry: "synthetic-three-surface-reciprocal-operator-fixture".to_string(),
+        },
+        ViewFactorTolerance::default(),
+    )
+    .expect("three-surface matrix");
+    let enclosure =
+        GrayDiffuseEnclosure::new(vec![first, second, third], matrix).expect("enclosure");
+    let report = with_cx(|cx| {
+        enclosure
+            .solve(cx, &[500.0, 350.0, 250.0])
+            .expect("three-surface radiosity")
+    });
+
+    assert_eq!(report.net_outward_heat_w.len(), 3);
+    assert!(
+        report.enclosure_energy_closure_w != 0.0,
+        "unequal-area three-term accumulation must not collapse to an exact pairwise negation"
+    );
+    assert!(report.relative_energy_closure() < 2.0e-14);
+    let radiosity_scale = report
+        .radiosity_w_m2
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0f64, f64::max);
+    assert!(report.linear_residual_max_w_m2 <= 2.0e-14 * radiosity_scale);
+
+    // Negative control: treating the half-area trace as one square metre
+    // replaces A_2 q_2 with q_2. That production mutation must be conspicuous.
+    let wrong_area_heat_sum = report.net_outward_heat_w[0]
+        + report.net_outward_heat_w[1]
+        + report.net_outward_flux_w_m2[2];
+    let wrong_area_scale = report.net_outward_heat_w[0].abs()
+        + report.net_outward_heat_w[1].abs()
+        + report.net_outward_flux_w_m2[2].abs();
+    assert!(
+        wrong_area_heat_sum.abs() / wrong_area_scale > 1.0e-3,
+        "negative control must reject omitting the third trace area"
+    );
 }
 
 fn opposite_surfaces() -> (ConductionMesh, RadiationSurface, RadiationSurface) {
@@ -330,16 +465,70 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
         .last()
         .expect("outer update");
     assert!(update <= solution.radiation.final_threshold_k);
-    assert!(solution.radiation.radiosity.net_outward_heat_w[0] > 0.0);
-    assert!(solution.radiation.radiosity.net_outward_heat_w[1] < 0.0);
+    let (expected_hot_surface_k, expected_cold_surface_k, expected_heat_w) =
+        analytic_two_slab_equilibrium(1.0);
+    let actual_surface_temperatures = enclosure
+        .surfaces()
+        .iter()
+        .map(|surface| {
+            surface
+                .mean_temperature(&mesh, &solution.conduction.temperature)
+                .expect("accepted surface temperature")
+        })
+        .collect::<Vec<_>>();
+    let temperature_tolerance_k =
+        4.0 * solution.radiation.final_threshold_k + 64.0 * f64::EPSILON * expected_hot_surface_k;
+    assert!(
+        (actual_surface_temperatures[0] - expected_hot_surface_k).abs() <= temperature_tolerance_k
+    );
+    assert!(
+        (actual_surface_temperatures[1] - expected_cold_surface_k).abs() <= temperature_tolerance_k
+    );
+    assert!(
+        (solution.radiation.radiosity.surface_temperatures_k[0] - expected_hot_surface_k).abs()
+            <= temperature_tolerance_k
+    );
+    assert!(
+        (solution.radiation.radiosity.surface_temperatures_k[1] - expected_cold_surface_k).abs()
+            <= temperature_tolerance_k
+    );
+    let heat_tolerance_w = 50.0 * temperature_tolerance_k;
+    assert!(
+        (solution.radiation.radiosity.net_outward_heat_w[0] - expected_heat_w).abs()
+            <= heat_tolerance_w
+    );
+    assert!(
+        (solution.radiation.radiosity.net_outward_heat_w[1] + expected_heat_w).abs()
+            <= heat_tolerance_w
+    );
+    let hot_conduction_heat_w = 20.0 * (400.0 - actual_surface_temperatures[0]);
+    let cold_conduction_heat_w = 20.0 * (actual_surface_temperatures[1] - 300.0);
+    assert!((hot_conduction_heat_w - expected_heat_w).abs() <= heat_tolerance_w);
+    assert!((cold_conduction_heat_w - expected_heat_w).abs() <= heat_tolerance_w);
+
+    // Executable negative control for the exact mutant that previously
+    // survived: applying twice the radiosity flux moves both equilibrium
+    // temperatures far beyond the accepted analytic envelope.
+    let (doubled_hot_surface_k, doubled_cold_surface_k, _) = analytic_two_slab_equilibrium(2.0);
+    assert!(
+        (doubled_hot_surface_k - expected_hot_surface_k).abs() > 1_000.0 * temperature_tolerance_k
+    );
+    assert!(
+        (doubled_cold_surface_k - expected_cold_surface_k).abs()
+            > 1_000.0 * temperature_tolerance_k
+    );
+
     assert!(solution.radiation.radiosity.relative_energy_closure() < 1.0e-12);
     let coupled_energy_closure = solution.conduction.report.energy.closure_w.abs()
         / solution.radiation.radiosity.enclosure_energy_scale_w;
     assert!(coupled_energy_closure < 1.0e-8);
     println!(
-        "{{\"suite\":\"fs-conduction-radiation\",\"case\":\"coupled-two-slab\",\"verdict\":\"pass\",\"outer_iterations\":{},\"surface_update_k\":{},\"radiative_heat_w\":{},\"coupled_energy_closure\":{}}}",
+        "{{\"suite\":\"fs-conduction-radiation\",\"case\":\"coupled-two-slab\",\"verdict\":\"pass\",\"outer_iterations\":{},\"surface_update_k\":{},\"hot_surface_k\":{},\"cold_surface_k\":{},\"analytic_heat_w\":{},\"radiative_heat_w\":{},\"coupled_energy_closure\":{}}}",
         solution.radiation.iterations,
         update,
+        actual_surface_temperatures[0],
+        actual_surface_temperatures[1],
+        expected_heat_w,
         solution.radiation.radiosity.net_outward_heat_w[0],
         coupled_energy_closure
     );
@@ -401,4 +590,51 @@ fn radiation_refuses_missing_cards_overlap_and_cancellation() {
 fn emissivity_query_uses_absolute_temperature_dimensions() {
     assert_eq!(TEMPERATURE_DIMS, fs_qty::Dims([0, 0, 0, 1, 0, 0]));
     assert_eq!(EMISSIVITY_DIMS, fs_qty::Dims::NONE);
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, TEMPERATURE_DIMS),
+            value: PropertyValue::Scalar {
+                value: 0.8,
+                dims: TEMPERATURE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 250.0, 500.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "deliberately dimensionally wrong emissivity fixture".to_string(),
+                license: "internal-test-use".to_string(),
+                artifact: None,
+            },
+        })
+        .expect("wrong-dimensional claim is structurally valid");
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "fixture-alloy".to_string(),
+            phase: "solid".to_string(),
+            process: "wrong-emissivity-dimensions".to_string(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .expect("wrong-dimensional card");
+    let refusal = SurfaceEmissivity::from_card(
+        "wrong-dimensional-surface",
+        &card,
+        350.0,
+        SelectionPolicy::SingleClaimOnly,
+    );
+    assert!(
+        matches!(
+            refusal,
+            Err(ConductionError::Dimensions {
+                expected,
+                found,
+                ..
+            }) if expected == EMISSIVITY_DIMS.0 && found == TEMPERATURE_DIMS.0
+        ),
+        "wrong-dimensional emissivity must refuse with the declared temperature dimensions"
+    );
 }

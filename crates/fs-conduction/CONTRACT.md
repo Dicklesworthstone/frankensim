@@ -209,9 +209,11 @@ producing solver's own typed claim is carried verbatim in
 10. **Radiation authority is explicit.** Every emissivity retains its material
     card and property-use receipt; every view-factor matrix passes finite
     range, row-closure, and area-weighted reciprocity admission before a
-    radiosity solve. Enclosure exchange closes globally, and the outer
-    conduction coupling stops only on its declared surface-temperature rule.
-    Evidence: `tests/radiation.rs`.
+    radiosity solve. Enclosure exchange closes globally on an unequal-area
+    three-surface fixture whose residual cannot collapse to exact pairwise
+    negation, and the outer conduction coupling stops only on its declared
+    surface-temperature rule and matches an independent scalar Newton
+    reference. Evidence: `tests/radiation.rs`.
 11. **Component power is delivered EXACTLY, not to discretization order.**
     Summing the exact P1 element load `∫ λ_a λ_b dV = V(1+δ_ab)/20` over `a`
     gives `V/4 · Σ_b f_b`, so the power the assembled operator injects is
@@ -495,8 +497,11 @@ None. Everything here is `[S]` solid work on the default path.
   step-quantized time-above-limit monotone in the limit; and refusals,
   determinism, and cancellation.
 - `tests/radiation.rs` — G0 card, dimensional, view-factor, reciprocity,
-  deterministic-replay, cancellation, and refusal checks; G1 parallel-plate
-  radiosity and a two-solid outer conduction-radiation fixed point.
+  cancellation, and refusal checks; an unequal-area three-surface radiosity
+  fixture exercises pivoting, multi-term back-substitution, and non-tautological
+  enclosure closure; G1 two-surface radiosity and a two-solid outer
+  conduction-radiation fixed point checked against an independent scalar
+  Newton equilibrium.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`, plus G1 manufactured P1 and P2 dual L2
   ladders with per-rung discrete primal/dual identity checks (4 tests).
@@ -526,13 +531,17 @@ those batteries reproduces from its log line alone.
 
 ### Level-A registry binding is executable, not retained authority
 
-The analytic, radiation, and MMS tests dev-depend on `fs-vvreg` and resolve
-canonical Level-A case rows at runtime. Nine analytic cases use the catalog
+The analytic and MMS tests dev-depend on `fs-vvreg` and resolve canonical
+Level-A case rows at runtime. Eight analytic cases use the catalog
 parameters and reference values directly: the two slab fluxes, uniform-source
 center rise, rectangular affine probe, cylindrical- and spherical-shell
 conductances, `mL=1` fin efficiency, a two-slab matching-P1 contact network
-whose three `0.1 K/W` terms reproduce the `0.3 K/W` series reference, and the
-infinite-parallel-plate view-factor row. Four primal P1 L2 ladders take their
+whose three `0.1 K/W` terms reproduce the `0.3 K/W` series reference. The
+infinite-parallel-plate row is intentionally REFERENCE-ONLY here:
+`ViewFactorMatrix::infinite_parallel_plates` stores `F12 = F21 = 1` literally,
+so admitting that matrix and consuming it in radiosity is not an
+executing-kernel reproduction of the geometry formula. Four primal P1 L2
+ladders take their
 theoretical order and two-sided gate from the catalog: isotropic Dirichlet,
 combined anisotropic temperature-dependent conductivity, mixed Neumann, and
 Robin. A fifth P1 L2 ladder resolves the heat-adjoint target through
@@ -557,12 +566,14 @@ definition; it is not substituted for this solver's geometry, discretization,
 or model envelopes. The test verdicts label that distinction explicitly, and
 no ladder or machine fingerprint is persisted into `fs-vvreg`. Consequently
 the registry query remains numerical `NoClaim`, all Level-A physical caps
-remain `Estimated`, and the three rows not bound in this crate are still
+remain `Estimated`, and the four rows not bound in this crate are still
 reference/target-only here. Two Nusselt rows execute separately in
 `fs-convection`, and the normalized lumped-transient row executes through the
 first-order generalized-alpha paths in `fs-time`. Across those owning crates,
-all 19 Level-A rows now have executing-kernel bindings; this completeness does
-not promote any row beyond its registry authority.
+18 of 19 Level-A rows have executing-kernel bindings. The infinite-parallel-
+plate view-factor row is the explicit remaining reference-only gap; catalog
+completeness does not promote it, or any other row, beyond its registry
+authority.
 
 ## No-claim boundaries
 
@@ -577,7 +588,10 @@ not promote any row beyond its registry authority.
   external-QMC generator; it admits a caller-supplied matrix and retains the
   declared seed, sample count, and generator label. There is no participating
   medium, spectral/specular/semitransparent model, spatially varying
-  emissivity, or self-shadowing geometry query.
+  emissivity, or self-shadowing geometry query. In particular, the
+  infinite-parallel-plate constructor materializes the analytic limiting value
+  `1`; it is an input convenience and admission fixture, not an executing
+  view-factor kernel.
 - THE ENCLOSURE COUPLING IS PARTITIONED. It applies one face-uniform frozen
   flux per named P1 trace in an under-relaxed outer fixed point, and only to
   faces that were explicit adiabatic remainder in the base boundary. It cannot

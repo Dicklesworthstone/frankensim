@@ -87,8 +87,8 @@ const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 12] = [
     ),
     (
         "thermal-a-parallel-plate-view-factor",
-        Some("tests/radiation.rs::parallel_plate_view_factor_binds_level_a_and_reciprocity_laws"),
-        "the analytic infinite-parallel-plate matrix reproduces F12=F21=1 and gates row closure plus area-weighted reciprocity",
+        None,
+        "reference-only here: the infinite-parallel-plate constructor stores F12=F21=1 literally; radiation tests exercise admission and radiosity algebra but no geometry kernel computes this Level-A value",
     ),
     (
         "thermal-a-contact-series",
@@ -919,7 +919,7 @@ fn level_a_analytic_binding_matrix_is_complete_and_gap_preserving() {
             .iter()
             .filter(|(_, test, _)| test.is_some())
             .count(),
-        9
+        8
     );
     for (id, test, basis) in LEVEL_A_ANALYTIC_BINDINGS {
         assert!(

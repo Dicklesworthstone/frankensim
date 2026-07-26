@@ -146,12 +146,12 @@ INTERPOLATION error rather than of the scheme.
 
 | tier | status | where |
 | --- | --- | --- |
-| G0 algebraic laws | green | `tests/conformance.rs` plus `tests/contact.rs` and `tests/radiation.rs` (card receipts, view-factor row/reciprocity admission, deterministic replay, enclosure balance, typed refusals) |
+| G0 algebraic laws | green | `tests/conformance.rs` plus `tests/contact.rs` and `tests/radiation.rs` (card receipts, view-factor row/reciprocity admission, unequal-area three-surface enclosure balance, typed refusals) |
 | G1 manufactured solutions | green, 5 ladders | `tests/mms.rs` |
-| G2 canonical benchmarks | partial | `tests/analytic.rs` and `tests/radiation.rs`: slab, slab+source, Dirichlet–Robin slab, cylindrical/spherical shells, straight fin, parallel-plate view factor and two-surface radiosity — closed forms, not a community benchmark suite |
+| G2 canonical benchmarks | partial | `tests/analytic.rs` and `tests/radiation.rs`: slab, slab+source, Dirichlet–Robin slab, cylindrical/spherical shells, straight fin, and two-surface radiosity with a caller-declared limiting matrix — closed forms, not a community benchmark suite; no geometry kernel computes the parallel-plate view factor |
 | G3 metamorphic | not run | no metamorphic battery exists for this crate |
 | G4 cancellation | green | `tests/conformance.rs` cancellation drills plus radiation radiosity/coupling refusal checks |
-| G5 determinism | partial | same-ISA conduction replay, snapshot-resume, and radiosity replay are bitwise; no registered golden and no cross-ISA audit |
+| G5 determinism | partial | same-ISA conduction replay and snapshot-resume are bitwise; calling the pure radiosity solve twice is not separate determinism evidence, and there is no registered golden or cross-ISA audit |
 
 ## Maturity
 

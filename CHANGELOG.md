@@ -288,6 +288,17 @@ workstream.
   Four gaps remain: P2 primal, combined anisotropic-nonlinear MMS, and the P1/P2
   adjoint-order ladders. This is a test-time binding, not a retained comparison
   receipt or L4 authority.
+- **Authority correction (`frankensim-h71xu`, 2026-07-25):** the preceding
+  binding is withdrawn. `ViewFactorMatrix::infinite_parallel_plates` stores
+  `F12 = F21 = 1` literally, so comparing that constructor output with the
+  catalog's literal `1` executes no geometry arithmetic. The historical
+  checkpoint coverage is therefore 14/19, and the current cross-crate total is
+  18/19 with this row explicitly reference-only. The historical two-surface
+  zero enclosure residual was also an exact pairwise-negation identity; current
+  evidence adds an unequal-area three-surface closure and checks the coupled
+  slab temperatures and heat rate against an independent scalar Newton
+  equilibrium, including a negative control for the formerly surviving
+  doubled-overlay-flux mutant.
 - Remote regression proof passed at stable `HEAD`
   `b3b5f2c1c809eec06cde1e40cbc916d6995469b5` with
   `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
@@ -337,11 +348,13 @@ workstream.
   lane started and ended at `9e00e57edc382794a825ece6f5d2aa68f43a0429`;
   RCH reported 260.6 seconds total, including 98.8 seconds of sync, 161.3
   seconds of remote execution, and successful artifact retrieval.
-- Aggregate Level-A execution coverage rises from 18/19 to 19/19: no Level-A
-  formula/order row remains without an executing kernel. This rung does not
-  turn the P1 `fs-conduction` material/boundary frontend into a general P2
-  thermal frontend, add a P2 design-gradient pullback or DWR estimate, persist
-  a corpus receipt or ladder, add a machine fingerprint, or confer L4
+- At implementation time this rung raised the recorded aggregate Level-A
+  execution count from 18/19 to 19/19. The later `frankensim-h71xu` authority
+  correction withdraws the literal-only parallel-plate view-factor binding, so
+  the current total is 18/19 and that formula row remains reference-only. This
+  rung does not turn the P1 `fs-conduction` material/boundary frontend into a
+  general P2 thermal frontend, add a P2 design-gradient pullback or DWR estimate,
+  persist a corpus receipt or ladder, add a machine fingerprint, or confer L4
   authority.
 
 ### Post-checkpoint Level-A P2 primal MMS binding
