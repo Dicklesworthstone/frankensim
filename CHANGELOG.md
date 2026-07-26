@@ -260,6 +260,65 @@ workstream.
   scenario-interface auto-lowering, contact adjoint, dominance-attribution
   corpus case, retained registry comparison receipt, or L4 authority.
 
+### Post-checkpoint contact assertion-authority repair (`frankensim-yg4ex`)
+
+- **Replaced a tautology that carried the Level-A tolerance claim.** The former
+  `contact_level_a_tolerance_rejects_a_deliberate_outside_value` set
+  `outside = reference + 2 * limit` and then asserted
+  `|outside - reference| > limit`. That is unconditionally true for any positive
+  limit, which the helper already asserts, so the test executed no production
+  code: it was arithmetic on two registry constants. Its replacement,
+  `contact_level_a_tolerance_rejects_a_wrong_bond_line_from_the_actual_solve`,
+  perturbs the bond line by 1%, drives the card -> resistance -> binding ->
+  assembly -> solve -> report chain, and requires the registry comparison to
+  reject the solved series resistance. It also asserts the ACCEPTING case in the
+  same test, so a gate that rejected everything cannot pass, and pins the
+  perturbation's magnitude so an unrelated corrupted term cannot satisfy it.
+- **Drove `assemble_into` with more than one bound surface for the first time.**
+  The neighbouring determinism test binds two surfaces but stops at `fluxes()`,
+  so the multi-surface assembly path was never executed even though
+  `CONTRACT.md` discusses ordering stability "before assembly or summation". The
+  new `two_named_surfaces_assemble_into_one_series_solve` solves three unit slabs
+  joined by two unequal bond lines against the closed form
+  `R = 3*0.1 + 0.1 + 0.2 = 0.6 K/W`, `Q = 50 W`.
+- **The multi-surface fixture carries a per-surface oracle, demonstrated by an
+  executed swap.** Series conservation puts the same `Q` through both bond lines,
+  so a total-heat check cannot see the two surfaces exchanged. Swapping the two
+  cards leaves every heat-rate assertion passing and fails only on the
+  jump oracle (`5 K` vs `10 K`, observed `9.999999999999963 K` where `5 K` was
+  required). Recorded because the blindness is the point: conservation-style
+  checks are invariant under permutation.
+- **Resolved the untested `matching_vertices` refusal as unreachable rather than
+  writing a test for it.** `interface.rs`'s "does not have a unique exact vertex
+  correspondence" branch cannot be reached from any public entry point:
+  `ThermalInterfaces::new` refuses declared pairs outside
+  `coincident_candidates` (candidacy being equality of the sorted coordinate
+  bit-pattern triple, so every side-A key occurs in side B with equal
+  multiplicity), and a two-way match needs two bit-identical vertices in one
+  boundary triangle, which forces zero signed volume and is refused by
+  `ConductionMesh::new`, which exposes no post-construction mutator. Deleting the
+  candidacy guard makes the refusal fall through to `matching_vertices` and
+  report interface `"<geometry>"`, so the branch is live defensive depth, not
+  dead code. The new `a_face_with_two_bit_identical_vertices_cannot_be_meshed`
+  pins the degeneracy half of that argument; no document may cite the branch as a
+  covered refusal.
+- **Two corrections against the filing bead's own claims.** The candidacy guard
+  was already covered by the "is not exactly coincident" clause of
+  `surface_declaration_and_binding_guards_each_refuse_their_own_defect`; the
+  original report missed it by grepping the full message string where the test
+  asserts a substring. And the reported Level-A flake risk was overstated by an
+  order of magnitude: the accepting case sits at `1.388e-14` against the row's
+  `1.3e-12` limit, about 94x clear rather than the reported ~9x. A 10x headroom
+  floor is now asserted so a future solver or `config()` change that eats the
+  margin is caught while margin remains.
+- Local proof on darwin/arm64: `cargo test -p fs-conduction --locked` passed
+  178/178 across 16 targets, with `tests/contact.rs` at 22/22 (19 before this
+  slice). `crates/fs-conduction/src/interface.rs` is byte-identical to `HEAD`;
+  the guard deletion above existed only inside the falsification run.
+- This rung changes test and documentation authority only. It adds no
+  nonmatching/mortar projection, no variable contact law, no contact adjoint, no
+  retained registry receipt, and no maturity promotion.
+
 ### Post-checkpoint Level-A surface-radiation execution binding
 
 - Added card-backed hemispherical-total emissivity with an explicit material

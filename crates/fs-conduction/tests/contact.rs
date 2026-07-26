@@ -814,6 +814,117 @@ fn a_bound_interface_refuses_a_changed_exact_vertex_correspondence() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Why `matching_vertices`' non-unique-correspondence refusal has no test.
+//
+// interface.rs's `matching_vertices` refuses with "does not have a unique exact
+// vertex correspondence" when a side-A vertex has anything other than exactly
+// one bit-equal partner in side B. That branch is UNREACHABLE from every public
+// entry point, and the two tests below are the reachability argument in code
+// rather than a test of the branch itself:
+//
+//   * matches.len() == 0 is impossible because `ThermalInterfaces::new` refuses
+//     any declared pair that is not in `coincident_candidates`, and candidacy is
+//     equality of the SORTED triple of coordinate bit patterns -- so every
+//     side-A key occurs in side B with the same multiplicity.
+//   * matches.len() >= 2 needs two bit-identical vertices inside one boundary
+//     triangle, which forces its parent tet to zero signed volume, which
+//     `ConductionMesh::new` refuses before any interface code runs. That is
+//     `a_face_with_two_bit_identical_vertices_cannot_be_meshed`.
+//
+// `ConductionMesh` exposes no post-construction mutator, so the invariant cannot
+// be re-broken after `new` admits a mesh. The branch is therefore defensive
+// depth, and no document may cite it as a covered refusal.
+//
+// This is not a paper argument. Deleting the candidacy guard from
+// `ThermalInterfaces::new` and rerunning makes
+// `the_candidacy_guard_is_what_keeps_vertex_matching_unreachable` fail by
+// reporting interface `"<geometry>"` -- the literal name
+// `matching_vertices` refuses under -- so the fall-through is observed, and the
+// branch is live defensive code rather than something that could be deleted.
+//
+// Two corrections to the record, both against my own earlier report:
+//   * the candidacy guard was ALREADY covered, by the "is not exactly
+//     coincident" clause of
+//     `surface_declaration_and_binding_guards_each_refuse_their_own_defect`.
+//     A grep for the full message string missed it because that test asserts a
+//     substring. The test below is kept for a different reason: under the guard
+//     deletion above it is the fixture that reaches `matching_vertices`, while
+//     the older one stops at the occupied-boundary guard.
+//   * `a_bound_interface_refuses_a_changed_exact_vertex_correspondence` does NOT
+//     reach `matching_vertices` despite its name; it perturbs an already-bound
+//     mesh, so the "changed after binding" guard fires first.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_candidacy_guard_is_what_keeps_vertex_matching_unreachable() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let mesh = two_tet_contact_mesh();
+    let pairs = ThermalInterfaces::coincident_face_pairs(&mesh).expect("one coincident face pair");
+    assert_eq!(pairs.len(), 1);
+    let pair = pairs[0];
+    let unrelated = (0..mesh.boundary().len())
+        .find(|slot| *slot != pair.side_a && *slot != pair.side_b)
+        .expect("the fixture has boundary faces outside the contact plane");
+    let bogus = InterfaceFacePair {
+        side_a: pair.side_a,
+        side_b: unrelated,
+    };
+    assert!(
+        !pairs.iter().any(|candidate| {
+            (candidate.side_a == bogus.side_a && candidate.side_b == bogus.side_b)
+                || (candidate.side_a == bogus.side_b && candidate.side_b == bogus.side_a)
+        }),
+        "the fixture must declare a pair the geometry does not support"
+    );
+
+    let error = ThermalInterfaces::new(
+        &mesh,
+        &adiabatic_boundary(&mesh),
+        vec![
+            InterfaceSurface::new("bondline", vec![bogus], resistance(&card))
+                .expect("interface surface"),
+        ],
+    )
+    .expect_err("a non-coincident declared pair must refuse before vertex matching");
+    assert_interface_refusal(
+        error,
+        "bondline",
+        "not exactly coincident matching P1 geometry",
+    );
+}
+
+#[test]
+fn a_face_with_two_bit_identical_vertices_cannot_be_meshed() {
+    // The last two vertices are bit-identical, so any boundary triangle using
+    // both would give `matching_vertices` a two-way match. The tet's signed
+    // volume is exactly zero, so the mesh never exists.
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let error = ConductionMesh::new(
+        TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3]]),
+        positions,
+    )
+    .expect_err("a tet with two coincident vertices is degenerate");
+    match error {
+        ConductionError::DegenerateElement {
+            element,
+            signed_volume,
+        } => {
+            assert_eq!(element, 0);
+            assert!(
+                signed_volume == 0.0,
+                "two coincident vertices must give exactly zero volume, got {signed_volume:e}"
+            );
+        }
+        other => panic!("expected a typed degenerate-element refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_bound_interface_refuses_changed_face_area_bits() {
     let card = contact_card(UncertaintyModel::Unstated);
@@ -865,16 +976,103 @@ fn a_bound_interface_refuses_changed_face_area_bits() {
     );
 }
 
+/// Solve the two-slab contact fixture with a caller-chosen area-specific bond
+/// line and return the series resistance the SOLVE implies, `ΔT / Q`.
+///
+/// This is the quantity the Level-A registry row is about, derived exactly the
+/// way the accepting test derives it. A falsifier built on it therefore has to
+/// travel the whole card -> resistance -> binding -> assembly -> solve -> report
+/// chain, instead of doing arithmetic on registry constants.
+fn solved_series_resistance(area_specific_resistance_m2_k_w: f64) -> f64 {
+    let (mesh, _) = two_slab_mesh(4);
+    let boundary = boundary(&mesh);
+    let card = contact_card(UncertaintyModel::HalfWidth {
+        half_width: 0.01,
+        confidence: 0.95,
+    });
+    let mut resistance = resistance(&card);
+    if area_specific_resistance_m2_k_w.to_bits() != AREA_SPECIFIC_RESISTANCE.to_bits() {
+        resistance = resistance
+            .with_measured_value(
+                area_specific_resistance_m2_k_w,
+                UncertaintyModel::Unstated,
+                "deliberate bond-line perturbation",
+            )
+            .expect("perturbed bond-line resistance");
+    }
+    let interface = InterfaceSurface::new("bondline", oriented_pairs(&mesh), resistance)
+        .expect("interface surface");
+    let interfaces = ThermalInterfaces::new(&mesh, &boundary, vec![interface])
+        .expect("complete interface binding");
+    let solution = solve_contact_fixture(&mesh, &boundary, &interfaces);
+    let flux = solution
+        .report
+        .interface_fluxes
+        .first()
+        .expect("one interface flux");
+    (T_HOT - T_COLD) / flux.heat_rate_a_to_b_w
+}
+
+/// The applied Level-A envelope must reject a bond line that is actually wrong.
+///
+/// The predecessor of this test set `outside = reference + 2 * limit` and then
+/// asserted `|outside - reference| > limit`. That is unconditionally true for
+/// any positive limit -- which the helper already asserts -- so it exercised no
+/// production code at all: it was arithmetic on two registry constants wearing
+/// the name of a tolerance check.
 #[test]
-fn contact_level_a_tolerance_rejects_a_deliberate_outside_value() {
+fn contact_level_a_tolerance_rejects_a_wrong_bond_line_from_the_actual_solve() {
     let (case, reference) = level_a_contact_reference();
+    // Registry pin, kept deliberately and labelled for what it is: a
+    // change-detector on the row's stored value, not a check of anything this
+    // crate computes.
     assert_eq!(reference.to_bits(), 0.3f64.to_bits());
-    let (_, limit) = level_a_tolerance_error_and_limit(case, reference);
-    let outside = reference + 2.0 * limit;
-    let (outside_error, outside_limit) = level_a_tolerance_error_and_limit(case, outside);
+
+    // DISCRIMINATION, not merely rejection. A gate that rejected everything
+    // would satisfy the falsifier below and look identical to one that works,
+    // so the accepting case is asserted here too rather than assumed from the
+    // neighbouring test.
+    let accepted = solved_series_resistance(AREA_SPECIFIC_RESISTANCE);
+    let (accepted_error, accepted_limit) = level_a_tolerance_error_and_limit(case, accepted);
     assert!(
-        outside_error > outside_limit,
-        "the applied Level-A tolerance must reject a constructed value outside its envelope"
+        accepted_error <= accepted_limit,
+        "the card's own bond line must stay inside the Level-A envelope: solved \
+         {accepted:.16e} K/W, error {accepted_error:.3e}, limit {accepted_limit:.3e}"
+    );
+
+    // HEADROOM, measured rather than assumed. The accepting case sits at
+    // ~1.39e-14 against the row's 1.3e-12 limit, about 94x clear. Pin one order
+    // of magnitude of that margin so a future solver or `config()` change that
+    // eats it is caught while margin remains, instead of surfacing later as an
+    // intermittent failure sitting on the registry bound.
+    assert!(
+        accepted_error * 10.0 < accepted_limit,
+        "the accepting case must keep an order of magnitude of headroom below the \
+         registry limit: error {accepted_error:.3e}, limit {accepted_limit:.3e}"
+    );
+
+    // The falsifier is a PLAUSIBLE modelling mistake -- a 1% bond-line error --
+    // rather than a value constructed two tolerances away from the answer.
+    const BOND_LINE_ERROR: f64 = 0.01;
+    let rejected = solved_series_resistance(AREA_SPECIFIC_RESISTANCE * (1.0 + BOND_LINE_ERROR));
+    let (rejected_error, rejected_limit) = level_a_tolerance_error_and_limit(case, rejected);
+    assert!(
+        rejected_error > rejected_limit,
+        "a {BOND_LINE_ERROR} relative bond-line error must be rejected: solved \
+         {rejected:.16e} K/W, error {rejected_error:.3e}, limit {rejected_limit:.3e}"
+    );
+
+    // And the perturbation must land where the physics says it does. The bond
+    // line is one of three equal series terms over a 1 m² trace, so a relative
+    // error in R'' moves the total by exactly `R'' * BOND_LINE_ERROR`. Without
+    // this, the rejection above would also pass if the perturbation had
+    // corrupted some unrelated term by an arbitrary amount.
+    let observed_shift = rejected - accepted;
+    let expected_shift = AREA_SPECIFIC_RESISTANCE * BOND_LINE_ERROR;
+    assert!(
+        (observed_shift - expected_shift).abs() < 1.0e-9,
+        "the perturbation must move the series resistance by the bond-line delta: \
+         expected {expected_shift:.16e} K/W, observed {observed_shift:.16e} K/W"
     );
 }
 
@@ -1106,6 +1304,102 @@ fn two_named_surfaces_sort_deterministically_without_swapping_their_physics() {
     assert!(
         (name_fluxes[0].heat_rate_a_to_b_w - name_fluxes[1].heat_rate_a_to_b_w).abs() > 1.0,
         "distinct resistances must make a surface swap observable"
+    );
+}
+
+/// Drive `assemble_into` with MORE THAN ONE bound surface, against a closed
+/// form, with a per-surface oracle.
+///
+/// The deterministic-sort test above binds two surfaces but stops at
+/// `fluxes()`, so before this test the multi-surface assembly path was never
+/// executed even though the contract talks about ordering stability "before
+/// assembly or summation". Two unequal bond lines in series also give the
+/// fixture a per-surface oracle: a total-heat check alone cannot see the two
+/// surfaces swapped, because series conservation puts the same Q through both.
+#[test]
+fn two_named_surfaces_assemble_into_one_series_solve() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let base = resistance(&card);
+    let doubled = base
+        .with_measured_value(
+            2.0 * AREA_SPECIFIC_RESISTANCE,
+            UncertaintyModel::Unstated,
+            "second declared bond line",
+        )
+        .expect("second resistance");
+    let (mesh, _) = slab_chain_mesh(1, 3);
+    let boundary = outer_boundary(&mesh, 3.0);
+    let first_plane = oriented_pairs_at_x(&mesh, 1.0);
+    let second_plane = oriented_pairs_at_x(&mesh, 2.0);
+    assert!(
+        !first_plane.is_empty() && !second_plane.is_empty(),
+        "the fixture must contain two nonempty contact surfaces"
+    );
+    assert_eq!(
+        first_plane.len() + second_plane.len(),
+        oriented_pairs(&mesh).len(),
+        "the two named surfaces must partition every coincident pair"
+    );
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new("bond-thin", first_plane, base).expect("thin surface"),
+            InterfaceSurface::new("bond-thick", second_plane, doubled).expect("thick surface"),
+        ],
+    )
+    .expect("two-surface binding");
+    assert_eq!(interfaces.surface_count(), 2);
+
+    let solution = solve_contact_fixture(&mesh, &boundary, &interfaces);
+    assert_eq!(
+        solution.report.interface_fluxes.len(),
+        2,
+        "an assembled two-surface solve must report both interfaces"
+    );
+    let flux_for = |name: &str| {
+        solution
+            .report
+            .interface_fluxes
+            .iter()
+            .find(|flux| flux.interface == name)
+            .unwrap_or_else(|| panic!("missing reported interface {name}"))
+    };
+    let thin = flux_for("bond-thin");
+    let thick = flux_for("bond-thick");
+
+    // Closed form: three unit slabs at k = 10 W/m·K over a 1 m² trace give
+    // 0.1 K/W each, and the two bond lines add 0.1 and 0.2 K/W, so
+    // R_total = 0.6 K/W and Q = 30 K / 0.6 K/W = 50 W.
+    const EXPECTED_HEAT_W: f64 = 50.0;
+    for flux in [thin, thick] {
+        assert!(
+            (flux.heat_rate_a_to_b_w - EXPECTED_HEAT_W).abs() < 1e-7,
+            "series conservation puts {EXPECTED_HEAT_W} W through {}, got {} W",
+            flux.interface,
+            flux.heat_rate_a_to_b_w
+        );
+    }
+
+    // PER-SURFACE oracle. The jumps are Q·R_c, so they differ by construction
+    // and identify which surface got which card. Swapping `base` and `doubled`
+    // above leaves every heat rate untouched and fails exactly here.
+    assert!(
+        (thin.mean_jump_k - EXPECTED_HEAT_W * AREA_SPECIFIC_RESISTANCE).abs() < 1e-7,
+        "the thin bond line must drop Q·R'' = 5 K, got {} K",
+        thin.mean_jump_k
+    );
+    assert!(
+        (thick.mean_jump_k - EXPECTED_HEAT_W * 2.0 * AREA_SPECIFIC_RESISTANCE).abs() < 1e-7,
+        "the thick bond line must drop Q·2R'' = 10 K, got {} K",
+        thick.mean_jump_k
+    );
+    assert!(
+        (thick.mean_jump_k - thin.mean_jump_k).abs() > 1.0,
+        "the two jumps must be far apart or the swap above is not observable: \
+         {} K vs {} K",
+        thin.mean_jump_k,
+        thick.mean_jump_k
     );
 }
 
