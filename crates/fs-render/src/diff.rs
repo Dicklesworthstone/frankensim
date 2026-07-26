@@ -21,12 +21,16 @@
 //!   theorem at the converged z-argmin (no dz*/dθ needed).
 //!
 //! Bias discipline: the estimator is DETERMINISTIC QUADRATURE — no
-//! variance; the bias is discretization error, measured to shrink at
-//! second order in the battery. The Monte-Carlo/reparameterized
+//! variance; the retained battery pins decreasing discretization error across
+//! its selected refinements but does not claim universal per-level monotonicity
+//! or a convergence order. The Monte-Carlo/reparameterized
 //! estimators for path-traced integration (and FrankenTorch-bridged
 //! learned BSDFs) are the recorded successors, not claimed.
 
-use crate::charts::{Ray, TraceTermination, sphere_trace};
+use crate::charts::{
+    DEFAULT_SPHERE_TRACE_STEP_BUDGET, MAX_SPHERE_TRACE_STEP_BUDGET, Ray, TraceTermination,
+    sphere_trace_with_step_budget,
+};
 use fs_ad::Real;
 use fs_ad::dual::Dual;
 use fs_evidence::{NumericalCertificate, NumericalKind};
@@ -484,12 +488,14 @@ fn trace_hit<T: BackendHitScalar>(
     cx: &Cx<'_>,
     x: T,
     y: T,
+    max_trace_steps: u32,
 ) -> Result<[T; 3], RenderError> {
     let ray = Ray {
         origin: Point3::new(x.value(), y.value(), Z_TOP),
         dir: Vec3::new(0.0, 0.0, -1.0),
     };
-    let (hit, audit) = sphere_trace(chart, cx, &ray, Z_TOP - Z_BOT, 1e-12, 1.0);
+    let (hit, audit) =
+        sphere_trace_with_step_budget(chart, cx, &ray, Z_TOP - Z_BOT, 1e-12, 1.0, max_trace_steps);
     if audit.termination == TraceTermination::Cancelled {
         return Err(RenderError::Cancelled);
     }
@@ -519,8 +525,9 @@ fn shade<T: BackendHitScalar>(
     cx: &Cx<'_>,
     x: T,
     y: T,
+    max_trace_steps: u32,
 ) -> Result<T, RenderError> {
-    let p = trace_hit(scene, chart, cx, x, y)?;
+    let p = trace_hit(scene, chart, cx, x, y, max_trace_steps)?;
     // Spatial gradient: seed position lanes over T.
     let scene_s: BlendScene<Dual<T, 3>> = BlendScene {
         c1: [
@@ -563,8 +570,8 @@ fn shade<T: BackendHitScalar>(
     }
 }
 
-/// Renderer resolution/quadrature knobs.
-#[derive(Clone, Copy)]
+/// Renderer resolution, quadrature knobs, and per-ray work budget.
+#[derive(Debug, Clone, Copy)]
 pub struct RenderCfg {
     /// Image is res × res over [0,1]².
     pub res: usize,
@@ -572,6 +579,11 @@ pub struct RenderCfg {
     pub subrows: usize,
     /// Coarse x-samples per pixel used to bracket crossings.
     pub xsamples: usize,
+    /// Maximum certified sphere-trace steps per shaded ray.
+    ///
+    /// Values above [`MAX_SPHERE_TRACE_STEP_BUDGET`] are refused rather than
+    /// silently expanding the renderer's work envelope.
+    pub max_trace_steps: u32,
 }
 
 impl Default for RenderCfg {
@@ -580,6 +592,7 @@ impl Default for RenderCfg {
             res: 32,
             subrows: 2,
             xsamples: 4,
+            max_trace_steps: DEFAULT_SPHERE_TRACE_STEP_BUDGET,
         }
     }
 }
@@ -593,6 +606,8 @@ fn validate_request(params: &[f64], cfg: RenderCfg) -> Result<(usize, usize), Re
         || cfg.res == 0
         || cfg.subrows == 0
         || cfg.xsamples == 0
+        || cfg.max_trace_steps == 0
+        || cfg.max_trace_steps > MAX_SPHERE_TRACE_STEP_BUDGET
     {
         return Err(RenderError::InvalidInput);
     }
@@ -671,6 +686,7 @@ fn integrate_row<T: BackendHitScalar>(
     inside_first: bool,
     row: &mut [T],
     res: usize,
+    max_trace_steps: u32,
 ) -> Result<(), RenderError> {
     let g1 = T::from_f64(0.5 - 0.5 / fs_math::det::sqrt(3.0));
     let g2 = T::from_f64(0.5 + 0.5 / fs_math::det::sqrt(3.0));
@@ -692,8 +708,8 @@ fn integrate_row<T: BackendHitScalar>(
             };
             let len = b - a;
             if len.value() > 0.0 && inside {
-                let s1 = shade(scene, chart, cx, a + len * g1, y)?;
-                let s2 = shade(scene, chart, cx, a + len * g2, y)?;
+                let s1 = shade(scene, chart, cx, a + len * g1, y, max_trace_steps)?;
+                let s2 = shade(scene, chart, cx, a + len * g2, y, max_trace_steps)?;
                 acc = acc + (s1 + s2) * half * len;
             } else if len.value() > 0.0 {
                 acc = acc + T::from_f64(BACKGROUND) * len;
@@ -736,6 +752,7 @@ pub fn render(params: &[f64], cx: &Cx<'_>, cfg: RenderCfg) -> Result<Vec<f64>, R
                 inside_first,
                 &mut row,
                 cfg.res,
+                cfg.max_trace_steps,
             )?;
         }
         for (px, v) in row.iter().enumerate() {
@@ -812,6 +829,7 @@ pub fn render_grad(
                 inside_first,
                 &mut row,
                 cfg.res,
+                cfg.max_trace_steps,
             )?;
         }
         for (px, v) in row.iter().enumerate() {
@@ -892,7 +910,30 @@ pub fn loss_and_grad(
 
 #[cfg(test)]
 mod tests {
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
     use super::*;
+
+    fn with_test_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 17,
+                    kernel_id: 5,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
 
     #[test]
     fn tangent_hit_refuses_to_mint_a_zero_gradient() {
@@ -902,5 +943,57 @@ mod tests {
         let result =
             <D9 as BackendHitScalar>::lift_hit_z(&scene, D9::constant(1.0), D9::constant(0.0), 0.0);
         assert_eq!(result, Err(RenderError::SingularHit));
+    }
+
+    #[test]
+    fn fine_reference_grazing_ray_uses_only_its_explicit_step_budget() {
+        with_test_cx(|cx| {
+            let scene =
+                BlendScene::from_params(&[0.38, 0.45, 0.0, 0.22, 0.62, 0.58, 0.1, 0.17, 0.08])
+                    .expect("valid blend fixture");
+            let chart = BlendChart { scene: &scene };
+            let ray = Ray {
+                origin: Point3::new(0.343_746_431_451_794_8, 0.666_992_187_5, Z_TOP),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            };
+            let (default_hit, default_audit) = sphere_trace_with_step_budget(
+                &chart,
+                cx,
+                &ray,
+                Z_TOP - Z_BOT,
+                1e-12,
+                1.0,
+                DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+            );
+            assert!(default_hit.is_none());
+            assert!(matches!(
+                default_audit.termination,
+                TraceTermination::ResidualLimit | TraceTermination::StepLimit
+            ));
+            assert_eq!(
+                default_audit.steps, DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+                "the ordinary work envelope remains bounded"
+            );
+
+            let (extended_hit, extended_audit) = sphere_trace_with_step_budget(
+                &chart,
+                cx,
+                &ray,
+                Z_TOP - Z_BOT,
+                1e-12,
+                1.0,
+                MAX_SPHERE_TRACE_STEP_BUDGET,
+            );
+            assert!(
+                extended_hit.is_some(),
+                "the explicitly enlarged bounded envelope reaches a certified short bracket"
+            );
+            assert!(extended_audit.certified && extended_audit.certifies_hit());
+            assert_eq!(extended_audit.termination, TraceTermination::Hit);
+            assert!(
+                extended_audit.steps > DEFAULT_SPHERE_TRACE_STEP_BUDGET
+                    && extended_audit.steps < MAX_SPHERE_TRACE_STEP_BUDGET
+            );
+        });
     }
 }

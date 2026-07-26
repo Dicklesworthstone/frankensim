@@ -52,27 +52,34 @@ differentiable lift). Pure Rust throughout.
   carrying `Some(L)` cannot upgrade the default `NoClaim`. Exact-distance hits
   use world-space distance tolerance. A Lipschitz-implicit chart authorizes a
   geometric `Hit` with either a rigorous singleton-zero field enclosure or a
-  short sign bracket. At a strict-sign residual limit, the marcher may inspect
-  one cancellation-aware witness no more than `2*eps` ahead in actual
+  short sign bracket. At each strict-sign residual sample, the marcher may
+  inspect one cancellation-aware witness no more than `2*eps` ahead in actual
   outward-rounded Euclidean distance. Rigorously opposite endpoint signs plus
-  the claim's finite-segment continuity prove a boundary in that segment. The
-  marcher uses bounded evaluated refinement when binary64 `Ray::at` rounding
+  the claim's finite-segment continuity prove a boundary in that segment. When
+  that bounded witness is same-sign or otherwise supplies no root evidence, it
+  remains non-adopted: the marcher may advance only to the independently
+  certified `|f|/L` safe endpoint and retry under the caller-admitted step
+  budget. The public default is 4096 steps; explicit requests are hard-capped
+  at 16384. Residual refinement never launches an over-relaxed endpoint.
+  The marcher uses bounded evaluated refinement when binary64 `Ray::at` rounding
   puts the first midpoint microscopically outside an endpoint-distance guard.
   It preserves the original root-free prefix endpoint and may pull back only a
   rigorously opposite-sign or singleton-zero far endpoint; same-sign,
   indeterminate, and no-progress refinement fails closed rather than discarding
   possible earlier even crossings. Only an evaluated representative within
   `eps` of both retained endpoints becomes the hit. The witness is evidence
-  only and is never adopted as march state. A nonzero
-  normalized residual `|f|/L` by itself certifies step safety, not proximity,
-  and stops as `ResidualLimit` with no `Hit`. Pending over-relaxed
+  only and is never adopted as march state. A nonzero normalized residual
+  `|f|/L` by itself certifies only the next root-free safe step, not proximity.
+  Reaching the caller boundary while it remains residual, exhausting bounded
+  residual refinement, or losing finite forward progress without a sign
+  bracket stops as `ResidualLimit` with no `Hit`. Pending over-relaxed
   endpoints are validated before either hit or miss acceptance. An
   outward-rounded working limit is classified at the caller's actual endpoint:
   hits require a validated endpoint sample, and misses require an
   epsilon-clear safe-ball bridge across any coordinate-rounding gap. Normalized
   working parameters size steps, but every chart and overlap evaluation uses
   the caller ray's own `Ray::at` arithmetic so a certificate is never returned
-  for a numerically different point. This is chart-backend bit-semantics v8.
+  for a numerically different point. This is chart-backend bit-semantics v9.
   `TraceAudit`
   states whether every marched sample supplied a positive finite certified
   bound and compatible rigorous trace-value certificate, counts retreats to the
@@ -145,7 +152,9 @@ residual-only stop, miss, or geometrically authorized hit without conflation.
 Differentiable rendering returns
 `RenderError` for cancellation, invalid parameters/configuration/targets,
 backend refusal, uncertified traces, and singular implicit/boundary
-derivatives. The tracer returns `TracerError`, preserving cancellation,
+derivatives. `RenderCfg.max_trace_steps` makes its per-ray work envelope
+explicit; zero or values above the hard 16384-step ceiling are invalid. The
+tracer returns `TracerError`, preserving cancellation,
 invalid dimensions/film buffers/progressive ranges, backend refusal,
 uncertified traces, and missing normals. `halton`
 panics only on `dim >= 8` (out of the prime table).
@@ -157,7 +166,10 @@ image.
 ## Determinism class
 
 SAME-ISA bit-deterministic: the sampling is low-discrepancy, keyed by sample
-index. The transfer renderer uses a distinct per-pixel Philox domain, so
+index. The complete `RenderCfg`, including `max_trace_steps`, is replay-critical
+input because a different bounded work envelope may change a typed refusal into
+a certified hit and therefore change image bytes. The transfer renderer uses a
+distinct per-pixel Philox domain, so
 pixel/tile execution order does not alter its samples. The claim is scoped
 to one ISA/libm build (determinism-tier policy, bead frankensim-lyms):
 volume tracking, phase functions, and disk sampling call platform libm
@@ -240,12 +252,15 @@ passes. The existing translated-scene frame-invariance pin in
 `tests/charts.rs` remains independent.
 
 `tests/diff_battery.rs` (bead qfx.5, feature `differentiable`): edge-aware
-gradient vs central FD, the frozen-crossing negative control, shrinking
-quadrature bias, inverse rendering, a combined appearance/physics objective,
+gradient vs central FD, the frozen-crossing negative control, a retained-fixture
+quadrature-bias refinement regression, inverse rendering, a combined appearance/physics objective,
 bitwise primal/gradient replay through the shared backend, a smooth-min seam
 derivative regression, and fail-closed cancellation. Numerical receipts are
 emitted by the current-tree run; this contract does not carry stale measurements
-across backend-semantic changes.
+across backend-semantic changes. Every change to chart hit certification or
+termination control flow must prove both the complete `tests/charts.rs` battery
+and all nine `tests/diff_battery.rs` cases with the `differentiable` feature;
+a charts-only proof set is narrower than the shared backend's blast radius.
 
 `tests/charts.rs` (beads qfx.2 + 8ll9, default feature): four distinct
 thin-shell/scaling falsifiers that all defeat the naive unit-bound marcher while
@@ -313,10 +328,12 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   claims stop as `InvalidSample`.
 - A nonzero `LipschitzImplicit` normalized residual is not a Euclidean
   distance-to-boundary certificate. Without a rigorous singleton zero or the
-  short opposite-sign witness above, it returns `ResidualLimit` and no `Hit`.
-  An independent oracle may therefore locate a transverse root beyond the
-  bounded witness while the production trace honestly remains `ResidualLimit`;
-  that is unresolved completeness, not a certified miss.
+  short opposite-sign witness above, it can authorize only another certified
+  root-free safe step; it never mints a `Hit`. If bounded continuation cannot
+  reach such evidence, the production trace returns `ResidualLimit`.
+  An independent oracle may therefore locate a root beyond the bounded
+  continuation budget while the production trace honestly remains
+  `ResidualLimit`; that is unresolved completeness, not a certified miss.
   Same-sign and indeterminate witnesses — including generic tangencies and
   even-contact intervals — remain explicit no-claim outcomes until a chart
   supplies a proximity or first-ray-root certificate. Exact-distance charts

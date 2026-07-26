@@ -1,7 +1,8 @@
 //! Chart-backend conformance (beads qfx.2 + 8ll9; default-on).
 //! Acceptance: zero false hits or tunneling across the adversarial ray battery
 //! (thin shells, grazing rays) vs the independent root-finder oracle; roots
-//! outside the bounded short-witness authority remain typed residual limits.
+//! outside the bounded short-witness authority require independently certified
+//! safe continuation or remain typed residual limits.
 //! NURBS Newton
 //! matches analytic references; mixed-chart scenes agree across backend
 //! kinds within tolerance; G3 frame invariance; ray rates measured and
@@ -9,6 +10,7 @@
 #![cfg(feature = "chart-backends")]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use asupersync::types::Budget;
 use fs_evidence::{NumericalCertificate, NumericalKind};
@@ -17,8 +19,9 @@ use fs_geom::fixtures::{SphereChart, TorusChart};
 use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_math::eft::two_sum;
 use fs_render::charts::{
-    Backend, CHART_BACKEND_BIT_SEMANTICS_VERSION, NurbsRayError, Ray, SceneTraceError,
-    TraceTermination, TriMesh, ray_intersect_nurbs, sphere_trace, trace_scene,
+    Backend, CHART_BACKEND_BIT_SEMANTICS_VERSION, DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+    MAX_SPHERE_TRACE_STEP_BUDGET, NurbsRayError, Ray, SceneTraceError, TraceTermination, TriMesh,
+    ray_intersect_nurbs, sphere_trace, sphere_trace_with_step_budget, trace_scene,
 };
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder};
 
@@ -285,6 +288,107 @@ impl Chart for LooseLipschitzChart {
 
     fn name(&self) -> &'static str {
         "loose-lipschitz"
+    }
+}
+
+const SHALLOW_CONTINUATION_EPS: f64 = 1.0 / 1_048_576.0;
+const SHALLOW_CONTINUATION_ROOT: f64 = 8.0 * SHALLOW_CONTINUATION_EPS;
+
+fn shallow_implicit_plane_sample(x: Point3) -> ChartSample {
+    let value = (x.x - SHALLOW_CONTINUATION_ROOT) * (1.0 / 16.0);
+    ChartSample {
+        signed_distance: value,
+        gradient: Some(Vec3::new(1.0 / 16.0, 0.0, 0.0)),
+        // The tight bound is 1/16. Publishing the valid looser bound makes
+        // the first normalized residual occur well before the 2*eps witness
+        // can reach the ordinary transverse root.
+        lipschitz: Some(1.0),
+        error: NumericalCertificate::estimate(value, value),
+    }
+}
+
+fn shallow_implicit_plane_enclosure(x: Point3, sample: &ChartSample) -> NumericalCertificate {
+    let (delta_lo, delta_hi) = exact_subtraction_bounds(x.x, SHALLOW_CONTINUATION_ROOT);
+    bounded_certificate(
+        (delta_lo * (1.0 / 16.0)).next_down(),
+        (delta_hi * (1.0 / 16.0)).next_up(),
+        sample.signed_distance,
+    )
+}
+
+/// The shallow plane above with every evaluated x-coordinate retained so the
+/// residual-continuation state transition can be checked independently of the
+/// eventual hit.
+#[derive(Default)]
+struct RecordingShallowImplicitPlane {
+    evaluations: Mutex<Vec<f64>>,
+}
+
+impl Chart for RecordingShallowImplicitPlane {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        self.evaluations
+            .lock()
+            .expect("evaluation trace mutex")
+            .push(x.x);
+        shallow_implicit_plane_sample(x)
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        shallow_implicit_plane_enclosure(x, sample)
+    }
+
+    fn name(&self) -> &'static str {
+        "recording-shallow-implicit-plane"
+    }
+}
+
+/// The shallow plane above, with cancellation requested by the first
+/// post-witness continuation sample.
+struct CancelOnResidualContinuation<'a> {
+    gate: &'a CancelGate,
+    evaluations: AtomicUsize,
+}
+
+impl Chart for CancelOnResidualContinuation<'_> {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        if self.evaluations.fetch_add(1, Ordering::SeqCst) == 2 {
+            self.gate.request();
+        }
+        shallow_implicit_plane_sample(x)
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        shallow_implicit_plane_enclosure(x, sample)
+    }
+
+    fn name(&self) -> &'static str {
+        "cancel-on-residual-continuation"
     }
 }
 
@@ -593,7 +697,7 @@ fn oracle_first_hit(chart: &dyn Chart, cx: &Cx<'_>, ray: &Ray, t_max: f64) -> Op
 #[test]
 fn rb_001_zero_tunneling_headline() {
     with_cx(|cx| {
-        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 8);
+        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 9);
         // Falsifier pairing: four thin-feature fields whose L > 1. The naive
         // unit-bound marcher tunnels in every case; the certified d/L path
         // approaches under a no-tunneling theorem and closes a short rigorous
@@ -780,6 +884,33 @@ fn rb_001b_trace_audit_states_fail_closed() {
         let (_, invalid_input) = sphere_trace(&thin_shell(), cx, &bad_ray, 6.0, 1e-6, 1.0);
         assert_eq!(invalid_input.termination, TraceTermination::InvalidInput);
         assert!(!invalid_input.certified);
+
+        let (_, zero_budget) =
+            sphere_trace_with_step_budget(&thin_shell(), cx, &ray, 6.0, 1e-6, 1.0, 0);
+        let (_, oversized_budget) = sphere_trace_with_step_budget(
+            &thin_shell(),
+            cx,
+            &ray,
+            6.0,
+            1e-6,
+            1.0,
+            MAX_SPHERE_TRACE_STEP_BUDGET + 1,
+        );
+        assert_eq!(zero_budget.termination, TraceTermination::InvalidInput);
+        assert_eq!(oversized_budget.termination, TraceTermination::InvalidInput);
+        assert!(!zero_budget.certified && !oversized_budget.certified);
+
+        let wrapped = sphere_trace(&thin_shell(), cx, &ray, 6.0, 1e-6, 1.0);
+        let explicit_default = sphere_trace_with_step_budget(
+            &thin_shell(),
+            cx,
+            &ray,
+            6.0,
+            1e-6,
+            1.0,
+            DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+        );
+        assert_eq!(wrapped, explicit_default);
 
         let invalid_chart = SampleOverrideChart {
             inner: thin_shell(),
@@ -1007,9 +1138,9 @@ fn rb_001j_short_bracket_clips_to_tmax_without_adopting_the_witness() {
             "a root beyond t_max must not leak in"
         );
         assert_eq!(blocked_audit.termination, TraceTermination::ResidualLimit);
-        assert_eq!(
-            blocked_audit.steps, 0,
-            "a same-sign witness never becomes the next march sample"
+        assert!(
+            blocked_audit.steps > 0,
+            "the witness stays non-adopted while the separately certified safe step reaches t_max"
         );
         assert!(blocked_audit.certified && !blocked_audit.certifies_hit());
     });
@@ -1031,7 +1162,10 @@ fn rb_001k_indeterminate_same_sign_and_tangent_witnesses_fail_closed() {
             TraceTermination::ResidualLimit,
             "an enclosure containing zero does not prove a root"
         );
-        assert_eq!(straddling_audit.steps, 0, "the witness is not adopted");
+        assert!(
+            straddling_audit.steps > 0,
+            "the independently certified safe prefix may advance even though the indeterminate witness is never adopted"
+        );
 
         let shell = thin_shell_with_thickness(0.5 * eps);
         let shell_ray = Ray {
@@ -1044,7 +1178,6 @@ fn rb_001k_indeterminate_same_sign_and_tangent_witnesses_fail_closed() {
             "a probe spanning both sides of an ultra-thin shell has no sign witness"
         );
         assert_eq!(shell_audit.termination, TraceTermination::ResidualLimit);
-        assert_eq!(shell_audit.steps, 0, "the same-sign probe is never a step");
 
         let tangent = ImplicitSphereChart {
             inner: SphereChart {
@@ -1062,7 +1195,6 @@ fn rb_001k_indeterminate_same_sign_and_tangent_witnesses_fail_closed() {
             "a tangent needs proximity or first-root evidence beyond endpoint signs"
         );
         assert_eq!(tangent_audit.termination, TraceTermination::ResidualLimit);
-        assert_eq!(tangent_audit.steps, 0, "the tangent probe is never adopted");
         assert!(straddling_audit.certified && shell_audit.certified && tangent_audit.certified);
     });
 }
@@ -1103,6 +1235,106 @@ fn rb_001l_cancellation_during_short_witness_wins() {
             chart.evaluations.load(Ordering::SeqCst),
             2,
             "only the current sample and speculative witness are evaluated"
+        );
+    });
+}
+
+#[test]
+fn rb_001m_same_sign_residual_continues_to_transverse_first_root() {
+    with_cx(|cx| {
+        let chart = RecordingShallowImplicitPlane::default();
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (hit, audit) = sphere_trace(
+            &chart,
+            cx,
+            &ray,
+            16.0 * SHALLOW_CONTINUATION_EPS,
+            SHALLOW_CONTINUATION_EPS,
+            1.6,
+        );
+        let hit = hit.expect("certified safe continuation reaches a short first-root bracket");
+        assert_eq!(audit.termination, TraceTermination::Hit);
+        assert!(audit.certified && audit.certifies_hit());
+        assert!(
+            audit.steps > 0,
+            "the initial same-sign 2*eps witness cannot certify this root"
+        );
+        assert!(
+            (hit.point.x - SHALLOW_CONTINUATION_ROOT).abs() <= SHALLOW_CONTINUATION_EPS,
+            "the returned representative remains within eps of the analytic first root"
+        );
+        let evaluations = chart.evaluations.lock().expect("evaluation trace mutex");
+        assert!(
+            evaluations.len() >= 3,
+            "current point, short witness, and safe continuation must all be evaluated"
+        );
+        assert_eq!(evaluations[0], 0.0);
+        assert_eq!(
+            evaluations[1].to_bits(),
+            0x3ebf_ffff_ffff_fffc,
+            "the second evaluation is the outward-rounded 2*eps speculative witness"
+        );
+        assert_eq!(
+            evaluations[2].to_bits(),
+            0x3e9f_ffff_ffff_fff8,
+            "the third evaluation is the independently certified safe endpoint"
+        );
+        assert!(
+            evaluations[2] > 0.0
+                && evaluations[2] <= 0.75 * SHALLOW_CONTINUATION_EPS
+                && evaluations[2] < evaluations[1],
+            "same-sign witness must remain non-adopted and omega=1.6 must not relax the \
+             certified safe continuation endpoint"
+        );
+    });
+}
+
+#[test]
+fn rb_001n_cancellation_during_residual_continuation_wins() {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 3,
+                kernel_id: 9,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let chart = CancelOnResidualContinuation {
+            gate: &gate,
+            evaluations: AtomicUsize::new(0),
+        };
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (hit, audit) = sphere_trace(
+            &chart,
+            &cx,
+            &ray,
+            16.0 * SHALLOW_CONTINUATION_EPS,
+            SHALLOW_CONTINUATION_EPS,
+            1.0,
+        );
+        assert!(hit.is_none());
+        assert_eq!(audit.termination, TraceTermination::Cancelled);
+        assert!(
+            !audit.certified,
+            "cancellation cannot publish a completed residual-continuation proof"
+        );
+        assert_eq!(
+            chart.evaluations.load(Ordering::SeqCst),
+            3,
+            "current sample, non-adopted witness, then the safe continuation sample"
         );
     });
 }
@@ -1399,25 +1631,24 @@ fn rb_001g_rotated_frep_retains_certified_trace_progress() {
             "ordinary-angle trig bounds must preserve a useful outside sign"
         );
         let (hit, audit) = sphere_trace(&rotated, cx, &ray, 6.0, 1e-9, 1.0);
+        let hit = hit.expect(
+            "certified safe continuation must eventually close a short bracket at the transverse root",
+        );
+        assert_eq!(audit.termination, TraceTermination::Hit);
+        assert!(audit.certified && audit.certifies_hit());
         assert!(
-            hit.is_none(),
-            "the conservative Rodrigues L leaves the first residual outside a 2eps bracket"
+            (hit.t - 2.5).abs() <= 1e-9,
+            "the returned representative stays within eps of the analytic first root"
         );
-        assert_eq!(audit.termination, TraceTermination::ResidualLimit);
-        assert!(audit.certified && !audit.certifies_hit());
-        assert!(audit.steps > 0, "tight trig bounds retain trace progress");
-        assert_eq!(
-            trace_scene(&[Backend::Chart(&rotated)], cx, &ray, 6.0, 1e-9),
-            Err(SceneTraceError::BackendFailure(
-                TraceTermination::ResidualLimit
-            )),
-            "production refuses a transverse root that the bounded witness did not reach"
-        );
+        let (_, scene_hit) = trace_scene(&[Backend::Chart(&rotated)], cx, &ray, 6.0, 1e-9)
+            .expect("production scene composition accepts the certified first-root bracket")
+            .expect("the rotated sphere is hit");
+        assert!((scene_hit.t - hit.t).abs() <= 1e-9);
         verdict(
             "rb-001g-rotated-frep",
             "a nontrivial rotated sphere retains certified progress under fs-ivl trig \
-             enclosures, then remains residual-only when the conservative L leaves the root \
-             beyond the bounded sign witness",
+             enclosures and advances only certified safe prefixes until the short sign witness \
+             closes around the transverse first root",
         );
     });
 }

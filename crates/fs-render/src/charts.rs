@@ -23,7 +23,12 @@ use fs_rep_nurbs::{NurbsError, NurbsSurface};
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
-pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 8;
+pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 9;
+/// Default per-ray work budget used by [`sphere_trace`].
+pub const DEFAULT_SPHERE_TRACE_STEP_BUDGET: u32 = 4_096;
+/// Hard admission ceiling for an explicit [`sphere_trace_with_step_budget`]
+/// request.
+pub const MAX_SPHERE_TRACE_STEP_BUDGET: u32 = 16_384;
 
 /// A ray with a finite, nonzero direction. The marcher converts certified
 /// physical step radii into this ray's parameter space; unit directions remain
@@ -212,11 +217,12 @@ impl TraceAudit {
 /// one non-adopted witness at most `2*eps` ahead may prove a short transverse
 /// bracket; only its evaluated midpoint, verified within `eps` of both bracket
 /// endpoints, becomes a geometric hit. Without that bracket or a rigorous
-/// singleton zero, the residual stops as [`TraceTermination::ResidualLimit`]
-/// with no [`Hit`].
+/// singleton zero, the witness is not adopted: the marcher advances only to
+/// the independently certified root-free safe endpoint and retries within the
+/// shared step budget, without over-relaxation. A boundary that remains
+/// residual or exhaustion without a bracket stops as
+/// [`TraceTermination::ResidualLimit`] with no [`Hit`].
 #[must_use]
-#[allow(clippy::float_cmp)] // Exact equality is the IEEE no-forward-progress test.
-#[allow(clippy::too_many_lines)] // Explicit fail-closed trace state is easier to audit in one place.
 pub fn sphere_trace(
     chart: &dyn Chart,
     cx: &Cx<'_>,
@@ -224,6 +230,35 @@ pub fn sphere_trace(
     t_max: f64,
     eps: f64,
     omega: f64,
+) -> (Option<Hit>, TraceAudit) {
+    sphere_trace_with_step_budget(
+        chart,
+        cx,
+        ray,
+        t_max,
+        eps,
+        omega,
+        DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+    )
+}
+
+/// Run the certified [`sphere_trace`] algorithm with an explicit per-ray step
+/// budget. Zero and requests above [`MAX_SPHERE_TRACE_STEP_BUDGET`] fail
+/// admission as [`TraceTermination::InvalidInput`]. Each adopted step retains
+/// the same theorem-backed authority and cancellation polling as the default
+/// entry point; a larger budget changes bounded completeness, not what
+/// constitutes a geometric hit.
+#[must_use]
+#[allow(clippy::float_cmp)] // Exact equality is the IEEE no-forward-progress test.
+#[allow(clippy::too_many_lines)] // Explicit fail-closed trace state is easier to audit in one place.
+pub fn sphere_trace_with_step_budget(
+    chart: &dyn Chart,
+    cx: &Cx<'_>,
+    ray: &Ray,
+    t_max: f64,
+    eps: f64,
+    omega: f64,
+    max_steps: u32,
 ) -> (Option<Hit>, TraceAudit) {
     if !ray.origin.x.is_finite()
         || !ray.origin.y.is_finite()
@@ -238,6 +273,8 @@ pub fn sphere_trace(
         || eps <= 0.0
         || !omega.is_finite()
         || !(1.0..2.0).contains(&omega)
+        || max_steps == 0
+        || max_steps > MAX_SPHERE_TRACE_STEP_BUDGET
     {
         return (
             None,
@@ -308,7 +345,11 @@ pub fn sphere_trace(
     let mut pending_distance_upper = 0.0f64;
     let mut pending_negative = false;
     let mut pending_sign = CertifiedSign::Indeterminate;
-    let max_steps = 4096u32;
+    // True only when the last evaluated sample reached the implicit residual
+    // threshold but its bounded sign witness did not prove a nearby root.
+    // The residual is not proximity evidence; it merely leaves the ordinary
+    // Lipschitz safe step available for bounded, cancellation-polled progress.
+    let mut unresolved_residual = false;
     loop {
         // A relaxed step may not bypass either termination boundary. When its
         // endpoint lies beyond the ray or iteration budget, retreat to the
@@ -439,6 +480,7 @@ pub fn sphere_trace(
         }
 
         let hit_termination = validated.hit_termination(eps);
+        unresolved_residual = false;
         if caller_t <= t_max && hit_termination == Some(TraceTermination::ResidualLimit) {
             if trace_claim == TraceStepClaim::LipschitzImplicit {
                 match certify_short_implicit_bracket(
@@ -492,7 +534,12 @@ pub fn sphere_trace(
                             },
                         );
                     }
-                    ShortBracketOutcome::NoWitness => {}
+                    ShortBracketOutcome::NoWitness => {
+                        // The speculative witness remains non-adopted. Continue
+                        // only through the separately certified root-free safe
+                        // endpoint below, then retry within the shared budget.
+                        unresolved_residual = true;
+                    }
                     ShortBracketOutcome::Cancelled => {
                         return (
                             None,
@@ -519,16 +566,18 @@ pub fn sphere_trace(
                     }
                 }
             }
-            return (
-                None,
-                TraceAudit {
-                    steps,
-                    worst_step_ratio: worst_ratio,
-                    certified,
-                    fallbacks,
-                    termination: TraceTermination::ResidualLimit,
-                },
-            );
+            if !unresolved_residual {
+                return (
+                    None,
+                    TraceAudit {
+                        steps,
+                        worst_step_ratio: worst_ratio,
+                        certified,
+                        fallbacks,
+                        termination: TraceTermination::ResidualLimit,
+                    },
+                );
+            }
         }
         if caller_t <= t_max && hit_termination == Some(TraceTermination::Hit) {
             let normal = s
@@ -715,19 +764,29 @@ pub fn sphere_trace(
         let Some((safe_endpoint, safe_distance_upper)) =
             certified_safe_endpoint(ray, parameter_scale, p, t, safe_dt, safe, march_t_max)
         else {
+            let termination = if unresolved_residual {
+                TraceTermination::ResidualLimit
+            } else {
+                TraceTermination::InvalidSample
+            };
             return (
                 None,
                 TraceAudit {
                     steps,
                     worst_step_ratio: worst_ratio,
-                    certified: false,
+                    certified: certified && termination == TraceTermination::ResidualLimit,
                     fallbacks,
-                    termination: TraceTermination::InvalidSample,
+                    termination,
                 },
             );
         };
         worst_ratio = worst_ratio.max(conservative_ratio_upper(safe_distance_upper, safe));
-        if omega > 1.0 {
+        if unresolved_residual {
+            // Residual refinement advances only the theorem-backed root-free
+            // prefix. In particular, it never adopts the failed 2*eps witness
+            // or launches an over-relaxed endpoint from that state.
+            t = safe_endpoint;
+        } else if omega > 1.0 {
             let relaxed_dt = omega * safe_dt;
             let relaxed_endpoint = t + relaxed_dt;
             if relaxed_endpoint <= t {
@@ -794,7 +853,9 @@ pub fn sphere_trace(
             worst_step_ratio: worst_ratio,
             certified,
             fallbacks,
-            termination: if steps == max_steps {
+            termination: if unresolved_residual {
+                TraceTermination::ResidualLimit
+            } else if steps == max_steps {
                 TraceTermination::StepLimit
             } else {
                 TraceTermination::Miss

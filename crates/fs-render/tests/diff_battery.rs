@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use asupersync::types::Budget;
 use fs_ad::dual::Dual;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
+use fs_render::charts::{DEFAULT_SPHERE_TRACE_STEP_BUDGET, MAX_SPHERE_TRACE_STEP_BUDGET};
 use fs_render::diff::{
     BlendScene, NPARAMS, RenderCfg, RenderError, loss_and_grad as loss_and_grad_with_cx,
     render as render_with_cx, render_grad as render_grad_with_cx,
@@ -153,9 +154,10 @@ fn dr_002_naive_autodiff_is_silently_wrong() {
     );
 }
 
-/// dr-003: bias discipline — the deterministic quadrature's
-/// discretization error against a much finer reference shrinks with
-/// the coarse sampling knobs (no variance; bias measured, not vibes).
+/// dr-003: retained-fixture bias regression — the deterministic quadrature's
+/// discretization error against a much finer reference shrinks at these
+/// selected refinements (no variance). Strict per-level max-norm monotonicity
+/// is an empirical fixture pin here, not a universal quadrature theorem.
 #[test]
 fn dr_003_quadrature_bias_shrinks() {
     let th = theta0();
@@ -165,6 +167,7 @@ fn dr_003_quadrature_bias_shrinks() {
             res: 32,
             subrows: 16,
             xsamples: 16,
+            max_trace_steps: MAX_SPHERE_TRACE_STEP_BUDGET,
         },
     );
     let err_at = |subrows: usize| -> f64 {
@@ -174,6 +177,7 @@ fn dr_003_quadrature_bias_shrinks() {
                 res: 32,
                 subrows,
                 xsamples: 4,
+                max_trace_steps: MAX_SPHERE_TRACE_STEP_BUDGET,
             },
         );
         img.iter()
@@ -420,6 +424,15 @@ fn dr_009_invalid_inputs_fail_without_panicking() {
                 res: usize::MAX,
                 subrows: usize::MAX,
                 xsamples: usize::MAX,
+                max_trace_steps: DEFAULT_SPHERE_TRACE_STEP_BUDGET,
+            },
+            RenderCfg {
+                max_trace_steps: 0,
+                ..RenderCfg::default()
+            },
+            RenderCfg {
+                max_trace_steps: MAX_SPHERE_TRACE_STEP_BUDGET + 1,
+                ..RenderCfg::default()
             },
         ] {
             assert_eq!(
@@ -445,6 +458,7 @@ fn dr_009_invalid_inputs_fail_without_panicking() {
             res: 2,
             subrows: 1,
             xsamples: 1,
+            max_trace_steps: DEFAULT_SPHERE_TRACE_STEP_BUDGET,
         };
         assert_eq!(
             loss_and_grad_with_cx(&params, &[0.0; 3], cx, cfg),
