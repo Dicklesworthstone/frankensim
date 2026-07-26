@@ -1,6 +1,7 @@
 # CONTRACT: fs-airflow
 
-> Status: ACTIVE for bead `frankensim-extreal-program-f85xj.5.5`.
+> Status: ACTIVE for beads `frankensim-extreal-program-f85xj.5.5` and
+> `frankensim-extreal-program-f85xj.5.7` (conjugate coupling).
 
 ## Purpose and layer
 
@@ -12,10 +13,19 @@ requires an explicit leakage branch, solves the fan/system operating point, and
 combines that record with a steady `fs-conduction` solution without making either
 lower-layer solver depend on the other.
 
+The `conjugate` module closes that combination into a two-way exchange. It owns
+the stream-wise air state the flow-network types do not carry, and the
+partitioned fixed point between a solid conduction solve and that air path.
+`fs-couple` has no coupling-loop driver — its only iteration entry points are
+hardwired to a private added-mass fixture map, and its contract assigns the
+driver to the consumer — so this crate is that consumer. Interface quasi-Newton
+(IQN-ILS) does not exist in `fs-couple` and is not called.
+
 Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
-`fs-evidence`, `fs-ivl`, `fs-math`, `fs-qty`, and `fs-regime`. Results flow
-outward as evidence-bearing typed quantities and as a Re/Pr handoff to the
-existing convection rung.
+`fs-couple`, `fs-evidence`, `fs-exec`, `fs-ivl`, `fs-ladder`, `fs-math`,
+`fs-qty`, and `fs-regime`. Results flow outward as evidence-bearing typed
+quantities, as a Re/Pr handoff to the existing convection rung, and as the
+CHT ladder's correlation-rung transfer.
 
 ## Public types and semantics
 
@@ -169,7 +179,18 @@ separate execution mode. Cross-ISA G5 evidence is not yet retained.
 Curve evaluation and each finite network reduction are bounded scalar work.
 The interval search has an explicit 65,536-box ceiling and returns a structured
 refusal rather than running without bound. No asupersync cancellation poll is
-required for this rung.
+required for that rung.
+
+`conjugate::solve_conjugate` DOES poll: every outer iteration opens with
+`Cx::checkpoint`, so a cancelled exchange stops at an iteration boundary and
+returns `AirflowError::Cancelled` carrying the index of the iteration that had
+not yet run. Each outer iteration is also a resume boundary:
+`ConjugateIteration::reference_temperatures_k` is the complete state that
+iteration was solved against, and `solve_conjugate_from` restarts from it.
+Under `Relaxation::Fixed` the resumed tail reproduces the uninterrupted run
+bitwise; under `Relaxation::Aitken` the scalar relaxer's own omega history is
+not carried across the resume, so the tail is a valid continuation and not a
+bitwise replay.
 
 ## Unsafe boundary
 
@@ -211,6 +232,45 @@ None.
 - deterministic region-order/tie-break equivalence, missing-requirement and
   malformed-region refusals, G3 upstream-envelope widening monotonicity, and
   source-only identity rebinding for fan power and margin.
+- G1 conjugate air path: the single-segment march against the closed-form
+  heated channel `T_w - (T_w - T_in)e^(-NTU)` evaluated through an independent
+  `f64::exp` path; the defining identity `h A (T_w - T_ref,eff) == Q` across
+  four decades of `h` and three of area; and physical-interval containment up
+  to `NTU ~ 25`.
+- G3 segment-refinement invariance: splitting one uniform-wall channel into
+  `N` equal segments leaves the outlet temperature and total heat unchanged for
+  `N` up to 256, EXACTLY, because `e^(-NTU) = (e^(-NTU/N))^N`. The rejected
+  arithmetic-mean model is built inside the test and shown to fail the same
+  check with a defect that grows with `NTU` (sub-millikelvin at `NTU ~ 0.6`,
+  above 10 K at `NTU ~ 20`), so the invariance is demonstrably sensitive rather
+  than merely satisfied.
+- G1 coupled fixed point against a manufactured solution: over a lumped solid
+  the exchange has closed forms for both the outlet air temperature
+  (`T_in + P/(m_dot c_p)`, a global energy statement) and the solid temperature
+  (`T_in + P/(m_dot c_p (1 - e^(-sum NTU)))`); neither is evaluated by the
+  driver.
+- convergence battery: monotone residual contraction, Aitken reaching the same
+  fixed point, and a typed non-convergence refusal that withholds the reached
+  temperatures.
+- G4 drills: cancellation at an outer-iteration boundary with the solid side
+  proven not to re-run, and checkpoint resume reproducing the uninterrupted
+  tail bitwise.
+- flux-balance sensitivity: the per-region audit closes to 2.4e-11 W on a 1.2 W
+  fixture AND is shown to open under an injected dropped-face fault that the
+  converged temperatures alone cannot reveal.
+- G0/G3 conjugate end-to-end (`tests/conjugate_e2e.rs`): a solved fan operating
+  point drives a validity-gated `CircularDuctLaminarCwt` card into a real
+  `fs-conduction` FEM solve at `Re ~ 854`, `NTU ~ 2.35`, converging in 32 outer
+  iterations; the air carries exactly the dissipated 1.2 W, the wall
+  temperature rises monotonically downstream with a 14.9 K stream-wise tilt, a
+  faster fan lowers peak, tilt, and air rise together, and the exchange replays
+  bitwise. A companion test solves the SAME bar under the old one-way declared
+  ambient and shows the coupled peak is 8.4 K hotter, so the coupling is not a
+  refinement of the previous model but a materially different answer.
+- CHT transfer: `restrict o prolongate = identity` on the coarse space, and the
+  property `Refine1d` cannot state — prolongating a wall state onto the refined
+  path preserves the air-side outlet and heat rate exactly at refinement
+  factors 2, 5, and 16.
 
 ## No-claim boundaries
 
@@ -226,7 +286,49 @@ None.
   channel momentum or fluid energy: its mean bulk-air reference temperature
   is the midpoint implied by declared base power, constant density/heat
   capacity, and the solved branch flow. It is neither conjugate CFD nor
-  manufacturer or experimental validation.
+  manufacturer or experimental validation. The `conjugate` module supersedes
+  that closure for callers who want a two-way exchange; the plate-fin fixture
+  is deliberately left as-is so the one-way and coupled answers stay
+  separately inspectable.
+- The conjugate exchange is NOT CFD. Air is a stream-wise chain of well-mixed
+  1-D segments: no lateral mixing, recirculation, buoyancy, heating-driven flow
+  redistribution, or momentum coupling back to the operating point. The
+  `RANS` and `LES` rungs remain declarations.
+- `h` is FROZEN across the outer loop. The coupling variable is the reference
+  temperature vector alone; air properties are not re-evaluated at the drifting
+  film or bulk temperature, so a temperature-dependent `h` is outside the
+  model. A caller who wants that must re-run the driver with a new `AirPath`.
+- Relaxation is SCALAR. `fs_couple::AitkenRelaxation` is a scalar delta-squared
+  relaxer; the driver projects the vector residual onto one area-weighted
+  scalar and applies a single omega to the whole vector. This is not a vector
+  interface accelerator. On this seam the composite gain is
+  `(1 - eps/NTU)` times the solid's gain, both strictly below one, so plain
+  staggering already contracts — the retained Aitken path is wiring, and no
+  claim is made that relaxation rescues a divergent case, because the battery
+  contains none.
+- The per-region flux balance is a WIRING falsifier, not a conservation proof.
+  Once `T_ref,eff` is defined so that `h A (T_w - T_ref) == Q`, the per-region
+  balance is an algebraic identity at the fixed point for a uniform `h`; it
+  catches a dropped face, a mis-bound region, or a wrong mass flow, and it
+  catches nothing about physics. The independent cross-check is
+  `decomposition_residual_w`, which compares the declared regions' sum against
+  `fs-conduction`'s own whole-domain `robin_out_w` loop and so detects a Robin
+  face owned by no region or counted twice. That is also wiring. The physical
+  content lives in the closed-form and refinement-invariance checks above.
+- The seam is typed, not ledgered. `conjugate::SEAM_PORT_KIND` declares the
+  `fs-couple` port kind and its effort dimension is checked against
+  `Temperature::DIMS`, and `fs_couple::EnergyAudit` records every exchange's
+  imbalance with NaN poisoning. The window-balance ledger path
+  (`BoundaryTemperatureReference`, `WindowEvidenceRef`) is NOT wired, so no
+  ledgered entropy accounting is claimed.
+- `SegmentRefinementTransfer`'s fine side is a REFINED CORRELATION STATE, not a
+  RANS field. It defines the correlation rung's own refinement semantics and
+  the state shape a RANS rung would have to accept; it is not evidence that a
+  RANS rung exists. The `RANS` and `LES` relative-cost hints in the CHT ladder
+  remain unmeasured declarations, because those rungs do not exist to measure.
+- The conjugate fixtures carry no maturity registration, retained corpus
+  receipt, machine fingerprint, or experimental comparison. No capability
+  level may be inferred from them.
 - The fin-flank row is the narrow Shah-London Chapter VII, Table 52 slice for
   smooth simultaneously developing rectangular flow at `alpha*=0.5` and
   `Pr=0.72`. Its lower-`Gz` bridge is a declared engineering interpolation,

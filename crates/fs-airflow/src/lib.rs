@@ -6,6 +6,7 @@
 //! coefficients, and leakage remain model-form estimates; a numerical root
 //! certificate does not promote those physical uncertainties to an enclosure.
 
+pub mod conjugate;
 pub mod qoi;
 
 use core::fmt;
@@ -1316,6 +1317,61 @@ pub enum AirflowError {
         /// Diagnostic returned by the regime-classification layer.
         detail: String,
     },
+    /// A conjugate-coupling input is non-finite or outside its admissible
+    /// sign.
+    InvalidConjugateInput {
+        /// Name of the rejected field.
+        field: &'static str,
+        /// Raw IEEE-754 bits of the rejected value.
+        value_bits: u64,
+    },
+    /// An air path was declared with no segments.
+    EmptyAirPath,
+    /// Two air-path segments claim the same solid Robin region.
+    DuplicateAirSegment {
+        /// The repeated region name.
+        region: String,
+    },
+    /// The solid side returned a different number of regions than the air path
+    /// declares segments.
+    SolidResponseArity {
+        /// Segments the path declares.
+        expected: usize,
+        /// Regions the solid side returned.
+        found: usize,
+    },
+    /// The solid side returned its regions in an order that does not match the
+    /// declared path.
+    SegmentRegionMismatch {
+        /// Zero-based position of the mismatch.
+        index: usize,
+        /// Region the path declares at this position.
+        expected: String,
+        /// Region the solid side returned at this position.
+        found: String,
+    },
+    /// The conjugate exchange produced a non-finite quantity.
+    NonFiniteCoupling {
+        /// Stage that produced the value.
+        stage: &'static str,
+        /// Raw IEEE-754 bits of the rejected value.
+        value_bits: u64,
+    },
+    /// The outer fixed point exhausted its iteration budget without meeting
+    /// the declared criterion. This is a refusal, not a returned answer.
+    ConjugateNotConverged {
+        /// Outer iterations performed.
+        iterations: usize,
+        /// Raw IEEE-754 bits of the final reference-temperature change, K.
+        max_change_bits: u64,
+        /// Raw IEEE-754 bits of the declared tolerance, K.
+        tolerance_bits: u64,
+    },
+    /// The exchange was cancelled at an outer-iteration checkpoint.
+    Cancelled {
+        /// Zero-based index of the iteration that had not yet run.
+        iteration: usize,
+    },
 }
 
 impl fmt::Display for AirflowError {
@@ -1416,6 +1472,60 @@ impl fmt::Display for AirflowError {
                 )
             }
             Self::Regime { detail } => write!(formatter, "Reynolds construction refused: {detail}"),
+            Self::InvalidConjugateInput { field, value_bits } => write!(
+                formatter,
+                "conjugate {field} {} is not finite and positive; fix: supply a finite \
+                 positive coherent-SI value",
+                f64::from_bits(*value_bits)
+            ),
+            Self::EmptyAirPath => write!(
+                formatter,
+                "an air path needs at least one segment; fix: declare the solid Robin \
+                 regions the stream passes over, in inlet-to-outlet order"
+            ),
+            Self::DuplicateAirSegment { region } => write!(
+                formatter,
+                "air-path region '{region}' appears twice; fix: one segment per solid \
+                 Robin region — the solve gives that region exactly one Robin row"
+            ),
+            Self::SolidResponseArity { expected, found } => write!(
+                formatter,
+                "air path declares {expected} segment(s) but the solid side returned \
+                 {found} region(s); fix: return one region per segment, in path order"
+            ),
+            Self::SegmentRegionMismatch {
+                index,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "air-path position {index} declares region '{expected}' but the solid \
+                 side returned '{found}'; fix: return regions in declared path order"
+            ),
+            Self::NonFiniteCoupling { stage, value_bits } => write!(
+                formatter,
+                "conjugate exchange produced a non-finite value at {stage} ({}); fix: \
+                 check the capacity rate, coefficients, and wall temperatures",
+                f64::from_bits(*value_bits)
+            ),
+            Self::ConjugateNotConverged {
+                iterations,
+                max_change_bits,
+                tolerance_bits,
+            } => write!(
+                formatter,
+                "conjugate exchange did not converge in {iterations} outer iteration(s): \
+                 final reference-temperature change {} K exceeds tolerance {} K; fix: \
+                 raise the iteration budget, relax with Aitken, or accept that this \
+                 configuration has no admitted coupled answer — the temperatures reached \
+                 are deliberately NOT returned",
+                f64::from_bits(*max_change_bits),
+                f64::from_bits(*tolerance_bits)
+            ),
+            Self::Cancelled { iteration } => write!(
+                formatter,
+                "conjugate exchange cancelled before outer iteration {iteration}"
+            ),
         }
     }
 }

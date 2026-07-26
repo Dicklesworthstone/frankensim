@@ -14,15 +14,23 @@ layer = "L3"
 fs-blake3 = { path = "../fs-blake3" }
 fs-conduction = { path = "../fs-conduction" }
 fs-convection = { path = "../fs-convection" }
+# The conjugate driver: port/conservation-role algebra (PortKind, EnergyAudit)
+# and the scalar Aitken relaxer. fs-couple has no coupling-loop driver and its
+# contract assigns one to the consumer, which is what `conjugate` builds.
+fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
+# Cancellation checkpoints at conjugate outer-iteration boundaries.
+fs-exec = { path = "../fs-exec" }
 fs-ivl = { path = "../fs-ivl" }
+# The CHT fidelity ladder: fs-airflow supplies the real correlation-rung
+# transfer that replaces the Refine1d demonstrator.
+fs-ladder = { path = "../fs-ladder" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
-fs-exec = { path = "../fs-exec" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
