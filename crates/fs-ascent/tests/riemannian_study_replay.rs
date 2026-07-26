@@ -34,8 +34,38 @@ const MATRIX_TILE: u32 = 20;
 const START_TILE: u32 = 21;
 const DIMENSION: usize = 12;
 const MEMORY: usize = 10;
-const GRADIENT_TOLERANCE: f64 = 1e-9;
-const SCALED_INTRINSIC_RESIDUAL_TOLERANCE: f64 = 1e-10;
+// Must sit ABOVE the double-precision gradient floor for this fixture, or the
+// study can never stop on the gradient criterion.
+//
+// `StopRule::GradNorm` compares `inf_norm(&g)` (riemann.rs:489). Measured on the
+// canonical seed-41 fixture, the run stalls at `inf_norm = 4.29e-8`
+// (`l2 = 7.13e-8`, `f = -3.0844`) after 19 iterations and 62 of 3000
+// evaluations. That is not budget exhaustion and not a defect: for a smooth
+// objective the attainable gradient floor is about `sqrt(eps * |f|)`, here
+// `sqrt(2.22e-16 * 3.084) = 2.6e-8`, the same order as the observed stall. Below
+// that the line search cannot certify a Wolfe step, and `riemann.rs:517`
+// deliberately reports `Stall` rather than "mint an unrequested GradNorm reason".
+//
+// The original `1e-9` was a code-first guess that had never been executed; it
+// demands a relative gradient near `3e-10`, which f64 cannot deliver here, so the
+// study stalled every time. `1e-6` clears the measured floor by ~23x while still
+// pinning a genuinely converged eigenvector (relative gradient ~3e-7).
+const GRADIENT_TOLERANCE: f64 = 1e-6;
+// Bounded BELOW by the gradient gate, not independent of it. For a Rayleigh
+// quotient the Riemannian gradient is `2(Ax - lambda x)`, so the intrinsic
+// residual is about half the gradient norm and can never be driven far below it.
+// The original `1e-10` demanded a residual three orders under the achievable
+// gradient floor (~4e-8 inf-norm), so it was unsatisfiable even at the stall
+// point, let alone at any GradNorm stop. Measured here: `1.30e-7` against a
+// `1e-6` gradient gate.
+//
+// This gate is deliberately the weakest of the four quality checks. The one with
+// real teeth is the INDEPENDENT Jacobi eigensolver comparison below: the returned
+// objective matches the true minimum eigenvalue to `2.75e-14` (measured), which
+// is the expected quadratic eigenvalue accuracy `~residual^2/gap` for a residual
+// of `1.3e-7`. A wrong eigenvector would fail that gate by many orders regardless
+// of what this residual bound is set to.
+const SCALED_INTRINSIC_RESIDUAL_TOLERANCE: f64 = 1e-6;
 const JACOBI_SCALED_RESIDUAL_TOLERANCE: f64 = 1e-12;
 const OBJECTIVE_ORACLE_ABS_TOLERANCE: f64 = 1e-7;
 const MANIFOLD_VIOLATION_TOLERANCE: f64 = 1e-14;
@@ -1093,7 +1123,32 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
         .zip(&final_x)
         .map(|(gradient, coordinate)| (-normal_component).mul_add(*coordinate, *gradient))
         .collect();
-    if bits(&callback_tangent_gradient) != payload.final_gradient_bits {
+    // Compare the recomputation to the returned gradient within the same ULP
+    // idiom the tangency residual below already uses, NOT bitwise.
+    //
+    // Production projects through the authoritative fs-opt manifold runtime
+    // (fs-opt/src/eval.rs:1563): it rescales by `max_abs`, accumulates the normal
+    // component with a COMPENSATED sum, and divides by a compensated `||x||^2`.
+    // The recomputation above deliberately uses the plain textbook form
+    // `g - <g,x> x` with an uncompensated sum and no norm division. Those are two
+    // different arithmetic routes to the same mathematical projection, so
+    // demanding BIT equality asserted formula identity rather than tangency, and
+    // refused every correct run once the optimizer moved onto the fs-opt runtime.
+    //
+    // The oracle keeps its teeth: an untangent, misscaled, or wrong-point
+    // gradient still fails here and at the residual gate below. The exactness
+    // this bead actually requires is run-to-run REPLAY, which is asserted
+    // separately by comparing two independent runs' complete receipts.
+    let returned_gradient_tolerance =
+        config.gradient_l2_replay_ulp_factor() * f64::EPSILON * recomputed_gradient_l2.max(1.0);
+    if callback_tangent_gradient.len() != final_gradient.len()
+        || callback_tangent_gradient
+            .iter()
+            .zip(&final_gradient)
+            .any(|(recomputed, returned)| {
+                (recomputed - returned).abs() > returned_gradient_tolerance
+            })
+    {
         return Err(SemanticRefusal::ReturnedGradientMismatch);
     }
     let mut tangent_residual = CompensatedSum::default();
