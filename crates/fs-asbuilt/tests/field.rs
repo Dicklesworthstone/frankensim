@@ -156,7 +156,12 @@ fn registration_for(
 }
 
 fn identity_registration(cx: &Cx<'_>) -> CalibratedRigid3Registration {
-    registration_for(&rodrigues([0.0, 0.0, 1.0], 0.0), [0.0, 0.0, 0.0], 1.0e-3, cx)
+    registration_for(
+        &rodrigues([0.0, 0.0, 1.0], 0.0),
+        [0.0, 0.0, 0.0],
+        1.0e-3,
+        cx,
+    )
 }
 
 fn coverage() -> CoveragePolicy {
@@ -180,9 +185,7 @@ fn plate_samples(
     for station in stations {
         let (x, y) = (station[0], station[1]);
         let d = deviation(x, y);
-        samples.push(
-            SurfaceSample::new(p3(x, y, 0.0), normal, p3(x, y, d)).expect("plate sample"),
-        );
+        samples.push(SurfaceSample::new(p3(x, y, 0.0), normal, p3(x, y, d)).expect("plate sample"));
     }
     (samples, stations.to_vec())
 }
@@ -432,8 +435,8 @@ fn oblique_incidence_shrinks_range_noise_and_grows_correspondence_ambiguity() {
         for step in 0..5 {
             let angle = 0.2 * f64::from(step);
             let normal = [angle.sin(), 0.0, angle.cos()];
-            let sample = SurfaceSample::new(p3(0.5, 0.5, 0.0), normal, p3(0.5, 0.5, 0.0))
-                .expect("sample");
+            let sample =
+                SurfaceSample::new(p3(0.5, 0.5, 0.0), normal, p3(0.5, 0.5, 0.0)).expect("sample");
             let field = DeviationField::extract(&[sample], &registration, &probe, coverage(), cx)
                 .expect("field extracts");
             let point = field.points()[0];
@@ -461,16 +464,17 @@ fn a_zero_noise_probe_leaves_only_the_registration_term() {
     with_default_cx(|cx| {
         let registration = identity_registration(cx);
         let probe = down_probe(0.0, 0.0);
-        let sample =
-            SurfaceSample::new(p3(1.0, 1.0, 0.0), [0.0, 0.0, 1.0], p3(1.0, 1.0, 0.01))
-                .expect("sample");
+        let sample = SurfaceSample::new(p3(1.0, 1.0, 0.0), [0.0, 0.0, 1.0], p3(1.0, 1.0, 0.01))
+            .expect("sample");
         let field = DeviationField::extract(&[sample], &registration, &probe, coverage(), cx)
             .expect("field extracts");
         let point = field.points()[0];
         assert_eq!(point.scan_sigma(), 0.0);
         assert_eq!(point.ambiguity_sigma(), 0.0);
         assert!(point.registration_sigma() > 0.0);
-        assert!((point.half_width() - coverage().factor() * point.registration_sigma()).abs() < 1e-18);
+        assert!(
+            (point.half_width() - coverage().factor() * point.registration_sigma()).abs() < 1e-18
+        );
     });
 }
 
@@ -483,8 +487,12 @@ fn the_measurement_term_brackets_the_half_width_not_the_value() {
         // Tilted stations give a spread of incidence, hence a real bracket.
         let (mut samples, _) = plate_samples(&stations, |x, _| 0.001 * x);
         samples.push(
-            SurfaceSample::new(p3(9.0, 9.0, 0.0), [0.5, 0.0, 0.75_f64.sqrt()], p3(9.0, 9.0, 0.0))
-                .expect("tilted sample"),
+            SurfaceSample::new(
+                p3(9.0, 9.0, 0.0),
+                [0.5, 0.0, 0.75_f64.sqrt()],
+                p3(9.0, 9.0, 0.0),
+            )
+            .expect("tilted sample"),
         );
 
         let field = DeviationField::extract(&samples, &registration, &probe, coverage(), cx)
@@ -554,7 +562,11 @@ fn near_edge_on_walls_are_flagged_and_counted_not_dropped() {
         let field = DeviationField::extract(&samples, &registration, &probe, coverage(), cx)
             .expect("field extracts");
 
-        assert_eq!(field.points().len(), 3, "only the flat stations are measured");
+        assert_eq!(
+            field.points().len(),
+            3,
+            "only the flat stations are measured"
+        );
         assert_eq!(
             field.grazing(),
             &[3, 4],
@@ -578,8 +590,12 @@ fn an_entirely_edge_on_scan_refuses_rather_than_returning_an_empty_field() {
         let normal = [(1.0f64 - 0.01 * 0.01).sqrt(), 0.0, 0.01];
         let samples: Vec<_> = (0..4)
             .map(|i| {
-                SurfaceSample::new(p3(f64::from(i), 0.0, 0.0), normal, p3(f64::from(i), 0.0, 0.0))
-                    .expect("wall sample")
+                SurfaceSample::new(
+                    p3(f64::from(i), 0.0, 0.0),
+                    normal,
+                    p3(f64::from(i), 0.0, 0.0),
+                )
+                .expect("wall sample")
             })
             .collect();
 
@@ -745,13 +761,11 @@ fn thickness_refuses_mismatched_pairings() {
         let registration = identity_registration(cx);
         let probe = down_probe(0.0, 0.0);
         let a = vec![
-            SurfaceSample::new(p3(0.0, 0.0, 0.2), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.2))
-                .expect("top"),
+            SurfaceSample::new(p3(0.0, 0.0, 0.2), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.2)).expect("top"),
         ];
         let b = Vec::new();
-        let error =
-            ThicknessField::extract(&a, &b, &[0.2], &registration, &probe, coverage(), cx)
-                .expect_err("unpaired faces refuse");
+        let error = ThicknessField::extract(&a, &b, &[0.2], &registration, &probe, coverage(), cx)
+            .expect_err("unpaired faces refuse");
         assert_eq!(
             error,
             FieldError::LengthMismatch {
@@ -774,8 +788,7 @@ fn form_fit_recovers_an_injected_quadratic_bow() {
         let probe = down_probe(0.0, 0.0);
         let stations = grid_stations();
         // A saddle-free bow plus tilt and piston.
-        let bow = |x: f64, y: f64| 0.003 + 0.001 * x - 0.0005 * y + 0.0008 * x * x
-            + 0.0004 * y * y;
+        let bow = |x: f64, y: f64| 0.003 + 0.001 * x - 0.0005 * y + 0.0008 * x * x + 0.0004 * y * y;
         let (samples, coordinates) = plate_samples(&stations, bow);
 
         let field = DeviationField::extract(&samples, &registration, &probe, coverage(), cx)
@@ -917,8 +930,16 @@ fn square_wave_roughness_matches_its_closed_form() {
         .collect();
     let stats = profile_statistics(&heights, ProfileForm::Mean, 4).expect("statistics");
 
-    assert!((stats.ra() - amplitude).abs() < 1e-12, "Ra = {}", stats.ra());
-    assert!((stats.rq() - amplitude).abs() < 1e-12, "Rq = {}", stats.rq());
+    assert!(
+        (stats.ra() - amplitude).abs() < 1e-12,
+        "Ra = {}",
+        stats.ra()
+    );
+    assert!(
+        (stats.rq() - amplitude).abs() < 1e-12,
+        "Rq = {}",
+        stats.rq()
+    );
     assert!((stats.rt() - 2.0 * amplitude).abs() < 1e-12);
     assert!((stats.rz() - 2.0 * amplitude).abs() < 1e-12);
     assert_eq!(stats.segments(), 4);
@@ -1095,8 +1116,9 @@ fn the_identity_moves_when_the_measured_content_moves() {
         let stations = grid_stations();
 
         let (baseline_samples, _) = plate_samples(&stations, |x, _| 0.002 * x);
-        let (perturbed_samples, _) =
-            plate_samples(&stations, |x, y| 0.002 * x + if y == 0.0 { 1e-9 } else { 0.0 });
+        let (perturbed_samples, _) = plate_samples(&stations, |x, y| {
+            0.002 * x + if y == 0.0 { 1e-9 } else { 0.0 }
+        });
 
         let baseline =
             DeviationField::extract(&baseline_samples, &registration, &probe, coverage(), cx)
@@ -1128,9 +1150,8 @@ fn the_identity_binds_the_refusal_set() {
 
         let without = DeviationField::extract(&[good], &registration, &probe, coverage(), cx)
             .expect("without refusal");
-        let with =
-            DeviationField::extract(&[good, wall], &registration, &probe, coverage(), cx)
-                .expect("with refusal");
+        let with = DeviationField::extract(&[good, wall], &registration, &probe, coverage(), cx)
+            .expect("with refusal");
 
         assert_eq!(without.points(), with.points());
         assert_ne!(
@@ -1176,17 +1197,27 @@ fn a_non_unit_normal_is_refused_at_declaration() {
     assert!(
         SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, f64::NAN], p3(0.0, 0.0, 0.0)).is_err()
     );
-    assert!(
-        SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.0)).is_ok()
-    );
+    assert!(SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.0)).is_ok());
 }
 
 #[test]
 fn probe_admission_rejects_degenerate_declarations() {
-    assert!(ProbeModel::new([0.0, 0.0, 2.0], 0.1, 0.0, 0.0).is_err(), "non-unit direction");
-    assert!(ProbeModel::new([0.0, 0.0, 1.0], 0.0, 0.0, 0.0).is_err(), "zero floor");
-    assert!(ProbeModel::new([0.0, 0.0, 1.0], 1.5, 0.0, 0.0).is_err(), "floor above one");
-    assert!(ProbeModel::new([0.0, 0.0, 1.0], 0.1, -1.0, 0.0).is_err(), "negative sigma");
+    assert!(
+        ProbeModel::new([0.0, 0.0, 2.0], 0.1, 0.0, 0.0).is_err(),
+        "non-unit direction"
+    );
+    assert!(
+        ProbeModel::new([0.0, 0.0, 1.0], 0.0, 0.0, 0.0).is_err(),
+        "zero floor"
+    );
+    assert!(
+        ProbeModel::new([0.0, 0.0, 1.0], 1.5, 0.0, 0.0).is_err(),
+        "floor above one"
+    );
+    assert!(
+        ProbeModel::new([0.0, 0.0, 1.0], 0.1, -1.0, 0.0).is_err(),
+        "negative sigma"
+    );
     assert!(ProbeModel::new([0.0, 0.0, 1.0], 0.1, 0.0, 0.0).is_ok());
 }
 
@@ -1195,9 +1226,8 @@ fn a_field_cites_the_registration_it_was_extracted_against() {
     with_default_cx(|cx| {
         let registration = identity_registration(cx);
         let probe = down_probe(0.0, 0.0);
-        let sample =
-            SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.01))
-                .expect("sample");
+        let sample = SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 0.01))
+            .expect("sample");
         let field = DeviationField::extract(&[sample], &registration, &probe, coverage(), cx)
             .expect("field extracts");
         assert_eq!(field.registration_ref(), registration.model_identity());
@@ -1215,15 +1245,19 @@ fn resolution_screens_compare_the_signal_against_its_own_half_width() {
         let registration = identity_registration(cx);
         // A deliberately noisy probe so the small deviation is unresolved.
         let probe = down_probe(0.0, 0.05);
-        let small =
-            SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 1e-6))
-                .expect("small");
-        let large =
-            SurfaceSample::new(p3(1.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(1.0, 0.0, 5.0))
-                .expect("large");
+        let small = SurfaceSample::new(p3(0.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(0.0, 0.0, 1e-6))
+            .expect("small");
+        let large = SurfaceSample::new(p3(1.0, 0.0, 0.0), [0.0, 0.0, 1.0], p3(1.0, 0.0, 5.0))
+            .expect("large");
         let field = DeviationField::extract(&[small, large], &registration, &probe, coverage(), cx)
             .expect("field extracts");
-        assert!(!field.points()[0].resolved(), "1 um under a 50 mm sigma is not resolved");
-        assert!(field.points()[1].resolved(), "5 m over a 50 mm sigma is resolved");
+        assert!(
+            !field.points()[0].resolved(),
+            "1 um under a 50 mm sigma is not resolved"
+        );
+        assert!(
+            field.points()[1].resolved(),
+            "5 m over a 50 mm sigma is resolved"
+        );
     });
 }
