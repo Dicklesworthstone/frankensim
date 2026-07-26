@@ -5,9 +5,10 @@
 //! validity-gated convection rows reach separately named heatsink surfaces,
 //! and that declared base-to-fin bondlines participate in the actual
 //! conduction solve. It does not validate a commercial fan, a plate-fin
-//! array, commercial hardware, or conjugate fluid physics. Its fin-flank
-//! coefficient executes one narrow source-table slice for a smooth
-//! simultaneously developing rectangular duct.
+//! array, commercial hardware, or conjugate fluid physics. Its nominal
+//! fin-flank coefficient executes one narrow table slice for a smooth
+//! simultaneously developing rectangular duct; the wrong-`D_h` falsifier
+//! deliberately enters the separately marked engineering bridge.
 
 use fs_airflow::{
     EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
@@ -22,7 +23,9 @@ use fs_conduction::{
     ScalarField, SolveConfig, StopRule, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
     ThermalInterfaces, solve_with_interfaces,
 };
-use fs_convection::{CorrelationError, CorrelationId, ThermalConductivity, evaluate};
+use fs_convection::{
+    CorrelationError, CorrelationId, EvaluationSourceRegion, ThermalConductivity, evaluate,
+};
 use fs_evidence::{ProvenanceHash, ValidityDomain};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
@@ -97,6 +100,7 @@ struct PlateFinRun {
     branch_flow_m3_s: f64,
     reynolds: f64,
     developing_cwt_provenance: ProvenanceHash,
+    developing_cwt_source_region: EvaluationSourceRegion,
     chf_provenance: ProvenanceHash,
     developing_cwt_nusselt: f64,
     developing_cwt_h_w_m2_k: f64,
@@ -425,7 +429,7 @@ fn solve_plate_fin(
         CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
         correlation_inputs,
     )
-    .expect("developing constant-wall-temperature source table admits");
+    .expect("developing constant-wall-temperature table/bridge card admits");
     let chf_limit = evaluate(CorrelationId::RectangularDuctLaminarChf, correlation_inputs)
         .expect("constant-heat-flux rectangular limit admits");
 
@@ -496,6 +500,7 @@ fn solve_plate_fin(
         branch_flow_m3_s,
         reynolds: handoff.reynolds,
         developing_cwt_provenance: developing_cwt.evidence().provenance,
+        developing_cwt_source_region: developing_cwt.source_region(),
         chf_provenance: chf_limit.evidence().provenance,
         developing_cwt_nusselt: developing_cwt.evidence().value,
         developing_cwt_h_w_m2_k,
@@ -525,6 +530,10 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         .map(|speed| solve_plate_fin(&mesh, geometry, speed, 1.0))
         .collect();
 
+    assert!(runs.iter().all(|run| {
+        run.developing_cwt_source_region == EvaluationSourceRegion::TableSliceInterpolation
+    }));
+
     for pair in runs.windows(2) {
         assert!(pair[1].speed_ratio > pair[0].speed_ratio);
         assert!(pair[1].branch_flow_m3_s > pair[0].branch_flow_m3_s);
@@ -536,7 +545,7 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         assert_ne!(pair[1].chf_provenance, pair[0].chf_provenance);
         assert!(
             pair[1].developing_cwt_nusselt > pair[0].developing_cwt_nusselt,
-            "the source-table flow term must increase Nu with solved Reynolds"
+            "the table-slice interpolation must increase Nu with solved Reynolds"
         );
         assert!(
             pair[1].developing_cwt_h_w_m2_k > pair[0].developing_cwt_h_w_m2_k,
@@ -642,6 +651,14 @@ fn a_hydraulic_diameter_misbinding_changes_h_and_the_solved_temperature() {
         (0.5 * nominal.hydraulic_diameter_m).to_bits()
     );
     assert_eq!(
+        nominal.developing_cwt_source_region,
+        EvaluationSourceRegion::TableSliceInterpolation
+    );
+    assert_eq!(
+        wrong.developing_cwt_source_region,
+        EvaluationSourceRegion::DeclaredEngineeringBridge
+    );
+    assert_eq!(
         wrong.cwt_limit_h_w_m2_k.to_bits(),
         (2.0 * nominal.cwt_limit_h_w_m2_k).to_bits()
     );
@@ -656,7 +673,7 @@ fn a_hydraulic_diameter_misbinding_changes_h_and_the_solved_temperature() {
     assert!(
         wrong.developing_cwt_h_w_m2_k > nominal.developing_cwt_h_w_m2_k
             && wrong.developing_cwt_h_w_m2_k < 2.0 * nominal.developing_cwt_h_w_m2_k,
-        "the wrong-D_h source-table coefficient must change through both Nu(Gz) and 1/D_h"
+        "the wrong-D_h declared-bridge coefficient must change through both Nu(Gz) and 1/D_h"
     );
     assert_ne!(
         wrong.developing_cwt_provenance,

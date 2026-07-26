@@ -1,8 +1,8 @@
 //! G0/G3 correlation-card, refusal, typing, and metamorphic coverage.
 
 use fs_convection::{
-    CorrelationError, CorrelationId, CorrelationInputs, DiscrepancyBasis, HeatTransferCoefficient,
-    ThermalConductivity, ThermalDirection, correlation_catalog, evaluate,
+    CorrelationError, CorrelationId, CorrelationInputs, DiscrepancyBasis, EvaluationSourceRegion,
+    HeatTransferCoefficient, ThermalConductivity, ThermalDirection, correlation_catalog, evaluate,
 };
 use fs_evidence::{CertifyError, NumericalKind};
 use fs_math::det;
@@ -280,6 +280,7 @@ fn rectangular_developing_card_retains_its_narrow_source_authority() {
         card.discrepancy_basis,
         DiscrepancyBasis::EngineeringAllowance
     );
+    assert_eq!(card.model.version, "1.1.0");
     assert!(card.source.citation.contains("Chapter VII, Table 52"));
     assert!(card.source.citation.contains("alpha*=0.5, Pr=0.72"));
     assert_eq!(
@@ -298,6 +299,14 @@ fn rectangular_developing_card_retains_its_narrow_source_authority() {
             .iter()
             .any(|assumption| assumption.contains("channel-average"))
     );
+    const BRIDGE_DISCLOSURE: &str = "Gz < 10 uses a declared linear-in-Gz engineering bridge from the fully developed CWT limit to the first Table 52 knot; that bridge is not represented as a source-published curve";
+    assert!(
+        card.model
+            .assumptions
+            .iter()
+            .any(|assumption| assumption == BRIDGE_DISCLOSURE),
+        "the machine-retained card must preserve the bridge no-claim disclosure"
+    );
     assert!(
         card.model
             .known_failures
@@ -307,11 +316,11 @@ fn rectangular_developing_card_retains_its_narrow_source_authority() {
 }
 
 #[test]
-fn rectangular_developing_source_knots_and_interpolation_are_spot_checked() {
+fn rectangular_developing_three_source_knots_and_one_interpolation_are_spot_checked() {
     // Test-owned transcriptions from Shah & London, Chapter VII, Table 52,
-    // alpha*=0.5 and Pr=0.72. The Gz=15 row is the independently calculated
-    // midpoint between the published Gz=10 and Gz=20 values.
-    for (graetz, expected_nusselt) in [(10.0, 4.20), (15.0, 4.495), (20.0, 4.79), (100.0, 7.42)] {
+    // alpha*=0.5 and Pr=0.72. These cover 3 of the implementation's 14 knots;
+    // the other eleven are not independently transcribed in this repository.
+    for (graetz, expected_nusselt) in [(10.0, 4.20), (20.0, 4.79), (100.0, 7.42)] {
         let evaluated = evaluate(
             CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
             rectangular_developing_inputs(graetz),
@@ -319,7 +328,62 @@ fn rectangular_developing_source_knots_and_interpolation_are_spot_checked() {
         .expect("source point is admitted");
         close(evaluated.groups()["Gz"], graetz, 3.0e-15);
         close(evaluated.evidence().value, expected_nusselt, 3.0e-15);
+        assert_eq!(
+            evaluated.source_region(),
+            EvaluationSourceRegion::TableSliceInterpolation
+        );
     }
+
+    // This midpoint is an implementation interpolation check, not a fourth
+    // source-transcribed Table 52 row.
+    let midpoint = evaluate(
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+        rectangular_developing_inputs(15.0),
+    )
+    .expect("interpolation midpoint is admitted");
+    close(midpoint.evidence().value, 4.495, 3.0e-15);
+    assert_eq!(
+        midpoint.source_region(),
+        EvaluationSourceRegion::TableSliceInterpolation
+    );
+}
+
+#[test]
+fn rectangular_developing_source_region_separates_bridge_from_table_slice() {
+    for graetz in [0.01, 1.0, 9.0] {
+        let evaluated = evaluate(
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            rectangular_developing_inputs(graetz),
+        )
+        .expect("declared lower-Gz bridge point is admitted");
+        assert_eq!(
+            evaluated.source_region(),
+            EvaluationSourceRegion::DeclaredEngineeringBridge,
+            "Gz={graetz} must not masquerade as a Table 52 evaluation"
+        );
+    }
+    for graetz in [10.0, 15.0, 220.0] {
+        let evaluated = evaluate(
+            CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+            rectangular_developing_inputs(graetz),
+        )
+        .expect("declared Table 52 slice point is admitted");
+        assert_eq!(
+            evaluated.source_region(),
+            EvaluationSourceRegion::TableSliceInterpolation,
+            "Gz={graetz} must execute the declared table-slice path"
+        );
+    }
+
+    let analytic = evaluate(
+        CorrelationId::RectangularDuctLaminarCwt,
+        rectangular_developing_inputs(10.0),
+    )
+    .expect("analytic CWT limit admits the shared point");
+    assert_eq!(
+        analytic.source_region(),
+        EvaluationSourceRegion::CitedFormula
+    );
 }
 
 #[test]
@@ -334,6 +398,10 @@ fn rectangular_developing_card_converges_to_cwt_and_reynolds_is_load_bearing() {
             inputs,
         )
         .expect("developing table card admits shared point");
+        assert_eq!(
+            developing.source_region(),
+            EvaluationSourceRegion::DeclaredEngineeringBridge
+        );
         let gap = developing.evidence().value - developed.evidence().value;
         assert!(gap > 0.0);
         if let Some(previous) = previous_gap {

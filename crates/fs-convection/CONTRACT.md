@@ -40,6 +40,10 @@ correlation.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
   `Evidence<HeatTransferCoefficient>` with `h = Nu k/L`. `k` is typed W/(m K),
   `L` is typed metres, and `h` is typed W/(m² K).
+- `EvaluationSourceRegion` makes the executed authority region machine
+  readable. Closed-form rows report `CitedFormula`; the developing rectangular
+  card reports `TableSliceInterpolation` at and above its first retained knot
+  and `DeclaredEngineeringBridge` below it.
 - `NusseltEvaluation::robin_boundary` returns a `CorrelationRobinBoundary`
   that owns both the evidence-bearing coefficient and the exact
   `fs-conduction::ThermalBc` row lowered from it. Private fields prevent the
@@ -63,11 +67,18 @@ correlation.
    analytic ideal limits. Their zero discrepancy denotes no empirical fit
    residual under the stated idealization; it is not a zero-error claim for
    hardware.
-6. The developing rectangular card executes only the Chapter VII, Table 52
-   `alpha*=0.5`, `Pr=0.72` row for `Gz` in `[10, 220]`. Its `Gz` interval
-   `[0.01, 10]` is a declared linear bridge between the analytic CWT limit at
-   zero and the first source row; it is not represented as a source-published
-   curve.
+6. For `Gz` in `[10, 220]`, the developing rectangular card linearly
+   interpolates in `Gz` between fourteen retained Chapter VII, Table 52
+   `alpha*=0.5`, `Pr=0.72` knots. It does not interpolate in `log(Gz)` or the
+   source's `x*` coordinate. Its `Gz` interval `[0.01, 10)` is a declared
+   linear-in-`Gz` engineering bridge between the analytic CWT limit at zero
+   and the first retained table knot; it is not represented as a
+   source-published curve. `EvaluationSourceRegion` distinguishes those paths,
+   with `Gz=10` belonging to the table slice. At `Gz=15`, the linear-in-`Gz`
+   chord is about 0.9% below a power-law interpolation through the two
+   bracketing knots; that low bias is an interpolation-choice observation, not
+   a rigorous error bound. The piecewise-linear interpolant is only C0 and its
+   derivative jumps at knots.
 7. Other v1 discrepancy bands, including that developing table card, are
    conservative engineering allowances, explicitly labeled as such. They are
    not fabricated source-published confidence intervals and cannot earn a
@@ -89,7 +100,10 @@ No library path panics for caller input.
 
 Formula powers, logarithms, and square roots use `fs-math::det`; polynomial
 evaluation has a fixed Horner tree. Evaluation provenance binds the stable
-card id, direction convention, sorted group names, and exact float bits.
+card id, direction convention, sorted group names, and exact float bits. The
+source-region marker is deterministically derived from the already-bound card
+id and exact `Gz` bits, so adding it does not perturb unrelated cards'
+provenance identities.
 
 ## Cancellation behavior
 
@@ -112,8 +126,12 @@ None.
   with a complete two-row family partition, JSON comparison verdicts, and
   frozen rectangular-duct square values;
 - per-formula frozen spot values;
-- independent test-owned transcriptions of four Shah-London Table 52 points,
-  including one interpolation midpoint, plus exact source metadata checks;
+- independent test-owned transcriptions of three of the fourteen retained
+  Shah-London Table 52 knots (`Gz=10,20,100`), one explicitly
+  implementation-owned interpolation midpoint, plus exact source metadata and
+  bridge-disclosure checks;
+- machine-readable source-region checks on both sides of `Gz=10`, including
+  the exact boundary and the analytic companion card;
 - narrow developing-rectangular refusal checks for `Gz`, `Pr`, `Re`, and
   aspect ratio;
 - limiting-behavior checks for the nonconstant cards, each asserting a
@@ -152,6 +170,11 @@ None.
   a licensed copy of Shah-London or a cross-code validation dataset. The
   developing rectangular card manually encodes only its declared Table 52
   numeric slice.
+- Only 3 of the developing card's 14 retained numeric knots are independently
+  repeated in the test suite. The other eleven values and the regular `Gz`
+  knot grid are implementation data without an in-repository source copy.
+  The grid may be a re-gridding of source `x*` values; no direct-transcription
+  claim is made for its abscissae or the eleven unchecked ordinates.
 - The two Level-A duct limits are resolved from `fs-vvreg` while the tests
   execute, but no comparison receipt or machine fingerprint is persisted into
   the corpus. This is a test-time binding, not a registry authority promotion.
@@ -178,7 +201,8 @@ None.
   transition regimes, solve a boundary layer, compute pressure drop, or model
   fan operating points.
 - Plate-fin behavior is represented only by smooth rectangular-channel
-  limiting rows and one narrow simultaneously developing source-table slice.
+  limiting rows, one narrow simultaneously developing table slice, and its
+  separately marked lower-`Gz` engineering bridge.
   Interrupted-fin, louver, offset-strip, shroud, bypass, and full-array effects
   remain outside v1.
 - The fully developed rectangular-duct cards admit aspect ratios from 0.001

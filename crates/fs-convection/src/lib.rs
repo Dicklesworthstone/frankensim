@@ -28,6 +28,9 @@ pub type ThermalConductivity = Qty<1, 1, -3, -1, 0, 0>;
 /// Convective heat-transfer coefficient in coherent SI W/(m² K).
 pub type HeatTransferCoefficient = Qty<0, 1, -3, -1, 0, 0>;
 
+const RECTANGULAR_DEVELOPING_FIRST_TABLE_GRAETZ: f64 = 10.0;
+const RECTANGULAR_DEVELOPING_BRIDGE_DISCLOSURE: &str = "Gz < 10 uses a declared linear-in-Gz engineering bridge from the fully developed CWT limit to the first Table 52 knot; that bridge is not represented as a source-published curve";
+
 /// Stable identifier for one implemented heat-transfer relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CorrelationId {
@@ -149,6 +152,22 @@ pub enum DiscrepancyBasis {
     /// Conservative engineering allowance used until a retained validation
     /// dataset replaces it. It is not represented as source-published data.
     EngineeringAllowance,
+}
+
+/// Which source-authority region produced one admitted evaluation.
+///
+/// This is an execution marker, not a validation colour. In particular,
+/// [`Self::TableSliceInterpolation`] includes both cited table knots and the
+/// implementation's linear-in-Graetz chords between them; it does not claim
+/// that every interpolated value was printed by the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationSourceRegion {
+    /// A cited closed-form relation or analytic limiting constant.
+    CitedFormula,
+    /// A knot or linear-in-Graetz chord inside the cited Table 52 slice.
+    TableSliceInterpolation,
+    /// A declared engineering bridge outside the source-published table slice.
+    DeclaredEngineeringBridge,
 }
 
 /// Bibliographic authority retained by a correlation card.
@@ -388,6 +407,7 @@ pub struct NusseltEvaluation {
     card: CorrelationCard,
     evidence: Evidence<f64>,
     groups: BTreeMap<String, f64>,
+    source_region: EvaluationSourceRegion,
 }
 
 /// A conduction Robin row paired with the exact correlation evidence that
@@ -444,6 +464,12 @@ impl NusseltEvaluation {
     #[must_use]
     pub const fn groups(&self) -> &BTreeMap<String, f64> {
         &self.groups
+    }
+
+    /// Machine-readable source-authority region used for this evaluation.
+    #[must_use]
+    pub const fn source_region(&self) -> EvaluationSourceRegion {
+        self.source_region
     }
 
     /// Convert `Nu` to `h = Nu k / L` while retaining the same model card,
@@ -561,6 +587,7 @@ pub fn evaluate(
     let model = ModelEvidence::from_card(&card.model, &groups);
     debug_assert!(model.in_domain);
     let provenance = evaluation_provenance(id, &groups, inputs.direction);
+    let source_region = evaluation_source_region(id, &groups);
     Ok(NusseltEvaluation {
         evidence: Evidence {
             value: nu,
@@ -574,7 +601,25 @@ pub fn evaluate(
         },
         card,
         groups,
+        source_region,
     })
+}
+
+fn evaluation_source_region(
+    id: CorrelationId,
+    groups: &BTreeMap<String, f64>,
+) -> EvaluationSourceRegion {
+    match id {
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072
+            if groups["Gz"] < RECTANGULAR_DEVELOPING_FIRST_TABLE_GRAETZ =>
+        {
+            EvaluationSourceRegion::DeclaredEngineeringBridge
+        }
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => {
+            EvaluationSourceRegion::TableSliceInterpolation
+        }
+        _ => EvaluationSourceRegion::CitedFormula,
+    }
 }
 
 fn domain_violations(
@@ -700,7 +745,20 @@ fn rectangular_laminar_chf(aspect_ratio: f64) -> f64 {
 
 fn rectangular_laminar_cwt_developing_pr072(graetz: f64) -> f64 {
     const GRAETZ_KNOTS: [f64; 14] = [
-        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 180.0, 200.0, 220.0,
+        RECTANGULAR_DEVELOPING_FIRST_TABLE_GRAETZ,
+        20.0,
+        30.0,
+        40.0,
+        50.0,
+        60.0,
+        80.0,
+        100.0,
+        120.0,
+        140.0,
+        160.0,
+        180.0,
+        200.0,
+        220.0,
     ];
     const NUSSELT_KNOTS: [f64; 14] = [
         4.20, 4.79, 5.23, 5.61, 5.95, 6.27, 6.88, 7.42, 7.91, 8.37, 8.80, 9.20, 9.60, 10.00,
@@ -865,7 +923,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
                 "constant properties with Pr = 0.72",
                 "aspect ratio is minor side over major side and equals 0.5",
                 "channel-average Nusselt number",
-                "Gz below 10 uses a declared linear bridge from the fully developed CWT limit to the first Table 52 row",
+                RECTANGULAR_DEVELOPING_BRIDGE_DISCLOSURE,
             ],
             vec![
                 "hydrodynamically developed inlet",
@@ -998,11 +1056,15 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             DiscrepancyBasis::EngineeringAllowance,
         ),
     };
+    let model_version = match id {
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => "1.1.0",
+        _ => "1.0.0",
+    };
     CorrelationCard {
         id,
         model: ModelCard::new(
             id.name(),
-            "1.0.0",
+            model_version,
             Ambition::Solid,
             assumptions.into_iter().map(str::to_string).collect(),
             validity,
