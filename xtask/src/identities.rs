@@ -59,6 +59,8 @@ const REQUIRED_IDENTITY_IDS: &[&str] = &[
     "fs-evidence:vv-case",
     "fs-evidence:vv-schema-admission-receipt",
     "fs-exec:gemm-tune-key",
+    "fs-exec:solver-resume",
+    "fs-exec:solver-snapshot-authority-subject",
     "fs-exec:tilepool-placement",
     "fs-exec:tune-row",
     "fs-exec:tuning-decision",
