@@ -630,7 +630,10 @@ pub fn solve_conjugate_from<F>(
 where
     F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 {
-    finite_positive("conjugate temperature tolerance", config.temperature_tolerance_k)?;
+    finite_positive(
+        "conjugate temperature tolerance",
+        config.temperature_tolerance_k,
+    )?;
     if initial_references_k.len() != path.segments().len() {
         return Err(AirflowError::SolidResponseArity {
             expected: path.segments().len(),

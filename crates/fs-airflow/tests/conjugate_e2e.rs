@@ -22,8 +22,8 @@ use fs_airflow::conjugate::{
     AirPath, AirSegment, ConjugateConfig, Relaxation, SolidRegionState, solve_conjugate,
 };
 use fs_airflow::{
-    EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
-    LossElement, LossNetwork, LossResistance, OperatingPoint, SourceProvenance, ToleranceBasis,
+    EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
+    LossNetwork, LossResistance, OperatingPoint, SourceProvenance, ToleranceBasis,
     solve_operating_point,
 };
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -570,11 +570,8 @@ fn a_declared_ambient_and_the_coupled_answer_disagree_materially() {
 
     // The one-way model: bulk air = inlet + half the sensible rise implied by
     // the DECLARED power, applied uniformly to every region.
-    let declared_bulk =
-        INLET_TEMPERATURE_K + TOTAL_POWER_W / (2.0 * fixture.capacity_rate_w_per_k);
-    let one_way = with_cx(|cx| {
-        solid_exchange(cx, &fixture, &[declared_bulk; SEGMENTS])
-    });
+    let declared_bulk = INLET_TEMPERATURE_K + TOTAL_POWER_W / (2.0 * fixture.capacity_rate_w_per_k);
+    let one_way = with_cx(|cx| solid_exchange(cx, &fixture, &[declared_bulk; SEGMENTS]));
     let one_way_peak = one_way
         .0
         .iter()
@@ -615,11 +612,8 @@ fn diagnostic_fixture_numbers() {
         .iter()
         .map(|s| s.mean_wall_temperature_k)
         .collect();
-    let declared_bulk =
-        INLET_TEMPERATURE_K + TOTAL_POWER_W / (2.0 * fixture.capacity_rate_w_per_k);
-    let one_way = with_cx(|cx| {
-        solid_exchange(cx, &fixture, &[declared_bulk; SEGMENTS])
-    });
+    let declared_bulk = INLET_TEMPERATURE_K + TOTAL_POWER_W / (2.0 * fixture.capacity_rate_w_per_k);
+    let one_way = with_cx(|cx| solid_exchange(cx, &fixture, &[declared_bulk; SEGMENTS]));
     let one_way_peak = one_way
         .0
         .iter()
@@ -627,15 +621,40 @@ fn diagnostic_fixture_numbers() {
         .fold(f64::NEG_INFINITY, f64::max);
     println!("Re                = {:.1}", fixture.reynolds);
     println!("h                 = {:.3} W/m2K", fixture.htc_w_m2_k);
-    println!("mdot*cp           = {:.5} W/K", fixture.capacity_rate_w_per_k);
+    println!(
+        "mdot*cp           = {:.5} W/K",
+        fixture.capacity_rate_w_per_k
+    );
     println!("total NTU         = {total_ntu:.4}");
     println!("iterations        = {}", solution.iterations);
-    println!("air rise          = {:.3} K", solution.march.outlet_temperature_k - INLET_TEMPERATURE_K);
+    println!(
+        "air rise          = {:.3} K",
+        solution.march.outlet_temperature_k - INLET_TEMPERATURE_K
+    );
     println!("walls             = {walls:?}");
-    println!("wall tilt         = {:.3} K", walls[SEGMENTS - 1] - walls[0]);
-    println!("coupled peak      = {:.3} K", walls.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    println!(
+        "wall tilt         = {:.3} K",
+        walls[SEGMENTS - 1] - walls[0]
+    );
+    println!(
+        "coupled peak      = {:.3} K",
+        walls.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+    );
     println!("one-way peak      = {one_way_peak:.3} K");
-    println!("air total         = {:.6} W (declared {TOTAL_POWER_W})", solution.balance.air_total_w);
-    println!("max region imbal  = {:.3e} W", solution.balance.max_region_imbalance_w);
-    println!("residual history  = {:?}", solution.history.iter().map(|h| h.max_reference_change_k).collect::<Vec<_>>());
+    println!(
+        "air total         = {:.6} W (declared {TOTAL_POWER_W})",
+        solution.balance.air_total_w
+    );
+    println!(
+        "max region imbal  = {:.3e} W",
+        solution.balance.max_region_imbalance_w
+    );
+    println!(
+        "residual history  = {:?}",
+        solution
+            .history
+            .iter()
+            .map(|h| h.max_reference_change_k)
+            .collect::<Vec<_>>()
+    );
 }

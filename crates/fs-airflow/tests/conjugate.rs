@@ -21,9 +21,9 @@ use fs_airflow::conjugate::{
     AirPath, AirSegment, ConjugateConfig, Relaxation, SegmentRefinementTransfer, SolidRegionState,
     seam_effort_dimensions, solve_conjugate, solve_conjugate_from,
 };
-use fs_ladder::{LadderRegistry, Transfer};
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_ladder::{LadderRegistry, Transfer};
 use fs_qty::Temperature;
 
 const INLET_K: f64 = 300.0;
@@ -62,9 +62,7 @@ fn capacity_rate() -> f64 {
 fn uniform_path(segments: usize, total_area_m2: f64, htc: f64) -> AirPath {
     let per = total_area_m2 / segments as f64;
     let declared = (0..segments)
-        .map(|index| {
-            AirSegment::new(&format!("channel-{index}"), per, htc).expect("valid segment")
-        })
+        .map(|index| AirSegment::new(&format!("channel-{index}"), per, htc).expect("valid segment"))
         .collect();
     AirPath::new(INLET_K, MASS_FLOW_KG_S, CP_J_KG_K, declared).expect("valid path")
 }
@@ -112,8 +110,8 @@ fn reference_temperature_reproduces_the_segment_heat_rate_exactly() {
             let march = path.march(&[wall]).expect("march");
             let segment = &march.segments[0];
             let robin_rate = htc * area * (wall - segment.reference_temperature_k);
-            let relative = (robin_rate - segment.heat_rate_w).abs()
-                / segment.heat_rate_w.abs().max(1.0e-30);
+            let relative =
+                (robin_rate - segment.heat_rate_w).abs() / segment.heat_rate_w.abs().max(1.0e-30);
             assert!(
                 relative < 1.0e-12,
                 "h={htc} A={area}: Robin rate {robin_rate} vs marched {}",
@@ -437,7 +435,14 @@ fn the_history_is_a_complete_monotone_replay_record() {
             window[1].max_reference_change_k
         );
     }
-    assert!(solution.history.last().expect("nonempty").max_reference_change_k <= 1.0e-12);
+    assert!(
+        solution
+            .history
+            .last()
+            .expect("nonempty")
+            .max_reference_change_k
+            <= 1.0e-12
+    );
 }
 
 #[test]
@@ -601,7 +606,14 @@ fn the_per_region_balance_is_sensitive_to_a_wiring_fault() {
     // And the fault is invisible to the converged temperatures alone: the
     // reference temperatures still satisfy the fixed point, which is exactly
     // why the audit is a separate obligation.
-    assert!(solution.history.last().expect("nonempty").max_reference_change_k <= 1.0e-12);
+    assert!(
+        solution
+            .history
+            .last()
+            .expect("nonempty")
+            .max_reference_change_k
+            <= 1.0e-12
+    );
 }
 
 #[test]
@@ -620,7 +632,14 @@ fn the_decomposition_cross_check_catches_an_unowned_robin_face() {
     let clean = solution
         .clone()
         .with_decomposition_cross_check(solution.balance.solid_total_w);
-    assert!(clean.balance.decomposition_residual_w.expect("present").abs() < 1.0e-9);
+    assert!(
+        clean
+            .balance
+            .decomposition_residual_w
+            .expect("present")
+            .abs()
+            < 1.0e-9
+    );
 
     // A whole-domain total carrying 3 W the declared regions never claimed:
     // some Robin face is outside every declared region.
@@ -798,7 +817,9 @@ fn the_cht_ladder_carries_the_injected_transfer() {
     // Rung 0 -> 1 now runs the conjugate refinement, not Refine1d. Refine1d
     // would map 3 coarse values to 5 fine ones (2n-1 linear interpolation);
     // the conjugate transfer maps them to 3*4 = 12 sub-segments.
-    let fine = ladder.prolongate(0, &[340.0, 350.0, 360.0]).expect("rung 0");
+    let fine = ladder
+        .prolongate(0, &[340.0, 350.0, 360.0])
+        .expect("rung 0");
     assert_eq!(fine.len(), 12);
     assert_eq!(
         ladder.restrict(1, &fine).expect("rung 1"),
