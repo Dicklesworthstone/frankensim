@@ -199,6 +199,17 @@ output.
   enclosure accuracy. The `RANS` and `LES` entries in `fs-ladder` remain rung
   declarations, not solvers, and no solid-fluid thermal field transfer is
   inferred from them.
+- `fs_airflow::conjugate` (bead f85xj.5.7) adds the partitioned conjugate
+  exchange the `conjugate-heat-transfer` vertical's `kernel-maturity` rationale
+  now cites: a stream-wise 1-D air path and a solid/air fixed point over the
+  per-region Robin reference temperature. That rationale previously claimed
+  "forced-convection CFD" and credited `fs-ladder`'s `cht()` bottom rung
+  directly; both were overstatements and are corrected in place with the prior
+  text retained. The correction does not raise the vertical: the exchange is a
+  correlation-rung coupling with a frozen `h`, its fixtures are synthetic, and
+  no CFD kernel, RANS rung, or field transfer exists. `ScoreUse::
+  SupersededForDecisionUse` continues to deny every retained score decision
+  authority.
 - `fs-lbm::ThermalLbm` is measured present only for its implemented
   two-dimensional Boussinesq slab. It is not promoted into an electronics CHT
   kernel.

@@ -170,7 +170,7 @@ const VERTICALS: [Vertical; 3] = [
             s(
                 KernelMaturity,
                 8,
-                "conduction FEM + forced-convection CFD with correlation-based Nusselt rungs (the fs-ladder cht() bottom rung — makes Proposal 3 real)",
+                "conduction FEM + validity-gated Nusselt correlations over a partitioned conjugate solid/air exchange (fs_airflow::conjugate, bead f85xj.5.7), which also supplies the cht() correlation-rung transfer. CORRECTED 2026-07-26: this rationale previously read 'forced-convection CFD' and credited the fs-ladder cht() bottom rung directly. NO CFD KERNEL EXISTS — the RANS and LES rungs are declarations, not solvers — and cht() alone carries the Refine1d demonstrator on both edges. The retained score predates this correction; ScoreUse::SupersededForDecisionUse already denies it decision authority",
             ),
             s(
                 IterationPain,
