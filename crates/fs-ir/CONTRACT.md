@@ -185,22 +185,29 @@ admitted derived-geometry boundary.
   plan is checked into the canonical `u64` declaration. The encoder admits
   that declaration before one empty backing `Vec` receives an exact
   `try_reserve_exact` request for the admitted bytes. The indexed producer sees
-  only an opaque append-only row writer, never the `Vec`, and every append is
-  checked against the admitted logical cap before mutation. A one-over producer
-  attempt therefore returns a typed declared-length mismatch without changing
-  row length, growing capacity, or publishing an identity. An unavailable
-  reservation remains a distinct typed allocation refusal rather than a
-  canonical limit, producer, or cancellation error. Both public graph and
-  receipt refusals preserve that allocation payload alongside ordered-stream
-  diagnostics even though their canonical-error accessor is necessarily
-  `None`. Oversized rows therefore refuse before payload allocation. The former
-  collection-wide `Vec<Vec<u8>>` batches no longer multiply retained canonical
-  payload by row cardinality. Graph/receipt refusals retain the ordered field,
-  origin, phase, row, declared/written bytes, completed prefix, and
-  no-publication disposition instead of flattening that evidence to a bare
-  canonical error. G3 pins the streamed receipt, semantic root, independent
-  canonical-preimage root, canonical byte count, and collection count to the
-  eager canonical reference.
+  only an opaque append-only row writer, never the `Vec`; the writer's backing
+  fields live in a private child module, so parent and sibling code cannot
+  bypass its checked surface. Every append is checked against the admitted
+  logical cap before mutation. A one-over producer attempt therefore returns a
+  typed declared-length mismatch without changing row length, growing capacity,
+  or publishing an identity. Once recorded, that sticky mismatch takes
+  precedence over any later canonical error returned by the same producer
+  callback; it is exposed with ordered-stream origin `Producer` and phase
+  `RowProducer`. An unavailable reservation remains a distinct typed allocation
+  refusal rather than a canonical limit, producer, or cancellation error. Both
+  public graph and receipt refusals preserve that allocation payload alongside
+  ordered-stream diagnostics even though their canonical-error accessor is
+  necessarily `None`. Oversized rows therefore refuse before payload
+  allocation. The former collection-wide `Vec<Vec<u8>>` batches no longer
+  multiply retained canonical payload by row cardinality. Machine-graph eager
+  rows and cap-enforced causal rows invoke one shared append-only serializer for
+  terminal quantity, shape, and dimension bytes; the independent causal length
+  planners remain allocation-free and execute before payload production.
+  Graph/receipt refusals retain the ordered field, origin, phase, row,
+  declared/written bytes, completed prefix, and no-publication disposition
+  instead of flattening that evidence to a bare canonical error. G3 pins the
+  streamed receipt, semantic root, independent canonical-preimage root,
+  canonical byte count, and collection count to the eager canonical reference.
 - The exact producer-retained peak for one ordered identity field is zero row
   payload bytes before admission and at most one active row afterward: the
   current row's admitted logical byte length. No prior or future row payload is
@@ -1496,18 +1503,19 @@ constructor-boundary assertions retain their exact typed error variants.
   byte counts, and collection counts. Actual equation, variable, condition,
   lineage, incidence, matching, derivative-variable, and unknown-axis fixtures
   also pin independent declared lengths to their payload serializers. An
-  exhaustive G0 byte-parity law binds the checked signal writer to the
-  authoritative Machine terminal-quantity and terminal-shape wire vocabulary
-  across every sealed variant. G0/G4
+  exhaustive G0 byte-parity law exercises the one shared Machine/causal
+  terminal-quantity and terminal-shape serializer across every sealed variant.
+  G0/G4
   adapter laws prove field and row admission precede payload allocation, admit
   empty and exact reduced-limit rows, refuse one-over counts/rows before
   production, reject an exact one-over producer append before row mutation or
-  allocation growth, inject a deterministic reserve failure, and detect
-  declared/payload disagreement. They retain canonical-versus-producer-versus-
-  allocation origin, phase, row, declared/written bytes, completed prefix, and
-  canonical-byte progress on refusal; graph and receipt wrapper laws separately
-  require the typed allocation payload to survive public propagation when no
-  canonical error exists.
+  allocation growth, pin that sticky cap refusal ahead of a later producer
+  error, inject a deterministic reserve failure, and detect declared/payload
+  disagreement. They retain canonical-versus-producer-versus-allocation origin,
+  phase, row, declared/written bytes, completed prefix, and canonical-byte
+  progress on refusal; graph and receipt wrapper laws separately require the
+  typed allocation payload to survive public propagation when no canonical
+  error exists.
 
 `tests/machine_semantics.rs` (Machine-IR E0 PR-3, G0/G3): fully populated
 behavior-overlay admission; complete state/initial/boundary/body-motion closure;

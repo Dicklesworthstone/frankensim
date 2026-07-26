@@ -3447,6 +3447,27 @@ fn machine_graph_identity(
         .finish()
 }
 
+/// Minimal append-only surface shared by the eager Machine encoders and
+/// bounded child serializers such as causalization's admitted-row writer.
+///
+/// Keeping the authoritative terminal vocabulary generic over this surface
+/// lets bounded writers reuse it without exposing reservation, resize, or
+/// backing-storage capabilities.
+trait MachineCanonicalBytes {
+    fn push(&mut self, byte: u8);
+    fn extend_from_slice(&mut self, bytes: &[u8]);
+}
+
+impl MachineCanonicalBytes for Vec<u8> {
+    fn push(&mut self, byte: u8) {
+        Vec::push(self, byte);
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        Vec::extend_from_slice(self, bytes);
+    }
+}
+
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     out.extend_from_slice(bytes);
@@ -3580,7 +3601,10 @@ fn interface_row(binding: &InterfaceBinding) -> Vec<u8> {
     out
 }
 
-fn push_terminal_quantity(out: &mut Vec<u8>, quantity: TerminalQuantitySpec) {
+fn push_terminal_quantity<O: MachineCanonicalBytes + ?Sized>(
+    out: &mut O,
+    quantity: TerminalQuantitySpec,
+) {
     match quantity {
         TerminalQuantitySpec::Dimensional(dims) => {
             out.push(1);
@@ -3595,11 +3619,11 @@ fn push_terminal_quantity(out: &mut Vec<u8>, quantity: TerminalQuantitySpec) {
     }
 }
 
-fn push_dims(out: &mut Vec<u8>, dims: Dims) {
-    out.extend(dims.0.map(|exponent| exponent as u8));
+fn push_dims<O: MachineCanonicalBytes + ?Sized>(out: &mut O, dims: Dims) {
+    out.extend_from_slice(&dims.0.map(|exponent| exponent as u8));
 }
 
-fn push_quantity_kind(out: &mut Vec<u8>, kind: QuantityKind) {
+fn push_quantity_kind<O: MachineCanonicalBytes + ?Sized>(out: &mut O, kind: QuantityKind) {
     match kind {
         QuantityKind::AbsoluteTemperature => out.push(1),
         QuantityKind::TemperatureDifference => out.push(2),
@@ -3636,7 +3660,7 @@ fn push_quantity_kind(out: &mut Vec<u8>, kind: QuantityKind) {
     }
 }
 
-fn push_terminal_shape(out: &mut Vec<u8>, shape: TerminalShape) {
+fn push_terminal_shape<O: MachineCanonicalBytes + ?Sized>(out: &mut O, shape: TerminalShape) {
     match shape {
         TerminalShape::Scalar => out.push(1),
         TerminalShape::Vector { components } => {

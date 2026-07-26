@@ -32,9 +32,9 @@ use fs_qty::{DIMENSION_COUNT, Dims};
 
 use super::semantics::{AdmittedMachineBehavior, MachineBehaviorIdV1, StateSlotContract};
 use super::{
-    AdmittedMachineGraph, ClockId, FrameBinding, InterfaceId, MachineElementId, MachineGraphIdV1,
-    MachineReferenceError, PortId, RelationId, StateSlotId, SubsystemId, TerminalId,
-    TerminalQuantitySpec, TerminalShape,
+    AdmittedMachineGraph, ClockId, FrameBinding, InterfaceId, MachineCanonicalBytes,
+    MachineElementId, MachineGraphIdV1, MachineReferenceError, PortId, RelationId, StateSlotId,
+    SubsystemId, TerminalId, TerminalQuantitySpec, TerminalShape,
 };
 
 /// Shared candidate version for equation, variable, and incidence entity-ID
@@ -435,17 +435,15 @@ fn hash_identity_receipt_adjudication<I: StrongIdentity, H: Hasher>(
     receipt.collection_items().hash(state);
 }
 
-/// Minimal append-only byte surface shared by eager canonicalization and the
+/// Causal append-only byte surface shared by eager canonicalization and the
 /// cap-enforcing streamed-row writer below.
 ///
-/// Keeping this surface deliberately smaller than `Vec<u8>` prevents a
-/// streamed producer from reserving, resizing, or otherwise bypassing its
-/// admitted row plan. The `Vec<u8>` implementation preserves the existing
-/// eager encoders; streamed producers receive only `CausalIdentityRowWriter`.
-trait CausalCanonicalBytes {
+/// The Machine-level supertrait owns the one authoritative terminal quantity
+/// and shape wire vocabulary. This causal extension adds only observable
+/// length, keeping streamed producers unable to reserve, resize, or reach
+/// backing storage.
+trait CausalCanonicalBytes: super::MachineCanonicalBytes {
     fn len(&self) -> usize;
-    fn push(&mut self, byte: u8);
-    fn extend_from_slice(&mut self, bytes: &[u8]);
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -455,14 +453,6 @@ trait CausalCanonicalBytes {
 impl CausalCanonicalBytes for Vec<u8> {
     fn len(&self) -> usize {
         Vec::len(self)
-    }
-
-    fn push(&mut self, byte: u8) {
-        Vec::push(self, byte);
-    }
-
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        Vec::extend_from_slice(self, bytes);
     }
 }
 
@@ -4628,102 +4618,115 @@ fn reserve_identity_row(
         })
 }
 
-/// Opaque producer surface for one already-admitted ordered-byte row.
-///
-/// The backing `Vec` is reserved fallibly before construction and never
-/// exposed to the producer. Every attempted append is checked against the
-/// logical row plan before mutation. An over-plan append records one stable
-/// typed mismatch and becomes a no-op, so neither the row length nor its
-/// allocation can grow because of the refused write.
-struct CausalIdentityRowWriter {
-    bytes: Vec<u8>,
-    plan: CausalIdentityRowPlan,
-    admitted_capacity: usize,
-    refusal: Option<CanonicalError>,
+mod causal_identity_row_writer {
+    use super::{CanonicalError, CausalCanonicalBytes, CausalIdentityRowPlan};
+
+    /// Opaque producer surface for one already-admitted ordered-byte row.
+    ///
+    /// The backing fields live in this child module so sibling and parent code
+    /// cannot bypass the checked append surface. The `Vec` is reserved fallibly
+    /// before construction and never exposed to the producer. Every attempted
+    /// append is checked against the logical row plan before mutation. An
+    /// over-plan append records one stable typed mismatch and becomes a no-op,
+    /// so neither row length nor allocation can grow because of the refused
+    /// write.
+    pub(super) struct CausalIdentityRowWriter {
+        bytes: Vec<u8>,
+        plan: CausalIdentityRowPlan,
+        admitted_capacity: usize,
+        refusal: Option<CanonicalError>,
+    }
+
+    impl CausalIdentityRowWriter {
+        pub(super) fn from_reserved(
+            bytes: Vec<u8>,
+            plan: CausalIdentityRowPlan,
+        ) -> Result<Self, CanonicalError> {
+            if !bytes.is_empty() {
+                return Err(CanonicalError::InvalidSchemaDescriptor(
+                    "ordered row reservation returned nonempty storage",
+                ));
+            }
+            if bytes.capacity() < plan.native_bytes {
+                return Err(CanonicalError::InvalidSchemaDescriptor(
+                    "ordered row reservation returned less than the admitted plan",
+                ));
+            }
+            let admitted_capacity = bytes.capacity();
+            Ok(Self {
+                bytes,
+                plan,
+                admitted_capacity,
+                refusal: None,
+            })
+        }
+
+        fn record_append(&mut self, additional_bytes: usize) -> bool {
+            if self.refusal.is_some() {
+                return false;
+            }
+            let Some(observed_native) = self.bytes.len().checked_add(additional_bytes) else {
+                self.refusal = Some(CanonicalError::LengthOverflow);
+                return false;
+            };
+            let Ok(observed) = u64::try_from(observed_native) else {
+                self.refusal = Some(CanonicalError::LengthOverflow);
+                return false;
+            };
+            if observed > self.plan.canonical_bytes {
+                self.refusal = Some(CanonicalError::DeclaredLengthMismatch {
+                    declared: self.plan.canonical_bytes,
+                    observed,
+                });
+                return false;
+            }
+            true
+        }
+
+        pub(super) fn refusal(&self) -> Option<CanonicalError> {
+            self.refusal
+        }
+
+        pub(super) fn into_bytes(self) -> Result<Vec<u8>, CanonicalError> {
+            if let Some(refusal) = self.refusal {
+                return Err(refusal);
+            }
+            debug_assert_eq!(
+                self.bytes.capacity(),
+                self.admitted_capacity,
+                "cap-enforced row writes cannot reallocate admitted storage"
+            );
+            Ok(self.bytes)
+        }
+
+        #[cfg(test)]
+        pub(super) fn capacity(&self) -> usize {
+            self.bytes.capacity()
+        }
+    }
+
+    impl super::super::MachineCanonicalBytes for CausalIdentityRowWriter {
+        fn push(&mut self, byte: u8) {
+            if self.record_append(1) {
+                self.bytes.push(byte);
+            }
+        }
+
+        fn extend_from_slice(&mut self, bytes: &[u8]) {
+            if self.record_append(bytes.len()) {
+                self.bytes.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    impl CausalCanonicalBytes for CausalIdentityRowWriter {
+        fn len(&self) -> usize {
+            self.bytes.len()
+        }
+    }
 }
 
-impl CausalIdentityRowWriter {
-    fn from_reserved(bytes: Vec<u8>, plan: CausalIdentityRowPlan) -> Result<Self, CanonicalError> {
-        if !bytes.is_empty() {
-            return Err(CanonicalError::InvalidSchemaDescriptor(
-                "ordered row reservation returned nonempty storage",
-            ));
-        }
-        if bytes.capacity() < plan.native_bytes {
-            return Err(CanonicalError::InvalidSchemaDescriptor(
-                "ordered row reservation returned less than the admitted plan",
-            ));
-        }
-        let admitted_capacity = bytes.capacity();
-        Ok(Self {
-            bytes,
-            plan,
-            admitted_capacity,
-            refusal: None,
-        })
-    }
-
-    fn record_append(&mut self, additional_bytes: usize) -> bool {
-        if self.refusal.is_some() {
-            return false;
-        }
-        let Some(observed_native) = self.bytes.len().checked_add(additional_bytes) else {
-            self.refusal = Some(CanonicalError::LengthOverflow);
-            return false;
-        };
-        let Ok(observed) = u64::try_from(observed_native) else {
-            self.refusal = Some(CanonicalError::LengthOverflow);
-            return false;
-        };
-        if observed > self.plan.canonical_bytes {
-            self.refusal = Some(CanonicalError::DeclaredLengthMismatch {
-                declared: self.plan.canonical_bytes,
-                observed,
-            });
-            return false;
-        }
-        true
-    }
-
-    fn refusal(&self) -> Option<CanonicalError> {
-        self.refusal
-    }
-
-    fn into_bytes(self) -> Result<Vec<u8>, CanonicalError> {
-        if let Some(refusal) = self.refusal {
-            return Err(refusal);
-        }
-        debug_assert_eq!(
-            self.bytes.capacity(),
-            self.admitted_capacity,
-            "cap-enforced row writes cannot reallocate admitted storage"
-        );
-        Ok(self.bytes)
-    }
-
-    #[cfg(test)]
-    fn capacity(&self) -> usize {
-        self.bytes.capacity()
-    }
-}
-
-impl CausalCanonicalBytes for CausalIdentityRowWriter {
-    fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    fn push(&mut self, byte: u8) {
-        if self.record_append(1) {
-            self.bytes.push(byte);
-        }
-    }
-
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        if self.record_append(bytes.len()) {
-            self.bytes.extend_from_slice(bytes);
-        }
-    }
-}
+use causal_identity_row_writer::CausalIdentityRowWriter;
 
 fn stream_identity_rows<I, C, T, L, W>(
     encoder: CanonicalEncoder<I, C>,
@@ -5128,7 +5131,7 @@ fn push_incidence_meaning_fixed(
     push_identity_receipt_adjudication(out, variable.identity_receipt());
     out.extend_from_slice(&derivative_order.to_le_bytes());
     out.push(solve_participation_tag(solve_participation));
-    push_dims(out, coefficient_dimensions);
+    super::push_dims(out, coefficient_dimensions);
     push_signal(out, term)?;
     push_optional_ref(out, operator);
     match clock_relation {
@@ -5468,67 +5471,8 @@ fn push_signal<O: CausalCanonicalBytes + ?Sized>(
     out: &mut O,
     signal: &SignalContract,
 ) -> Result<(), CanonicalError> {
-    match signal.quantity {
-        TerminalQuantitySpec::Dimensional(dims) => {
-            out.push(1);
-            push_dims(out, dims);
-        }
-        TerminalQuantitySpec::Semantic(semantic_type) => {
-            out.push(2);
-            match semantic_type.kind() {
-                super::QuantityKind::AbsoluteTemperature => out.push(1),
-                super::QuantityKind::TemperatureDifference => out.push(2),
-                super::QuantityKind::Angle(domain) => {
-                    out.push(3);
-                    out.push(super::angle_domain_tag(domain));
-                }
-                super::QuantityKind::AngularVelocity(domain) => {
-                    out.push(4);
-                    out.push(super::angle_domain_tag(domain));
-                }
-                super::QuantityKind::Torque => out.push(5),
-                super::QuantityKind::Energy => out.push(6),
-                super::QuantityKind::Pressure => out.push(7),
-                super::QuantityKind::Stress => out.push(8),
-                super::QuantityKind::Strain { basis, component } => {
-                    out.push(9);
-                    out.push(super::strain_basis_tag(basis));
-                    out.push(super::strain_component_tag(component));
-                }
-                super::QuantityKind::Composition(basis) => {
-                    out.push(10);
-                    out.push(super::composition_basis_tag(basis));
-                }
-                super::QuantityKind::Mass => out.push(11),
-                super::QuantityKind::Amount => out.push(12),
-                super::QuantityKind::MolarMass => out.push(13),
-                super::QuantityKind::MassConcentration => out.push(14),
-                super::QuantityKind::AmountConcentration => out.push(15),
-                super::QuantityKind::Entropy => out.push(16),
-                super::QuantityKind::HeatCapacity => out.push(17),
-                super::QuantityKind::AcousticPressure => out.push(18),
-                super::QuantityKind::AcousticPower => out.push(19),
-            }
-            out.push(super::value_form_tag(semantic_type.form()));
-            push_dims(out, semantic_type.expected_dims());
-        }
-    }
-    match signal.shape {
-        TerminalShape::Scalar => out.push(1),
-        TerminalShape::Vector { components } => {
-            out.push(2);
-            out.extend_from_slice(&components.get().to_le_bytes());
-        }
-        TerminalShape::Tensor { rows, columns } => {
-            out.push(3);
-            out.extend_from_slice(&rows.get().to_le_bytes());
-            out.extend_from_slice(&columns.get().to_le_bytes());
-        }
-        TerminalShape::FieldTrace { components } => {
-            out.push(4);
-            out.extend_from_slice(&components.get().to_le_bytes());
-        }
-    }
+    super::push_terminal_quantity(out, signal.quantity);
+    super::push_terminal_shape(out, signal.shape);
     out.extend_from_slice(signal.clock.identity().as_bytes());
     push_row_count(out, signal.frame.canonical_key().len())?;
     out.extend_from_slice(signal.frame.canonical_key().as_bytes());
@@ -5537,10 +5481,6 @@ fn push_signal<O: CausalCanonicalBytes + ?Sized>(
         super::OrientationParity::Reversing => 2,
     });
     Ok(())
-}
-
-fn push_dims<O: CausalCanonicalBytes + ?Sized>(out: &mut O, dims: Dims) {
-    out.extend_from_slice(&dims.0.map(|exponent| exponent as u8));
 }
 
 fn push_activation_cancellable<O: CausalCanonicalBytes + ?Sized>(
@@ -9572,15 +9512,13 @@ mod internal_tests {
 
     /// Smallest `max_field_bytes` these row fixtures may declare.
     ///
-    /// `max_field_bytes` is a PER-ITEM cap, and `CanonicalEncoder::new` charges
-    /// the schema's own descriptors against it before any row exists:
-    /// `identity.rs:1862-1868` enforces it for `domain`, `name`, and `context`
-    /// in turn. For `StreamParitySchemaV1` those are 49, 20, and 51 bytes, so
-    /// any cap below 51 makes the encoder UNCONSTRUCTABLE and every test using
-    /// it dies in `expect("valid bounded encoder")` long before reaching the row
-    /// logic it meant to exercise. `validate_limits` does not surface that
-    /// floor up front (tracked separately), so it can only be discovered by
-    /// running the tests.
+    /// `max_field_bytes` bounds each item and the cumulative encoded field, and
+    /// `CanonicalEncoder::new` also requires it to admit the complete recursive
+    /// schema descriptor before any row exists. For `StreamParitySchemaV1`,
+    /// `domain`, `name`, and `context` are 49, 20, and 51 bytes, so 51 is the
+    /// binding descriptor floor. A smaller cap now returns the typed
+    /// `CanonicalError::MaxFieldBytesBelowSchemaFloor` construction refusal
+    /// rather than masquerading as a row/payload `LimitExceeded`.
     ///
     /// 64 clears the floor with headroom while staying small enough that an
     /// exact-cap row and a one-over row are both cheap to build. The property
@@ -10351,6 +10289,62 @@ mod internal_tests {
             length_after.get(),
             0,
             "refused one-over write is checked before row mutation"
+        );
+    }
+
+    #[test]
+    fn g0_sticky_over_cap_refusal_precedes_later_producer_error() {
+        let rows = [()];
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 1, 16);
+
+        let refusal = with_internal_cx(|cx| {
+            let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
+                limits,
+                NeverCancel,
+            )
+            .expect("valid bounded encoder");
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &rows,
+                cx,
+                |(), _| Ok(4),
+                |(), _, out| {
+                    out.extend_from_slice(&[1, 2, 3, 4, 5]);
+                    Err(CanonicalError::Cancelled { absorbed_bytes: 77 })
+                },
+            )
+            .expect_err("sticky cap refusal must win without publishing")
+        });
+
+        assert_eq!(
+            refusal.canonical_error(),
+            Some(CanonicalError::DeclaredLengthMismatch {
+                declared: 4,
+                observed: 5,
+            }),
+            "the first sticky writer refusal precedes the later callback error"
+        );
+        assert_eq!(refusal.allocation_refusal(), None);
+        assert!(
+            !refusal.is_cancelled(),
+            "the discarded producer cancellation cannot reclassify the cap refusal"
+        );
+        let stream = refusal
+            .stream_refusal()
+            .expect("sticky cap refusal retains stream context");
+        assert_eq!(stream.origin(), CausalIdentityStreamOrigin::Producer);
+        assert_eq!(
+            stream.diagnostic().phase(),
+            OrderedBytesStreamPhase::RowProducer
+        );
+        assert_eq!(stream.diagnostic().row_index(), Some(0));
+        assert_eq!(stream.diagnostic().declared_row_bytes(), Some(4));
+        assert_eq!(stream.diagnostic().written_row_bytes(), 0);
+        assert_eq!(stream.diagnostic().completed_rows(), 0);
+        assert_eq!(
+            stream.diagnostic().disposition(),
+            OrderedBytesStreamDisposition::EncoderConsumedNoPublication
         );
     }
 
