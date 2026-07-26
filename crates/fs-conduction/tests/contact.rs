@@ -126,27 +126,113 @@ fn empty_contact_card() -> InterfaceSystemCard {
     .expect("empty interface card is structurally valid")
 }
 
-fn two_slab_mesh(n: usize) -> (ConductionMesh, usize) {
-    let (left, mut positions) = box_grid([n, n, n], [1.0, 1.0, 1.0]);
-    let left_vertex_count = positions.len();
-    let (right, right_positions) = box_grid([n, n, n], [1.0, 1.0, 1.0]);
-    let offset = u32::try_from(left_vertex_count).expect("fixture vertex count fits u32");
-    let mut tets = left.tets;
-    tets.extend(
-        right
-            .tets
-            .into_iter()
-            .map(|tet| tet.map(|vertex| vertex + offset)),
+fn slab_chain_mesh(n: usize, slab_count: usize) -> (ConductionMesh, usize) {
+    assert!(
+        slab_count > 0,
+        "a slab chain must contain at least one slab"
     );
-    positions.extend(right_positions.into_iter().map(|[x, y, z]| [x + 1.0, y, z]));
+    let mut tets = Vec::new();
+    let mut positions = Vec::new();
+    let mut vertices_per_slab = 0usize;
+    for slab in 0..slab_count {
+        let (complex, slab_positions) = box_grid([n, n, n], [1.0, 1.0, 1.0]);
+        if slab == 0 {
+            vertices_per_slab = slab_positions.len();
+        } else {
+            assert_eq!(
+                slab_positions.len(),
+                vertices_per_slab,
+                "identical box-grid inputs must have identical vertex counts"
+            );
+        }
+        let offset =
+            u32::try_from(positions.len()).expect("fixture vertex count fits in a u32 index");
+        tets.extend(
+            complex
+                .tets
+                .into_iter()
+                .map(|tet| tet.map(|vertex| vertex + offset)),
+        );
+        positions.extend(
+            slab_positions
+                .into_iter()
+                .map(|[x, y, z]| [x + slab as f64, y, z]),
+        );
+    }
     let complex = TetComplex::from_tets(positions.len(), tets);
     (
-        ConductionMesh::new(complex, positions).expect("two-slab mesh"),
-        left_vertex_count,
+        ConductionMesh::new(complex, positions).expect("slab-chain mesh"),
+        vertices_per_slab,
     )
 }
 
+fn two_slab_mesh(n: usize) -> (ConductionMesh, usize) {
+    slab_chain_mesh(n, 2)
+}
+
+fn two_tet_contact_mesh() -> ConductionMesh {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    ConductionMesh::new(
+        TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3], [4, 5, 6, 7]]),
+        positions,
+    )
+    .expect("two-tet matching-contact mesh")
+}
+
+fn coincident_base_tet_mesh(apex_heights: &[f64]) -> ConductionMesh {
+    assert!(
+        apex_heights.len() >= 2,
+        "the refusal fixture needs at least two coincident traces"
+    );
+    let mut positions = Vec::with_capacity(4 * apex_heights.len());
+    let mut tets = Vec::with_capacity(apex_heights.len());
+    for &height in apex_heights {
+        let offset = u32::try_from(positions.len()).expect("fixture vertex count fits u32");
+        positions.extend([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, height],
+        ]);
+        tets.push([offset, offset + 1, offset + 2, offset + 3]);
+    }
+    ConductionMesh::new(TetComplex::from_tets(positions.len(), tets), positions)
+        .expect("coincident-base tetrahedra remain individually nondegenerate")
+}
+
+fn outer_boundary(mesh: &ConductionMesh, cold_x: f64) -> ThermalBoundary {
+    ThermalBoundaryBuilder::new(mesh)
+        .region(
+            "hot",
+            |face| on_box_face(face.centroid[0], 0.0),
+            ThermalBc::dirichlet(T_HOT).expect("hot condition"),
+        )
+        .expect("hot boundary")
+        .region(
+            "cold",
+            |face| on_box_face(face.centroid[0], cold_x),
+            ThermalBc::dirichlet(T_COLD).expect("cold condition"),
+        )
+        .expect("cold boundary")
+        .adiabatic_remainder()
+        .finish()
+        .expect("complete boundary partition")
+}
+
 fn boundary(mesh: &ConductionMesh) -> ThermalBoundary {
+    outer_boundary(mesh, 2.0)
+}
+
+fn boundary_with_occupied_interface(mesh: &ConductionMesh) -> ThermalBoundary {
     ThermalBoundaryBuilder::new(mesh)
         .region(
             "hot",
@@ -160,9 +246,22 @@ fn boundary(mesh: &ConductionMesh) -> ThermalBoundary {
             ThermalBc::dirichlet(T_COLD).expect("cold condition"),
         )
         .expect("cold boundary")
+        .region(
+            "occupied-contact",
+            |face| on_box_face(face.centroid[0], 1.0),
+            ThermalBc::neumann(0.0).expect("zero-flux condition"),
+        )
+        .expect("occupied interface boundary")
         .adiabatic_remainder()
         .finish()
-        .expect("complete boundary partition")
+        .expect("complete occupied-interface boundary")
+}
+
+fn adiabatic_boundary(mesh: &ConductionMesh) -> ThermalBoundary {
+    ThermalBoundaryBuilder::new(mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("explicit all-adiabatic boundary")
 }
 
 fn resistance(card: &InterfaceSystemCard) -> InterfaceResistance {
@@ -192,6 +291,81 @@ fn oriented_pairs(mesh: &ConductionMesh) -> Vec<InterfaceFacePair> {
         .collect()
 }
 
+fn oriented_pairs_at_x(mesh: &ConductionMesh, x: f64) -> Vec<InterfaceFacePair> {
+    oriented_pairs(mesh)
+        .into_iter()
+        .filter(|pair| on_box_face(mesh.boundary()[pair.side_a].centroid[0], x))
+        .collect()
+}
+
+fn solve_contact_fixture(
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    interfaces: &ThermalInterfaces,
+) -> fs_conduction::ConductionSolution {
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    with_cx(|cx| {
+        solve_with_interfaces(
+            cx,
+            ConductionProblem {
+                mesh,
+                boundary,
+                material: &material,
+                source: &source,
+            },
+            interfaces,
+            config(),
+        )
+        .expect("contact solve")
+    })
+}
+
+fn binding_validation_error(
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    interfaces: &ThermalInterfaces,
+) -> ConductionError {
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let temperature = vec![0.5 * (T_HOT + T_COLD); mesh.vertex_count()];
+    with_cx(|cx| {
+        match fs_conduction::assemble_operator_with_interfaces(
+            cx,
+            mesh,
+            boundary,
+            &material,
+            &source,
+            &temperature,
+            interfaces,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("the changed mesh/boundary binding must refuse before assembly"),
+        }
+    })
+}
+
+fn assert_interface_refusal(error: ConductionError, expected_interface: &str, expected_what: &str) {
+    match error {
+        ConductionError::Interface {
+            interface,
+            what,
+            fix,
+        } => {
+            assert_eq!(interface, expected_interface);
+            assert!(
+                what.contains(expected_what),
+                "expected diagnosis containing {expected_what:?}, got {what:?}"
+            );
+            assert!(
+                !fix.trim().is_empty(),
+                "an interface refusal must retain an actionable fix"
+            );
+        }
+        other => panic!("expected a typed interface refusal, got {other:?}"),
+    }
+}
+
 fn level_a_contact_reference() -> (&'static fs_vvreg::thermal_level_a::ThermalLevelACase, f64) {
     let case = thermal_level_a_cases()
         .iter()
@@ -202,12 +376,30 @@ fn level_a_contact_reference() -> (&'static fs_vvreg::thermal_level_a::ThermalLe
     (case, case.reference_value_si)
 }
 
+fn level_a_tolerance_error_and_limit(
+    case: &fs_vvreg::thermal_level_a::ThermalLevelACase,
+    observed: f64,
+) -> (f64, f64) {
+    let ThermalLevelAAcceptance::Tolerance { atol, rtol } = case.acceptance else {
+        panic!("the Level-A contact row must retain a numerical tolerance");
+    };
+    let error = (observed - case.reference_value_si).abs();
+    let limit = atol + rtol * case.reference_value_si.abs();
+    assert!(
+        atol.is_finite() && atol >= 0.0 && rtol.is_finite() && rtol >= 0.0,
+        "the registry tolerance itself must be finite and non-negative"
+    );
+    assert!(
+        limit.is_finite() && limit > 0.0,
+        "the registry row must expose a non-vacuous positive comparison limit"
+    );
+    (error, limit)
+}
+
 #[test]
 fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
     let (mesh, left_vertex_count) = two_slab_mesh(4);
     let boundary = boundary(&mesh);
-    let material = ConductivityModel::isotropic_declared(K).expect("material");
-    let source = ScalarField::Uniform(0.0);
     let card = contact_card(UncertaintyModel::HalfWidth {
         half_width: 0.01,
         confidence: 0.95,
@@ -223,21 +415,7 @@ fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
     let interfaces = ThermalInterfaces::new(&mesh, &boundary, vec![interface])
         .expect("complete interface binding");
     assert_eq!(interfaces.surface_count(), 1);
-
-    let solution = with_cx(|cx| {
-        solve_with_interfaces(
-            cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
-            &interfaces,
-            config(),
-        )
-        .expect("contact solve")
-    });
+    let solution = solve_contact_fixture(&mesh, &boundary, &interfaces);
 
     let mut max_error = 0.0f64;
     for (vertex, &point) in mesh.positions().iter().enumerate() {
@@ -269,6 +447,16 @@ fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
     card.claims()
         .verify_receipt(&flux.receipt)
         .expect("reported receipt replays");
+    let (level_a_case, reference) = level_a_contact_reference();
+    let solved_resistance = (T_HOT - T_COLD) / flux.heat_rate_a_to_b_w;
+    let (level_a_error, level_a_limit) =
+        level_a_tolerance_error_and_limit(level_a_case, solved_resistance);
+    assert!(
+        level_a_error <= level_a_limit,
+        "solve-derived resistance {solved_resistance:.16e} K/W differs from the \
+         Level-A reference {reference:.16e} K/W by {level_a_error:.16e}, above \
+         the registry limit {level_a_limit:.16e}"
+    );
 
     let slab_a = ThermalResistanceTerm::slab(
         "slab-a",
@@ -300,10 +488,10 @@ fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
     let series =
         SeriesThermalResistance::new(vec![slab_b.clone(), contact.clone(), slab_a.clone()])
             .expect("series budget");
-    let (_, reference) = level_a_contact_reference();
     assert!(
         (series.budget().value_k_per_w - reference).abs() <= f64::EPSILON,
-        "three-term floating-point sum should match the Level-A decimal reference within one ULP"
+        "the auxiliary three-term arithmetic budget must stay within one \
+         absolute f64::EPSILON of the Level-A decimal reference"
     );
     assert_eq!(series.budget().complete_half_width_k_per_w(), Some(0.01));
     assert_eq!(series.budget().confidence_floor, Some(0.95));
@@ -317,7 +505,8 @@ fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
         "{{\"suite\":\"fs-conduction/contact\",\"case\":\"two-slab-series\",\
          \"level_a_case_id\":\"thermal-a-contact-series\",\"verdict\":\"pass\",\
          \"authority\":\"executed-matching-p1-interface-not-retained-registry-receipt\",\
-         \"detail\":\"R_total={:.16e} K/W; max_nodal_error={max_error:.16e} K; \
+         \"detail\":\"R_solved={solved_resistance:.16e} K/W; \
+         R_budget={:.16e} K/W; max_nodal_error={max_error:.16e} K; \
          interface_heat_rate={:.16e} W; card_identity={card_identity}; receipt_identity={receipt_identity}\"}}",
         series.budget().value_k_per_w,
         flux.heat_rate_a_to_b_w,
@@ -363,6 +552,148 @@ fn missing_interface_card_and_missing_binding_refuse_typed() {
 }
 
 #[test]
+fn surface_declaration_and_binding_guards_each_refuse_their_own_defect() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let declared = resistance(&card);
+    let (mesh, _) = two_slab_mesh(1);
+    let boundary = boundary(&mesh);
+    let pairs = oriented_pairs(&mesh);
+    let pair = pairs[0];
+
+    assert_interface_refusal(
+        InterfaceSurface::new("   ", vec![pair], declared.clone())
+            .expect_err("a blank interface name must refuse"),
+        "<unnamed>",
+        "name is blank",
+    );
+    assert_interface_refusal(
+        InterfaceSurface::new("empty", Vec::new(), declared.clone())
+            .expect_err("an empty interface surface must refuse"),
+        "empty",
+        "has no paired faces",
+    );
+
+    let duplicate_name = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new("duplicate", vec![pair], declared.clone())
+                .expect("first declaration"),
+            InterfaceSurface::new("duplicate", vec![pair], declared.clone())
+                .expect("second declaration"),
+        ],
+    )
+    .expect_err("one semantic interface name cannot identify two surfaces");
+    assert_interface_refusal(duplicate_name, "duplicate", "surface name is duplicated");
+
+    let duplicate_pair = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new("alpha", vec![pair], declared.clone())
+                .expect("first pair declaration"),
+            InterfaceSurface::new("beta", vec![pair], declared.clone())
+                .expect("second pair declaration"),
+        ],
+    )
+    .expect_err("one geometric face pair cannot be bound twice");
+    assert_interface_refusal(duplicate_pair, "beta", "was bound more than once");
+
+    let outside = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new(
+                "outside",
+                vec![InterfaceFacePair {
+                    side_a: mesh.boundary().len(),
+                    side_b: pair.side_b,
+                }],
+                declared.clone(),
+            )
+            .expect("range validation belongs to mesh binding"),
+        ],
+    )
+    .expect_err("an out-of-range boundary slot must refuse");
+    assert_interface_refusal(outside, "outside", "is outside the");
+
+    let self_pair = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new(
+                "self-pair",
+                vec![InterfaceFacePair {
+                    side_a: pair.side_a,
+                    side_b: pair.side_a,
+                }],
+                declared.clone(),
+            )
+            .expect("self-pair validation belongs to mesh binding"),
+        ],
+    )
+    .expect_err("a face cannot transfer heat to itself");
+    assert_interface_refusal(self_pair, "self-pair", "is paired with itself");
+
+    let hot_face = mesh
+        .boundary()
+        .iter()
+        .position(|face| on_box_face(face.centroid[0], 0.0))
+        .expect("the slab has a hot exterior face");
+    let noncoincident = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![
+            InterfaceSurface::new(
+                "noncoincident",
+                vec![InterfaceFacePair {
+                    side_a: pair.side_a,
+                    side_b: hot_face,
+                }],
+                declared.clone(),
+            )
+            .expect("coincidence validation belongs to mesh binding"),
+        ],
+    )
+    .expect_err("unrelated exterior faces cannot form a contact pair");
+    assert_interface_refusal(noncoincident, "noncoincident", "is not exactly coincident");
+
+    let occupied = ThermalInterfaces::new(
+        &mesh,
+        &boundary_with_occupied_interface(&mesh),
+        vec![
+            InterfaceSurface::new("occupied", pairs, declared)
+                .expect("complete occupied interface declaration"),
+        ],
+    )
+    .expect_err("an interface face cannot also carry an external boundary row");
+    assert_interface_refusal(
+        occupied,
+        "occupied",
+        "also carries an external boundary condition",
+    );
+}
+
+#[test]
+fn coincident_geometry_refuses_nonopposing_and_multi_owner_traces() {
+    let same_side = coincident_base_tet_mesh(&[1.0, 2.0]);
+    assert_interface_refusal(
+        ThermalInterfaces::coincident_face_pairs(&same_side)
+            .expect_err("same-side coincident traces have nonopposing normals"),
+        "<geometry>",
+        "do not have opposing normals",
+    );
+
+    let three_owner = coincident_base_tet_mesh(&[-1.0, 1.0, 2.0]);
+    assert_interface_refusal(
+        ThermalInterfaces::coincident_face_pairs(&three_owner)
+            .expect_err("three boundary traces cannot own one geometric triangle"),
+        "<geometry>",
+        "3 boundary faces share one exact geometric triangle",
+    );
+}
+
+#[test]
 fn unstated_uncertainty_stays_incomplete() {
     let card = contact_card(UncertaintyModel::Unstated);
     let term = resistance(&card)
@@ -396,7 +727,7 @@ fn series_uncertainty_overflow_refuses() {
 }
 
 #[test]
-fn interface_binding_cannot_be_reused_on_a_different_mesh() {
+fn a_bound_interface_refuses_a_different_face_set() {
     let card = contact_card(UncertaintyModel::Unstated);
     let (coarse_mesh, _) = two_slab_mesh(1);
     let coarse_boundary = boundary(&coarse_mesh);
@@ -408,37 +739,143 @@ fn interface_binding_cannot_be_reused_on_a_different_mesh() {
 
     let (fine_mesh, _) = two_slab_mesh(2);
     let fine_boundary = boundary(&fine_mesh);
-    let material = ConductivityModel::isotropic_declared(K).expect("material");
-    let source = ScalarField::Uniform(0.0);
-    let error = with_cx(|cx| {
-        solve_with_interfaces(
-            cx,
-            ConductionProblem {
-                mesh: &fine_mesh,
-                boundary: &fine_boundary,
-                material: &material,
-                source: &source,
-            },
-            &interfaces,
-            config(),
-        )
-        .expect_err("a mesh-bound interface object must not be reusable on another mesh")
-    });
-    assert!(matches!(
-        error,
-        ConductionError::Interface { ref interface, .. } if interface == "<binding>"
-    ));
+    assert_interface_refusal(
+        binding_validation_error(&fine_mesh, &fine_boundary, &interfaces),
+        "<binding>",
+        "face set does not match",
+    );
 }
 
 #[test]
-fn contact_level_a_row_exposes_a_tolerance_gate() {
+fn a_bound_interface_refuses_a_changed_boundary_condition() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let (mesh, _) = two_slab_mesh(1);
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &boundary(&mesh),
+        vec![
+            InterfaceSurface::new("bondline", oriented_pairs(&mesh), resistance(&card))
+                .expect("interface surface"),
+        ],
+    )
+    .expect("interface binding");
+
+    assert_interface_refusal(
+        binding_validation_error(&mesh, &boundary_with_occupied_interface(&mesh), &interfaces),
+        "bondline",
+        "now carries an external boundary condition",
+    );
+}
+
+#[test]
+fn a_bound_interface_refuses_a_changed_exact_vertex_correspondence() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let mesh = two_tet_contact_mesh();
+    let original_pairs =
+        ThermalInterfaces::coincident_face_pairs(&mesh).expect("one coincident face pair");
+    assert_eq!(original_pairs.len(), 1);
+    let pair = original_pairs[0];
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &adiabatic_boundary(&mesh),
+        vec![
+            InterfaceSurface::new("bondline", original_pairs.clone(), resistance(&card))
+                .expect("interface surface"),
+        ],
+    )
+    .expect("interface binding");
+
+    let mut changed_positions = mesh.positions().to_vec();
+    let side_b_vertices = mesh.boundary()[pair.side_b]
+        .vertices
+        .map(|vertex| vertex as usize);
+    changed_positions.swap(side_b_vertices[0], side_b_vertices[1]);
+    let changed_mesh = ConductionMesh::new(mesh.complex().clone(), changed_positions)
+        .expect("swapping two face coordinates preserves nondegenerate tetrahedra");
+    assert_eq!(
+        ThermalInterfaces::coincident_face_pairs(&changed_mesh).expect("same face-pair slots"),
+        original_pairs,
+        "the fixture must isolate vertex correspondence rather than face-set drift"
+    );
+    assert_eq!(
+        changed_mesh.boundary()[pair.side_a].area.to_bits(),
+        mesh.boundary()[pair.side_a].area.to_bits(),
+        "the fixture must isolate correspondence rather than area drift"
+    );
+
+    assert_interface_refusal(
+        binding_validation_error(
+            &changed_mesh,
+            &adiabatic_boundary(&changed_mesh),
+            &interfaces,
+        ),
+        "bondline",
+        "changed after binding",
+    );
+}
+
+#[test]
+fn a_bound_interface_refuses_changed_face_area_bits() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let mesh = two_tet_contact_mesh();
+    let original_pairs =
+        ThermalInterfaces::coincident_face_pairs(&mesh).expect("one coincident face pair");
+    let pair = original_pairs[0];
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &adiabatic_boundary(&mesh),
+        vec![
+            InterfaceSurface::new("bondline", original_pairs.clone(), resistance(&card))
+                .expect("interface surface"),
+        ],
+    )
+    .expect("interface binding");
+
+    let changed_positions = mesh
+        .positions()
+        .iter()
+        .map(|&[x, y, z]| [2.0 * x, y, z])
+        .collect();
+    let changed_mesh = ConductionMesh::new(mesh.complex().clone(), changed_positions)
+        .expect("uniform coordinate scaling preserves nondegenerate tetrahedra");
+    assert_eq!(
+        ThermalInterfaces::coincident_face_pairs(&changed_mesh).expect("same face-pair slots"),
+        original_pairs,
+        "the fixture must isolate area rather than face-set drift"
+    );
+    assert_eq!(
+        changed_mesh.boundary()[pair.side_a].vertices,
+        mesh.boundary()[pair.side_a].vertices,
+        "the fixture must retain the bound vertex ids"
+    );
+    assert_ne!(
+        changed_mesh.boundary()[pair.side_a].area.to_bits(),
+        mesh.boundary()[pair.side_a].area.to_bits(),
+        "the fixture must actually move the stored area bits"
+    );
+
+    assert_interface_refusal(
+        binding_validation_error(
+            &changed_mesh,
+            &adiabatic_boundary(&changed_mesh),
+            &interfaces,
+        ),
+        "bondline",
+        "changed after binding",
+    );
+}
+
+#[test]
+fn contact_level_a_tolerance_rejects_a_deliberate_outside_value() {
     let (case, reference) = level_a_contact_reference();
     assert_eq!(reference.to_bits(), 0.3f64.to_bits());
-    assert!(matches!(
-        case.acceptance,
-        ThermalLevelAAcceptance::Tolerance { atol, rtol }
-            if atol.is_finite() && atol >= 0.0 && rtol.is_finite() && rtol >= 0.0
-    ));
+    let (_, limit) = level_a_tolerance_error_and_limit(case, reference);
+    let outside = reference + 2.0 * limit;
+    let (outside_error, outside_limit) = level_a_tolerance_error_and_limit(case, outside);
+    assert!(
+        outside_error > outside_limit,
+        "the applied Level-A tolerance must reject a constructed value outside its envelope"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -584,11 +1021,101 @@ fn mapped_resistances_follow_their_face_pairs_through_the_deterministic_sort() {
 }
 
 #[test]
+fn two_named_surfaces_sort_deterministically_without_swapping_their_physics() {
+    let card = contact_card(UncertaintyModel::Unstated);
+    let base = resistance(&card);
+    let higher_resistance = base
+        .with_measured_value(
+            2.0 * AREA_SPECIFIC_RESISTANCE,
+            UncertaintyModel::Unstated,
+            "second declared bond line",
+        )
+        .expect("second resistance");
+    let (mesh, vertices_per_slab) = slab_chain_mesh(1, 3);
+    let boundary = outer_boundary(&mesh, 3.0);
+    let first_plane = oriented_pairs_at_x(&mesh, 1.0);
+    let second_plane = oriented_pairs_at_x(&mesh, 2.0);
+    assert!(
+        !first_plane.is_empty() && !second_plane.is_empty(),
+        "the fixture must contain two nonempty contact surfaces"
+    );
+    assert_eq!(
+        first_plane.len() + second_plane.len(),
+        oriented_pairs(&mesh).len(),
+        "the two named surfaces must partition every coincident pair"
+    );
+
+    let bind = |reverse_declaration: bool| {
+        let alpha = InterfaceSurface::new(
+            "alpha-second-plane",
+            second_plane.clone(),
+            higher_resistance.clone(),
+        )
+        .expect("alpha surface");
+        let zeta = InterfaceSurface::new("zeta-first-plane", first_plane.clone(), base.clone())
+            .expect("zeta surface");
+        let surfaces = if reverse_declaration {
+            vec![zeta, alpha]
+        } else {
+            vec![alpha, zeta]
+        };
+        ThermalInterfaces::new(&mesh, &boundary, surfaces).expect("two-surface binding")
+    };
+    let name_order = bind(false);
+    let reverse_order = bind(true);
+
+    let mut temperature = vec![0.0; mesh.vertex_count()];
+    for (vertex, value) in temperature.iter_mut().enumerate() {
+        *value = match vertex / vertices_per_slab {
+            0 => T_HOT,
+            1 => 0.5 * (T_HOT + T_COLD),
+            2 => T_COLD,
+            other => panic!("unexpected slab index {other}"),
+        };
+    }
+    let name_fluxes = name_order
+        .fluxes(&temperature)
+        .expect("name-order interface fluxes");
+    let reverse_fluxes = reverse_order
+        .fluxes(&temperature)
+        .expect("reverse-order interface fluxes");
+    assert_eq!(
+        name_fluxes
+            .iter()
+            .map(|flux| flux.interface.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha-second-plane", "zeta-first-plane"],
+        "reported surfaces must follow stable name order"
+    );
+    assert_eq!(name_fluxes.len(), reverse_fluxes.len());
+    for (name_flux, reverse_flux) in name_fluxes.iter().zip(&reverse_fluxes) {
+        assert_eq!(name_flux.interface, reverse_flux.interface);
+        assert_eq!(
+            name_flux.conductance_w_per_k.to_bits(),
+            reverse_flux.conductance_w_per_k.to_bits()
+        );
+        assert_eq!(
+            name_flux.mean_jump_k.to_bits(),
+            reverse_flux.mean_jump_k.to_bits()
+        );
+        assert_eq!(
+            name_flux.heat_rate_a_to_b_w.to_bits(),
+            reverse_flux.heat_rate_a_to_b_w.to_bits()
+        );
+    }
+    assert!(
+        (name_fluxes[0].heat_rate_a_to_b_w - name_fluxes[1].heat_rate_a_to_b_w).abs() > 1.0,
+        "distinct resistances must make a surface swap observable"
+    );
+}
+
+#[test]
 fn an_all_equal_map_reproduces_the_uniform_surface_exactly() {
     // Metamorphic: a map whose every entry equals the card value is the same
-    // physics as the uniform declaration, so the assembled solve must agree
-    // bitwise. This is what pins the mapped path to the existing Level-A
-    // contact result rather than leaving it on its own private arithmetic.
+    // physics as the uniform declaration. Run BOTH solves and require their
+    // jump-bearing fields and interface reports to agree bitwise; comparing
+    // conductance at a uniform temperature would exercise input arithmetic
+    // while leaving the jump operator completely unconstrained.
     let card = contact_card(UncertaintyModel::Unstated);
     let (mesh, _) = two_slab_mesh(2);
     let boundary = boundary(&mesh);
@@ -611,17 +1138,46 @@ fn an_all_equal_map_reproduces_the_uniform_surface_exactly() {
     )
     .expect("mapped binds");
 
-    let temperature = vec![T_HOT; mesh.vertex_count()];
-    let uniform_flux = uniform.fluxes(&temperature).expect("uniform fluxes");
-    let mapped_flux = mapped.fluxes(&temperature).expect("mapped fluxes");
-    assert_eq!(uniform_flux.len(), mapped_flux.len());
+    let uniform_solution = solve_contact_fixture(&mesh, &boundary, &uniform);
+    let mapped_solution = solve_contact_fixture(&mesh, &boundary, &mapped);
     assert_eq!(
-        uniform_flux[0].conductance_w_per_k.to_bits(),
-        mapped_flux[0].conductance_w_per_k.to_bits(),
-        "an all-equal map must be bitwise identical to the uniform surface"
+        uniform_solution.temperature.len(),
+        mapped_solution.temperature.len()
+    );
+    for (vertex, (&uniform_temperature, &mapped_temperature)) in uniform_solution
+        .temperature
+        .iter()
+        .zip(&mapped_solution.temperature)
+        .enumerate()
+    {
+        assert_eq!(
+            uniform_temperature.to_bits(),
+            mapped_temperature.to_bits(),
+            "all-equal mapped and uniform solves differ at vertex {vertex}"
+        );
+    }
+    let uniform_flux = &uniform_solution.report.interface_fluxes[0];
+    let mapped_flux = &mapped_solution.report.interface_fluxes[0];
+    assert_eq!(
+        uniform_flux.conductance_w_per_k.to_bits(),
+        mapped_flux.conductance_w_per_k.to_bits()
     );
     assert_eq!(
-        uniform_flux[0].card_identity, mapped_flux[0].card_identity,
+        uniform_flux.mean_jump_k.to_bits(),
+        mapped_flux.mean_jump_k.to_bits(),
+        "the executed jump must be bitwise identical"
+    );
+    assert_eq!(
+        uniform_flux.heat_rate_a_to_b_w.to_bits(),
+        mapped_flux.heat_rate_a_to_b_w.to_bits(),
+        "the executed interface heat rate must be bitwise identical"
+    );
+    assert!(
+        uniform_flux.mean_jump_k.abs() > 1.0 && uniform_flux.heat_rate_a_to_b_w.abs() > 1.0,
+        "the comparison must remain jump-bearing and non-vacuous"
+    );
+    assert_eq!(
+        uniform_flux.card_identity, mapped_flux.card_identity,
         "both cite the same material card"
     );
     assert_eq!(uniform.surface_is_mapped("bondline"), Some(false));
@@ -630,16 +1186,15 @@ fn an_all_equal_map_reproduces_the_uniform_surface_exactly() {
 
 #[test]
 fn a_thicker_bond_line_conducts_less() {
-    // Directional sanity: doubling every face's area-specific resistance —
-    // what a uniformly thicker measured bond line means — must halve the
-    // interface conductance, not change it by an arbitrary amount.
+    // Directional solve: doubling every face's area-specific resistance —
+    // what a uniformly thicker measured bond line means — lowers the
+    // SERIES heat rate and increases the interface jump. The independent
+    // three-term closed forms are 100 W at R''=0.1 and 75 W at R''=0.2.
     let card = contact_card(UncertaintyModel::Unstated);
     let (mesh, _) = two_slab_mesh(2);
     let boundary = boundary(&mesh);
     let pairs = oriented_pairs(&mesh);
-    let temperature = vec![T_HOT; mesh.vertex_count()];
-
-    let nominal = ThermalInterfaces::new(
+    let nominal_interfaces = ThermalInterfaces::new(
         &mesh,
         &boundary,
         vec![
@@ -651,12 +1206,9 @@ fn a_thicker_bond_line_conducts_less() {
             .expect("nominal"),
         ],
     )
-    .expect("nominal binds")
-    .fluxes(&temperature)
-    .expect("nominal fluxes")[0]
-        .conductance_w_per_k;
+    .expect("nominal binds");
 
-    let thick = ThermalInterfaces::new(
+    let thick_interfaces = ThermalInterfaces::new(
         &mesh,
         &boundary,
         vec![
@@ -668,14 +1220,33 @@ fn a_thicker_bond_line_conducts_less() {
             .expect("thick"),
         ],
     )
-    .expect("thick binds")
-    .fluxes(&temperature)
-    .expect("thick fluxes")[0]
-        .conductance_w_per_k;
+    .expect("thick binds");
+
+    let nominal_solution = solve_contact_fixture(&mesh, &boundary, &nominal_interfaces);
+    let thick_solution = solve_contact_fixture(&mesh, &boundary, &thick_interfaces);
+    let nominal = &nominal_solution.report.interface_fluxes[0];
+    let thick = &thick_solution.report.interface_fluxes[0];
 
     assert!(
-        (thick - 0.5 * nominal).abs() < 1e-12 * nominal,
-        "doubling R'' must halve the conductance: {thick} vs {nominal}"
+        (nominal.heat_rate_a_to_b_w - 100.0).abs() < 1e-7,
+        "the nominal solve must reproduce the independent 100 W series value"
+    );
+    assert!(
+        (thick.heat_rate_a_to_b_w - 75.0).abs() < 1e-7,
+        "the thicker solve must reproduce the independent 75 W series value"
+    );
+    assert!(
+        thick.heat_rate_a_to_b_w < nominal.heat_rate_a_to_b_w,
+        "a thicker bond line must transfer less heat under the same end temperatures"
+    );
+    assert!(
+        thick.mean_jump_k > nominal.mean_jump_k,
+        "the added contact resistance must move more of the fixed temperature drop onto the interface"
+    );
+    assert!(
+        (thick.conductance_w_per_k - 0.5 * nominal.conductance_w_per_k).abs()
+            < 1e-12 * nominal.conductance_w_per_k,
+        "doubling R'' must halve the input-derived interface conductance"
     );
 }
 

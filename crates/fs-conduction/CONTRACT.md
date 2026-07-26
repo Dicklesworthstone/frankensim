@@ -199,7 +199,13 @@ producing solver's own typed claim is carried verbatim in
    `area-specific-thermal-contact-resistance` claim, and an explicit
    `ThermalInterfaces` solve/assembly path. Reusing a bound object with a
    different face set, vertex mapping, area, or boundary condition refuses.
-   Evidence: `tests/contact.rs`.
+   Evidence: `tests/contact.rs::missing_interface_card_and_missing_binding_refuse_typed`,
+   `::surface_declaration_and_binding_guards_each_refuse_their_own_defect`
+   (blank/duplicate names, empty surfaces, duplicate/self/out-of-range/
+   noncoincident pairs, and external-boundary overlap),
+   `::coincident_geometry_refuses_nonopposing_and_multi_owner_traces`, and the
+   four `a_bound_interface_refuses_*` tests that isolate face-set, boundary,
+   exact-vertex-correspondence, and area-bit drift.
 10. **Radiation authority is explicit.** Every emissivity retains its material
     card and property-use receipt; every view-factor matrix passes finite
     range, row-closure, and area-weighted reciprocity admission before a
@@ -375,16 +381,26 @@ None. Everything here is `[S]` solid work on the default path.
   declared envelope and a stated reason for its size; a complete Level-A
   analytic crosswalk keeps unsupported rows visible.
 - `tests/contact.rs` — G1 two-slab series-resistance comparison against the
-  Level-A `0.3 K/W` row, plus G0 receipt, uncertainty, determinism, missing-card,
-  missing-binding, overflow, and wrong-mesh refusals. Mapped-resistance
-  coverage (`f85xj.12.9`): per-face application; the SORT-PERMUTATION test —
-  a reversed declaration, pairs and values reversed together, must bind to the
-  same per-face values as the forward one, which is what proves the
-  deterministic face sort cannot separate a face from its resistance; the
-  metamorphic all-equal map reproducing the uniform surface BITWISE; doubling
-  `R''` halving the conductance; and refusals for a count mismatch, mixed
-  cards, a blank measured rationale, and non-finite/non-positive measured
-  values.
+  Level-A `0.3 K/W` row. The registry tolerance is applied to the
+  SOLVE-DERIVED end-to-end resistance `deltaT/Q`, and a deliberate value beyond
+  that envelope is rejected; the separately assembled three-term budget is
+  retained as arithmetic evidence, not mislabeled as the solve result. G0
+  covers receipt replay, uncertainty, overflow, missing-card/binding, every
+  surface-declaration and geometric-ownership refusal, and isolated bound-state
+  drift in face set, boundary condition, exact vertex correspondence, and area
+  bits. A three-slab/two-interface fixture declares the two named surfaces in
+  both orders, requires canonical name order, and compares jump-bearing flux
+  records bitwise while distinct resistances make a swap observable.
+  Mapped-resistance coverage (`f85xj.12.9`): per-face application; the
+  SORT-PERMUTATION test — a reversed declaration, pairs and values reversed
+  together, must bind to the same per-face values as the forward one, which is
+  what proves the deterministic face sort cannot separate a face from its
+  resistance; the metamorphic all-equal map runs BOTH nonzero-jump solves and
+  reproduces the uniform temperature field and interface report BITWISE;
+  doubling `R''` runs both solves and moves heat rate from the independent
+  `100 W` series value to `75 W` while increasing the interface jump; and
+  refusals cover a count mismatch, mixed cards, a blank measured rationale,
+  and non-finite/non-positive measured values.
 - `tests/power.rs` — component power maps (`f85xj.5.9`): delivered power equal
   to declared power at `1e-12` and INVARIANT ACROSS MESH REFINEMENT (n = 2..5),
   which is what separates an arithmetic identity from a discretization

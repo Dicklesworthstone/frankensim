@@ -236,11 +236,12 @@ workstream.
   conservative sum with a confidence floor, finite-sum overflow refuses, and
   any unstated term keeps the complete uncertainty band unavailable.
 - Bound `thermal-a-contact-series` to a G1 two-slab solve. The focused remote
-  fixture reproduced the `0.3 K/W` Level-A network as
-  `0.30000000000000004 K/W`, with `1.393e-11 K` maximum nodal error and
-  approximately `100 W` A-to-B interface heat rate. Missing cards, missing
-  bindings, changed-mesh reuse, and aggregate uncertainty overflow have typed
-  refusal tests.
+  fixture reproduced the analytic nodal profile with `1.393e-11 K` maximum
+  error and approximately `100 W` A-to-B interface heat rate. The separately
+  assembled three-term arithmetic budget sums to
+  `0.30000000000000004 K/W`; that number is not itself a solve result.
+  Missing cards, missing bindings, changed-mesh reuse, and aggregate
+  uncertainty overflow have typed refusal tests.
 - Remote regression proof passed with
   `RCH_REQUIRE_REMOTE=1 rch exec --no-self-healing -- env
   CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
