@@ -195,3 +195,20 @@ determinism.
   f85xj.10.3, and f85xj.10.4.
 - `Refine1d` is a 1D demonstrator, not a production multigrid transfer. Real
   per-kernel operators are injected.
+- `LadderRegistry::cht` injects `Refine1d` on BOTH edges. It makes the CHT
+  ladder's SHAPE real -- three named rungs, cost hints, working adjacency --
+  and establishes nothing about a coupled solve, a RANS rung, or a physically
+  meaningful transfer. A maturity or readiness score must not be read off its
+  existence; that inference was a live overstatement in `fs-wedge`'s
+  `kernel-maturity` rationale until bead f85xj.5.7 corrected it.
+  `LadderRegistry::cht_with` and `cht_ladder_with` are the injection points a
+  real consumer uses. `fs_airflow::conjugate::SegmentRefinementTransfer` is the
+  one this workspace ships: it moves per-segment wall temperatures over a
+  retained air path and preserves the air-side outlet and heat rate exactly
+  under refinement, a statement `Refine1d` cannot make about the anonymous
+  scalars it interpolates.
+- The `RANS` and `LES` rungs remain declarations. Their `relative_cost` hints
+  (40x and 2000x) are unmeasured, and cannot be measured, because no solver
+  implements those rungs. The bottom rung's cost is likewise a hint: a
+  conjugate correlation-rung solve costs one inner conduction solve per outer
+  iteration, which the consumer measures, not this crate.

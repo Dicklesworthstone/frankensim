@@ -327,14 +327,37 @@ pub struct LadderRegistry {
 
 impl LadderRegistry {
     fn cht_ladder() -> Ladder {
+        Self::cht_ladder_with(Box::new(Refine1d), Box::new(Refine1d))
+    }
+
+    /// The CHT ladder with CALLER-SUPPLIED transfers on both edges.
+    ///
+    /// This is the constructor a real consumer wants. [`LadderRegistry::cht`]
+    /// injects [`Refine1d`] on both edges, which is a *demonstrator*: a
+    /// generic 1-D coarsen/refine that knows nothing about surface
+    /// temperatures, flow-network state, or fields. A conjugate consumer that
+    /// owns the coupled state supplies a transfer defined over that state —
+    /// `fs_airflow::conjugate::SegmentRefinementTransfer` is the one this
+    /// workspace ships — so the rung boundary moves real quantities rather
+    /// than an interpolated vector of anonymous scalars.
+    ///
+    /// The bottom rung's note is a statement about the CONSUMER's kernel, not
+    /// about this crate: the correlation rung is only a coupled conjugate
+    /// solve if the caller's transfers and solver make it one.
+    #[must_use]
+    pub fn cht_ladder_with(
+        correlation_to_rans: Box<dyn Transfer>,
+        rans_to_les: Box<dyn Transfer>,
+    ) -> Ladder {
         Ladder::new(
             "cht",
             "correlation-Nu",
             1.0,
-            "cheap bottom rung: forced-convection Nusselt correlation",
+            "cheap bottom rung: forced-convection Nusselt correlation on a \
+             partitioned conjugate solid/air exchange",
         )
-        .then(Box::new(Refine1d), "RANS", 40.0, "steady RANS CFD")
-        .then(Box::new(Refine1d), "LES", 2000.0, "large-eddy simulation")
+        .then(correlation_to_rans, "RANS", 40.0, "steady RANS CFD")
+        .then(rans_to_les, "LES", 2000.0, "large-eddy simulation")
     }
 
     /// An empty registry.
@@ -369,13 +392,32 @@ impl LadderRegistry {
     }
 
     /// A registry seeded with the conjugate-heat-transfer (electronics
-    /// cooling) ladder from Proposal 7 — the correlation-based bottom rung
-    /// makes the fidelity ladder immediately real. Rungs:
-    /// `correlation-Nu` (Nusselt correlation) → `RANS` → `LES`.
+    /// cooling) ladder from Proposal 7. Rungs: `correlation-Nu` (Nusselt
+    /// correlation) → `RANS` → `LES`.
+    ///
+    /// **Both edges carry the [`Refine1d`] DEMONSTRATOR.** This constructor
+    /// makes the ladder's *shape* real — three named rungs with cost hints and
+    /// working adjacency — and nothing more. It does not establish that a
+    /// coupled solve, a RANS rung, or a physically meaningful transfer exists,
+    /// and a maturity or readiness score must not be read off its existence.
+    /// Use [`LadderRegistry::cht_ladder_with`] to inject transfers defined
+    /// over the real coupled state.
     #[must_use]
     pub fn cht() -> LadderRegistry {
         let mut r = LadderRegistry::new();
         r.register(Self::cht_ladder());
+        r
+    }
+
+    /// A registry seeded with the CHT ladder carrying caller-supplied
+    /// transfers.
+    #[must_use]
+    pub fn cht_with(
+        correlation_to_rans: Box<dyn Transfer>,
+        rans_to_les: Box<dyn Transfer>,
+    ) -> LadderRegistry {
+        let mut r = LadderRegistry::new();
+        r.register(Self::cht_ladder_with(correlation_to_rans, rans_to_les));
         r
     }
 
