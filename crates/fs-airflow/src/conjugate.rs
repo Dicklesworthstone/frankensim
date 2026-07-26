@@ -96,6 +96,8 @@
 //!   window-balance ledger path (`BoundaryTemperatureReference`,
 //!   `WindowEvidenceRef`) is not wired.
 
+use core::cmp::Ordering;
+
 use fs_couple::{AitkenRelaxation, EnergyAudit, PortKind};
 use fs_exec::Cx;
 use fs_math::det;
@@ -453,6 +455,16 @@ pub struct ConjugateConfig {
     pub temperature_tolerance_k: f64,
     /// Outer iterations allowed before a typed non-convergence refusal.
     pub max_iterations: usize,
+    /// The largest per-region interface imbalance admitted at convergence, W.
+    ///
+    /// The temperature criterion alone CANNOT bound this: a small reference
+    /// change in kelvin only bounds a heat rate once multiplied by a
+    /// conductance, so a converged temperature is not evidence of a closed
+    /// interface. A run that meets the temperature criterion but not this one
+    /// refuses with [`AirflowError::ConjugateBalanceUnclosed`] rather than
+    /// returning an answer whose two sides disagree about the heat crossing
+    /// the same surface.
+    pub balance_tolerance_w: f64,
     /// Relaxation scheme.
     pub relaxation: Relaxation,
 }
@@ -462,6 +474,7 @@ impl Default for ConjugateConfig {
         ConjugateConfig {
             temperature_tolerance_k: 1.0e-9,
             max_iterations: 100,
+            balance_tolerance_w: 1.0e-6,
             relaxation: Relaxation::default(),
         }
     }
@@ -634,6 +647,7 @@ where
         "conjugate temperature tolerance",
         config.temperature_tolerance_k,
     )?;
+    finite_positive("conjugate balance tolerance", config.balance_tolerance_w)?;
     if initial_references_k.len() != path.segments().len() {
         return Err(AirflowError::SolidResponseArity {
             expected: path.segments().len(),
@@ -657,8 +671,10 @@ where
     let total_area: f64 = path.segments().iter().map(AirSegment::area_m2).sum();
 
     for iteration in 0..config.max_iterations {
-        cx.checkpoint()
-            .map_err(|_| AirflowError::Cancelled { iteration })?;
+        cx.checkpoint().map_err(|_| AirflowError::Cancelled {
+            iteration,
+            references_k: reference.clone(),
+        })?;
 
         let response = solid(cx, &reference)?;
         check_response_matches_path(path, &response)?;
@@ -675,22 +691,8 @@ where
         audit.record(interface_imbalance);
 
         let updated = march.reference_temperatures_k();
-        let mut max_change = 0.0_f64;
-        let mut weighted = 0.0_f64;
-        for ((segment, &next), &current) in
-            path.segments().iter().zip(&updated).zip(reference.iter())
-        {
-            let delta = next - current;
-            if !delta.is_finite() {
-                return Err(AirflowError::NonFiniteCoupling {
-                    stage: "reference temperature update",
-                    value_bits: delta.to_bits(),
-                });
-            }
-            max_change = max_change.max(delta.abs());
-            weighted += segment.area_m2() * delta;
-        }
-        let scalar_residual = weighted / total_area;
+        let (max_change, scalar_residual) =
+            fixed_point_residual(path, &reference, &updated, total_area)?;
 
         let omega = match (&config.relaxation, aitken.as_mut()) {
             (Relaxation::Fixed { omega }, _) => *omega,
@@ -712,14 +714,25 @@ where
         });
 
         if max_change <= config.temperature_tolerance_k {
-            return Ok(converged_solution(
-                updated,
-                march,
-                response,
-                history,
-                iteration + 1,
-                audit.max_generation(),
-            ));
+            // Poll AFTER the exchange too. Checking only at iteration entry
+            // lets a cancellation requested during the final solid solve
+            // publish a success, which is precisely the drain-then-finalize
+            // contract this is supposed to honour.
+            cx.checkpoint().map_err(|_| AirflowError::Cancelled {
+                iteration,
+                references_k: reference.clone(),
+            })?;
+            return admit_converged(
+                converged_solution(
+                    updated,
+                    march,
+                    response,
+                    history,
+                    iteration + 1,
+                    audit.max_generation(),
+                ),
+                config.balance_tolerance_w,
+            );
         }
 
         for (slot, &next) in reference.iter_mut().zip(&updated) {
@@ -841,14 +854,99 @@ impl fs_ladder::Transfer for SegmentRefinementTransfer {
     }
 
     fn restrict(&self, fine: &[f64]) -> Vec<f64> {
-        // Sub-segments of one coarse segment have equal area by construction,
-        // so the area-weighted mean is the plain mean. A trailing partial
-        // block is averaged over what it actually has rather than assuming a
-        // full one.
-        fine.chunks(self.factor)
-            .map(|block| block.iter().sum::<f64>() / block.len() as f64)
+        // NOT a plain mean. The coarse wall that reproduces a block's outlet
+        // is the DOWNSTREAM-WEIGHTED mean
+        //
+        //   W = (1 - a) * sum_i a^(f-1-i) W_i / (1 - a^f),   a = e^(-NTU/f)
+        //
+        // because air entering sub-segment i has already been warmed by
+        // everything upstream, so a hot sub-segment near the outlet moves the
+        // block's exit temperature more than an equally hot one near the
+        // inlet. The plain mean is the a -> 1 (NTU -> 0) limit of this, and
+        // coincides with it exactly when the block's walls are uniform --
+        // which is every state `prolongate` emits, and is why a round-trip
+        // test alone cannot see the difference. On a nonuniform block it is
+        // wrong by tens of kelvin (measured 15.65 K at NTU 2 over 4
+        // sub-segments), so restricting a genuinely refined fine state would
+        // silently corrupt the coarse rung.
+        let capacity = self.path.capacity_rate_w_per_k();
+        self.path
+            .segments()
+            .iter()
+            .zip(fine.chunks(self.factor))
+            .map(|(segment, block)| {
+                if block.is_empty() {
+                    return f64::NAN;
+                }
+                let sub_ntu = segment.ntu(capacity) / self.factor as f64;
+                let a = det::exp(-sub_ntu);
+                let span = block.len();
+                let numerator: f64 = block
+                    .iter()
+                    .enumerate()
+                    .map(|(i, wall)| det::pow(a, (span - 1 - i) as f64) * wall)
+                    .sum();
+                let denominator: f64 = (0..span).map(|i| det::pow(a, i as f64)).sum();
+                if denominator == 0.0 {
+                    return f64::NAN;
+                }
+                numerator / denominator
+            })
             .collect()
     }
+}
+
+/// The fixed-point residual: `(max_j |dT_j|, area-weighted mean dT)`.
+///
+/// The max drives the convergence test; the signed area-weighted mean is the
+/// scalar the (scalar-only) Aitken relaxer needs, since a max of absolute
+/// values carries no sign for a delta-squared step to work with.
+fn fixed_point_residual(
+    path: &AirPath,
+    current: &[f64],
+    updated: &[f64],
+    total_area: f64,
+) -> Result<(f64, f64), AirflowError> {
+    let mut max_change = 0.0_f64;
+    let mut weighted = 0.0_f64;
+    for ((segment, &next), &now) in path.segments().iter().zip(updated).zip(current) {
+        let delta = next - now;
+        if !delta.is_finite() {
+            return Err(AirflowError::NonFiniteCoupling {
+                stage: "reference temperature update",
+                value_bits: delta.to_bits(),
+            });
+        }
+        max_change = max_change.max(delta.abs());
+        weighted += segment.area_m2() * delta;
+    }
+    Ok((max_change, weighted / total_area))
+}
+
+/// The temperature criterion does not bound watts, so a converged exchange
+/// must still close its interface before it is an answer.
+///
+/// NaN-safe by construction: `max_region_imbalance_w` poisons to NaN if any
+/// region did, and `NaN.partial_cmp(_)` is `None`, so an unorderable
+/// imbalance takes the refusal branch.
+fn admit_converged(
+    solution: ConjugateSolution,
+    balance_tolerance_w: f64,
+) -> Result<ConjugateSolution, AirflowError> {
+    if matches!(
+        solution
+            .balance
+            .max_region_imbalance_w
+            .partial_cmp(&balance_tolerance_w),
+        Some(Ordering::Less | Ordering::Equal)
+    ) {
+        return Ok(solution);
+    }
+    Err(AirflowError::ConjugateBalanceUnclosed {
+        iterations: solution.iterations,
+        max_region_imbalance_bits: solution.balance.max_region_imbalance_w.to_bits(),
+        tolerance_bits: balance_tolerance_w.to_bits(),
+    })
 }
 
 /// The solid side must answer with one region per segment, in path order.
@@ -870,6 +968,28 @@ fn check_response_matches_path(
                 index,
                 expected: segment.region().to_string(),
                 found: state.region.clone(),
+            });
+        }
+        // Fail closed on the NUMBERS, not just the labels. A NaN heat rate
+        // would otherwise reach the audit, where a plain `f64::max` fold
+        // SILENTLY DROPS it (`f64::max(0.0, NaN) == 0.0`) and reports a
+        // perfectly balanced interface for a coupling that broke down. This
+        // is the same trap `fs_couple::EnergyAudit` documents and poisons
+        // against; the per-region fold poisons too, and this gate stops the
+        // value earlier.
+        finite("solid wall temperature", state.mean_wall_temperature_k)?;
+        finite("solid region heat rate", state.heat_rate_w)?;
+        finite_positive("solid region area", state.area_m2)?;
+        // The area the solid integrated over must be the area the air path
+        // was declared with, or the two sides are exchanging heat across
+        // different surfaces and every downstream watt is mis-scaled.
+        let declared = segment.area_m2();
+        if (state.area_m2 - declared).abs() > 1.0e-9 * declared {
+            return Err(AirflowError::SegmentAreaMismatch {
+                index,
+                region: state.region.clone(),
+                declared_bits: declared.to_bits(),
+                reported_bits: state.area_m2.to_bits(),
             });
         }
     }
@@ -914,10 +1034,17 @@ fn converged_solution(
             imbalance_w: state.heat_rate_w - segment.heat_rate_w,
         })
         .collect();
-    let max_region_imbalance_w = regions
-        .iter()
-        .map(|row| row.imbalance_w.abs())
-        .fold(0.0_f64, f64::max);
+    // Poison rather than fold: `f64::max` drops NaN, so a plain fold would
+    // report zero imbalance for a coupling that produced NaN. `NaN <= tol` is
+    // false, so every downstream comparison fails closed.
+    let max_region_imbalance_w = if regions.iter().any(|row| row.imbalance_w.is_nan()) {
+        f64::NAN
+    } else {
+        regions
+            .iter()
+            .map(|row| row.imbalance_w.abs())
+            .fold(0.0_f64, f64::max)
+    };
     let solid_total_w: f64 = solid.iter().map(|state| state.heat_rate_w).sum();
     let air_total_w = march.total_heat_rate_w;
     ConjugateSolution {

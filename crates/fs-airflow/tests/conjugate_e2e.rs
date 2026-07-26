@@ -336,6 +336,7 @@ fn config() -> ConjugateConfig {
         // far above the inner solve's own noise floor.
         temperature_tolerance_k: 1.0e-9,
         max_iterations: 60,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     }
 }

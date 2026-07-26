@@ -186,7 +186,14 @@ required for that rung.
 returns `AirflowError::Cancelled` carrying the index of the iteration that had
 not yet run. Each outer iteration is also a resume boundary:
 `ConjugateIteration::reference_temperatures_k` is the complete state that
-iteration was solved against, and `solve_conjugate_from` restarts from it.
+iteration was solved against, `AirflowError::Cancelled` carries that vector so
+a caller can resume from the refusal itself without having retained a history,
+and `solve_conjugate_from` restarts from either. The poll happens at iteration
+entry AND after the exchange that meets the criterion, so a cancellation
+requested during the final solid solve refuses instead of publishing success.
+A resumed run restarts iteration numbering, the energy audit, and the history
+at zero: it is a fresh exchange seeded from a retained state, not a
+continuation of the original record.
 Under `Relaxation::Fixed` the resumed tail reproduces the uninterrupted run
 bitwise; under `Relaxation::Aitken` the scalar relaxer's own omega history is
 not carried across the resume, so the tail is a valid continuation and not a
@@ -290,6 +297,27 @@ None.
   that closure for callers who want a two-way exchange; the plate-fin fixture
   is deliberately left as-is so the one-way and coupled answers stay
   separately inspectable.
+- The convergence criterion is TWO gates, not one. A reference-temperature
+  residual in kelvin cannot bound an interface heat rate in watts without a
+  conductance, so `ConjugateConfig::balance_tolerance_w` is a separate declared
+  obligation and a run that meets the temperature criterion while its worst
+  per-region imbalance exceeds it refuses with
+  `AirflowError::ConjugateBalanceUnclosed`. The dropped-face fixture proves the
+  gap is real: it reaches its temperature fixed point and is caught only by the
+  watt gate.
+- "Exact" in this crate's conjugate documentation means exact in REAL
+  arithmetic. Measured floating-point bands on the current fixtures: segment
+  refinement holds the outlet to 1e-10 K and the heat rate to 1e-8 W up to
+  N = 256; the transfer round trip lands within 1e-9 K rather than bit-exact,
+  because the restriction evaluates a ratio of geometric sums; the coupled
+  per-region balance closes to 2.4e-11 W on a 1.2 W fixture.
+- `SegmentRefinementTransfer::restrict` is the DOWNSTREAM-WEIGHTED mean
+  `W = (1-a) * sum_i a^(f-1-i) W_i / (1 - a^f)` with `a = e^(-NTU/f)`, not a
+  plain mean. A plain mean is outlet-preserving only on the uniform blocks
+  `prolongate` emits, so a round-trip test cannot distinguish them; on a
+  nonuniform fine state the plain mean is wrong by 15.65 K at NTU 2 over four
+  sub-segments. The nonuniform check in `tests/conjugate.rs` is the one that
+  discriminates.
 - The conjugate exchange is NOT CFD. Air is a stream-wise chain of well-mixed
   1-D segments: no lateral mixing, recirculation, buoyancy, heating-driven flow
   redistribution, or momentum coupling back to the operating point. The

@@ -354,6 +354,7 @@ fn the_coupled_fixed_point_reproduces_its_closed_form_solution() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
 
@@ -402,6 +403,7 @@ fn the_history_is_a_complete_monotone_replay_record() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let solution = with_cx(|cx| {
@@ -456,6 +458,7 @@ fn aitken_relaxation_reaches_the_same_fixed_point() {
     let plain = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let aitken = ConjugateConfig {
@@ -492,6 +495,7 @@ fn exhausting_the_iteration_budget_refuses_with_a_diagnosis() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-14,
         max_iterations: 2,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let error = with_cx(|cx| {
@@ -523,6 +527,7 @@ fn cancellation_stops_at_an_outer_iteration_boundary() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let gate = CancelGate::new();
@@ -535,8 +540,18 @@ fn cancellation_stops_at_an_outer_iteration_boundary() {
         })
         .expect_err("a cancelled exchange must refuse")
     });
-    assert_eq!(error, AirflowError::Cancelled { iteration: 1 });
+    let AirflowError::Cancelled {
+        iteration,
+        references_k,
+    } = &error
+    else {
+        panic!("expected a cancellation refusal, got {error:?}")
+    };
+    assert_eq!(*iteration, 1);
     assert_eq!(calls, 1, "the solid side ran again after cancellation");
+    // The refusal must carry enough state to resume from, not just an index.
+    assert_eq!(references_k.len(), 4);
+    assert!(references_k.iter().all(|t| t.is_finite()));
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +565,7 @@ fn the_per_region_balance_closes_at_the_fixed_point() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let solution = with_cx(|cx| {
@@ -582,38 +598,137 @@ fn the_per_region_balance_is_sensitive_to_a_wiring_fault() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
-    let solution = with_cx(|cx| {
+    let error = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
             let mut states = lumped_solid(&regions, power_w, references);
             // Region 2 loses half of its faces on the way out of the solver.
             states[2].heat_rate_w *= 0.5;
             Ok(states)
         })
-        .expect("the fault does not stop the loop converging — that is the point")
+        .expect_err("a dropped-face fault must REFUSE, not return an answer")
     });
 
+    // The critical property: the fault is INVISIBLE to the temperature
+    // criterion. The reference temperatures still reach their fixed point, so
+    // a driver gated only on kelvin publishes this run as converged. A small
+    // residual in K cannot bound a heat rate in W without a conductance, so
+    // the watt-denominated gate is a separate obligation, not a restatement.
+    match error {
+        AirflowError::ConjugateBalanceUnclosed {
+            max_region_imbalance_bits,
+            tolerance_bits,
+            ..
+        } => {
+            let imbalance = f64::from_bits(max_region_imbalance_bits);
+            assert!(
+                imbalance > 1.0,
+                "the dropped-face imbalance should be large, saw {imbalance} W"
+            );
+            assert!(imbalance > f64::from_bits(tolerance_bits));
+        }
+        other => panic!("expected a balance refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_non_finite_solid_heat_rate_cannot_reach_a_closed_balance() {
+    // `f64::max` SILENTLY DROPS NaN, so a plain fold over per-region
+    // imbalances would report 0 W -- a perfectly closed interface -- for a
+    // coupling that blew up. The response gate stops it first, and the fold
+    // poisons as a second line.
+    let (path, regions) = lumped_fixture(3);
+    let config = ConjugateConfig::default();
+    let error = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            let mut states = lumped_solid(&regions, 30.0, references);
+            states[1].heat_rate_w = f64::NAN;
+            Ok(states)
+        })
+        .expect_err("a NaN heat rate must refuse")
+    });
     assert!(
-        solution.balance.max_region_imbalance_w > 1.0,
-        "a dropped-face fault must not close: {} W",
-        solution.balance.max_region_imbalance_w
+        matches!(
+            error,
+            AirflowError::InvalidConjugateInput {
+                field: "solid region heat rate",
+                ..
+            }
+        ),
+        "got {error:?}"
     );
+}
+
+#[test]
+fn a_solid_area_that_disagrees_with_the_declared_path_refuses() {
+    // Right region, right count, wrong surface: the two sides would exchange
+    // heat across different areas and every watt downstream is mis-scaled.
+    let (path, regions) = lumped_fixture(3);
+    let config = ConjugateConfig::default();
+    let error = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            let mut states = lumped_solid(&regions, 30.0, references);
+            states[0].area_m2 *= 1.5;
+            Ok(states)
+        })
+        .expect_err("an area mismatch must refuse")
+    });
     assert!(
-        solution.balance.regions[2].imbalance_w.abs() > 1.0,
-        "the fault must be attributed to the region that carries it"
+        matches!(error, AirflowError::SegmentAreaMismatch { index: 0, .. }),
+        "got {error:?}"
     );
-    // And the fault is invisible to the converged temperatures alone: the
-    // reference temperatures still satisfy the fixed point, which is exactly
-    // why the audit is a separate obligation.
-    assert!(
-        solution
-            .history
-            .last()
-            .expect("nonempty")
-            .max_reference_change_k
-            <= 1.0e-12
-    );
+}
+
+#[test]
+fn resuming_from_an_actual_cancellation_completes_the_exchange() {
+    // The drill that matters: cancel for real, then resume from the refusal's
+    // own payload -- not from a history the caller might not have kept.
+    let power_w = 45.0;
+    let (path, regions) = lumped_fixture(4);
+    let config = ConjugateConfig {
+        temperature_tolerance_k: 1.0e-12,
+        max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
+        relaxation: Relaxation::Fixed { omega: 1.0 },
+    };
+    let uninterrupted = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            Ok(lumped_solid(&regions, power_w, references))
+        })
+        .expect("converges")
+    });
+
+    let gate = CancelGate::new();
+    let mut seen = 0_usize;
+    let error = with_gated_cx(&gate, |cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            seen += 1;
+            if seen == 3 {
+                gate.request();
+            }
+            Ok(lumped_solid(&regions, power_w, references))
+        })
+        .expect_err("cancelled")
+    });
+    let AirflowError::Cancelled { references_k, .. } = error else {
+        panic!("expected cancellation")
+    };
+
+    let resumed = with_cx(|cx| {
+        solve_conjugate_from(cx, &path, &config, &references_k, |_, references| {
+            Ok(lumped_solid(&regions, power_w, references))
+        })
+        .expect("resumes from the cancellation payload")
+    });
+    for (a, b) in resumed
+        .reference_temperatures_k
+        .iter()
+        .zip(&uninterrupted.reference_temperatures_k)
+    {
+        assert_eq!(a.to_bits(), b.to_bits(), "resumed answer drifted");
+    }
 }
 
 #[test]
@@ -761,7 +876,9 @@ fn the_refinement_transfer_round_trips_on_the_coarse_space() {
     let coarse = vec![340.0, 350.0, 360.0];
     let fine = transfer.prolongate(&coarse);
     assert_eq!(fine.len(), 12);
-    assert_eq!(transfer.restrict(&fine), coarse);
+    for (restricted, original) in transfer.restrict(&fine).iter().zip(&coarse) {
+        assert!((restricted - original).abs() < 1.0e-9);
+    }
 }
 
 #[test]
@@ -798,8 +915,15 @@ fn the_refinement_transfer_preserves_the_air_side_qoi_exactly() {
         );
 
         // Restricting the refined wall state returns the coarse one, so the
-        // round trip is closed on the physical state too.
-        assert_eq!(transfer.restrict(&fine_walls), walls);
+        // round trip is closed on the physical state too. This is an identity
+        // in REAL arithmetic; the restriction evaluates a ratio of geometric
+        // sums, so in f64 it lands within a few ULP rather than bit-exact.
+        for (restricted, original) in transfer.restrict(&fine_walls).iter().zip(&walls) {
+            assert!(
+                (restricted - original).abs() < 1.0e-9,
+                "factor {factor}: restricted {restricted} vs {original}"
+            );
+        }
     }
 }
 
@@ -817,14 +941,76 @@ fn the_cht_ladder_carries_the_injected_transfer() {
     // Rung 0 -> 1 now runs the conjugate refinement, not Refine1d. Refine1d
     // would map 3 coarse values to 5 fine ones (2n-1 linear interpolation);
     // the conjugate transfer maps them to 3*4 = 12 sub-segments.
+    //
+    // WHAT THIS DOES NOT SHOW: the edges are NAMED correlation->RANS and
+    // RANS->LES because those are the rungs the CHT ladder declares, and
+    // installing a correlation self-refinement on them does not make either
+    // fine side a RANS or LES state. No RANS rung exists (bead f85xj.5.8).
+    // This asserts the INJECTION SEAM carries a caller-supplied operator
+    // instead of the demonstrator; the real cross-fidelity transfer is
+    // tracked as the remainder of clause (c).
     let fine = ladder
         .prolongate(0, &[340.0, 350.0, 360.0])
         .expect("rung 0");
     assert_eq!(fine.len(), 12);
-    assert_eq!(
-        ladder.restrict(1, &fine).expect("rung 1"),
-        vec![340.0, 350.0, 360.0]
+    for (restricted, original) in ladder
+        .restrict(1, &fine)
+        .expect("rung 1")
+        .iter()
+        .zip(&[340.0, 350.0, 360.0])
+    {
+        assert!((restricted - original).abs() < 1.0e-9);
+    }
+}
+
+#[test]
+fn the_refinement_transfer_restricts_a_nonuniform_state_outlet_preserving() {
+    // The round-trip test above only ever restricts states `prolongate`
+    // emitted, whose blocks are UNIFORM -- and a plain mean is correct exactly
+    // there. That makes the round trip structurally blind to how a genuinely
+    // refined fine state comes back. Air entering a sub-segment has already
+    // been warmed upstream, so a hot sub-segment near the block outlet moves
+    // the exit temperature more than an equally hot one near the inlet.
+    let factor = 4;
+    let coarse_path = uniform_path(1, 0.03, 80.0);
+    let transfer =
+        SegmentRefinementTransfer::new(coarse_path.clone(), factor).expect("valid factor");
+    let fine_path = transfer.refined_path().expect("refined path");
+
+    // Deliberately nonuniform: the hot end is downstream.
+    let fine_walls = vec![310.0, 330.0, 360.0, 400.0];
+    let fine_outlet = fine_path
+        .march(&fine_walls)
+        .expect("fine march")
+        .outlet_temperature_k;
+
+    let coarse_walls = transfer.restrict(&fine_walls);
+    assert_eq!(coarse_walls.len(), 1);
+    let coarse_outlet = coarse_path
+        .march(&coarse_walls)
+        .expect("coarse march")
+        .outlet_temperature_k;
+    assert!(
+        (coarse_outlet - fine_outlet).abs() < 1.0e-9,
+        "restriction did not preserve the outlet: coarse {coarse_outlet} vs fine {fine_outlet}"
     );
+
+    // Sensitivity: the plain mean this replaced is wrong by tens of kelvin
+    // here, so the check above falsifies a real alternative.
+    let plain_mean = fine_walls.iter().sum::<f64>() / factor as f64;
+    let plain_outlet = coarse_path
+        .march(&[plain_mean])
+        .expect("plain march")
+        .outlet_temperature_k;
+    assert!(
+        (plain_outlet - fine_outlet).abs() > 1.0,
+        "the plain mean should be visibly wrong here, saw {plain_outlet} vs {fine_outlet}"
+    );
+
+    // And it still reduces to the plain mean on a uniform block, so it does
+    // not disturb the states `prolongate` produces.
+    let uniform = vec![355.0; factor];
+    assert!((transfer.restrict(&uniform)[0] - 355.0).abs() < 1.0e-9);
 }
 
 #[test]
@@ -854,6 +1040,7 @@ fn resuming_from_a_checkpoint_reproduces_the_uninterrupted_tail_bitwise() {
     let config = ConjugateConfig {
         temperature_tolerance_k: 1.0e-12,
         max_iterations: 200,
+        balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
     };
     let full = with_cx(|cx| {

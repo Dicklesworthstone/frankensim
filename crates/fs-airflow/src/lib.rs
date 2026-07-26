@@ -1166,7 +1166,13 @@ fn push_string_identity(bytes: &mut Vec<u8>, value: &str) {
 }
 
 /// Structured airflow-model refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately NOT derived: [`AirflowError::Cancelled`] carries the
+/// reference-temperature vector needed to resume, and an `f64` has no
+/// equivalence relation. Every float elsewhere in this enum is stored as raw
+/// IEEE-754 bits precisely so refusals stay exactly comparable; the resume
+/// payload is data, not an identity.
+#[derive(Debug, Clone, PartialEq)]
 pub enum AirflowError {
     /// At least two fan points are required.
     TooFewFanPoints {
@@ -1368,9 +1374,40 @@ pub enum AirflowError {
         tolerance_bits: u64,
     },
     /// The exchange was cancelled at an outer-iteration checkpoint.
+    ///
+    /// Carries the reference-temperature vector the cancelled iteration was
+    /// about to be solved against, so `conjugate::solve_conjugate_from` can
+    /// resume from the refusal itself. A cancellation that returned only an
+    /// index would force the caller to have retained a history it may not
+    /// have.
     Cancelled {
         /// Zero-based index of the iteration that had not yet run.
         iteration: usize,
+        /// The reference temperatures that iteration would have used, K.
+        references_k: Vec<f64>,
+    },
+    /// The interface heat balance did not close at the declared tolerance,
+    /// even though the temperature criterion was met. This is a refusal: a
+    /// converged temperature does not bound a heat rate.
+    ConjugateBalanceUnclosed {
+        /// Outer iterations performed.
+        iterations: usize,
+        /// Raw IEEE-754 bits of the worst per-region imbalance, W.
+        max_region_imbalance_bits: u64,
+        /// Raw IEEE-754 bits of the declared tolerance, W.
+        tolerance_bits: u64,
+    },
+    /// The solid side integrated over a different area than the air path
+    /// declares for that segment.
+    SegmentAreaMismatch {
+        /// Zero-based position in the declared path.
+        index: usize,
+        /// The region carrying the mismatch.
+        region: String,
+        /// Raw IEEE-754 bits of the air path's declared area, m^2.
+        declared_bits: u64,
+        /// Raw IEEE-754 bits of the area the solid side reported, m^2.
+        reported_bits: u64,
     },
 }
 
@@ -1522,9 +1559,39 @@ impl fmt::Display for AirflowError {
                 f64::from_bits(*max_change_bits),
                 f64::from_bits(*tolerance_bits)
             ),
-            Self::Cancelled { iteration } => write!(
+            Self::Cancelled { iteration, .. } => write!(
                 formatter,
-                "conjugate exchange cancelled before outer iteration {iteration}"
+                "conjugate exchange cancelled before outer iteration {iteration}; \
+                 fix: resume with solve_conjugate_from and this refusal's \
+                 references_k"
+            ),
+            Self::ConjugateBalanceUnclosed {
+                iterations,
+                max_region_imbalance_bits,
+                tolerance_bits,
+            } => write!(
+                formatter,
+                "conjugate exchange met its temperature criterion in {iterations} \
+                 iteration(s) but its worst per-region interface imbalance {} W \
+                 exceeds the declared {} W; a converged temperature does not bound \
+                 a heat rate, so this is refused rather than returned; fix: check \
+                 that every declared region's area and heat rate come from the same \
+                 solve, or widen balance_tolerance_w deliberately",
+                f64::from_bits(*max_region_imbalance_bits),
+                f64::from_bits(*tolerance_bits)
+            ),
+            Self::SegmentAreaMismatch {
+                index,
+                region,
+                declared_bits,
+                reported_bits,
+            } => write!(
+                formatter,
+                "air-path position {index} ('{region}') declares area {} m^2 but the \
+                 solid side integrated over {} m^2; fix: the two sides must exchange \
+                 heat across the same surface",
+                f64::from_bits(*declared_bits),
+                f64::from_bits(*reported_bits)
             ),
         }
     }
