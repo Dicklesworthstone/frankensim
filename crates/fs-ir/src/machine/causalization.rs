@@ -9570,6 +9570,25 @@ mod internal_tests {
         const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("rows", WireType::OrderedBytes)];
     }
 
+    /// Smallest `max_field_bytes` these row fixtures may declare.
+    ///
+    /// `max_field_bytes` is a PER-ITEM cap, and `CanonicalEncoder::new` charges
+    /// the schema's own descriptors against it before any row exists:
+    /// `identity.rs:1862-1868` enforces it for `domain`, `name`, and `context`
+    /// in turn. For `StreamParitySchemaV1` those are 49, 20, and 51 bytes, so
+    /// any cap below 51 makes the encoder UNCONSTRUCTABLE and every test using
+    /// it dies in `expect("valid bounded encoder")` long before reaching the row
+    /// logic it meant to exercise. `validate_limits` does not surface that
+    /// floor up front (tracked separately), so it can only be discovered by
+    /// running the tests.
+    ///
+    /// 64 clears the floor with headroom while staying small enough that an
+    /// exact-cap row and a one-over row are both cheap to build. The property
+    /// under test is unchanged — a row exactly at the cap admits, one byte over
+    /// refuses at row admission before its producer runs; only the numeric cap
+    /// moved. Do NOT lower this back toward 8.
+    const REDUCED_FIELD_BYTE_CAP: u64 = 64;
+
     fn with_internal_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         let gate = CancelGate::new();
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -9615,7 +9634,7 @@ mod internal_tests {
         produced: &core::cell::Cell<usize>,
     ) -> CausalIdentityError {
         let rows = [b"planned".as_slice()];
-        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 1, 16);
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 1, 16);
         with_internal_cx(|cx| {
             let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
                 limits,
@@ -10128,7 +10147,8 @@ mod internal_tests {
     #[test]
     fn g0_oversized_stream_row_refuses_before_payload_allocation() {
         let rows = [()];
-        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 1, 16);
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 1, 16);
+        let one_over = REDUCED_FIELD_BYTE_CAP + 1;
         let produced = core::cell::Cell::new(0usize);
 
         let refusal = with_internal_cx(|cx| {
@@ -10142,10 +10162,10 @@ mod internal_tests {
                 Field::new(0, "rows"),
                 &rows,
                 cx,
-                |(), _| Ok(9),
+                |(), _| Ok(one_over as usize),
                 |(), _, out| {
                     produced.set(produced.get() + 1);
-                    out.extend_from_slice(&[0; 9]);
+                    out.extend_from_slice(&[0; (REDUCED_FIELD_BYTE_CAP + 1) as usize]);
                     Ok(())
                 },
             )
@@ -10156,8 +10176,8 @@ mod internal_tests {
             refusal.canonical_error(),
             Some(CanonicalError::LimitExceeded {
                 kind: LimitKind::FieldBytes,
-                requested: 9,
-                limit: 8,
+                requested: one_over,
+                limit: REDUCED_FIELD_BYTE_CAP,
             })
         );
         let stream = refusal
@@ -10169,7 +10189,7 @@ mod internal_tests {
             OrderedBytesStreamPhase::RowAdmission
         );
         assert_eq!(stream.diagnostic().row_index(), Some(0));
-        assert_eq!(stream.diagnostic().declared_row_bytes(), Some(9));
+        assert_eq!(stream.diagnostic().declared_row_bytes(), Some(one_over));
         assert_eq!(stream.diagnostic().completed_rows(), 0);
         assert_eq!(
             produced.get(),
@@ -10180,8 +10200,26 @@ mod internal_tests {
 
     #[test]
     fn g0_streamed_identity_rows_admit_empty_and_exact_reduced_limit() {
-        let rows = [Vec::new(), vec![0x5a; 8]];
-        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 2, 16);
+        // `max_field_bytes` is CUMULATIVE over the field, not per row: each row
+        // admission charges (bytes already booked for this field) + (this row's
+        // declared bytes). After the leading empty row this schema/field has
+        // booked the framing below (field header, declared row count, and both
+        // row-length prefixes), so the second row lands exactly ON the cap when
+        // it declares `CAP - framing`.
+        //
+        // The pair of cases is the point. Alone, the admitting case cannot tell
+        // "the bound is inclusive" from "the bound is loose", and the framing
+        // constant would be an unchecked magic number. Asserting that one more
+        // byte refuses pins the boundary exactly and makes the constant
+        // self-checking: if the framing ever drifts, exactly one of these two
+        // cases fails and this comment says how to re-derive it (read
+        // `requested` back out of the LimitExceeded diagnostic).
+        const CUMULATIVE_ROW_FRAMING_BYTES: u64 = 24;
+        const EXACT_CAP_ROW_BYTES: usize =
+            (REDUCED_FIELD_BYTE_CAP - CUMULATIVE_ROW_FRAMING_BYTES) as usize;
+
+        let rows = [Vec::new(), vec![0x5a; EXACT_CAP_ROW_BYTES]];
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 2, 16);
 
         let receipt = with_internal_cx(|cx| {
             let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
@@ -10206,12 +10244,53 @@ mod internal_tests {
         });
 
         assert_eq!(receipt.collection_items(), 2);
+
+        // One byte past the same cumulative cap must refuse at row admission.
+        let one_over_rows = [Vec::new(), vec![0x5a; EXACT_CAP_ROW_BYTES + 1]];
+        let refusal = with_internal_cx(|cx| {
+            let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
+                limits,
+                NeverCancel,
+            )
+            .expect("valid reduced-limit encoder");
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &one_over_rows,
+                cx,
+                |row, _| Ok(row.len()),
+                |row, _, out| {
+                    out.extend_from_slice(row);
+                    Ok(())
+                },
+            )
+            .expect_err("one byte past the cumulative field cap must refuse")
+        });
+
+        assert_eq!(
+            refusal.canonical_error(),
+            Some(CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: REDUCED_FIELD_BYTE_CAP + 1,
+                limit: REDUCED_FIELD_BYTE_CAP,
+            }),
+            "the cumulative field-bytes bound is inclusive at exactly the cap"
+        );
+        let stream = refusal
+            .stream_refusal()
+            .expect("cumulative cap refusal retains stream context");
+        assert_eq!(
+            stream.diagnostic().phase(),
+            OrderedBytesStreamPhase::RowAdmission
+        );
+        assert_eq!(stream.diagnostic().row_index(), Some(1));
+        assert_eq!(stream.diagnostic().completed_rows(), 1);
     }
 
     #[test]
     fn g0_one_over_producer_refuses_before_mutation_growth_or_publication() {
         let rows = [()];
-        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 1, 16);
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 1, 16);
         let capacity_before = core::cell::Cell::new(0usize);
         let capacity_after = core::cell::Cell::new(usize::MAX);
         let length_after = core::cell::Cell::new(usize::MAX);
@@ -10375,7 +10454,7 @@ mod internal_tests {
     #[test]
     fn g0_streamed_identity_rows_refuse_length_payload_disagreement() {
         let rows = [()];
-        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 1, 16);
+        let limits = CanonicalLimits::new(4 * 1_024, REDUCED_FIELD_BYTE_CAP, 1, 1, 16);
 
         let refusal = with_internal_cx(|cx| {
             let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
