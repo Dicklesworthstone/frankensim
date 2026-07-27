@@ -372,6 +372,7 @@
     "crates/fs-checker/tests/plugins.rs",
     "crates/fs-cli/tests/cli.rs",
     "crates/fs-cli/tests/import.rs",
+    "crates/fs-cli/tests/solve.rs",
     "crates/fs-conduction/tests/adjoint.rs",
     "crates/fs-conduction/tests/analytic.rs",
     "crates/fs-conduction/tests/conformance.rs",
