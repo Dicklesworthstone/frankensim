@@ -14,11 +14,15 @@ layer = "L6"
 asupersync = { path = "../../../asupersync", optional = true }
 fs-dfo = { path = "../fs-dfo", optional = true }
 fs-blake3 = { path = "../fs-blake3" }
+fs-conduction = { path = "../fs-conduction", optional = true }
+fs-convection = { path = "../fs-convection", optional = true }
 fs-evidence = { path = "../fs-evidence" }
 fs-eproc = { path = "../fs-eproc", optional = true }
+fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom" }
 fs-ladder = { path = "../fs-ladder" }
 fs-ledger = { path = "../fs-ledger" }
+fs-matdb = { path = "../fs-matdb", optional = true }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync", features = ["test-internals"] }
@@ -36,6 +40,12 @@ voi-queries = ["dep:asupersync", "dep:fs-eproc"]
 # huq.15 milestone's Gauntlet call — the fixture-matrix scoreboard here
 # is necessary, not sufficient.
 moonshot-planner = ["dep:fs-dfo"]
+# [S] dependency-hygiene gate, not an ambition gate (bead f85xj.10.4): the
+# production cooling fidelity-graph instance runs real fs-conduction /
+# fs-convection probes, so enabling it pulls the physics cone into fs-plan.
+# The default build keeps the 10.2 boundary (campaign machinery without
+# concrete physics solvers).
+cooling-instance = ["dep:fs-conduction", "dep:fs-convection", "dep:fs-exec", "dep:fs-matdb"]
 
 [[test]]
 name = "alloc_battery"
@@ -46,6 +56,10 @@ required-features = ["moonshot-planner"]
 
 [[test]]
 name = "fidelity_campaign"
+
+[[test]]
+name = "cooling_instance"
+required-features = ["cooling-instance"]
 
 [lints]
 workspace = true

@@ -18,6 +18,8 @@
 //! VoI adds asupersync cancellation and fs-eproc audit authority.
 
 pub mod alloc;
+#[cfg(feature = "cooling-instance")]
+pub mod cooling_instance;
 pub mod cost;
 pub mod fidelity_campaign;
 pub mod ledgers;
@@ -32,6 +34,12 @@ pub use alloc::{
     AllocProblem, AllocationError, Allocator, BudgetInfeasible, Knob, KnobSetting,
     MAX_ALLOCATION_KNOBS, MAX_EXECUTION_TRACKS, MAX_ORACLE_COMBINATIONS, MAX_SETTINGS_PER_KNOB,
     MAX_TOTAL_SETTINGS, Plan, PlanInputError, allocate, oracle_min_error,
+};
+#[cfg(feature = "cooling-instance")]
+pub use cooling_instance::{
+    COOLING_CARD_DOMAIN, COOLING_INSTANCE_NAME, COOLING_MODEL_DOMAIN, COOLING_STRUCTURE_DOMAIN,
+    CoolingEdgeSummary, CoolingFidelityInstance, CoolingInstanceError, CoolingNodeCard,
+    RADIATION_REGIME_SPLIT_TOLERANCE, assemble_cooling_instance, card_ref_for,
 };
 pub use cost::{
     CostModel, CostObservation, CostPrediction, CostRefusal, MAX_COST_EVALUATION_OBSERVATIONS,

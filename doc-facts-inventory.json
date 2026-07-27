@@ -684,6 +684,7 @@
     "crates/fs-package/tests/receipt_catalog.rs",
     "crates/fs-plan/tests/alloc_battery.rs",
     "crates/fs-plan/tests/conformance.rs",
+    "crates/fs-plan/tests/cooling_instance.rs",
     "crates/fs-plan/tests/fidelity_campaign.rs",
     "crates/fs-plan/tests/moonshot_battery.rs",
     "crates/fs-plan/tests/voi.rs",

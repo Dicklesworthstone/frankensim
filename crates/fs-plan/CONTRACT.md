@@ -449,6 +449,18 @@ None. Safe Rust only.
   allocator + fs-dfo dependency; promotion gated on the huq.15 flagship
   Gauntlet (the fixture-matrix scoreboard here is necessary, not
   sufficient).
+- `cooling-instance` [S] (default OFF, bead f85xj.10.4) — a dependency-hygiene
+  gate, not an ambition gate: `cooling_instance::assemble_cooling_instance`
+  runs real fs-conduction / fs-convection / fs-matdb probe evaluations under
+  an fs-exec `Cx`, so enabling it pulls the physics cone into this crate.
+  The default build keeps the 10.2 boundary (campaign machinery without
+  concrete physics solvers). Nodes bind retained model cards through
+  `hash_domain(COOLING_CARD_DOMAIN, card.to_ledger_row_json())`; probe
+  wall-clock costs are machine-relative and flow into edge/graph identities,
+  while `structural_digest` deliberately excludes them so the instance SHAPE
+  is golden-pinnable. Card binding is exact reference, not provenance or
+  promotion authority; the thermal-LBM node, resolved 3-D PCB rung, and
+  lumped-vs-marched pairing remain explicit campaign gaps.
 
 ## Conformance tests
 
@@ -478,6 +490,23 @@ a clean ledger. A separate synthetic truth fixture recovers the planted
 discrepancy and cost calibration, proves input-order-invariant identities, and
 exercises partition/regime refusals. Freshness tests independently move corpus
 identity, corpus generation, machine fingerprint, and target build identity.
+
+Feature-gated `tests/cooling_instance.rs` is the f85xj.10.4 production-instance
+battery. It assembles the cooling fidelity graph from seven really-carded
+nodes (three catalog convection correlations, two radiation rungs, two PCB
+treatments), fits four real probe-campaign edge contexts (two radiation
+regime bins with an independent closed-form parallel-plate reference, the
+bulk-vs-homogenized PCB flux pair, the CWT-vs-Hausen pair), and proves the
+three flagship demonstrations: cost-is-not-authority (the calibrated cheap
+linearized rung is CheapestAdequate inside its validated near-anchor regime
+while gray-diffuse remains the graph maximum), regime-dependent routing (the
+same QoI at the same tolerance refuses the cheap stand-in in the far-cold
+regime and escalates to the gray-diffuse maximum), and the honest gap (a
+natural-convection query refuses with NoApplicableEvidence while the campaign
+retains the matching actionable acquisition demand). The battery also proves
+card-reference recomputability, cost-independence plus golden pinning of the
+structural digest, freshness/staleness, atomic ledger retention, legacy
+`cht()` coexistence, and summary/edge joinability.
 
 `tests/alloc_battery.rs` covers budget-safe allocation, typed input/work
 refusals, online re-planning, oracle bounds, evaluator safety, and tropical

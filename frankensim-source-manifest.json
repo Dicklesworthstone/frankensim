@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "88f8a1ceef00d7a1e8503b253695a79e4250c4fc9ace85adc1f34b99b26bbdff",
+  "manifest_identity": "3bdd631a7e851822742361a32caa7ede6e9e3f5719e29a9f959002746d65bd52",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "bfa819e3867b325216b44503f313c3d080ea5f93b417f681ae97d6bbd3a22c61",
+    "source_root": "c414f913063013be67c6bf023a46df256f55f5e0076eef0c304ad7adf9b3bab8",
     "tracked_file_count": 1943,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1939,7 +1939,7 @@
       {"path": "xtask/Cargo.toml", "git_mode": "100644", "bytes": 576, "content_blake3": "37a58635541bd5e8ce3e59284b45e6d3f2a810c14d7893da0ac865bd20ffa697"},
       {"path": "xtask/src/bootstrap_provenance.rs", "git_mode": "100644", "bytes": 22690, "content_blake3": "c3462d990d5848909b3f3c104e3292c92d0dc1e3db38b437a9fbebee46b320de"},
       {"path": "xtask/src/claim_integrity_gate.rs", "git_mode": "100644", "bytes": 25356, "content_blake3": "877b27f139d9e6eafe69081dde9b629990aa132167fa33f9f4dc4eabe5b80169"},
-      {"path": "xtask/src/claims.rs", "git_mode": "100644", "bytes": 57075, "content_blake3": "d6c5d67f786c6ddfdb5a4c07e91e5d0e2c85259c626a57425ef6ee4416ac05e8"},
+      {"path": "xtask/src/claims.rs", "git_mode": "100644", "bytes": 64002, "content_blake3": "61b1659acb1a6041b58f18595ea43922cd577409abf08b5570b5877295867a67"},
       {"path": "xtask/src/closures.rs", "git_mode": "100644", "bytes": 5588, "content_blake3": "20613f2ea42f6ad5c99eee6d5dfaccfab40219c623fef727d57f454422d37d36"},
       {"path": "xtask/src/compatibility.rs", "git_mode": "100644", "bytes": 5029, "content_blake3": "da8d95f3349cef5ef59d084b585794b0bbb9d7e30a2a7814210bcb824cc9d630"},
       {"path": "xtask/src/consolidation.rs", "git_mode": "100644", "bytes": 20481, "content_blake3": "98475fc8d3b06fd5e84672260778a115772138e2bdd7608b9540a80602f8b1e2"},
