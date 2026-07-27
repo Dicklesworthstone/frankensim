@@ -292,6 +292,42 @@ fn multiplicative_cross_terms_are_enclosed_instead_of_linearized_away() {
         }
         other => panic!("expected balanced, got {other:?}"),
     }
+
+    // The refusal direction of the same headline: the exact hull's lower
+    // endpoint is 0.9^3 = 0.729 W, while a symmetric first-order band around
+    // 1.0 W reaches down to 0.7 W. A power reading in [0.7, 0.729) is
+    // provably inconsistent with the declared supports yet survives the
+    // linearization, so pin the refusal to keep the low side from silently
+    // regressing to a widened lower endpoint.
+    let low_run = RigRun {
+        run_id: "cross-term-low-run".to_string(),
+        acquired_on: "2026-06-15".to_string(),
+        partition: DatasetPartition::Validation,
+        readings: vec![
+            Reading {
+                sensor_id: "power".to_string(),
+                value_si: 0.71,
+            },
+            Reading {
+                sensor_id: "t-in".to_string(),
+                value_si: 10.0,
+            },
+            Reading {
+                sensor_id: "t-out".to_string(),
+                value_si: 11.0,
+            },
+            Reading {
+                sensor_id: "flow".to_string(),
+                value_si: 1.0,
+            },
+        ],
+    };
+    match ingest(&spec, &low_run).expect_err("a sub-hull power reading must refuse") {
+        RigError::EnergyBalanceViolated { detail } => {
+            assert!(detail.contains("power in"), "detail: {detail}");
+        }
+        other => panic!("expected an energy-balance refusal, got {other:?}"),
+    }
 }
 
 #[test]
