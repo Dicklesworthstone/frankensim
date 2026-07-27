@@ -25,7 +25,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   + ASCII STL; OBJ subset (`v`/`f`, fan triangulation, negative indices,
   `v/vt/vn` forms with vt/vn ignored); PLY ASCII + binary_little_endian
   (vertex x/y/z any scalar type, face index lists; other
-  elements/properties skipped with correct stride accounting). Every
+  elements/properties skipped with correct stride accounting). PLY header
+  admission caps the checked sum of all declared element rows at
+  `MAX_PLY_TOTAL_ROWS = 100,000,000` and caps checked aggregate dispatch
+  work at `MAX_PLY_DISPATCH_WORK = 400,000,000`, where one element row costs
+  one visit plus one visit for each property declared on that row. A
+  positive-count element must therefore declare at least one consuming
+  property; a zero-count declaration may have none. Each list remains
+  separately capped at `MAX_PLY_LIST_ITEMS = 1,024`, and every admitted list
+  item must consume an ASCII token or the declared binary item stride. Every
   parser: element-capped (`MAX_ELEMENTS`), length-checked, non-finite
   coordinates refused, structured `IoError` — never a panic.
 - **Quarantine** (`quarantine` module): `import_mesh` → `Quarantined
@@ -103,8 +111,10 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   Markdown are report artifacts consumable by the HELM-side `compare` path;
   L2 does not call CLI/report/ledger code.
 - **Exports** (`export` + format modules): binary STL / OBJ / ASCII PLY
-  (deterministic; OBJ and PLY carry f64 shortest-round-trip text, exact
-  on re-import); 3MF (minimal OPC ZIP with STORED entries, fixed
+  (deterministic; for finite, nonempty soups with in-range triangle indices
+  inside the corresponding reader envelopes, OBJ and PLY carry f64
+  shortest-round-trip text that is exact on re-import); 3MF (minimal OPC ZIP
+  with STORED entries, fixed
   timestamps for byte determinism); GLB (glTF 2.0 binary container,
   f32 positions + u32 indices, chunk-accounted); legacy-ASCII VTK
   unstructured grid with optional scalar point field.
@@ -227,10 +237,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
 
 ## Invariants
 
-1. **Round-trip fidelity per format**: OBJ and PLY re-import bitwise-
-   identical f64 positions; STL agrees to f32 precision (documented
-   lossy: positions only, welded by exact coordinate match, normals
-   recomputed).
+1. **Round-trip fidelity per format for representable source soups within
+   the documented reader envelopes**: when the source has at least one vertex
+   and one triangle, every position coordinate is finite, and every triangle
+   index is in range, OBJ and PLY re-import bitwise-identical f64 positions;
+   STL agrees to f32 precision (documented lossy: positions only, welded by
+   exact coordinate match, normals recomputed). The PLY statement additionally
+   requires the emitted document to remain within the reader's documented
+   aggregate and per-item envelopes; the infallible writer does not itself
+   enforce these source or import preconditions.
 2. **No import is trusted without promotion**: the census runs on every
    import; promotion refuses while blocking defects remain, and both
    outcomes emit ledger-ready receipt JSON with the source hash, parser
@@ -395,6 +410,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     sibling-free consumer must reject it when the live manifest identity moves.
     Duplicate source paths, case IDs, or retained byte identities refuse
     manifest admission rather than inflating the population.
+24. **PLY dispatch work is admitted from the complete header**: only after all
+    element/property relationships are assembled does the reader checked-add
+    total rows and `count * (1 + property_count)` dispatch work. Aggregate
+    arithmetic overflow and either cap crossing return `ResourceBound` before
+    body iteration. Positive-count propertyless elements return `Unsupported`
+    before body iteration, while zero-count propertyless declarations remain
+    legal. Unknown scalar and list properties with real input stride are
+    consumed in declared element order without being reinterpreted as face
+    indices.
 
 ## Error model
 
@@ -404,7 +428,10 @@ ambiguous, over-limit, or numerically invalid schema declarations. `IoError`:
 column, what }`. Catalog-JSON syntax errors and CSV lexical/parser-v2 structural
 errors use absolute input-byte offsets; CSV resource refusals use record
 positions; common projection refusals name the operation dimension and declared
-limit. Catalog resource refusals remain deterministic.
+limit. PLY aggregate row and dispatch-work cap diagnostics report the exact
+computed count and public cap; checked-arithmetic failures name the overflowed
+dimension. A positive-count propertyless PLY element is `Unsupported`, not a
+partial body parse. Catalog resource refusals remain deterministic.
 Receipt-producing APIs use the same refusal variants and are success-only; the
 receipt's authority and no-claim fields are not substitutes for an error
 receipt.
@@ -542,6 +569,9 @@ Supplier-corpus execution polls the caller's `Cx` at scorecard entry, every
 case boundary, inside owned STEP materialization/import loops, and immediately
 before publication. Cancellation returns `CorpusRunError::Cancelled` and
 publishes neither a partial full scorecard nor a compact summary.
+PLY parsing has no `Cx`: its complete header pre-admits aggregate row/property
+dispatch work, and every list has a separate 1,024-item/input-stride bound, but
+the reader makes no cancellation-latency claim within those admitted loops.
 
 ## Unsafe boundary
 
@@ -560,7 +590,10 @@ deterministic bytes + ASCII STL fixture; io-002 the defect zoo
 (duplicate/degenerate/hole/unreferenced) censused, repaired, promoted
 with receipts — and an over-budget hole REFUSED with actionable fixes
 and a refused receipt; io-003 13.5k mutants + truncations + junk with
-zero panics; io-004 PLY face-list integer validation; io-005 AISC-flavored
+zero panics; io-004 PLY face-list integer validation; io-004a positive-count
+propertyless refusal with zero-count preservation; io-004b exact aggregate
+row/dispatch boundaries in ASCII and binary; io-004c data-consuming unknown
+scalar/list elements in both encodings; io-005 AISC-flavored
 CSV plus strict/bounded JSON catalogs, quoting/Unicode-surrogate decoding,
 syntax-refusal offsets, a resource refusal, and the teaching-error battery;
 io-006 3MF ZIP
@@ -569,7 +602,7 @@ counts. Reaching an aggregate outcome means its preceding checks passed;
 pre-verdict assertions and parser `expect` failures remain ordinary Rust test
 diagnostics and therefore do not emit a failed aggregate record. `io-003`
 records its exact input seed (`0x10_0003`) for mutation-stream replay; the other
-five outcomes use deterministic seed zero. The suite has no concurrent
+eight outcomes use deterministic seed zero. The suite has no concurrent
 aggregate case, so these records make no scheduler-replay claim. Existing
 promotion-receipt and fuzz-measurement data use validated fs-obs `Custom`
 companions, not canonical aggregate outcomes; the fuzz companion also retains
@@ -707,6 +740,13 @@ import identically in both ASCII and binary (conformance-tested).
 - **OBJ vt/vn and materials are dropped** (documented lossy subset);
   PLY color/normal properties are skipped, not preserved.
 - **PLY binary_big_endian is refused** (structured `Unsupported`).
+- **PLY aggregate dispatch work is a structural work bound, not a complete
+  byte, allocation, or latency receipt.** It counts element-row loop entries
+  and property dispatches derived from the complete header. List-item reads are
+  bounded separately to 1,024 per list and require corresponding input tokens
+  or bytes, but are not charged again to the header-derived dispatch counter.
+  Unknown properties are consumed for layout only: their values are not
+  retained, given geometry meaning, or exhaustively type-normalized.
 - **3MF/GLB are WRITE-ONLY** (import of container formats is follow-up);
   the 3MF is the minimal core-spec package, no extensions.
 - **VTK export is legacy-ASCII**, one optional scalar field; XML VTK and

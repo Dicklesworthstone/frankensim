@@ -604,3 +604,175 @@ fn ply_face_first_element_order_is_legal() {
         Err(fs_io::IoError::ResourceBound { .. })
     ));
 }
+
+#[test]
+fn ply_positive_rows_require_a_consuming_property() {
+    let cap = fs_io::ply::MAX_PLY_TOTAL_ROWS;
+    for format in ["ascii", "binary_little_endian"] {
+        let single = format!(
+            "ply\nformat {format} 1.0\nelement metadata {cap}\n\
+             element vertex 3\nproperty double x\nproperty double y\nproperty double z\n\
+             element face 1\nproperty list uchar uint vertex_indices\nend_header\n"
+        );
+        match fs_io::ply::read_ply(single.as_bytes()) {
+            Err(fs_io::IoError::Unsupported { what }) => assert_eq!(
+                what,
+                format!("PLY element \"metadata\" declares {cap} rows but has no properties")
+            ),
+            other => panic!("expected propertyless-row refusal, got {other:?}"),
+        }
+
+        let mut many = format!("ply\nformat {format} 1.0\n");
+        for ordinal in 0..32 {
+            many.push_str(&format!("element metadata_{ordinal} {cap}\n"));
+        }
+        many.push_str("end_header\n");
+        match fs_io::ply::read_ply(many.as_bytes()) {
+            Err(fs_io::IoError::Unsupported { what }) => assert_eq!(
+                what,
+                format!("PLY element \"metadata_0\" declares {cap} rows but has no properties")
+            ),
+            other => panic!("expected first propertyless-row refusal, got {other:?}"),
+        }
+    }
+
+    let zero_count = "ply\nformat ascii 1.0\nelement metadata 0\n\
+        element vertex 3\nproperty double x\nproperty double y\nproperty double z\n\
+        element face 1\nproperty list uchar uint vertex_indices\nend_header\n\
+        0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    let parsed = fs_io::ply::read_ply(zero_count.as_bytes())
+        .expect("zero-count elements may have no properties");
+    assert_eq!(parsed.positions.len(), 3);
+    assert_eq!(parsed.triangles, vec![[0, 1, 2]]);
+    verdict(
+        "io-004a",
+        true,
+        "positive-count propertyless PLY elements refuse before body work; zero-count declarations remain legal",
+        DETERMINISTIC_SEED,
+    );
+}
+
+#[test]
+fn ply_aggregate_header_limits_have_exact_boundaries() {
+    let row_cap = fs_io::ply::MAX_PLY_TOTAL_ROWS;
+    let work_cap = fs_io::ply::MAX_PLY_DISPATCH_WORK;
+    assert_eq!(row_cap, fs_io::MAX_ELEMENTS as u64);
+    assert_eq!(work_cap, 4 * row_cap);
+
+    for format in ["ascii", "binary_little_endian"] {
+        let too_many_rows = format!(
+            "ply\nformat {format} 1.0\nelement samples {row_cap}\n\
+             property uchar value\nelement marker 1\nproperty uchar value\nend_header\n"
+        );
+        match fs_io::ply::read_ply(too_many_rows.as_bytes()) {
+            Err(fs_io::IoError::ResourceBound { what }) => assert_eq!(
+                what,
+                format!(
+                    "PLY aggregate element rows {} exceed cap {row_cap}",
+                    row_cap + 1
+                )
+            ),
+            other => panic!("expected aggregate-row refusal, got {other:?}"),
+        }
+
+        let too_much_dispatch = format!(
+            "ply\nformat {format} 1.0\nelement samples {row_cap}\n\
+             property uchar a\nproperty uchar b\nproperty uchar c\nproperty uchar d\n\
+             end_header\n"
+        );
+        match fs_io::ply::read_ply(too_much_dispatch.as_bytes()) {
+            Err(fs_io::IoError::ResourceBound { what }) => assert_eq!(
+                what,
+                format!(
+                    "PLY aggregate dispatch work {} exceeds cap {work_cap} \
+                     (row iterations plus property visits)",
+                    5 * row_cap
+                )
+            ),
+            other => panic!("expected aggregate-dispatch refusal, got {other:?}"),
+        }
+
+        let half_rows = row_cap / 2;
+        assert_eq!(2 * half_rows, row_cap);
+        let cross_element_dispatch = format!(
+            "ply\nformat {format} 1.0\nelement first {half_rows}\n\
+             property uchar a\nproperty uchar b\nproperty uchar c\nproperty uchar d\n\
+             element second {half_rows}\n\
+             property uchar a\nproperty uchar b\nproperty uchar c\nproperty uchar d\n\
+             end_header\n"
+        );
+        match fs_io::ply::read_ply(cross_element_dispatch.as_bytes()) {
+            Err(fs_io::IoError::ResourceBound { what }) => assert_eq!(
+                what,
+                format!(
+                    "PLY aggregate dispatch work {} exceeds cap {work_cap} \
+                     (row iterations plus property visits)",
+                    10 * half_rows
+                )
+            ),
+            other => panic!("expected cross-element dispatch refusal, got {other:?}"),
+        }
+
+        let exact_dispatch = format!(
+            "ply\nformat {format} 1.0\nelement samples {row_cap}\n\
+             property uchar a\nproperty uchar b\nproperty uchar c\nend_header\n"
+        );
+        assert!(
+            matches!(
+                fs_io::ply::read_ply(exact_dispatch.as_bytes()),
+                Err(fs_io::IoError::Malformed { .. })
+            ),
+            "the exact dispatch boundary must pass header admission and reach the empty body"
+        );
+    }
+    verdict(
+        "io-004b",
+        true,
+        "PLY aggregate row and row/property dispatch caps retain exact ASCII and binary boundaries",
+        DETERMINISTIC_SEED,
+    );
+}
+
+#[test]
+fn ply_unknown_elements_consume_declared_ascii_and_binary_data() {
+    let ascii = "ply\nformat ascii 1.0\nelement metadata 2\n\
+        property float weight\nproperty list uchar float samples\n\
+        element vertex 3\nproperty double x\nproperty double y\nproperty double z\n\
+        element face 1\nproperty list uchar uint vertex_indices\nend_header\n\
+        1.5 2 0.25 -0.5\n2.5 1 3.75\n\
+        0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    let ascii_mesh =
+        fs_io::ply::read_ply(ascii.as_bytes()).expect("ASCII unknown-element stride parses");
+    assert_eq!(ascii_mesh.positions.len(), 3);
+    assert_eq!(ascii_mesh.triangles, vec![[0, 1, 2]]);
+
+    let mut binary = Vec::new();
+    binary.extend_from_slice(
+        b"ply\nformat binary_little_endian 1.0\n\
+          element metadata 1\nproperty ushort code\nproperty list uchar float samples\n\
+          element vertex 3\nproperty double x\nproperty double y\nproperty double z\n\
+          element face 1\nproperty list uchar uint vertex_indices\nend_header\n",
+    );
+    binary.extend_from_slice(&513u16.to_le_bytes());
+    binary.push(2);
+    binary.extend_from_slice(&0.25f32.to_le_bytes());
+    binary.extend_from_slice(&(-0.5f32).to_le_bytes());
+    for vertex in [[0.0f64, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+        for coordinate in vertex {
+            binary.extend_from_slice(&coordinate.to_le_bytes());
+        }
+    }
+    binary.push(3);
+    for index in [0u32, 1, 2] {
+        binary.extend_from_slice(&index.to_le_bytes());
+    }
+    let binary_mesh = fs_io::ply::read_ply(&binary).expect("binary unknown-element stride parses");
+    assert_eq!(binary_mesh.positions, ascii_mesh.positions);
+    assert_eq!(binary_mesh.triangles, ascii_mesh.triangles);
+    verdict(
+        "io-004c",
+        true,
+        "unknown PLY scalar and list properties consume their declared ASCII and binary stride",
+        DETERMINISTIC_SEED,
+    );
+}

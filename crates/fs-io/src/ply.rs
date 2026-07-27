@@ -8,6 +8,21 @@ use fs_geom::Point3;
 use fs_rep_mesh::Soup;
 use std::fmt::Write as _;
 
+const MAX_PLY_HEADER_LINES: usize = 10_000;
+
+/// Maximum sum of all element row counts declared by one PLY header.
+pub const MAX_PLY_TOTAL_ROWS: u64 = MAX_ELEMENTS as u64;
+
+/// Maximum header-derived row/property dispatch work for one PLY body.
+///
+/// One unit is charged for entering an element row and one for visiting each
+/// property declared on that row. List items are separately limited by
+/// [`MAX_PLY_LIST_ITEMS`] and must each consume an input token or byte stride.
+pub const MAX_PLY_DISPATCH_WORK: u64 = 4 * MAX_PLY_TOTAL_ROWS;
+
+/// Maximum number of items admitted in one PLY list property.
+pub const MAX_PLY_LIST_ITEMS: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
     Ascii,
@@ -107,7 +122,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header, IoError> {
         if stop {
             break;
         }
-        if lines.len() > 10_000 {
+        if lines.len() > MAX_PLY_HEADER_LINES {
             return Err(IoError::ResourceBound {
                 what: "header line cap".to_string(),
             });
@@ -124,14 +139,72 @@ fn parse_header(bytes: &[u8]) -> Result<Header, IoError> {
     for (ln, line) in lines.iter().enumerate() {
         header_line(line, ln, &mut format, &mut elements)?;
     }
+    let format = format.ok_or(IoError::Malformed {
+        at: 0,
+        what: "no format line".to_string(),
+    })?;
+    preflight_body_dispatch(&elements)?;
     Ok(Header {
-        format: format.ok_or(IoError::Malformed {
-            at: 0,
-            what: "no format line".to_string(),
-        })?,
+        format,
         elements,
         body_start: pos,
     })
+}
+
+fn preflight_body_dispatch(elements: &[Element]) -> Result<(), IoError> {
+    let mut total_rows = 0u64;
+    let mut dispatch_work = 0u64;
+    for element in elements {
+        if element.count != 0 && element.props.is_empty() {
+            return Err(IoError::Unsupported {
+                what: format!(
+                    "PLY element {:?} declares {} rows but has no properties",
+                    element.name, element.count
+                ),
+            });
+        }
+
+        let count = u64::try_from(element.count).map_err(|_| IoError::ResourceBound {
+            what: "PLY aggregate element-row count overflow".to_string(),
+        })?;
+        let properties =
+            u64::try_from(element.props.len()).map_err(|_| IoError::ResourceBound {
+                what: "PLY aggregate property count overflow".to_string(),
+            })?;
+        total_rows = total_rows
+            .checked_add(count)
+            .ok_or(IoError::ResourceBound {
+                what: "PLY aggregate element-row count overflow".to_string(),
+            })?;
+        let per_row = properties.checked_add(1).ok_or(IoError::ResourceBound {
+            what: "PLY aggregate dispatch work overflow".to_string(),
+        })?;
+        let element_work = count.checked_mul(per_row).ok_or(IoError::ResourceBound {
+            what: "PLY aggregate dispatch work overflow".to_string(),
+        })?;
+        dispatch_work = dispatch_work
+            .checked_add(element_work)
+            .ok_or(IoError::ResourceBound {
+                what: "PLY aggregate dispatch work overflow".to_string(),
+            })?;
+    }
+
+    if total_rows > MAX_PLY_TOTAL_ROWS {
+        return Err(IoError::ResourceBound {
+            what: format!(
+                "PLY aggregate element rows {total_rows} exceed cap {MAX_PLY_TOTAL_ROWS}"
+            ),
+        });
+    }
+    if dispatch_work > MAX_PLY_DISPATCH_WORK {
+        return Err(IoError::ResourceBound {
+            what: format!(
+                "PLY aggregate dispatch work {dispatch_work} exceeds cap \
+                 {MAX_PLY_DISPATCH_WORK} (row iterations plus property visits)"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn header_line(
@@ -285,20 +358,25 @@ fn read_ascii_body(
                             Prop::List(_, _, name) => {
                                 let count_tok = next_token(&mut tokens, "list count")?;
                                 let n = parse_usize_token(count_tok, "list count")?;
-                                if n > 1024 {
+                                if n > MAX_PLY_LIST_ITEMS {
                                     return Err(IoError::ResourceBound {
-                                        what: "list longer than 1024".to_string(),
+                                        what: format!("list longer than {MAX_PLY_LIST_ITEMS}"),
                                     });
-                                }
-                                let mut idx = Vec::with_capacity(n);
-                                for _ in 0..n {
-                                    let item_tok = next_token(&mut tokens, "list item")?;
-                                    idx.push(parse_u32_token(item_tok, "list item")?);
                                 }
                                 if el.name == "face"
                                     && (name == "vertex_indices" || name == "vertex_index")
                                 {
+                                    let mut idx = Vec::with_capacity(n);
+                                    for _ in 0..n {
+                                        let item_tok = next_token(&mut tokens, "list item")?;
+                                        idx.push(parse_u32_token(item_tok, "list item")?);
+                                    }
                                     push_face(triangles, &idx)?;
+                                } else {
+                                    for _ in 0..n {
+                                        let item_tok = next_token(&mut tokens, "list item")?;
+                                        let _ = next_f64_token(item_tok, "list item")?;
+                                    }
                                 }
                             }
                         }
@@ -340,20 +418,27 @@ fn read_binary_body(
                             Prop::List(count_ty, item_ty, name) => {
                                 let cb = take(bytes, &mut pos, count_ty.size())?;
                                 let n = parse_usize_value(count_ty.read_f64(cb), "list count")?;
-                                if n > 1024 {
+                                if n > MAX_PLY_LIST_ITEMS {
                                     return Err(IoError::ResourceBound {
-                                        what: "list longer than 1024".to_string(),
+                                        what: format!("list longer than {MAX_PLY_LIST_ITEMS}"),
                                     });
-                                }
-                                let mut idx = Vec::with_capacity(n);
-                                for _ in 0..n {
-                                    let ib = take(bytes, &mut pos, item_ty.size())?;
-                                    idx.push(parse_u32_value(item_ty.read_f64(ib), "list item")?);
                                 }
                                 if el.name == "face"
                                     && (name == "vertex_indices" || name == "vertex_index")
                                 {
+                                    let mut idx = Vec::with_capacity(n);
+                                    for _ in 0..n {
+                                        let ib = take(bytes, &mut pos, item_ty.size())?;
+                                        idx.push(parse_u32_value(
+                                            item_ty.read_f64(ib),
+                                            "list item",
+                                        )?);
+                                    }
                                     push_face(triangles, &idx)?;
+                                } else {
+                                    for _ in 0..n {
+                                        let _ = take(bytes, &mut pos, item_ty.size())?;
+                                    }
                                 }
                             }
                         }
@@ -395,6 +480,7 @@ fn parse_u32_token(tok: &str, what: &str) -> Result<u32, IoError> {
     parse_u32_value(v, what)
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn parse_usize_value(v: f64, what: &str) -> Result<usize, IoError> {
     if !(v.is_finite() && v.fract() == 0.0 && v >= 0.0) {
         return Err(IoError::Malformed {
@@ -402,8 +488,12 @@ fn parse_usize_value(v: f64, what: &str) -> Result<usize, IoError> {
             what: format!("{what} must be a non-negative integer, got {v}"),
         });
     }
-    if v > 1024.0 {
-        return Ok(1025);
+    if v > MAX_PLY_LIST_ITEMS as f64 {
+        return MAX_PLY_LIST_ITEMS
+            .checked_add(1)
+            .ok_or_else(|| IoError::ResourceBound {
+                what: "PLY list-item cap has no representable refusal sentinel".to_string(),
+            });
     }
     Ok(v as usize)
 }
@@ -451,8 +541,13 @@ fn push_face(triangles: &mut Vec<[u32; 3]>, idx: &[u32]) -> Result<(), IoError> 
     Ok(())
 }
 
-/// Export as ASCII PLY (deterministic; f64 positions, documented lossy
-/// to f64-text round-trip which is exact with `{}` shortest form).
+/// Export as deterministic ASCII PLY with shortest-round-trip f64 text.
+///
+/// When a soup has at least one vertex and one triangle, every position
+/// coordinate is finite, every triangle index is in range, and its counts fit
+/// [`read_ply`]'s documented envelopes, re-import preserves position bits and
+/// triangle indices exactly. This infallible writer does not itself validate
+/// those preconditions.
 #[must_use]
 pub fn write_ply(soup: &Soup) -> String {
     let mut out = String::new();
@@ -471,4 +566,25 @@ pub fn write_ply(soup: &Soup) -> String {
         let _ = writeln!(out, "3 {} {} {}", t[0], t[1], t[2]);
     }
     out
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod tests {
+    use super::{Element, Prop, Ty, preflight_body_dispatch};
+    use crate::IoError;
+
+    #[test]
+    fn aggregate_dispatch_arithmetic_refuses_overflow() {
+        let elements = [Element {
+            name: "synthetic-overflow-probe".to_string(),
+            count: usize::MAX,
+            props: vec![Prop::Scalar(Ty::U8, "value".to_string())],
+        }];
+        assert_eq!(
+            preflight_body_dispatch(&elements),
+            Err(IoError::ResourceBound {
+                what: "PLY aggregate dispatch work overflow".to_string(),
+            })
+        );
+    }
 }
