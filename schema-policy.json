@@ -165,11 +165,16 @@
           "constant": "MODEL_PACK_SCHEMA_VERSION",
           "location": "crates/fs-matdb/src/model_pack.rs",
           "value": "1"
+        },
+        {
+          "constant": "MATERIAL_CARD_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/material_pack.rs",
+          "value": "1"
         }
       ],
       "surface": [
         "the FSMATPK magic and container layout of a compiled pack",
-        "the material, species, interface, and model pack payload structure",
+        "the material, species, interface, model, and material-card pack payload structure",
         "the card claim/provenance/validity-domain fields a consumer reads",
         "refusal rather than extrapolation outside a declared validity domain"
       ],

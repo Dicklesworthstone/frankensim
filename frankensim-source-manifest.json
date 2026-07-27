@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "85fe5254e195f055d3ffea4ec7f9a9d0dc1234151dc369a4c177160ab16bd5ff",
+  "manifest_identity": "5075561eba6cf849ce9924aa40e4b30059dc87a6d21693f50d64d5964436e88f",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "35675c6604f4fcc4f659bfb783dbfec620d00f6a807163642f42bb6cb5787ed2",
+    "source_root": "6940a480e9605f53a3d95d4d834bda8bbd87f6920c1d72ceee5f3f3267b4b95a",
     "tracked_file_count": 1945,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1061,7 +1061,7 @@
       {"path": "crates/fs-plan/CONTRACT.md", "git_mode": "100644", "bytes": 38528, "content_blake3": "dff814f5207c41de3e057f1fb514aa4de3841c279679a5499ac32683423a3332"},
       {"path": "crates/fs-plan/Cargo.toml", "git_mode": "100644", "bytes": 2457, "content_blake3": "2a497e5b353a18ea3f06994d88cb761184d002787d58895e0d716491dd69983c"},
       {"path": "crates/fs-plan/src/alloc.rs", "git_mode": "100644", "bytes": 30533, "content_blake3": "23c159aa46daa5add8cce48d575f6d978f4a7cd9cd1fbefc89586f643693c93e"},
-      {"path": "crates/fs-plan/src/cooling_instance.rs", "git_mode": "100644", "bytes": 36438, "content_blake3": "3198a6c91cd6b17e313b4c26ba8488bc04c300d2021ff3f4d4f9bd41b3bdc991"},
+      {"path": "crates/fs-plan/src/cooling_instance.rs", "git_mode": "100644", "bytes": 36662, "content_blake3": "dccae0847df6d9c5199987a95adaa584432a5b174c4749a136f313c32b5152ec"},
       {"path": "crates/fs-plan/src/cost.rs", "git_mode": "100644", "bytes": 22383, "content_blake3": "4f9c30981fcc2d27cc3500b75595be62346be8bb8d7972403334b90266791bc5"},
       {"path": "crates/fs-plan/src/fidelity_campaign.rs", "git_mode": "100644", "bytes": 37856, "content_blake3": "1f8d720ad44498909025c17ec19c32de25973ad4dc7f15d6ec9f8d2745613b48"},
       {"path": "crates/fs-plan/src/ledgers.rs", "git_mode": "100644", "bytes": 15049, "content_blake3": "8245d9051477384b55e4c207d2409734537e03be371cfa175daa69701fba4962"},

@@ -33,6 +33,7 @@ use fs_qty::Dims;
 mod cards;
 mod interface;
 mod interface_pack;
+mod material_pack;
 mod model_pack;
 mod pack;
 mod pcb;
@@ -48,6 +49,9 @@ pub use cards::{
 pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 pub use interface_pack::{
     INTERFACE_PACK_SCHEMA_VERSION, INTERFACE_PACK_TARGET_BASIS, NormalizedInterfacePack,
+};
+pub use material_pack::{
+    MATERIAL_CARD_PACK_SCHEMA_VERSION, MATERIAL_CARD_PACK_TARGET_BASIS, NormalizedMaterialCardPack,
 };
 pub use model_pack::{
     MODEL_PACK_SCHEMA_VERSION, MODEL_PACK_TARGET_BASIS, ModelNormalizationReceipt,

@@ -629,6 +629,7 @@
     "crates/fs-matdb/tests/interface.rs",
     "crates/fs-matdb/tests/interface_pack.rs",
     "crates/fs-matdb/tests/joint_query.rs",
+    "crates/fs-matdb/tests/material_pack.rs",
     "crates/fs-matdb/tests/model_pack.rs",
     "crates/fs-matdb/tests/pack.rs",
     "crates/fs-matdb/tests/pcb.rs",

@@ -81,6 +81,20 @@ persistence.
   and `context` record. V1 carries no constitutive model cards; model-law
   transport requires a separately versioned binding and cannot be smuggled
   through this wrapper.
+- `NormalizedMaterialCardPack` — the `FSMCDPK\0` v1 wrapper for one
+  revision-0 `MaterialCard`. FSMATPK itself carries no material identity
+  (its `pack_id` is a free-text name, not a `MaterialStateId`), so this
+  wrapper binds a caller-declared named state (chemistry/phase/process at
+  revision 0; blanks and nonzero revisions refuse) around a complete
+  `NormalizedPack` claim payload. Decode re-admits the nested claim pack and
+  verifies both its hash and the reconstructed material-card hash before
+  accepting canonical bytes, so a runtime consumer reconstructs exactly the
+  card a project binding references by content hash. Claim selection is
+  deliberately NOT performed at compile time: the card transports its
+  complete claim set and requirement-driven selection happens at binding
+  time, where it leaves a replayable usage receipt. V1 carries no
+  constitutive model cards; model-law transport requires a separately
+  versioned binding and cannot be smuggled through this wrapper.
 - `NormalizedModelPack` — a separate bounded `FSMODPK` v1 transport for
   immutable `ConstitutiveModelCard`s. Model cards are not laundered into
   scalar property claims: the pack retains each law/version, dimensioned
@@ -372,6 +386,14 @@ verified exact binary round-trip; G3 phase/EOS/positive-value/provenance gates,
 complete dimension-linked receipt coverage, pack/species identity binding,
 whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
 
+`tests/material_pack.rs` (frankensim-hp7tb): G0 deterministic canonical
+round-trip with magic/version pins, whole-pack identity verification, and
+reconstructed-card accessor checks; a binding-style claim-set query on the
+reconstructed card whose usage receipt replays against the decoded claim set;
+declared-state identity movement; magic/version/truncation/trailing-byte and
+pinned-hash-mismatch refusals; blank-state and nonzero-revision admission
+refusals.
+
 `tests/pcb.rs` (f85xj.5.6): G0 hand calculations for parallel in-plane and
 series through-plane rules; exact Reuss/Voigt ordering; single-layer and
 zero-coverage degeneracies; bounded material/coverage corner containment;
@@ -462,6 +484,12 @@ Wankel-housing authority.
   and certification live in fs-evidence and are assigned at the PR-4
   query boundary, never at insertion.
 - `Unstated` uncertainty is a marked absence, not zero uncertainty.
+- A `NormalizedMaterialCardPack` binds already-admitted claims to a
+  caller-declared material state and reproduces identities. It does not
+  authenticate the declared state, does not claim the nested claim set is
+  complete or even relevant for that state, and does not re-evaluate
+  redistribution terms; those remain offline-compiler and caller
+  responsibilities.
 - Interface/system properties (friction, wetting, contact conductance)
   are NOT expressible as bulk claims — they wait for
   InterfaceSystemCard (PR-3), because they are system+history
