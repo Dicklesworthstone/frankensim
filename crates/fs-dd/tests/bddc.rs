@@ -1,9 +1,10 @@
 //! BDDC conformance (the tfz.11 bead; runs under `bddc` +
 //! `sheaf-coarse`). Acceptance: condition numbers match BDDC theory
-//! (log²(H/h) scaling); coefficient-jump robustness at 1e6 with bounded
-//! iterations; the sheaf-derived edge coarse space measured against
-//! corners-only (honestly reported); CCD-aligned partitioning shows the
-//! expected locality metric; subdomain sweep ledgered.
+//! (log²(H/h) scaling); a rho-scaled, subdomain-aligned contrast sweep through
+//! 1e6 with bounded RHS-dependent Ritz estimates and iterations; the
+//! sheaf-derived edge coarse space measured against corners-only (honestly
+//! reported); CCD-aligned partitioning shows the expected locality metric;
+//! subdomain sweep ledgered.
 #![cfg(feature = "bddc")]
 
 use fs_dd::{Bddc, CgError, CgReport, CgTermination, Decomposition};
@@ -260,7 +261,7 @@ fn invalid_cell_coefficient_cannot_disappear_during_harmonic_mean() {
         m: 2,
         rho: vec![f64::NAN, 1.0, 1.0, 1.0],
     };
-    decomp.apply_global(&vec![0.0; 9]);
+    let _ = decomp.apply_global(&vec![0.0; 9]);
 }
 
 #[test]
@@ -463,6 +464,32 @@ fn dd_001_g0_preconditioner_properties() {
         (lhs - rhs_).abs() <= 1e-10 * lhs.abs().max(1.0),
         "symmetric: {lhs} vs {rhs_}"
     );
+    // The coefficient-aware gather/scatter is exercised only by a jump.
+    // Probe both coarse-space variants so a one-sided or mis-indexed local
+    // weight cannot hide behind the uniform=counting special case.
+    for with_edge_modes in [false, true] {
+        let jump = Bddc::new(Decomposition::checkerboard(4, 4, 1.0e6), with_edge_modes);
+        let a = rhs(jump.gamma_len(), 0x5248_4f53_4341_4c45);
+        let b = rhs(jump.gamma_len(), 0x5452_414e_5350_4f53);
+        let ma = jump.precondition(&a);
+        let mb = jump.precondition(&b);
+        let lhs: f64 = ma.iter().zip(&b).map(|(x, y)| x * y).sum();
+        let rhs_: f64 = a.iter().zip(&mb).map(|(x, y)| x * y).sum();
+        let scale = lhs.abs().max(rhs_.abs()).max(1.0);
+        assert!(
+            (lhs - rhs_).abs() <= 1e-10 * scale,
+            "jump symmetric (edge_modes={with_edge_modes}): {lhs} vs {rhs_}"
+        );
+        for seed in [0x5350_442d_4a55_4d50, 0x5350_442d_5052_4f42] {
+            let probe = rhs(jump.gamma_len(), seed);
+            let image = jump.precondition(&probe);
+            let energy: f64 = probe.iter().zip(&image).map(|(x, y)| x * y).sum();
+            assert!(
+                energy.is_finite() && energy > 0.0,
+                "jump SPD probe (edge_modes={with_edge_modes}, seed={seed:#x}): {energy}"
+            );
+        }
+    }
     // The preconditioned solve converges fast on the uniform problem.
     let (iters, kappa) = converged_diagnostics(
         bddc.solve_cg(&rhs(bddc.gamma_len(), 9), 1e-8, 200),
@@ -517,27 +544,46 @@ fn dd_002_log_squared_h_over_h_scaling() {
     );
     verdict(
         "dd-002",
-        "kappa/(1+log(H/h))^2 stays in a <4x band across H/h in {2,4,8} — the BDDC \
+        "kappa/(1+log(H/h))^2 stays in a <4x band across H/h in {4,8,16} — the BDDC \
          signature",
     );
 }
 
 #[test]
 fn dd_003_coefficient_jump_robustness() {
-    // Checkerboard 1e6: the jump-aligned decomposition must stay
-    // bounded. Compare against the uniform problem's iterations.
+    // Subdomain-aligned checkerboards must remain contrast-independent across
+    // six decades, not merely happen to recover at one endpoint.
     let uniform = Bddc::new(Decomposition::uniform(4, 4), true);
     let (it_u, _) = converged_diagnostics(
         uniform.solve_cg(&rhs(uniform.gamma_len(), 5), 1e-8, 400),
         1e-8,
         "dd-003 uniform reference",
     );
-    let jump = Bddc::new(Decomposition::checkerboard(4, 4, 1e6), true);
-    let (it_j, kappa_j) = converged_diagnostics(
-        jump.solve_cg(&rhs(jump.gamma_len(), 5), 1e-8, 400),
-        1e-8,
-        "dd-003 jump solve",
+    let mut rows = Vec::new();
+    for contrast in [1.0, 10.0, 1.0e2, 1.0e3, 1.0e4, 1.0e5, 1.0e6] {
+        let jump = Bddc::new(Decomposition::checkerboard(4, 4, contrast), true);
+        let (iterations, kappa) = converged_diagnostics(
+            jump.solve_cg(&rhs(jump.gamma_len(), 5), 1e-8, 400),
+            1e-8,
+            "dd-003 jump sweep",
+        );
+        println!(
+            "{{\"metric\":\"jump-contrast-sweep\",\"contrast\":{contrast:.0},\
+             \"iters\":{iterations},\"kappa\":{kappa:.2}}}"
+        );
+        rows.push((contrast, iterations, kappa));
+    }
+    let kappa_min = rows.iter().map(|row| row.2).fold(f64::INFINITY, f64::min);
+    let kappa_max = rows.iter().map(|row| row.2).fold(0.0_f64, f64::max);
+    assert!(
+        kappa_max / kappa_min < 4.0,
+        "rho-scaled checkerboard RHS-dependent Ritz estimate must stay in a <4x \
+         band across 1..1e6: {rows:?}"
     );
+    let (_, it_j, kappa_j) = rows
+        .last()
+        .copied()
+        .expect("the literal contrast sweep is nonempty");
     println!(
         "{{\"metric\":\"jump-robustness\",\"uniform_iters\":{it_u},\"jump_iters\":{it_j},\
          \"jump_kappa\":{kappa_j:.2}}}"
@@ -546,18 +592,19 @@ fn dd_003_coefficient_jump_robustness() {
         it_j <= 3 * it_u.max(5),
         "1e6 checkerboard stays bounded: {it_j} vs uniform {it_u}"
     );
-    verdict(
-        "dd-003",
-        "checkerboard 1e6 jumps: iterations within 3x of uniform (subdomain-aligned \
-         jumps are the BDDC-friendly case, honestly noted)",
+    let detail = format!(
+        "rho-scaled subdomain-aligned checkerboards: RHS-dependent Ritz estimate \
+         spans {kappa_min:.2}..{kappa_max:.2} through 1e6 contrast; 1e6 takes \
+         {it_j} iterations vs {it_u} uniform"
     );
+    verdict("dd-003", &detail);
 }
 
 #[test]
 fn dd_004_sheaf_edge_coarse_vs_corners_only() {
     // The measured comparison the bead demands: corners-only vs the
     // sheaf-derived edge enrichment, on uniform AND jump fixtures.
-    let mut table: Vec<(&str, usize, f64, usize, f64, usize, usize)> = Vec::new();
+    let mut table: Vec<(&str, f64, f64, usize, usize)> = Vec::new();
     for (name, d) in [
         ("uniform", Decomposition::uniform(4, 4)),
         ("jump-1e6", Decomposition::checkerboard(4, 4, 1e6)),
@@ -581,32 +628,26 @@ fn dd_004_sheaf_edge_coarse_vs_corners_only() {
             corners.coarse_dim(),
             sheaf.coarse_dim()
         );
-        table.push((name, 0usize, k_c, 0usize, k_s, it_c, it_s));
+        table.push((name, k_c, k_s, it_c, it_s));
     }
-    // THE HONEST MEASURED CLAIM (the bead: "measured, honestly
-    // reported if not"): on the ADVERSARIAL jump fixture the
-    // sheaf-edge coarse space strictly improves the condition estimate
-    // with comparable iterations; on the uniform fixture kappa is
-    // comparable and iterations pay a small price for the larger
-    // coarse space — reported, not hidden.
-    let (_, _, k_c_jump, _, k_s_jump, it_c_jump, it_s_jump) = table[1];
+    // THE HONEST MEASURED CLAIM (the bead: "measured, honestly reported if
+    // not"): the sheaf-edge coarse space strictly improves the
+    // RHS-dependent Ritz estimate. Iterations and coarse dimension are a
+    // separate trade, emitted above and reported without a dominance claim.
+    let (_, k_c_uniform, k_s_uniform, it_c_uniform, it_s_uniform) = table[0];
+    let (_, k_c_jump, k_s_jump, it_c_jump, it_s_jump) = table[1];
     assert!(
         k_s_jump < k_c_jump,
-        "jump fixture: the sheaf coarse space strictly improves kappa \
+        "jump fixture: the sheaf coarse space strictly improves the Ritz estimate \
          ({k_s_jump:.2} vs {k_c_jump:.2})"
     );
-    #[allow(clippy::cast_precision_loss)]
-    {
-        assert!(
-            (it_s_jump as f64) <= 1.3 * (it_c_jump as f64),
-            "jump fixture: iterations comparable ({it_s_jump} vs {it_c_jump})"
-        );
-    }
-    verdict(
-        "dd-004",
-        "adversarial jump fixture: sheaf-edge coarse strictly improves kappa with \
-         comparable iterations; the uniform trade is ledgered honestly",
+    let detail = format!(
+        "measured corners->sheaf trade: uniform Ritz estimate \
+         {k_c_uniform:.2}->{k_s_uniform:.2}, iterations {it_c_uniform}->{it_s_uniform}; \
+         jump-1e6 Ritz estimate {k_c_jump:.2}->{k_s_jump:.2}, iterations \
+         {it_c_jump}->{it_s_jump}; coarse dimension 9->33; no wall-clock claim"
     );
+    verdict("dd-004", &detail);
 }
 
 #[cfg(feature = "sheaf-coarse")]

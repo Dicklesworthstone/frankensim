@@ -1,10 +1,10 @@
 //! fs-dd — DOMAIN DECOMPOSITION (plan §8.9, bead tfz.11; [M] — behind
 //! the `bddc` / `sheaf-coarse` features until Gauntlet evidence
 //! promotes them). BDDC substructuring on the 2-D model problem:
-//! corners-primal coarse spaces with weighted interface averaging, the
-//! SHEAF-HARMONIC edge enrichment (the same cellular-sheaf machinery as
-//! watertightness — Bet 11 earning its keep twice), coefficient-jump
-//! robustness, and CCD-aligned partitioning metrics. Layer L3.
+//! corners-primal coarse spaces with coefficient-scaled interface averaging,
+//! the SHEAF-HARMONIC edge enrichment (the same cellular-sheaf machinery as
+//! watertightness — Bet 11 earning its keep twice), subdomain-aligned
+//! coefficient-jump evidence, and CCD-aligned partitioning metrics. Layer L3.
 //!
 //! The model problem is the variable-coefficient 5-point Laplacian on
 //! the unit square (spectrally equivalent to P1 FEM — the setting BDDC
@@ -253,6 +253,9 @@ struct Subdomain {
     /// Global interface/corner node ids on this subdomain's boundary
     /// (excluding the outer Dirichlet rim).
     boundary: Vec<usize>,
+    /// Standard nodal rho-scaling on `boundary`, normalized across every
+    /// subdomain sharing the corresponding global node.
+    boundary_weight: Vec<f64>,
     /// Factored K_II (interior-interior).
     l_ii: Vec<Vec<f64>>,
     /// K_IB (interior × boundary).
@@ -443,8 +446,6 @@ pub struct Bddc {
     gpos: BTreeMap<usize, usize>,
     /// Corner nodes (subset of gamma), sorted.
     corners: Vec<usize>,
-    /// Multiplicity weights per gamma node (counting functions).
-    weight: Vec<f64>,
     /// Extra coarse edge-average vectors (sheaf enrichment), each a
     /// gamma-sized vector.
     edge_modes: Vec<Vec<f64>>,
@@ -473,6 +474,40 @@ impl SubdomainBounds {
     fn contains(self, x: usize, y: usize) -> bool {
         x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
     }
+}
+
+/// Standard nodal rho-scaling numerator for one subdomain trace.
+///
+/// For a boundary basis function, rho-scaling uses the largest coefficient
+/// among the cells in this subdomain that touch the node. This is exactly the
+/// subdomain coefficient on the checkerboard fixture while remaining defined
+/// for the public arbitrary per-cell coefficient field.
+fn local_nodal_coefficient(d: &Decomposition, bounds: SubdomainBounds, x: usize, y: usize) -> f64 {
+    let n = d.n();
+    let mut coefficient = 0.0_f64;
+    for cy in [y.checked_sub(1), Some(y)].into_iter().flatten() {
+        for cx in [x.checked_sub(1), Some(x)].into_iter().flatten() {
+            if cx >= bounds.x0
+                && cx < bounds.x1
+                && cy >= bounds.y0
+                && cy < bounds.y1
+                && cx < n
+                && cy < n
+            {
+                let local = d.rho[cy * n + cx];
+                assert!(
+                    local.is_finite() && local > 0.0,
+                    "cell coefficients must be finite and positive"
+                );
+                coefficient = coefficient.max(local);
+            }
+        }
+    }
+    assert!(
+        coefficient.is_finite() && coefficient > 0.0,
+        "each retained subdomain-boundary node must touch a local cell"
+    );
+    coefficient
 }
 
 fn local_stiffness(d: &Decomposition, nodes: &[usize], bounds: SubdomainBounds) -> Vec<Vec<f64>> {
@@ -561,24 +596,55 @@ impl Bddc {
                 if ni > 0 {
                     cholesky_factor(&mut k_ii);
                 }
+                let boundary_weight = boundary
+                    .iter()
+                    .map(|&g| local_nodal_coefficient(&decomp, bounds, g % np, g / np))
+                    .collect();
                 subs.push(Subdomain {
                     interior,
                     boundary,
+                    boundary_weight,
                     l_ii: k_ii,
                     k_ib,
                     k_bb,
                 });
             }
         }
-        // Counting weights: 1 / (number of subdomains sharing the node).
-        let mut weight = vec![0.0f64; gamma.len()];
+        // Standard rho-scaling:
+        //
+        //   delta_i(g) = rho_i(g) / sum_{j containing g} rho_j(g).
+        //
+        // Form the ratio through a per-node maximum so the denominator cannot
+        // overflow when every admitted coefficient is finite but very large.
+        let mut max_weight = vec![0.0f64; gamma.len()];
         for sub in &subs {
-            for &g in &sub.boundary {
-                weight[gpos[&g]] += 1.0;
+            for (&g, &raw) in sub.boundary.iter().zip(&sub.boundary_weight) {
+                let slot = gpos[&g];
+                max_weight[slot] = max_weight[slot].max(raw);
             }
         }
-        for w in &mut weight {
-            *w = 1.0 / *w;
+        assert!(
+            max_weight
+                .iter()
+                .all(|weight| weight.is_finite() && *weight > 0.0),
+            "every gamma node must have a finite positive rho-scaling numerator"
+        );
+        let mut scaled_sum = vec![0.0f64; gamma.len()];
+        for sub in &subs {
+            for (&g, &raw) in sub.boundary.iter().zip(&sub.boundary_weight) {
+                let slot = gpos[&g];
+                scaled_sum[slot] += raw / max_weight[slot];
+            }
+        }
+        assert!(
+            scaled_sum.iter().all(|sum| sum.is_finite() && *sum >= 1.0),
+            "every gamma node must have a finite rho-scaling denominator"
+        );
+        for sub in &mut subs {
+            for (&g, weight) in sub.boundary.iter().zip(&mut sub.boundary_weight) {
+                let slot = gpos[&g];
+                *weight = (*weight / max_weight[slot]) / scaled_sum[slot];
+            }
         }
         // Sheaf-derived edge modes: one average constraint per open
         // interface edge (nodes shared by exactly 2 subdomains, grouped
@@ -610,7 +676,6 @@ impl Bddc {
             gamma,
             gpos,
             corners,
-            weight,
             edge_modes,
             local_schur: Vec::new(),
             local_deflate: Vec::new(),
@@ -755,16 +820,19 @@ impl Bddc {
         out
     }
 
-    /// The BDDC preconditioner application (corners + optional
-    /// sheaf-edge coarse space; weighted local corrections). All
-    /// factorizations were computed once at construction.
+    /// The BDDC preconditioner application: nodal rho-scaled local corrections
+    /// plus the corners + optional sheaf-edge continuous coarse correction.
+    /// All factorizations were computed once at construction.
     #[must_use]
     pub fn precondition(&self, r: &[f64]) -> Vec<f64> {
-        // Weighted residual.
-        let rw: Vec<f64> = r.iter().zip(&self.weight).map(|(a, w)| a * w).collect();
         let mut z = vec![0.0f64; r.len()];
         // LOCAL corrections from the pre-factored free-boundary blocks,
-        // DEFLATED against the coarse edge modes (P S_loc^{-1} P r).
+        // DEFLATED against the coarse edge modes. The same subdomain-local
+        // diagonal scaling acts on gather and scatter:
+        //
+        //   sum_i R_i^T D_i P_i S_i^-1 P_i D_i R_i.
+        //
+        // Using the same D_i on both sides preserves symmetry.
         for ((sub, (free, l_loc)), deflate) in self
             .subs
             .iter()
@@ -776,7 +844,7 @@ impl Bddc {
             }
             let mut rhs: Vec<f64> = free
                 .iter()
-                .map(|&i| rw[self.gpos[&sub.boundary[i]]])
+                .map(|&i| sub.boundary_weight[i] * r[self.gpos[&sub.boundary[i]]])
                 .collect();
             for v in deflate {
                 let proj: f64 = rhs.iter().zip(v).map(|(a, b)| a * b).sum();
@@ -792,15 +860,18 @@ impl Bddc {
                 }
             }
             for (a, &fa) in free.iter().enumerate() {
-                z[self.gpos[&sub.boundary[fa]]] += sol[a];
+                z[self.gpos[&sub.boundary[fa]]] += sub.boundary_weight[fa] * sol[a];
             }
         }
-        // COARSE correction from the pre-factored Galerkin matrix.
+        // COARSE correction from the pre-factored global Galerkin matrix.
+        // The basis is already continuous on gamma. Since the D_i form a
+        // partition of unity, their gather/scatter sums cancel on this global
+        // component; applying one fabricated global weight would damp it.
         if !self.coarse_basis.is_empty() {
             let rhs: Vec<f64> = self
                 .coarse_basis
                 .iter()
-                .map(|v| v.iter().zip(&rw).map(|(a, b)| a * b).sum())
+                .map(|v| v.iter().zip(r).map(|(a, b)| a * b).sum())
                 .collect();
             let coef = cholesky_solve(&self.coarse_l, &rhs);
             for (k, v) in self.coarse_basis.iter().enumerate() {
@@ -809,8 +880,7 @@ impl Bddc {
                 }
             }
         }
-        // Re-weight the output (the transpose of the input weighting).
-        z.iter().zip(&self.weight).map(|(a, w)| a * w).collect()
+        z
     }
 
     /// Preconditioned CG on the Schur system with explicit termination,
@@ -1413,7 +1483,84 @@ fn bisect_ritz(d: &[f64], e: &[f64], radius: f64, target: usize) -> Option<f64> 
 
 #[cfg(test)]
 mod tests {
-    use super::{lanczos_condition_estimate, lanczos_prefix_condition_estimate};
+    use super::{
+        Bddc, Decomposition, lanczos_condition_estimate, lanczos_prefix_condition_estimate,
+    };
+
+    #[test]
+    fn rho_scaling_is_a_coefficient_aware_partition_of_unity() {
+        let uniform = Bddc::new(Decomposition::uniform(4, 4), false);
+        for sub in &uniform.subs {
+            for (&g, &weight) in sub.boundary.iter().zip(&sub.boundary_weight) {
+                let multiplicity = uniform
+                    .subs
+                    .iter()
+                    .filter(|candidate| candidate.boundary.contains(&g))
+                    .count();
+                let expected =
+                    1.0 / f64::from(u32::try_from(multiplicity).expect("at most four subdomains"));
+                assert_eq!(
+                    weight.to_bits(),
+                    expected.to_bits(),
+                    "uniform rho-scaling must reduce exactly to counting at node {g}"
+                );
+            }
+        }
+
+        let jump = Bddc::new(Decomposition::checkerboard(4, 4, 1.0e6), false);
+        let mut sums = vec![0.0_f64; jump.gamma.len()];
+        let mut smallest = 1.0_f64;
+        let mut largest = 0.0_f64;
+        for sub in &jump.subs {
+            for (&g, &weight) in sub.boundary.iter().zip(&sub.boundary_weight) {
+                assert!(
+                    weight.is_finite() && (0.0..=1.0).contains(&weight),
+                    "node {g} has invalid rho weight {weight}"
+                );
+                sums[jump.gpos[&g]] += weight;
+                smallest = smallest.min(weight);
+                largest = largest.max(weight);
+            }
+        }
+        for (slot, sum) in sums.into_iter().enumerate() {
+            assert!(
+                (sum - 1.0).abs() <= 8.0 * f64::EPSILON,
+                "gamma slot {slot} weights sum to {sum}, not one"
+            );
+        }
+        assert!(
+            smallest < 2.0e-6 && largest > 1.0 - 2.0e-6,
+            "the 1e6 jump must bias shared edge nodes: [{smallest}, {largest}]"
+        );
+
+        // Spatial falsifier for an invalid one-number-per-subdomain shortcut.
+        // At interface node (2,1), the incident maxima are 8 on the left and
+        // 5 on the right. The much larger coefficient at non-incident cell
+        // (0,0) must not affect this node's weights.
+        let mut spatial = Decomposition::uniform(2, 2);
+        let n = spatial.s * spatial.m;
+        spatial.rho[0] = 1.0e6;
+        spatial.rho[1] = 8.0;
+        spatial.rho[n + 1] = 2.0;
+        spatial.rho[2] = 5.0;
+        spatial.rho[n + 2] = 3.0;
+        let spatial = Bddc::new(spatial, false);
+        let node = spatial.decomp.node(2, 1);
+        let left_slot = spatial.subs[0]
+            .boundary
+            .iter()
+            .position(|candidate| *candidate == node)
+            .expect("left trace owns target node");
+        let right_slot = spatial.subs[1]
+            .boundary
+            .iter()
+            .position(|candidate| *candidate == node)
+            .expect("right trace owns target node");
+        let left = spatial.subs[0].boundary_weight[left_slot];
+        let right = spatial.subs[1].boundary_weight[right_slot];
+        assert!((left - 8.0 / 13.0).abs() <= f64::EPSILON, "{left}");
+        assert!((right - 5.0 / 13.0).abs() <= f64::EPSILON, "{right}");
+    }
 
     #[test]
     fn lanczos_condition_estimate_rejects_malformed_evidence() {

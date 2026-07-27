@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Domain decomposition: BDDC substructuring with corners-primal coarse spaces, sheaf-harmonic edge enrichment (Bet 11's second consumer), coefficient-jump robustness, and CCD-aligned partitioning metrics."
+description = "Domain decomposition: BDDC substructuring with nodal rho scaling, corners-primal and sheaf-harmonic coarse spaces, subdomain-aligned coefficient-jump evidence, and CCD-locality metrics."
 
 [package.metadata.frankensim]
 layer = "L3"
