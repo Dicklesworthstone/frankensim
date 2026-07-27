@@ -197,8 +197,9 @@ impl crate::Csr {
     /// k-ascending order — bitwise equality with per-column SpMV is
     /// GATED in conformance.
     pub fn spmm_blocked(&self, b: &[f64], nrhs: usize, y: &mut [f64]) {
-        assert_eq!(b.len(), self.ncols() * nrhs, "spmm: B is ncols x nrhs");
-        assert_eq!(y.len(), self.nrows() * nrhs, "spmm: Y is nrows x nrhs");
+        let (b_len, y_len) = self.checked_spmm_buffer_lengths(nrhs);
+        assert_eq!(b.len(), b_len, "spmm: B is ncols x nrhs");
+        assert_eq!(y.len(), y_len, "spmm: Y is nrows x nrhs");
         crate::fma::spmm_blocked_dispatch(self, b, nrhs, y);
     }
 

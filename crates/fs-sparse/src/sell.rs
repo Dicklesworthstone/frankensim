@@ -13,6 +13,80 @@
 
 use crate::Csr;
 
+/// Structured refusal from [`Sell::from_csr`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SellError {
+    /// A SELL chunk must contain at least one lane.
+    InvalidChunkHeight {
+        /// The refused chunk height.
+        chunk_height: usize,
+    },
+    /// The requested layout cannot be represented by `usize` storage offsets.
+    GeometryOverflow {
+        /// Layout operation whose result was not representable.
+        operation: &'static str,
+        /// Left operand of the checked operation.
+        lhs: usize,
+        /// Right operand of the checked operation.
+        rhs: usize,
+    },
+}
+
+impl std::fmt::Display for SellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SellError::InvalidChunkHeight { chunk_height } => {
+                write!(
+                    f,
+                    "SELL chunk height must be at least 1, got {chunk_height}"
+                )
+            }
+            SellError::GeometryOverflow {
+                operation,
+                lhs,
+                rhs,
+            } => write!(
+                f,
+                "SELL geometry overflow while {operation}: operands {lhs} and {rhs}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SellError {}
+
+fn checked_geometry_add(
+    operation: &'static str,
+    lhs: usize,
+    rhs: usize,
+) -> Result<usize, SellError> {
+    lhs.checked_add(rhs).ok_or(SellError::GeometryOverflow {
+        operation,
+        lhs,
+        rhs,
+    })
+}
+
+fn checked_geometry_mul(
+    operation: &'static str,
+    lhs: usize,
+    rhs: usize,
+) -> Result<usize, SellError> {
+    lhs.checked_mul(rhs).ok_or(SellError::GeometryOverflow {
+        operation,
+        lhs,
+        rhs,
+    })
+}
+
+fn bounded_worker_count(requested: usize, useful_chunks: usize) -> usize {
+    let host_parallelism = std::thread::available_parallelism().map_or(1, |count| count.get());
+    requested
+        .max(1)
+        .min(useful_chunks.max(1))
+        .min(host_parallelism)
+}
+
 /// Sliced ELL with sorting window. Row `perm[r]`'s data lives in lane
 /// `r % C` of chunk `r / C` (r is the SORTED position; `perm` maps sorted
 /// position → original row).
@@ -40,10 +114,18 @@ impl Sell {
     /// internally. Sorting is STABLE by descending length, so equal-length
     /// rows keep matrix order — the permutation is a pure function of the
     /// structure (deterministic).
-    #[must_use]
-    pub fn from_csr(a: &Csr, c: usize, sigma: usize) -> Sell {
-        assert!(c >= 1, "chunk height must be at least 1");
-        let sigma = sigma.max(c).div_ceil(c) * c;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SellError::InvalidChunkHeight`] when `c == 0`, or
+    /// [`SellError::GeometryOverflow`] when the rounded sorting window or
+    /// lane-fastest storage geometry cannot be represented by `usize`.
+    pub fn from_csr(a: &Csr, c: usize, sigma: usize) -> Result<Sell, SellError> {
+        if c == 0 {
+            return Err(SellError::InvalidChunkHeight { chunk_height: c });
+        }
+        let sigma_chunks = sigma.max(c).div_ceil(c);
+        let sigma = checked_geometry_mul("rounding sigma to chunk height", sigma_chunks, c)?;
         let nrows = a.nrows();
         let mut perm: Vec<usize> = (0..nrows).collect();
         for window in perm.chunks_mut(sigma) {
@@ -51,13 +133,16 @@ impl Sell {
         }
         let nchunks = nrows.div_ceil(c);
         let row_len: Vec<usize> = perm.iter().map(|&r| a.row(r).0.len()).collect();
-        let mut chunk_ptr = vec![0usize; nchunks + 1];
+        let chunk_ptr_len = checked_geometry_add("sizing the chunk pointer table", nchunks, 1)?;
+        let mut chunk_ptr = vec![0usize; chunk_ptr_len];
         for ch in 0..nchunks {
-            let width = (ch * c..((ch + 1) * c).min(nrows))
-                .map(|p| row_len[p])
-                .max()
-                .unwrap_or(0);
-            chunk_ptr[ch + 1] = chunk_ptr[ch] + width * c;
+            let row0 = checked_geometry_mul("locating a chunk row start", ch, c)?;
+            let next_chunk = checked_geometry_add("locating the next chunk", ch, 1)?;
+            let row1 = checked_geometry_mul("locating a chunk row end", next_chunk, c)?.min(nrows);
+            let width = (row0..row1).map(|p| row_len[p]).max().unwrap_or(0);
+            let chunk_slots = checked_geometry_mul("sizing a chunk", width, c)?;
+            chunk_ptr[next_chunk] =
+                checked_geometry_add("accumulating chunk storage", chunk_ptr[ch], chunk_slots)?;
         }
         let total = chunk_ptr[nchunks];
         let mut col_idx = vec![0usize; total];
@@ -66,11 +151,14 @@ impl Sell {
             let (ch, lane) = (pos / c, pos % c);
             let (cols, values) = a.row(orig);
             for (k, (&cc, &vv)) in cols.iter().zip(values).enumerate() {
-                col_idx[chunk_ptr[ch] + k * c + lane] = cc;
-                vals[chunk_ptr[ch] + k * c + lane] = vv;
+                let stride = checked_geometry_mul("locating a SELL slot", k, c)?;
+                let slot = checked_geometry_add("offsetting a SELL slot", chunk_ptr[ch], stride)?;
+                let slot = checked_geometry_add("selecting a SELL lane", slot, lane)?;
+                col_idx[slot] = cc;
+                vals[slot] = vv;
             }
         }
-        Sell {
+        Ok(Sell {
             c,
             sigma,
             nrows,
@@ -80,7 +168,7 @@ impl Sell {
             chunk_ptr,
             col_idx,
             vals,
-        }
+        })
     }
 
     /// Exact (bitwise-lossless) expansion back to CSR: true row lengths are
@@ -201,11 +289,14 @@ impl Sell {
     pub(crate) fn spmv_chunked_body(&self, x: &[f64], y: &mut [f64]) {
         let c = self.c;
         let nchunks = self.chunk_ptr.len() - 1;
-        let mut acc = vec![0.0f64; c];
+        if nchunks == 0 {
+            return;
+        }
+        let mut acc = vec![0.0f64; c.min(self.nrows)];
         for ch in 0..nchunks {
             let base = self.chunk_ptr[ch];
             let kmax = (self.chunk_ptr[ch + 1] - base) / c;
-            let row0 = ch * c;
+            let row0 = ch.saturating_mul(c).min(self.nrows);
             let live = self.nrows.saturating_sub(row0).min(c);
             acc.fill(0.0);
             for k in 0..kmax {
@@ -230,13 +321,18 @@ impl Sell {
     #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn shard_body(&self, x: &[f64], lo: usize, hi: usize) -> Vec<(usize, f64)> {
+        if lo >= hi {
+            return Vec::new();
+        }
         let c = self.c;
-        let mut out = Vec::with_capacity((hi - lo) * c);
-        let mut acc = vec![0.0f64; c];
+        let row_lo = lo.saturating_mul(c).min(self.nrows);
+        let row_hi = hi.saturating_mul(c).min(self.nrows);
+        let mut out = Vec::with_capacity(row_hi - row_lo);
+        let mut acc = vec![0.0f64; self.nrows.saturating_sub(row_lo).min(c)];
         for ch in lo..hi {
             let base = self.chunk_ptr[ch];
             let kmax = (self.chunk_ptr[ch + 1] - base) / c;
-            let row0 = ch * c;
+            let row0 = ch.saturating_mul(c).min(self.nrows);
             let live = self.nrows.saturating_sub(row0).min(c);
             acc.fill(0.0);
             for k in 0..kmax {
@@ -263,26 +359,30 @@ impl Sell {
     pub fn spmv_chunked_sharded(&self, x: &[f64], y: &mut [f64], threads: usize) {
         assert_eq!(x.len(), self.ncols, "spmv: x length");
         assert_eq!(y.len(), self.nrows, "spmv: y length");
-        let t = threads.max(1);
         let nchunks = self.chunk_ptr.len() - 1;
+        if nchunks == 0 {
+            return;
+        }
+        let t = bounded_worker_count(threads, nchunks);
         let per = nchunks.div_ceil(t);
         // Each thread owns disjoint ROWS (chunks partition sorted rows;
         // perm is a bijection), so unsynchronized writes through a raw
         // pointer wrapper would be needed... instead: write into a
         // per-thread staging of (orig_row, value) pairs and apply
         // serially — the apply order is chunk-ascending, deterministic.
-        let mut stages: Vec<Vec<(usize, f64)>> = Vec::new();
+        let mut stages: Vec<Vec<(usize, f64)>> = Vec::with_capacity(t);
         std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for w in 0..t {
-                let lo = (w * per).min(nchunks);
-                let hi = ((w + 1) * per).min(nchunks);
+            let mut handles = Vec::with_capacity(t);
+            let mut lo = 0usize;
+            while lo < nchunks {
+                let hi = lo.saturating_add(per).min(nchunks);
                 handles.push(scope.spawn(move || {
                     // Closures are separate codegen units: target_feature
                     // does NOT propagate in, so the shard body dispatches
                     // HERE (one detection per shard — bead nabk).
                     crate::fma::sell_shard_dispatch(self, x, lo, hi)
                 }));
+                lo = hi;
             }
             for h in handles {
                 stages.push(h.join().expect("chunk worker"));
@@ -305,7 +405,7 @@ mod tests {
     fn round_trip_is_bitwise_lossless() {
         for (n, c, sigma) in [(50usize, 4usize, 16usize), (64, 8, 8), (7, 4, 32)] {
             let a = random_coo(n, n, 5, 0x5E11 + n as u64).assemble();
-            let s = Sell::from_csr(&a, c, sigma);
+            let s = Sell::from_csr(&a, c, sigma).expect("test SELL geometry is representable");
             let back = s.to_csr();
             assert_eq!(a.nnz(), back.nnz());
             for r in 0..n {
@@ -334,7 +434,7 @@ mod tests {
                 coo.push(n / 2, col, 0.25); // dense row
             }
             let a = coo.assemble();
-            let s = Sell::from_csr(&a, c, sigma);
+            let s = Sell::from_csr(&a, c, sigma).expect("test SELL geometry is representable");
             let x: Vec<f64> = (0..n).map(|_| lcg()).collect();
             let (mut y1, mut y2) = (vec![0.0; n], vec![0.0; n]);
             a.spmv(&x, &mut y1);
@@ -362,8 +462,8 @@ mod tests {
             coo.push(0, col, 1.0);
         }
         let a = coo.assemble();
-        let unsorted = Sell::from_csr(&a, 8, 8); // sigma == C → no sorting effect
-        let sorted = Sell::from_csr(&a, 8, 64);
+        let unsorted = Sell::from_csr(&a, 8, 8).expect("test SELL geometry is representable"); // sigma == C → no sorting effect
+        let sorted = Sell::from_csr(&a, 8, 64).expect("test SELL geometry is representable");
         assert!(
             sorted.physical_slots() <= unsorted.physical_slots(),
             "sorting must not increase padding: {} vs {}",
@@ -372,7 +472,7 @@ mod tests {
         );
         // Laplacian is near-uniform: padding overhead should be tiny.
         let lap = laplacian_2d(16);
-        let s = Sell::from_csr(&lap, 8, 64);
+        let s = Sell::from_csr(&lap, 8, 64).expect("test SELL geometry is representable");
         let overhead = s.physical_slots() as f64 / lap.nnz() as f64;
         assert!(
             overhead < 1.35,

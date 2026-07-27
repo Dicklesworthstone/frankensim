@@ -32,7 +32,9 @@ results are machine-specific, not a universal throughput guarantee.
   never invented by a conversion). `to_csr` drops exact-zero fill.
 - `Sell` — SELL-C-σ, stable-sorted by descending row length within σ-row
   windows, lane-fastest layout. Stores TRUE per-row lengths; pad slots exist
-  physically but are never read. `to_csr` is bitwise lossless.
+  physically but are never read. `Sell::from_csr` returns `Result` and refuses
+  zero chunk height or unrepresentable sorting/storage geometry through
+  `SellError`; `to_csr` is bitwise lossless.
 - `ops::{transpose, symmetrize, spgemm, spgemm_sparse_spa}` — pattern
   algebra on canonical CSR. `spgemm` is the dense-SPA reference path;
   `spgemm_sparse_spa` uses a per-row BTree accumulator for very wide products
@@ -101,7 +103,9 @@ spmv/spmm/spgemm/symmetrize, indivisible BSR block shapes. These are
 programmer errors; silently proceeding would void determinism claims. No
 allocation-failure handling beyond std's. The checkpointed CSR constructor
 instead returns `Ok(None)` for malformed canonical parts and passes through a
-caller checkpoint error as `Err`.
+caller checkpoint error as `Err`. SELL tuning parameters are a separate typed
+admission boundary: `Sell::from_csr` returns `SellError::InvalidChunkHeight`
+or `SellError::GeometryOverflow` without arithmetic or indexing panics.
 
 ## Determinism class
 **Bit-deterministic cross-ISA by construction**: kernels are fixed-order
@@ -146,6 +150,7 @@ kernel bodies remain safe slice arithmetic. Workspace-level `unsafe_code =
 suites: assembly canonicalization + stream-order invariance, SpMV vs dense
 oracle, linearity, adversarial patterns (empty rows, dense row, single
 column, empty matrix), BSR/SELL round-trips, SELL padding economics,
+SELL hostile worker/chunk-height admission and checked geometry refusal,
 checkpointed CSR publication and malformed canonical-part refusal,
 transpose involution, symmetrize bitwise symmetry, SpGEMM vs dense oracle +
 Laplacian-square pattern sanity, sparse-SPA SpGEMM vs dense-SPA reference on

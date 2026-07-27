@@ -32,7 +32,7 @@ pub use interop::{InteropError, WEIGHT_KEY, csr_to_graph_snapshot, graph_snapsho
 #[cfg(feature = "fnp-interop")]
 pub use interop_fnp::{FnpInteropError, csr_to_dense_array, dense_array_to_csr};
 pub use perf::CsrCompact;
-pub use sell::Sell;
+pub use sell::{Sell, SellError};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).
@@ -334,9 +334,27 @@ impl Csr {
     /// Per output column the accumulation sequence is identical to `spmv` on
     /// that column — bitwise equal (tested).
     pub fn spmm(&self, x: &[f64], k: usize, y: &mut [f64]) {
-        assert_eq!(x.len(), self.ncols * k, "spmm: X must be ncols*k");
-        assert_eq!(y.len(), self.nrows * k, "spmm: Y must be nrows*k");
+        let (x_len, y_len) = self.checked_spmm_buffer_lengths(k);
+        assert_eq!(x.len(), x_len, "spmm: X must be ncols*k");
+        assert_eq!(y.len(), y_len, "spmm: Y must be nrows*k");
         fma::spmm_dispatch(self, x, k, y);
+    }
+
+    /// Validate dense SpMM totals once before any row-stride arithmetic.
+    ///
+    /// Canonical CSR guarantees every stored column is below `ncols`; the
+    /// kernels visit only rows below `nrows`. Representable total lengths
+    /// therefore bound every subsequent row/column offset and slice endpoint.
+    pub(crate) fn checked_spmm_buffer_lengths(&self, nrhs: usize) -> (usize, usize) {
+        let x_len = self
+            .ncols
+            .checked_mul(nrhs)
+            .expect("spmm: RHS dimensions ncols*nrhs overflow usize");
+        let y_len = self
+            .nrows
+            .checked_mul(nrhs)
+            .expect("spmm: output dimensions nrows*nrhs overflow usize");
+        (x_len, y_len)
     }
 
     /// The spmm loop body (see [`Csr::spmv_body`]'s capsule note).
@@ -547,6 +565,24 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-sparse\",\"case\":\"spmm-bitwise\",\"verdict\":\"pass\",\"detail\":\"spmm == per-column spmv, 30x20 k=7\"}}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "spmm: RHS dimensions ncols*nrhs overflow usize")]
+    fn spmm_rejects_rhs_shape_overflow_before_dispatch() {
+        let huge_ncols = usize::MAX / 2 + 1;
+        let a = Csr::from_parts(1, huge_ncols, vec![0, 0], Vec::new(), Vec::new());
+        let mut y = [f64::NAN; 2];
+        a.spmm(&[], 2, &mut y);
+    }
+
+    #[test]
+    #[should_panic(expected = "spmm: RHS dimensions ncols*nrhs overflow usize")]
+    fn blocked_spmm_rejects_rhs_shape_overflow_before_dispatch() {
+        let huge_ncols = usize::MAX / 2 + 1;
+        let a = Csr::from_parts(1, huge_ncols, vec![0, 0], Vec::new(), Vec::new());
+        let mut y = [f64::NAN; 2];
+        a.spmm_blocked(&[], 2, &mut y);
     }
 
     #[test]

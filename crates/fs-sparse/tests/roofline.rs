@@ -70,7 +70,7 @@ fn wsbf_roofline() {
     };
     // Serial wide (usize idx), serial compact, sharded compact,
     // chunk-major SELL (serial + sharded).
-    let sell = Sell::from_csr(&a, 8, 64);
+    let sell = Sell::from_csr(&a, 8, 64).expect("fixed SELL geometry is representable");
     let t_wide = time_best(&mut || a.spmv(&x, &mut y));
     let t_cmp = time_best(&mut || compact.spmv(&x, &mut y));
     let t_shard = time_best(&mut || compact.spmv_sharded(&x, &mut y, threads));

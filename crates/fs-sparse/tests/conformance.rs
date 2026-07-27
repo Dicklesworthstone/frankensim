@@ -7,7 +7,7 @@
 
 use fs_casebook::{CASEBOOK_RECORD_VERSION, CaseOutcome, Suite, ToleranceSpec, fnv1a64};
 use fs_propcheck::Shrink;
-use fs_sparse::{Bsr, Coo, Csr, Sell, ops};
+use fs_sparse::{Bsr, Coo, Csr, Sell, SellError, ops};
 
 #[derive(Clone, Debug)]
 struct SparseCase {
@@ -122,7 +122,7 @@ fn cross_format_battery_and_golden_hash() {
         a.spmv(&x, &mut y_csr);
 
         // Every format must agree BITWISE.
-        let sell = Sell::from_csr(a, 8, 32);
+        let sell = Sell::from_csr(a, 8, 32).expect("fixed SELL geometry is representable");
         let mut y_sell = vec![0.0; a.nrows()];
         sell.spmv(&x, &mut y_sell);
         for r in 0..a.nrows() {
@@ -221,7 +221,7 @@ fn generated_cross_format_spmv_is_bitwise_equal() {
             let mut bsr_out = [0.0; 8];
             bsr.spmv(&x, &mut bsr_out);
 
-            let sell = Sell::from_csr(&csr, 8, 32);
+            let sell = Sell::from_csr(&csr, 8, 32).expect("fixed SELL geometry is representable");
             let mut sell_out = [0.0; 8];
             sell.spmv(&x, &mut sell_out);
 
@@ -304,6 +304,10 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     let mut empty_y: [f64; 0] = [];
     empty_compact.spmv_sharded(&[], &mut empty_y, usize::MAX);
     assert_eq!(empty_compact.numa_localized(usize::MAX), empty_compact);
+    let empty_sell = Sell::from_csr(&empty_serial, usize::MAX, usize::MAX)
+        .expect("empty SELL has no physical slot allocation");
+    empty_sell.spmv_chunked(&[], &mut empty_y);
+    empty_sell.spmv_chunked_sharded(&[], &mut empty_y, usize::MAX);
 
     let empty_rows_coo = Coo::new(128, 1);
     let empty_rows = empty_rows_coo.assemble();
@@ -316,6 +320,15 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
         empty_rows_compact.numa_localized(usize::MAX),
         empty_rows_compact
     );
+    let empty_rows_sell = Sell::from_csr(&empty_rows, usize::MAX, usize::MAX)
+        .expect("empty rows require no physical SELL slots");
+    assert_eq!(empty_rows_sell.physical_slots(), 0);
+    let mut empty_rows_sell_y = [f64::NAN; 128];
+    empty_rows_sell.spmv_chunked(&[1.0], &mut empty_rows_sell_y);
+    assert_eq!(empty_rows_sell_y, [0.0; 128]);
+    empty_rows_sell_y.fill(f64::NAN);
+    empty_rows_sell.spmv_chunked_sharded(&[1.0], &mut empty_rows_sell_y, usize::MAX);
+    assert_eq!(empty_rows_sell_y, [0.0; 128]);
 
     let mut coo = Coo::new(1, 1);
     coo.push(0, 0, 2.0);
@@ -328,6 +341,11 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     compact.spmv_sharded(&[3.0], &mut y, usize::MAX);
     assert_eq!(y[0].to_bits(), 6.0f64.to_bits());
     assert_eq!(compact.numa_localized(usize::MAX), compact);
+    let one_chunk_sell =
+        Sell::from_csr(&serial, 4, 4).expect("one-chunk SELL geometry is representable");
+    let mut one_chunk_y = [f64::NAN];
+    one_chunk_sell.spmv_chunked_sharded(&[3.0], &mut one_chunk_y, usize::MAX);
+    assert_eq!(one_chunk_y[0].to_bits(), 6.0f64.to_bits());
 
     let mut ragged = Coo::new(7, 5);
     ragged.push(0, 0, 1.0);
@@ -345,6 +363,43 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     ragged_compact.spmv_sharded(&x, &mut ragged_sharded_y, usize::MAX);
     assert!(bitwise_equal(&ragged_serial_y, &ragged_sharded_y));
     assert_eq!(ragged_compact.numa_localized(usize::MAX), ragged_compact);
+    let ragged_sell =
+        Sell::from_csr(&ragged_serial, 3, 6).expect("ragged SELL geometry is representable");
+    let mut ragged_sell_y = [f64::NAN; 7];
+    ragged_sell.spmv_chunked_sharded(&x, &mut ragged_sell_y, usize::MAX);
+    assert!(bitwise_equal(&ragged_serial_y, &ragged_sell_y));
+}
+
+/// G0 checked-admission regression: invalid or unrepresentable SELL tuning
+/// geometry is returned as data, never as an arithmetic or indexing panic.
+#[test]
+fn sell_geometry_overflow_is_structured() {
+    let empty = Coo::new(0, 0).assemble();
+    assert_eq!(
+        Sell::from_csr(&empty, 0, 1),
+        Err(SellError::InvalidChunkHeight { chunk_height: 0 })
+    );
+
+    let sigma_chunks = usize::MAX.div_ceil(2);
+    assert_eq!(
+        Sell::from_csr(&empty, 2, usize::MAX),
+        Err(SellError::GeometryOverflow {
+            operation: "rounding sigma to chunk height",
+            lhs: sigma_chunks,
+            rhs: 2,
+        })
+    );
+
+    let two_entries = Csr::from_parts(1, 2, vec![0, 2], vec![0, 1], vec![1.0, -1.0]);
+    let overflowing_c = usize::MAX / 2 + 1;
+    assert_eq!(
+        Sell::from_csr(&two_entries, overflowing_c, overflowing_c),
+        Err(SellError::GeometryOverflow {
+            operation: "sizing a chunk",
+            lhs: 2,
+            rhs: overflowing_c,
+        })
+    );
 }
 
 /// Chunk-major SELL must not execute physical padding as extra arithmetic:
@@ -354,7 +409,7 @@ fn sell_chunked_skips_signed_zero_padding() {
     let tiny = f64::from_bits(1);
     let a = Csr::from_parts(2, 2, vec![0, 1, 3], vec![0, 0, 1], vec![-tiny, -tiny, 0.0]);
     let x = [0.25, 1.0];
-    let sell = Sell::from_csr(&a, 2, 2);
+    let sell = Sell::from_csr(&a, 2, 2).expect("fixed SELL geometry is representable");
     assert_eq!(sell.physical_slots(), a.nnz() + 1);
 
     let mut y_csr = [f64::NAN; 2];
@@ -409,7 +464,8 @@ fn wsbf_segment2_bitwise_twins() {
     let mut y_ref = vec![0.0f64; nrows];
     a.spmv(&x, &mut y_ref);
     for (c, sigma) in [(4usize, 32usize), (8, 64), (2, 16)] {
-        let sell = fs_sparse::Sell::from_csr(&a, c, sigma);
+        let sell =
+            fs_sparse::Sell::from_csr(&a, c, sigma).expect("fixed SELL geometry is representable");
         let mut y_row = vec![0.0f64; nrows];
         sell.spmv(&x, &mut y_row);
         let mut y_ch = vec![0.0f64; nrows];
@@ -716,7 +772,7 @@ fn casebook_assembly_outcome() -> CaseOutcome {
 fn casebook_spmv_bits() -> [[u64; 4]; 3] {
     let csr = casebook_fixture();
     let bsr = Bsr::from_csr(&csr, 2, 2);
-    let sell = Sell::from_csr(&csr, 2, 4);
+    let sell = Sell::from_csr(&csr, 2, 4).expect("fixed SELL geometry is representable");
     let mut csr_y = [0.0; 4];
     let mut bsr_y = [0.0; 4];
     let mut sell_y = [0.0; 4];
