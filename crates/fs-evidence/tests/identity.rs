@@ -4972,6 +4972,24 @@ fn sourced_certified_f64_identity_enforces_resources_and_cancellation() {
         (SchemaDescriptorKind::Context, SourceSchema::CONTEXT.len()),
         (SchemaDescriptorKind::FieldName, longest_declared_field),
     ];
+    // The encoder's floor keeps the FIRST maximal term (strict `>` in
+    // `SchemaDescriptorFloor::observe`) while `max_by_key` keeps the LAST, so
+    // the binding below is only well-defined while the maximum is unique.
+    // Refuse a tie here rather than asserting a wrong binding.
+    let longest_descriptor = descriptor_terms
+        .iter()
+        .map(|(_, bytes)| *bytes)
+        .max()
+        .expect("source schema has descriptor fields");
+    assert_eq!(
+        descriptor_terms
+            .iter()
+            .filter(|(_, bytes)| *bytes == longest_descriptor)
+            .count(),
+        1,
+        "descriptor byte lengths tie at the maximum; the floor binding is \
+         order-dependent, adjust the fixture before trusting this test"
+    );
     let (binding, exact_field_len) = descriptor_terms
         .into_iter()
         .max_by_key(|(_, bytes)| *bytes)
