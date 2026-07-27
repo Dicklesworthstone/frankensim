@@ -13,6 +13,12 @@
 //! Graph identity excludes diagnostic labels, canonicalizes all collections,
 //! and binds the exact admitted Machine graph. Opaque sources are admitted only
 //! through an explicit source identity plus a separate audit-receipt identity.
+//!
+//! The admitted streamed-row writer is deliberately not a public capability:
+//!
+//! ```compile_fail
+//! use fs_ir::machine::causalization::causal_identity_row_writer::CausalIdentityRowWriter;
+//! ```
 
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -32,9 +38,9 @@ use fs_qty::{DIMENSION_COUNT, Dims};
 
 use super::semantics::{AdmittedMachineBehavior, MachineBehaviorIdV1, StateSlotContract};
 use super::{
-    AdmittedMachineGraph, ClockId, FrameBinding, InterfaceId, MachineCanonicalBytes,
-    MachineElementId, MachineGraphIdV1, MachineReferenceError, PortId, RelationId, StateSlotId,
-    SubsystemId, TerminalId, TerminalQuantitySpec, TerminalShape,
+    AdmittedMachineGraph, ClockId, FrameBinding, InterfaceId, MachineElementId, MachineGraphIdV1,
+    MachineReferenceError, PortId, RelationId, StateSlotId, SubsystemId, TerminalId,
+    TerminalQuantitySpec, TerminalShape,
 };
 
 /// Shared candidate version for equation, variable, and incidence entity-ID
@@ -448,11 +454,19 @@ trait CausalCanonicalBytes: super::MachineCanonicalBytes {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    #[cfg(test)]
+    fn capacity_for_test(&self) -> usize;
 }
 
 impl CausalCanonicalBytes for Vec<u8> {
     fn len(&self) -> usize {
         Vec::len(self)
+    }
+
+    #[cfg(test)]
+    fn capacity_for_test(&self) -> usize {
+        Vec::capacity(self)
     }
 }
 
@@ -4630,7 +4644,7 @@ mod causal_identity_row_writer {
     /// over-plan append records one stable typed mismatch and becomes a no-op,
     /// so neither row length nor allocation can grow because of the refused
     /// write.
-    pub(super) struct CausalIdentityRowWriter {
+    struct CausalIdentityRowWriter {
         bytes: Vec<u8>,
         plan: CausalIdentityRowPlan,
         admitted_capacity: usize,
@@ -4638,7 +4652,7 @@ mod causal_identity_row_writer {
     }
 
     impl CausalIdentityRowWriter {
-        pub(super) fn from_reserved(
+        fn from_reserved(
             bytes: Vec<u8>,
             plan: CausalIdentityRowPlan,
         ) -> Result<Self, CanonicalError> {
@@ -4683,11 +4697,11 @@ mod causal_identity_row_writer {
             true
         }
 
-        pub(super) fn refusal(&self) -> Option<CanonicalError> {
+        fn refusal(&self) -> Option<CanonicalError> {
             self.refusal
         }
 
-        pub(super) fn into_bytes(self) -> Result<Vec<u8>, CanonicalError> {
+        fn into_bytes(self) -> Result<Vec<u8>, CanonicalError> {
             if let Some(refusal) = self.refusal {
                 return Err(refusal);
             }
@@ -4697,11 +4711,6 @@ mod causal_identity_row_writer {
                 "cap-enforced row writes cannot reallocate admitted storage"
             );
             Ok(self.bytes)
-        }
-
-        #[cfg(test)]
-        pub(super) fn capacity(&self) -> usize {
-            self.bytes.capacity()
         }
     }
 
@@ -4723,10 +4732,32 @@ mod causal_identity_row_writer {
         fn len(&self) -> usize {
             self.bytes.len()
         }
+
+        #[cfg(test)]
+        fn capacity_for_test(&self) -> usize {
+            self.bytes.capacity()
+        }
+    }
+
+    /// Run one producer behind the append-only trait-object capability.
+    ///
+    /// Construction, sticky-refusal inspection, and byte extraction stay in
+    /// this child module; parent-module producers can neither name nor replace
+    /// the concrete writer.
+    pub(super) fn produce_reserved_row(
+        bytes: Vec<u8>,
+        plan: CausalIdentityRowPlan,
+        produce: impl FnOnce(&mut dyn CausalCanonicalBytes) -> Result<(), CanonicalError>,
+    ) -> Result<Vec<u8>, CanonicalError> {
+        let mut writer = CausalIdentityRowWriter::from_reserved(bytes, plan)?;
+        let producer_result = produce(&mut writer);
+        if let Some(refusal) = writer.refusal() {
+            return Err(refusal);
+        }
+        producer_result?;
+        writer.into_bytes()
     }
 }
-
-use causal_identity_row_writer::CausalIdentityRowWriter;
 
 fn stream_identity_rows<I, C, T, L, W>(
     encoder: CanonicalEncoder<I, C>,
@@ -4740,7 +4771,7 @@ where
     I: StrongIdentity,
     C: CancellationProbe,
     L: FnMut(&T, &Cx<'_>) -> Result<usize, CanonicalError>,
-    W: FnMut(&T, &Cx<'_>, &mut CausalIdentityRowWriter) -> Result<(), CanonicalError>,
+    W: FnMut(&T, &Cx<'_>, &mut dyn CausalCanonicalBytes) -> Result<(), CanonicalError>,
 {
     stream_identity_rows_with_reserve(
         encoder,
@@ -4766,7 +4797,7 @@ where
     I: StrongIdentity,
     C: CancellationProbe,
     L: FnMut(&T, &Cx<'_>) -> Result<usize, CanonicalError>,
-    W: FnMut(&T, &Cx<'_>, &mut CausalIdentityRowWriter) -> Result<(), CanonicalError>,
+    W: FnMut(&T, &Cx<'_>, &mut dyn CausalCanonicalBytes) -> Result<(), CanonicalError>,
     R: FnMut(&mut Vec<u8>, CausalIdentityRowPlan) -> Result<(), CausalIdentityAllocationRefusal>,
 {
     let declared_count = u64::try_from(values.len()).map_err(|_| CanonicalError::LengthOverflow)?;
@@ -4808,16 +4839,10 @@ where
             ))?;
             let mut bytes = Vec::new();
             reserve_row(&mut bytes, plan).map_err(CausalIdentityRowError::Allocation)?;
-            let mut writer = CausalIdentityRowWriter::from_reserved(bytes, plan)
-                .map_err(CausalIdentityRowError::Canonical)?;
-            let producer_result = write_row(value, cx, &mut writer);
-            if let Some(refusal) = writer.refusal() {
-                return Err(CausalIdentityRowError::Canonical(refusal));
-            }
-            producer_result.map_err(CausalIdentityRowError::Canonical)?;
-            let bytes = writer
-                .into_bytes()
-                .map_err(CausalIdentityRowError::Canonical)?;
+            let bytes = causal_identity_row_writer::produce_reserved_row(bytes, plan, |out| {
+                write_row(value, cx, out)
+            })
+            .map_err(CausalIdentityRowError::Canonical)?;
             sink.write(&bytes)
                 .map_err(CausalIdentityRowError::Canonical)
         })
@@ -4959,7 +4984,7 @@ fn extraction_context_row(context: &CausalExtractionContext) -> Vec<u8> {
 fn equation_structure_row(
     equation: &EquationSpec,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     push_identity_receipt_adjudication(out, equation.id.identity_receipt());
@@ -4976,7 +5001,7 @@ fn equation_structure_row(
 fn variable_structure_row(
     variable: &VariableSpec,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     push_identity_receipt_adjudication(out, variable.id.identity_receipt());
@@ -5000,7 +5025,7 @@ fn variable_structure_row(
 fn condition_row(
     condition: &ActivationConditionSpec,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     condition.condition.append_canonical(out);
@@ -5032,7 +5057,7 @@ fn condition_row(
     identity_materialization_checkpoint(cx, out.len())
 }
 
-fn condition_artifact_row(condition: &ActivationConditionSpec, out: &mut CausalIdentityRowWriter) {
+fn condition_artifact_row(condition: &ActivationConditionSpec, out: &mut dyn CausalCanonicalBytes) {
     debug_assert!(out.is_empty());
     condition.condition.append_canonical(out);
     match &condition.source {
@@ -5183,7 +5208,7 @@ fn node_artifact_row_equation(
     id: &EquationId,
     lineage: &NodeLineage,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     let lineage_bytes = lineage.canonical_row_len_cancellable(cx)?;
@@ -5207,7 +5232,7 @@ fn node_artifact_row_equation_len_cancellable(
 fn node_artifact_row_variable(
     variable: &VariableSpec,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     let lineage_bytes = variable.lineage.canonical_row_len_cancellable(cx)?;
@@ -5241,7 +5266,7 @@ fn node_artifact_row_variable_len_cancellable(
     ])
 }
 
-fn incidence_artifact_row(incidence: &IncidenceSpec, out: &mut CausalIdentityRowWriter) {
+fn incidence_artifact_row(incidence: &IncidenceSpec, out: &mut dyn CausalCanonicalBytes) {
     debug_assert!(out.is_empty());
     push_identity_receipt_adjudication(out, incidence.id.identity_receipt());
     match &incidence.clock_relation {
@@ -8664,7 +8689,7 @@ fn receipt_domain_row_cancellable(
     Ok(out)
 }
 
-fn unknown_axis_row(state: &CausalUnknownAxisState, out: &mut CausalIdentityRowWriter) {
+fn unknown_axis_row(state: &CausalUnknownAxisState, out: &mut dyn CausalCanonicalBytes) {
     debug_assert!(out.is_empty());
     out.push(outcome_axis_tag(state.axis));
     out.push(unknown_reason_tag(state.reason));
@@ -8693,7 +8718,7 @@ fn analysis_context_row(context: &CausalAnalysisContext) -> Vec<u8> {
     out
 }
 
-fn matching_row(pair: &CausalMatchingPair, out: &mut CausalIdentityRowWriter) {
+fn matching_row(pair: &CausalMatchingPair, out: &mut dyn CausalCanonicalBytes) {
     debug_assert!(out.is_empty());
     push_identity_receipt_adjudication(out, pair.incidence.identity_receipt());
     push_identity_receipt_adjudication(out, pair.equation.identity_receipt());
@@ -8773,7 +8798,7 @@ fn maximum_matching_binding_row_cancellable(
     Ok(out)
 }
 
-fn derivative_variable_row(variable: &DerivativeVariableKey, out: &mut CausalIdentityRowWriter) {
+fn derivative_variable_row(variable: &DerivativeVariableKey, out: &mut dyn CausalCanonicalBytes) {
     debug_assert!(out.is_empty());
     push_identity_receipt_adjudication(out, variable.variable.identity_receipt());
     out.extend_from_slice(&variable.derivative_order.to_le_bytes());
@@ -8782,7 +8807,7 @@ fn derivative_variable_row(variable: &DerivativeVariableKey, out: &mut CausalIde
 fn conditional_outcome_row_cancellable(
     outcome: &ConditionalCausalOutcome,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     // The full child receipt below already commits its ordered unknown-axis
     // reasons and checkpoints. Keep those progress coordinates out of the
@@ -8816,7 +8841,7 @@ fn conditional_outcome_row_len_cancellable(
 fn normalized_conditional_outcome_row_cancellable(
     outcome: &ConditionalCausalOutcome,
     cx: &Cx<'_>,
-    out: &mut CausalIdentityRowWriter,
+    out: &mut dyn CausalCanonicalBytes,
 ) -> Result<(), CanonicalError> {
     debug_assert!(out.is_empty());
     push_row_count(out, outcome.assignment.len())?;
@@ -9549,21 +9574,25 @@ mod internal_tests {
 
     fn materialize_planned_test_row(
         planned_bytes: usize,
-        write: impl FnOnce(&mut CausalIdentityRowWriter) -> Result<(), CanonicalError>,
+        write: impl FnOnce(&mut dyn CausalCanonicalBytes) -> Result<(), CanonicalError>,
     ) -> Vec<u8> {
         let plan = CausalIdentityRowPlan::new(0, planned_bytes).expect("test row plan");
         let mut row = Vec::new();
         reserve_identity_row(&mut row, plan).expect("test row reserve");
-        let mut writer =
-            CausalIdentityRowWriter::from_reserved(row, plan).expect("test checked row writer");
-        let admitted_capacity = writer.capacity();
-        write(&mut writer).expect("test row producer");
+        let admitted_capacity = core::cell::Cell::new(0usize);
+        let final_capacity = core::cell::Cell::new(usize::MAX);
+        let row = causal_identity_row_writer::produce_reserved_row(row, plan, |out| {
+            admitted_capacity.set(out.capacity_for_test());
+            write(out)?;
+            final_capacity.set(out.capacity_for_test());
+            Ok(())
+        })
+        .expect("test checked row writer");
         assert_eq!(
-            writer.capacity(),
-            admitted_capacity,
+            final_capacity.get(),
+            admitted_capacity.get(),
             "test row producer must not grow past its admitted reservation"
         );
-        let row = writer.into_bytes().expect("test row remains within plan");
         assert_eq!(row.len(), planned_bytes, "test row plan must be exact");
         row
     }
@@ -10246,9 +10275,9 @@ mod internal_tests {
                 cx,
                 |(), _| Ok(4),
                 |(), _, out| {
-                    capacity_before.set(out.capacity());
+                    capacity_before.set(out.capacity_for_test());
                     out.extend_from_slice(&[1, 2, 3, 4, 5]);
-                    capacity_after.set(out.capacity());
+                    capacity_after.set(out.capacity_for_test());
                     length_after.set(out.len());
                     Ok(())
                 },
@@ -10353,29 +10382,28 @@ mod internal_tests {
         let plan = CausalIdentityRowPlan::new(0, 4).expect("test row plan");
         let mut bytes = Vec::new();
         reserve_identity_row(&mut bytes, plan).expect("test row reserve");
-        let mut writer =
-            CausalIdentityRowWriter::from_reserved(bytes, plan).expect("checked row writer");
-        for byte in [1, 2, 3, 4] {
-            writer.push(byte);
-        }
-        let admitted_capacity = writer.capacity();
-        writer.push(5);
+        let admitted_capacity = core::cell::Cell::new(0usize);
+        let capacity_after = core::cell::Cell::new(usize::MAX);
+        let length_after = core::cell::Cell::new(usize::MAX);
+        let refusal = causal_identity_row_writer::produce_reserved_row(bytes, plan, |out| {
+            for byte in [1, 2, 3, 4] {
+                out.push(byte);
+            }
+            admitted_capacity.set(out.capacity_for_test());
+            out.push(5);
+            capacity_after.set(out.capacity_for_test());
+            length_after.set(out.len());
+            Ok(())
+        });
 
-        assert_eq!(writer.len(), 4, "refused byte is not appended");
+        assert_eq!(length_after.get(), 4, "refused byte is not appended");
         assert_eq!(
-            writer.capacity(),
-            admitted_capacity,
+            capacity_after.get(),
+            admitted_capacity.get(),
             "refused byte cannot grow storage"
         );
         assert_eq!(
-            writer.refusal(),
-            Some(CanonicalError::DeclaredLengthMismatch {
-                declared: 4,
-                observed: 5,
-            })
-        );
-        assert_eq!(
-            writer.into_bytes(),
+            refusal,
             Err(CanonicalError::DeclaredLengthMismatch {
                 declared: 4,
                 observed: 5,
