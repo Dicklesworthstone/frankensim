@@ -2,7 +2,9 @@
 
 use fs_airflow::{
     AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
-    LossElement, LossNetwork, LossResistance, SourceProvenance, ToleranceBasis, fan_law_source,
+    LossElement, LossNetwork, LossResistance, ORIFICE_CD_SOURCE_IDENTIFIER,
+    ORIFICE_PLATEAU_REYNOLDS, ORIFICE_RESISTANCE_UNCERTAINTY_REL, SHARP_EDGED_ORIFICE_CD,
+    SourceProvenance, ToleranceBasis, fan_law_source, sharp_edged_orifice_loss,
     solve_operating_point,
 };
 use fs_evidence::{NumericalKind, ProvenanceHash, ValidityDomain};
@@ -594,4 +596,118 @@ fn the_operating_point_is_bit_identical_across_worker_counts() {
             }
         }
     }
+}
+
+// ---- Sharp-edged-orifice vent lowering (frankensim-frn2i slice 1) ----
+
+#[test]
+fn orifice_resistance_matches_the_closed_form_derivation() {
+    let element = sharp_edged_orifice_loss("side-vent", Area::new(0.01), Density::new(1.2))
+        .expect("physical vent lowers");
+    // Independent operation order: zeta = 1/Cd^2 first, then zeta * rho / (2 A^2).
+    let zeta = 1.0 / (SHARP_EDGED_ORIFICE_CD * SHARP_EDGED_ORIFICE_CD);
+    let expected = zeta * 1.2 / (2.0 * 0.01 * 0.01);
+    let got = element.resistance.value();
+    assert!(
+        ((got - expected) / expected).abs() < 1.0e-14,
+        "resistance {got} drifted from the closed form {expected}"
+    );
+    assert_eq!(element.uncertainty_rel, ORIFICE_RESISTANCE_UNCERTAINTY_REL);
+    assert_eq!(element.source.identifier, ORIFICE_CD_SOURCE_IDENTIFIER);
+    assert_eq!(
+        element.tolerance_basis,
+        ToleranceBasis::EngineeringAllowance
+    );
+}
+
+#[test]
+fn orifice_resistance_uncertainty_covers_the_sourced_cd_range() {
+    // The declared allowance must bracket both sourced endpoints Cd in
+    // {0.60, 0.65} relative to the retained plateau constant.
+    for cd in [0.60_f64, 0.65] {
+        let scale = SHARP_EDGED_ORIFICE_CD / cd;
+        let ratio = scale * scale;
+        assert!(
+            (ratio - 1.0).abs() < ORIFICE_RESISTANCE_UNCERTAINTY_REL,
+            "declared allowance does not cover sourced Cd {cd}: ratio {ratio}"
+        );
+    }
+}
+
+#[test]
+fn orifice_lowering_refuses_nonphysical_inputs() {
+    for (area, density, field) in [
+        (0.0, 1.2, "open area"),
+        (-0.01, 1.2, "open area"),
+        (f64::NAN, 1.2, "open area"),
+        (0.01, 0.0, "air density"),
+        (0.01, -1.2, "air density"),
+        (0.01, f64::INFINITY, "air density"),
+    ] {
+        match sharp_edged_orifice_loss("vent", Area::new(area), Density::new(density)) {
+            Err(AirflowError::InvalidOrificeInput { field: got, .. }) => {
+                assert_eq!(got, field, "wrong refused field for ({area}, {density})");
+            }
+            other => panic!("({area}, {density}) must refuse as InvalidOrificeInput: {other:?}"),
+        }
+    }
+    match sharp_edged_orifice_loss("", Area::new(0.01), Density::new(1.2)) {
+        Err(AirflowError::EmptyElementName) => {}
+        other => panic!("empty name must propagate the constructor refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn orifice_element_carries_the_plateau_regime_card() {
+    let element = sharp_edged_orifice_loss("intake-vent", Area::new(0.004), Density::new(1.18))
+        .expect("physical vent lowers");
+    let card = element
+        .regime_audit_card()
+        .expect("the orifice model must never be cardless");
+    assert_eq!(card.name, "airflow.loss.intake-vent");
+    assert_eq!(card.version, ORIFICE_CD_SOURCE_IDENTIFIER);
+    let bounds = card.validity.bounds();
+    let (lo, hi) = bounds
+        .get("loss_reynolds")
+        .expect("plateau domain is on the loss_reynolds axis");
+    assert_eq!((*lo, *hi), ORIFICE_PLATEAU_REYNOLDS);
+}
+
+#[test]
+fn vent_lowered_network_solves_a_certified_operating_point() {
+    let density = Density::new(1.2);
+    let primary = LossNetwork::parallel(vec![
+        LossNetwork::Element(
+            sharp_edged_orifice_loss("intake-vent", Area::new(0.01), density)
+                .expect("physical vent"),
+        ),
+        LossNetwork::Element(
+            sharp_edged_orifice_loss("exhaust-vent", Area::new(0.01), density)
+                .expect("physical vent"),
+        ),
+    ])
+    .expect("parallel vent network");
+    let leakage = LeakageElement::new(
+        sharp_edged_orifice_loss("seam-leakage", Area::new(0.002), density)
+            .expect("physical leakage orifice"),
+    );
+    let network = EnclosureNetwork::new(primary, leakage);
+    let fan = FanBank::new(fan_curve(0.02), 1, FanArrangement::Series, 1.0).expect("fan bank");
+    let point = solve_operating_point(&fan, &network).expect("certified operating point");
+    let root = point.nominal_root.flow;
+    assert!(root.lo() > 0.0 && root.hi().is_finite() && root.lo() <= root.hi());
+    let paths: Vec<&str> = point
+        .branches
+        .iter()
+        .map(|branch| branch.path.as_str())
+        .collect();
+    assert!(paths.contains(&"intake-vent"));
+    assert!(paths.contains(&"exhaust-vent"));
+    let leakage_branch = point
+        .branches
+        .iter()
+        .find(|branch| branch.leakage)
+        .expect("mandatory leakage branch is reported");
+    assert_eq!(leakage_branch.path, "seam-leakage");
+    assert!(point.leakage_fraction > 0.0 && point.leakage_fraction < 1.0);
 }

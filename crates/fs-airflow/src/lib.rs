@@ -522,6 +522,92 @@ impl LossElement {
     }
 }
 
+/// Citation for the sharp-edged thin-orifice discharge coefficient.
+pub const ORIFICE_CD_SOURCE_CITATION: &str = "Idelchik, Handbook of Hydraulic Resistance, 3rd ed., \
+     diagram 4-11 (sharp-edged orifice, high-Reynolds plateau); ASHRAE Handbook—Fundamentals, \
+     airflow through large intentional openings (Cd 0.60–0.65)";
+
+/// Stable identifier for the sharp-edged-orifice discharge model.
+pub const ORIFICE_CD_SOURCE_IDENTIFIER: &str = "idelchik-hhr3-sharp-edge-orifice-v1";
+
+/// Discharge coefficient for a sharp-edged thin orifice on the
+/// high-Reynolds plateau.
+pub const SHARP_EDGED_ORIFICE_CD: f64 = 0.61;
+
+/// Declared relative resistance uncertainty for the orifice model.
+///
+/// The sourced large-opening range is `Cd ∈ [0.60, 0.65]`. Resistance scales
+/// as `1/Cd^2`, so relative to the retained `Cd = 0.61` the sourced range
+/// moves the resistance by `(0.61/0.65)^2 - 1 ≈ -0.12` to
+/// `(0.61/0.60)^2 - 1 ≈ +0.034`; `0.15` covers that spread symmetrically
+/// with headroom. This is a caller-declared engineering allowance, not a
+/// source-published confidence interval.
+pub const ORIFICE_RESISTANCE_UNCERTAINTY_REL: f64 = 0.15;
+
+/// Orifice-Reynolds validity domain of the retained `Cd` plateau.
+///
+/// Below ~1e4 the sharp-edge coefficient is Reynolds-dependent and the
+/// plateau constant is wrong; the upper bound keeps the domain finite as
+/// [`LossElement::with_regime_validity`] requires. Audited post-solve on the
+/// `loss_reynolds` axis by the existing regime-audit lane.
+pub const ORIFICE_PLATEAU_REYNOLDS: (f64, f64) = (1.0e4, 1.0e7);
+
+/// Lower a declared open vent area to a quadratic loss element via the
+/// sharp-edged thin-orifice model.
+///
+/// Model: `ΔP = ζ (ρ/2) v²` with orifice velocity `v = Q/A` and
+/// `ζ = 1/Cd²`, so the quadratic resistance is `R = ρ / (2 Cd² A²)` in
+/// Pa/(m³/s)². `Cd` is the sourced plateau constant
+/// [`SHARP_EDGED_ORIFICE_CD`]; the declared uncertainty covers the sourced
+/// `Cd` range. The element carries a `loss_reynolds` validity domain of
+/// [`ORIFICE_PLATEAU_REYNOLDS`] so final admission audits the plateau
+/// assumption after the flow exists instead of guessing a Reynolds number
+/// before the solve.
+///
+/// The model is for a clean sharp-edged thin opening. It is NOT a discharge
+/// model for louvered, screened, filtered, or ducted vents, makes no
+/// compressibility or installation-effect claim, and the density is a typed
+/// caller input: deriving it from an operating envelope belongs to the
+/// lowering stage, not this crate.
+///
+/// # Errors
+/// Refuses a non-finite or non-positive area or density, and propagates any
+/// [`LossElement::new`] refusal (for example an empty name).
+pub fn sharp_edged_orifice_loss(
+    name: impl Into<String>,
+    open_area: Area,
+    air_density: Density,
+) -> Result<LossElement, AirflowError> {
+    let area = open_area.value();
+    let density = air_density.value();
+    if !(area.is_finite() && area > 0.0) {
+        return Err(AirflowError::InvalidOrificeInput {
+            field: "open area",
+            value_bits: area.to_bits(),
+        });
+    }
+    if !(density.is_finite() && density > 0.0) {
+        return Err(AirflowError::InvalidOrificeInput {
+            field: "air density",
+            value_bits: density.to_bits(),
+        });
+    }
+    let cd = SHARP_EDGED_ORIFICE_CD;
+    let resistance = density / (2.0 * cd * cd * area * area);
+    LossElement::new(
+        name,
+        LossResistance::new(resistance),
+        ORIFICE_RESISTANCE_UNCERTAINTY_REL,
+        SourceProvenance::new(ORIFICE_CD_SOURCE_CITATION, ORIFICE_CD_SOURCE_IDENTIFIER),
+        ToleranceBasis::EngineeringAllowance,
+    )?
+    .with_regime_validity(ValidityDomain::unconstrained().with(
+        "loss_reynolds",
+        ORIFICE_PLATEAU_REYNOLDS.0,
+        ORIFICE_PLATEAU_REYNOLDS.1,
+    ))
+}
+
 /// Explicit leakage path, kept distinct so a network cannot silently omit it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeakageElement(LossElement);
@@ -1318,6 +1404,13 @@ pub enum AirflowError {
         /// Raw IEEE-754 bits of the rejected value.
         value_bits: u64,
     },
+    /// An orifice-lowering input is non-finite or non-positive.
+    InvalidOrificeInput {
+        /// Name of the rejected orifice field.
+        field: &'static str,
+        /// Raw IEEE-754 bits of the rejected value.
+        value_bits: u64,
+    },
     /// Role-tagged Reynolds construction refused.
     Regime {
         /// Diagnostic returned by the regime-classification layer.
@@ -1521,6 +1614,12 @@ impl fmt::Display for AirflowError {
                     "{field} must be finite and positive for correlation handoff"
                 )
             }
+            Self::InvalidOrificeInput { field, value_bits } => write!(
+                formatter,
+                "orifice {field} {} is not finite and positive; fix: declare a finite \
+                 positive coherent-SI value",
+                f64::from_bits(*value_bits)
+            ),
             Self::Regime { detail } => write!(formatter, "Reynolds construction refused: {detail}"),
             Self::InvalidConjugateInput { field, value_bits } => write!(
                 formatter,

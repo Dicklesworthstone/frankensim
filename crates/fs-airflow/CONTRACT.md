@@ -45,6 +45,17 @@ CHT ladder's correlation-rung transfer.
   `airflow.loss.<element>` and the card version to the retained source
   identifier. `LossNetwork::regime_audit_cards` and the enclosure wrapper
   expose those exact cards without silently deduplicating ambiguous names.
+- `sharp_edged_orifice_loss` lowers a declared open area and typed air
+  density to a `LossElement` through the sharp-edged thin-orifice model
+  `R = ρ / (2 Cd² A²)`, with `Cd` the retained plateau constant
+  `SHARP_EDGED_ORIFICE_CD` (0.61) cited through
+  `ORIFICE_CD_SOURCE_CITATION`/`ORIFICE_CD_SOURCE_IDENTIFIER`. The declared
+  `ORIFICE_RESISTANCE_UNCERTAINTY_REL` (0.15, engineering allowance) covers
+  the sourced `Cd ∈ [0.60, 0.65]` large-opening spread, and every produced
+  element carries a `loss_reynolds` validity card over
+  `ORIFICE_PLATEAU_REYNOLDS` so the plateau assumption is audited after the
+  solve. Non-finite or non-positive area or density refuses as
+  `InvalidOrificeInput`.
 - `EnclosureNetwork` cannot be constructed without a distinct
   `LeakageElement`; leakage is not an implicit constant.
 - `solve_operating_point` returns an `OperatingPoint` with an interval-Newton
@@ -246,6 +257,12 @@ None.
   provenance binds every changed point;
 - semantic-identity separation when uncertainty authority changes without
   changing the nominal operating point.
+- G0 sharp-edged-orifice vent lowering: closed-form resistance derivation
+  with an independent operation order, allowance coverage of both sourced
+  `Cd` endpoints, non-physical-input and empty-name refusals, plateau regime
+  card identity/axis/bounds, and a fully vent-lowered enclosure (two parallel
+  orifice vents plus an orifice leakage seam) solving to a certified
+  operating point with the leakage branch reported.
 - actual loss-card projection from an explicitly validated `LossElement`,
   including refusal of unconstrained pseudo-validity and an isolated
   out-of-domain loss Reynolds perturbation that demotes all seven E05.10
@@ -450,6 +467,13 @@ None.
   card. An attached domain is only the source owner's stated operating box; it
   does not validate the quadratic loss law or turn its uncertainty into a
   rigorous enclosure.
+- The sharp-edged-orifice lowering models a clean thin sharp-edged opening
+  only. It is not a discharge model for louvered, screened, filtered, or
+  ducted vents, claims no compressibility or installation effects, and its
+  declared allowance is an engineering spread over sourced `Cd` values, not a
+  published confidence interval. Density is a caller declaration; deriving it
+  from an operating envelope is the lowering stage's obligation, and no
+  retained orifice measurement corpus exists.
 - The nominal root bracket certifies only the declared mathematical model.
   Tolerance-propagated flow, pressure, branch splits, and Reynolds values remain
   `Estimate`, not validated hardware envelopes.
