@@ -450,7 +450,11 @@ const ANCHOR_MEAN_K: f64 = 320.0;
 /// the radiation probes are audited against.
 fn parallel_plate_exchange_w_m2(hot_k: f64, sink_k: f64) -> f64 {
     let factor = 1.0 / (1.0 / HOT_EMISSIVITY + 1.0 / SINK_EMISSIVITY - 1.0);
-    factor * STEFAN_BOLTZMANN_W_M2_K4 * (hot_k.powi(4) - sink_k.powi(4))
+    // Explicit squaring keeps the fourth power bit-stable across build modes;
+    // `f64::powi` rounding is optimization-level-dependent (bead 4xnt).
+    let hot_sq = hot_k * hot_k;
+    let sink_sq = sink_k * sink_k;
+    factor * STEFAN_BOLTZMANN_W_M2_K4 * (hot_sq * hot_sq - sink_sq * sink_sq)
 }
 
 struct RadiationProbe {
