@@ -1,5 +1,6 @@
 //! fs-wedge — go-to-market wedge selection as data (plan addendum,
-//! Proposal 7). Layer: UTIL (pure data + audit; no dependencies).
+//! Proposal 7). Layer: UTIL (decision data + bounded offline replay + audit;
+//! `fs-blake3` is the sole production dependency).
 //!
 //! The wedge is the beachhead. The load-bearing DOCTRINE is a NEGATIVE one:
 //!
@@ -25,6 +26,14 @@
 //! dossier protocol in `data/cycle-time-baseline-dossier.md`; the retired flat
 //! placeholder survives only as [`RETIRED_PLACEHOLDER_BASELINE`], which the
 //! kill-criterion evaluation refuses with a typed error.
+
+pub mod historical;
+
+pub use historical::{
+    COMPARISON_EVIDENCE_SNAPSHOT, HistoricalEvidenceError, HistoricalEvidenceReceipt,
+    HistoricalEvidenceSnapshot, comparison_evidence_bundle, comparison_evidence_manifest,
+    verify_comparison_evidence, verify_default_comparison_evidence,
+};
 
 /// The load-bearing negative doctrine of wedge selection.
 pub const WEDGE_DOCTRINE: &str = "Do not sell against peak single-physics fidelity anywhere; the wedge is a \
@@ -687,18 +696,25 @@ const CHT_CAD: [CadBurdenEntry; 1] = [CadBurdenEntry {
 const CHT_COMPUTE: [ComputeCostEntry; 3] = [
     ComputeCostEntry {
         rung: "correlation-Nu",
-        variables: "C = number of components or thermal interfaces",
-        work_envelope: "Target envelope O(C), but no executable correlation/fan kernel exists, so neither operation count nor wall time is measured.",
+        variables: "C = number of thermal interfaces; I = outer conjugate iterations; W_s = work of one inner solid-conduction solve",
+        work_envelope: "O(C) correlation/setup work, then I*(W_s + O(C)) for one inner solid-conduction solve and one air-path march per outer iteration; no retained wall-time envelope or fs-plan CostModel exists.",
         measurement: measured(
-            Readiness::Absent,
-            1,
+            Readiness::Partial,
+            6,
             MeasurementMethod::StaticComplexityAnalysis,
-            &[evidence(
-                EvidenceKind::WorkspacePath,
-                "crates/fs-ladder/src/lib.rs",
-                "correlation-Nu",
-            )],
-            "Only a rung label and advisory relative cost exist.",
+            &[
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-convection/src/lib.rs",
+                    "pub struct CorrelationInputs",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-airflow/src/conjugate.rs",
+                    "pub fn solve_conjugate",
+                ),
+            ],
+            "The correlation catalog, air-path march, and partitioned conjugate driver are executable; coefficients are frozen before the outer loop, and the static shape does not measure inner-solver convergence, wall time, memory residency, or a fidelity-edge cost artifact.",
         ),
     },
     ComputeCostEntry {
@@ -728,7 +744,7 @@ const CHT_COMPUTE: [ComputeCostEntry; 3] = [
             &[evidence(
                 EvidenceKind::WorkspacePath,
                 "crates/fs-ladder/CONTRACT.md",
-                "The ladder does not run solves",
+                "The `RANS` and `LES` rungs remain declarations",
             )],
             "A relative-cost hint is not compute evidence.",
         ),
@@ -900,12 +916,19 @@ const AM_KERNELS: [KernelReadinessEntry; 5] = [
             Readiness::Absent,
             0,
             MeasurementMethod::WorkspaceInventory,
-            &[evidence(
-                EvidenceKind::Bead,
-                "frankensim-extreal-program-f85xj.1.1",
-                "inventory found no laser path, melt-pool, phase-change, or powder-bed kernel",
-            )],
-            "No production kernel represents the AM process heat source, melt pool, or phase evolution.",
+            &[
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.1.1",
+                    "kernel-readiness matrix",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/CONTRACT.md",
+                    "NO PHASE CHANGE, no latent heat, no moving boundaries",
+                ),
+            ],
+            "Independent workspace probes find no moving-heat-source or phase-change kernel, and the conduction contract explicitly excludes latent heat and moving boundaries; no production melt-pool or powder-bed process model exists.",
         ),
     },
     KernelReadinessEntry {
@@ -959,9 +982,9 @@ const AM_KERNELS: [KernelReadinessEntry; 5] = [
             &[evidence(
                 EvidenceKind::WorkspacePath,
                 "crates/fs-asbuilt/CONTRACT.md",
-                "v1 is 2-D rigid registration",
+                "Registration requires KNOWN correspondences in both the 2-D and 3-D",
             )],
-            "Two-dimensional known-correspondence registration exists; three-dimensional Kabsch/ICP and full CT or point-cloud admission are staged.",
+            "Two- and three-dimensional known-correspondence registration exist, including rigid Kabsch, similarity, and datum-priority paths; correspondence-free ICP and full CT or point-cloud admission remain staged.",
         ),
     },
 ];
@@ -1016,11 +1039,18 @@ const AM_COMPUTE: [ComputeCostEntry; 3] = [
             Readiness::Absent,
             0,
             MeasurementMethod::StaticComplexityAnalysis,
-            &[evidence(
-                EvidenceKind::Bead,
-                "frankensim-extreal-program-f85xj.1.1",
-                "no executable AM process rung found in tracked inventory",
-            )],
+            &[
+                evidence(
+                    EvidenceKind::Bead,
+                    "frankensim-extreal-program-f85xj.1.1",
+                    "compute-cost envelope per fidelity rung",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/CONTRACT.md",
+                    "NO PHASE CHANGE, no latent heat, no moving boundaries",
+                ),
+            ],
             "Symbolic variables are retained without fabricating an operation or wall-time estimate.",
         ),
     },
@@ -1043,7 +1073,7 @@ const AM_COMPUTE: [ComputeCostEntry; 3] = [
     ComputeCostEntry {
         rung: "as-built-registration-screen",
         variables: "N = known fiducial correspondences",
-        work_envelope: "Exactly 6*N point visits for the current two-dimensional registration preflight/solve path; full 3-D scan registration is outside the envelope.",
+        work_envelope: "Exactly 6*N point visits for the legacy two-dimensional registration preflight/solve path; the implemented 3-D rigid, covariance, and datum paths have separate unquantified envelopes, while correspondence-free scan registration remains staged.",
         measurement: measured(
             Readiness::Present,
             7,
@@ -1053,7 +1083,7 @@ const AM_COMPUTE: [ComputeCostEntry; 3] = [
                 "crates/fs-asbuilt/CONTRACT.md",
                 "exactly `6n` point visits",
             )],
-            "The exact count covers a narrow inspection rung, not process simulation or three-dimensional compensation.",
+            "The exact count covers the narrow two-dimensional known-correspondence screen, not the 3-D paths, correspondence search, process simulation, or compensation.",
         ),
     },
 ];
@@ -1061,7 +1091,7 @@ const AM_COMPUTE: [ComputeCostEntry; 3] = [
 const MEASURED_INPUTS: [MeasuredWedgeInputs; 3] = [
     MeasuredWedgeInputs {
         vertical: "conjugate-heat-transfer",
-        measured_on: "2026-07-22",
+        measured_on: "2026-07-26",
         kernels: &CHT_KERNELS,
         validation_data: &CHT_VALIDATION,
         cad_burden: &CHT_CAD,
@@ -1069,7 +1099,7 @@ const MEASURED_INPUTS: [MeasuredWedgeInputs; 3] = [
     },
     MeasuredWedgeInputs {
         vertical: "aeroelastic-screening",
-        measured_on: "2026-07-22",
+        measured_on: "2026-07-26",
         kernels: &AERO_KERNELS,
         validation_data: &AERO_VALIDATION,
         cad_burden: &AERO_CAD,
@@ -1077,7 +1107,7 @@ const MEASURED_INPUTS: [MeasuredWedgeInputs; 3] = [
     },
     MeasuredWedgeInputs {
         vertical: "additive-manufacturing-distortion",
-        measured_on: "2026-07-22",
+        measured_on: "2026-07-26",
         kernels: &AM_KERNELS,
         validation_data: &AM_VALIDATION,
         cad_burden: &AM_CAD,
@@ -1262,7 +1292,7 @@ pub struct ComparisonCandidate {
 }
 
 /// Refusals from the pure scoring and sensitivity routines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoringError {
     /// The supplied weights do not sum to 100.
     WeightsNotNormalized {
@@ -1311,6 +1341,12 @@ pub enum ScoringError {
         factor: ScoringFactor,
         /// Requested replacement weight.
         requested: u8,
+    },
+    /// The default comparison cannot replay its exact historical source set.
+    HistoricalEvidenceUnavailable {
+        /// Exact retained-history refusal, boxed to keep ordinary scoring
+        /// failures cheap to return.
+        source: Box<HistoricalEvidenceError>,
     },
 }
 
@@ -1794,24 +1830,29 @@ const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
                     "pub struct ConductionSolver",
                 ),
                 evidence(
-                    EvidenceKind::Bead,
-                    "frankensim-extreal-program-f85xj.5.3",
-                    "contact resistance remains successor work",
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-conduction/src/interface.rs",
+                    "pub struct InterfaceResistance",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-convection/src/lib.rs",
+                    "pub struct CorrelationInputs",
+                ),
+                evidence(
+                    EvidenceKind::WorkspacePath,
+                    "crates/fs-airflow/src/lib.rs",
+                    "pub struct FanCurve",
                 ),
                 evidence(
                     EvidenceKind::Bead,
                     "frankensim-extreal-program-f85xj.5.4",
                     "surface radiation remains successor work",
                 ),
-                evidence(
-                    EvidenceKind::Bead,
-                    "frankensim-extreal-program-f85xj.5.5",
-                    "fan curve and flow network remain successor work",
-                ),
             ],
-            "Steady conduction with anisotropy and nonlinear material data exists; contact, radiation, fan networks, and calibrated forced-convection correlations remain incomplete.",
+            "At the pinned inventory revision, steady conduction, contact resistance, forced-convection correlations, and fan-network operating points existed; surface radiation and calibrated end-to-end thermal assurance remained incomplete.",
         ),
-        "The compromise starts from a real core and has a bounded missing-kernel list, while explicitly deferring RANS rather than claiming it.",
+        "The compromise already had four real core components and a bounded missing-kernel list, while explicitly deferring RANS rather than claiming it.",
     ),
     factor_rating(
         ScoringFactor::ValidationTractability,
@@ -1824,7 +1865,7 @@ const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
                 evidence(
                     EvidenceKind::WorkspacePath,
                     "crates/fs-conduction/CONTRACT.md",
-                    "Every test prints a JSON-lines verdict",
+                    "every analytic comparison and MMS gate",
                 ),
                 evidence(
                     EvidenceKind::OfficialSource,
@@ -1878,8 +1919,8 @@ const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
             &[
                 evidence(
                     EvidenceKind::Bead,
-                    "frankensim-extreal-program-f85xj.5.2",
-                    "forced-convection correlation rung is in progress",
+                    "frankensim-extreal-program-f85xj.5.4",
+                    "surface radiation remains successor work",
                 ),
                 evidence(
                     EvidenceKind::Bead,
@@ -1889,7 +1930,7 @@ const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
             ],
             "No measured delivery schedule exists, but the candidate removes the gated RANS rung from its critical path.",
         ),
-        "A bounded analytic/correlation stack should reach decisions sooner than full CHT, while remaining honest that four supporting kernels are unfinished.",
+        "A bounded conduction/contact/correlation/fan stack should reach decisions sooner than full CHT, while remaining honest that radiation, calibration, and delivery-schedule evidence were unfinished at the pinned snapshot.",
     ),
     factor_rating(
         ScoringFactor::Differentiation,
@@ -1922,11 +1963,11 @@ const THERMAL_ASSURANCE_FACTORS: [FactorRating; 9] = [
                 ),
                 evidence(
                     EvidenceKind::WorkspacePath,
-                    "crates/fs-ladder/CONTRACT.md",
-                    "The ladder does not run solves",
+                    "crates/fs-ladder/src/lib.rs",
+                    "real costs from telemetry",
                 ),
             ],
-            "The implemented sparse conduction core and planned algebraic/correlation rungs avoid a resolved-flow state, but no wall-time envelope is yet retained.",
+            "At the pinned inventory revision, the sparse conduction core and declared correlation rung avoided a resolved-flow state, but the ladder offered only an advisory cost hint; no coupled solve, retained wall-time envelope, or fs-plan cost artifact existed.",
         ),
         "Deferring RANS gives this candidate the smallest expected decision-useful state among the thermal options; the rating is not a performance claim.",
     ),
@@ -1971,7 +2012,7 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         measured_on: "2026-07-22",
         inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &THERMAL_ASSURANCE_FACTORS,
-        minority_case: "Thermal design assurance preserves the declared thermal market thesis while limiting the first product to conduction, interfaces, radiation, fan/correlation rungs, and evidence-led decisions. Its remaining risk is that the customer-pain baseline and several supporting kernels are still pending.",
+        minority_case: "Thermal design assurance preserves the declared thermal market thesis while limiting the first product to conduction, interfaces, radiation, fan/correlation rungs, and evidence-led decisions. At the pinned snapshot, its remaining risk was the absent customer-pain baseline, surface radiation, end-to-end calibration, and delivery evidence.",
     },
 ];
 
@@ -2254,16 +2295,39 @@ pub fn ranked_recommendation(
 
 /// The default measured recommendation.
 pub fn default_recommendation() -> Result<RankedRecommendation, ScoringError> {
+    verify_default_comparison_evidence().map_err(|source| {
+        ScoringError::HistoricalEvidenceUnavailable {
+            source: Box::new(source),
+        }
+    })?;
     ranked_recommendation(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())
 }
 
 /// Render the full scoring table and both one-factor sensitivity tables as a
 /// deterministic, verbose report artifact.
+#[allow(clippy::too_many_lines)] // One canonical encoder keeps report row order visibly fixed.
 pub fn render_comparison_report() -> Result<String, ScoringError> {
     use core::fmt::Write as _;
-    let recommendation = default_recommendation()?;
+    let history = verify_default_comparison_evidence().map_err(|source| {
+        ScoringError::HistoricalEvidenceUnavailable {
+            source: Box::new(source),
+        }
+    })?;
+    let recommendation = ranked_recommendation(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())?;
     let weights = canonical_weight_values(&DEFAULT_FACTOR_WEIGHTS)?;
-    let mut out = String::from("FS-WEDGE-COMPARISON\tv1\n");
+    let mut out = String::from("FS-WEDGE-COMPARISON\tv2\n");
+    writeln!(
+        out,
+        "HISTORICAL_EVIDENCE\t{}\tpolicy={}\trevision={}\tmanifest_blake3={}\tbundle_blake3={}\tsources={}\tpointers={}",
+        history.schema(),
+        history.policy_version(),
+        history.inventory_revision(),
+        history.manifest_identity_blake3(),
+        history.bundle_identity_blake3(),
+        history.source_count(),
+        history.pointer_count(),
+    )
+    .expect("write to String");
     out.push_str("WEIGHTS\tfactor\tweight\n");
     for factor in ScoringFactor::ALL {
         writeln!(
@@ -2839,8 +2903,8 @@ pub const RETIRED_PLACEHOLDER_BASELINE: CycleTimeBaseline = CycleTimeBaseline {
     protocol: "none: declared as a scoping placeholder without measurement or sources",
     dossier: EvidencePointer {
         kind: EvidenceKind::WorkspacePath,
-        reference: "crates/fs-wedge/src/lib.rs",
-        locator: "RETIRED_PLACEHOLDER_BASELINE",
+        reference: "crates/fs-wedge/data/cycle-time-baseline-dossier.md",
+        locator: "Supersedes: the `baseline_days = 5.0` scoping placeholder",
     },
     provenance: BaselineProvenance::Placeholder,
     steps: &[],
@@ -3164,7 +3228,7 @@ impl WedgeAudit {
 /// for an absent capability.
 pub const STRONG_THRESHOLD: u8 = 8;
 
-fn audit_comparison(gaps: &mut Vec<String>) -> [AuditCheck; 4] {
+fn audit_comparison(gaps: &mut Vec<String>) -> [AuditCheck; 5] {
     let inputs_complete = COMPARISON_CANDIDATES.len() == 3
         && COMPARISON_CANDIDATES
             .iter()
@@ -3176,6 +3240,14 @@ fn audit_comparison(gaps: &mut Vec<String>) -> [AuditCheck; 4] {
     let weights_normalized = canonical_weight_values(&DEFAULT_FACTOR_WEIGHTS).is_ok();
     if !weights_normalized {
         gaps.push("the default comparison weights do not normalize to 100".to_string());
+    }
+
+    let historical_evidence = verify_default_comparison_evidence();
+    let history_bound = historical_evidence.is_ok();
+    if let Err(error) = historical_evidence {
+        gaps.push(format!(
+            "the default comparison cannot replay its retained historical evidence: {error}"
+        ));
     }
 
     let recommendation = default_recommendation();
@@ -3216,6 +3288,10 @@ fn audit_comparison(gaps: &mut Vec<String>) -> [AuditCheck; 4] {
         AuditCheck {
             name: "default-weights-normalized",
             passed: weights_normalized,
+        },
+        AuditCheck {
+            name: "comparison-history-bound",
+            passed: history_bound,
         },
         AuditCheck {
             name: "comparison-ranking-complete",

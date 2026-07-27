@@ -11,6 +11,7 @@ description = "Go-to-market wedge selection as data (addendum Proposal 7): the c
 layer = "UTIL"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 
 [dev-dependencies]
 

@@ -2,13 +2,20 @@
 //! historical-score supersession, evidence-complete measured inputs, workspace
 //! evidence drift, candidate rankings, and the cycle-time kill criterion.
 
+use fs_blake3::hash_domain;
+use fs_wedge::historical::{
+    COMPARISON_EVIDENCE_BUNDLE_IDENTITY_DOMAIN, COMPARISON_EVIDENCE_MANIFEST_IDENTITY_DOMAIN,
+};
 use fs_wedge::{
-    BaselineProvenance, CHT_BASELINE, ComparisonCandidate, DEFAULT_FACTOR_WEIGHTS, EvidenceKind,
+    BaselineProvenance, CHT_BASELINE, COMPARISON_EVIDENCE_SNAPSHOT, ComparisonCandidate,
+    DEFAULT_FACTOR_WEIGHTS, EvidenceKind, HistoricalEvidenceError, HistoricalEvidenceSnapshot,
     IncumbentStep, InputAxis, KillCriterionError, KillVerdict, Measurement,
     RETIRED_PLACEHOLDER_BASELINE, Readiness, STRONG_THRESHOLD, ScoreUse, ScoringError,
     ScoringFactor, WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, comparison_candidates,
-    default_recommendation, four_criteria, measured_inputs_for, measured_wedge_inputs,
-    render_comparison_report, score_candidates, to_json, verticals,
+    comparison_evidence_bundle, comparison_evidence_manifest, default_recommendation,
+    four_criteria, measured_inputs_for, measured_wedge_inputs, render_comparison_report,
+    score_candidates, to_json, verify_comparison_evidence, verify_default_comparison_evidence,
+    verticals,
 };
 use std::path::Path;
 
@@ -144,6 +151,7 @@ const fn kernel_probe(path: &'static str, marker: &'static str) -> KernelProbe {
     KernelProbe { path, marker }
 }
 
+#[allow(clippy::too_many_lines)] // One exhaustive capability-to-probe table is easiest to audit.
 fn kernel_probes(vertical: &str, capability: &str) -> Option<Vec<KernelProbe>> {
     match (vertical, capability) {
         ("conjugate-heat-transfer", "steady-conduction-fem") => Some(vec![kernel_probe(
@@ -253,7 +261,7 @@ fn kernel_probes(vertical: &str, capability: &str) -> Option<Vec<KernelProbe>> {
         ]),
         ("additive-manufacturing-distortion", "as-built-registration") => Some(vec![
             kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct Point2"),
-            kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct Point3"),
+            kernel_probe("crates/fs-asbuilt/src/rigid3.rs", "pub struct Point3"),
             kernel_probe("crates/fs-asbuilt/src/lib.rs", "pub struct IcpSolver"),
         ]),
         _ => None,
@@ -341,7 +349,7 @@ fn kernel_readiness_matrix_matches_independent_workspace_probes() {
 }
 
 #[test]
-fn workspace_evidence_paths_and_markers_have_not_drifted() {
+fn current_workspace_evidence_paths_and_markers_have_not_drifted() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
         .parent()
@@ -388,22 +396,399 @@ fn workspace_evidence_paths_and_markers_have_not_drifted() {
             ));
         }
     }
-    for candidate in comparison_candidates() {
-        for input in candidate.factors {
-            failures.extend(check_workspace_measurement(
-                root,
-                candidate.name,
-                input.factor.label(),
-                input.factor.label(),
-                input.measurement,
-            ));
-        }
-    }
     assert!(
         failures.is_empty(),
         "evidence drift:\n{}",
         failures.join("\n")
     );
+}
+
+fn authenticated_snapshot(manifest: &str, bundle: &[u8]) -> HistoricalEvidenceSnapshot {
+    let manifest_identity = Box::leak(
+        hash_domain(
+            COMPARISON_EVIDENCE_MANIFEST_IDENTITY_DOMAIN,
+            manifest.as_bytes(),
+        )
+        .to_hex()
+        .into_boxed_str(),
+    );
+    let bundle_identity = Box::leak(
+        hash_domain(COMPARISON_EVIDENCE_BUNDLE_IDENTITY_DOMAIN, bundle)
+            .to_hex()
+            .into_boxed_str(),
+    );
+    HistoricalEvidenceSnapshot {
+        manifest_identity_blake3: manifest_identity,
+        bundle_identity_blake3: bundle_identity,
+        ..COMPARISON_EVIDENCE_SNAPSHOT
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn test_tar_size(header: &[u8]) -> usize {
+    let field = &header[124..136];
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    usize::from_str_radix(
+        std::str::from_utf8(&field[..end])
+            .expect("test TAR size is ASCII")
+            .trim(),
+        8,
+    )
+    .expect("test TAR size is octal")
+}
+
+fn test_tar_header_offset(bundle: &[u8], path: &str) -> usize {
+    let mut offset = 0usize;
+    loop {
+        let header = &bundle[offset..offset + 512];
+        assert!(
+            !header.iter().all(|byte| *byte == 0),
+            "missing test TAR path {path}"
+        );
+        let end = header[..100]
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(100);
+        if &header[..end] == path.as_bytes() {
+            return offset;
+        }
+        let size = test_tar_size(header);
+        offset += 512 + size.div_ceil(512) * 512;
+    }
+}
+
+fn rename_test_tar_file(bundle: &mut [u8], old: &str, new: &str) {
+    assert_eq!(old.len(), new.len(), "test rename preserves header layout");
+    let offset = test_tar_header_offset(bundle, old);
+    let header = &mut bundle[offset..offset + 512];
+    header[..new.len()].copy_from_slice(new.as_bytes());
+    header[148..156].fill(b' ');
+    let checksum: usize = header.iter().map(|byte| usize::from(*byte)).sum();
+    let encoded = format!("{checksum:06o}\0 ");
+    assert_eq!(encoded.len(), 8);
+    header[148..156].copy_from_slice(encoded.as_bytes());
+}
+
+#[test]
+fn historical_comparison_replays_from_retained_exact_source_bytes() {
+    let first = verify_default_comparison_evidence().expect("historical snapshot replays");
+    let second = verify_default_comparison_evidence().expect("historical replay is deterministic");
+    assert_eq!(first, second);
+    assert_eq!(
+        first.inventory_revision(),
+        COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+    );
+    assert_eq!(first.source_count(), 13);
+    assert_eq!(first.pointer_count(), 31);
+    assert_eq!(
+        first.manifest_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.manifest_identity_blake3
+    );
+    assert_eq!(
+        first.bundle_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.bundle_identity_blake3
+    );
+
+    // The historical marker is deliberately absent from today's contract.
+    // Replay succeeds because it reads the retained b3b bytes, never HEAD.
+    let live_contract = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../fs-ladder/CONTRACT.md"),
+    )
+    .expect("live fs-ladder contract is readable");
+    assert!(!live_contract.contains("The ladder does not run solves"));
+    assert!(live_contract.contains("The `RANS` and `LES` rungs remain declarations"));
+    assert!(
+        comparison_evidence_manifest().contains(
+            "full-electronics-cooling-cht\tlow-compute-cost\tcrates/fs-ladder/CONTRACT.md\tThe ladder does not run solves"
+        )
+    );
+}
+
+#[test]
+fn historical_comparison_replay_fails_closed_on_artifact_and_revision_mutation() {
+    let mut tampered_bundle = comparison_evidence_bundle().to_vec();
+    tampered_bundle[1024] ^= 1;
+    assert!(matches!(
+        verify_comparison_evidence(
+            COMPARISON_EVIDENCE_SNAPSHOT,
+            comparison_evidence_manifest(),
+            &tampered_bundle,
+            comparison_candidates(),
+        ),
+        Err(HistoricalEvidenceError::IdentityMismatch {
+            artifact: "bundle",
+            ..
+        })
+    ));
+
+    let tampered_manifest = comparison_evidence_manifest().replacen(
+        "The ladder does not run solves",
+        "The ladder does run solves",
+        1,
+    );
+    assert!(matches!(
+        verify_comparison_evidence(
+            COMPARISON_EVIDENCE_SNAPSHOT,
+            &tampered_manifest,
+            comparison_evidence_bundle(),
+            comparison_candidates(),
+        ),
+        Err(HistoricalEvidenceError::IdentityMismatch {
+            artifact: "manifest",
+            ..
+        })
+    ));
+
+    let mut candidates = comparison_candidates().to_vec();
+    candidates[0].inventory_revision = "0000000000000000000000000000000000000000";
+    assert!(matches!(
+        verify_comparison_evidence(
+            COMPARISON_EVIDENCE_SNAPSHOT,
+            comparison_evidence_manifest(),
+            comparison_evidence_bundle(),
+            &candidates,
+        ),
+        Err(HistoricalEvidenceError::CandidateRevisionMismatch {
+            candidate: "full-electronics-cooling-cht",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn historical_comparison_replay_refuses_missing_and_unavailable_sources() {
+    let mut missing_source_bundle = comparison_evidence_bundle().to_vec();
+    rename_test_tar_file(
+        &mut missing_source_bundle,
+        "crates/fs-adjoint/CONTRACT.md",
+        "crates/fs-adjoinx/CONTRACT.md",
+    );
+    let missing_source_snapshot =
+        authenticated_snapshot(comparison_evidence_manifest(), &missing_source_bundle);
+    let error = verify_comparison_evidence(
+        missing_source_snapshot,
+        comparison_evidence_manifest(),
+        &missing_source_bundle,
+        comparison_candidates(),
+    )
+    .expect_err("renamed retained source must fail closed");
+    match &error {
+        HistoricalEvidenceError::SourceMismatch {
+            inventory_revision,
+            bundle_identity_blake3,
+            reference,
+            expected_bytes: Some(_),
+            observed_bytes: None,
+        } => {
+            assert_eq!(
+                *inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+            );
+            assert_eq!(
+                *bundle_identity_blake3,
+                missing_source_snapshot.bundle_identity_blake3
+            );
+            assert_eq!(reference, "crates/fs-adjoint/CONTRACT.md");
+        }
+        other => panic!("unexpected missing-source diagnostic: {other:?}"),
+    }
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision));
+    assert!(diagnostic.contains("crates/fs-adjoint/CONTRACT.md"));
+
+    let empty_snapshot = authenticated_snapshot(comparison_evidence_manifest(), &[]);
+    let unavailable = verify_comparison_evidence(
+        empty_snapshot,
+        comparison_evidence_manifest(),
+        &[],
+        comparison_candidates(),
+    )
+    .expect_err("empty retained bundle must fail closed");
+    assert!(matches!(
+        &unavailable,
+        HistoricalEvidenceError::MalformedBundle { offset: 0, .. }
+    ));
+    assert!(unavailable.to_string().contains("TAR length"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One two-stage mutation proves identity refusal precedes marker refusal.
+fn historical_comparison_replay_refuses_reauthenticated_content_and_marker_mutation() {
+    let mut content_mutation = comparison_evidence_bundle().to_vec();
+    let non_marker = b"The fidelity-ladder registry";
+    let content_offset =
+        find_subslice(&content_mutation, non_marker).expect("non-marker source text is retained");
+    content_mutation[content_offset] = b't';
+    let content_snapshot =
+        authenticated_snapshot(comparison_evidence_manifest(), &content_mutation);
+    let content_error = verify_comparison_evidence(
+        content_snapshot,
+        comparison_evidence_manifest(),
+        &content_mutation,
+        comparison_candidates(),
+    )
+    .expect_err("per-source identity must reject reauthenticated content mutation");
+    match &content_error {
+        HistoricalEvidenceError::SourceIdentityMismatch {
+            inventory_revision,
+            candidate,
+            factor,
+            reference,
+            locator,
+            expected_blake3,
+            observed_blake3,
+        } => {
+            assert_eq!(
+                *inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+            );
+            assert_eq!(candidate.as_ref(), "full-electronics-cooling-cht");
+            assert_eq!(factor.as_ref(), "low-compute-cost");
+            assert_eq!(reference.as_ref(), "crates/fs-ladder/CONTRACT.md");
+            assert_eq!(locator.as_ref(), "The ladder does not run solves");
+            assert_ne!(expected_blake3, observed_blake3);
+        }
+        other => panic!("unexpected content-mutation diagnostic: {other:?}"),
+    }
+    let diagnostic = content_error.to_string();
+    assert!(diagnostic.contains("full-electronics-cooling-cht/low-compute-cost"));
+    assert!(diagnostic.contains("expected BLAKE3"));
+    assert!(diagnostic.contains("observed"));
+
+    let marker = b"The ladder does not run solves";
+    let mut markerless_bundle = comparison_evidence_bundle().to_vec();
+    let marker_offset =
+        find_subslice(&markerless_bundle, marker).expect("historical marker is retained");
+    markerless_bundle[marker_offset] = b't';
+    let preliminary_snapshot =
+        authenticated_snapshot(comparison_evidence_manifest(), &markerless_bundle);
+    let observed_markerless_identity = match verify_comparison_evidence(
+        preliminary_snapshot,
+        comparison_evidence_manifest(),
+        &markerless_bundle,
+        comparison_candidates(),
+    ) {
+        Err(HistoricalEvidenceError::SourceIdentityMismatch {
+            observed_blake3, ..
+        }) => observed_blake3,
+        other => panic!("expected source-identity refusal before marker replay: {other:?}"),
+    };
+    let original_ladder_identity = comparison_evidence_manifest()
+        .lines()
+        .find(|line| line.starts_with("SOURCE\tcrates/fs-ladder/CONTRACT.md\t"))
+        .and_then(|line| line.split('\t').nth(5))
+        .expect("ladder source identity is present");
+    let markerless_manifest = comparison_evidence_manifest().replacen(
+        original_ladder_identity,
+        &observed_markerless_identity,
+        1,
+    );
+    let markerless_snapshot = authenticated_snapshot(&markerless_manifest, &markerless_bundle);
+    let marker_error = verify_comparison_evidence(
+        markerless_snapshot,
+        &markerless_manifest,
+        &markerless_bundle,
+        comparison_candidates(),
+    )
+    .expect_err("authenticated source without locator must fail closed");
+    match &marker_error {
+        HistoricalEvidenceError::MarkerMissing {
+            inventory_revision,
+            source_identity_blake3,
+            candidate,
+            factor,
+            reference,
+            locator,
+        } => {
+            assert_eq!(
+                *inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+            );
+            assert_eq!(source_identity_blake3, &observed_markerless_identity);
+            assert_eq!(candidate.as_ref(), "full-electronics-cooling-cht");
+            assert_eq!(factor.as_ref(), "low-compute-cost");
+            assert_eq!(reference.as_ref(), "crates/fs-ladder/CONTRACT.md");
+            assert_eq!(locator.as_ref(), "The ladder does not run solves");
+        }
+        other => panic!("unexpected marker diagnostic: {other:?}"),
+    }
+    assert!(
+        marker_error
+            .to_string()
+            .contains("after verifying source BLAKE3")
+    );
+}
+
+#[test]
+fn historical_comparison_replay_refuses_authenticated_pointer_path_mutation() {
+    let canonical = "POINTER\tfull-electronics-cooling-cht\tlow-compute-cost\tcrates/fs-ladder/CONTRACT.md\tThe ladder does not run solves";
+    let mutated = "POINTER\tfull-electronics-cooling-cht\tlow-compute-cost\tcrates/fs-laddeq/CONTRACT.md\tThe ladder does not run solves";
+    let path_mutation = comparison_evidence_manifest().replacen(canonical, mutated, 1);
+    let snapshot = authenticated_snapshot(&path_mutation, comparison_evidence_bundle());
+    let error = verify_comparison_evidence(
+        snapshot,
+        &path_mutation,
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    )
+    .expect_err("authenticated pointer-path mutation must fail closed");
+    match &error {
+        HistoricalEvidenceError::PointerMismatch {
+            inventory_revision,
+            manifest_identity_blake3,
+            expected,
+            observed,
+            ..
+        } => {
+            assert_eq!(
+                *inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+            );
+            assert_eq!(*manifest_identity_blake3, snapshot.manifest_identity_blake3);
+            assert!(expected.contains("crates/fs-ladder/CONTRACT.md"));
+            assert!(observed.contains("crates/fs-laddeq/CONTRACT.md"));
+        }
+        other => panic!("unexpected pointer-path diagnostic: {other:?}"),
+    }
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision));
+    assert!(diagnostic.contains("manifest BLAKE3"));
+}
+
+#[test]
+fn historical_pointer_sequence_comparison_is_structural() {
+    let prefix = "POINTER\tfull-electronics-cooling-cht\t";
+    let collision_manifest = comparison_evidence_manifest()
+        .lines()
+        .map(|line| {
+            line.strip_prefix(prefix)
+                .map_or_else(|| line.to_string(), |rest| format!("{prefix}foo/{rest}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let snapshot = authenticated_snapshot(&collision_manifest, comparison_evidence_bundle());
+    let mut candidates = comparison_candidates().to_vec();
+    candidates[0].name = "full-electronics-cooling-cht/foo";
+    let error = verify_comparison_evidence(
+        snapshot,
+        &collision_manifest,
+        comparison_evidence_bundle(),
+        &candidates,
+    )
+    .expect_err("delimiter-colliding pointer tuples must remain unequal");
+    assert!(matches!(
+        error,
+        HistoricalEvidenceError::PointerMismatch { index: 0, .. }
+    ));
 }
 
 #[test]
@@ -558,6 +943,8 @@ fn verbose_comparison_report_is_deterministic() {
     let first = render_comparison_report().expect("comparison report renders");
     let second = render_comparison_report().expect("comparison report replays");
     assert_eq!(first, second);
+    assert!(first.starts_with("FS-WEDGE-COMPARISON\tv2\n"));
+    assert_eq!(first.matches("HISTORICAL_EVIDENCE\t").count(), 1);
     assert_eq!(first.matches("FACTOR\t").count(), 27);
     assert_eq!(first.matches("RATING_FLIP\t").count(), 18);
     assert_eq!(first.matches("WEIGHT_FLIP\t").count(), 18);
@@ -639,6 +1026,7 @@ fn the_audit_is_complete() {
     assert!(a.passed("no-absent-strong-scores"));
     assert!(a.passed("comparison-inputs-complete"));
     assert!(a.passed("default-weights-normalized"));
+    assert!(a.passed("comparison-history-bound"));
     assert!(a.passed("comparison-ranking-complete"));
     assert!(a.passed("comparison-sensitivity-complete"));
     assert!(a.passed("ranks-complete"));
@@ -646,7 +1034,7 @@ fn the_audit_is_complete() {
     assert!(a.passed("kill-criterion-measurable"));
     assert!(a.passed("cycle-time-baseline-measured"));
     assert!(a.passed("placeholder-baseline-refused"));
-    assert_eq!(a.checks.len(), 12);
+    assert_eq!(a.checks.len(), 13);
 }
 
 #[test]
@@ -717,23 +1105,38 @@ fn the_measured_baseline_is_complete_and_published_source_derived() {
 }
 
 #[test]
-fn the_baseline_dossier_exists_and_carries_its_marker() {
-    // The dossier is the replay handle for every figure in the record; the
-    // pointer must resolve against the tracked tree, exactly like the other
-    // workspace evidence-drift checks in this battery.
+fn the_baseline_dossiers_exist_and_carry_their_markers() {
+    // Both the live record and the retired placeholder point outside the Rust
+    // declaration that embeds the pointer, so neither marker can satisfy its
+    // own `contains` check.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let repo_root = Path::new(manifest_dir)
         .ancestors()
         .nth(2)
         .expect("workspace root above crates/fs-wedge");
+    for pointer in [CHT_BASELINE.dossier, RETIRED_PLACEHOLDER_BASELINE.dossier] {
+        assert_ne!(
+            pointer.reference, "crates/fs-wedge/src/lib.rs",
+            "baseline dossier pointers must not self-verify against their declaring source"
+        );
+        assert_eq!(
+            pointer.reference, "crates/fs-wedge/data/cycle-time-baseline-dossier.md",
+            "baseline records must resolve through the retained external dossier"
+        );
+        let path = repo_root.join(pointer.reference);
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("unreadable dossier {}: {error}", path.display()));
+        assert!(
+            contents.contains(pointer.locator),
+            "dossier {} lost its marker {}",
+            path.display(),
+            pointer.locator
+        );
+    }
+
     let dossier_path = repo_root.join(CHT_BASELINE.dossier.reference);
     let dossier = std::fs::read_to_string(&dossier_path)
         .unwrap_or_else(|error| panic!("unreadable dossier {}: {error}", dossier_path.display()));
-    assert!(
-        dossier.contains(CHT_BASELINE.dossier.locator),
-        "dossier lost its marker {}",
-        CHT_BASELINE.dossier.locator
-    );
     // Every load-bearing URL in the record must appear in the dossier, so the
     // Rust constants cannot drift away from the provenance document.
     for step in CHT_BASELINE.steps {

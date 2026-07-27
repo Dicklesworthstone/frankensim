@@ -7,8 +7,11 @@ sensitivity tables, and the cycle-time kill criterion.
 
 ## Purpose and layer
 
-Layer UTIL (pure data + audit; no dependencies). This gates NOTHING technical —
-it constrains vertical-specific kernel work and records the commercial bet.
+Layer UTIL (pure decision data, bounded offline historical replay, and audit).
+Its only production crate dependency is `fs-blake3`, used for domain-separated
+artifact and source identities. This crate gates no scientific or
+kernel-capability claim; it does fail closed when the default recommendation's
+retained evidence cannot be authenticated and replayed.
 
 ## Public types and semantics
 
@@ -52,18 +55,38 @@ it constrains vertical-specific kernel work and records the commercial bet.
   exactly one such input per factor, an inventory revision, and a minority
   case. `comparison_candidates()` returns full electronics CHT, SDF
   structural/topology assurance, and thermal design assurance.
+- `historical` defines the retained-comparison replay protocol.
+  `HistoricalEvidenceSnapshot` binds schema and policy versions, the reviewed
+  inventory revision, manifest and bundle paths, domain-separated BLAKE3
+  identities, and admitted source/pointer counts.
+  `COMPARISON_EVIDENCE_SNAPSHOT` is the descriptor for the embedded
+  `b3b5f2c1...` snapshot.
+- `comparison_evidence_manifest()` and `comparison_evidence_bundle()` expose
+  the exact embedded TSV manifest and TAR bytes.
+  `verify_default_comparison_evidence()` replays those artifacts without
+  reading Git or the filesystem. `verify_comparison_evidence()` admits
+  caller-supplied artifacts for mutation and migration tests only after the
+  supplied descriptor authenticates them.
+- Successful replay returns `HistoricalEvidenceReceipt`, exposing schema,
+  policy, revision, both recomputed artifact identities, and authenticated
+  source/pointer counts. `HistoricalEvidenceError` carries the fail-closed
+  diagnostic, including per-source expected/observed BLAKE3 identities when
+  exact content differs.
 - `score_candidates` is the pure scoring function. It validates weights and
   candidates, computes the integer sum `rating * weight`, and orders by total
   descending then stable candidate slug ascending. `tilted_weights` raises one
   weight and proportionally rescales the others to 100 using deterministic
   largest-remainder allocation.
-- `ranked_recommendation` and `default_recommendation` return the ranking,
-  runner-up minority report, and exhaustive single-factor flip tables. Rating
+- `ranked_recommendation` is the pure caller-supplied scoring/sensitivity
+  routine. `default_recommendation` first requires successful replay of the
+  retained historical evidence, then returns the default ranking, runner-up
+  minority report, and exhaustive single-factor flip tables. Rating
   sensitivity raises only one challenger rating. Weight sensitivity raises one
   factor weight while proportionally reducing every other weight.
-- `render_comparison_report()` emits the complete weights, factor evidence,
-  rank, minority report, and both sensitivity tables as a deterministic TSV-like
-  artifact.
+- `render_comparison_report()` emits `FS-WEDGE-COMPARISON v2`: one
+  authenticated `HISTORICAL_EVIDENCE` receipt row followed by the complete
+  weights, factor evidence, ranks, minority report, and both sensitivity tables
+  as a deterministic TSV-like artifact.
 - `CycleTimeBaseline` + `CHT_BASELINE` — a per-step sourced envelope over the
   six `IncumbentStep`s (CAD preparation, meshing, solver setup, solve,
   post-processing, report assembly), never a point value. Each
@@ -102,6 +125,26 @@ it constrains vertical-specific kernel work and records the commercial bet.
   assurance `623`, and full electronics CHT `502`. Thermal design assurance is
   the provisional recommendation; SDF structural assurance is the runner-up
   whose minority report is retained.
+- The default comparison is bound to that revision through an embedded
+  canonical manifest and retained source TAR. Replay authenticates the exact
+  manifest and TAR bytes with separate domain-separated BLAKE3 identities
+  before parsing either artifact.
+- The canonical v1 manifest contains one revision row, 13 strictly path-sorted
+  `SOURCE` rows, and the exact canonical sequence of 31 historical
+  `WorkspacePath` pointer occurrences. Each source row carries byte length,
+  extraction-audit SHA-256 and Git blob metadata, and a domain-separated BLAKE3
+  over revision, path, and exact source bytes. Every candidate revision must
+  equal the snapshot revision; every retained source must be consumed;
+  missing, extra, duplicate, reordered, or identity-mismatched evidence fails
+  closed.
+- The retained TAR must have valid header checksums, zero payload padding, at
+  least two zero termination blocks, exactly one leading matching revision PAX
+  record, normalized paths, supported entry types, and exactly the
+  manifest-declared regular-file set and byte lengths. Every historical locator
+  must occur in its identity-verified retained source bytes.
+- Historical comparison replay reads no live workspace or Git state. Current
+  measured-input drift checks remain intentionally live and are a separate
+  authority lane.
 - `Measurement.score <= Readiness::score_ceiling()`. In particular, an absent
   capability can never reach `STRONG_THRESHOLD` (`8`).
 - Exactly three verticals ranked 1, 2, 3; each names at least one exercised
@@ -111,27 +154,46 @@ it constrains vertical-specific kernel work and records the commercial bet.
   per step in pipeline order, every source complete, at least one
   non-vendor source per step); and the placeholder refusal drill passes in
   `audit()` (`cycle-time-baseline-measured`, `placeholder-baseline-refused`).
+- `audit()` requires `comparison-history-bound` in addition to comparison
+  completeness, normalized weights, ranking, and sensitivity checks.
 
 ## Error model
 
-Static accessors are total. Scoring returns `ScoringError` for non-normalized,
-missing, or duplicate weights; missing, duplicate, or incomplete candidates;
-invalid factor inputs; and non-increasing weight tilts. The kill-criterion
-evaluation returns `KillCriterionError` for placeholder baselines, incomplete
-baseline records, and non-positive or non-finite measured cycle times; it never
-coerces or defaults. Internal `expect` calls are applied only after those
-structural validations and to infallible writes to `String`.
+Static data accessors are total. Pure scoring returns `ScoringError` for
+non-normalized, missing, or duplicate weights; missing, duplicate, or
+incomplete candidates; invalid factor inputs; and non-increasing weight tilts.
+`default_recommendation` and `render_comparison_report` additionally return
+`ScoringError::HistoricalEvidenceUnavailable { source }`, preserving the exact
+historical replay refusal.
+
+Historical replay returns `HistoricalEvidenceError` for invalid descriptors,
+artifacts beyond their admitted caps, whole-artifact or per-source identity
+mismatches, malformed manifests or TARs, oversized caller evidence,
+candidate-revision or pointer mismatches, unreferenced sources,
+missing/extra/wrong-length source files, and missing locator markers. Admission
+caps are 128 KiB per manifest, 1 MiB per bundle, 512 source or pointer rows, and
+4096 UTF-8 bytes per manifest scalar.
+
+The kill-criterion evaluation returns `KillCriterionError` for placeholder
+baselines, incomplete baseline records, and non-positive or non-finite measured
+cycle times; neither subsystem coerces or defaults invalid evidence. Internal
+`expect` calls are applied only after structural validation, in tests, and to
+infallible writes to `String`.
 
 ## Determinism class
 
-Fully deterministic: pure `const` inputs; inventory and evidence order are
-fixed; integer scoring avoids floating-point rank drift; ties use stable slugs;
+Fully deterministic for identical compiled artifacts and inputs: embedded
+evidence bytes and pointer order are fixed; manifest, TAR, and per-source
+identities are domain separated; parsing uses canonical row/file ordering;
+integer scoring avoids floating-point rank drift; ties use stable slugs; and
 largest-remainder weight normalization breaks equal remainders by canonical
-factor order. `to_json` and `render_comparison_report` replay byte-for-byte.
+factor order. Historical replay receipts, `to_json`, and
+`render_comparison_report` reproduce byte-for-byte.
 
 ## Cancellation behavior
 
-None.
+None. Replay is synchronous and has no cancellation points; its parser work is
+bounded by the documented artifact, row, scalar, and caller-evidence caps.
 
 ## Unsafe boundary
 
@@ -155,10 +217,26 @@ load-bearing sources, https URLs); dossier existence, marker, and URL
 cross-citation; envelope arithmetic against the dossier derivation; the typed
 placeholder refusal; the printed kill-criterion derivation; manifest numeric
 round-trip of the envelope; the audit's baseline and refusal-drill checks;
-complete audit; negative doctrine and unique labels; deterministic JSON. The
-workspace evidence test reads every `WorkspacePath`, checks its locator
-marker, prints a deterministic `PASS`/`FAIL` table, and fails on drift. A
-separate exhaustive kernel-matrix test independently probes the required
+complete audit; negative doctrine and unique labels; deterministic JSON.
+
+The live workspace-evidence test reads every `WorkspacePath` in
+`measured_wedge_inputs()`, checks its current locator marker, prints a
+deterministic `PASS`/`FAIL` table, and fails on drift. Historical comparison
+pointers are deliberately excluded from that live scan and instead replay from
+the retained snapshot.
+
+Historical replay tests prove deterministic 13-source/31-pointer receipts and
+independence from today's workspace. G3 mutations refuse unauthenticated
+manifest/TAR bytes, candidate-revision drift, a renamed/missing TAR source, an
+empty snapshot, an authenticated pointer-path change, a same-length non-marker
+content change after whole-bundle reauthentication, and an
+identity-reauthenticated source whose locator was removed. Unit tests
+independently recompute all 13 per-source identities and both top-level
+artifact identities. Report tests require the v2 header and exactly one
+`HISTORICAL_EVIDENCE` row; audit tests require `comparison-history-bound` and
+13 total checks.
+
+A separate exhaustive kernel-matrix test independently probes the required
 implementation markers for all 15 kernel rows, derives `present`, `partial`,
 or `absent` from the number found, prints a labeled matrix/observed diff, and
 fails when a new or removed module makes the recorded readiness stale. The
@@ -186,12 +264,40 @@ output.
 - Evidence authority and comparative desirability are separate axes. A high
   factor rating cannot promote an `Absent` or `Partial` measurement into a
   stronger scientific claim, and the weighted total is not a certificate.
+- Artifact authentication proves that replay consumed the descriptor-bound
+  manifest, TAR, and revision/path/source identities and that their recorded
+  paths, lengths, pointer sequence, revision label, and locator substrings
+  satisfy the v1 protocol. It does not prove that the retained statements are
+  scientifically true, complete, current, or correctly interpreted, and it
+  does not validate the comparative ratings or weights.
+- The Git revision, Git blob OIDs, extraction-audit SHA-256 values, and TAR PAX
+  comment are retained provenance metadata, not an independent Git trust
+  proof. Offline replay does not contact a repository, recompute Git/SHA-256
+  identities, validate commit ancestry or signatures, or establish that the
+  revision was reviewed by an authorized human. Exact runtime content binding
+  comes from the separately domain-bound manifest, TAR, and per-source BLAKE3
+  identities.
+- Locator replay proves substring presence only. It does not certify the
+  surrounding contract's semantics, implementation behavior, model validity,
+  or evidence authority.
+- `verify_comparison_evidence` authenticates bytes against its
+  caller-supplied descriptor, so its receipt proves protocol self-consistency,
+  not canonical review authority. Only the embedded constant plus
+  `verify_default_comparison_evidence` names this crate's reviewed default
+  trust root.
+- `ranked_recommendation` remains a pure scoring primitive for caller-supplied
+  records. Only the default recommendation/report/audit path requires the
+  retained-history receipt, and that receipt does not turn a weighted score
+  into a scientific or commercial certificate.
 - Weight sensitivity permits a factor to reach 100, which can zero every other
   factor. In that degenerate case a recommendation may flip solely through the
   documented slug tie-break; the report exposes rather than hides that result.
 - The recommendation is provisional pending ratification and successor
-  customer-baseline work. It records the repository inventory at the pinned
-  revision above and does not silently incorporate later workspace changes.
+  customer-baseline work. Its comparison factors replay exclusively from the
+  retained `b3b5f2c1...` source bundle and therefore do not silently
+  incorporate later workspace changes. Separately dated measured-readiness
+  inputs continue to inspect the live workspace and must not be confused with
+  the historical comparison snapshot.
 - `fs-convection` and `fs-airflow` now provide the typed correlation catalog,
   fan curve, flow-network operating point, and evidence-preserving correlation
   handoff used by the low-cost CHT rung. Their synthetic fixtures and
