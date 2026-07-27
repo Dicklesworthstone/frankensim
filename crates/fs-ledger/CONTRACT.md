@@ -38,13 +38,14 @@ validation.
   historical v2 crash window (committed DDL, stale marker), which still
   heals; incompatible same-name early objects still fail closed.
 - `LedgerInstanceId` / `Ledger::instance_id()` — opaque, move-stable identity
-  of one physical ledger. Schema v4 stores exactly one 16-byte UUID in
+  of one persisted database lineage. Schema v4 stores exactly one 16-byte UUID in
   `ledger_identity`; fresh initialization and v1-v3 migration seed it inside
   the same transaction as the v4 version marker. Schema v5 adds attested
   update/delete refusal triggers plus a reinsert guard that permits only the
-  initial empty-table seed. Reopenings and path aliases of one file
-  agree, while replacement files at the same path and independent in-memory
-  handles differ. `instance_id()` is the cached open-time value;
+  initial empty-table seed. Reopenings, path aliases, and byte-for-byte copies
+  of one database agree, while independently initialized replacement files at
+  the same path and independent in-memory handles differ. `instance_id()` is
+  the cached open-time value;
   `checked_instance_id()` first performs one bounded `sqlite_master` lookup
   for the three reserved guard names and requires their normalized definitions
   to equal the shipped v5 DDL, then re-reads the current row and refuses a
@@ -73,7 +74,16 @@ validation.
   `get_artifact` / `read_artifact_chunks` / `artifact_info`, plus
   `get_artifact_bounded` / `read_artifact_chunks_bounded` for consumers that
   must refuse above a caller-supplied payload cap before any byte callback or
-  result-buffer allocation,
+  result-buffer allocation, and
+  `read_artifact_chunks_bounded_controlled` for a caller that must stop after
+  one hash-coupled tile of at most `CONTROLLED_ARTIFACT_TILE_LEN` (64 KiB).
+  `Continue(total_len)` is returned only after
+  complete shape and final content-hash validation; `Break(reason)` stops the
+  query before hashing or delivering a later tile and deliberately carries no
+  complete-artifact integrity claim. If a guarded chunk row disagrees with the
+  preflight envelope, its validator stores the exact corruption detail and
+  stops the row query immediately, before that row reaches the callback or any
+  later row is visited,
   `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`. The
   tail bound is on retained logical bytes and requested capacity; allocators
   may round capacity upward, and it is not a claim that multi-GiB writer
@@ -108,7 +118,20 @@ validation.
   type/length/CASE-gated JSON preflight followed by the same guarded payload
   query), `op_content_identity` (independently re-hashes the optional session,
   IR, seed, versions, budget, and capability bytes into six distinct typed
-  raw-content fields), `op_execution_context` (fixed-size typed branch/mode
+  raw-content fields), `read_op_fields_controlled` (re-attests the persisted
+  database-lineage identity; captures one complete bounded metadata envelope
+  plus the schema-v20 monotone operation-source generation; selects each
+  present variable field separately under its exact type, byte length, and
+  captured generation; delivers field-tagged callback tiles of at most
+  `CONTROLLED_OP_FIELD_TILE_LEN` = 64 KiB in fixed
+  session/IR/seed/versions/budget/capability/diagnostic order; and rechecks the
+  complete envelope and generation before returning `Complete`),
+  `verify_op_content_identity_prehashed` (for a caller-selected candidate,
+  re-attests the same database lineage and unchanged source
+  envelope/generation, compares the six completed source hashes with only the
+  fixed-size v18 sidecar, then rechecks the same envelope/generation without
+  fetching the variable source fields again), `op_execution_context`
+  (fixed-size typed branch/mode
   read after the same op-envelope preflight), `link` (FK-checked `in|out`
   edges accepted only while the target op is bounded, branch-valid, and unfinished),
   `edge_exists` (exact role-qualified verifier query), plus
@@ -412,7 +435,18 @@ validation.
 - Time travel (`travel` module, schema v2): `fork`/`branches`/`branch_diff`
   (a fork is a new op-log branch sharing every artifact by hash; visibility
   = own ops + ancestors' up to each fork point), `begin_op_on` (branch +
-  recorded `ExecMode`), `at_time` (consistent views at arbitrary instants:
+  recorded `ExecMode`), `visible_op_ids_page_controlled` (re-attests the
+  database-lineage identity; walks at most 64 fixed-size ancestry rows;
+  captures the first-page global operation-ID high-water before any segment ID
+  query; selects at most `cap+1` descending IDs from each ancestry segment;
+  merges them into strict descending global order; and returns at most
+  `cap <= MAX_VISIBLE_OP_PAGE_ROWS = 64` IDs plus an opaque continuation bound
+  to that lineage, branch, high-water, inclusive next key, and exact cap).
+  A callback is polled before work, after every ancestry/high-water/ID row, and
+  immediately before and after each delivered ID. A stop before an ID resumes
+  at that same ID; a stop after a delivered prefix resumes strictly below its
+  last ID. Appends above the captured high-water remain outside every
+  continuation page. `at_time` (consistent views at arbitrary instants:
   outcomes not yet written are masked, unfinished ops' outputs invisible),
   `explain` (strict-JSON causal trees even for hostile artifact-kind text,
   retaining producer outcome and diagnostic, depth-limited, DAG-deduped, loud
@@ -749,6 +783,20 @@ refusal, or verifier panic).
     rollback is always attempted, and a rollback failure is retained after the
     primary failure in a deterministic combined diagnostic. Cleanup failure
     never replaces or obscures the causal failure.
+24. A controlled operation read returns `Complete` only after every present
+    field was delivered in canonical order, every identity-bearing field query
+    still matched the captured source generation, and a final bounded metadata
+    read exactly matched the initial envelope and generation. `Break` carries
+    no complete-row or sidecar-agreement claim. The prehashed sidecar verifier
+    accepts only the checked database lineage and unchanged captured source
+    metadata before and after comparing every required and optional typed
+    content field.
+25. A controlled visible-operation cursor is valid only for its checked
+    database lineage, exact branch, first-page high-water, exact cap, and a
+    nonincreasing next-key interval. Every returned operation ID is positive,
+    globally descending, and visible through exactly one ancestry segment.
+    Duplicate, nonpositive, out-of-interval, or non-descending storage results
+    are corruption, never continuation keys.
 
 ## Error model
 
@@ -762,6 +810,25 @@ offending Five Explicits field), `Invalid` (names the field),
 `ArtifactReadLimit` refuses an artifact whose stored metadata declares a length
 above the caller's explicit validation/materialization budget before payload
 delivery; it makes no independent content-integrity claim.
+The controlled bounded reader returns a callback `Break` only when its own
+local callback-stop sentinel is the engine result. A separate local
+row-validation sentinel reconstructs the exact `LedgerError::Corrupt` detail
+and stops at the first invalid row. An unrelated engine abort/error remains a
+`LedgerError::Sql`; the two local states cannot reclassify it. A completing
+callback still surfaces final shape or content-hash corruption.
+The controlled operation-field reader has the same exact local-sentinel
+mapping, using `OpCorrupt` for row/envelope/generation disagreement. Its
+metadata-only preflight distinguishes an absent operation (`NotFound`) from a
+present malformed one (`OpCorrupt`); `Complete` is unavailable after any
+callback break. Candidate-only prehashed verification returns `OpCorrupt` for
+a missing, duplicate, future-versioned, optional-session-divergent, or
+required-field-divergent sidecar, for changed source metadata/generation, or
+for a prehash from a different checked database lineage.
+Controlled visible-operation paging returns `Invalid {
+field: "visible_op_page.cap" }` unless `cap` is in `1..=64`, and `Invalid {
+field: "visible_op_page.cursor" }` for a lineage, branch, cap, or high-water
+interval mismatch. Unknown branches remain `NotFound`; malformed ancestry,
+duplicate/nonpositive IDs, and descending-keyset violations are `Corrupt`.
 `OpCorrupt` refuses a stored op envelope that violates its type, byte, JSON,
 finish-state, branch, execution-context, or role-qualified edge contract before
 materialization. `OpLineageSealed` is the typed, non-retryable refusal for any
@@ -810,6 +877,13 @@ Identity reconciliation orders operation IDs and tune row IDs ascending under
 captured inclusive ceilings; the same retained source generation and input
 cursor produce the same output cursor and counts. Physical row IDs remain
 storage envelopes, not semantic identities.
+Controlled visible-operation pages use descending global operation-ID order,
+deterministic ancestry caps, and a first-page high-water. The same unchanged
+database lineage plus input cursor/cap produces the same page prefix,
+continuation, and fixed-row work count; later appends are excluded. Controlled
+operation fields use one fixed field order and exact byte offsets. Their
+callback partition is always 64 KiB except for a final shorter tile; hashes are
+over exact source bytes and are independent of callback storage choices.
 Nightly admission and diagnostic ordering are deterministic:
 `argv -> db-path -> outcome -> suite -> value -> GITHUB_SHA -> RUNNER_OS ->
 constructed envelopes`. Environment values are used exactly as supplied after
@@ -832,6 +906,30 @@ not claim general per-call scope-tree cancellation. The narrow exception is
 bounded row boundaries and immediately before commit, owns the transaction,
 and rolls the complete page back when a poll observes cancellation. One
 already-dispatched bounded row query is not preempted.
+`read_artifact_chunks_bounded_controlled` is a synchronous caller-control
+boundary rather than an ambient cancellation source. Within each already
+materialized inline value or chunk row it hashes one at-most-64-KiB tile,
+delivers that exact tile to the callback, then either continues or stops.
+A callback break therefore skips hashing and delivery of every later tile and
+the final artifact hash comparison; only a completing read has
+complete-artifact integrity authority. The SQL engine may already have
+dispatched/materialized the containing storage row of up to
+`STORAGE_CHUNK_LEN`; the API makes no within-engine row-materialization latency
+claim. If the guarded payload query observes a post-preflight row-shape
+disagreement, that first invalid row terminates the query before callback
+delivery, retains its exact corruption diagnosis, and prevents all later row
+visits. The established infallible streaming APIs retain storage-row callback
+granularity.
+`read_op_fields_controlled` and `visible_op_ids_page_controlled` are likewise
+synchronous caller-control boundaries, not ambient cancellation sources. An
+operation callback break stops the active field query through its private
+local sentinel and skips all later tiles and fields; it returns no complete
+prehash. The engine may already have materialized that one at-most-1-MiB
+field, so the 64-KiB bound is callback/hash work rather than within-engine
+materialization latency. A visible-page callback is polled at every fixed-size
+ancestry/high-water/ID row boundary and on both sides of each delivered ID.
+Its returned prefix and continuation encode whether the stop happened before
+or after delivery, so retry does not skip or duplicate a retained ID.
 The nightly writer has no asynchronous cancellation boundary. Once its
 transaction begins, every fallible write/commit path attempts synchronous
 rollback; if both operations fail, both errors escape in primary-then-cleanup
@@ -853,8 +951,11 @@ covering multi-level trees), seeded streaming-split property, versioned
 migration + future-version refusal, the schema-attestation gauntlet
 (valid-empty atomic init, conflicting-object-at-v0, partial-schema,
 wrong-column, wrong-affinity, and missing-index all refused fail-closed
-with the file untouched), dual-path chunked dedupe + round trip,
-corruption-fails-loudly (inline + chunked), concurrent snapshot readers
+with the file untouched), dual-path chunked dedupe + round trip, controlled
+bounded exact-cap-inline and multi-row first-tile stop behavior, preservation
+of infallible storage-row callback granularity, zero callbacks on metadata
+over-cap refusal, final hash mismatch propagation on a completing controlled
+read, corruption-fails-loudly (inline + chunked), concurrent snapshot readers
 during a write sweep (monotone + internally consistent), kill -9 crash
 battery (6 seeded rounds → lint-clean + integrity-clean), and an events/sec
 throughput smoke ledgered as a metric. `ledger_013` races two file-backed
@@ -872,8 +973,10 @@ database/sidecar creation on pure refusal. Closure-injected transaction faults
 prove write-plus-rollback and commit-plus-rollback diagnostics retain both
 causes in exact order without requiring a production fault-injection switch.
 Artifact unit regressions cover inline and chunked exact caller caps, cap+1
-refusal with zero payload callbacks, and the explicit metadata-declaration
-precedence for a tampered length. Op unit regressions cover exact and cap+1 canonical writes
+refusal with zero payload callbacks, the explicit metadata-declaration
+precedence for a tampered length, and first-row termination with distinct
+callback-stop, exact row-corruption, and unrelated engine-error states. Op unit
+regressions cover exact and cap+1 canonical writes
 for every variable-size field, raw-SQL oversized IR/version rows, guarded read
 refusal, typed execution-context corruption/missing behavior, deterministic
 role-qualified lineage ordering, exact-cap/cap+1/zero-cap truncation, explicit
@@ -950,6 +1053,22 @@ one-row request binding and ordering across both source families, response-loss
 replay, stale-on-source-mutation including row-ID reuse, the exact 64/65 row
 boundary, and cancellation after one provisional write with zero published
 sidecars and the unchanged resume cursor.
+Controlled-operation regressions cover exact 64-KiB and limit-plus-one field
+partitioning, canonical field order/offsets, stop-before-later-fields and
+source retry, absent and malformed rows, exact local-stop versus unrelated
+engine-abort mapping, candidate-only sidecar reads, every required content-ID
+mismatch, optional-session mismatch, missing/duplicate/future-version
+sidecars, foreign database lineage, and a same-length source mutation that
+advances the captured generation. `tests/conformance.rs` additionally uses an
+independent writer to prove both an identity-bearing generation change and an
+in-flight terminal/diagnostic presence flip prevent a mixed `Complete`.
+Controlled visible-page regressions cover the exact 64/65 row boundary,
+descending pagination across interleaved fork ancestry, response-loss replay,
+first-page high-water exclusion of a later append, stop before work/before the
+first ID/after a retained prefix, strict no-skip/no-duplicate resume, unknown
+branches, and literal lineage/branch/high-water/cap cursor binding. A raw
+nonpositive operation-ID fixture proves cursor arithmetic fails closed before
+constructing a continuation.
 The cancellation regression uses the private injectable checkpoint seam and
 proves transaction mechanics only. Runtime exercise through the public `Cx`
 adapter, independent-connection writer contention, rollback-failure injection,
@@ -1140,6 +1259,24 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
 - `LedgerInstanceId` is a collision-resistant uniqueness token, not a secret,
   signature, or authentication credential. Byte-for-byte database copies
   intentionally retain one identity because they are copies of one lineage.
+- Controlled operation delivery bounds callback/hash work to 64-KiB tiles, but
+  FrankenSQLite may already materialize the active field of at most 1 MiB.
+  The schema-v20 generation is database-wide, so an unrelated compatible
+  operation mutation may conservatively interrupt a read; no liveness claim is
+  made under writer churn. The prehashed verifier's final metadata read brackets
+  its own metadata/sidecar query sequence; it is not an absolute snapshot
+  promise after the method returns. Complete delivery and prehashed sidecar
+  agreement prove exact raw-byte consistency only. They do not assign an IR
+  schema, semantic meaning, scientific validity, or authority. Diagnostic bytes are
+  outside the v18 identity sidecar; their supported writer path is immutable
+  after terminal publication, while arbitrary out-of-band SQL mutation remains
+  outside the API consistency claim.
+- Controlled visible-operation paging freezes an append-only ID high-water, not
+  a general serialized database snapshot. Its opaque cursor is neither
+  authenticated transport nor semantic identity. It excludes later API
+  appends, but arbitrary out-of-band mutation of retained branch/operation rows
+  remains outside the snapshot claim. Per-segment SQL may materialize at most
+  `cap+1` fixed-size IDs before the bounded Rust merge.
 - A checkpoint receipt proves that the referenced artifact and executor report
   are mutually bound and durably present. It does not independently prove that
   every solver thread was registered with the executor `DrainTracker`, that the
@@ -1214,6 +1351,11 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
 - Multi-GiB single artifacts: chunk storage bounds row sizes, but the
   streaming path is verified at the tens-of-MiB scale only so far; fsqlite
   transaction memory behavior at multi-GiB scale is unmeasured.
+- A controlled bounded-reader callback observes one at-most-64-KiB tile after
+  that tile is hashed. A break prevents later tile hashing/delivery, but the
+  SQL engine may already have materialized the containing at-most-4-MiB row;
+  the ledger makes no SQL row-dispatch/materialization or wall-clock latency
+  claim.
 - The v1 tables do not encode the per-BLOB `STORAGE_CHUNK_LEN` or artifact
   envelope byte bounds as schema CHECKs. Existing databases are protected by
   bounded canonical writes, metadata-only read preflights, guarded variable-size

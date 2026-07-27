@@ -73,9 +73,27 @@ pub use state_checkpoint::{
     StateCheckpointReceipt, StateSlotId, VerifiedStateCheckpoint,
 };
 pub use travel::{
-    BranchDiff, BranchInfo, ExecMode, ExplainNode, ExplainOp, GcReport, MAIN_BRANCH,
-    ReplayMismatch, ReplayVerdict, ViewSnapshot,
+    BranchDiff, BranchInfo, ControlledVisibleOpPage, ExecMode, ExplainNode, ExplainOp, GcReport,
+    MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, ReplayMismatch, ReplayVerdict, ViewSnapshot,
+    VisibleOpCursor, VisibleOpPage, VisibleOpPageProgress,
 };
+
+/// Maximum byte slice hashed before a controlled artifact reader invokes its
+/// callback.
+///
+/// SQL may already have materialized one storage row of up to
+/// [`STORAGE_CHUNK_LEN`], but controlled hashing and callback delivery advance
+/// together in slices no larger than this value.
+pub const CONTROLLED_ARTIFACT_TILE_LEN: usize = 64 * 1024;
+
+/// Maximum exact operation-field bytes delivered before a controlled
+/// operation reader invokes its callback.
+///
+/// Each source field is selected separately after a metadata-only bounded
+/// preflight. The SQL engine may already have materialized that one field of
+/// at most [`MAX_OP_FIELD_BYTES`], while callback delivery remains bounded by
+/// this smaller tile.
+pub const CONTROLLED_OP_FIELD_TILE_LEN: usize = 64 * 1024;
 
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -1773,13 +1791,14 @@ pub const VCS_COMMIT_ENVELOPE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
 
 pub(crate) const VCS_IDENTITY_EVENT_KIND: &str = "vcs-identity";
 
-/// Opaque identity of one physical ledger instance.
+/// Opaque identity of one persisted database lineage.
 ///
 /// File-backed ledgers persist this value in schema metadata, so aliases and
-/// reopenings agree while a replacement database at the same path does not.
-/// In-memory ledgers retain a generated value inside the handle, so moving the
-/// Rust value cannot change its identity and independent handles never alias by
-/// address reuse.
+/// reopenings agree. A byte-for-byte database copy intentionally keeps the same
+/// lineage identity, while an independently initialized replacement at the
+/// same path does not. In-memory ledgers retain a generated value inside the
+/// handle, so moving the Rust value cannot change its identity and independent
+/// handles never alias by address reuse.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LedgerInstanceId([u8; 16]);
 
@@ -2349,11 +2368,22 @@ pub enum OpOutcome {
 }
 
 impl OpOutcome {
-    fn as_str(self) -> &'static str {
+    /// Stable lowercase storage name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             OpOutcome::Ok => "ok",
             OpOutcome::Error => "error",
             OpOutcome::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ok" => Some(Self::Ok),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
         }
     }
 }
@@ -2465,6 +2495,143 @@ pub struct OpRow {
     pub outcome: Option<String>,
     /// Structured diagnostic (JSON), if any.
     pub diag: Option<String>,
+}
+
+/// One variable-size field delivered by
+/// [`Ledger::read_op_fields_controlled`].
+///
+/// Fields are visited in this exact order. Text fields are delivered as their
+/// exact stored UTF-8 bytes; no parsing or canonical rewriting occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpVariableField {
+    /// Optional session identity bytes.
+    Session,
+    /// Frozen operation IR JSON bytes.
+    Ir,
+    /// Frozen seed bytes.
+    Seed,
+    /// Frozen versions JSON bytes.
+    Versions,
+    /// Frozen budget JSON bytes.
+    Budget,
+    /// Frozen capability JSON bytes.
+    Capability,
+    /// Optional terminal diagnostic JSON bytes.
+    Diagnostic,
+}
+
+impl OpVariableField {
+    /// Stable lowercase field name used by diagnostics and work ledgers.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Ir => "ir",
+            Self::Seed => "seed",
+            Self::Versions => "versions",
+            Self::Budget => "budget",
+            Self::Capability => "capability",
+            Self::Diagnostic => "diagnostic",
+        }
+    }
+}
+
+/// Fixed-size envelope and exact byte lengths for one controlled operation
+/// read.
+///
+/// Variable fields are deliberately absent. A caller reconstructs them from
+/// the field-tagged callback tiles only after
+/// [`ControlledOpRead::Complete`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlledOpMetadata {
+    /// Ledger-local operation row ID.
+    pub id: i64,
+    /// Branch containing the operation.
+    pub branch: i64,
+    /// Recorded deterministic or fast execution mode.
+    pub exec_mode: ExecMode,
+    /// Start time provenance envelope.
+    pub t_start: i64,
+    /// Optional terminal time.
+    pub t_end: Option<i64>,
+    /// Optional terminal outcome.
+    pub outcome: Option<OpOutcome>,
+    /// Exact optional session byte length.
+    pub session_len: Option<u64>,
+    /// Exact IR byte length.
+    pub ir_len: u64,
+    /// Exact seed byte length.
+    pub seed_len: u64,
+    /// Exact versions byte length.
+    pub versions_len: u64,
+    /// Exact budget byte length.
+    pub budget_len: u64,
+    /// Exact capability byte length.
+    pub capability_len: u64,
+    /// Exact optional diagnostic byte length.
+    pub diagnostic_len: Option<u64>,
+    /// Monotone database-wide generation covering every identity-bearing
+    /// operation-field insertion, update, or deletion.
+    pub source_generation: i64,
+}
+
+/// Exact field hashes accumulated by one complete controlled operation read.
+///
+/// The fields are private so callers cannot construct or edit this value.
+/// This value is not sidecar authority by itself. After a cheap row/IR
+/// prefilter selects a candidate, pass it to
+/// [`Ledger::verify_op_content_identity_prehashed`] to compare these hashes
+/// with the fixed-size retained sidecar without re-reading the source fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrehashedOpContent {
+    ledger_instance_id: LedgerInstanceId,
+    op: i64,
+    source_metadata: ControlledOpMetadata,
+    session: Option<ContentHash>,
+    ir: ContentHash,
+    seed: ContentHash,
+    versions: ContentHash,
+    budget: ContentHash,
+    capability: ContentHash,
+}
+
+impl PrehashedOpContent {
+    /// Persisted database-lineage identity from which the exact bytes were
+    /// read. A byte-for-byte database copy deliberately retains this value.
+    #[must_use]
+    pub const fn ledger_instance_id(self) -> LedgerInstanceId {
+        self.ledger_instance_id
+    }
+
+    /// Ledger-local operation row whose fields were hashed.
+    #[must_use]
+    pub const fn op(self) -> i64 {
+        self.op
+    }
+}
+
+/// Successful completion of a controlled operation read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlledOpReadComplete {
+    /// Fixed-size operation envelope and exact field lengths.
+    pub metadata: ControlledOpMetadata,
+    /// Opaque exact hashes accumulated from every identity-bearing source
+    /// field.
+    pub prehashed_content: PrehashedOpContent,
+}
+
+/// Result of one controlled operation-field read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlledOpRead<B> {
+    /// No operation with the requested ID exists.
+    NotFound,
+    /// The callback requested a stop. No complete-row or content-sidecar
+    /// verification claim is returned.
+    Break(B),
+    /// Every present field was delivered completely and exact source hashes
+    /// were accumulated. The retained sidecar has deliberately not yet been
+    /// inspected.
+    Complete(ControlledOpReadComplete),
 }
 
 /// One event-stream row to append.
@@ -3355,6 +3522,111 @@ impl ArtifactChunkValidator {
     }
 }
 
+enum ControlledArtifactReadStop<B> {
+    Callback(B),
+    Corrupt(String),
+}
+
+fn stream_controlled_artifact_row<B>(
+    row: &fsqlite::Row,
+    validator: &mut ArtifactChunkValidator,
+    hasher: &mut Blake3,
+    callback_tile_len: usize,
+    callback: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<B>,
+    local_stop: &mut Option<ControlledArtifactReadStop<B>>,
+) -> Result<(), FrankenError> {
+    if local_stop.is_some() {
+        return Err(FrankenError::Abort);
+    }
+    let bytes = match validator.accept(row) {
+        Ok(bytes) => bytes,
+        Err(detail) => {
+            *local_stop = Some(ControlledArtifactReadStop::Corrupt(detail));
+            return Err(FrankenError::Abort);
+        }
+    };
+    for tile in bytes.chunks(callback_tile_len) {
+        hasher.update(tile);
+        if let std::ops::ControlFlow::Break(reason) = callback(tile) {
+            *local_stop = Some(ControlledArtifactReadStop::Callback(reason));
+            return Err(FrankenError::Abort);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_controlled_artifact_query<B>(
+    h: &ContentHash,
+    query: Result<(), FrankenError>,
+    local_stop: Option<ControlledArtifactReadStop<B>>,
+) -> Result<Option<B>, LedgerError> {
+    match (query, local_stop) {
+        (Err(FrankenError::Abort), Some(ControlledArtifactReadStop::Callback(reason))) => {
+            Ok(Some(reason))
+        }
+        (Err(FrankenError::Abort), Some(ControlledArtifactReadStop::Corrupt(detail)))
+        | (Ok(()), Some(ControlledArtifactReadStop::Corrupt(detail))) => {
+            Err(LedgerError::Corrupt {
+                hash_hex: h.to_hex(),
+                detail,
+            })
+        }
+        (Err(error), _) => Err(sql_err("read_artifact_chunks", &error)),
+        (Ok(()), Some(ControlledArtifactReadStop::Callback(_))) => Err(LedgerError::Invalid {
+            field: "artifact read control".to_string(),
+            problem: "the row query completed after a callback requested an immediate stop"
+                .to_string(),
+        }),
+        (Ok(()), None) => Ok(None),
+    }
+}
+
+enum ControlledOpFieldStop<B> {
+    Callback(B),
+    Corrupt(String),
+}
+
+fn controlled_op_field_column(field: OpVariableField) -> (&'static str, bool) {
+    match field {
+        OpVariableField::Session => ("session", false),
+        OpVariableField::Ir => ("ir", true),
+        OpVariableField::Seed => ("seed", false),
+        OpVariableField::Versions => ("versions", true),
+        OpVariableField::Budget => ("budget", true),
+        OpVariableField::Capability => ("capability", true),
+        OpVariableField::Diagnostic => ("diag", true),
+    }
+}
+
+fn resolve_controlled_op_field_query<B>(
+    op: i64,
+    field: OpVariableField,
+    query: Result<(), FrankenError>,
+    local_stop: Option<ControlledOpFieldStop<B>>,
+) -> Result<Option<B>, LedgerError> {
+    match (query, local_stop) {
+        (Err(FrankenError::Abort), Some(ControlledOpFieldStop::Callback(reason))) => {
+            Ok(Some(reason))
+        }
+        (Err(FrankenError::Abort), Some(ControlledOpFieldStop::Corrupt(detail)))
+        | (Ok(()), Some(ControlledOpFieldStop::Corrupt(detail))) => {
+            Err(LedgerError::OpCorrupt { op, detail })
+        }
+        (Err(error), _) => Err(sql_err(
+            &format!("controlled operation {} field read", field.as_str()),
+            &error,
+        )),
+        (Ok(()), Some(ControlledOpFieldStop::Callback(_))) => Err(LedgerError::Invalid {
+            field: "operation read control".to_string(),
+            problem: format!(
+                "the {} field query completed after its callback requested an immediate stop",
+                field.as_str()
+            ),
+        }),
+        (Ok(()), None) => Ok(None),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The Ledger
 // ---------------------------------------------------------------------------
@@ -3432,11 +3704,12 @@ impl Ledger {
         &self.path
     }
 
-    /// Cached open-time identity of this physical ledger instance.
+    /// Cached open-time identity of this persisted database lineage.
     ///
-    /// This is the authority key for binding higher-level sinks. It is stable
-    /// across aliases and reopenings of one file, distinct for a replacement
-    /// file at the same path, and distinct for independent in-memory handles.
+    /// This is the binding key for higher-level sinks. It is stable across
+    /// aliases, reopenings, and byte-for-byte copies of one database; it is
+    /// distinct for an independently initialized replacement file at the same
+    /// path and for independent in-memory handles.
     /// Use [`Ledger::checked_instance_id`] at a trust boundary that must also
     /// detect out-of-band mutation after this handle opened.
     #[must_use]
@@ -4727,12 +5000,73 @@ impl Ledger {
         self.read_artifact_chunks_with_info(h, &info, f).map(Some)
     }
 
+    /// Stream an artifact under a caller cap while allowing the callback to
+    /// stop before any later controlled tile is hashed or delivered.
+    ///
+    /// `ControlFlow::Continue(())` accepts one delivered tile and keeps
+    /// reading. Each tile is hashed before callback delivery and is at most
+    /// [`CONTROLLED_ARTIFACT_TILE_LEN`] bytes.
+    /// `ControlFlow::Break(reason)` stops before any later tile is hashed or
+    /// delivered and returns that exact reason. A break deliberately carries
+    /// no complete content-integrity claim: only
+    /// `ControlFlow::Continue(total_len)` means every tile was validated and
+    /// the final content hash matched. Callback effects for an already
+    /// delivered prefix are not rolled back.
+    ///
+    /// The metadata limit is enforced before the callback observes payload
+    /// bytes. The underlying SQL engine may already have materialized one
+    /// inline value or chunk row bounded by [`STORAGE_CHUNK_LEN`], but hashing
+    /// and callback delivery within that row remain tile-bounded.
+    ///
+    /// # Errors
+    /// The same storage, integrity, and limit errors as
+    /// [`Ledger::read_artifact_chunks_bounded`]. An engine-originated query
+    /// abort remains a ledger error. Only the locally issued callback-stop
+    /// sentinel is translated into `ControlFlow::Break`; a distinct local
+    /// row-validation sentinel retains its exact corruption detail.
+    pub fn read_artifact_chunks_bounded_controlled<B>(
+        &self,
+        h: &ContentHash,
+        max_bytes: u64,
+        f: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<Option<std::ops::ControlFlow<B, u64>>, LedgerError> {
+        let Some(info) = self.artifact_info(h)? else {
+            return Ok(None);
+        };
+        self.require_artifact_read_limit(h, &info, max_bytes)?;
+        self.read_artifact_chunks_with_info_controlled(h, &info, CONTROLLED_ARTIFACT_TILE_LEN, f)
+            .map(Some)
+    }
+
     fn read_artifact_chunks_with_info(
         &self,
         h: &ContentHash,
         info: &ArtifactInfo,
         f: &mut dyn FnMut(&[u8]),
     ) -> Result<u64, LedgerError> {
+        let mut controlled = |chunk: &[u8]| {
+            f(chunk);
+            std::ops::ControlFlow::<std::convert::Infallible>::Continue(())
+        };
+        match self.read_artifact_chunks_with_info_controlled(
+            h,
+            info,
+            STORAGE_CHUNK_LEN,
+            &mut controlled,
+        )? {
+            std::ops::ControlFlow::Continue(streamed) => Ok(streamed),
+            std::ops::ControlFlow::Break(never) => match never {},
+        }
+    }
+
+    fn read_artifact_chunks_with_info_controlled<B>(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+        callback_tile_len: usize,
+        f: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<std::ops::ControlFlow<B, u64>, LedgerError> {
+        debug_assert!(callback_tile_len > 0);
         if info.chunk_count == 0 {
             self.preflight_inline_artifact(h, info)?;
             let rows = self
@@ -4756,8 +5090,14 @@ impl Ledger {
                     hash_hex: h.to_hex(),
                     detail,
                 })?;
-            let computed = hash_bytes(bytes);
-            f(bytes);
+            let mut hasher = Blake3::new();
+            for tile in bytes.chunks(callback_tile_len) {
+                hasher.update(tile);
+                if let std::ops::ControlFlow::Break(reason) = f(tile) {
+                    return Ok(std::ops::ControlFlow::Break(reason));
+                }
+            }
+            let computed = hasher.finalize();
             if computed != *h {
                 return Err(LedgerError::Corrupt {
                     hash_hex: h.to_hex(),
@@ -4767,41 +5107,33 @@ impl Ledger {
                     ),
                 });
             }
-            return Ok(info.len);
+            return Ok(std::ops::ControlFlow::Continue(info.len));
         }
 
         self.preflight_chunked_artifact(h, info)?;
         let mut validator = ArtifactChunkValidator::new(info);
         let mut hasher = Blake3::new();
-        let mut corrupt_detail = None;
-        self.conn
-            .query_with_params_for_each(
-                "SELECT seq, bytes FROM artifact_chunks WHERE hash = ?1 AND bytes IS NOT NULL \
+        let mut local_stop = None;
+        let query = self.conn.query_with_params_for_each(
+            "SELECT seq, bytes FROM artifact_chunks WHERE hash = ?1 AND bytes IS NOT NULL \
                  AND length(bytes) <= ?2 ORDER BY seq",
-                &[
-                    blob_param(h.as_bytes()),
-                    SqliteValue::Integer(int_from_usize(STORAGE_CHUNK_LEN)),
-                ],
-                |row| {
-                    if corrupt_detail.is_some() {
-                        return Ok(());
-                    }
-                    match validator.accept(row) {
-                        Ok(bytes) => {
-                            hasher.update(bytes);
-                            f(bytes);
-                        }
-                        Err(detail) => corrupt_detail = Some(detail),
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|e| sql_err("read_artifact_chunks", &e))?;
-        if let Some(detail) = corrupt_detail {
-            return Err(LedgerError::Corrupt {
-                hash_hex: h.to_hex(),
-                detail,
-            });
+            &[
+                blob_param(h.as_bytes()),
+                SqliteValue::Integer(int_from_usize(STORAGE_CHUNK_LEN)),
+            ],
+            |row| {
+                stream_controlled_artifact_row(
+                    row,
+                    &mut validator,
+                    &mut hasher,
+                    callback_tile_len,
+                    f,
+                    &mut local_stop,
+                )
+            },
+        );
+        if let Some(reason) = resolve_controlled_artifact_query(h, query, local_stop)? {
+            return Ok(std::ops::ControlFlow::Break(reason));
         }
         let streamed = validator.finish().map_err(|detail| LedgerError::Corrupt {
             hash_hex: h.to_hex(),
@@ -4817,7 +5149,7 @@ impl Ledger {
                 ),
             });
         }
-        Ok(streamed)
+        Ok(std::ops::ControlFlow::Continue(streamed))
     }
 
     /// Re-hash every stored artifact against its recorded identity.
@@ -5057,6 +5389,439 @@ impl Ledger {
             .ok_or_else(|| LedgerError::NotFound {
                 what: format!("op {id}"),
             })
+    }
+
+    fn controlled_op_metadata_inner(
+        &self,
+        id: i64,
+    ) -> Result<Option<ControlledOpMetadata>, LedgerError> {
+        if !self.op_row_is_bounded(id)? {
+            return Ok(None);
+        }
+        let rows = self
+            .conn
+            .query_with_params(
+                &format!(
+                    "SELECT id, branch, exec_mode, t_start, t_end, outcome,
+                            CASE WHEN session IS NULL THEN -1 ELSE length(session) END,
+                            length(CAST(ir AS BLOB)), length(seed),
+                            length(CAST(versions AS BLOB)),
+                            length(CAST(budget AS BLOB)),
+                            length(CAST(capability AS BLOB)),
+                            CASE WHEN diag IS NULL THEN -1 ELSE length(CAST(diag AS BLOB)) END,
+                            EXISTS(SELECT 1 FROM branches WHERE branches.id = ops.branch),
+                            (SELECT generation
+                             FROM identity_reconcile_source_generation
+                             WHERE singleton = 1)
+                     FROM ops WHERE id = ?1 AND {} LIMIT 2",
+                    op_storage_predicate()
+                ),
+                &[SqliteValue::Integer(id)],
+            )
+            .map_err(|error| sql_err("controlled operation metadata read", &error))?;
+        if rows.len() != 1 {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: if rows.is_empty() {
+                    "operation disappeared or changed after bounded metadata preflight".to_string()
+                } else {
+                    "one operation ID selected multiple metadata rows".to_string()
+                },
+            });
+        }
+        let row = rows
+            .first()
+            .expect("one controlled operation metadata row checked above");
+        let integer = |index: usize, field: &'static str| -> Result<i64, LedgerError> {
+            match row.get(index) {
+                Some(SqliteValue::Integer(value)) => Ok(*value),
+                _ => Err(LedgerError::OpCorrupt {
+                    op: id,
+                    detail: format!("{field} has non-integer storage after bounded preflight"),
+                }),
+            }
+        };
+        let required_len = |index: usize, field: &'static str| -> Result<u64, LedgerError> {
+            let value = integer(index, field)?;
+            u64::try_from(value).map_err(|_| LedgerError::OpCorrupt {
+                op: id,
+                detail: format!("{field} has a negative byte length after bounded preflight"),
+            })
+        };
+        let optional_len =
+            |index: usize, field: &'static str| -> Result<Option<u64>, LedgerError> {
+                let value = integer(index, field)?;
+                if value == -1 {
+                    Ok(None)
+                } else {
+                    u64::try_from(value)
+                    .map(Some)
+                    .map_err(|_| LedgerError::OpCorrupt {
+                        op: id,
+                        detail: format!(
+                            "{field} has an invalid negative byte length after bounded preflight"
+                        ),
+                    })
+                }
+            };
+        let stored_id = integer(0, "operation ID")?;
+        if stored_id != id {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: format!(
+                    "controlled metadata selected operation ID {stored_id}, expected {id}"
+                ),
+            });
+        }
+        let branch = integer(1, "branch")?;
+        let exec_mode = match row.get(2) {
+            Some(SqliteValue::Text(value)) => {
+                ExecMode::parse(value).ok_or_else(|| LedgerError::OpCorrupt {
+                    op: id,
+                    detail: "execution mode is outside the deterministic/fast domain".to_string(),
+                })?
+            }
+            _ => {
+                return Err(LedgerError::OpCorrupt {
+                    op: id,
+                    detail: "execution mode has non-text storage after bounded preflight"
+                        .to_string(),
+                });
+            }
+        };
+        let t_start = integer(3, "start time")?;
+        let t_end = match row.get(4) {
+            Some(SqliteValue::Null) => None,
+            Some(SqliteValue::Integer(value)) => Some(*value),
+            _ => {
+                return Err(LedgerError::OpCorrupt {
+                    op: id,
+                    detail: "terminal time has invalid storage after bounded preflight".to_string(),
+                });
+            }
+        };
+        let outcome =
+            match row.get(5) {
+                Some(SqliteValue::Null) => None,
+                Some(SqliteValue::Text(value)) => Some(OpOutcome::parse(value).ok_or_else(
+                    || LedgerError::OpCorrupt {
+                        op: id,
+                        detail: "terminal outcome is outside the closed outcome domain".to_string(),
+                    },
+                )?),
+                _ => {
+                    return Err(LedgerError::OpCorrupt {
+                        op: id,
+                        detail: "terminal outcome has invalid storage after bounded preflight"
+                            .to_string(),
+                    });
+                }
+            };
+        if t_end.is_some() != outcome.is_some() {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: "terminal time and outcome presence disagree".to_string(),
+            });
+        }
+        if integer(13, "branch-presence guard")? != 1 {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: format!("branch {branch} does not exist in the branch registry"),
+            });
+        }
+        let source_generation = integer(14, "operation source generation")?;
+        if source_generation < 0 {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: format!(
+                    "operation source generation must be non-negative, found {source_generation}"
+                ),
+            });
+        }
+        Ok(Some(ControlledOpMetadata {
+            id,
+            branch,
+            exec_mode,
+            t_start,
+            t_end,
+            outcome,
+            session_len: optional_len(6, "session")?,
+            ir_len: required_len(7, "IR")?,
+            seed_len: required_len(8, "seed")?,
+            versions_len: required_len(9, "versions")?,
+            budget_len: required_len(10, "budget")?,
+            capability_len: required_len(11, "capability")?,
+            diagnostic_len: optional_len(12, "diagnostic")?,
+            source_generation,
+        }))
+    }
+
+    fn read_controlled_op_field<B>(
+        &self,
+        op: i64,
+        field: OpVariableField,
+        expected_len: u64,
+        expected_generation: i64,
+        callback: &mut dyn FnMut(OpVariableField, u64, &[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<std::ops::ControlFlow<B, ContentHash>, LedgerError> {
+        let expected_len = usize::try_from(expected_len).map_err(|_| LedgerError::OpCorrupt {
+            op,
+            detail: format!(
+                "{} byte length is outside the platform address domain",
+                field.as_str()
+            ),
+        })?;
+        let (column, text_field) = controlled_op_field_column(field);
+        let storage_guard = if text_field {
+            format!("typeof({column}) = 'text' AND length(CAST({column} AS BLOB)) = ?2")
+        } else {
+            format!("typeof({column}) = 'blob' AND length({column}) = ?2")
+        };
+        let expected_len_param =
+            i64::try_from(expected_len).map_err(|_| LedgerError::OpCorrupt {
+                op,
+                detail: format!(
+                    "{} byte length is outside the SQLite INTEGER domain",
+                    field.as_str()
+                ),
+            })?;
+        let mut rows_seen = 0usize;
+        let mut hasher = Blake3::new();
+        let mut local_stop = None;
+        let query = self.conn.query_with_params_for_each(
+            &format!(
+                "SELECT {column} FROM ops
+                 WHERE id = ?1 AND {storage_guard}
+                   AND (SELECT generation
+                        FROM identity_reconcile_source_generation
+                        WHERE singleton = 1) = ?3
+                 LIMIT 2"
+            ),
+            &[
+                SqliteValue::Integer(op),
+                SqliteValue::Integer(expected_len_param),
+                SqliteValue::Integer(expected_generation),
+            ],
+            |row| {
+                if local_stop.is_some() {
+                    return Err(FrankenError::Abort);
+                }
+                rows_seen = rows_seen.saturating_add(1);
+                if rows_seen != 1 {
+                    local_stop = Some(ControlledOpFieldStop::Corrupt(format!(
+                        "one operation ID selected multiple {} field rows",
+                        field.as_str()
+                    )));
+                    return Err(FrankenError::Abort);
+                }
+                let bytes = match (text_field, row.get(0)) {
+                    (true, Some(SqliteValue::Text(value))) => value.as_bytes(),
+                    (false, Some(SqliteValue::Blob(value))) => value.as_ref(),
+                    _ => {
+                        local_stop = Some(ControlledOpFieldStop::Corrupt(format!(
+                            "{} changed storage type after bounded metadata preflight",
+                            field.as_str()
+                        )));
+                        return Err(FrankenError::Abort);
+                    }
+                };
+                if bytes.len() != expected_len {
+                    local_stop = Some(ControlledOpFieldStop::Corrupt(format!(
+                        "{} changed byte length after bounded metadata preflight: expected \
+                         {expected_len}, found {}",
+                        field.as_str(),
+                        bytes.len()
+                    )));
+                    return Err(FrankenError::Abort);
+                }
+                let mut offset = 0u64;
+                for tile in bytes.chunks(CONTROLLED_OP_FIELD_TILE_LEN) {
+                    hasher.update(tile);
+                    if let std::ops::ControlFlow::Break(reason) = callback(field, offset, tile) {
+                        local_stop = Some(ControlledOpFieldStop::Callback(reason));
+                        return Err(FrankenError::Abort);
+                    }
+                    offset = offset.saturating_add(
+                        u64::try_from(tile.len()).expect("controlled operation tile fits u64"),
+                    );
+                }
+                Ok(())
+            },
+        );
+        if let Some(reason) = resolve_controlled_op_field_query(op, field, query, local_stop)? {
+            return Ok(std::ops::ControlFlow::Break(reason));
+        }
+        if rows_seen != 1 {
+            return Err(LedgerError::OpCorrupt {
+                op,
+                detail: format!(
+                    "{} disappeared or changed after bounded metadata preflight",
+                    field.as_str()
+                ),
+            });
+        }
+        Ok(std::ops::ControlFlow::Continue(hasher.finalize()))
+    }
+
+    /// Read one bounded operation without materializing all variable fields
+    /// together.
+    ///
+    /// A metadata-only preflight validates the complete operation envelope.
+    /// Each present variable field is then selected separately, guarded by its
+    /// preflighted storage type, exact byte length, and the captured monotone
+    /// operation-source generation. The fixed envelope and generation are
+    /// re-read after the final field, before `Complete` can be returned.
+    /// Fields are delivered in canonical order as exact field-tagged slices of at most
+    /// [`CONTROLLED_OP_FIELD_TILE_LEN`] bytes. `offset` is the byte offset
+    /// within that field. A callback break stops the active query through a
+    /// local sentinel and skips every later tile and field. An unrelated
+    /// engine abort remains a [`LedgerError::Sql`]; a row disagreement remains
+    /// [`LedgerError::OpCorrupt`].
+    ///
+    /// Complete delivery returns fixed metadata plus private hashes of the six
+    /// identity-bearing fields. It deliberately does not inspect the retained
+    /// operation-content sidecar, so an unrelated row with a malformed
+    /// sidecar cannot block a caller's cheap candidate prefilter. Selected
+    /// candidates use [`Ledger::verify_op_content_identity_prehashed`], which
+    /// reads only the fixed-size sidecar and does not fetch source fields
+    /// again.
+    ///
+    /// The SQL engine may already have materialized the active field of at
+    /// most [`MAX_OP_FIELD_BYTES`]. This API bounds callback delivery and
+    /// retained caller work; it does not claim within-engine field
+    /// materialization cancellation.
+    ///
+    /// # Errors
+    /// Storage failures, [`LedgerError::OpCorrupt`] for a malformed or
+    /// concurrently changed row, or an exact callback break embedded in
+    /// [`ControlledOpRead::Break`].
+    pub fn read_op_fields_controlled<B>(
+        &self,
+        id: i64,
+        mut callback: impl FnMut(OpVariableField, u64, &[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<ControlledOpRead<B>, LedgerError> {
+        self.note_read_query();
+        let ledger_instance_id = self.checked_instance_id()?;
+        let Some(metadata) = self.controlled_op_metadata_inner(id)? else {
+            return Ok(ControlledOpRead::NotFound);
+        };
+        let session = if let Some(len) = metadata.session_len {
+            match self.read_controlled_op_field(
+                id,
+                OpVariableField::Session,
+                len,
+                metadata.source_generation,
+                &mut callback,
+            )? {
+                std::ops::ControlFlow::Break(reason) => {
+                    return Ok(ControlledOpRead::Break(reason));
+                }
+                std::ops::ControlFlow::Continue(hash) => Some(hash),
+            }
+        } else {
+            None
+        };
+        let ir = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Ir,
+            metadata.ir_len,
+            metadata.source_generation,
+            &mut callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let seed = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Seed,
+            metadata.seed_len,
+            metadata.source_generation,
+            &mut callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let versions = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Versions,
+            metadata.versions_len,
+            metadata.source_generation,
+            &mut callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let budget = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Budget,
+            metadata.budget_len,
+            metadata.source_generation,
+            &mut callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let capability = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Capability,
+            metadata.capability_len,
+            metadata.source_generation,
+            &mut callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        if let Some(len) = metadata.diagnostic_len {
+            if let std::ops::ControlFlow::Break(reason) = self.read_controlled_op_field(
+                id,
+                OpVariableField::Diagnostic,
+                len,
+                metadata.source_generation,
+                &mut callback,
+            )? {
+                return Ok(ControlledOpRead::Break(reason));
+            }
+        }
+        let Some(current_metadata) = self.controlled_op_metadata_inner(id)? else {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: "operation disappeared before controlled delivery completed".to_string(),
+            });
+        };
+        if current_metadata != metadata {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: format!(
+                    "operation envelope or source generation changed during controlled delivery: \
+                     began at generation {}, ended at {}",
+                    metadata.source_generation, current_metadata.source_generation
+                ),
+            });
+        }
+        Ok(ControlledOpRead::Complete(ControlledOpReadComplete {
+            metadata,
+            prehashed_content: PrehashedOpContent {
+                ledger_instance_id,
+                op: id,
+                source_metadata: metadata,
+                session,
+                ir,
+                seed,
+                versions,
+                budget,
+                capability,
+            },
+        }))
     }
 
     /// Fetch one op row, if present. Every variable-size field is checked by
@@ -8662,6 +9427,144 @@ mod tests {
     }
 
     #[test]
+    fn controlled_chunk_row_stop_states_are_fail_fast_and_distinct() {
+        let ledger = mem();
+        let hash = hash_bytes(b"controlled-row-stop-state");
+        let info = ArtifactInfo {
+            hash,
+            kind: "controlled-row-stop-state".to_string(),
+            len: 2,
+            chunk_count: 2,
+            meta: None,
+            created_at: 0,
+        };
+
+        let mut corrupt_validator = ArtifactChunkValidator::new(&info);
+        let mut corrupt_hasher = Blake3::new();
+        let mut corrupt_stop = None;
+        let mut corrupt_rows_visited = 0usize;
+        let mut unreachable_callback = |_: &[u8]| {
+            panic!("an invalid row must stop before callback delivery");
+            #[allow(unreachable_code)]
+            std::ops::ControlFlow::<()>::Continue(())
+        };
+        let corrupt_query = ledger.conn.query_with_params_for_each(
+            "SELECT 1, X'61' UNION ALL SELECT 2, X'62'",
+            &[],
+            |row| {
+                corrupt_rows_visited += 1;
+                stream_controlled_artifact_row(
+                    row,
+                    &mut corrupt_validator,
+                    &mut corrupt_hasher,
+                    CONTROLLED_ARTIFACT_TILE_LEN,
+                    &mut unreachable_callback,
+                    &mut corrupt_stop,
+                )
+            },
+        );
+        assert!(matches!(corrupt_query, Err(FrankenError::Abort)));
+        assert_eq!(
+            corrupt_rows_visited, 1,
+            "the local validator sentinel must stop the row query immediately"
+        );
+        let corrupt = resolve_controlled_artifact_query(&hash, corrupt_query, corrupt_stop);
+        assert!(matches!(
+            corrupt,
+            Err(LedgerError::Corrupt { hash_hex, detail })
+                if hash_hex == hash.to_hex()
+                    && detail == "chunk sequence mismatch: expected 0, found 1"
+        ));
+
+        let mut callback_validator = ArtifactChunkValidator::new(&info);
+        let mut callback_hasher = Blake3::new();
+        let mut callback_stop = None;
+        let mut callback_rows_visited = 0usize;
+        let mut callback = |bytes: &[u8]| {
+            assert_eq!(bytes, b"a");
+            std::ops::ControlFlow::Break("planned-stop")
+        };
+        let callback_query = ledger.conn.query_with_params_for_each(
+            "SELECT 0, X'61' UNION ALL SELECT 1, X'62'",
+            &[],
+            |row| {
+                callback_rows_visited += 1;
+                stream_controlled_artifact_row(
+                    row,
+                    &mut callback_validator,
+                    &mut callback_hasher,
+                    CONTROLLED_ARTIFACT_TILE_LEN,
+                    &mut callback,
+                    &mut callback_stop,
+                )
+            },
+        );
+        assert!(matches!(callback_query, Err(FrankenError::Abort)));
+        assert_eq!(callback_rows_visited, 1);
+        assert_eq!(
+            resolve_controlled_artifact_query(&hash, callback_query, callback_stop)
+                .expect("local callback sentinel"),
+            Some("planned-stop")
+        );
+
+        let unrelated_abort =
+            resolve_controlled_artifact_query::<()>(&hash, Err(FrankenError::Abort), None);
+        assert!(matches!(
+            unrelated_abort,
+            Err(LedgerError::Sql { context, .. }) if context == "read_artifact_chunks"
+        ));
+    }
+
+    #[test]
+    fn controlled_op_field_stop_states_map_only_the_local_abort_sentinel() {
+        let callback = resolve_controlled_op_field_query(
+            17,
+            OpVariableField::Ir,
+            Err(FrankenError::Abort),
+            Some(ControlledOpFieldStop::Callback("planned-stop")),
+        );
+        assert_eq!(callback.expect("local callback stop"), Some("planned-stop"));
+
+        let corrupt = resolve_controlled_op_field_query::<()>(
+            17,
+            OpVariableField::Seed,
+            Err(FrankenError::Abort),
+            Some(ControlledOpFieldStop::Corrupt(
+                "fixture disagreement".to_string(),
+            )),
+        );
+        assert!(matches!(
+            corrupt,
+            Err(LedgerError::OpCorrupt { op: 17, detail })
+                if detail == "fixture disagreement"
+        ));
+
+        let unrelated = resolve_controlled_op_field_query::<()>(
+            17,
+            OpVariableField::Budget,
+            Err(FrankenError::Abort),
+            None,
+        );
+        assert!(matches!(
+            unrelated,
+            Err(LedgerError::Sql { context, .. })
+                if context == "controlled operation budget field read"
+        ));
+
+        let completed_after_stop = resolve_controlled_op_field_query(
+            17,
+            OpVariableField::Capability,
+            Ok(()),
+            Some(ControlledOpFieldStop::Callback("lost-stop")),
+        );
+        assert!(matches!(
+            completed_after_stop,
+            Err(LedgerError::Invalid { field, .. })
+                if field == "operation read control"
+        ));
+    }
+
+    #[test]
     fn chunked_dense_rows_stream_and_materialize_exactly() {
         let ledger = mem();
         let hash = insert_raw_chunked_artifact(&ledger, b"abcde", 5, 2, &[(0, b"abc"), (1, b"de")]);
@@ -9176,6 +10079,231 @@ mod tests {
                 if field == "diag" && problem.contains("operation-field limit")
         ));
         assert!(ledger.op(unfinished).unwrap().unwrap().outcome.is_none());
+    }
+
+    #[test]
+    fn controlled_op_read_tiles_exact_fields_and_verifies_complete_prehash() {
+        let ledger = mem();
+        let session = vec![0x53; 17];
+        let ir = json_with_exact_bytes(CONTROLLED_OP_FIELD_TILE_LEN + 1);
+        let seed = vec![0xA7; CONTROLLED_OP_FIELD_TILE_LEN];
+        let versions = r#"{"solver":"controlled"}"#.to_string();
+        let budget = r#"{"wall_ns":1000}"#.to_string();
+        let capability = r#"{"cores":2}"#.to_string();
+        let explicits = FiveExplicits {
+            seed: &seed,
+            versions: &versions,
+            budget: &budget,
+            capability: &capability,
+        };
+        let op = ledger
+            .begin_op(Some(&session), &ir, &explicits, 10)
+            .expect("begin controlled operation");
+        let diagnostic = json_with_exact_bytes(CONTROLLED_OP_FIELD_TILE_LEN);
+        ledger
+            .finish_op(op, OpOutcome::Ok, Some(&diagnostic), 20)
+            .expect("finish controlled operation");
+
+        let field_index = |field: OpVariableField| match field {
+            OpVariableField::Session => 0,
+            OpVariableField::Ir => 1,
+            OpVariableField::Seed => 2,
+            OpVariableField::Versions => 3,
+            OpVariableField::Budget => 4,
+            OpVariableField::Capability => 5,
+            OpVariableField::Diagnostic => 6,
+        };
+        let mut delivered: [Vec<u8>; 7] = std::array::from_fn(|_| Vec::new());
+        let mut tile_lengths: [Vec<usize>; 7] = std::array::from_fn(|_| Vec::new());
+        let read = ledger
+            .read_op_fields_controlled(op, |field, offset, tile| {
+                let index = field_index(field);
+                assert_eq!(
+                    offset,
+                    u64::try_from(delivered[index].len()).unwrap(),
+                    "{} tile offset",
+                    field.as_str()
+                );
+                assert!(
+                    tile.len() <= CONTROLLED_OP_FIELD_TILE_LEN,
+                    "{} tile exceeded callback bound",
+                    field.as_str()
+                );
+                tile_lengths[index].push(tile.len());
+                delivered[index].extend_from_slice(tile);
+                std::ops::ControlFlow::<()>::Continue(())
+            })
+            .expect("controlled operation read");
+        let ControlledOpRead::Complete(complete) = read else {
+            panic!("complete delivery must return the private prehash")
+        };
+        assert_eq!(complete.metadata.id, op);
+        assert_eq!(complete.metadata.branch, travel::MAIN_BRANCH);
+        assert_eq!(complete.metadata.exec_mode, ExecMode::Deterministic);
+        assert_eq!(complete.metadata.t_start, 10);
+        assert_eq!(complete.metadata.t_end, Some(20));
+        assert_eq!(complete.metadata.outcome, Some(OpOutcome::Ok));
+        assert_eq!(complete.metadata.session_len, Some(17));
+        assert_eq!(complete.metadata.ir_len, u64::try_from(ir.len()).unwrap());
+        assert_eq!(
+            complete.metadata.seed_len,
+            u64::try_from(seed.len()).unwrap()
+        );
+        assert_eq!(
+            complete.metadata.diagnostic_len,
+            Some(u64::try_from(diagnostic.len()).unwrap())
+        );
+        assert_eq!(delivered[0], session);
+        assert_eq!(delivered[1], ir.as_bytes());
+        assert_eq!(delivered[2], seed);
+        assert_eq!(delivered[3], versions.as_bytes());
+        assert_eq!(delivered[4], budget.as_bytes());
+        assert_eq!(delivered[5], capability.as_bytes());
+        assert_eq!(delivered[6], diagnostic.as_bytes());
+        assert_eq!(
+            tile_lengths[1],
+            vec![CONTROLLED_OP_FIELD_TILE_LEN, 1],
+            "limit + 1 must split at the exact callback boundary"
+        );
+        assert_eq!(
+            tile_lengths[2],
+            vec![CONTROLLED_OP_FIELD_TILE_LEN],
+            "an exact-boundary field is one full tile"
+        );
+        assert_eq!(
+            tile_lengths[6],
+            vec![CONTROLLED_OP_FIELD_TILE_LEN],
+            "an exact-boundary optional field is one full tile"
+        );
+
+        let prehashed = ledger
+            .verify_op_content_identity_prehashed(&complete.prehashed_content)
+            .expect("fixed sidecar agrees with controlled source hashes");
+        assert_eq!(
+            Some(prehashed),
+            ledger
+                .op_content_identity(op)
+                .expect("independent source re-read")
+        );
+    }
+
+    #[test]
+    fn controlled_op_read_stops_before_later_fields_and_retries_from_source() {
+        let ledger = mem();
+        let op = ledger
+            .begin_op(Some(b"controlled-session"), r#"{"op":"stop"}"#, &FX, 1)
+            .unwrap();
+        ledger
+            .finish_op(op, OpOutcome::Cancelled, Some(r#"{"reason":"fixture"}"#), 2)
+            .unwrap();
+
+        let mut visited = Vec::new();
+        let stopped = ledger
+            .read_op_fields_controlled(op, |field, offset, _| {
+                visited.push((field, offset));
+                if field == OpVariableField::Ir {
+                    std::ops::ControlFlow::Break("planned-stop")
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .expect("callback stop is a controlled result");
+        assert_eq!(stopped, ControlledOpRead::Break("planned-stop"));
+        assert_eq!(
+            visited,
+            vec![(OpVariableField::Session, 0), (OpVariableField::Ir, 0)],
+            "no later field may be read or delivered after the callback break"
+        );
+
+        let retried = ledger
+            .read_op_fields_controlled(op, |_, _, _| std::ops::ControlFlow::<()>::Continue(()))
+            .expect("retry directly from immutable source row");
+        let ControlledOpRead::Complete(retried) = retried else {
+            panic!("continue-only retry must complete")
+        };
+        assert_eq!(retried.metadata.outcome, Some(OpOutcome::Cancelled));
+        ledger
+            .verify_op_content_identity_prehashed(&retried.prehashed_content)
+            .expect("retry prehash agrees with retained sidecar");
+        assert!(matches!(
+            ledger.read_op_fields_controlled::<()>(9_999, |_, _, _| {
+                std::ops::ControlFlow::Continue(())
+            }),
+            Ok(ControlledOpRead::NotFound)
+        ));
+    }
+
+    #[test]
+    fn controlled_op_read_ignores_sidecar_until_candidate_verification() {
+        let ledger = mem();
+        let decoy = ledger.begin_op(None, r#"{"op":"decoy"}"#, &FX, 1).unwrap();
+        let selected = ledger
+            .begin_op(None, r#"{"op":"selected"}"#, &FX, 2)
+            .unwrap();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_guard_delete")
+            .expect("drop sidecar delete guard for malformed fixture");
+        ledger
+            .conn
+            .prepare("DELETE FROM op_content_identities WHERE op = ?1")
+            .unwrap()
+            .execute_with_params(&[SqliteValue::Integer(decoy)])
+            .expect("remove only the unrelated sidecar");
+
+        let selected_read = ledger
+            .read_op_fields_controlled(
+                selected,
+                |_, _, _| std::ops::ControlFlow::<()>::Continue(()),
+            )
+            .expect("unrelated malformed sidecar does not block selected row");
+        let ControlledOpRead::Complete(selected_read) = selected_read else {
+            panic!("selected row must complete")
+        };
+        ledger
+            .verify_op_content_identity_prehashed(&selected_read.prehashed_content)
+            .expect("selected candidate sidecar remains sound");
+
+        let decoy_read = ledger
+            .read_op_fields_controlled(decoy, |_, _, _| std::ops::ControlFlow::<()>::Continue(()))
+            .expect("cheap row read deliberately ignores its missing sidecar");
+        let ControlledOpRead::Complete(decoy_read) = decoy_read else {
+            panic!("source fields remain independently readable")
+        };
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&decoy_read.prehashed_content),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == decoy && detail.contains("no typed content-identity sidecar")
+        ));
+    }
+
+    #[test]
+    fn controlled_op_read_rejects_a_malformed_envelope_before_delivery() {
+        let ledger = mem();
+        let op = ledger.begin_op(None, "{}", &FX, 1).unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE ops SET exec_mode = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                text_param("outside-closed-domain"),
+                SqliteValue::Integer(op),
+            ])
+            .expect("inject malformed execution mode");
+        let mut callbacks = 0;
+        let error = ledger
+            .read_op_fields_controlled::<()>(op, |_, _, _| {
+                callbacks += 1;
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect_err("malformed envelope must fail closed");
+        assert_eq!(callbacks, 0);
+        assert!(matches!(
+            error,
+            LedgerError::OpCorrupt { op: rejected, .. } if rejected == op
+        ));
     }
 
     #[test]

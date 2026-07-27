@@ -26,8 +26,8 @@ use fsqlite::SqliteValue;
 use crate::{
     ContentHash, EdgeRole, FiveExplicits, Ledger, LedgerError, LedgerInstanceId,
     MAX_TUNE_KERNEL_BYTES, MAX_TUNE_MACHINE_BYTES, MAX_TUNE_MEASURED_BYTES, MAX_TUNE_PARAMS_BYTES,
-    MAX_TUNE_SHAPE_CLASS_BYTES, SCHEMA_VERSION, blob_param, now_wall_ns, row_i64, row_text,
-    sql_err, text_param, tune_corrupt,
+    MAX_TUNE_SHAPE_CLASS_BYTES, PrehashedOpContent, SCHEMA_VERSION, blob_param, now_wall_ns,
+    row_i64, row_text, sql_err, text_param, tune_corrupt,
 };
 
 /// Schema version of one artifact compatibility-hash to typed-content-ID row.
@@ -2819,21 +2819,7 @@ impl Ledger {
             .map(|_| ())
     }
 
-    /// Return independently re-hashed typed identities for one operation's
-    /// exact frozen session, IR, seed, versions, budget, and capability bytes.
-    ///
-    /// Row IDs, branches, execution mode, clocks, outcomes, diagnostics,
-    /// lineage, semantic meaning, and authority remain separate. Absence means
-    /// the compatibility operation itself does not exist.
-    ///
-    /// # Errors
-    /// [`LedgerError::OpCorrupt`] when the operation envelope or its v18
-    /// sidecar is missing, malformed, future-versioned, or content-divergent;
-    /// storage failures otherwise.
-    pub fn op_content_identity(&self, op: i64) -> Result<Option<OpContentIdentity>, LedgerError> {
-        let Some(source) = self.op(op)? else {
-            return Ok(None);
-        };
+    fn stored_op_content_identity(&self, op: i64) -> Result<OpContentIdentity, LedgerError> {
         let rows = self
             .conn
             .query_with_params(
@@ -2895,6 +2881,25 @@ impl Ledger {
                 ),
             ));
         }
+        Ok(stored)
+    }
+
+    /// Return independently re-hashed typed identities for one operation's
+    /// exact frozen session, IR, seed, versions, budget, and capability bytes.
+    ///
+    /// Row IDs, branches, execution mode, clocks, outcomes, diagnostics,
+    /// lineage, semantic meaning, and authority remain separate. Absence means
+    /// the compatibility operation itself does not exist.
+    ///
+    /// # Errors
+    /// [`LedgerError::OpCorrupt`] when the operation envelope or its v18
+    /// sidecar is missing, malformed, future-versioned, or content-divergent;
+    /// storage failures otherwise.
+    pub fn op_content_identity(&self, op: i64) -> Result<Option<OpContentIdentity>, LedgerError> {
+        let Some(source) = self.op(op)? else {
+            return Ok(None);
+        };
+        let stored = self.stored_op_content_identity(op)?;
         let explicits = FiveExplicits {
             seed: &source.seed,
             versions: &source.versions,
@@ -2944,6 +2949,131 @@ impl Ledger {
             ));
         }
         Ok(Some(stored))
+    }
+
+    /// Verify one candidate operation's fixed-size content sidecar against
+    /// hashes accumulated by [`Ledger::read_op_fields_controlled`].
+    ///
+    /// The source operation is metadata-preflighted again, but none of its
+    /// variable fields are fetched. This preserves
+    /// [`Ledger::op_content_identity`] as the independently re-reading
+    /// consistency method while allowing a discovery caller to avoid fetching
+    /// a selected candidate's fields twice. The captured source generation and
+    /// fixed envelope must match before and after the fixed sidecar query. A
+    /// prehash from another database lineage is refused even when the local row
+    /// ID matches; a byte-for-byte database copy deliberately retains the same
+    /// lineage identity. The final metadata read brackets this method's own
+    /// query sequence; it cannot promise that another connection will not
+    /// append after the method returns.
+    ///
+    /// Call this only after the caller's cheap row/IR/Five-Explicits prefilter:
+    /// a malformed sidecar on an unrelated row must not block discovery.
+    ///
+    /// # Errors
+    /// [`LedgerError::OpCorrupt`] for a foreign prehash, a missing or malformed
+    /// source/sidecar, a future sidecar version, or any optional/required field
+    /// mismatch; storage failures otherwise.
+    pub fn verify_op_content_identity_prehashed(
+        &self,
+        prehashed: &PrehashedOpContent,
+    ) -> Result<OpContentIdentity, LedgerError> {
+        self.note_read_query();
+        self.verify_op_content_identity_prehashed_inner(prehashed, |_| Ok(()))
+    }
+
+    fn verify_op_content_identity_prehashed_inner<F>(
+        &self,
+        prehashed: &PrehashedOpContent,
+        after_sidecar: F,
+    ) -> Result<OpContentIdentity, LedgerError>
+    where
+        F: FnOnce(&Ledger) -> Result<(), LedgerError>,
+    {
+        let op = prehashed.op;
+        let current_instance = self.checked_instance_id()?;
+        if prehashed.ledger_instance_id != current_instance {
+            return Err(op_identity_corrupt(
+                op,
+                format!(
+                    "operation prehash names database lineage {} but this handle names {}",
+                    prehashed.ledger_instance_id, current_instance
+                ),
+            ));
+        }
+        let Some(current_metadata) = self.controlled_op_metadata_inner(op)? else {
+            return Err(op_identity_corrupt(
+                op,
+                "source operation named by the prehash is missing",
+            ));
+        };
+        if current_metadata != prehashed.source_metadata {
+            return Err(op_identity_corrupt(
+                op,
+                format!(
+                    "source operation envelope or generation changed after controlled delivery: \
+                     read generation {}, current generation {}",
+                    prehashed.source_metadata.source_generation, current_metadata.source_generation
+                ),
+            ));
+        }
+        let stored = self.stored_op_content_identity(op)?;
+        let matches =
+            |content_id: ContentId, hash: ContentHash| content_id.as_bytes() == hash.as_bytes();
+        for (field, found, required) in [
+            ("ir_content_id", stored.ir_content_id, prehashed.ir),
+            ("seed_content_id", stored.seed_content_id, prehashed.seed),
+            (
+                "versions_content_id",
+                stored.versions_content_id,
+                prehashed.versions,
+            ),
+            (
+                "budget_content_id",
+                stored.budget_content_id,
+                prehashed.budget,
+            ),
+            (
+                "capability_content_id",
+                stored.capability_content_id,
+                prehashed.capability,
+            ),
+        ] {
+            if !matches(found, required) {
+                return Err(op_identity_corrupt(
+                    op,
+                    format!("{field} differs from the controlled source-field hash"),
+                ));
+            }
+        }
+        let session_matches = match (stored.session_content_id, prehashed.session) {
+            (None, None) => true,
+            (Some(found), Some(required)) => matches(found, required),
+            _ => false,
+        };
+        if !session_matches {
+            return Err(op_identity_corrupt(
+                op,
+                "session_content_id differs from the controlled optional session hash",
+            ));
+        }
+        after_sidecar(self)?;
+        let Some(final_metadata) = self.controlled_op_metadata_inner(op)? else {
+            return Err(op_identity_corrupt(
+                op,
+                "source operation disappeared during prehashed identity verification",
+            ));
+        };
+        if final_metadata != prehashed.source_metadata {
+            return Err(op_identity_corrupt(
+                op,
+                format!(
+                    "source operation envelope or generation changed during prehashed identity \
+                     verification: read generation {}, final generation {}",
+                    prehashed.source_metadata.source_generation, final_metadata.source_generation
+                ),
+            ));
+        }
+        Ok(stored)
     }
 
     /// Reconcile one operation inserted by a compatible pre-v18 writer with
@@ -5648,6 +5778,295 @@ mod tests {
             .expect("roll back source and sidecar together");
         assert_eq!(ledger.op(rolled_back).unwrap(), None);
         assert_eq!(ledger.op_content_identity(rolled_back).unwrap(), None);
+    }
+
+    fn controlled_identity_fixture() -> (Ledger, i64, PrehashedOpContent) {
+        let ledger = Ledger::open(":memory:").expect("controlled identity fixture");
+        let explicits = crate::FiveExplicits {
+            seed: b"controlled-identity-seed",
+            versions: r#"{"version":"fixture"}"#,
+            budget: r#"{"wall_ns":100}"#,
+            capability: r#"{"cores":1}"#,
+        };
+        let op = ledger
+            .begin_op(
+                Some(b"controlled-identity-session"),
+                r#"{"op":"controlled-identity"}"#,
+                &explicits,
+                1,
+            )
+            .expect("record controlled identity operation");
+        let read = ledger
+            .read_op_fields_controlled(op, |_, _, _| std::ops::ControlFlow::<()>::Continue(()))
+            .expect("read controlled identity source");
+        let crate::ControlledOpRead::Complete(complete) = read else {
+            panic!("continue-only controlled identity fixture must complete")
+        };
+        (ledger, op, complete.prehashed_content)
+    }
+
+    #[test]
+    fn prehashed_operation_verifier_rechecks_generation_after_sidecar_query() {
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        let captured_generation = prehashed.source_metadata.source_generation;
+        let error = ledger
+            .verify_op_content_identity_prehashed_inner(&prehashed, |ledger| {
+                ledger
+                    .begin_op(
+                        None,
+                        r#"{"op":"intervening-append"}"#,
+                        &crate::FiveExplicits {
+                            seed: b"intervening-append-seed",
+                            versions: "{}",
+                            budget: "{}",
+                            capability: "{}",
+                        },
+                        2,
+                    )
+                    .map(|_| ())
+            })
+            .expect_err("an append between sidecar and final metadata reads must be refused");
+        assert_eq!(
+            ledger
+                .identity_reconcile_source_generation()
+                .expect("read generation after intervening append"),
+            captured_generation + 1
+        );
+        assert!(matches!(
+            error,
+            LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            } if rejected == op
+                && detail.contains("changed during prehashed identity verification")
+        ));
+    }
+
+    #[test]
+    fn prehashed_operation_verifier_refuses_every_sidecar_disagreement() {
+        for field in [
+            "ir_content_id",
+            "seed_content_id",
+            "versions_content_id",
+            "budget_content_id",
+            "capability_content_id",
+        ] {
+            let (ledger, op, prehashed) = controlled_identity_fixture();
+            ledger
+                .conn
+                .execute("DROP TRIGGER trg_op_content_identity_immutable_update")
+                .expect("open required-field disagreement fixture");
+            ledger
+                .conn
+                .prepare(&format!(
+                    "UPDATE op_content_identities SET {field} = ?1 WHERE op = ?2"
+                ))
+                .expect("prepare required-field disagreement")
+                .execute_with_params(&[blob_param(&[0xD1; 32]), SqliteValue::Integer(op)])
+                .expect("inject required-field disagreement");
+            let error = ledger
+                .verify_op_content_identity_prehashed(&prehashed)
+                .expect_err("required sidecar disagreement must fail closed");
+            assert!(matches!(
+                error,
+                LedgerError::OpCorrupt {
+                    op: rejected,
+                    detail,
+                } if rejected == op && detail.contains(field)
+            ));
+        }
+
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_immutable_update")
+            .unwrap();
+        ledger
+            .conn
+            .prepare(
+                "UPDATE op_content_identities
+                 SET session_content_id = NULL
+                 WHERE op = ?1",
+            )
+            .unwrap()
+            .execute_with_params(&[SqliteValue::Integer(op)])
+            .unwrap();
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op && detail.contains("session_content_id")
+        ));
+
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_immutable_update")
+            .unwrap();
+        let schema_version_update = ledger
+            .conn
+            .prepare(
+                "UPDATE op_content_identities
+                 SET row_schema_version = ?1
+                 WHERE op = ?2",
+            )
+            .unwrap()
+            .execute_with_params(&[
+                SqliteValue::Integer(i64::from(OP_CONTENT_IDENTITY_ROW_VERSION) + 1),
+                SqliteValue::Integer(op),
+            ]);
+        assert!(
+            schema_version_update.is_err(),
+            "the table CHECK must reject unsupported sidecar schema versions"
+        );
+        ledger
+            .verify_op_content_identity_prehashed(&prehashed)
+            .expect("the rejected update must leave the supported sidecar intact");
+    }
+
+    #[test]
+    fn prehashed_operation_verifier_refuses_missing_duplicate_and_foreign_state() {
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .prepare("UPDATE ops SET seed = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                blob_param(b"controlled-identity-move"),
+                SqliteValue::Integer(op),
+            ])
+            .expect("replace source seed with same-length bytes");
+        assert_eq!(
+            b"controlled-identity-move".len(),
+            b"controlled-identity-seed".len(),
+            "fixture must isolate generation from byte-length checks"
+        );
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op
+                && detail.contains("generation changed after controlled delivery")
+        ));
+
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_guard_delete")
+            .unwrap();
+        ledger
+            .conn
+            .prepare("DELETE FROM op_content_identities WHERE op = ?1")
+            .unwrap()
+            .execute_with_params(&[SqliteValue::Integer(op)])
+            .unwrap();
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op && detail.contains("no typed content-identity sidecar")
+        ));
+
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_guard_delete")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "CREATE TABLE duplicate_op_content_fixture AS
+                 SELECT * FROM op_content_identities",
+            )
+            .unwrap();
+        ledger
+            .conn
+            .execute("DROP TABLE op_content_identities")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "CREATE TABLE op_content_identities(
+                     op INTEGER NOT NULL,
+                     session_content_id BLOB,
+                     ir_content_id BLOB NOT NULL,
+                     seed_content_id BLOB NOT NULL,
+                     versions_content_id BLOB NOT NULL,
+                     budget_content_id BLOB NOT NULL,
+                     capability_content_id BLOB NOT NULL,
+                     row_schema_version INTEGER NOT NULL
+                 )",
+            )
+            .unwrap();
+        for _ in 0..2 {
+            ledger
+                .conn
+                .execute(
+                    "INSERT INTO op_content_identities
+                     SELECT * FROM duplicate_op_content_fixture",
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op && detail.contains("multiple typed content-identity sidecars")
+        ));
+
+        let (source, op, prehashed) = controlled_identity_fixture();
+        let foreign = Ledger::open(":memory:").expect("foreign database lineage");
+        let foreign_op = foreign
+            .begin_op(
+                None,
+                "{}",
+                &crate::FiveExplicits {
+                    seed: b"foreign-seed",
+                    versions: "{}",
+                    budget: "{}",
+                    capability: "{}",
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(foreign_op, op, "fixture uses the same ledger-local row ID");
+        assert!(matches!(
+            foreign.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op && detail.contains("database lineage")
+        ));
+        drop(source);
+
+        let (ledger, op, prehashed) = controlled_identity_fixture();
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_op_content_identity_guard_delete")
+            .unwrap();
+        ledger
+            .conn
+            .prepare("DELETE FROM op_content_identities WHERE op = ?1")
+            .unwrap()
+            .execute_with_params(&[SqliteValue::Integer(op)])
+            .unwrap();
+        ledger
+            .conn
+            .prepare("DELETE FROM ops WHERE id = ?1")
+            .unwrap()
+            .execute_with_params(&[SqliteValue::Integer(op)])
+            .unwrap();
+        assert!(matches!(
+            ledger.verify_op_content_identity_prehashed(&prehashed),
+            Err(LedgerError::OpCorrupt {
+                op: rejected,
+                detail,
+            }) if rejected == op && detail.contains("source") && detail.contains("missing")
+        ));
     }
 
     #[test]

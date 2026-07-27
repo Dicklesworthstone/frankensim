@@ -19,8 +19,9 @@ use std::sync::{
 
 use common::SyncConnection;
 use fs_ledger::{
-    Blake3, EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, SCHEMA_VERSION,
-    STORAGE_CHUNK_LEN, hash_bytes,
+    Blake3, CONTROLLED_ARTIFACT_TILE_LEN, CONTROLLED_OP_FIELD_TILE_LEN, ControlledOpRead,
+    ControlledVisibleOpPage, EdgeRole, EventRow, ExecMode, FiveExplicits, Ledger, LedgerError,
+    MAIN_BRANCH, OpOutcome, OpVariableField, SCHEMA_VERSION, STORAGE_CHUNK_LEN, hash_bytes,
 };
 
 static NEXT_DB: AtomicU32 = AtomicU32::new(0);
@@ -735,6 +736,159 @@ fn ledger_004_dedupe_and_chunked_round_trip() {
     verdict(
         "ledger-004",
         "6 MiB artifact: chunked storage, dual-path dedupe, byte round trip",
+    );
+}
+
+#[test]
+fn ledger_004b_controlled_bounded_stream_stops_at_callback_boundary() {
+    let db = temp_db("controlled-stream");
+    let l = Ledger::open(&db).expect("open");
+
+    let inline = l
+        .put_artifact("bounded-inline", b"inline evidence", None)
+        .expect("inline artifact");
+    let mut inline_callbacks = 0usize;
+    let inline_result = l
+        .read_artifact_chunks_bounded_controlled(&inline.hash, inline.len, &mut |chunk| {
+            inline_callbacks += 1;
+            assert_eq!(chunk, b"inline evidence");
+            std::ops::ControlFlow::Break("planned-inline-stop")
+        })
+        .expect("controlled inline read")
+        .expect("inline artifact exists");
+    assert_eq!(
+        inline_result,
+        std::ops::ControlFlow::Break("planned-inline-stop")
+    );
+    assert_eq!(inline_callbacks, 1);
+
+    let exact_cap_bytes = official_pattern(STORAGE_CHUNK_LEN);
+    let exact_cap = l
+        .put_artifact("bounded-inline-exact-cap", &exact_cap_bytes, None)
+        .expect("exact-cap inline artifact");
+    assert!(!exact_cap.chunked, "the exact storage bound remains inline");
+    let mut exact_cap_callbacks = 0usize;
+    let exact_cap_stop = l
+        .read_artifact_chunks_bounded_controlled(&exact_cap.hash, exact_cap.len, &mut |tile| {
+            exact_cap_callbacks += 1;
+            assert_eq!(tile.len(), CONTROLLED_ARTIFACT_TILE_LEN);
+            assert_eq!(tile, &exact_cap_bytes[..CONTROLLED_ARTIFACT_TILE_LEN]);
+            std::ops::ControlFlow::Break("planned-first-tile-stop")
+        })
+        .expect("controlled exact-cap read")
+        .expect("exact-cap artifact exists");
+    assert_eq!(
+        exact_cap_stop,
+        std::ops::ControlFlow::Break("planned-first-tile-stop")
+    );
+    assert_eq!(
+        exact_cap_callbacks, 1,
+        "an exact-cap inline row stops after its first controlled tile"
+    );
+
+    let chunked_bytes = official_pattern(STORAGE_CHUNK_LEN * 2 + 17);
+    let chunked = l
+        .put_artifact("bounded-chunked", &chunked_bytes, None)
+        .expect("chunked artifact");
+    assert!(chunked.chunked);
+    let mut stopped_callbacks = 0usize;
+    let stopped = l
+        .read_artifact_chunks_bounded_controlled(&chunked.hash, chunked.len, &mut |chunk| {
+            stopped_callbacks += 1;
+            assert_eq!(chunk.len(), CONTROLLED_ARTIFACT_TILE_LEN);
+            std::ops::ControlFlow::Break("planned-first-tile-stop")
+        })
+        .expect("controlled chunked read")
+        .expect("chunked artifact exists");
+    assert_eq!(
+        stopped,
+        std::ops::ControlFlow::Break("planned-first-tile-stop")
+    );
+    assert_eq!(
+        stopped_callbacks, 1,
+        "a callback break must not deliver a later controlled tile"
+    );
+
+    let mut over_cap_callbacks = 0usize;
+    let over_cap =
+        l.read_artifact_chunks_bounded_controlled(&chunked.hash, chunked.len - 1, &mut |_| {
+            over_cap_callbacks += 1;
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+    assert!(matches!(
+        over_cap,
+        Err(fs_ledger::LedgerError::ArtifactReadLimit {
+            limit,
+            observed,
+            ..
+        }) if limit == chunked.len - 1 && observed == chunked.len
+    ));
+    assert_eq!(
+        over_cap_callbacks, 0,
+        "metadata preflight must reject an over-cap artifact before delivering bytes"
+    );
+
+    let mut completed_bytes = Vec::new();
+    let mut completed_callbacks = 0usize;
+    let completed = l
+        .read_artifact_chunks_bounded_controlled(&chunked.hash, chunked.len, &mut |chunk| {
+            completed_callbacks += 1;
+            assert!(chunk.len() <= CONTROLLED_ARTIFACT_TILE_LEN);
+            completed_bytes.extend_from_slice(chunk);
+            std::ops::ControlFlow::<()>::Continue(())
+        })
+        .expect("complete controlled read")
+        .expect("chunked artifact exists");
+    assert_eq!(
+        completed,
+        std::ops::ControlFlow::Continue(chunked.len),
+        "only a complete integrity-checked read returns the total length"
+    );
+    assert_eq!(completed_bytes, chunked_bytes);
+    assert_eq!(
+        completed_callbacks,
+        chunked_bytes.len().div_ceil(CONTROLLED_ARTIFACT_TILE_LEN)
+    );
+
+    let mut infallible_row_lengths = Vec::new();
+    let infallible_len = l
+        .read_artifact_chunks_bounded(&chunked.hash, chunked.len, &mut |row| {
+            infallible_row_lengths.push(row.len());
+        })
+        .expect("infallible bounded read")
+        .expect("chunked artifact exists");
+    assert_eq!(infallible_len, chunked.len);
+    assert_eq!(
+        infallible_row_lengths,
+        vec![STORAGE_CHUNK_LEN, STORAGE_CHUNK_LEN, 17],
+        "the established infallible callback retains storage-row granularity"
+    );
+
+    let mismatched = l
+        .put_artifact("bounded-complete-mismatch", b"complete then compare", None)
+        .expect("mismatch artifact");
+    l.corrupt_artifact_for_test(&mismatched.hash)
+        .expect("corrupt mismatch artifact");
+    let mut mismatch_callbacks = 0usize;
+    let mismatch =
+        l.read_artifact_chunks_bounded_controlled(&mismatched.hash, mismatched.len, &mut |_| {
+            mismatch_callbacks += 1;
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+    assert!(matches!(
+        mismatch,
+        Err(fs_ledger::LedgerError::Corrupt { .. })
+    ));
+    assert_eq!(
+        mismatch_callbacks, 1,
+        "a completing callback cannot suppress the final content-hash comparison"
+    );
+
+    drop(l);
+    cleanup_db(&db);
+    verdict(
+        "ledger-004b",
+        "controlled bounded reads stop after one hash-coupled tile and complete reads retain full integrity authority",
     );
 }
 
@@ -1815,5 +1969,188 @@ fn ledger_010_nightly_writer_records_run() {
     verdict(
         "ledger-010",
         "nightly_ledger preserves hostile JSON, records typed provenance, and refuses every pure invalid input before database creation",
+    );
+}
+
+#[test]
+fn ledger_039_controlled_operation_discovery_is_bounded_and_replayable() {
+    let db = temp_db("controlled-operation-discovery");
+    let ledger = Ledger::open(&db).expect("open controlled discovery ledger");
+    let first = ledger
+        .begin_op_on(
+            MAIN_BRANCH,
+            ExecMode::Deterministic,
+            None,
+            r#"{"op":"prefix"}"#,
+            &FX,
+            1,
+        )
+        .expect("record shared prefix");
+    let child = ledger
+        .fork("controlled-conformance-child", MAIN_BRANCH)
+        .expect("fork controlled child");
+    let ir = format!(
+        "{{\"payload\":\"{}\"}}",
+        "x".repeat(CONTROLLED_OP_FIELD_TILE_LEN)
+    );
+    let selected = ledger
+        .begin_op_on(
+            child,
+            ExecMode::Fast,
+            Some(b"controlled-conformance-session"),
+            &ir,
+            &FX,
+            2,
+        )
+        .expect("record selected child operation");
+    ledger
+        .finish_op(selected, OpOutcome::Ok, Some(r#"{"status":"complete"}"#), 3)
+        .expect("finish selected operation");
+
+    let first_page = ledger
+        .visible_op_ids_page_controlled(child, None, 1, |_| {
+            std::ops::ControlFlow::<()>::Continue(())
+        })
+        .expect("first bounded visible page");
+    let ControlledVisibleOpPage::Complete(first_page) = first_page else {
+        panic!("continue-only page controller cannot stop")
+    };
+    assert_eq!(first_page.op_ids, vec![selected]);
+    let cursor = first_page.next_cursor.expect("shared prefix remains");
+
+    let late = ledger
+        .begin_op_on(
+            child,
+            ExecMode::Deterministic,
+            None,
+            r#"{"op":"late"}"#,
+            &FX,
+            4,
+        )
+        .expect("append after captured high-water");
+    assert!(late > selected);
+    let continuation = ledger
+        .visible_op_ids_page_controlled(child, Some(cursor), 1, |_| {
+            std::ops::ControlFlow::<()>::Continue(())
+        })
+        .expect("resume captured visible cohort");
+    let ControlledVisibleOpPage::Complete(continuation) = continuation else {
+        panic!("continue-only continuation cannot stop")
+    };
+    assert_eq!(continuation.op_ids, vec![first]);
+    assert!(!continuation.truncated);
+
+    let mut last_field = None;
+    let mut next_offset = 0_u64;
+    let mut maximum_tile = 0_usize;
+    let read = ledger
+        .read_op_fields_controlled(selected, |field, offset, tile| {
+            if last_field == Some(field) {
+                assert_eq!(offset, next_offset);
+            } else {
+                last_field = Some(field);
+                next_offset = 0;
+                assert_eq!(offset, 0);
+            }
+            maximum_tile = maximum_tile.max(tile.len());
+            next_offset += u64::try_from(tile.len()).unwrap();
+            std::ops::ControlFlow::<()>::Continue(())
+        })
+        .expect("controlled field read");
+    let ControlledOpRead::Complete(complete) = read else {
+        panic!("continue-only field controller cannot stop")
+    };
+    assert_eq!(complete.metadata.id, selected);
+    assert_eq!(complete.metadata.branch, child);
+    assert_eq!(complete.metadata.exec_mode, ExecMode::Fast);
+    assert_eq!(complete.metadata.outcome, Some(OpOutcome::Ok));
+    assert_eq!(last_field, Some(OpVariableField::Diagnostic));
+    assert!(maximum_tile <= CONTROLLED_OP_FIELD_TILE_LEN);
+    ledger
+        .verify_op_content_identity_prehashed(&complete.prehashed_content)
+        .expect("selected candidate sidecar agrees with delivered bytes");
+
+    let generation_probe = ledger
+        .begin_op_on(
+            child,
+            ExecMode::Deterministic,
+            None,
+            r#"{"op":"generation-probe"}"#,
+            &FX,
+            5,
+        )
+        .expect("record same-length source-change probe");
+    let raw = SyncConnection::open(&db).expect("open independent fixture writer");
+    let mut changed_source = false;
+    let generation_error = ledger
+        .read_op_fields_controlled::<()>(generation_probe, |field, _, _| {
+            if !changed_source && field == OpVariableField::Ir {
+                raw.execute_with_params(
+                    "UPDATE ops SET seed = ?1 WHERE id = ?2",
+                    &[
+                        fsqlite::SqliteValue::Blob(vec![0xA5; FX.seed.len()].into()),
+                        fsqlite::SqliteValue::Integer(generation_probe),
+                    ],
+                )
+                .expect("replace seed through independent fixture writer");
+                changed_source = true;
+            }
+            std::ops::ControlFlow::Continue(())
+        })
+        .expect_err("source generation change must refuse a mixed completion");
+    assert!(changed_source);
+    assert!(matches!(
+        generation_error,
+        LedgerError::OpCorrupt {
+            op: rejected,
+            detail,
+        } if rejected == generation_probe
+            && (detail.contains("source generation")
+                || detail.contains("changed after bounded metadata preflight")
+                || detail.contains("disappeared or changed"))
+    ));
+
+    let optional_probe = ledger
+        .begin_op_on(
+            child,
+            ExecMode::Deterministic,
+            None,
+            r#"{"op":"optional-probe"}"#,
+            &FX,
+            6,
+        )
+        .expect("record optional-envelope probe");
+    let mut finished_elsewhere = false;
+    let optional_error = ledger
+        .read_op_fields_controlled::<()>(optional_probe, |field, _, _| {
+            if !finished_elsewhere && field == OpVariableField::Capability {
+                raw.execute_with_params(
+                    "UPDATE ops
+                     SET t_end = 7, outcome = 'ok', diag = '{\"done\":true}'
+                     WHERE id = ?1",
+                    &[fsqlite::SqliteValue::Integer(optional_probe)],
+                )
+                .expect("finish operation through independent fixture writer");
+                finished_elsewhere = true;
+            }
+            std::ops::ControlFlow::Continue(())
+        })
+        .expect_err("optional envelope change must refuse a stale completion");
+    assert!(finished_elsewhere);
+    assert!(matches!(
+        optional_error,
+        LedgerError::OpCorrupt {
+            op: rejected,
+            detail,
+        } if rejected == optional_probe
+            && detail.contains("envelope or source generation changed")
+    ));
+
+    drop(raw);
+    drop(ledger);
+    cleanup_db(&db);
+    verdict(
+        "ledger-039",
+        "controlled visible-op pagination freezes a high-water cohort and controlled field reads verify only after complete bounded delivery",
     );
 }

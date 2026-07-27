@@ -21,8 +21,8 @@ use std::collections::BTreeSet;
 use fsqlite::SqliteValue;
 
 use crate::{
-    ContentHash, FiveExplicits, Ledger, LedgerError, OpRow, blob_param, opt_blob_param, row_i64,
-    sql_err, text_param,
+    ContentHash, FiveExplicits, Ledger, LedgerError, LedgerInstanceId, OpRow, blob_param,
+    opt_blob_param, row_i64, sql_err, text_param,
 };
 
 fn json_string(value: &str) -> String {
@@ -52,6 +52,105 @@ pub const MAIN_BRANCH: i64 = 1;
 
 /// Ancestry depth guard: a parent chain longer than this is corruption.
 const MAX_BRANCH_DEPTH: usize = 64;
+
+/// Maximum visible operation IDs returned by one controlled keyset page.
+///
+/// Each ancestry segment selects at most `cap + 1` fixed-size IDs before the
+/// deterministic descending merge, so the complete page work is bounded by
+/// `MAX_BRANCH_DEPTH * (MAX_VISIBLE_OP_PAGE_ROWS + 1)` ID rows plus ancestry
+/// and first-page high-water rows.
+pub const MAX_VISIBLE_OP_PAGE_ROWS: usize = 64;
+
+/// Opaque continuation for one descending visible-operation scan.
+///
+/// The cursor binds the persisted database lineage, branch, first-page
+/// high-water mark, inclusive next key, and exact page cap. A byte-for-byte
+/// database copy deliberately retains that lineage identity. The cursor is
+/// intentionally not a serialized authority or a semantic operation identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleOpCursor {
+    ledger_instance_id: LedgerInstanceId,
+    branch: i64,
+    high_water: i64,
+    at_or_below: i64,
+    page_rows: u8,
+}
+
+impl VisibleOpCursor {
+    /// Persisted database-lineage identity that minted this cursor.
+    #[must_use]
+    pub const fn ledger_instance_id(self) -> LedgerInstanceId {
+        self.ledger_instance_id
+    }
+
+    /// Branch whose visibility rules this scan follows.
+    #[must_use]
+    pub const fn branch(self) -> i64 {
+        self.branch
+    }
+
+    /// Inclusive global operation-ID ceiling captured before the first
+    /// ancestry-segment page query.
+    #[must_use]
+    pub const fn high_water(self) -> i64 {
+        self.high_water
+    }
+
+    /// Inclusive descending keyset bound for the next page.
+    #[must_use]
+    pub const fn at_or_below(self) -> i64 {
+        self.at_or_below
+    }
+
+    /// Exact caller cap bound into every page of this scan.
+    #[must_use]
+    pub const fn page_rows(self) -> u8 {
+        self.page_rows
+    }
+}
+
+/// Deterministic work progress exposed to a controlled visible-op scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisibleOpPageProgress {
+    /// Fixed-size ancestry, high-water, and operation-ID rows examined so far.
+    pub examined_rows: u64,
+    /// Globally ordered operation IDs delivered into the current page prefix.
+    pub delivered_ids: u64,
+}
+
+/// One complete descending visible-operation keyset page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleOpPage {
+    /// Visible operation IDs in strict descending global ID order.
+    pub op_ids: Vec<i64>,
+    /// Continuation strictly below the last returned ID, or `None` when the
+    /// captured visible cohort is exhausted.
+    pub next_cursor: Option<VisibleOpCursor>,
+    /// Whether another page exists inside the captured high-water mark.
+    pub truncated: bool,
+    /// Exact fixed-size rows examined while producing this page.
+    pub examined_rows: u64,
+}
+
+/// Controlled result for one visible-operation page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlledVisibleOpPage<B> {
+    /// Caller-requested stop. `op_ids` is the already delivered descending
+    /// prefix. `resume` retries the first undelivered ID; `None` means control
+    /// stopped before the first-page high-water mark was captured.
+    Break {
+        /// Exact caller-provided stop reason.
+        reason: B,
+        /// Already delivered prefix, safe to retain without duplication.
+        op_ids: Vec<i64>,
+        /// Exact continuation for the first undelivered ID.
+        resume: Option<VisibleOpCursor>,
+        /// Exact fixed-size rows examined before the stop.
+        examined_rows: u64,
+    },
+    /// Complete page under the bound cursor and cap.
+    Complete(VisibleOpPage),
+}
 
 /// Recorded execution mode of an op (plan §5.4): part of provenance, and
 /// the contract the replay audit enforces per op.
@@ -538,6 +637,105 @@ impl Ledger {
         })
     }
 
+    fn branch_chain_controlled<B>(
+        &self,
+        branch: i64,
+        progress: &mut VisibleOpPageProgress,
+        control: &mut impl FnMut(VisibleOpPageProgress) -> std::ops::ControlFlow<B>,
+    ) -> Result<std::ops::ControlFlow<B, Vec<ChainSegment>>, LedgerError> {
+        let mut segments = Vec::new();
+        let mut current = branch;
+        let mut cap: Option<i64> = None;
+        for _ in 0..MAX_BRANCH_DEPTH {
+            let rows = self
+                .conn
+                .query_with_params(
+                    "SELECT id, parent, fork_op FROM branches WHERE id = ?1 LIMIT 2",
+                    &[SqliteValue::Integer(current)],
+                )
+                .map_err(|error| sql_err("controlled visible-op ancestry", &error))?;
+            if rows.len() != 1 {
+                return if rows.is_empty() {
+                    Err(LedgerError::NotFound {
+                        what: format!("branch {current}"),
+                    })
+                } else {
+                    Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!("branch {current}: one ID selected multiple ancestry rows"),
+                    })
+                };
+            }
+            let row = rows
+                .first()
+                .expect("one controlled ancestry row checked above");
+            let stored = match row.get(0) {
+                Some(SqliteValue::Integer(value)) => *value,
+                _ => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!("branch {current}: ancestry row ID is not an INTEGER"),
+                    });
+                }
+            };
+            if stored != current {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: String::new(),
+                    detail: format!(
+                        "branch {current}: ancestry lookup returned divergent ID {stored}"
+                    ),
+                });
+            }
+            let parent = match row.get(1) {
+                Some(SqliteValue::Null) => None,
+                Some(SqliteValue::Integer(value)) => Some(*value),
+                _ => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!("branch {current}: parent has invalid fixed-size storage"),
+                    });
+                }
+            };
+            let fork_op = match row.get(2) {
+                Some(SqliteValue::Null) => None,
+                Some(SqliteValue::Integer(value)) => Some(*value),
+                _ => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!(
+                            "branch {current}: fork point has invalid fixed-size storage"
+                        ),
+                    });
+                }
+            };
+            segments.push(ChainSegment {
+                branch: stored,
+                cap,
+            });
+            progress.examined_rows = progress.examined_rows.saturating_add(1);
+            if let std::ops::ControlFlow::Break(reason) = control(*progress) {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            match parent {
+                None => return Ok(std::ops::ControlFlow::Continue(segments)),
+                Some(next) => {
+                    cap = match (fork_op, cap) {
+                        (Some(fork), Some(existing)) => Some(fork.min(existing)),
+                        (Some(fork), None) => Some(fork),
+                        (None, _) => Some(0),
+                    };
+                    current = next;
+                }
+            }
+        }
+        Err(LedgerError::Corrupt {
+            hash_hex: String::new(),
+            detail: format!(
+                "branch {branch}: ancestry deeper than {MAX_BRANCH_DEPTH} — parent cycle?"
+            ),
+        })
+    }
+
     /// Op ids visible on `branch` (its own ops plus ancestors' up to each
     /// fork point), ascending, optionally capped at `upto_op`.
     ///
@@ -572,6 +770,291 @@ impl Ledger {
         }
         ids.sort_unstable();
         Ok(ids)
+    }
+
+    /// Return one cancellation-aware descending keyset page of operation IDs
+    /// visible from a branch.
+    ///
+    /// A first page (`resume = None`) validates the fixed-size branch ancestry,
+    /// captures one global operation-ID high-water mark, and only then issues
+    /// per-segment ID queries. Later appends therefore cannot enter the
+    /// invocation. Every ancestry segment selects at most `cap + 1`
+    /// fixed-size IDs in descending order; the bounded union is merged into
+    /// strict global descending order. The cursor binds this persisted
+    /// database lineage, branch, high-water mark, inclusive next key, and
+    /// exact cap.
+    ///
+    /// `control` is polled before work, after every fixed-size row, immediately
+    /// before each ID is delivered, and immediately after it joins the page
+    /// prefix. A break before the first ID resumes at that same ID. A break
+    /// after `N` delivered IDs returns those IDs plus a cursor strictly below
+    /// the last one, so retry neither skips nor duplicates the retained
+    /// prefix. A stop before first-page high-water capture returns
+    /// `resume = None`.
+    ///
+    /// `cap` must be in `1..=MAX_VISIBLE_OP_PAGE_ROWS`; zero is deliberately
+    /// not an existence probe because the controlled result must identify a
+    /// concrete next key. Use a one-row page when only existence is needed.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] for a zero/oversized cap or a cursor whose
+    /// ledger, branch, cap, or key interval disagrees; [`LedgerError::NotFound`]
+    /// for an unknown branch; corruption and engine errors otherwise.
+    #[allow(clippy::too_many_lines)] // Keep high-water, per-segment merge, and every resume edge visibly ordered.
+    pub fn visible_op_ids_page_controlled<B>(
+        &self,
+        branch: i64,
+        resume: Option<VisibleOpCursor>,
+        cap: usize,
+        mut control: impl FnMut(VisibleOpPageProgress) -> std::ops::ControlFlow<B>,
+    ) -> Result<ControlledVisibleOpPage<B>, LedgerError> {
+        if cap == 0 || cap > MAX_VISIBLE_OP_PAGE_ROWS {
+            return Err(LedgerError::Invalid {
+                field: "visible_op_page.cap".to_string(),
+                problem: format!("must be between 1 and {MAX_VISIBLE_OP_PAGE_ROWS}, got {cap}"),
+            });
+        }
+        let cap_u8 = u8::try_from(cap).map_err(|_| LedgerError::Invalid {
+            field: "visible_op_page.cap".to_string(),
+            problem: format!("page cap {cap} does not fit the cursor transport"),
+        })?;
+        let ledger_instance_id = self.checked_instance_id()?;
+        if let Some(cursor) = resume {
+            if cursor.ledger_instance_id != ledger_instance_id {
+                return Err(LedgerError::Invalid {
+                    field: "visible_op_page.cursor".to_string(),
+                    problem: format!(
+                        "cursor ledger {} differs from current ledger {}",
+                        cursor.ledger_instance_id, ledger_instance_id
+                    ),
+                });
+            }
+            if cursor.branch != branch {
+                return Err(LedgerError::Invalid {
+                    field: "visible_op_page.cursor".to_string(),
+                    problem: format!(
+                        "cursor branch {} differs from requested branch {branch}",
+                        cursor.branch
+                    ),
+                });
+            }
+            if cursor.page_rows != cap_u8 {
+                return Err(LedgerError::Invalid {
+                    field: "visible_op_page.cursor".to_string(),
+                    problem: format!(
+                        "cursor binds page cap {} but request uses {cap}",
+                        cursor.page_rows
+                    ),
+                });
+            }
+            if cursor.at_or_below > cursor.high_water {
+                return Err(LedgerError::Invalid {
+                    field: "visible_op_page.cursor".to_string(),
+                    problem: format!(
+                        "cursor next key {} exceeds captured high-water {}",
+                        cursor.at_or_below, cursor.high_water
+                    ),
+                });
+            }
+        }
+
+        self.note_read_query();
+        let mut progress = VisibleOpPageProgress::default();
+        if let std::ops::ControlFlow::Break(reason) = control(progress) {
+            return Ok(ControlledVisibleOpPage::Break {
+                reason,
+                op_ids: Vec::new(),
+                resume,
+                examined_rows: 0,
+            });
+        }
+        let segments = match self.branch_chain_controlled(branch, &mut progress, &mut control)? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(ControlledVisibleOpPage::Break {
+                    reason,
+                    op_ids: Vec::new(),
+                    resume,
+                    examined_rows: progress.examined_rows,
+                });
+            }
+            std::ops::ControlFlow::Continue(segments) => segments,
+        };
+        let cursor = if let Some(cursor) = resume {
+            cursor
+        } else {
+            let row = self
+                .conn
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM ops")
+                .map_err(|error| sql_err("visible-op high-water capture", &error))?;
+            let high_water = row_i64(&row, 0, "visible-op high-water capture")?;
+            let cursor = VisibleOpCursor {
+                ledger_instance_id,
+                branch,
+                high_water,
+                at_or_below: high_water,
+                page_rows: cap_u8,
+            };
+            progress.examined_rows = progress.examined_rows.saturating_add(1);
+            if let std::ops::ControlFlow::Break(reason) = control(progress) {
+                return Ok(ControlledVisibleOpPage::Break {
+                    reason,
+                    op_ids: Vec::new(),
+                    resume: Some(cursor),
+                    examined_rows: progress.examined_rows,
+                });
+            }
+            cursor
+        };
+
+        let query_limit = cap + 1;
+        let mut candidates = Vec::with_capacity(segments.len().saturating_mul(query_limit));
+        for segment in &segments {
+            let ceiling = segment
+                .cap
+                .unwrap_or(i64::MAX)
+                .min(cursor.high_water)
+                .min(cursor.at_or_below);
+            let rows = self
+                .conn
+                .query_with_params(
+                    &format!(
+                        "SELECT id FROM ops
+                         WHERE branch = ?1 AND id <= ?2
+                         ORDER BY id DESC LIMIT {query_limit}"
+                    ),
+                    &[
+                        SqliteValue::Integer(segment.branch),
+                        SqliteValue::Integer(ceiling),
+                    ],
+                )
+                .map_err(|error| sql_err("controlled visible-op segment page", &error))?;
+            if rows.len() > query_limit {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: String::new(),
+                    detail: format!(
+                        "branch {} returned {} IDs above the fixed page query bound {query_limit}",
+                        segment.branch,
+                        rows.len()
+                    ),
+                });
+            }
+            let mut previous = None;
+            for row in &rows {
+                let id = row_i64(row, 0, "controlled visible-op segment page")?;
+                if id <= 0 {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!(
+                            "branch {} returned nonpositive operation ID {id}",
+                            segment.branch
+                        ),
+                    });
+                }
+                if id > ceiling || previous.is_some_and(|prior| id >= prior) {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!(
+                            "branch {} escaped its strict descending keyset interval at op {id}",
+                            segment.branch
+                        ),
+                    });
+                }
+                previous = Some(id);
+                candidates.push(id);
+                progress.examined_rows = progress.examined_rows.saturating_add(1);
+                if let std::ops::ControlFlow::Break(reason) = control(progress) {
+                    return Ok(ControlledVisibleOpPage::Break {
+                        reason,
+                        op_ids: Vec::new(),
+                        resume: Some(cursor),
+                        examined_rows: progress.examined_rows,
+                    });
+                }
+            }
+        }
+        candidates.sort_unstable_by(|left, right| right.cmp(left));
+        if candidates.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: format!(
+                    "branch {branch}: ancestry segments produced a duplicate global operation ID"
+                ),
+            });
+        }
+
+        let deliver_count = cap.min(candidates.len());
+        let mut delivered: Vec<i64> = Vec::with_capacity(deliver_count);
+        for &id in candidates.iter().take(deliver_count) {
+            if let std::ops::ControlFlow::Break(reason) = control(progress) {
+                let resume = delivered.last().map_or(Some(cursor), |last| {
+                    Some(VisibleOpCursor {
+                        at_or_below: last
+                            .checked_sub(1)
+                            .expect("positive delivered operation ID has a lower key"),
+                        ..cursor
+                    })
+                });
+                return Ok(ControlledVisibleOpPage::Break {
+                    reason,
+                    op_ids: delivered,
+                    resume,
+                    examined_rows: progress.examined_rows,
+                });
+            }
+            delivered.push(id);
+            progress.delivered_ids = progress.delivered_ids.saturating_add(1);
+            if let std::ops::ControlFlow::Break(reason) = control(progress) {
+                let more = delivered.len() < deliver_count || candidates.len() > cap;
+                let resume = if more {
+                    Some(VisibleOpCursor {
+                        at_or_below: id.checked_sub(1).ok_or_else(|| LedgerError::Corrupt {
+                            hash_hex: String::new(),
+                            detail: "a minimum operation ID cannot have a lower resume key"
+                                .to_string(),
+                        })?,
+                        ..cursor
+                    })
+                } else {
+                    None
+                };
+                return Ok(ControlledVisibleOpPage::Break {
+                    reason,
+                    op_ids: delivered,
+                    resume,
+                    examined_rows: progress.examined_rows,
+                });
+            }
+        }
+        let next_cursor = if candidates.len() > cap {
+            let last = *delivered.last().ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: "a truncated visible-op page returned no operation ID".to_string(),
+            })?;
+            Some(VisibleOpCursor {
+                at_or_below: last.checked_sub(1).ok_or_else(|| LedgerError::Corrupt {
+                    hash_hex: String::new(),
+                    detail: "a minimum operation ID cannot have a lower continuation key"
+                        .to_string(),
+                })?,
+                ..cursor
+            })
+        } else {
+            None
+        };
+        if let std::ops::ControlFlow::Break(reason) = control(progress) {
+            return Ok(ControlledVisibleOpPage::Break {
+                reason,
+                op_ids: delivered,
+                resume: next_cursor,
+                examined_rows: progress.examined_rows,
+            });
+        }
+        Ok(ControlledVisibleOpPage::Complete(VisibleOpPage {
+            op_ids: delivered,
+            next_cursor,
+            truncated: next_cursor.is_some(),
+            examined_rows: progress.examined_rows,
+        }))
     }
 
     /// A consistent view of `branch` at instant `t_ns` (mid-sweep points
@@ -1169,6 +1652,294 @@ mod tests {
             .finish_op(op, spec.outcome, spec.diag, spec.t + 1)
             .expect("finish replay fixture");
         ledger
+    }
+
+    fn complete_visible_page(
+        ledger: &Ledger,
+        branch: i64,
+        resume: Option<VisibleOpCursor>,
+        cap: usize,
+    ) -> VisibleOpPage {
+        match ledger
+            .visible_op_ids_page_controlled(branch, resume, cap, |_| {
+                std::ops::ControlFlow::<()>::Continue(())
+            })
+            .expect("controlled visible-operation page")
+        {
+            ControlledVisibleOpPage::Complete(page) => page,
+            ControlledVisibleOpPage::Break { .. } => {
+                panic!("a continue-only controller cannot stop the page")
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_visible_pages_merge_forks_and_freeze_the_first_high_water() {
+        let ledger = mem();
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 1, 10);
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 2, 20);
+        let child = ledger.fork("controlled-child", MAIN_BRANCH).unwrap();
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 3, 30);
+        unit(&ledger, child, ExecMode::Deterministic, 4, 40);
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 5, 50);
+        unit(&ledger, child, ExecMode::Deterministic, 6, 60);
+
+        let first = complete_visible_page(&ledger, child, None, 2);
+        assert_eq!(first.op_ids, vec![6, 4]);
+        assert!(first.truncated);
+        let continuation = first.next_cursor.expect("two older visible rows remain");
+        assert_eq!(continuation.high_water(), 6);
+        assert_eq!(continuation.at_or_below(), 3);
+        assert_eq!(continuation.branch(), child);
+        assert_eq!(continuation.page_rows(), 2);
+
+        unit(&ledger, child, ExecMode::Deterministic, 7, 70);
+        let second = complete_visible_page(&ledger, child, Some(continuation), 2);
+        assert_eq!(second.op_ids, vec![2, 1]);
+        assert!(!second.truncated);
+        assert_eq!(second.next_cursor, None);
+
+        let response_loss_retry = complete_visible_page(&ledger, child, Some(continuation), 2);
+        assert_eq!(response_loss_retry, second);
+        assert_eq!(
+            ledger.visible_op_ids(child, None).unwrap(),
+            vec![1, 2, 4, 6, 7],
+            "the ordinary live view includes the append excluded by the cursor"
+        );
+    }
+
+    #[test]
+    fn controlled_visible_page_captures_high_water_before_segment_queries() {
+        let ledger = mem();
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 1, 10);
+        unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 2, 20);
+        let mut appended = false;
+        let page = ledger
+            .visible_op_ids_page_controlled(MAIN_BRANCH, None, 4, |progress| {
+                if !appended && progress.examined_rows == 2 && progress.delivered_ids == 0 {
+                    appended = true;
+                    unit(&ledger, MAIN_BRANCH, ExecMode::Deterministic, 3, 30);
+                }
+                std::ops::ControlFlow::<()>::Continue(())
+            })
+            .expect("high-water controlled page");
+        let ControlledVisibleOpPage::Complete(page) = page else {
+            panic!("continue-only controller cannot stop")
+        };
+        assert!(
+            appended,
+            "fixture append must occur after high-water capture"
+        );
+        assert_eq!(page.op_ids, vec![2, 1]);
+        assert_eq!(
+            ledger.visible_op_ids(MAIN_BRANCH, None).unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn controlled_visible_page_breaks_resume_without_skip_or_duplicate() {
+        let ledger = mem();
+        for tag in 1..=3 {
+            unit(
+                &ledger,
+                MAIN_BRANCH,
+                ExecMode::Deterministic,
+                tag,
+                i64::try_from(tag * 10).unwrap(),
+            );
+        }
+        let baseline = complete_visible_page(&ledger, MAIN_BRANCH, None, 3);
+        assert_eq!(baseline.op_ids, vec![3, 2, 1]);
+
+        let stopped_before_work = ledger
+            .visible_op_ids_page_controlled(MAIN_BRANCH, None, 3, |_| {
+                std::ops::ControlFlow::Break("before-work")
+            })
+            .unwrap();
+        assert!(matches!(
+            stopped_before_work,
+            ControlledVisibleOpPage::Break {
+                reason: "before-work",
+                ref op_ids,
+                resume: None,
+                examined_rows: 0,
+            } if op_ids.is_empty()
+        ));
+
+        let expected_rows = baseline.examined_rows;
+        let stopped_before_first = ledger
+            .visible_op_ids_page_controlled(MAIN_BRANCH, None, 3, |progress| {
+                if progress.examined_rows == expected_rows && progress.delivered_ids == 0 {
+                    std::ops::ControlFlow::Break("before-first")
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+        let ControlledVisibleOpPage::Break {
+            reason,
+            op_ids,
+            resume,
+            examined_rows,
+        } = stopped_before_first
+        else {
+            panic!("controller must stop immediately before the first ID")
+        };
+        assert_eq!(reason, "before-first");
+        assert!(op_ids.is_empty());
+        assert_eq!(examined_rows, expected_rows);
+        let same_first = resume.expect("captured first-page cursor");
+        assert_eq!(
+            complete_visible_page(&ledger, MAIN_BRANCH, Some(same_first), 3).op_ids,
+            vec![3, 2, 1]
+        );
+
+        let stopped_after_two = ledger
+            .visible_op_ids_page_controlled(MAIN_BRANCH, None, 3, |progress| {
+                if progress.delivered_ids == 2 {
+                    std::ops::ControlFlow::Break("after-two")
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+        let ControlledVisibleOpPage::Break {
+            reason,
+            op_ids,
+            resume,
+            ..
+        } = stopped_after_two
+        else {
+            panic!("controller must stop after two delivered IDs")
+        };
+        assert_eq!(reason, "after-two");
+        assert_eq!(op_ids, vec![3, 2]);
+        assert_eq!(
+            complete_visible_page(
+                &ledger,
+                MAIN_BRANCH,
+                Some(resume.expect("one older row remains")),
+                3,
+            )
+            .op_ids,
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn controlled_visible_page_enforces_exact_cap_and_cursor_bindings() {
+        let ledger = mem();
+        for t in 1..=65 {
+            ledger
+                .begin_op_on(MAIN_BRANCH, ExecMode::Deterministic, None, "{}", &FX, t)
+                .unwrap();
+        }
+        let first = complete_visible_page(&ledger, MAIN_BRANCH, None, MAX_VISIBLE_OP_PAGE_ROWS);
+        assert_eq!(first.op_ids.len(), MAX_VISIBLE_OP_PAGE_ROWS);
+        assert_eq!(first.op_ids.first(), Some(&65));
+        assert_eq!(first.op_ids.last(), Some(&2));
+        assert!(first.truncated);
+        let cursor = first.next_cursor.expect("exact boundary leaves one row");
+        let last =
+            complete_visible_page(&ledger, MAIN_BRANCH, Some(cursor), MAX_VISIBLE_OP_PAGE_ROWS);
+        assert_eq!(last.op_ids, vec![1]);
+        assert!(!last.truncated);
+
+        for cap in [0, MAX_VISIBLE_OP_PAGE_ROWS + 1] {
+            assert!(matches!(
+                ledger.visible_op_ids_page_controlled::<()>(
+                    MAIN_BRANCH,
+                    None,
+                    cap,
+                    |_| std::ops::ControlFlow::Continue(())
+                ),
+                Err(LedgerError::Invalid { field, .. })
+                    if field == "visible_op_page.cap"
+            ));
+        }
+        assert!(matches!(
+            ledger.visible_op_ids_page_controlled::<()>(
+                MAIN_BRANCH,
+                Some(cursor),
+                1,
+                |_| std::ops::ControlFlow::Continue(())
+            ),
+            Err(LedgerError::Invalid { field, .. })
+                if field == "visible_op_page.cursor"
+        ));
+        let child = ledger.fork("cursor-binding-child", MAIN_BRANCH).unwrap();
+        let child_cursor = complete_visible_page(&ledger, child, None, MAX_VISIBLE_OP_PAGE_ROWS)
+            .next_cursor
+            .expect("child snapshot inherits the one-row continuation");
+        assert!(matches!(
+            ledger.visible_op_ids_page_controlled::<()>(
+                MAIN_BRANCH,
+                Some(child_cursor),
+                MAX_VISIBLE_OP_PAGE_ROWS,
+                |_| std::ops::ControlFlow::Continue(())
+            ),
+            Err(LedgerError::Invalid { field, .. })
+                if field == "visible_op_page.cursor"
+        ));
+        let invalid_interval = VisibleOpCursor {
+            at_or_below: cursor.high_water() + 1,
+            ..cursor
+        };
+        assert!(matches!(
+            ledger.visible_op_ids_page_controlled::<()>(
+                MAIN_BRANCH,
+                Some(invalid_interval),
+                MAX_VISIBLE_OP_PAGE_ROWS,
+                |_| std::ops::ControlFlow::Continue(())
+            ),
+            Err(LedgerError::Invalid { field, .. })
+                if field == "visible_op_page.cursor"
+        ));
+        let foreign = mem();
+        assert!(matches!(
+            foreign.visible_op_ids_page_controlled::<()>(
+                MAIN_BRANCH,
+                Some(cursor),
+                MAX_VISIBLE_OP_PAGE_ROWS,
+                |_| std::ops::ControlFlow::Continue(())
+            ),
+            Err(LedgerError::Invalid { field, .. })
+                if field == "visible_op_page.cursor"
+        ));
+        assert!(matches!(
+            ledger.visible_op_ids_page_controlled::<()>(9_999, None, 1, |_| {
+                std::ops::ControlFlow::Continue(())
+            }),
+            Err(LedgerError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn controlled_visible_page_rejects_nonpositive_raw_operation_ids() {
+        let ledger = mem();
+        ledger
+            .conn
+            .execute(
+                "INSERT INTO ops(
+                     id, session, ir, seed, versions, budget, capability,
+                     t_start, branch, exec_mode
+                 ) VALUES (
+                     0, NULL, '{}', X'01', '{}', '{}', '{}',
+                     1, 1, 'deterministic'
+                 )",
+            )
+            .expect("insert malformed nonpositive operation ID fixture");
+        let error = ledger
+            .visible_op_ids_page_controlled::<()>(MAIN_BRANCH, None, 1, |_| {
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect_err("nonpositive operation ID cannot enter cursor arithmetic");
+        assert!(matches!(
+            error,
+            LedgerError::Corrupt { detail, .. }
+                if detail.contains("nonpositive operation ID 0")
+        ));
     }
 
     #[test]
