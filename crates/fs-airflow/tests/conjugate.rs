@@ -1014,6 +1014,43 @@ fn the_refinement_transfer_restricts_a_nonuniform_state_outlet_preserving() {
 }
 
 #[test]
+fn a_mis_sized_transfer_state_poisons_instead_of_truncating() {
+    // The infallible `Transfer` trait cannot refuse, so a state whose arity
+    // disagrees with the bound path must come back all-NaN at the correct
+    // output arity. Silent alternatives are worse: zip/chunks would drop the
+    // surplus downstream entries (the ones restrict weights most heavily) or
+    // restrict a partial block with full-block weights.
+    let factor = 4;
+    let transfer =
+        SegmentRefinementTransfer::new(uniform_path(2, 0.03, 80.0), factor).expect("valid factor");
+
+    // One entry short, one surplus, and an entirely wrong shape.
+    for bad_fine in [vec![300.0; 7], vec![300.0; 9], vec![300.0; 1]] {
+        let coarse = transfer.restrict(&bad_fine);
+        assert_eq!(coarse.len(), 2);
+        assert!(
+            coarse.iter().all(|wall| wall.is_nan()),
+            "mis-sized fine state ({} entries) must poison, saw {coarse:?}",
+            bad_fine.len()
+        );
+    }
+    for bad_coarse in [vec![300.0; 1], vec![300.0; 3]] {
+        let fine = transfer.prolongate(&bad_coarse);
+        assert_eq!(fine.len(), 2 * factor);
+        assert!(
+            fine.iter().all(|wall| wall.is_nan()),
+            "mis-sized coarse state ({} entries) must poison, saw {fine:?}",
+            bad_coarse.len()
+        );
+    }
+
+    // Correct arities are untouched by the guard.
+    let ok_fine = vec![340.0; 2 * factor];
+    assert_eq!(transfer.prolongate(&[340.0, 350.0]).len(), 2 * factor);
+    assert_eq!(transfer.restrict(&ok_fine).len(), 2);
+}
+
+#[test]
 fn a_zero_refinement_factor_refuses() {
     let path = uniform_path(2, 0.02, 50.0);
     assert!(matches!(

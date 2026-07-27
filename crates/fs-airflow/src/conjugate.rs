@@ -846,6 +846,14 @@ impl SegmentRefinementTransfer {
 
 impl fs_ladder::Transfer for SegmentRefinementTransfer {
     fn prolongate(&self, coarse: &[f64]) -> Vec<f64> {
+        // The infallible `Transfer` contract cannot refuse, so a state whose
+        // arity disagrees with the bound path POISONS at the correct output
+        // arity instead of scaling garbage into a plausible fine state; the
+        // downstream response gates refuse non-finite walls.
+        let segment_count = self.path.segments().len();
+        if coarse.len() != segment_count {
+            return vec![f64::NAN; segment_count * self.factor];
+        }
         let mut fine = Vec::with_capacity(coarse.len() * self.factor);
         for &wall in coarse {
             fine.extend(std::iter::repeat_n(wall, self.factor));
@@ -854,6 +862,13 @@ impl fs_ladder::Transfer for SegmentRefinementTransfer {
     }
 
     fn restrict(&self, fine: &[f64]) -> Vec<f64> {
+        // Same poisoning rule as `prolongate`: `zip` + `chunks` would
+        // otherwise silently drop surplus downstream entries or restrict a
+        // partial block with weights built for a full one.
+        let segment_count = self.path.segments().len();
+        if fine.len() != segment_count * self.factor {
+            return vec![f64::NAN; segment_count];
+        }
         // NOT a plain mean. The coarse wall that reproduces a block's outlet
         // is the DOWNSTREAM-WEIGHTED mean
         //
