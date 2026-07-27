@@ -154,6 +154,20 @@ CHT ladder's correlation-rung transfer.
     low-fan/low-resistance and high-fan/high-resistance corners. A flow root is
     never recombined with the opposite resistance bound to manufacture a wider
     but physically unreachable band.
+12. Every successfully admitted `AirPath` and every published march or solve
+    result keeps its represented conjugate reductions inside the finite `f64`
+    domain. Path admission checks the derived positive capacity rate, segment
+    conductance, NTU, effectiveness terms, and total wetted area. The march
+    checks its temperature difference before products, every segment heat, and
+    the running air-heat total. The coupled loop checks solid totals, the
+    air/solid difference, each area-weighted residual contribution, the running
+    weighted sum, and its final division. Final assembly independently
+    rechecks every region difference and both heat-rate totals before it can
+    publish a balance. Zero remains legal for signed heat rates, differences,
+    and residuals; it refuses where the model mathematically requires a
+    strictly positive denominator or exchange factor. The separately
+    documented infallible decomposition attachment is a poisoned diagnostic,
+    not a published finite-result guarantee.
 
 ## Error model
 
@@ -162,7 +176,10 @@ empty network groups, zero/invalid resistances, stall operation, absent curve
 intersections, incomplete/ambiguous root searches, unknown branches, and bad
 convection-handoff inputs. Loss-card attachment additionally refuses an
 unconstrained/unusable validity box or malformed projected identity. Caller
-input does not panic.
+input does not panic. Conjugate path aggregates that must be positive refuse as
+`InvalidConjugateInput` with their exact field; signed runtime arithmetic
+refuses as `NonFiniteCoupling` with the exact producing stage. A finite row
+cannot disappear into a non-finite multi-row total.
 
 ## Determinism class
 
@@ -262,6 +279,12 @@ None.
 - G4 drills: cancellation at an outer-iteration boundary with the solid side
   proven not to re-run, and checkpoint resume reproducing the uninterrupted
   tail bitwise.
+- G0 derived-arithmetic refusals: positive mass-flow and heat-capacity inputs
+  whose product underflows, segment conductance/NTU range failures, overflowing
+  total wetted area, per-segment and multi-segment air heat, multi-region solid
+  heat, the air/solid difference, both area-weighted residual stages, and every
+  independently recomputed converged-balance reduction retain exact diagnostic
+  attribution.
 - flux-balance sensitivity: the per-region audit closes to 2.4e-11 W on a 1.2 W
   fixture AND is shown to open under an injected dropped-face fault that the
   converged temperatures alone cannot reveal.
@@ -378,6 +401,20 @@ None.
   `fs-conduction`'s own whole-domain `robin_out_w` loop and so detects a Robin
   face owned by no region or counted twice. That is also wiring. The physical
   content lives in the closed-form and refinement-invariance checks above.
+- `ConjugateSolution::with_decomposition_cross_check` is an INFALLIBLE
+  compatibility surface. It cannot return a structured refusal without a
+  public API change. A non-finite whole-domain Robin total or subtraction
+  poisons `decomposition_residual_w` with `NaN`, which withholds a finite
+  diagnostic but does not identify which operand was invalid. Callers needing
+  exact refusal attribution must validate both operands and ensure their
+  subtraction is representable before attaching the total; this method alone
+  is not an admission gate.
+- `AirSegment::ntu(capacity)` is also an INFALLIBLE compatibility helper. It
+  performs unchecked raw arithmetic for an arbitrary caller-supplied capacity
+  and can return zero or a non-finite value. The checked `AirPath` admission
+  and march paths validate capacity, conductance, NTU, and effectiveness before
+  using them; callers must not treat the standalone helper as an admission
+  receipt.
 - The seam is typed, not ledgered. `conjugate::SEAM_PORT_KIND` declares the
   `fs-couple` port kind and its effort dimension is checked against
   `Temperature::DIMS`, and `fs_couple::EnergyAudit` records every exchange's

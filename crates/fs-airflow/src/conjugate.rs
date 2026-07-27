@@ -142,6 +142,27 @@ fn finite(field: &'static str, value: f64) -> Result<f64, AirflowError> {
     Ok(value)
 }
 
+fn finite_coupling(stage: &'static str, value: f64) -> Result<f64, AirflowError> {
+    if !value.is_finite() {
+        return Err(AirflowError::NonFiniteCoupling {
+            stage,
+            value_bits: value.to_bits(),
+        });
+    }
+    Ok(value)
+}
+
+fn finite_sum(
+    stage: &'static str,
+    values: impl IntoIterator<Item = f64>,
+) -> Result<f64, AirflowError> {
+    let mut total = 0.0;
+    for value in values {
+        total = finite_coupling(stage, total + value)?;
+    }
+    Ok(total)
+}
+
 /// One ordered segment of the air path: the named solid Robin region it
 /// exchanges heat with, that region's wetted area, and the coefficient the
 /// correlation rung produced for it.
@@ -158,7 +179,8 @@ impl AirSegment {
     /// # Errors
     /// [`AirflowError::EmptyElementName`] for a blank region;
     /// [`AirflowError::InvalidConjugateInput`] for a non-finite or
-    /// non-positive area or coefficient.
+    /// non-positive area or coefficient, or when their positive product is not
+    /// representable as a finite, positive conductance.
     pub fn new(
         region: &str,
         area_m2: f64,
@@ -167,13 +189,14 @@ impl AirSegment {
         if region.trim().is_empty() {
             return Err(AirflowError::EmptyElementName);
         }
+        let area_m2 = finite_positive("air segment area", area_m2)?;
+        let htc_w_per_m2_k =
+            finite_positive("air segment heat-transfer coefficient", htc_w_per_m2_k)?;
+        finite_positive("air segment conductance", area_m2 * htc_w_per_m2_k)?;
         Ok(AirSegment {
             region: region.to_string(),
-            area_m2: finite_positive("air segment area", area_m2)?,
-            htc_w_per_m2_k: finite_positive(
-                "air segment heat-transfer coefficient",
-                htc_w_per_m2_k,
-            )?,
+            area_m2,
+            htc_w_per_m2_k,
         })
     }
 
@@ -196,6 +219,12 @@ impl AirSegment {
     }
 
     /// `h A / (ṁ c_p)` for this segment against a capacity rate.
+    ///
+    /// This public compatibility helper is infallible raw arithmetic and does
+    /// not admit an arbitrary caller-supplied capacity rate. It can therefore
+    /// return zero or a non-finite value for an invalid or unrepresentable
+    /// ratio. [`AirPath::new`] and [`AirPath::march`] use the checked exchange
+    /// path instead.
     #[must_use]
     pub fn ntu(&self, capacity_rate_w_per_k: f64) -> f64 {
         self.htc_w_per_m2_k * self.area_m2 / capacity_rate_w_per_k
@@ -214,6 +243,26 @@ fn effectiveness(ntu: f64) -> (f64, f64) {
     }
     let eps = -det::expm1(-ntu);
     (eps, eps / ntu)
+}
+
+fn admitted_exchange_terms(
+    segment: &AirSegment,
+    capacity_rate_w_per_k: f64,
+) -> Result<(f64, f64, f64), AirflowError> {
+    let conductance = finite_positive(
+        "air segment conductance",
+        segment.htc_w_per_m2_k * segment.area_m2,
+    )?;
+    let ntu = finite_positive("air segment NTU", conductance / capacity_rate_w_per_k)?;
+    let (effectiveness, effectiveness_over_ntu) = effectiveness(ntu);
+    Ok((
+        ntu,
+        finite_positive("air segment effectiveness", effectiveness)?,
+        finite_positive(
+            "air segment effectiveness-to-NTU ratio",
+            effectiveness_over_ntu,
+        )?,
+    ))
 }
 
 /// One marched segment's state.
@@ -278,7 +327,9 @@ impl AirPath {
     /// two segments cannot both own the same solid trace, because the solve
     /// gives that trace exactly one Robin row;
     /// [`AirflowError::InvalidConjugateInput`] for non-finite or non-positive
-    /// inlet temperature, mass flow, or specific heat.
+    /// inlet temperature, mass flow, or specific heat, or when the derived
+    /// capacity rate, total area, conductance/NTU, or effectiveness terms are
+    /// not representable in their required finite, positive domain.
     pub fn new(
         inlet_temperature_k: f64,
         mass_flow_kg_per_s: f64,
@@ -298,7 +349,7 @@ impl AirPath {
                 });
             }
         }
-        Ok(AirPath {
+        let path = AirPath {
             inlet_temperature_k: finite_positive("air inlet temperature", inlet_temperature_k)?,
             mass_flow_kg_per_s: finite_positive("air mass flow", mass_flow_kg_per_s)?,
             specific_heat_j_per_kg_k: finite_positive(
@@ -306,7 +357,13 @@ impl AirPath {
                 specific_heat_j_per_kg_k,
             )?,
             segments,
-        })
+        };
+        let capacity = path.checked_capacity_rate_w_per_k()?;
+        path.checked_total_area_m2()?;
+        for segment in &path.segments {
+            admitted_exchange_terms(segment, capacity)?;
+        }
+        Ok(path)
     }
 
     /// Path segments in inlet-to-outlet order.
@@ -322,9 +379,24 @@ impl AirPath {
     }
 
     /// `ṁ c_p`, W/K.
+    ///
+    /// Construction admits the product as finite and strictly positive, so
+    /// every `AirPath` returned by [`AirPath::new`] satisfies this invariant.
     #[must_use]
     pub fn capacity_rate_w_per_k(&self) -> f64 {
         self.mass_flow_kg_per_s * self.specific_heat_j_per_kg_k
+    }
+
+    fn checked_capacity_rate_w_per_k(&self) -> Result<f64, AirflowError> {
+        finite_positive("air capacity rate", self.capacity_rate_w_per_k())
+    }
+
+    fn checked_total_area_m2(&self) -> Result<f64, AirflowError> {
+        let mut total = 0.0;
+        for segment in &self.segments {
+            total = finite_positive("total air segment area", total + segment.area_m2)?;
+        }
+        Ok(total)
     }
 
     /// The region names this path binds, in order.
@@ -349,30 +421,20 @@ impl AirPath {
                 found: wall_temperatures_k.len(),
             });
         }
-        let capacity = self.capacity_rate_w_per_k();
+        let capacity = self.checked_capacity_rate_w_per_k()?;
         let mut inlet = self.inlet_temperature_k;
         let mut states = Vec::with_capacity(self.segments.len());
         let mut total = 0.0;
         for (segment, &wall) in self.segments.iter().zip(wall_temperatures_k) {
             finite("solid wall temperature", wall)?;
-            let ntu = segment.ntu(capacity);
-            let (eps, eps_over_ntu) = effectiveness(ntu);
-            let driving = wall - inlet;
-            let heat_rate_w = capacity * driving * eps;
-            let outlet = inlet + driving * eps;
-            let reference = wall - driving * eps_over_ntu;
-            for (stage, value) in [
-                ("segment outlet temperature", outlet),
-                ("segment reference temperature", reference),
-                ("segment heat rate", heat_rate_w),
-            ] {
-                if !value.is_finite() {
-                    return Err(AirflowError::NonFiniteCoupling {
-                        stage,
-                        value_bits: value.to_bits(),
-                    });
-                }
-            }
+            let (ntu, eps, eps_over_ntu) = admitted_exchange_terms(segment, capacity)?;
+            let driving = finite_coupling("segment temperature difference", wall - inlet)?;
+            let heat_rate_w = finite_coupling("segment heat rate", capacity * driving * eps)?;
+            let outlet = finite_coupling("segment outlet temperature", inlet + driving * eps)?;
+            let reference = finite_coupling(
+                "segment reference temperature",
+                wall - driving * eps_over_ntu,
+            )?;
             states.push(SegmentState {
                 region: segment.region.clone(),
                 inlet_temperature_k: inlet,
@@ -382,7 +444,7 @@ impl AirPath {
                 effectiveness: eps,
                 heat_rate_w,
             });
-            total += heat_rate_w;
+            total = finite_coupling("total air heat rate", total + heat_rate_w)?;
             inlet = outlet;
         }
         Ok(AirMarch {
@@ -600,18 +662,30 @@ pub struct ConjugateSolution {
     pub history: Vec<ConjugateIteration>,
     /// Outer iterations performed.
     pub iterations: usize,
-    /// The worst interface-power imbalance the [`fs_couple::EnergyAudit`] saw
-    /// across every exchange, W. NaN if any exchange produced a NaN balance —
-    /// the audit poisons rather than silently dropping it.
+    /// The worst finite interface-power imbalance the
+    /// [`fs_couple::EnergyAudit`] saw across every admitted exchange, W.
+    /// Non-finite exchange arithmetic refuses before solution assembly;
+    /// the audit's poisoning remains a defensive invariant for independent
+    /// callers.
     pub worst_recorded_imbalance_w: f64,
 }
 
 impl ConjugateSolution {
     /// Attach the whole-domain Robin total from a conduction report and
     /// recompute the decomposition cross-check.
+    ///
+    /// This compatibility surface is infallible. A non-finite total or
+    /// subtraction therefore poisons the optional residual with `NaN`; callers
+    /// that need a structured refusal must validate both operands and the
+    /// representability of their subtraction before calling.
     #[must_use]
     pub fn with_decomposition_cross_check(mut self, robin_out_w: f64) -> ConjugateSolution {
-        self.balance.decomposition_residual_w = Some(self.balance.solid_total_w - robin_out_w);
+        let residual = self.balance.solid_total_w - robin_out_w;
+        self.balance.decomposition_residual_w = Some(if residual.is_finite() {
+            residual
+        } else {
+            f64::NAN
+        });
         self
     }
 }
@@ -722,7 +796,7 @@ where
     let mut audit = EnergyAudit::new();
     let mut history: Vec<ConjugateIteration> = Vec::new();
     let mut reference = initial_references_k.to_vec();
-    let total_area: f64 = path.segments().iter().map(AirSegment::area_m2).sum();
+    let total_area = path.checked_total_area_m2()?;
 
     for iteration in 0..config.max_iterations {
         cx.checkpoint().map_err(|_| AirflowError::Cancelled {
@@ -739,21 +813,30 @@ where
             .collect();
         let march = path.march(&walls)?;
 
-        let solid_total: f64 = response.iter().map(|state| state.heat_rate_w).sum();
-        let air_total = march.total_heat_rate_w;
-        let interface_imbalance = solid_total - air_total;
+        let solid_total = finite_sum(
+            "total solid heat rate",
+            response.iter().map(|state| state.heat_rate_w),
+        )?;
+        let air_total = finite_coupling("total air heat rate", march.total_heat_rate_w)?;
+        let interface_imbalance = finite_coupling(
+            "air-solid interface heat-rate imbalance",
+            solid_total - air_total,
+        )?;
         audit.record(interface_imbalance);
 
         let updated = march.reference_temperatures_k();
         let (max_change, scalar_residual) =
             fixed_point_residual(path, &reference, &updated, total_area)?;
 
-        let omega = match (&config.relaxation, aitken.as_mut()) {
-            (Relaxation::Fixed { omega }, _) => *omega,
-            (Relaxation::Aitken { .. }, Some(relaxer)) => relaxer.next_omega(scalar_residual),
-            // Unreachable: the relaxer is constructed iff the scheme is Aitken.
-            (Relaxation::Aitken { omega_init, .. }, None) => *omega_init,
-        };
+        let omega = finite_coupling(
+            "relaxation omega",
+            match (&config.relaxation, aitken.as_mut()) {
+                (Relaxation::Fixed { omega }, _) => *omega,
+                (Relaxation::Aitken { .. }, Some(relaxer)) => relaxer.next_omega(scalar_residual),
+                // Unreachable: the relaxer is constructed iff the scheme is Aitken.
+                (Relaxation::Aitken { omega_init, .. }, None) => *omega_init,
+            },
+        )?;
 
         history.push(ConjugateIteration {
             iteration,
@@ -784,7 +867,7 @@ where
                     history,
                     iteration + 1,
                     audit.max_generation(),
-                ),
+                )?,
                 config,
             );
         }
@@ -988,20 +1071,25 @@ fn fixed_point_residual(
     updated: &[f64],
     total_area: f64,
 ) -> Result<(f64, f64), AirflowError> {
+    finite_positive("total air segment area", total_area)?;
     let mut max_change = 0.0_f64;
     let mut weighted = 0.0_f64;
     for ((segment, &next), &now) in path.segments().iter().zip(updated).zip(current) {
-        let delta = next - now;
-        if !delta.is_finite() {
-            return Err(AirflowError::NonFiniteCoupling {
-                stage: "reference temperature update",
-                value_bits: delta.to_bits(),
-            });
-        }
+        let delta = finite_coupling("reference temperature update", next - now)?;
         max_change = max_change.max(delta.abs());
-        weighted += segment.area_m2() * delta;
+        let contribution = finite_coupling(
+            "area-weighted reference residual contribution",
+            segment.area_m2() * delta,
+        )?;
+        weighted = finite_coupling(
+            "area-weighted reference residual accumulation",
+            weighted + contribution,
+        )?;
     }
-    Ok((max_change, weighted / total_area))
+    Ok((
+        max_change,
+        finite_coupling("area-weighted reference residual", weighted / total_area)?,
+    ))
 }
 
 /// The temperature criterion does not bound watts, so a converged exchange
@@ -1014,23 +1102,29 @@ fn fixed_point_residual(
 /// interface moves microwatts or kilowatts. The refusal reports the
 /// EFFECTIVE threshold, not the configured floor.
 ///
-/// NaN-safe by construction: `max_region_imbalance_w` poisons to NaN if any
-/// region did, and `NaN.partial_cmp(_)` is `None`, so an unorderable
-/// imbalance takes the refusal branch regardless of what the scale fold
-/// produced.
+/// Final assembly has already refused any non-finite region imbalance or
+/// aggregate before this gate receives a solution. The explicit finite checks
+/// on the derived scale and threshold remain defensive, so this comparison
+/// only judges ordered finite values.
 fn admit_converged(
     solution: ConjugateSolution,
     config: &ConjugateConfig,
 ) -> Result<ConjugateSolution, AirflowError> {
-    let scale = solution
-        .balance
-        .regions
-        .iter()
-        .map(|row| row.solid_heat_rate_w.abs().max(row.air_heat_rate_w.abs()))
-        .fold(0.0_f64, f64::max);
-    let threshold = config
-        .balance_tolerance_w
-        .max(config.balance_relative_tolerance * scale);
+    let scale = finite_coupling(
+        "interface heat-rate scale",
+        solution
+            .balance
+            .regions
+            .iter()
+            .map(|row| row.solid_heat_rate_w.abs().max(row.air_heat_rate_w.abs()))
+            .fold(0.0_f64, f64::max),
+    )?;
+    let threshold = finite_coupling(
+        "interface imbalance threshold",
+        config
+            .balance_tolerance_w
+            .max(config.balance_relative_tolerance * scale),
+    )?;
     if matches!(
         solution
             .balance
@@ -1069,13 +1163,11 @@ fn check_response_matches_path(
                 found: state.region.clone(),
             });
         }
-        // Fail closed on the NUMBERS, not just the labels. A NaN heat rate
-        // would otherwise reach the audit, where a plain `f64::max` fold
-        // SILENTLY DROPS it (`f64::max(0.0, NaN) == 0.0`) and reports a
-        // perfectly balanced interface for a coupling that broke down. This
-        // is the same trap `fs_couple::EnergyAudit` documents and poisons
-        // against; the per-region fold poisons too, and this gate stops the
-        // value earlier.
+        // Fail closed on the NUMBERS, not just the labels. A non-finite state
+        // is attributed and refused here before it can enter aggregate
+        // arithmetic, the energy audit, or final solution assembly.
+        // `fs_couple::EnergyAudit` retains its own poisoning behavior as a
+        // defensive invariant for independent callers.
         finite("solid wall temperature", state.mean_wall_temperature_k)?;
         finite("solid region heat rate", state.heat_rate_w)?;
         finite_positive("solid region area", state.area_m2)?;
@@ -1157,38 +1249,46 @@ fn converged_solution(
     history: Vec<ConjugateIteration>,
     iterations: usize,
     worst_recorded_imbalance_w: f64,
-) -> ConjugateSolution {
-    let regions: Vec<RegionBalance> = solid
-        .iter()
-        .zip(&march.segments)
-        .map(|(state, segment)| RegionBalance {
+) -> Result<ConjugateSolution, AirflowError> {
+    let mut regions = Vec::with_capacity(solid.len());
+    let mut max_region_imbalance_w = 0.0_f64;
+    for (state, segment) in solid.iter().zip(&march.segments) {
+        let imbalance_w = finite_coupling(
+            "converged region interface heat-rate imbalance",
+            state.heat_rate_w - segment.heat_rate_w,
+        )?;
+        max_region_imbalance_w = max_region_imbalance_w.max(imbalance_w.abs());
+        regions.push(RegionBalance {
             region: state.region.clone(),
             solid_heat_rate_w: state.heat_rate_w,
             air_heat_rate_w: segment.heat_rate_w,
-            imbalance_w: state.heat_rate_w - segment.heat_rate_w,
-        })
-        .collect();
-    // Poison rather than fold: `f64::max` drops NaN, so a plain fold would
-    // report zero imbalance for a coupling that produced NaN. `NaN <= tol` is
-    // false, so every downstream comparison fails closed.
-    let max_region_imbalance_w = if regions.iter().any(|row| row.imbalance_w.is_nan()) {
-        f64::NAN
-    } else {
-        regions
-            .iter()
-            .map(|row| row.imbalance_w.abs())
-            .fold(0.0_f64, f64::max)
-    };
-    let solid_total_w: f64 = solid.iter().map(|state| state.heat_rate_w).sum();
-    let air_total_w = march.total_heat_rate_w;
-    ConjugateSolution {
+            imbalance_w,
+        });
+    }
+    let solid_total_w = finite_sum(
+        "converged solid heat-rate total",
+        solid.iter().map(|state| state.heat_rate_w),
+    )?;
+    let air_total_w = finite_sum(
+        "converged air heat-rate total",
+        march.segments.iter().map(|state| state.heat_rate_w),
+    )?;
+    let interface_imbalance_w = finite_coupling(
+        "converged interface heat-rate imbalance",
+        solid_total_w - air_total_w,
+    )?;
+    let worst_recorded_imbalance_w = finite_coupling(
+        "recorded interface heat-rate imbalance",
+        worst_recorded_imbalance_w,
+    )?;
+    Ok(ConjugateSolution {
         reference_temperatures_k,
         balance: FluxBalanceAudit {
             regions,
             max_region_imbalance_w,
             solid_total_w,
             air_total_w,
-            interface_imbalance_w: solid_total_w - air_total_w,
+            interface_imbalance_w,
             decomposition_residual_w: None,
         },
         march,
@@ -1196,7 +1296,7 @@ fn converged_solution(
         history,
         iterations,
         worst_recorded_imbalance_w,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1223,5 +1323,114 @@ mod tests {
     fn effectiveness_ratio_stays_near_one_for_tiny_ntu() {
         let (_, ratio) = effectiveness(1.0e-12);
         assert!((ratio - 1.0).abs() < 1.0e-9, "ratio = {ratio}");
+    }
+
+    #[test]
+    fn residual_division_overflow_keeps_its_stage_attribution() {
+        let path = AirPath::new(
+            300.0,
+            1.0,
+            1.0,
+            vec![AirSegment::new("wall", 1.0, 1.0).expect("segment")],
+        )
+        .expect("path");
+        let error = fixed_point_residual(&path, &[0.0], &[1.0], f64::from_bits(1))
+            .expect_err("an unrepresentable weighted mean must refuse");
+        assert!(matches!(
+            error,
+            AirflowError::NonFiniteCoupling {
+                stage: "area-weighted reference residual",
+                ..
+            }
+        ));
+    }
+
+    fn synthetic_march(heat_rates: &[f64]) -> AirMarch {
+        AirMarch {
+            segments: heat_rates
+                .iter()
+                .enumerate()
+                .map(|(index, &heat_rate_w)| SegmentState {
+                    region: format!("row-{index}"),
+                    inlet_temperature_k: 300.0,
+                    outlet_temperature_k: 300.0,
+                    reference_temperature_k: 300.0,
+                    ntu: 1.0,
+                    effectiveness: 0.5,
+                    heat_rate_w,
+                })
+                .collect(),
+            outlet_temperature_k: 300.0,
+            total_heat_rate_w: 0.0,
+        }
+    }
+
+    fn synthetic_solid(heat_rates: &[f64]) -> Vec<SolidRegionState> {
+        heat_rates
+            .iter()
+            .enumerate()
+            .map(|(index, &heat_rate_w)| SolidRegionState {
+                region: format!("row-{index}"),
+                area_m2: 1.0,
+                mean_wall_temperature_k: 300.0,
+                heat_rate_w,
+                mean_reference_temperature_k: Some(300.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn converged_reductions_refuse_at_the_exact_recomputed_stage() {
+        let solid_overflow = converged_solution(
+            vec![300.0; 2],
+            synthetic_march(&[f64::MAX, f64::MAX]),
+            synthetic_solid(&[f64::MAX, f64::MAX]),
+            Vec::new(),
+            1,
+            0.0,
+        )
+        .expect_err("the recomputed solid total must refuse");
+        assert!(matches!(
+            solid_overflow,
+            AirflowError::NonFiniteCoupling {
+                stage: "converged solid heat-rate total",
+                ..
+            }
+        ));
+
+        let air_overflow = converged_solution(
+            vec![300.0; 2],
+            synthetic_march(&[f64::MAX, f64::MAX]),
+            synthetic_solid(&[0.0, 0.0]),
+            Vec::new(),
+            1,
+            0.0,
+        )
+        .expect_err("the recomputed air total must refuse");
+        assert!(matches!(
+            air_overflow,
+            AirflowError::NonFiniteCoupling {
+                stage: "converged air heat-rate total",
+                ..
+            }
+        ));
+
+        let row = f64::MAX * 0.45;
+        let interface_overflow = converged_solution(
+            vec![300.0; 2],
+            synthetic_march(&[-row, -row]),
+            synthetic_solid(&[row, row]),
+            Vec::new(),
+            1,
+            0.0,
+        )
+        .expect_err("the recomputed interface difference must refuse");
+        assert!(matches!(
+            interface_overflow,
+            AirflowError::NonFiniteCoupling {
+                stage: "converged interface heat-rate imbalance",
+                ..
+            }
+        ));
     }
 }

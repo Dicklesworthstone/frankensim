@@ -58,6 +58,24 @@ fn capacity_rate() -> f64 {
     MASS_FLOW_KG_S * CP_J_KG_K
 }
 
+fn assert_invalid_field(error: AirflowError, expected: &'static str) {
+    match error {
+        AirflowError::InvalidConjugateInput { field, .. } => {
+            assert_eq!(field, expected);
+        }
+        other => panic!("expected InvalidConjugateInput({expected}), got {other:?}"),
+    }
+}
+
+fn assert_non_finite_stage(error: AirflowError, expected: &'static str) {
+    match error {
+        AirflowError::NonFiniteCoupling { stage, .. } => {
+            assert_eq!(stage, expected);
+        }
+        other => panic!("expected NonFiniteCoupling({expected}), got {other:?}"),
+    }
+}
+
 /// `N` equal segments spanning the same total area and coefficient.
 fn uniform_path(segments: usize, total_area_m2: f64, htc: f64) -> AirPath {
     let per = total_area_m2 / segments as f64;
@@ -963,6 +981,20 @@ fn the_decomposition_cross_check_catches_an_unowned_robin_face() {
         .clone()
         .with_decomposition_cross_check(solution.balance.solid_total_w + 3.0);
     assert!((dirty.balance.decomposition_residual_w.expect("present") + 3.0).abs() < 1.0e-9);
+
+    // This method predates the structured refusal surface and is infallible.
+    // Invalid arithmetic must therefore poison its optional diagnostic rather
+    // than leave a citable infinity that looks like an ordinary residual.
+    let mut finite_overflow = solution;
+    finite_overflow.balance.solid_total_w = f64::MAX;
+    let poisoned = finite_overflow.with_decomposition_cross_check(-f64::MAX);
+    assert!(
+        poisoned
+            .balance
+            .decomposition_residual_w
+            .expect("present")
+            .is_nan()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,6 +1047,236 @@ fn a_path_refuses_structurally_invalid_declarations() {
             found: 1
         }
     );
+}
+
+#[test]
+fn derived_path_quantities_refuse_at_the_exact_admission_stage() {
+    let ordinary = AirSegment::new("ordinary", 1.0, 1.0).expect("segment");
+    let capacity_underflow = AirPath::new(
+        INLET_K,
+        f64::MIN_POSITIVE,
+        f64::MIN_POSITIVE,
+        vec![ordinary.clone()],
+    )
+    .expect_err("positive factors whose product is zero must refuse");
+    assert_invalid_field(capacity_underflow, "air capacity rate");
+
+    let capacity_overflow = AirPath::new(INLET_K, f64::MAX, 2.0, vec![ordinary])
+        .expect_err("positive finite factors whose product is infinite must refuse");
+    assert_invalid_field(capacity_overflow, "air capacity rate");
+
+    let conductance_underflow = AirSegment::new("tiny-conductance", 1.0, f64::from_bits(1))
+        .expect("the smallest positive conductance is representable");
+    let ntu_underflow = AirPath::new(INLET_K, 1.0, f64::MAX, vec![conductance_underflow])
+        .expect_err("a positive conductance/capacity ratio rounded to zero must refuse");
+    assert_invalid_field(ntu_underflow, "air segment NTU");
+
+    let conductance_overflow = AirSegment::new("conductance-overflow", f64::MAX, 2.0)
+        .expect_err("an unrepresentable hA product must refuse");
+    assert_invalid_field(conductance_overflow, "air segment conductance");
+
+    let huge_conductance =
+        AirSegment::new("huge-conductance", 1.0, f64::MAX).expect("finite conductance");
+    let ntu_overflow = AirPath::new(INLET_K, 1.0, f64::from_bits(1), vec![huge_conductance])
+        .expect_err("an unrepresentable conductance/capacity ratio must refuse");
+    assert_invalid_field(ntu_overflow, "air segment NTU");
+
+    let wide_a = AirSegment::new("wide-a", f64::MAX, 1.0e-308).expect("finite conductance");
+    let wide_b = AirSegment::new("wide-b", f64::MAX, 1.0e-308).expect("finite conductance");
+    let total_area_overflow = AirPath::new(INLET_K, 1.0, 1.0, vec![wide_a, wide_b])
+        .expect_err("an unrepresentable total wetted area must refuse");
+    assert_invalid_field(total_area_overflow, "total air segment area");
+}
+
+#[test]
+fn march_refuses_each_non_finite_heat_aggregate_at_its_producing_stage() {
+    let ordinary = AirPath::new(
+        f64::MAX,
+        1.0,
+        1.0,
+        vec![AirSegment::new("ordinary", 1.0, 1.0).expect("segment")],
+    )
+    .expect("path");
+    let driving_overflow = ordinary
+        .march(&[-f64::MAX])
+        .expect_err("the wall/inlet difference must be checked before products");
+    assert_non_finite_stage(driving_overflow, "segment temperature difference");
+
+    let large_segment = AirSegment::new("large", 1.0, 1.0e308).expect("finite conductance");
+    let large_path = AirPath::new(INLET_K, 1.0e154, 1.0e154, vec![large_segment]).expect("path");
+    let segment_heat_overflow = large_path
+        .march(&[INLET_K + 2.0])
+        .expect_err("an unrepresentable segment heat rate must refuse");
+    assert_non_finite_stage(segment_heat_overflow, "segment heat rate");
+
+    let two_large = vec![
+        AirSegment::new("large-a", 1.0, 1.0e308).expect("segment"),
+        AirSegment::new("large-b", 1.0, 1.0e308).expect("segment"),
+    ];
+    let aggregate_path = AirPath::new(INLET_K, 1.0e154, 1.0e154, two_large).expect("path");
+    let target_driving = 1.45;
+    let independent_effectiveness = 1.0 - (-1.0_f64).exp();
+    let walls = [
+        INLET_K + target_driving,
+        INLET_K + target_driving * independent_effectiveness + target_driving,
+    ];
+    let aggregate_heat_overflow = aggregate_path
+        .march(&walls)
+        .expect_err("finite row heat rates with an unrepresentable sum must refuse");
+    assert_non_finite_stage(aggregate_heat_overflow, "total air heat rate");
+}
+
+#[test]
+fn coupled_aggregate_overflows_keep_their_exact_attribution() {
+    let (path, regions) = lumped_fixture(2);
+    let solid_total_overflow = with_cx(|cx| {
+        solve_conjugate(cx, &path, &ConjugateConfig::default(), |_, references| {
+            let mut states = lumped_solid(&regions, 10.0, references);
+            for state in &mut states {
+                state.heat_rate_w = f64::MAX;
+            }
+            Ok(states)
+        })
+        .expect_err("finite solid rows with an unrepresentable sum must refuse")
+    });
+    assert_non_finite_stage(solid_total_overflow, "total solid heat rate");
+
+    let interface_path = AirPath::new(
+        INLET_K,
+        1.0e154,
+        1.0e154,
+        vec![AirSegment::new("interface", 1.0, 1.0e308).expect("segment")],
+    )
+    .expect("path");
+    let interface_overflow = with_cx(|cx| {
+        solve_conjugate(
+            cx,
+            &interface_path,
+            &ConjugateConfig::default(),
+            |_, references| {
+                Ok(vec![SolidRegionState {
+                    region: "interface".to_string(),
+                    area_m2: 1.0,
+                    mean_wall_temperature_k: INLET_K - 1.5,
+                    heat_rate_w: f64::MAX,
+                    mean_reference_temperature_k: Some(references[0]),
+                }])
+            },
+        )
+        .expect_err("an unrepresentable air/solid total difference must refuse")
+    });
+    assert_non_finite_stage(
+        interface_overflow,
+        "air-solid interface heat-rate imbalance",
+    );
+}
+
+#[test]
+fn area_weighted_residual_overflows_keep_term_and_accumulator_attribution() {
+    let contribution_path = AirPath::new(
+        INLET_K,
+        1.0,
+        1.0,
+        vec![AirSegment::new("wide", 1.0e308, 1.0e-308).expect("segment")],
+    )
+    .expect("path");
+    let contribution_overflow = with_cx(|cx| {
+        solve_conjugate(
+            cx,
+            &contribution_path,
+            &ConjugateConfig::default(),
+            |_, references| {
+                Ok(vec![SolidRegionState {
+                    region: "wide".to_string(),
+                    area_m2: 1.0e308,
+                    mean_wall_temperature_k: INLET_K + 5.0,
+                    heat_rate_w: 0.0,
+                    mean_reference_temperature_k: Some(references[0]),
+                }])
+            },
+        )
+        .expect_err("an unrepresentable area times residual must refuse")
+    });
+    assert_non_finite_stage(
+        contribution_overflow,
+        "area-weighted reference residual contribution",
+    );
+
+    let accumulation_path = AirPath::new(
+        INLET_K,
+        1.0,
+        1.0,
+        vec![
+            AirSegment::new("wide-a", 4.0e307, 2.5e-308).expect("segment"),
+            AirSegment::new("wide-b", 4.0e307, 2.5e-308).expect("segment"),
+        ],
+    )
+    .expect("path");
+    let accumulation_overflow = with_cx(|cx| {
+        solve_conjugate(
+            cx,
+            &accumulation_path,
+            &ConjugateConfig::default(),
+            |_, references| {
+                Ok(accumulation_path
+                    .segments()
+                    .iter()
+                    .zip(references)
+                    .map(|(segment, reference)| SolidRegionState {
+                        region: segment.region().to_string(),
+                        area_m2: segment.area_m2(),
+                        mean_wall_temperature_k: INLET_K + 5.0,
+                        heat_rate_w: 0.0,
+                        mean_reference_temperature_k: Some(*reference),
+                    })
+                    .collect())
+            },
+        )
+        .expect_err("finite weighted terms with an unrepresentable sum must refuse")
+    });
+    assert_non_finite_stage(
+        accumulation_overflow,
+        "area-weighted reference residual accumulation",
+    );
+}
+
+#[test]
+fn converged_region_differences_refuse_before_a_balance_is_published() {
+    let capacity = 1.0e308;
+    let segments = vec![
+        AirSegment::new("row-a", 1.0, capacity).expect("segment"),
+        AirSegment::new("row-b", 1.0, capacity).expect("segment"),
+    ];
+    let path = AirPath::new(INLET_K, 1.0e154, 1.0e154, segments).expect("path");
+    let independent_effectiveness = 1.0 - (-1.0_f64).exp();
+    let first_wall = INLET_K - 1.5;
+    let second_wall = INLET_K - 1.5 * independent_effectiveness + 1.5;
+    let config = ConjugateConfig {
+        temperature_tolerance_k: f64::MAX,
+        ..ConjugateConfig::default()
+    };
+    let error = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            Ok(vec![
+                SolidRegionState {
+                    region: "row-a".to_string(),
+                    area_m2: 1.0,
+                    mean_wall_temperature_k: first_wall,
+                    heat_rate_w: f64::MAX,
+                    mean_reference_temperature_k: Some(references[0]),
+                },
+                SolidRegionState {
+                    region: "row-b".to_string(),
+                    area_m2: 1.0,
+                    mean_wall_temperature_k: second_wall,
+                    heat_rate_w: -f64::MAX,
+                    mean_reference_temperature_k: Some(references[1]),
+                },
+            ])
+        })
+        .expect_err("an unrepresentable per-region difference must refuse")
+    });
+    assert_non_finite_stage(error, "converged region interface heat-rate imbalance");
 }
 
 #[test]
