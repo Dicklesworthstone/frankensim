@@ -331,8 +331,9 @@ Why it is achievable, mechanism by mechanism:
   tie-break, and the outer fixed point traverses surfaces and faces in retained
   order. External QMC metadata may be admitted, but this crate runs no RNG.
 - The library calls NO platform transcendental. Only `sqrt` (IEEE-754
-  correctly rounded, hence exempt) and, in `fixtures::annulus_sector`,
-  `fs_math::det::{sin, cos}`.
+  correctly rounded, hence exempt), `fs_math::det::{sin, cos}` in
+  `fixtures::annulus_sector`, and `fs_math::det::exp` in
+  `lumped::response_at`.
 
 Why the class is not stronger: the cross-ISA claim requires a G5 audit on both
 reference ISAs per `docs/DETERMINISM_CLASSES.md`, and none has been run for this

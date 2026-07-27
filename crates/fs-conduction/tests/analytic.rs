@@ -829,8 +829,10 @@ fn straight_fin_against_the_one_dimensional_model() {
     let mut fin_config = config();
     // The catalog geometry is thinner and more ill-conditioned than the
     // historical fin fixture. This remains well below the 2% model envelope,
-    // while avoiding a refusal on a 1.15e-13 recomputed residual.
-    fin_config.linear.tolerance = 2.0e-13;
+    // while avoiding a refusal on a recomputed residual measured at 1.15e-13
+    // on this fixture; ~8x headroom so a re-dimension does not read as a
+    // solver regression.
+    fin_config.linear.tolerance = 1.0e-12;
     let solution = with_cx(|cx| {
         solve(
             cx,

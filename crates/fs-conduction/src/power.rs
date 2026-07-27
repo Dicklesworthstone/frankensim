@@ -383,10 +383,15 @@ impl PowerMap {
                 ));
             }
             // Delivered power is Σ_a f_a w_a, so this density makes the
-            // component's delivered power exactly its declared power.
+            // component's delivered power exactly its declared power up to
+            // the density round-trip. The row RECOMPUTES that sum from the
+            // discrete quantities instead of echoing the declaration, so a
+            // mis-bound footprint or wrong denominator is visible per row.
             let component_density = component.watts / bound_volume;
+            let mut delivered = 0.0f64;
             for &vertex in &component.vertices {
                 density[vertex] += component_density;
+                delivered = component_density.mul_add(lumped[vertex], delivered);
             }
             component_total += component.watts;
             half_width_total = match (half_width_total, component.uncertainty) {
@@ -400,7 +405,7 @@ impl PowerMap {
                 declared_w: component.watts,
                 bound_volume_m3: bound_volume,
                 density_w_per_m3: component_density,
-                delivered_w: component.watts,
+                delivered_w: delivered,
             });
         }
 
@@ -824,10 +829,15 @@ impl SurfacePowerMap {
                 ));
             }
 
-            // Negative: positive Neumann flux LEAVES the domain.
+            // Negative: positive Neumann flux LEAVES the domain. The row's
+            // delivered power is RECOMPUTED from that flux against the same
+            // nodal weights the operator integrates, not copied from the
+            // declaration.
             let outward = -component.watts / lumped_area;
+            let mut delivered = 0.0f64;
             for &vertex in &vertices {
                 flux[vertex] += outward;
+                delivered = (-outward).mul_add(lumped[vertex], delivered);
             }
             component_total += component.watts;
             half_width_total = match (half_width_total, component.uncertainty) {
@@ -842,7 +852,7 @@ impl SurfacePowerMap {
                 face_area_m2: face_area,
                 lumped_area_m2: lumped_area,
                 outward_flux_w_per_m2: outward,
-                delivered_w: component.watts,
+                delivered_w: delivered,
             });
         }
 

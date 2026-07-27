@@ -349,7 +349,7 @@ impl LumpedNetwork {
         let steady = self.steady(power_w)?;
         let mut out = Vec::with_capacity(self.nodes.len());
         for ((node, start), settle) in self.nodes.iter().zip(initial_k.iter()).zip(steady.iter()) {
-            let decay = (-time_s / node.time_constant_s()).exp();
+            let decay = fs_math::det::exp(-time_s / node.time_constant_s());
             let value = settle + (start - settle) * decay;
             if !value.is_finite() {
                 return Err(lumped_error(
