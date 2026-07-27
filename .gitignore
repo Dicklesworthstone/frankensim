@@ -93,7 +93,7 @@ Desktop.ini
 /remote-target*/
 # An unexpanded ${RCH_TARGET_BASE:-${TMPDIR:-/tmp}} (single-quoted through a
 # wrapper) creates this literal directory tree at the repo root.
-/${TMPDIR:-*/
+/$[{]TMPDIR:-*/
 # Default rustc output when compiling a snippet from stdin.
 /rust_out
 
