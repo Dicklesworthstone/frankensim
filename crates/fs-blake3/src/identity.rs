@@ -2722,14 +2722,13 @@ where
             declared_count,
             self.limits.max_collection_items,
         )?;
-        self.ensure_additional(checked_add(
-            Self::field_prefix_len(spec)?,
-            u64::from(u64::BITS / 8),
-        )?)?;
+        let count_bytes = u64::from(u64::BITS / 8);
+        self.ensure_field_bytes(count_bytes)?;
+        self.ensure_additional(checked_add(Self::field_prefix_len(spec)?, count_bytes)?)?;
         self.begin_field::<I::Schema>(field, WireType::CanonicalSet, Presence::Required)?;
         self.append(&declared_count.to_le_bytes())?;
         let mut observed = 0u64;
-        let mut field_payload = u64::from(u64::BITS / 8);
+        let mut field_payload = count_bytes;
         let mut previous: Option<&'a [u8]> = None;
         for value in values {
             observed = checked_add(observed, 1)?;

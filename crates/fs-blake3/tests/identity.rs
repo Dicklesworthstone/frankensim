@@ -268,6 +268,15 @@ impl CanonicalSchema for TinySequenceLeaf {
     const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("i", WireType::OrderedBytes)];
 }
 
+enum TinySetLeaf {}
+impl CanonicalSchema for TinySetLeaf {
+    const DOMAIN: &'static str = "d";
+    const NAME: &'static str = "n";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "c";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("i", WireType::CanonicalSet)];
+}
+
 enum SetLeaf {}
 impl CanonicalSchema for SetLeaf {
     const DOMAIN: &'static str = "org.frankensim.test.identity.set.v1";
@@ -1608,6 +1617,34 @@ fn canonical_collections_bind_order_and_refuse_ambiguity() {
         unsorted,
         Err(CanonicalError::NonCanonicalSetOrder { index: 1 })
     ));
+}
+
+#[test]
+fn empty_canonical_set_charges_count_prefix_to_field_budget_before_iteration() {
+    let below_count_prefix = CanonicalLimits::new(1024, 7, 4, 4, 4);
+    let refused =
+        CanonicalEncoder::<SemanticId<TinySetLeaf>, _>::new(below_count_prefix, NeverCancel)
+            .unwrap()
+            .canonical_set(Field::new(0, "i"), 0, PanicChunks);
+    assert!(matches!(
+        refused,
+        Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: 8,
+            limit: 7,
+        })
+    ));
+
+    let exact_count_prefix = CanonicalLimits::new(1024, 8, 4, 4, 4);
+    let admitted =
+        CanonicalEncoder::<SemanticId<TinySetLeaf>, _>::new(exact_count_prefix, NeverCancel)
+            .unwrap()
+            .canonical_set(Field::new(0, "i"), 0, std::iter::empty::<&'static [u8]>())
+            .unwrap()
+            .finish()
+            .unwrap();
+    assert_eq!(admitted.collection_items(), 0);
+    assert_eq!(admitted.limits(), exact_count_prefix);
 }
 
 #[test]
