@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "5c6f40bb19b8c611c4f17a94e2ad7ff68d1517ba0f2cf18e831551bf354d2c8d",
+  "manifest_identity": "88f8a1ceef00d7a1e8503b253695a79e4250c4fc9ace85adc1f34b99b26bbdff",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "912fb16829955a5a00c4ce0dd860812beebab927309577f61d835d30097ae732",
+    "source_root": "bfa819e3867b325216b44503f313c3d080ea5f93b417f681ae97d6bbd3a22c61",
     "tracked_file_count": 1943,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1432,8 +1432,8 @@
       {"path": "crates/fs-spectral/src/lib.rs", "git_mode": "100644", "bytes": 10903, "content_blake3": "921f10456ef3ab8fcd8a7e89bd589ae82a82661472735787a9f04be27f4ecc41"},
       {"path": "crates/fs-spectral/src/service.rs", "git_mode": "100644", "bytes": 26905, "content_blake3": "406bb5d30b294695825fa4fc95650215e3dad444260d3111ce365b2df4f9f8bb"},
       {"path": "crates/fs-spectral/src/truth.rs", "git_mode": "100644", "bytes": 106827, "content_blake3": "bf76a59edbd60b51b2a65c30814f94fc3c87df9d634f972eb86948c4ac7c9209"},
-      {"path": "crates/fs-spectral/tests/adapter.rs", "git_mode": "100644", "bytes": 22042, "content_blake3": "c2ad7ee919c19da3b76ff5d7f4413650dfeb667172e2d08ea5650132c26da908"},
-      {"path": "crates/fs-spectral/tests/admission.rs", "git_mode": "100644", "bytes": 198684, "content_blake3": "15b8b9c0ce5c22d9a5afa11738d8d406d989a7337637ec3a22053e91f0aee0c3"},
+      {"path": "crates/fs-spectral/tests/adapter.rs", "git_mode": "100644", "bytes": 22090, "content_blake3": "c786f4c49777f969d59b3aaa5388254c7ca8fcb42d444493dc6d43d018f279ce"},
+      {"path": "crates/fs-spectral/tests/admission.rs", "git_mode": "100644", "bytes": 201881, "content_blake3": "f1b7c9e8f7f41a610d869f98098612a0658a3ed821bb95ef9f5b6f948ea5100a"},
       {"path": "crates/fs-spectral/tests/bridge.rs", "git_mode": "100644", "bytes": 44325, "content_blake3": "3687f97229e30b6e5842ca5bc33c371ad3d2814bb9091cc8e4d94a870c5a81a8"},
       {"path": "crates/fs-spectral/tests/service.rs", "git_mode": "100644", "bytes": 28786, "content_blake3": "26a8ea8782bfbe265fc2520fffc78bfb0a8052362e74fa3f3c6da812246fcbdc"},
       {"path": "crates/fs-spectral/tests/spectral.rs", "git_mode": "100644", "bytes": 5260, "content_blake3": "efe29919d47aaf3d2509092872fd1a77a2eb373199726df5c89b7c4e12ea5c6d"},

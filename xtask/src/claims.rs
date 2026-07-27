@@ -186,25 +186,78 @@ fn inventory_containment_violation(
 /// Paths matching `pathspec` in the `HEAD` commit, sorted.
 ///
 /// `None` mirrors `git_tracked_files`: not a worktree, or no commit yet.
+///
+/// `git ls-tree` cannot do this filtering itself: it applies no wildmatch to
+/// plain pathspecs (a bare `crates/fs-*/tests/*.rs` matches nothing, which
+/// made the committed-file containment direction vacuously green), and it
+/// rejects `:(glob)` pathspec magic outright. `:(glob)` is no fix on the
+/// `ls-files` side either — glob `*` stops at `/`, while the plain-pathspec
+/// wildmatch that defined the recorded registry lets `*` cross `/`. So HEAD
+/// is enumerated unfiltered and matched here with [`wildmatch_star`], which
+/// reproduces exactly that plain-pathspec semantics and refuses pattern
+/// shapes it was not proven against.
 fn git_head_files(root: &Path, pathspec: &str) -> Result<Option<Vec<String>>, String> {
     let output = std::process::Command::new("git")
         .args(["-C"])
         .arg(root)
-        .args(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", pathspec])
+        .args(["ls-tree", "-r", "--name-only", "-z", "HEAD"])
         .output()
-        .map_err(|error| format!("cannot execute git ls-tree for {pathspec:?}: {error}"))?;
+        .map_err(|error| format!("cannot execute git ls-tree for HEAD: {error}"))?;
     if !output.status.success() {
         return Ok(None);
     }
     let text = String::from_utf8(output.stdout)
         .map_err(|error| format!("git ls-tree output is not UTF-8: {error}"))?;
-    let mut paths: Vec<String> = text
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .collect();
+    let mut paths = Vec::new();
+    for path in text.split('\0').filter(|path| !path.is_empty()) {
+        if wildmatch_star(pathspec, path)? {
+            paths.push(path.to_string());
+        }
+    }
     paths.sort();
     Ok(Some(paths))
+}
+
+/// Match `path` against a `*`-only pattern with Git's plain-pathspec
+/// semantics: `*` matches any run of characters INCLUDING `/`, and the
+/// pattern must consume the whole path.
+///
+/// Fails closed on `?`, `[`, `\` or `:(` in the pattern: those metacharacters
+/// have Git meanings this helper does not reproduce, and a silent semantic
+/// mismatch here is precisely the vacuity class this function exists to end.
+fn wildmatch_star(pattern: &str, path: &str) -> Result<bool, String> {
+    if pattern.contains(['?', '[', '\\']) || pattern.starts_with(":(") {
+        return Err(format!(
+            "pathspec {pattern:?} uses metacharacters beyond `*`; extend wildmatch_star (and \
+             its equivalence test against git ls-files) before relying on it"
+        ));
+    }
+    let mut pieces = pattern.split('*');
+    let first = pieces.next().unwrap_or_default();
+    let Some(mut rest) = path.strip_prefix(first) else {
+        return Ok(false);
+    };
+    // Consecutive stars collapse to one, so empty pieces carry no obligation.
+    let literals: Vec<&str> = pieces.filter(|piece| !piece.is_empty()).collect();
+    let Some((last, middle)) = literals.split_last() else {
+        // All-literal pattern needs the whole path consumed; a pattern ending
+        // in bare stars accepts any remainder.
+        return Ok(pattern.contains('*') || rest.is_empty());
+    };
+    // Greedy first-fit is exact here: every candidate remainder ends at the
+    // path's end, so taking the earliest occurrence of each middle literal
+    // leaves the maximal remainder and never forfeits a match.
+    for segment in middle {
+        let Some(found) = rest.find(segment) else {
+            return Ok(false);
+        };
+        rest = &rest[found + segment.len()..];
+    }
+    if pattern.ends_with('*') {
+        Ok(rest.contains(last))
+    } else {
+        Ok(rest.strip_suffix(last).is_some())
+    }
 }
 
 fn git_tracked_files(root: &Path, pathspec: &str) -> Result<Option<Vec<String>>, String> {
@@ -716,10 +769,10 @@ pub fn check_docs(root: &Path) -> DocsReport {
                 doc_note(
                     DOC_INVENTORY_FILE,
                     if git_index_verified {
-                        "portable tracked-file registry exactly matches git ls-files for all documentation fact inputs"
+                        "portable tracked-file registry satisfies committed-file containment (HEAD subset-of recorded subset-of index) for all documentation fact inputs"
                             .to_string()
                     } else {
-                        "source-snapshot mode: .git is unavailable; portable tracked-file registry is schema-valid, strictly sorted, duplicate-free, and every recorded input exists (a Git worktree additionally verifies exact index equality)"
+                        "source-snapshot mode: .git is unavailable; portable tracked-file registry is schema-valid, strictly sorted, duplicate-free, and every recorded input exists (a Git worktree additionally verifies HEAD/index containment)"
                             .to_string()
                     },
                 ),
@@ -1173,6 +1226,105 @@ mod containment_tests {
             &v(["crates/fs-a/tests/a.rs", "crates/fs-a/tests/new.rs"].as_slice()),
         );
         assert!(problem.is_none(), "{problem:?}");
+    }
+
+    #[test]
+    fn wildmatch_star_reproduces_plain_pathspec_semantics() {
+        let hit = |pattern, path| wildmatch_star(pattern, path).unwrap();
+        // The three registry pathspecs, including the slash-crossing `*` that
+        // distinguishes plain-pathspec wildmatch from `:(glob)`.
+        assert!(hit("crates/fs-*/tests/*.rs", "crates/fs-a/tests/x.rs"));
+        assert!(hit("crates/fs-*/tests/*.rs", "crates/fs-a/tests/sub/x.rs"));
+        assert!(hit(
+            "crates/fs-*/tests/*.rs",
+            "crates/fs-wasm/inner/tests/x.rs"
+        ));
+        assert!(hit(
+            "crates/fs-*/Cargo.toml",
+            "crates/fs-a/nested/Cargo.toml"
+        ));
+        assert!(hit("crates/fs-*/CONTRACT.md", "crates/fs-a/CONTRACT.md"));
+        assert!(!hit(
+            "crates/fs-*/tests/*.rs",
+            "crates/fs-a/tests/x.rs.orig"
+        ));
+        assert!(!hit("crates/fs-*/tests/*.rs", "xtask/tests/x.rs"));
+        assert!(!hit("crates/fs-*/Cargo.toml", "crates/other/Cargo.toml"));
+        // Whole-path consumption: consecutive stars collapse, a non-star tail
+        // still anchors at the end (the bug class a naive splitter invites).
+        assert!(hit("a**b", "aXb"));
+        assert!(!hit("a**b", "abX"));
+        assert!(hit("a*", "a/deep/path"));
+        assert!(!hit("Cargo.toml", "crates/Cargo.toml"));
+        assert!(hit("Cargo.toml", "Cargo.toml"));
+        assert!(hit("*b", "a/b"));
+        assert!(!hit("*ab*b", "ab"));
+        // Unsupported metacharacters refuse instead of silently mismatching.
+        assert!(wildmatch_star("crates/fs-?/x", "y").is_err());
+        assert!(wildmatch_star(":(glob)crates/*", "y").is_err());
+        assert!(wildmatch_star("a[bc]d", "y").is_err());
+    }
+
+    /// The strongest divergence guard: [`git_head_files`] must return exactly
+    /// what `git ls-files` (whose plain-pathspec wildmatch defined the
+    /// recorded registry) reports against HEAD, obtained here through a
+    /// throwaway index so no worktree or staging state can leak in.
+    #[test]
+    fn head_enumeration_matches_ls_files_semantics_at_head() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let scratch_index = std::env::temp_dir().join(format!(
+            "fs-claims-head-index-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        for pathspec in [
+            "crates/fs-*/Cargo.toml",
+            "crates/fs-*/CONTRACT.md",
+            "crates/fs-*/tests/*.rs",
+        ] {
+            let Ok(Some(head)) = git_head_files(root, pathspec) else {
+                // Not a worktree (archive/snapshot builds): nothing to compare.
+                return;
+            };
+            let read_tree = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(root)
+                .args(["read-tree", "HEAD"])
+                .env("GIT_INDEX_FILE", &scratch_index)
+                .output()
+                .expect("git read-tree must execute");
+            assert!(
+                read_tree.status.success(),
+                "git read-tree HEAD failed: {}",
+                String::from_utf8_lossy(&read_tree.stderr)
+            );
+            let truth = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(root)
+                .args(["ls-files", "-z", "--", pathspec])
+                .env("GIT_INDEX_FILE", &scratch_index)
+                .output()
+                .expect("git ls-files must execute");
+            assert!(truth.status.success());
+            let mut expected: Vec<String> = String::from_utf8(truth.stdout)
+                .expect("git ls-files output is UTF-8")
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .collect();
+            expected.sort();
+            assert!(
+                !expected.is_empty(),
+                "ground truth for {pathspec:?} is empty; the equivalence check would be vacuous"
+            );
+            assert_eq!(
+                head, expected,
+                "git_head_files diverges from ls-files semantics for {pathspec:?}"
+            );
+        }
+        let _ = std::fs::remove_file(&scratch_index);
     }
 
     #[test]
