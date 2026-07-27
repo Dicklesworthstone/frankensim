@@ -968,12 +968,14 @@ name = "fs-cli"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-io",
  "fs-ledger",
  "fs-project",
  "fs-qty",
+ "fs-session",
 ]
 
 [[package]]

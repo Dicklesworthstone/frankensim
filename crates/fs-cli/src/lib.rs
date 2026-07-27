@@ -8,6 +8,7 @@
 //! CLI-shaped mock is not substituted for an integrated workflow.
 
 mod import;
+mod solve;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -17,6 +18,11 @@ use std::path::{Path, PathBuf};
 pub use import::{
     GeometryImportLimits, GeometryImportRefusal, GeometryImportRun, RawGeometryLibrary,
     RecordedImportRefusal, RetainedGeometryImport, import_project_geometry,
+};
+pub use solve::{
+    CompletedStage, SOLVE_DRIVER_VERSION, SOLVE_RUN_IDENTITY_DOMAIN, SolveDriverState,
+    SolveOutcome, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage, StageSummary, resume_solve,
+    run_solve,
 };
 
 /// Maximum project source accepted by the CLI.
@@ -34,6 +40,9 @@ pub mod exit {
     pub const REFUSED: u8 = 4;
     /// The command is reserved but its authoritative producer is not shipped.
     pub const UNAVAILABLE: u8 = 5;
+    /// The run stopped honestly at budget enforcement with a durable,
+    /// resumable completed prefix; the partial is not presented as complete.
+    pub const BUDGET: u8 = 6;
 }
 
 const RESULT_SCHEMA: &str = "frankensim.cli.result.v1";
@@ -41,7 +50,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> | solve --resume <run-id> | report <run-id> | package <run-id>";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id>";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -66,8 +75,8 @@ enum Command {
     Help,
     Validate(PathBuf),
     Import(ImportCommand),
-    SolveProject(PathBuf),
-    Resume(String),
+    SolveProject { project: PathBuf, ledger: PathBuf },
+    Resume { run_id: String, ledger: PathBuf },
     Report(String),
     Package(String),
 }
@@ -136,18 +145,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
         Command::Help => help(mode),
         Command::Validate(path) => validate_path(&path, mode),
         Command::Import(command) => import_path(&command, mode),
-        Command::SolveProject(path) => unavailable(
-            mode,
-            "solve",
-            &path.to_string_lossy(),
-            "frankensim-extreal-program-f85xj.6.5",
-        ),
-        Command::Resume(run_id) => unavailable(
-            mode,
-            "solve",
-            &run_id,
-            "frankensim-extreal-program-f85xj.6.5",
-        ),
+        Command::SolveProject { project, ledger } => solve_path(&project, &ledger, mode),
+        Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
         Command::Report(run_id) => unavailable(
             mode,
             "report",
@@ -245,11 +244,22 @@ fn parse_args(
         [verb, rest @ ..] if verb == "import" => {
             Command::Import(parse_import_args(rest).map_err(|diagnostic| (mode, diagnostic))?)
         }
-        [verb, project] if verb == "solve" && is_operand(project) => {
-            Command::SolveProject(PathBuf::from(project))
+        [verb, project, ledger] if verb == "solve" && is_operand(project) && is_operand(ledger) => {
+            Command::SolveProject {
+                project: PathBuf::from(project),
+                ledger: PathBuf::from(ledger),
+            }
         }
-        [verb, resume, run_id] if verb == "solve" && resume == "--resume" && is_operand(run_id) => {
-            Command::Resume(run_id.clone())
+        [verb, resume, run_id, ledger]
+            if verb == "solve"
+                && resume == "--resume"
+                && is_operand(run_id)
+                && is_operand(ledger) =>
+        {
+            Command::Resume {
+                run_id: run_id.clone(),
+                ledger: PathBuf::from(ledger),
+            }
         }
         [verb, run_id] if verb == "report" && is_operand(run_id) => Command::Report(run_id.clone()),
         [verb, run_id] if verb == "package" && is_operand(run_id) => {
@@ -375,6 +385,10 @@ fn help(mode: OutputMode) -> CommandOutput {
     }
 }
 
+// The import flow reads as one narrative from argument admission to ledger
+// retention; the length lint is satisfied by narrative order, not splitting.
+// The ledger closure's Err carries the crate's by-value refusal idiom.
+#[allow(clippy::too_many_lines, clippy::result_large_err)]
 fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
     let project_label = command.project.to_string_lossy();
     let decoded = match read_project_for_import(&command.project, mode) {
@@ -609,6 +623,366 @@ fn read_project_for_import(
     }
     .map_err(|error| import_refusal(mode, &label, error.code, error.detail, error.hint))?;
     Ok(decoded)
+}
+
+fn solve_path(project: &Path, ledger_path: &Path, mode: OutputMode) -> CommandOutput {
+    let project_label = project.to_string_lossy();
+    let decoded = match read_project_for_solve(project, mode) {
+        Ok(decoded) => decoded,
+        Err(output) => return output,
+    };
+    let findings = decoded.findings();
+    if !findings.is_empty() {
+        let mut stderr = String::new();
+        for finding in &findings {
+            let diagnostic = Diagnostic::new(
+                "solve",
+                finding.code,
+                finding.what.clone(),
+                finding.fix.clone(),
+            )
+            .with_subject(project_label.to_string());
+            stderr.push_str(&format_diagnostic(mode, &diagnostic));
+        }
+        return CommandOutput {
+            exit_code: exit::REFUSED,
+            stdout: format_result(
+                mode,
+                "solve",
+                "refused",
+                &project_label,
+                None,
+                findings.len(),
+            ),
+            stderr,
+        };
+    }
+    let ledger = match open_solve_ledger(ledger_path, &project_label, mode) {
+        Ok(ledger) => ledger,
+        Err(output) => return output,
+    };
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let started = std::time::Instant::now();
+    let mut clock = move || started.elapsed().as_secs_f64();
+    let mut progress = Vec::new();
+    let result = run_solve(&ledger, &gate, &mut clock, &decoded, &mut progress);
+    render_solve_result(mode, &project_label, result, &progress)
+}
+
+fn resume_path(run_id: &str, ledger_path: &Path, mode: OutputMode) -> CommandOutput {
+    let ledger = match open_solve_ledger(ledger_path, run_id, mode) {
+        Ok(ledger) => ledger,
+        Err(output) => return output,
+    };
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let started = std::time::Instant::now();
+    let mut clock = move || started.elapsed().as_secs_f64();
+    let mut progress = Vec::new();
+    let result = resume_solve(&ledger, &gate, &mut clock, run_id, &mut progress);
+    render_solve_result(mode, run_id, result, &progress)
+}
+
+fn read_project_for_solve(
+    path: &Path,
+    mode: OutputMode,
+) -> Result<fs_project::DecodedProject, CommandOutput> {
+    let label = path.to_string_lossy();
+    let refuse_input = |code: &str, message: String, fix: &str| {
+        let diagnostic = Diagnostic::new("solve", code.to_string(), message, fix.to_string())
+            .with_subject(label.to_string());
+        refusal(
+            mode,
+            exit::INPUT,
+            &diagnostic,
+            Some(("solve", "refused", &label, None, 0)),
+        )
+    };
+    let syntax = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("fsim") => ProjectSyntax::Sexpr,
+        Some("json") => ProjectSyntax::Json,
+        _ => {
+            return Err(refuse_input(
+                "cli-input-format",
+                format!("project `{label}` has no admitted .fsim or .json extension"),
+                "name canonical s-expression projects *.fsim and canonical JSON projects *.json",
+            ));
+        }
+    };
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        refuse_input(
+            "cli-input-read",
+            format!("cannot inspect project: {error}"),
+            "provide a readable regular UTF-8 project file",
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_PROJECT_BYTES {
+        return Err(refuse_input(
+            "cli-input-too-large",
+            format!("project must be a regular file no larger than {MAX_PROJECT_BYTES} bytes"),
+            "provide a stable bounded canonical project file",
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|error| {
+        refuse_input(
+            "cli-input-read",
+            format!("cannot open project: {error}"),
+            "provide a readable regular UTF-8 project file",
+        )
+    })?;
+    let mut source = String::new();
+    file.take(MAX_PROJECT_BYTES.saturating_add(1))
+        .read_to_string(&mut source)
+        .map_err(|error| {
+            refuse_input(
+                "cli-input-read",
+                format!("cannot read UTF-8 project: {error}"),
+                "provide a readable regular UTF-8 project file",
+            )
+        })?;
+    if u64::try_from(source.len()).map_or(true, |length| length > MAX_PROJECT_BYTES) {
+        return Err(refuse_input(
+            "cli-input-too-large",
+            format!("project exceeded the {MAX_PROJECT_BYTES}-byte cap while being read"),
+            "retry against a stable file no larger than the documented cap",
+        ));
+    }
+    let decoded = match syntax {
+        ProjectSyntax::Sexpr => fs_project::parse_sexpr(&source),
+        ProjectSyntax::Json => fs_project::parse_json(&source),
+    }
+    .map_err(|error| {
+        let diagnostic = Diagnostic::new("solve", error.code, error.detail, error.hint)
+            .with_subject(label.to_string());
+        refusal(
+            mode,
+            exit::REFUSED,
+            &diagnostic,
+            Some(("solve", "refused", &label, None, 1)),
+        )
+    })?;
+    Ok(decoded)
+}
+
+fn open_solve_ledger(
+    path: &Path,
+    subject: &str,
+    mode: OutputMode,
+) -> Result<fs_ledger::Ledger, CommandOutput> {
+    let Some(ledger_path) = path.to_str() else {
+        let diagnostic = Diagnostic::new(
+            "solve",
+            "cli-solve-ledger-path",
+            "the ledger path is not valid UTF-8",
+            "pass a UTF-8 ledger path",
+        )
+        .with_subject(subject.to_string());
+        return Err(refusal(
+            mode,
+            exit::INPUT,
+            &diagnostic,
+            Some(("solve", "refused", subject, None, 0)),
+        ));
+    };
+    fs_ledger::Ledger::open(ledger_path).map_err(|error| {
+        let diagnostic = Diagnostic::new(
+            "solve",
+            "cli-solve-ledger-open",
+            format!("cannot open ledger `{ledger_path}`: {error}"),
+            "pass a writable ledger path; the same ledger the import wrote into",
+        )
+        .with_subject(subject.to_string());
+        refusal(
+            mode,
+            exit::INPUT,
+            &diagnostic,
+            Some(("solve", "refused", subject, None, 0)),
+        )
+    })
+}
+
+fn render_solve_result(
+    mode: OutputMode,
+    subject: &str,
+    result: Result<SolveOutcome, SolveRefusal>,
+    progress: &[String],
+) -> CommandOutput {
+    let mut stderr = String::new();
+    match mode {
+        OutputMode::Json => {
+            for line in progress {
+                stderr.push_str(line);
+                stderr.push('\n');
+            }
+        }
+        OutputMode::Text => {}
+    }
+    match result {
+        Ok(outcome) => render_solve_success(mode, subject, &outcome, stderr),
+        Err(solve_refusal) => render_solve_refusal(mode, subject, &solve_refusal, stderr),
+    }
+}
+
+fn render_solve_success(
+    mode: OutputMode,
+    subject: &str,
+    outcome: &SolveOutcome,
+    mut stderr: String,
+) -> CommandOutput {
+    {
+        {
+            if mode == OutputMode::Text {
+                for stage in &outcome.stages {
+                    let _ = writeln!(
+                        stderr,
+                        "STAGE {} ok wall_s={} receipt={}",
+                        stage.stage, stage.wall_s, stage.receipt
+                    );
+                }
+            }
+            let (status, exit_code) = match &outcome.status {
+                SolveRunStatus::Completed => ("completed", exit::SUCCESS),
+                SolveRunStatus::BudgetExceeded { .. } => ("budget-exceeded", exit::BUDGET),
+                SolveRunStatus::Cancelled => ("cancelled", exit::REFUSED),
+            };
+            if let SolveRunStatus::BudgetExceeded {
+                resource,
+                used,
+                granted,
+            } = &outcome.status
+            {
+                let diagnostic = Diagnostic::new(
+                    "solve",
+                    "cli-solve-budget-exceeded",
+                    format!(
+                        "budget enforcement stopped the run: {resource} used {used} of \
+                         {granted}; the completed prefix is durable and honest"
+                    ),
+                    format!(
+                        "resume with `frankensim solve --resume {} <ledger>` after raising \
+                         budgets starts a fresh run; completed artifacts deduplicate",
+                        outcome.run
+                    ),
+                )
+                .with_subject(subject.to_string());
+                stderr.push_str(&format_diagnostic(mode, &diagnostic));
+            }
+            let stages_completed = outcome.prior_stages as usize + outcome.stages.len();
+            let stdout = match mode {
+                OutputMode::Json => {
+                    let mut out = String::from("{\"schema\":");
+                    push_json_string(&mut out, RESULT_SCHEMA);
+                    out.push_str(",\"command\":\"solve\",\"status\":");
+                    push_json_string(&mut out, status);
+                    out.push_str(",\"subject\":");
+                    push_json_string(&mut out, subject);
+                    out.push_str(",\"run\":");
+                    push_json_string(&mut out, &outcome.run);
+                    let _ = write!(out, ",\"stages_completed\":{stages_completed}");
+                    if let Some(receipt) = &outcome.run_receipt {
+                        out.push_str(",\"run_receipt\":");
+                        push_json_string(&mut out, receipt);
+                    }
+                    out.push_str("}\n");
+                    out
+                }
+                OutputMode::Text => {
+                    let mut out = format!(
+                        "status={status}\ncommand=solve\nsubject={}\nrun={}\nstages_completed={stages_completed}\n",
+                        escape_text(subject),
+                        outcome.run,
+                    );
+                    if let Some(receipt) = &outcome.run_receipt {
+                        let _ = writeln!(out, "run_receipt={receipt}");
+                    }
+                    out
+                }
+            };
+            CommandOutput {
+                exit_code,
+                stdout,
+                stderr,
+            }
+        }
+    }
+}
+
+fn render_solve_refusal(
+    mode: OutputMode,
+    subject: &str,
+    solve_refusal: &SolveRefusal,
+    mut stderr: String,
+) -> CommandOutput {
+    {
+        {
+            let status = if solve_refusal.dependency.is_some() {
+                "unavailable"
+            } else {
+                "refused"
+            };
+            let exit_code = if solve_refusal.dependency.is_some() {
+                exit::UNAVAILABLE
+            } else {
+                exit::REFUSED
+            };
+            let mut message = solve_refusal.what.clone();
+            if let Some(op) = solve_refusal.recorded_op {
+                let _ = write!(message, "; refusal retained as ledger operation {op}");
+            }
+            let diagnostic = Diagnostic::new(
+                "solve",
+                solve_refusal.code.to_string(),
+                message,
+                solve_refusal.fix.clone(),
+            )
+            .with_subject(subject.to_string());
+            stderr.push_str(&format_diagnostic(mode, &diagnostic));
+            let stdout = match mode {
+                OutputMode::Json => {
+                    let mut out = String::from("{\"schema\":");
+                    push_json_string(&mut out, RESULT_SCHEMA);
+                    out.push_str(",\"command\":\"solve\",\"status\":");
+                    push_json_string(&mut out, status);
+                    out.push_str(",\"subject\":");
+                    push_json_string(&mut out, subject);
+                    if let Some(run) = &solve_refusal.run {
+                        out.push_str(",\"run\":");
+                        push_json_string(&mut out, run);
+                    }
+                    if let Some(stage) = solve_refusal.stage {
+                        out.push_str(",\"stage\":");
+                        push_json_string(&mut out, stage);
+                    }
+                    if let Some(dependency) = solve_refusal.dependency {
+                        out.push_str(",\"dependency\":");
+                        push_json_string(&mut out, dependency);
+                    }
+                    out.push_str("}\n");
+                    out
+                }
+                OutputMode::Text => {
+                    let mut out = format!(
+                        "status={status}\ncommand=solve\nsubject={}\n",
+                        escape_text(subject)
+                    );
+                    if let Some(run) = &solve_refusal.run {
+                        let _ = writeln!(out, "run={run}");
+                    }
+                    if let Some(stage) = solve_refusal.stage {
+                        let _ = writeln!(out, "stage={stage}");
+                    }
+                    if let Some(dependency) = solve_refusal.dependency {
+                        let _ = writeln!(out, "dependency={dependency}");
+                    }
+                    out
+                }
+            };
+            CommandOutput {
+                exit_code,
+                stdout,
+                stderr,
+            }
+        }
+    }
 }
 
 fn read_raw_import_source(

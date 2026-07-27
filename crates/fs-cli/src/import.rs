@@ -7,6 +7,16 @@
 //! assignment, and retains every successful artifact and receipt in one
 //! fs-ledger operation. Physical source labels are diagnostic provenance only.
 
+// Refusals are cold-path values carrying complete diagnostics (the crate's
+// by-value refusal idiom); the import/prepare flows read as one narrative
+// from admission to retention, and `insert_faceted_step`'s arity mirrors the
+// STEP policy surface one-for-one.
+#![allow(
+    clippy::result_large_err,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
+
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
@@ -1231,7 +1241,7 @@ fn transaction_refusal(
     )
 }
 
-fn explicits(
+pub(crate) fn explicits(
     project: &ProjectSpec,
 ) -> Result<(String, String, String, [u8; 8]), GeometryImportRefusal> {
     let versions = project.versions.as_ref().ok_or_else(|| {
@@ -1471,7 +1481,7 @@ fn refusal_json(error: &GeometryImportRefusal) -> String {
     )
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for character in value.chars() {
         match character {

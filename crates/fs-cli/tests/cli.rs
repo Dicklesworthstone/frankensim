@@ -224,8 +224,6 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
 #[test]
 fn g0_unintegrated_product_stages_fail_closed_with_their_owner() {
     for (command, dependency) in [
-        (&["solve", "project.fsim"][..], "f85xj.6.5"),
-        (&["solve", "--resume", "run-1"][..], "f85xj.6.5"),
         (&["report", "run-1"][..], "f85xj.6.9"),
         (&["package", "run-1"][..], "f85xj.6.10"),
     ] {
@@ -238,6 +236,24 @@ fn g0_unintegrated_product_stages_fail_closed_with_their_owner() {
         assert!(output.stderr.contains("cli-stage-unavailable"));
         assert!(output.stderr.contains("placeholder artifact"));
     }
+}
+
+#[test]
+fn g0_solve_grammar_requires_a_ledger_operand() {
+    // The pre-6.5 one-operand spellings are now off-grammar, not unavailable.
+    let missing_ledger = run(args(&["solve", "project.fsim", "--json"]));
+    assert_eq!(missing_ledger.exit_code, exit::USAGE);
+    assert!(missing_ledger.stderr.contains("cli-usage"));
+
+    let missing_resume_ledger = run(args(&["solve", "--resume", "run-1", "--json"]));
+    assert_eq!(missing_resume_ledger.exit_code, exit::USAGE);
+    assert!(missing_resume_ledger.stderr.contains("cli-usage"));
+
+    // A well-formed solve against a missing project fails at bounded input,
+    // before any ledger side effect.
+    let missing_project = run(args(&["solve", "no-such.fsim", "no-such.db", "--json"]));
+    assert_eq!(missing_project.exit_code, exit::INPUT);
+    assert!(missing_project.stderr.contains("cli-input-read"));
 }
 
 #[test]
