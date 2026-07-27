@@ -6,12 +6,14 @@
 //! scripted clock and caller-owned cancellation gate.
 
 use fs_cli::{
-    GeometryImportLimits, RawGeometryLibrary, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage,
+    CompletedStage, GeometryImportLimits, GeometryImportRun, RawGeometryLibrary,
+    SOLVE_DRIVER_VERSION, SolveDriverState, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage,
     import_project_geometry, resume_solve, run_solve,
 };
+use fs_exec::solver::LegacySnapshotV1Adapter;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_io::quarantine::import_mesh;
-use fs_ledger::Ledger;
+use fs_ledger::{EdgeRole, ExtensionTable, FiveExplicits, Ledger, OpOutcome, hash_bytes};
 use fs_project::{
     Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl, Envelope,
     GeometryArtifact, GeometryAssignment, HalfSpaceSide, MeshSelector, Metadata, OutputRequest,
@@ -195,7 +197,7 @@ fn decode(spec: &ProjectSpec) -> DecodedProject {
 
 /// Import the fixture geometry into the ledger so the solve prefix has
 /// retained evidence to verify.
-fn import_fixture(ledger: &Ledger, spec: &ProjectSpec, bytes: Vec<u8>) {
+fn import_fixture(ledger: &Ledger, spec: &ProjectSpec, bytes: Vec<u8>) -> GeometryImportRun {
     let artifact = &spec.geometry.as_ref().expect("geometry")[0];
     let mut raw = RawGeometryLibrary::new();
     assert!(!raw.insert_mesh(
@@ -210,7 +212,166 @@ fn import_fixture(ledger: &Ledger, spec: &ProjectSpec, bytes: Vec<u8>) {
     with_cx(&gate, |cx| {
         import_project_geometry(spec, &raw, ledger, GeometryImportLimits::DEFAULT, cx)
             .expect("fixture imports")
-    });
+    })
+}
+
+/// Reproduce a successful import candidate in an isolated ledger while
+/// allowing one exact IR or summary-byte mutation.
+fn reproduce_import_candidate(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+) -> i64 {
+    reproduce_import_candidate_with_mesh(source, imported, target, ir, summary, None)
+}
+
+fn reproduce_import_candidate_with_mesh(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+    promoted_mesh_override: Option<&[u8]>,
+) -> i64 {
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let op = target
+        .begin_op(
+            None,
+            ir,
+            &FiveExplicits {
+                seed: &source_row.seed,
+                versions: &source_row.versions,
+                budget: &source_row.budget,
+                capability: &source_row.capability,
+            },
+            source_row.t_start,
+        )
+        .expect("reproduced import op");
+    for entry in &imported.artifacts {
+        for (hash, kind, role) in [
+            (entry.raw_source, "geometry-source", EdgeRole::In),
+            (
+                entry.promotion_receipt,
+                "geometry-import-receipt",
+                EdgeRole::Out,
+            ),
+            (entry.promoted_mesh, "geometry-mesh-ply", EdgeRole::Out),
+            (
+                entry.assignment_report,
+                "geometry-assignment-report",
+                EdgeRole::Out,
+            ),
+        ] {
+            let bytes = if kind == "geometry-mesh-ply" {
+                promoted_mesh_override.map_or_else(
+                    || {
+                        source
+                            .get_artifact(&hash)
+                            .expect("read source artifact")
+                            .expect("source artifact exists")
+                    },
+                    <[u8]>::to_vec,
+                )
+            } else {
+                source
+                    .get_artifact(&hash)
+                    .expect("read source artifact")
+                    .expect("source artifact exists")
+            };
+            let copied = target
+                .put_artifact(kind, &bytes, None)
+                .expect("copy typed import artifact");
+            if kind == "geometry-mesh-ply" && promoted_mesh_override.is_some() {
+                assert_eq!(copied.hash, hash_bytes(&bytes));
+            } else {
+                assert_eq!(copied.hash, hash);
+            }
+            target.link(op, &copied.hash, role).expect("typed edge");
+        }
+        let promotion_receipt = String::from_utf8(
+            source
+                .get_artifact(&entry.promotion_receipt)
+                .expect("read source promotion receipt")
+                .expect("source promotion receipt exists"),
+        )
+        .expect("source promotion receipt UTF-8");
+        target
+            .put_extension(
+                ExtensionTable::Imports,
+                &entry.import_record,
+                &promotion_receipt,
+            )
+            .expect("copy exact import extension row");
+    }
+    let summary = target
+        .put_artifact("geometry-import-run-receipt", summary.as_bytes(), None)
+        .expect("reproduced summary");
+    target
+        .link(op, &summary.hash, EdgeRole::Out)
+        .expect("summary edge");
+    target
+        .finish_op(
+            op,
+            OpOutcome::Ok,
+            None,
+            source_row.t_end.expect("source import finish clock"),
+        )
+        .expect("finish reproduced import");
+    op
+}
+
+fn replace_json_object_with_empty(input: &str, marker: &str) -> String {
+    let start = input.find(marker).expect("JSON marker") + marker.len();
+    assert_eq!(input.as_bytes().get(start), Some(&b'{'));
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (offset, byte) in input.as_bytes()[start..].iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1).expect("balanced JSON object");
+                if depth == 0 {
+                    end = Some(start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.expect("complete JSON object");
+    format!("{}{{}}{}", &input[..start], &input[end..])
+}
+
+fn replace_json_unsigned(input: &str, marker: &str, replacement: usize) -> String {
+    let start = input.find(marker).expect("JSON unsigned marker") + marker.len();
+    let digits = input.as_bytes()[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    assert!(digits > 0, "marker must precede an unsigned JSON integer");
+    format!(
+        "{}{replacement}{}",
+        &input[..start],
+        &input[start + digits..]
+    )
 }
 
 /// A benign clock: strictly increasing, one millisecond per call.
@@ -236,6 +397,11 @@ fn run_to_gap(ledger: &Ledger, decoded: &DecodedProject) -> (SolveRefusal, Vec<S
 
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
+    assert_eq!(
+        SOLVE_DRIVER_VERSION, 2,
+        "authority-semantic changes must deliberately advance this identity-bearing version"
+    );
+
     let bytes = tetra_stl();
     let base = decode(&fixture_project(7, &bytes));
     let again = decode(&fixture_project(7, &bytes));
@@ -585,6 +751,681 @@ fn g3_resume_of_an_unknown_run_refuses() {
     let refusal = resume_solve(&ledger, &gate, &mut clock, &"ab".repeat(32), &mut progress)
         .expect_err("unknown run refuses");
     assert_eq!(refusal.code, "cli-solve-unknown-run");
+}
+
+#[test]
+fn g3_publicly_sealed_state_without_authoritative_lineage_refuses_before_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let imported = import_fixture(&ledger, &spec, bytes);
+    let run = SolveRunId::derive(&decoded);
+
+    let project_source = ledger
+        .put_artifact("solve-project-source", decoded.canonical.as_bytes(), None)
+        .expect("project source");
+    let forged_ir = format!(
+        "{{\"schema\":\"frankensim.cli.solve-stage.v1\",\"stage\":\"assign\",\"ordinal\":1,\"run\":\"{}\",\"project\":\"{}\",\"driver_version\":{SOLVE_DRIVER_VERSION}}}",
+        run.to_hex(),
+        decoded.hash().to_hex(),
+    );
+    let forged_op = ledger
+        .begin_op(
+            Some(run.as_bytes()),
+            &forged_ir,
+            &FiveExplicits {
+                seed: b"forged",
+                versions: r#"{"forged":true}"#,
+                budget: r#"{"forged":true}"#,
+                capability: r#"{"forged":true}"#,
+            },
+            2,
+        )
+        .expect("forged op");
+    ledger
+        .link(forged_op, &project_source.hash, EdgeRole::In)
+        .expect("forged project edge");
+
+    // Every construction below is intentionally available through the public
+    // API. Codec validity and a caller-selected session/kind must not mint
+    // authority to skip both implemented stages.
+    let forged_state = SolveDriverState {
+        run: *run.as_bytes(),
+        project: *decoded.hash().as_bytes(),
+        consumed_core_s: 0.0,
+        consumed_wall_s: 0.0,
+        completed: vec![
+            CompletedStage {
+                ordinal: 0,
+                op_id: forged_op,
+                receipt: imported.summary_artifact,
+            },
+            CompletedStage {
+                ordinal: 1,
+                op_id: forged_op,
+                receipt: imported.summary_artifact,
+            },
+        ],
+    };
+    let run_prefix: [u8; 8] = run.as_bytes()[..8].try_into().expect("run prefix");
+    let envelope = LegacySnapshotV1Adapter::<SolveDriverState>::seal(
+        &forged_state,
+        u64::from_le_bytes(run_prefix),
+    );
+    let forged_checkpoint = ledger
+        .put_artifact("solve-stage-state", &envelope, None)
+        .expect("forged state artifact");
+    ledger
+        .link(forged_op, &forged_checkpoint.hash, EdgeRole::Out)
+        .expect("forged state edge");
+    ledger
+        .finish_op(forged_op, OpOutcome::Ok, None, 3)
+        .expect("finish forged op");
+
+    let ops_before_resume = ledger.table_count("ops").expect("op count");
+    let artifacts_before_resume = ledger.table_count("artifacts").expect("artifact count");
+    let seals_before_resume = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge-seal count");
+    let imports_before_resume = ledger.table_count("imports").expect("imports count");
+    let identities_before_resume = ledger
+        .table_count("op_content_identities")
+        .expect("op-content-identity count");
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run.to_hex(), &mut progress)
+        .expect_err("caller-mintable state has no resume authority");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(progress.is_empty(), "no forged stage may execute");
+    assert_eq!(
+        ledger.table_count("ops").expect("op count"),
+        ops_before_resume,
+        "identity refusal occurs before any stage/refusal publication"
+    );
+    assert_eq!(
+        ledger.table_count("artifacts").expect("artifact count"),
+        artifacts_before_resume,
+        "identity refusal publishes no artifacts"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        seals_before_resume,
+        "identity refusal publishes no lineage seal"
+    );
+    assert_eq!(
+        ledger.table_count("imports").expect("imports count"),
+        imports_before_resume,
+        "identity refusal mutates no import extension row"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_content_identities")
+            .expect("op-content-identity count"),
+        identities_before_resume,
+        "identity refusal publishes no operation identity"
+    );
+}
+
+#[test]
+fn g3_forged_higher_checkpoint_with_substituted_predecessor_refuses_before_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let run = SolveRunId::derive(&decoded);
+
+    // Produce the canonical assign row, receipt, and checkpoint in an
+    // independent reference ledger.
+    let reference = Ledger::open(":memory:").expect("reference ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let _ = run_to_gap(&reference, &decoded);
+    let reference_stage = reference
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("reference ops")
+        .into_iter()
+        .filter_map(|id| reference.op(id).expect("reference op row"))
+        .find(|row| {
+            row.session.as_deref() == Some(run.as_bytes().as_slice())
+                && row.outcome.as_deref() == Some("ok")
+                && row.ir.contains("\"stage\":\"assign\"")
+        })
+        .expect("reference assign stage");
+    let reference_edges = reference
+        .op_artifact_edges_bounded(reference_stage.id, 64)
+        .expect("reference assign edges")
+        .edges;
+    let output_with_kind = |kind: &str| {
+        reference_edges
+            .iter()
+            .find(|edge| {
+                edge.role == EdgeRole::Out
+                    && reference
+                        .artifact_info(&edge.artifact)
+                        .expect("reference artifact info")
+                        .is_some_and(|info| info.kind == kind)
+            })
+            .map(|edge| edge.artifact)
+            .unwrap_or_else(|| panic!("reference assign output kind `{kind}`"))
+    };
+    let reference_receipt = output_with_kind("solve-stage-receipt");
+    let reference_checkpoint = output_with_kind("solve-stage-state");
+
+    // Build the same run only through its valid first stage.
+    let ledger = Ledger::open(":memory:").expect("target ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let gate = CancelGate::new_clock_free();
+    let mut calls = 0u64;
+    let gate_ref = &gate;
+    let mut cancelling_clock = move || {
+        calls += 1;
+        if calls == 2 {
+            gate_ref.request();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    };
+    let mut progress = Vec::new();
+    let cancelled = run_solve(
+        &ledger,
+        &gate,
+        &mut cancelling_clock,
+        &decoded,
+        &mut progress,
+    )
+    .expect_err("target stops after import verification");
+    assert_eq!(cancelled.code, "cli-solve-cancelled");
+
+    // Copy the canonical higher receipt/checkpoint bytes and canonical row.
+    // The one deliberate delta is the In edge: the forged operation consumes
+    // its own higher checkpoint instead of the direct stage-0 predecessor.
+    let copy_output = |hash, kind| {
+        let bytes = reference
+            .get_artifact(&hash)
+            .expect("read reference output")
+            .expect("reference output exists");
+        ledger
+            .put_artifact(kind, &bytes, None)
+            .expect("copy canonical output")
+    };
+    let receipt = copy_output(reference_receipt, "solve-stage-receipt");
+    let checkpoint = copy_output(reference_checkpoint, "solve-stage-state");
+    let forged_op = ledger
+        .begin_op(
+            reference_stage.session.as_deref(),
+            &reference_stage.ir,
+            &FiveExplicits {
+                seed: &reference_stage.seed,
+                versions: &reference_stage.versions,
+                budget: &reference_stage.budget,
+                capability: &reference_stage.capability,
+            },
+            reference_stage.t_start,
+        )
+        .expect("otherwise-canonical forged stage");
+    assert_eq!(
+        forged_op, reference_stage.id,
+        "matching histories give the forged row its canonical operation id"
+    );
+    ledger
+        .link(forged_op, &checkpoint.hash, EdgeRole::In)
+        .expect("substituted predecessor");
+    ledger
+        .link(forged_op, &receipt.hash, EdgeRole::Out)
+        .expect("canonical receipt edge");
+    ledger
+        .link(forged_op, &checkpoint.hash, EdgeRole::Out)
+        .expect("canonical checkpoint edge");
+    ledger
+        .seal_op_artifact_edges(forged_op, 3)
+        .expect("exact edge-count seal");
+    ledger
+        .finish_op(
+            forged_op,
+            OpOutcome::Ok,
+            None,
+            reference_stage.t_end.expect("reference finish clock"),
+        )
+        .expect("finish otherwise-canonical forged stage");
+
+    let counts_before = [
+        ledger.table_count("ops").expect("op count"),
+        ledger.table_count("artifacts").expect("artifact count"),
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        ledger.table_count("imports").expect("imports count"),
+        ledger
+            .table_count("op_content_identities")
+            .expect("identity count"),
+    ];
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let refusal = resume_solve(
+        &ledger,
+        &fresh_gate,
+        &mut clock,
+        &run.to_hex(),
+        &mut resume_progress,
+    )
+    .expect_err("substituted predecessor has no resume authority");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(
+        resume_progress.is_empty(),
+        "resume executes no forged stage"
+    );
+    assert_eq!(
+        [
+            ledger.table_count("ops").expect("op count"),
+            ledger.table_count("artifacts").expect("artifact count"),
+            ledger
+                .table_count("op_artifact_edge_seals")
+                .expect("edge-seal count"),
+            ledger.table_count("imports").expect("imports count"),
+            ledger
+                .table_count("op_content_identities")
+                .expect("identity count"),
+        ],
+        counts_before,
+        "identity refusal is zero-publication across rows, artifacts, seals, and extensions"
+    );
+}
+
+#[test]
+fn g3_competing_valid_longest_checkpoints_refuse_as_ambiguous() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (first, _) = run_to_gap(&ledger, &decoded);
+    let (second, _) = run_to_gap(&ledger, &decoded);
+    let run = first.run.expect("first run id");
+    assert_eq!(second.run.as_deref(), Some(run.as_str()));
+
+    let counts_before = [
+        ledger.table_count("ops").expect("op count"),
+        ledger.table_count("artifacts").expect("artifact count"),
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        ledger
+            .table_count("op_content_identities")
+            .expect("identity count"),
+    ];
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("equally long valid histories are ambiguous");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(refusal.what.contains("competing independently valid"));
+    assert!(progress.is_empty());
+    assert_eq!(
+        [
+            ledger.table_count("ops").expect("op count"),
+            ledger.table_count("artifacts").expect("artifact count"),
+            ledger
+                .table_count("op_artifact_edge_seals")
+                .expect("edge-seal count"),
+            ledger
+                .table_count("op_content_identities")
+                .expect("identity count"),
+        ],
+        counts_before,
+        "ambiguity refusal publishes nothing"
+    );
+}
+
+#[test]
+fn g3_import_summary_requires_the_exact_versioned_schema_not_a_hash_substring() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source_ledger = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source_ledger, &spec, bytes);
+    let source_row = source_ledger
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+
+    // Reproduce the accepted import writer's exact row, Five Explicits,
+    // execution context, typed artifacts, and edge roles in an isolated
+    // ledger. The summary schema string below is the sole admission delta.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let valid_summary = String::from_utf8(
+        source_ledger
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let fake_summary = valid_summary.replacen(
+        "frankensim.cli.geometry-import-receipt.v1",
+        "attacker.geometry-import-receipt.v1",
+        1,
+    );
+    reproduce_import_candidate(
+        &source_ledger,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &fake_summary,
+    );
+
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+    assert_eq!(refusal.stage, Some("import-verify"));
+    assert!(
+        refusal.what.contains("no completed geometry import"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "the decoy summary must execute no stage"
+    );
+}
+
+#[test]
+fn g3_import_ir_requires_exact_writer_limits_and_policy_shapes() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    for (label, ir) in [
+        (
+            "limits",
+            replace_json_object_with_empty(&source_row.ir, ",\"limits\":"),
+        ),
+        (
+            "policy",
+            replace_json_object_with_empty(&source_row.ir, ",\"policy\":"),
+        ),
+    ] {
+        let ledger = Ledger::open(":memory:").expect("isolated decoy ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label} decoy: {refusal:?}"
+        );
+        assert!(
+            progress.is_empty(),
+            "{label} decoy must execute no solve stage"
+        );
+    }
+}
+
+#[test]
+fn g3_import_ir_byte_caps_must_admit_the_exact_retained_raw_bytes() {
+    let bytes = tetra_stl();
+    assert!(bytes.len() > 1, "fixture must exceed the forged caps");
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    for (label, ir) in [
+        (
+            "per-source",
+            replace_json_unsigned(&source_row.ir, ",\"max_source_bytes\":", 1),
+        ),
+        (
+            "aggregate",
+            replace_json_unsigned(&source_row.ir, ",\"max_total_source_bytes\":", 1),
+        ),
+    ] {
+        let ledger = Ledger::open(":memory:").expect("isolated cap ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label} cap decoy: {refusal:?}"
+        );
+        assert!(
+            progress.is_empty(),
+            "{label} cap decoy must execute no solve stage"
+        );
+    }
+}
+
+#[test]
+fn g3_promoted_ply_with_unknown_huge_element_refuses_before_stage_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    assert_eq!(imported.artifacts.len(), 1, "fixture has one geometry row");
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let entry = &imported.artifacts[0];
+    let canonical_mesh = source
+        .get_artifact(&entry.promoted_mesh)
+        .expect("read canonical mesh")
+        .expect("canonical mesh exists");
+    let vertex_line = canonical_mesh
+        .windows(b"element vertex ".len())
+        .position(|window| window == b"element vertex ")
+        .expect("writer vertex line");
+    let mut hostile_mesh = Vec::with_capacity(canonical_mesh.len() + 32);
+    hostile_mesh.extend_from_slice(&canonical_mesh[..vertex_line]);
+    hostile_mesh.extend_from_slice(b"element junk 100000000\n");
+    hostile_mesh.extend_from_slice(&canonical_mesh[vertex_line..]);
+    assert!(
+        hostile_mesh.len() < 1024,
+        "the malformed header remains a tiny retained artifact"
+    );
+
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let hostile_hash = hash_bytes(&hostile_mesh);
+    let hostile_summary =
+        valid_summary.replacen(&entry.promoted_mesh.to_hex(), &hostile_hash.to_hex(), 1);
+    assert_ne!(
+        hostile_summary, valid_summary,
+        "summary binds the decoy mesh"
+    );
+
+    let ledger = Ledger::open(":memory:").expect("decoy ledger");
+    reproduce_import_candidate_with_mesh(
+        &source,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &hostile_summary,
+        Some(&hostile_mesh),
+    );
+    let seals_before = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge seals");
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+    assert!(
+        refusal.what.contains("no completed geometry import"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "malformed retained PLY must publish no completed-stage progress"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge seals"),
+        seals_before,
+        "malformed retained PLY must not seal a completed stage"
+    );
+}
+
+#[test]
+fn g3_genuine_import_above_project_solve_envelope_refuses_without_stage_publication() {
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    spec.budgets.as_mut().expect("budgets").memory_bytes = 1;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let seals_before = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge seals");
+
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-envelope");
+    assert_eq!(refusal.stage, Some("import-verify"));
+    assert!(
+        refusal.what.contains("effective solve envelope"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "no completed stage may publish progress"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge seals"),
+        seals_before,
+        "envelope refusal must not seal a completed stage"
+    );
+}
+
+#[test]
+fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    ledger.begin().expect("begin wide fixture transaction");
+    let unrelated = ledger
+        .begin_op(
+            None,
+            "{\"schema\":\"unrelated.wide-success.v1\"}",
+            &FiveExplicits {
+                seed: b"unrelated",
+                versions: "{}",
+                budget: "{}",
+                capability: "{}",
+            },
+            0,
+        )
+        .expect("wide unrelated op");
+    for index in 0..1025u32 {
+        let artifact = ledger
+            .put_artifact("unrelated-tiny-evidence", &index.to_le_bytes(), None)
+            .expect("unrelated artifact");
+        ledger
+            .link(unrelated, &artifact.hash, EdgeRole::Out)
+            .expect("unrelated edge");
+    }
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 1)
+        .expect("finish unrelated op");
+    ledger.commit().expect("commit wide fixture transaction");
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert!(
+        progress.iter().any(|line| line.contains("import-verify")),
+        "the older valid import must still execute the solve prefix"
+    );
+}
+
+#[test]
+fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (initial, _) = run_to_gap(&ledger, &decoded);
+    let run_hex = initial.run.expect("run id");
+    let run = SolveRunId::parse_hex(&run_hex).expect("run id parses");
+    let receipts_before = stage_receipt_hashes(&ledger, &run_hex);
+    assert_eq!(receipts_before.len(), 2, "fixture has a valid checkpoint");
+
+    ledger.begin().expect("begin wide fixture transaction");
+    let unrelated = ledger
+        .begin_op(
+            Some(run.as_bytes()),
+            "{\"schema\":\"unrelated.same-run-wide-success.v1\"}",
+            &FiveExplicits {
+                seed: b"unrelated",
+                versions: "{}",
+                budget: "{}",
+                capability: "{}",
+            },
+            100,
+        )
+        .expect("same-run unrelated op");
+    for index in 0..1025u32 {
+        let artifact = ledger
+            .put_artifact("unrelated-same-run-evidence", &index.to_le_bytes(), None)
+            .expect("unrelated artifact");
+        ledger
+            .link(unrelated, &artifact.hash, EdgeRole::Out)
+            .expect("unrelated edge");
+    }
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 101)
+        .expect("finish unrelated op");
+    ledger.commit().expect("commit wide fixture transaction");
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run_hex, &mut progress)
+        .expect_err("valid checkpoint resumes to the known stage gap");
+    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert!(progress.is_empty(), "no new stage executes before the gap");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run_hex),
+        receipts_before,
+        "the unrelated operation neither obscures nor extends the valid checkpoint"
+    );
 }
 
 #[test]

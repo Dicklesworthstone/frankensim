@@ -113,7 +113,9 @@ Run identity is content-derived before any side effect:
 `hash_domain("org.frankensim.fs-cli.solve-run.v1", project canonical hash ||
 constellation || workspace || root seed || driver version)`. Budgets travel
 inside the project hash, so raising a budget starts a new run whose completed
-artifacts still deduplicate by content. Every solve operation carries the
+artifacts still deduplicate by content. Driver semantics version 2 binds the
+strict lineage/evidence rules in this contract; version-1 run ids do not
+collide with or silently resume under version 2. Every solve operation carries the
 32-byte run identity as its ledger `session` value; the run's own operations
 are its index — resume and downstream consumers locate evidence through
 `visible_op_ids` + session filtering + bounded edge reads, with no ledger
@@ -135,9 +137,11 @@ Stages execute in pinned order: `import-verify`, `assign`,
 is one atomic ledger operation: frozen stage IR, the Five Explicits, the
 stage receipt artifact, lineage links, and the sealed driver state. The first
 stage additionally retains the exact canonical project source as input
-lineage. In slice 1 `import-verify` re-hashes every retained import artifact
-against the run's pinned project (row presence is not authority) and `assign`
-binds declared targets to that verified evidence; `material-resolve`
+lineage. In slice 1 `import-verify` streams every retained import artifact
+through the ledger's content-hash verifier (row presence is not authority),
+checks the frozen import byte/count envelope against retained raw, canonical
+PLY, and canonical assignment-report bytes, and `assign` binds declared
+targets to that verified evidence; `material-resolve`
 (frankensim-hp7tb), `flow-network` (frankensim-frn2i), `conduction`
 (frankensim-s93ej), and `qoi` (frankensim-s2l9v) refuse with
 `cli-solve-stage-gap` (exit 5) naming their producer bead, and the refusal is
@@ -149,11 +153,53 @@ post-restart authorized resume path is explicitly unfinished (fs-exec
 CONTRACT), while the v1 `LegacySnapshotExpectationV1` is reconstructible from
 durable fields alone. The sealed driver state (run, project hash, consumption
 totals, completed stages) is retained as a `solve-stage-state` artifact; its
-ledger content hash doubles as the envelope's exact-byte expectation root.
-Resume admits the state through `open_expected` (fail-closed), re-reads the
-retained project, re-validates it strictly, re-derives the run identity and
-refuses on any mismatch, then re-charges the recorded consumption so the
-budget continues instead of resetting.
+ledger content hash and `open_expected` admission prove only bounded codec
+integrity. Public `SolveDriverState`/`CompletedStage` construction and a valid
+legacy envelope grant no resume authority.
+
+Before opening a governor or publishing progress, resume independently
+re-attests every candidate prefix that can tie or extend the longest verified
+prefix. After bounded checkpoint decode and shape validation, a candidate
+strictly shorter than an already verified prefix is skipped because it cannot
+affect longest-prefix selection. Resume discovery requires the exact supported
+solve-stage schema, field order, run, driver version, stage/ordinal pairing,
+diagnostic state, and logical clocks before reading that operation's bounded
+edge set; unrelated successful same-session operations therefore cannot
+obscure a valid checkpoint by carrying a wide output set. A stage-shaped
+candidate must then have positive, distinct, increasing operation ids; finite
+nonnegative one-core totals (`core_s == wall_s`); exact canonical stage rows,
+Five Explicits, deterministic main-branch execution context, and typed
+operation-content identity sidecars; complete nontruncated edge sets with the
+writer's exact edge-count seal; exact canonical stage receipts; one checkpoint
+per stage; and a direct predecessor-checkpoint chain. Stage zero must consume
+the exact strictly decoded canonical project and one exact import summary. Its
+import operation must carry the exact project, Five Explicits, canonical
+versioned IR field order and complete limits/policy shapes (including
+named-group arrays), deterministic main-branch context, typed content sidecar,
+exact typed edges, and strict whole-input-consumed receipt grammar. Unrelated
+successful import operations are rejected by the cheap
+row/IR/Five-Explicits prefilter before any bounded edge scan. Import evidence
+is capped at 255 sources so the complete worst-case `4*N+1` edge set fits the
+ledger's 1024-edge scan. Raw artifacts are streamed under their frozen
+per-source/aggregate caps; opaque promotion receipts are streamed under a
+4 MiB per-artifact cap. PLY and assignment-report evidence that solve must
+parse has a 64 MiB per-artifact cap. Before the general PLY parser runs, solve
+requires the exact nine-line ASCII header emitted by `fs_io::ply::write_ply`,
+canonical unsigned vertex/face counts within the frozen import limits, and a
+matching number of newline-terminated body records. Before reading any source
+payload, solve preflights the checked total of the summary and every raw,
+promotion, PLY, and report artifact against the smaller of the project memory
+budget value and a 512 MiB hard admitted-input/work envelope. This is a
+deterministic per-candidate resource-admission bound, not a claim that peak
+allocations fit within that value: canonical PLY checking can simultaneously
+retain the input bytes, decoded soup, and canonical re-encoding. Independently
+valid equal-length or longer parallel histories can repeat this bounded
+attestation within one resume invocation; no invocation-wide cumulative work
+cap or memoization claim is made. A genuine candidate outside these solve
+envelopes produces `cli-solve-import-envelope`. Competing independently valid
+longest checkpoints are ambiguous and refuse rather than winning by row order.
+Only after this complete attestation does resume re-charge recorded
+consumption, so the budget continues instead of resetting.
 
 ## Output and exit contract
 
@@ -186,7 +232,8 @@ is real and durable.
 
 Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-session`, `cli-solve-ledger`, `cli-solve-ledger-transaction`,
-`cli-solve-import-evidence`, `cli-solve-assignment`, `cli-solve-capability`,
+`cli-solve-import-evidence`, `cli-solve-import-envelope`,
+`cli-solve-assignment`, `cli-solve-capability`,
 `cli-solve-stage-gap`, `cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,
@@ -210,11 +257,17 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
   result record, and bound as the `session` of every operation the run
   writes; the same project in the same workspace always derives the same run.
 - Each completed solve stage commits atomically: stage receipt, sealed driver
-  state, lineage links, and terminal outcome land together or not at all
+  state, exact sealed lineage links, and terminal outcome land together or not at all
   (fs-ledger's crash battery is the durability authority).
 - The driver state sealed after stage N lists exactly stages 0..=N with their
-  operation ids and receipt hashes; resume continues from the longest
-  retained prefix and re-verifies project identity first.
+  positive, distinct, increasing operation ids and receipt hashes. Resume uses
+  the unique longest fully re-attested retained prefix; a malformed candidate
+  cannot lend authority to its decoded fields, and equally long valid
+  competitors refuse as ambiguous.
+- The slice-1 single-core driver records finite nonnegative consumption with
+  `consumed_core_s == consumed_wall_s` in every checkpoint. A non-finite or
+  backward fresh clock refuses before a checkpoint or lineage seal is
+  published.
 - A pre-cancelled solve publishes nothing; cancellation between stages leaves
   the completed prefix durable and resumable with bit-identical stage
   evidence relative to an uninterrupted run.
@@ -235,6 +288,12 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
   STEP root and target-spacing bits, and ordered named-group mappings. Caller
   path labels do not enter semantic identity. Frozen solve stage IR binds the
   stage name, ordinal, run identity, project hash, and driver version.
+- Solve admission checks frozen raw-source byte caps against streamed actual
+  lengths (including checked aggregate addition), assignment request and
+  predicate-work caps against the exact project and promoted PLY face counts,
+  mesh vertex/face and named-group face-range caps against canonical retained
+  PLY, and selected-face totals against canonical retained assignment-report
+  rows.
 - A STEP success retains both lower receipts and writes/assigns the exact
   repaired soup whose counts and fingerprint appear in the import receipt.
 - Caller-supplied named-group face ordinals are never laundered across
@@ -315,12 +374,20 @@ recorded case runs the ledger linter.
 the pinned stage order and gap owners, prefix execution with a ledgered
 `cli-solve-stage-gap` refusal, and the honest budget-exceeded partial with
 warning fractions and refused re-resume. G3 covers missing/mismatched import
-evidence, unknown run ids, and a corrupted retained project pin (refused by
-the ledger's own read-integrity gate before the driver's identity check —
-both fail closed). G4 covers pre-cancellation with zero publication and
-between-stage cancellation whose resumed evidence is bit-identical to an
-uninterrupted run. G5 covers identical stage-receipt identities across
-independent fresh ledgers.
+evidence, an exact-schema import-summary decoy, a caller-sealed but
+non-authoritative state, a canonical higher checkpoint with one substituted
+predecessor, `{}` replacements for otherwise exact import limits/policy
+objects, isolated per-source and aggregate byte-cap forgeries, a genuine import
+outside the project-memory solve envelope, a tiny PLY header with an unknown
+zero-property element and a huge declared count, unrelated successful import
+and same-run operations wider than the complete edge scan, competing valid
+longest checkpoints, unknown run ids, and a corrupted retained project pin
+(refused by the ledger's own read-integrity gate before the driver's identity
+check — both fail closed). Identity refusals occur before progress or ledger
+publication. G4 covers pre-cancellation with zero
+publication and between-stage cancellation whose resumed evidence is
+bit-identical to an uninterrupted run. G5 covers identical stage-receipt
+identities across independent fresh ledgers.
 
 ## No-claim boundaries
 
@@ -332,7 +399,10 @@ independent fresh ledgers.
   finite tessellation, assignment reports, and their lineage. The legacy FNV
   hook and caller path/label do not authenticate custody, physical/CAD
   sameness, continuum coverage, units, or topology beyond the retained
-  lower-layer claims.
+  lower-layer claims. The summary's `assignment_table` is strictly encoded and
+  bounded as part of the retained bytes but is diagnostic rendering, not
+  resume authority; typed assignment-report artifacts carry the retained
+  assignment evidence.
 - Faceted STEP support is limited to fs-io's pinned triangular root-reachable
   resource subset and estimated SDF handoff. It is not full EXPRESS/AP
   interpretation, representation/unit-context discovery, NURBS/surface
@@ -346,16 +416,25 @@ independent fresh ledgers.
   complete: `material-resolve`, `flow-network`, `conduction`, and `qoi` are
   typed gaps owned by their named beads, and no end-to-end solve, physics
   answer, QoI, or product-determinism claim is made. `import-verify` proves
-  retained bytes re-hash to their identities; it does not prove the geometry
-  is watertight, meshable, or physically meaningful. `assign` binds declared
-  targets to verified import evidence; it does not re-run selector
+  canonical internal row/receipt/lineage structure, retained content hashes,
+  and the documented resource-count consistency only. PLY/report parsing
+  checks exact writer grammar, project source/unit/subject ordering, and
+  bounded counts; it does not recompute the source FNV/parser admission,
+  cross-check or replay promotion/STEP repair-root-spacing policy, authenticate
+  lower-layer producers, verify mesh/named-group/request/assignment
+  fingerprints, re-run named-group or selector classification, or recompute
+  reported areas, volumes, and bounds. It therefore does not prove the
+  geometry is watertight, meshable, or physically meaningful. `assign` binds
+  declared targets to verified import evidence; it does not re-run selector
   resolution.
 - The session opened by the driver uses caller-declared capability evidence
   (`open_session_declared`); no external issuer, grant authentication, or
   revocation policy is claimed. Memory consumption is charged as zero — the
-  driver does not sample RSS — so the memory budget axis is currently
-  derived-but-inert and enforcement is real only for core-seconds and wall
-  seconds.
+  governor does not sample RSS — so governor/runtime-memory enforcement is
+  currently inert while its core-seconds and wall-seconds enforcement is real.
+  Separately, the solve import byte-total preflight genuinely refuses evidence
+  above the declared memory value used as an admitted-input/work cap; it
+  neither measures nor proves peak memory use.
 - The governor is in-memory per process; exactly-once submission and durable
   session terminals (`Governor::new_durable`) are not yet wired. Budget
   continuity across resume relies on the recorded consumption in the sealed
@@ -365,6 +444,13 @@ independent fresh ledgers.
   pause acknowledgement) arrive with the physics stage producers. Migration
   of the driver state to the v2 envelope waits on fs-exec's post-restart
   authorized-resume seam, which its CONTRACT names as unfinished.
+- Resume attestation proves consistency with this driver's retained canonical
+  row/receipt/lineage format. Operation-content sidecars and artifact-edge
+  seals detect divergence and post-seal mutation; they are not signatures,
+  external producer authentication, or authorization against an actor that can
+  manufacture an entirely canonical ledger history through the public ledger
+  API. That stronger threat model requires a separately authenticated producer
+  capability or signed receipt scheme.
 - Deterministic replay is claimed for retained stage artifacts, not for
   enforcement outcomes; kill -9 crash recovery of the ledger is fs-ledger's
   proven claim, and the driver's own kill -9 drill (resume to identical
