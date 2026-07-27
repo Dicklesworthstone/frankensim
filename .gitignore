@@ -45,6 +45,10 @@ flamegraph.folded
 .beads/.br_history/
 .beads/*.lock
 .beads/.*.lock
+# Renamed stale locks keep the original name plus a .stale-<timestamp> suffix,
+# which the two patterns above miss.
+.beads/*.lock.stale-*
+.beads/.*.lock.stale-*
 .beads/beads.db
 .beads/beads.db-*
 .beads/last-touched
@@ -87,6 +91,11 @@ Desktop.ini
 # RCH and local remote-build scratch directories
 /rch_target*/
 /remote-target*/
+# An unexpanded ${RCH_TARGET_BASE:-${TMPDIR:-/tmp}} (single-quoted through a
+# wrapper) creates this literal directory tree at the repo root.
+/${TMPDIR:-*/
+# Default rustc output when compiling a snippet from stdin.
+/rust_out
 
 # Generated package artifacts
 *.crate
@@ -104,3 +113,6 @@ frankensim_illustration.png
 /beads_compliance_audit/
 # br doctor per-run artifacts
 .doctor/
+
+# Cloudflare wrangler CLI local state (already skipped by xtask traversal)
+/.wrangler/
