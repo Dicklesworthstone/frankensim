@@ -30,9 +30,13 @@
 pub mod historical;
 
 pub use historical::{
-    COMPARISON_EVIDENCE_SNAPSHOT, HistoricalEvidenceError, HistoricalEvidenceReceipt,
-    HistoricalEvidenceSnapshot, comparison_evidence_bundle, comparison_evidence_manifest,
-    verify_comparison_evidence, verify_default_comparison_evidence,
+    COMPARISON_EVIDENCE_DESCRIPTOR_IDENTITY_DOMAIN, COMPARISON_EVIDENCE_SNAPSHOT,
+    COMPARISON_MODEL_IDENTITY_DOMAIN, HistoricalEvidenceError, HistoricalEvidenceReceipt,
+    HistoricalEvidenceSnapshot, HistoricalEvidenceTrustOrigin,
+    MAX_COMPARISON_EVIDENCE_MARKER_SCAN_WORK, comparison_evidence_bundle,
+    comparison_evidence_descriptor_identity_blake3, comparison_evidence_manifest,
+    comparison_model_identity_blake3, verify_comparison_evidence,
+    verify_default_comparison_evidence,
 };
 
 /// The load-bearing negative doctrine of wedge selection.
@@ -1281,10 +1285,13 @@ pub struct ComparisonCandidate {
     pub name: &'static str,
     /// Human-readable candidate name.
     pub display: &'static str,
-    /// Date on which the comparison inputs were reviewed.
+    /// Declared date associated with the comparison-input review.
     pub measured_on: &'static str,
-    /// Git revision of the code inventory reviewed before this comparison.
-    pub inventory_revision: &'static str,
+    /// Declared Git revision label associated with the code inventory.
+    ///
+    /// Historical replay checks consistency with this label; the label is not
+    /// proof of Git provenance or authorized human review.
+    pub declared_inventory_revision: &'static str,
     /// Exactly one measured input for every scoring factor.
     pub factors: &'static [FactorRating],
     /// Strongest case for this candidate if it finishes second.
@@ -1994,7 +2001,7 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         name: "full-electronics-cooling-cht",
         display: "Full electronics-cooling CHT",
         measured_on: "2026-07-22",
-        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
+        declared_inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &CHT_FULL_FACTORS,
         minority_case: "Full CHT most completely exercises the original multi-tool coupling thesis and could become the strongest long-run moat. Its present score is held down by the missing solid-fluid field transfer and high-fidelity flow rungs, unmeasured compute, and a longer validation path—not by evidence that the market need is false.",
     },
@@ -2002,7 +2009,7 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         name: "sdf-structural-topology-assurance",
         display: "SDF structural/topology optimization assurance",
         measured_on: "2026-07-22",
-        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
+        declared_inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &SDF_STRUCTURAL_FACTORS,
         minority_case: "SDF structural assurance is the lowest technical-risk route to a differentiated demo: SDF charts, CutFEM elasticity, topology optimization, deterministic replay, and checked adjoints already compose. It should win if customer-pain evidence appears or if kernel readiness/CAD burden receive materially more weight; its current weakness is external market and validation-data evidence, plus honest 2-D scope.",
     },
@@ -2010,7 +2017,7 @@ const COMPARISON_CANDIDATES: [ComparisonCandidate; 3] = [
         name: "thermal-design-assurance",
         display: "Thermal design assurance",
         measured_on: "2026-07-22",
-        inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
+        declared_inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
         factors: &THERMAL_ASSURANCE_FACTORS,
         minority_case: "Thermal design assurance preserves the declared thermal market thesis while limiting the first product to conduction, interfaces, radiation, fan/correlation rungs, and evidence-led decisions. At the pinned snapshot, its remaining risk was the absent customer-pain baseline, surface radiation, end-to-end calibration, and delivery evidence.",
     },
@@ -2052,7 +2059,7 @@ fn validate_candidate(candidate: &ComparisonCandidate) -> Result<(), ScoringErro
     if candidate.name.trim().is_empty()
         || candidate.display.trim().is_empty()
         || candidate.measured_on.trim().is_empty()
-        || candidate.inventory_revision.trim().is_empty()
+        || candidate.declared_inventory_revision.trim().is_empty()
         || candidate.minority_case.trim().is_empty()
         || candidate.factors.len() != ScoringFactor::ALL.len()
     {
@@ -2315,15 +2322,22 @@ pub fn render_comparison_report() -> Result<String, ScoringError> {
     })?;
     let recommendation = ranked_recommendation(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())?;
     let weights = canonical_weight_values(&DEFAULT_FACTOR_WEIGHTS)?;
-    let mut out = String::from("FS-WEDGE-COMPARISON\tv2\n");
+    let mut out = String::from("FS-WEDGE-COMPARISON\tv4\n");
     writeln!(
         out,
-        "HISTORICAL_EVIDENCE\t{}\tpolicy={}\trevision={}\tmanifest_blake3={}\tbundle_blake3={}\tsources={}\tpointers={}",
+        "HISTORICAL_EVIDENCE\t{}\tpolicy={}\tdeclared_inventory_revision={}\ttrust_origin={}\tdescriptor_identity_blake3={}\tcomparison_model_identity_blake3={}\tmanifest_path={}\tmanifest_blake3={}\tbundle_path={}\tbundle_blake3={}\tcurrent_decision_authority={}\thuman_review_authority={}\tsources={}\tpointers={}",
         history.schema(),
         history.policy_version(),
-        history.inventory_revision(),
+        history.declared_inventory_revision(),
+        history.trust_origin().label(),
+        history.descriptor_identity_blake3(),
+        history.comparison_model_identity_blake3(),
+        history.manifest_path(),
         history.manifest_identity_blake3(),
+        history.bundle_path(),
         history.bundle_identity_blake3(),
+        history.current_decision_authority(),
+        history.human_review_authority(),
         history.source_count(),
         history.pointer_count(),
     )
@@ -2342,7 +2356,10 @@ pub fn render_comparison_report() -> Result<String, ScoringError> {
         writeln!(
             out,
             "CANDIDATE\t{}\t{}\t{}\t{}",
-            candidate.name, candidate.display, candidate.measured_on, candidate.inventory_revision
+            candidate.name,
+            candidate.display,
+            candidate.measured_on,
+            candidate.declared_inventory_revision
         )
         .expect("write to String");
         for input in candidate.factors {

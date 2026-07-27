@@ -12,8 +12,9 @@
 //! standing on stale authority (P8, Governance Rule 2).
 
 use fs_wedge::{
-    BaselineProvenance, CHT_BASELINE, CycleTimeBaseline, ScoringError, comparison_candidates,
-    default_recommendation,
+    BaselineProvenance, CHT_BASELINE, CycleTimeBaseline, HistoricalEvidenceTrustOrigin,
+    ScoringError, comparison_candidates, default_recommendation,
+    verify_default_comparison_evidence,
 };
 
 use crate::json_escape;
@@ -66,8 +67,24 @@ pub struct VerticalRatification {
     pub runner_up: &'static str,
     /// The runner-up's retained strongest case, verbatim from the comparison.
     pub minority_report: &'static str,
-    /// Git revision of the code inventory the scoring table rests on.
+    /// Descriptor-declared revision label the scoring table is consistent with.
+    ///
+    /// Historical replay does not prove Git provenance or human review.
     pub scoring_inventory_revision: &'static str,
+    /// Frozen canonical identity of the complete scoring model and weights.
+    pub scoring_model_identity_blake3: &'static str,
+    /// Frozen canonical identity of the complete retained-evidence descriptor.
+    pub scoring_evidence_descriptor_identity_blake3: &'static str,
+    /// Required retained-TAR parser/admission policy.
+    pub scoring_evidence_policy_version: u32,
+    /// Required historical replay origin at this ratification boundary.
+    pub scoring_evidence_trust_origin: HistoricalEvidenceTrustOrigin,
+    /// Whether the historical scoring evidence itself authorizes this decision.
+    ///
+    /// This remains false: the ratification record owns the decision boundary.
+    pub scoring_evidence_current_decision_authority: bool,
+    /// Whether the historical scoring evidence proves authorized human review.
+    pub scoring_evidence_human_review_authority: bool,
     /// Candidate totals recorded at ratification, in rank order.
     pub recorded_totals: &'static [RecordedTotal],
     /// Required cycle-time reduction factor, bound to the measured baseline.
@@ -145,6 +162,12 @@ pub const VERTICAL_RATIFICATION_V1: VerticalRatification = VerticalRatification 
         validation data with retained raw records; if thermal data acquisition stalls, it is \
         the strongest fallback.",
     scoring_inventory_revision: "b3b5f2c1c809eec06cde1e40cbc916d6995469b5",
+    scoring_model_identity_blake3: "d9821a2b7cc45bfd635991fc1886e8577cb1138af8ff13c5469693c905cb8b54",
+    scoring_evidence_descriptor_identity_blake3: "87778e8008f2d6ad5b898828dcede63cd2c30b94b4a57332e30446e88589d6e8",
+    scoring_evidence_policy_version: 2,
+    scoring_evidence_trust_origin: HistoricalEvidenceTrustOrigin::EmbeddedDefault,
+    scoring_evidence_current_decision_authority: false,
+    scoring_evidence_human_review_authority: false,
     recorded_totals: &[
         RecordedTotal {
             candidate: "thermal-design-assurance",
@@ -234,6 +257,14 @@ impl VerticalRatification {
                 "scoring_inventory_revision",
                 self.scoring_inventory_revision,
             ),
+            (
+                "scoring_model_identity_blake3",
+                self.scoring_model_identity_blake3,
+            ),
+            (
+                "scoring_evidence_descriptor_identity_blake3",
+                self.scoring_evidence_descriptor_identity_blake3,
+            ),
             ("review_due", self.review_due),
         ];
         for (field, value) in fields {
@@ -293,6 +324,57 @@ impl VerticalRatification {
     fn validate_scoring(&self) -> Result<(), RatificationError> {
         let recommendation = default_recommendation()
             .map_err(|source| RatificationError::ScoringUnavailable { source })?;
+        let receipt = verify_default_comparison_evidence().map_err(|source| {
+            RatificationError::ScoringUnavailable {
+                source: ScoringError::HistoricalEvidenceUnavailable {
+                    source: Box::new(source),
+                },
+            }
+        })?;
+        if receipt.policy_version() != self.scoring_evidence_policy_version {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_evidence_policy_version",
+                recorded: self.scoring_evidence_policy_version.to_string(),
+                recomputed: receipt.policy_version().to_string(),
+            });
+        }
+        if receipt.descriptor_identity_blake3() != self.scoring_evidence_descriptor_identity_blake3
+        {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_evidence_descriptor_identity_blake3",
+                recorded: self.scoring_evidence_descriptor_identity_blake3.to_string(),
+                recomputed: receipt.descriptor_identity_blake3().to_string(),
+            });
+        }
+        if receipt.trust_origin() != self.scoring_evidence_trust_origin {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_evidence_trust_origin",
+                recorded: self.scoring_evidence_trust_origin.label().to_string(),
+                recomputed: receipt.trust_origin().label().to_string(),
+            });
+        }
+        if receipt.comparison_model_identity_blake3() != self.scoring_model_identity_blake3 {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_model_identity_blake3",
+                recorded: self.scoring_model_identity_blake3.to_string(),
+                recomputed: receipt.comparison_model_identity_blake3().to_string(),
+            });
+        }
+        if receipt.current_decision_authority() != self.scoring_evidence_current_decision_authority
+        {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_evidence_current_decision_authority",
+                recorded: self.scoring_evidence_current_decision_authority.to_string(),
+                recomputed: receipt.current_decision_authority().to_string(),
+            });
+        }
+        if receipt.human_review_authority() != self.scoring_evidence_human_review_authority {
+            return Err(RatificationError::ScoringDrift {
+                field: "scoring_evidence_human_review_authority",
+                recorded: self.scoring_evidence_human_review_authority.to_string(),
+                recomputed: receipt.human_review_authority().to_string(),
+            });
+        }
         if recommendation.recommended != self.chosen_vertical {
             return Err(RatificationError::ScoringDrift {
                 field: "chosen_vertical",
@@ -326,11 +408,11 @@ impl VerticalRatification {
             }
         }
         for candidate in comparison_candidates() {
-            if candidate.inventory_revision != self.scoring_inventory_revision {
+            if candidate.declared_inventory_revision != self.scoring_inventory_revision {
                 return Err(RatificationError::ScoringDrift {
                     field: "scoring_inventory_revision",
                     recorded: self.scoring_inventory_revision.to_string(),
-                    recomputed: candidate.inventory_revision.to_string(),
+                    recomputed: candidate.declared_inventory_revision.to_string(),
                 });
             }
         }
@@ -344,13 +426,19 @@ impl VerticalRatification {
         let mut out = String::new();
         write!(
             out,
-            "{{\"id\":\"{}\",\"decided_on\":\"{}\",\"chosen_vertical\":\"{}\",\"runner_up\":\"{}\",\"minority_report\":\"{}\",\"scoring_inventory_revision\":\"{}\",\"recorded_totals\":[",
+            "{{\"id\":\"{}\",\"decided_on\":\"{}\",\"chosen_vertical\":\"{}\",\"runner_up\":\"{}\",\"minority_report\":\"{}\",\"scoring_inventory_revision\":\"{}\",\"scoring_model_identity_blake3\":\"{}\",\"scoring_evidence_descriptor_identity_blake3\":\"{}\",\"scoring_evidence_policy_version\":{},\"scoring_evidence_trust_origin\":\"{}\",\"scoring_evidence_current_decision_authority\":{},\"scoring_evidence_human_review_authority\":{},\"recorded_totals\":[",
             json_escape(self.id),
             json_escape(self.decided_on),
             json_escape(self.chosen_vertical),
             json_escape(self.runner_up),
             json_escape(self.minority_report),
             json_escape(self.scoring_inventory_revision),
+            json_escape(self.scoring_model_identity_blake3),
+            json_escape(self.scoring_evidence_descriptor_identity_blake3),
+            self.scoring_evidence_policy_version,
+            self.scoring_evidence_trust_origin.label(),
+            self.scoring_evidence_current_decision_authority,
+            self.scoring_evidence_human_review_authority,
         )
         .expect("write to String");
         for (index, total) in self.recorded_totals.iter().enumerate() {

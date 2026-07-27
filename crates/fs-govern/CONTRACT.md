@@ -588,8 +588,11 @@ they are not implied by this solid graph core.
 
 - `VERTICAL_RATIFICATION_V1` is the program's one ratified vertical decision
   record: chosen vertical (`thermal-design-assurance`), runner-up and retained
-  minority report, the recorded scoring totals and inventory pin they rest on,
-  the kill criterion bound to the measured cycle-time baseline, three named
+  minority report, the recorded scoring totals, descriptor-declared inventory
+  revision, separately frozen complete-model and retained-evidence-descriptor
+  BLAKE3 identities, retained-TAR admission policy version 2, and required
+  embedded-default trust origin they rest on, the kill criterion bound to the
+  measured cycle-time baseline, three named
   mechanically-evaluable `Falsifier`s, the next review date, honored
   principles, and the downstream beads gated on the record id.
 - The record is fail-closed. `ratified_vertical()` re-validates before
@@ -599,9 +602,23 @@ they are not implied by this solid graph core.
   provenance non-placeholder and its record complete
   (`BaselineNotMeasured`), and the scoring table recomputed via
   `fs_wedge::default_recommendation()` with any disagreement refused as
-  `ScoringDrift` (recommendation, runner-up, totals, and the inventory
-  revision on every comparison candidate). `ratification_json()` renders
-  every record in `decision_records()` fail-closed and deterministically.
+  `ScoringDrift` (recommendation, runner-up, totals, declared inventory
+  revision on every comparison candidate, complete-model identity,
+  retained-evidence-descriptor identity, TAR admission policy version, and
+  embedded-default trust origin). The replay
+  receipt must continue to state
+  `current_decision_authority=false` and `human_review_authority=false`; the
+  commercial ratification record, not historical self-consistency, owns the
+  decision boundary. The ratification record and `ratification_json()` carry
+  both facts as the namespaced machine fields
+  `scoring_evidence_current_decision_authority=false` and
+  `scoring_evidence_human_review_authority=false`. `ratification_json()` renders
+  the separately pinned descriptor root as
+  `scoring_evidence_descriptor_identity_blake3` and every record in
+  `decision_records()` fail-closed and deterministically.
+- The stable v1 public/JSON field name `scoring_inventory_revision` is
+  preserved for compatibility. Its semantics are the descriptor-declared
+  consistency label only; the name does not assert live Git provenance.
 - The conclusion is mirrored in `fs-wedge` (`RATIFIED_VERTICAL`,
   `RATIFICATION_RECORD_ID`) and cross-checked by this crate's battery so the
   two crates cannot fork the story. `fs-govern` therefore carries a
@@ -611,7 +628,12 @@ they are not implied by this solid graph core.
   capability level, and does not validate the thermal market thesis — the
   customer-pain factor remains a declared assumption until interviews or
   workflow traces exist. A failed quarterly falsifier forces re-selection of
-  the wedge, not a change to the platform architecture.
+  the wedge, not a change to the platform architecture. The declared revision
+  and embedded-default origin are consistency metadata, not Git-attestation or
+  authorized-human-review proof. The pinned descriptor root authenticates
+  protocol path labels, not filesystem existence or origin; a path rename or
+  TAR reserialization invalidates this ratification until an explicit record
+  migration, without changing the independent comparison-model identity.
 
 ## Measured wedge decision audit (`wedge_audit` module, bead f85xj.1.5)
 

@@ -7,7 +7,10 @@ use fs_govern::{
     RatificationError, VERTICAL_RATIFICATION_V1, decision_records, ratification_json,
     ratified_vertical,
 };
-use fs_wedge::{CHT_BASELINE, RETIRED_PLACEHOLDER_BASELINE, default_recommendation};
+use fs_wedge::{
+    CHT_BASELINE, HistoricalEvidenceTrustOrigin, RETIRED_PLACEHOLDER_BASELINE,
+    default_recommendation, verify_default_comparison_evidence,
+};
 
 #[test]
 fn the_ratification_record_stands_on_the_measured_world() {
@@ -20,6 +23,50 @@ fn the_ratification_record_stands_on_the_measured_world() {
     let recommendation = default_recommendation().expect("comparison recomputes");
     assert_eq!(recommendation.recommended, record.chosen_vertical);
     assert_eq!(recommendation.runner_up, record.runner_up);
+    let evidence = verify_default_comparison_evidence().expect("embedded evidence replays");
+    assert_ne!(
+        record.scoring_model_identity_blake3,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ratification must pin a non-placeholder comparison-model identity"
+    );
+    assert_eq!(
+        record.scoring_model_identity_blake3,
+        evidence.comparison_model_identity_blake3()
+    );
+    assert_ne!(
+        record.scoring_evidence_descriptor_identity_blake3,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ratification must pin a non-placeholder evidence-descriptor identity"
+    );
+    assert_eq!(
+        record.scoring_evidence_descriptor_identity_blake3,
+        evidence.descriptor_identity_blake3()
+    );
+    assert_eq!(record.scoring_evidence_policy_version, 2);
+    assert_eq!(
+        record.scoring_evidence_policy_version,
+        evidence.policy_version()
+    );
+    assert_eq!(
+        record.scoring_evidence_trust_origin,
+        HistoricalEvidenceTrustOrigin::EmbeddedDefault
+    );
+    assert_eq!(
+        record.scoring_evidence_trust_origin,
+        evidence.trust_origin()
+    );
+    assert!(!record.scoring_evidence_current_decision_authority);
+    assert!(!record.scoring_evidence_human_review_authority);
+    assert_eq!(
+        record.scoring_evidence_current_decision_authority,
+        evidence.current_decision_authority()
+    );
+    assert_eq!(
+        record.scoring_evidence_human_review_authority,
+        evidence.human_review_authority()
+    );
+    assert!(!evidence.current_decision_authority());
+    assert!(!evidence.human_review_authority());
 
     // The kill criterion is bound to the measured baseline record.
     assert!((record.kill_target_reduction - CHT_BASELINE.target_reduction).abs() < 1e-12);
@@ -155,6 +202,63 @@ fn a_drifted_scoring_table_is_refused() {
         }
         other => panic!("expected ScoringDrift, got {other:?}"),
     }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_model_identity_blake3 =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_model_identity_blake3");
+        }
+        other => panic!("expected model-identity ScoringDrift, got {other:?}"),
+    }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_evidence_descriptor_identity_blake3 =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_evidence_descriptor_identity_blake3");
+        }
+        other => panic!("expected descriptor-identity ScoringDrift, got {other:?}"),
+    }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_evidence_policy_version = 1;
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_evidence_policy_version");
+        }
+        other => panic!("expected policy-version ScoringDrift, got {other:?}"),
+    }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_evidence_trust_origin =
+        HistoricalEvidenceTrustOrigin::CallerSuppliedProtocolConsistency;
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_evidence_trust_origin");
+        }
+        other => panic!("expected trust-origin ScoringDrift, got {other:?}"),
+    }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_evidence_current_decision_authority = true;
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_evidence_current_decision_authority");
+        }
+        other => panic!("expected decision-authority ScoringDrift, got {other:?}"),
+    }
+
+    let mut record = VERTICAL_RATIFICATION_V1;
+    record.scoring_evidence_human_review_authority = true;
+    match record.validate() {
+        Err(RatificationError::ScoringDrift { field, .. }) => {
+            assert_eq!(field, "scoring_evidence_human_review_authority");
+        }
+        other => panic!("expected human-review-authority ScoringDrift, got {other:?}"),
+    }
 }
 
 #[test]
@@ -197,6 +301,44 @@ fn governance_e2e_lists_every_decision_record_field_by_field() {
             record.scoring_inventory_revision,
             record.scoring_inventory_revision.len() == 40,
         );
+        log(
+            "scoring_model_identity_blake3",
+            record.scoring_model_identity_blake3,
+            record.scoring_model_identity_blake3.len() == 64,
+        );
+        log(
+            "scoring_evidence_descriptor_identity_blake3",
+            record.scoring_evidence_descriptor_identity_blake3,
+            record.scoring_evidence_descriptor_identity_blake3.len() == 64,
+        );
+        log(
+            "scoring_evidence_policy_version",
+            &record.scoring_evidence_policy_version.to_string(),
+            record.scoring_evidence_policy_version == 2,
+        );
+        log(
+            "scoring_evidence_trust_origin",
+            record.scoring_evidence_trust_origin.label(),
+            record.scoring_evidence_trust_origin == HistoricalEvidenceTrustOrigin::EmbeddedDefault,
+        );
+        log(
+            "scoring_evidence_current_decision_authority",
+            if record.scoring_evidence_current_decision_authority {
+                "true"
+            } else {
+                "false"
+            },
+            !record.scoring_evidence_current_decision_authority,
+        );
+        log(
+            "scoring_evidence_human_review_authority",
+            if record.scoring_evidence_human_review_authority {
+                "true"
+            } else {
+                "false"
+            },
+            !record.scoring_evidence_human_review_authority,
+        );
         for total in record.recorded_totals {
             log(
                 "recorded_total",
@@ -235,6 +377,18 @@ fn the_ratification_json_is_fail_closed_and_deterministic() {
     assert_eq!(json, ratification_json().expect("still valid"));
     assert!(json.starts_with("{\"decision_records\":["));
     assert!(json.contains("\"chosen_vertical\":\"thermal-design-assurance\""));
+    assert!(
+        json.contains(
+            "\"scoring_inventory_revision\":\"b3b5f2c1c809eec06cde1e40cbc916d6995469b5\""
+        )
+    );
+    assert!(!json.contains("\"declared_scoring_inventory_revision\""));
+    assert!(json.contains("\"scoring_evidence_trust_origin\":\"embedded-default\""));
+    assert!(json.contains("\"scoring_evidence_policy_version\":2"));
+    assert!(json.contains("\"scoring_model_identity_blake3\":\""));
+    assert!(json.contains("\"scoring_evidence_descriptor_identity_blake3\":\""));
+    assert!(json.contains("\"scoring_evidence_current_decision_authority\":false"));
+    assert!(json.contains("\"scoring_evidence_human_review_authority\":false"));
     assert!(json.contains("\"kill_target_reduction\":3"));
     assert!(json.contains("\"id\":\"level-c-thermal-data-unobtainable\""));
     assert!(json.contains("frankensim-extreal-program-f85xj.6.1"));

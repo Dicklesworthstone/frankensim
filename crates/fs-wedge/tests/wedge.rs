@@ -9,13 +9,14 @@ use fs_wedge::historical::{
 use fs_wedge::{
     BaselineProvenance, CHT_BASELINE, COMPARISON_EVIDENCE_SNAPSHOT, ComparisonCandidate,
     DEFAULT_FACTOR_WEIGHTS, EvidenceKind, HistoricalEvidenceError, HistoricalEvidenceSnapshot,
-    IncumbentStep, InputAxis, KillCriterionError, KillVerdict, Measurement,
-    RETIRED_PLACEHOLDER_BASELINE, Readiness, STRONG_THRESHOLD, ScoreUse, ScoringError,
-    ScoringFactor, WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge, comparison_candidates,
-    comparison_evidence_bundle, comparison_evidence_manifest, default_recommendation,
-    four_criteria, measured_inputs_for, measured_wedge_inputs, render_comparison_report,
-    score_candidates, to_json, verify_comparison_evidence, verify_default_comparison_evidence,
-    verticals,
+    HistoricalEvidenceTrustOrigin, IncumbentStep, InputAxis, KillCriterionError, KillVerdict,
+    Measurement, MeasurementMethod, RETIRED_PLACEHOLDER_BASELINE, Readiness, STRONG_THRESHOLD,
+    ScoreUse, ScoringError, ScoringFactor, WEDGE_DOCTRINE, WedgeCriterion, audit, chosen_wedge,
+    comparison_candidates, comparison_evidence_bundle,
+    comparison_evidence_descriptor_identity_blake3, comparison_evidence_manifest,
+    comparison_model_identity_blake3, default_recommendation, four_criteria, measured_inputs_for,
+    measured_wedge_inputs, render_comparison_report, score_candidates, to_json,
+    verify_comparison_evidence, verify_default_comparison_evidence, verticals,
 };
 use std::path::Path;
 
@@ -417,11 +418,19 @@ fn authenticated_snapshot(manifest: &str, bundle: &[u8]) -> HistoricalEvidenceSn
             .to_hex()
             .into_boxed_str(),
     );
-    HistoricalEvidenceSnapshot {
+    authenticated_descriptor(HistoricalEvidenceSnapshot {
         manifest_identity_blake3: manifest_identity,
         bundle_identity_blake3: bundle_identity,
         ..COMPARISON_EVIDENCE_SNAPSHOT
-    }
+    })
+}
+
+fn authenticated_descriptor(
+    mut snapshot: HistoricalEvidenceSnapshot,
+) -> HistoricalEvidenceSnapshot {
+    snapshot.descriptor_identity_blake3 =
+        Box::leak(comparison_evidence_descriptor_identity_blake3(snapshot).into_boxed_str());
+    snapshot
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -470,9 +479,14 @@ fn rename_test_tar_file(bundle: &mut [u8], old: &str, new: &str) {
     let offset = test_tar_header_offset(bundle, old);
     let header = &mut bundle[offset..offset + 512];
     header[..new.len()].copy_from_slice(new.as_bytes());
+    rechecksum_test_tar_header(bundle, offset);
+}
+
+fn rechecksum_test_tar_header(bundle: &mut [u8], offset: usize) {
+    let header = &mut bundle[offset..offset + 512];
     header[148..156].fill(b' ');
     let checksum: usize = header.iter().map(|byte| usize::from(*byte)).sum();
-    let encoded = format!("{checksum:06o}\0 ");
+    let encoded = format!("{checksum:07o}\0");
     assert_eq!(encoded.len(), 8);
     header[148..156].copy_from_slice(encoded.as_bytes());
 }
@@ -483,9 +497,36 @@ fn historical_comparison_replays_from_retained_exact_source_bytes() {
     let second = verify_default_comparison_evidence().expect("historical replay is deterministic");
     assert_eq!(first, second);
     assert_eq!(
-        first.inventory_revision(),
-        COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+        first.schema(),
+        "frankensim-wedge-comparison-evidence-snapshot-v3"
     );
+    assert_eq!(first.policy_version(), 2);
+    assert_eq!(
+        first.declared_inventory_revision(),
+        COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision
+    );
+    assert_eq!(
+        first.comparison_model_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.comparison_model_identity_blake3
+    );
+    assert_eq!(
+        first.descriptor_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.descriptor_identity_blake3
+    );
+    assert_eq!(
+        first.manifest_path(),
+        COMPARISON_EVIDENCE_SNAPSHOT.manifest_path
+    );
+    assert_eq!(
+        first.bundle_path(),
+        COMPARISON_EVIDENCE_SNAPSHOT.bundle_path
+    );
+    assert_eq!(
+        first.trust_origin(),
+        HistoricalEvidenceTrustOrigin::EmbeddedDefault
+    );
+    assert!(!first.current_decision_authority());
+    assert!(!first.human_review_authority());
     assert_eq!(first.source_count(), 13);
     assert_eq!(first.pointer_count(), 31);
     assert_eq!(
@@ -496,6 +537,19 @@ fn historical_comparison_replays_from_retained_exact_source_bytes() {
         first.bundle_identity_blake3(),
         COMPARISON_EVIDENCE_SNAPSHOT.bundle_identity_blake3
     );
+    let caller_replay = verify_comparison_evidence(
+        COMPARISON_EVIDENCE_SNAPSHOT,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    )
+    .expect("caller-supplied replay remains protocol-consistent");
+    assert_eq!(
+        caller_replay.trust_origin(),
+        HistoricalEvidenceTrustOrigin::CallerSuppliedProtocolConsistency
+    );
+    assert!(!caller_replay.current_decision_authority());
+    assert!(!caller_replay.human_review_authority());
 
     // The historical marker is deliberately absent from today's contract.
     // Replay succeeds because it reads the retained b3b bytes, never HEAD.
@@ -510,6 +564,232 @@ fn historical_comparison_replays_from_retained_exact_source_bytes() {
             "full-electronics-cooling-cht\tlow-compute-cost\tcrates/fs-ladder/CONTRACT.md\tThe ladder does not run solves"
         )
     );
+}
+
+#[test]
+fn manifest_path_requires_descriptor_reauthentication_without_changing_content_roots() {
+    let stale = HistoricalEvidenceSnapshot {
+        manifest_path: "retained/comparison-evidence-b3b5f2c1.tsv",
+        ..COMPARISON_EVIDENCE_SNAPSHOT
+    };
+    let rebound_root = comparison_evidence_descriptor_identity_blake3(stale);
+    match verify_comparison_evidence(
+        stale,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    ) {
+        Err(HistoricalEvidenceError::DescriptorIdentityMismatch { expected, observed }) => {
+            assert_eq!(
+                expected,
+                COMPARISON_EVIDENCE_SNAPSHOT.descriptor_identity_blake3
+            );
+            assert_eq!(observed, rebound_root);
+        }
+        other => panic!("expected descriptor-identity refusal, got {other:?}"),
+    }
+
+    let rebound = authenticated_descriptor(stale);
+    let receipt = verify_comparison_evidence(
+        rebound,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    )
+    .expect("caller may reauthenticate a different manifest path label");
+    assert_eq!(receipt.descriptor_identity_blake3(), rebound_root);
+    assert_ne!(
+        receipt.descriptor_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.descriptor_identity_blake3
+    );
+    assert_eq!(receipt.manifest_path(), rebound.manifest_path);
+    assert_eq!(
+        receipt.bundle_path(),
+        COMPARISON_EVIDENCE_SNAPSHOT.bundle_path
+    );
+    assert_eq!(
+        receipt.manifest_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.manifest_identity_blake3
+    );
+    assert_eq!(
+        receipt.bundle_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.bundle_identity_blake3
+    );
+    assert_eq!(
+        receipt.comparison_model_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.comparison_model_identity_blake3
+    );
+    assert_eq!(
+        receipt.trust_origin(),
+        HistoricalEvidenceTrustOrigin::CallerSuppliedProtocolConsistency
+    );
+    assert!(!receipt.current_decision_authority());
+    assert!(!receipt.human_review_authority());
+}
+
+#[test]
+fn bundle_path_requires_descriptor_reauthentication_without_changing_content_roots() {
+    let stale = HistoricalEvidenceSnapshot {
+        bundle_path: "retained/comparison-evidence-b3b5f2c1.tar",
+        ..COMPARISON_EVIDENCE_SNAPSHOT
+    };
+    let rebound_root = comparison_evidence_descriptor_identity_blake3(stale);
+    match verify_comparison_evidence(
+        stale,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    ) {
+        Err(HistoricalEvidenceError::DescriptorIdentityMismatch { expected, observed }) => {
+            assert_eq!(
+                expected,
+                COMPARISON_EVIDENCE_SNAPSHOT.descriptor_identity_blake3
+            );
+            assert_eq!(observed, rebound_root);
+        }
+        other => panic!("expected descriptor-identity refusal, got {other:?}"),
+    }
+
+    let rebound = authenticated_descriptor(stale);
+    let receipt = verify_comparison_evidence(
+        rebound,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        comparison_candidates(),
+    )
+    .expect("caller may reauthenticate a different bundle path label");
+    assert_eq!(receipt.descriptor_identity_blake3(), rebound_root);
+    assert_ne!(
+        receipt.descriptor_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.descriptor_identity_blake3
+    );
+    assert_eq!(
+        receipt.manifest_path(),
+        COMPARISON_EVIDENCE_SNAPSHOT.manifest_path
+    );
+    assert_eq!(receipt.bundle_path(), rebound.bundle_path);
+    assert_eq!(
+        receipt.manifest_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.manifest_identity_blake3
+    );
+    assert_eq!(
+        receipt.bundle_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.bundle_identity_blake3
+    );
+    assert_eq!(
+        receipt.comparison_model_identity_blake3(),
+        COMPARISON_EVIDENCE_SNAPSHOT.comparison_model_identity_blake3
+    );
+    assert_eq!(
+        receipt.trust_origin(),
+        HistoricalEvidenceTrustOrigin::CallerSuppliedProtocolConsistency
+    );
+    assert!(!receipt.current_decision_authority());
+    assert!(!receipt.human_review_authority());
+}
+
+#[test]
+fn same_score_authority_and_rationale_mutation_changes_model_identity() {
+    let canonical_scores = score_candidates(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())
+        .expect("canonical scores are valid");
+    let mut candidates = comparison_candidates().to_vec();
+    let mut factors: [fs_wedge::FactorRating; 9] = candidates[0]
+        .factors
+        .try_into()
+        .expect("candidate has exactly nine factors");
+    let original_rating = factors[0].rating;
+    let original_authority_score = factors[0].measurement.score;
+    factors[0].measurement.readiness = Readiness::Partial;
+    factors[0].measurement.method = MeasurementMethod::WorkspaceInventory;
+    factors[0].measurement.finding =
+        "Adversarial mutation preserves the score while changing evidence authority.";
+    factors[0].rationale =
+        "Adversarial mutation preserves the comparative rating but changes its rationale.";
+    assert_eq!(factors[0].rating, original_rating);
+    assert_eq!(factors[0].measurement.score, original_authority_score);
+    candidates[0].factors = Box::leak(Box::new(factors));
+    assert_eq!(
+        score_candidates(&DEFAULT_FACTOR_WEIGHTS, &candidates)
+            .expect("mutated model remains structurally scoreable"),
+        canonical_scores,
+        "authority metadata and rationale do not enter the weighted total"
+    );
+
+    let mutated_identity = comparison_model_identity_blake3(&DEFAULT_FACTOR_WEIGHTS, &candidates)
+        .expect("mutated complete model has a canonical identity");
+    assert_ne!(
+        mutated_identity,
+        COMPARISON_EVIDENCE_SNAPSHOT.comparison_model_identity_blake3
+    );
+    assert!(matches!(
+        verify_comparison_evidence(
+            COMPARISON_EVIDENCE_SNAPSHOT,
+            comparison_evidence_manifest(),
+            comparison_evidence_bundle(),
+            &candidates,
+        ),
+        Err(HistoricalEvidenceError::ComparisonModelIdentityMismatch { .. })
+    ));
+
+    let reauthenticated_identity = Box::leak(mutated_identity.into_boxed_str());
+    let caller_snapshot = authenticated_descriptor(HistoricalEvidenceSnapshot {
+        comparison_model_identity_blake3: reauthenticated_identity,
+        ..COMPARISON_EVIDENCE_SNAPSHOT
+    });
+    let caller_receipt = verify_comparison_evidence(
+        caller_snapshot,
+        comparison_evidence_manifest(),
+        comparison_evidence_bundle(),
+        &candidates,
+    )
+    .expect("caller may prove protocol consistency for its own complete model");
+    assert_eq!(
+        caller_receipt.trust_origin(),
+        HistoricalEvidenceTrustOrigin::CallerSuppliedProtocolConsistency
+    );
+    assert!(!caller_receipt.current_decision_authority());
+    assert!(!caller_receipt.human_review_authority());
+}
+
+#[test]
+fn comparison_model_identity_binds_weights_and_non_workspace_pointers() {
+    let canonical_identity =
+        comparison_model_identity_blake3(&DEFAULT_FACTOR_WEIGHTS, comparison_candidates())
+            .expect("canonical model has an identity");
+
+    let mut shifted_weights = DEFAULT_FACTOR_WEIGHTS;
+    shifted_weights[0].weight -= 1;
+    shifted_weights[1].weight += 1;
+    let shifted_identity =
+        comparison_model_identity_blake3(&shifted_weights, comparison_candidates())
+            .expect("normalized shifted weights have an identity");
+    assert_ne!(shifted_identity, canonical_identity);
+
+    let mut candidates = comparison_candidates().to_vec();
+    let mut factors: [fs_wedge::FactorRating; 9] = candidates[0]
+        .factors
+        .try_into()
+        .expect("candidate has exactly nine factors");
+    let mut pointers = factors[0].measurement.evidence.to_vec();
+    let bead_pointer = pointers
+        .iter_mut()
+        .find(|pointer| pointer.kind == EvidenceKind::Bead)
+        .expect("customer-pain input has a Bead pointer");
+    bead_pointer.locator = "adversarial caller-supplied Bead scope";
+    factors[0].measurement.evidence = Box::leak(pointers.into_boxed_slice());
+    candidates[0].factors = Box::leak(Box::new(factors));
+    let pointer_identity = comparison_model_identity_blake3(&DEFAULT_FACTOR_WEIGHTS, &candidates)
+        .expect("mutated non-workspace pointer remains structurally complete");
+    assert_ne!(pointer_identity, canonical_identity);
+    assert!(matches!(
+        verify_comparison_evidence(
+            COMPARISON_EVIDENCE_SNAPSHOT,
+            comparison_evidence_manifest(),
+            comparison_evidence_bundle(),
+            &candidates,
+        ),
+        Err(HistoricalEvidenceError::ComparisonModelIdentityMismatch { .. })
+    ));
 }
 
 #[test]
@@ -548,7 +828,7 @@ fn historical_comparison_replay_fails_closed_on_artifact_and_revision_mutation()
     ));
 
     let mut candidates = comparison_candidates().to_vec();
-    candidates[0].inventory_revision = "0000000000000000000000000000000000000000";
+    candidates[0].declared_inventory_revision = "0000000000000000000000000000000000000000";
     assert!(matches!(
         verify_comparison_evidence(
             COMPARISON_EVIDENCE_SNAPSHOT,
@@ -561,6 +841,72 @@ fn historical_comparison_replay_fails_closed_on_artifact_and_revision_mutation()
             ..
         })
     ));
+}
+
+#[test]
+fn historical_comparison_replay_refuses_reauthenticated_noncanonical_tar_headers() {
+    #[derive(Debug, Clone, Copy)]
+    enum Mutation {
+        PaxPath,
+        Magic,
+        Version,
+        NulTypeflag,
+        Mode,
+        NamePadding,
+        PrefixPadding,
+        ChecksumTerminator,
+        ReservedPadding,
+    }
+
+    for mutation in [
+        Mutation::PaxPath,
+        Mutation::Magic,
+        Mutation::Version,
+        Mutation::NulTypeflag,
+        Mutation::Mode,
+        Mutation::NamePadding,
+        Mutation::PrefixPadding,
+        Mutation::ChecksumTerminator,
+        Mutation::ReservedPadding,
+    ] {
+        let mut bundle = comparison_evidence_bundle().to_vec();
+        let header = &mut bundle[..512];
+        match mutation {
+            Mutation::PaxPath => {
+                header[..100].fill(0);
+                header[..b"../escape".len()].copy_from_slice(b"../escape");
+            }
+            Mutation::Magic => header[257] = b'v',
+            Mutation::Version => header[264] = b'1',
+            Mutation::NulTypeflag => header[156] = 0,
+            Mutation::Mode => header[106] = b'7',
+            Mutation::NamePadding => header[b"pax_global_header".len() + 1] = b'x',
+            Mutation::PrefixPadding => header[346] = b'x',
+            Mutation::ChecksumTerminator => {}
+            Mutation::ReservedPadding => header[500] = b'x',
+        }
+        rechecksum_test_tar_header(&mut bundle, 0);
+        if matches!(mutation, Mutation::ChecksumTerminator) {
+            // The checksum sum treats this whole field as spaces, so changing
+            // only the terminator preserves the numeric checksum.
+            bundle[155] = b' ';
+        }
+        let snapshot = authenticated_snapshot(comparison_evidence_manifest(), &bundle);
+        let error = verify_comparison_evidence(
+            snapshot,
+            comparison_evidence_manifest(),
+            &bundle,
+            comparison_candidates(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                HistoricalEvidenceError::MalformedBundle { offset: 0, .. }
+            ),
+            "{mutation:?} unexpectedly produced {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -582,15 +928,15 @@ fn historical_comparison_replay_refuses_missing_and_unavailable_sources() {
     .expect_err("renamed retained source must fail closed");
     match &error {
         HistoricalEvidenceError::SourceMismatch {
-            inventory_revision,
+            declared_inventory_revision,
             bundle_identity_blake3,
             reference,
             expected_bytes: Some(_),
             observed_bytes: None,
         } => {
             assert_eq!(
-                *inventory_revision,
-                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+                *declared_inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision
             );
             assert_eq!(
                 *bundle_identity_blake3,
@@ -601,7 +947,7 @@ fn historical_comparison_replay_refuses_missing_and_unavailable_sources() {
         other => panic!("unexpected missing-source diagnostic: {other:?}"),
     }
     let diagnostic = error.to_string();
-    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision));
+    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision));
     assert!(diagnostic.contains("crates/fs-adjoint/CONTRACT.md"));
 
     let empty_snapshot = authenticated_snapshot(comparison_evidence_manifest(), &[]);
@@ -638,7 +984,7 @@ fn historical_comparison_replay_refuses_reauthenticated_content_and_marker_mutat
     .expect_err("per-source identity must reject reauthenticated content mutation");
     match &content_error {
         HistoricalEvidenceError::SourceIdentityMismatch {
-            inventory_revision,
+            declared_inventory_revision,
             candidate,
             factor,
             reference,
@@ -647,8 +993,8 @@ fn historical_comparison_replay_refuses_reauthenticated_content_and_marker_mutat
             observed_blake3,
         } => {
             assert_eq!(
-                *inventory_revision,
-                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+                *declared_inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision
             );
             assert_eq!(candidate.as_ref(), "full-electronics-cooling-cht");
             assert_eq!(factor.as_ref(), "low-compute-cost");
@@ -701,7 +1047,7 @@ fn historical_comparison_replay_refuses_reauthenticated_content_and_marker_mutat
     .expect_err("authenticated source without locator must fail closed");
     match &marker_error {
         HistoricalEvidenceError::MarkerMissing {
-            inventory_revision,
+            declared_inventory_revision,
             source_identity_blake3,
             candidate,
             factor,
@@ -709,8 +1055,8 @@ fn historical_comparison_replay_refuses_reauthenticated_content_and_marker_mutat
             locator,
         } => {
             assert_eq!(
-                *inventory_revision,
-                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+                *declared_inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision
             );
             assert_eq!(source_identity_blake3, &observed_markerless_identity);
             assert_eq!(candidate.as_ref(), "full-electronics-cooling-cht");
@@ -742,15 +1088,15 @@ fn historical_comparison_replay_refuses_authenticated_pointer_path_mutation() {
     .expect_err("authenticated pointer-path mutation must fail closed");
     match &error {
         HistoricalEvidenceError::PointerMismatch {
-            inventory_revision,
+            declared_inventory_revision,
             manifest_identity_blake3,
             expected,
             observed,
             ..
         } => {
             assert_eq!(
-                *inventory_revision,
-                COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision
+                *declared_inventory_revision,
+                COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision
             );
             assert_eq!(*manifest_identity_blake3, snapshot.manifest_identity_blake3);
             assert!(expected.contains("crates/fs-ladder/CONTRACT.md"));
@@ -759,7 +1105,7 @@ fn historical_comparison_replay_refuses_authenticated_pointer_path_mutation() {
         other => panic!("unexpected pointer-path diagnostic: {other:?}"),
     }
     let diagnostic = error.to_string();
-    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.inventory_revision));
+    assert!(diagnostic.contains(COMPARISON_EVIDENCE_SNAPSHOT.declared_inventory_revision));
     assert!(diagnostic.contains("manifest BLAKE3"));
 }
 
@@ -943,8 +1289,20 @@ fn verbose_comparison_report_is_deterministic() {
     let first = render_comparison_report().expect("comparison report renders");
     let second = render_comparison_report().expect("comparison report replays");
     assert_eq!(first, second);
-    assert!(first.starts_with("FS-WEDGE-COMPARISON\tv2\n"));
+    assert!(first.starts_with("FS-WEDGE-COMPARISON\tv4\n"));
     assert_eq!(first.matches("HISTORICAL_EVIDENCE\t").count(), 1);
+    assert!(
+        first.contains("\tdeclared_inventory_revision=b3b5f2c1c809eec06cde1e40cbc916d6995469b5")
+    );
+    assert!(first.contains("\ttrust_origin=embedded-default"));
+    assert!(first.contains("\tdescriptor_identity_blake3="));
+    assert!(first.contains("\tcomparison_model_identity_blake3="));
+    assert!(
+        first.contains("\tmanifest_path=crates/fs-wedge/data/comparison-evidence-b3b5f2c1.tsv")
+    );
+    assert!(first.contains("\tbundle_path=crates/fs-wedge/data/comparison-evidence-b3b5f2c1.tar"));
+    assert!(first.contains("\tcurrent_decision_authority=false"));
+    assert!(first.contains("\thuman_review_authority=false"));
     assert_eq!(first.matches("FACTOR\t").count(), 27);
     assert_eq!(first.matches("RATING_FLIP\t").count(), 18);
     assert_eq!(first.matches("WEIGHT_FLIP\t").count(), 18);
