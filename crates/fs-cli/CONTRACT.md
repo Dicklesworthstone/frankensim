@@ -22,7 +22,8 @@ and L6 policy.
 As of bead `frankensim-extreal-program-f85xj.6.5` (slice 1) it additionally
 owns the deterministic solve-orchestration driver: content-derived run
 identity, session budgets derived from the project, staged ledgered
-execution, cancellation at stage boundaries, durable stage checkpoints
+execution, cancellation at stage boundaries and fixed solve-owned evidence
+checkpoints, durable stage checkpoints
 through the fs-exec legacy v1 snapshot envelope, and honest
 budget-exceeded/stage-gap terminals.
 
@@ -103,7 +104,7 @@ refusals retain all evidence available at the refusal stage and finish one
 terminal error operation. Project-admission, resource-envelope, and
 pre-cancellation failures occur before ledger side effects.
 
-### Solve orchestration (slice 1)
+### Solve orchestration (slices 1-2)
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The
@@ -117,9 +118,13 @@ artifacts still deduplicate by content. Driver semantics version 2 binds the
 strict lineage/evidence rules in this contract; version-1 run ids do not
 collide with or silently resume under version 2. Every solve operation carries the
 32-byte run identity as its ledger `session` value; the run's own operations
-are its index — resume and downstream consumers locate evidence through
-`visible_op_ids` + session filtering + bounded edge reads, with no ledger
-schema extension.
+are its index. Resume and import discovery walk globally descending
+`visible_op_ids_page_controlled` pages under a first-page high-water mark,
+then reconstruct each bounded candidate through
+`read_op_fields_controlled`. Retained field hashes are compared with the
+fixed operation-content sidecar only after cheap row/IR/Five-Explicits
+prefilters; a malformed sidecar on an unrelated row therefore cannot block
+discovery. No ledger schema extension is required.
 
 The session capability token is derived from project budgets: wall seconds
 from `:solve-time`, memory bytes from `:memory-bytes`, cores pinned to 1
@@ -183,23 +188,37 @@ is capped at 255 sources so the complete worst-case `4*N+1` edge set fits the
 ledger's 1024-edge scan. Raw artifacts are streamed under their frozen
 per-source/aggregate caps; opaque promotion receipts are streamed under a
 4 MiB per-artifact cap. PLY and assignment-report evidence that solve must
-parse has a 64 MiB per-artifact cap. Before the general PLY parser runs, solve
-requires the exact nine-line ASCII header emitted by `fs_io::ply::write_ply`,
-canonical unsigned vertex/face counts within the frozen import limits, and a
-matching number of newline-terminated body records. Before reading any source
-payload, solve preflights the checked total of the summary and every raw,
+parse has a 64 MiB per-artifact cap. Before payload verification, solve
+requires the exact nine-line ASCII header emitted by `fs_io::ply::write_ply`
+within a 256-byte header window, canonical unsigned vertex/face counts within
+the frozen import limits, and a matching number of newline-terminated body
+records. Solve then makes two bounded passes over that exact writer grammar:
+the first decodes finite vertex coordinates and in-range `u32` triangle
+indices; the second requires every numeric token to equal Rust's canonical
+writer spelling with exact single spaces and newlines. No generic
+`fs_io::ply::read_ply` or full-buffer `write_ply` call remains in solve
+verification. Before reading any source payload, solve preflights the checked
+total of the summary and every raw,
 promotion, PLY, and report artifact against the smaller of the project memory
 budget value and a 512 MiB hard admitted-input/work envelope. This is a
 deterministic per-candidate resource-admission bound, not a claim that peak
-allocations fit within that value: canonical PLY checking can simultaneously
-retain the input bytes, decoded soup, and canonical re-encoding. Independently
-valid equal-length or longer parallel histories can repeat this bounded
-attestation within one resume invocation; no invocation-wide cumulative work
-cap or memoization claim is made. A genuine candidate outside these solve
-envelopes produces `cli-solve-import-envelope`. Competing independently valid
-longest checkpoints are ambiguous and refuse rather than winning by row order.
-Only after this complete attestation does resume re-charge recorded
-consumption, so the budget continues instead of resetting.
+allocations fit within that value. One invocation examines at most 8,192
+visible operation IDs in at most 128 64-row pages and charges a single 1 GiB
+cumulative work ledger. This is a deterministic conservative byte-equivalent
+admission/work measure, not exact CPU accounting: controlled
+operation/artifact input bytes are charged once, accepted UTF-8 copies and
+direct byte-comparison passes add their processed bytes, derived render/receipt
+outputs add their exact output bytes, and fixed page rows, sidecars, edge
+items, descriptors, and project/entity/assignment items add documented proxy
+charges. If captured history continues beyond either cap, or cumulative work
+would exceed 1 GiB, solve returns
+`cli-solve-work-envelope`; it does not report a false not-found result or
+publish a refusal row that would worsen the same history bound. A genuine
+candidate outside the separate per-candidate solve envelope produces
+`cli-solve-import-envelope`. Competing independently valid longest checkpoints
+are ambiguous and refuse rather than winning by row order. Only after this
+complete attestation does resume re-charge recorded consumption, so the budget
+continues instead of resetting.
 
 ## Output and exit contract
 
@@ -233,7 +252,7 @@ is real and durable.
 Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-session`, `cli-solve-ledger`, `cli-solve-ledger-transaction`,
 `cli-solve-import-evidence`, `cli-solve-import-envelope`,
-`cli-solve-assignment`, `cli-solve-capability`,
+`cli-solve-work-envelope`, `cli-solve-assignment`, `cli-solve-capability`,
 `cli-solve-stage-gap`, `cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,
@@ -270,7 +289,11 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
   published.
 - A pre-cancelled solve publishes nothing; cancellation between stages leaves
   the completed prefix durable and resumable with bit-identical stage
-  evidence relative to an uninterrupted run.
+  evidence relative to an uninterrupted run. Cancellation during fresh or
+  resume evidence verification returns `cli-solve-cancelled` directly with no
+  refusal operation, stage receipt, checkpoint, seal, progress line, or
+  terminal-success publication. A zero-stage prefix recommends a fresh retry;
+  `--resume` guidance is emitted only after at least one durable stage exists.
 - Budget continuity survives resume: recorded consumption is re-charged
   before any new stage runs, and a resume that would already be exhausted
   refuses rather than resetting the meter.
@@ -332,14 +355,53 @@ A pre-cancelled attempt publishes nothing. Once the atomic SQLite transaction
 begins, the bounded ledger calls finish or roll back; cancellation does not
 leave a partial successful operation.
 
-The solve driver owns a caller-supplied `fs-exec::CancelGate` and polls it at
-every stage boundary before starting the next stage. Cancellation returns a
-`cli-solve-cancelled` refusal naming the resume command; the completed prefix
-is already durable, so nothing extra is written. Cancellation inside a stage
-body is not yet claimed: slice-1 stage bodies are short bounded verifications,
-and the physics stages that need intra-stage polling arrive with their
-producer beads. The binary does not yet install an OS signal handler; gate
-wiring exists at the library seam and is conformance-tested there.
+The solve driver owns a caller-supplied `fs-exec::CancelGate`. It polls at
+every stage boundary and throughout solve-owned evidence materialization,
+stream verification, incremental UTF-8 validation/copy, JSON cursor
+advancement, PLY body scanning, canonical payload decoding, writer-token
+verification, named-group face-reference and duplicate validation, retained
+project comparison, import-IR canonical comparison, and reconstructed
+stage-receipt comparison. Solve-owned artifact readers poll at phase entry
+before ledger dispatch, before and after every shared controlled tile, and
+again after the controlled reader returns before classifying a missing,
+stopped, corrupt, or complete result. Byte scans and comparisons use an
+input-byte checkpoint cadence no wider than 64 KiB and repeat the current
+checkpoint after inspected work before returning a mismatch or parse error.
+It also polls after every successful stage body immediately before clock,
+charge, or ledger publication. Cancellation returns `cli-solve-cancelled`
+directly; it never passes through the retained-refusal writer, so the already
+durable prefix is unchanged.
+
+The 64 KiB value is an input-byte checkpoint cadence, not a wall-clock latency
+claim. The controlled fs-ledger reader hashes and delivers one shared
+at-most-64-KiB tile before invoking solve; a callback break prevents later
+tile hashing/delivery. Its SQL engine may already have materialized the
+containing storage row of up to 4 MiB. JSON cursors poll at phase entry, at
+each crossed fixed boundary, and at the final current position before their
+wrapper classifies success or syntax failure. UTF-8 conversion and output
+reservation results, byte-comparison mismatches, named-face range failures,
+and PLY line/header/payload failures are likewise classified only after the
+post-work checkpoint. Import named-group duplicate checks preserve the
+writer's face and group order: they reserve each complete duplicate set once,
+scan face references in tiles representing at most 64 KiB of `u32` values,
+and bound every solve evidence label at 4 KiB. The enclosing operation IR
+inherits fs-ledger's guarded `MAX_OP_IR_BYTES` 1 MiB ceiling.
+
+Allocation and the named duplicate-set insertion itself remain bounded opaque
+intervals. Retained project parsing through `fs_project::parse_sexpr` is one
+opaque call over at most `MAX_PROJECT_BYTES` (16 MiB), bracketed by phase-entry
+and completion checkpoints; solve makes no intra-call latency claim for that
+lower-layer parser. Canonical import-project rendering and canonical stage
+receipt construction are also captured as bounded opaque calls bracketed by
+entry/completion checkpoints, followed by tiled byte comparison. State-envelope
+decoding is bounded by 4 MiB and bracketed before its result is classified.
+The PLY preflight, payload walk, and writer-spelling wrappers each repeat a
+bounded post-result checkpoint, including on short malformed input. Canonical
+JSON integer and finite-float token widths are capped before standard-library
+numeric conversion; the finite writer bound is 327 bytes, including the
+negative smallest subnormal. The binary does not yet install an OS signal
+handler; gate wiring exists at the library seam and is conformance-tested
+there.
 
 ## Unsafe boundary
 
@@ -385,9 +447,37 @@ longest checkpoints, unknown run ids, and a corrupted retained project pin
 (refused by the ledger's own read-integrity gate before the driver's identity
 check — both fail closed). Identity refusals occur before progress or ledger
 publication. G4 covers pre-cancellation with zero
-publication and between-stage cancellation whose resumed evidence is
-bit-identical to an uninterrupted run. G5 covers identical stage-receipt
-identities across independent fresh ledgers.
+publication, every fresh solve-owned evidence phase, a storage-row-spanning
+raw artifact, an exact-4-MiB inline promotion receipt stopped after its first
+shared 64-KiB controlled tile, extreme finite PLY writer spellings, incremental
+UTF-8 and JSON-parser phases, named-group face-range checks, chunked retained
+project comparison, resume checkpoint/project/receipt re-attestation, and the
+final pre-publication boundary with exact zero publication beyond any already
+durable prefix. It also proves a cancelled resume retry reproduces the same stage-receipt
+identities as an uninterrupted run. G5 covers identical stage-receipt
+identities across independent fresh ledgers. The typed G4 matrices enumerate
+61 fresh and 79 resume checkpoints, including entry/intermediate/completion
+points around visible-ID pages, controlled candidate fields and text
+conversion, operation sidecars, artifact descriptors, edge seals/pages/set
+comparisons, the invocation-cached canonical project JSON and Five Explicits,
+project validation/identity, entity resolution, source-indexed and stage
+assignment derivation, canonical receipt construction, retained-project
+parsing, state decoding, both available reconstructed stage receipts, and
+order-preserving duplicate work.
+Focused unit regressions cover immediate JSON phase entry, final-current
+syntax priority, empty/missing evidence dispatch entry, mismatch and invalid
+UTF-8 result priority, malformed PLY completion polling, named-face range
+priority, exact-4-KiB/cap-plus-one labels, and the exact-1-GiB cumulative-work
+boundary whose refused plus-one charge does not advance the meter. A focused
+accounting regression proves accepted UTF-8 copies and direct byte comparisons
+charge each processed tile once while invalid UTF-8 is not charged as accepted
+copy work. Integration regressions cover multi-page unrelated history, the
+8,192/8,193 visible-ID boundary, and cancellation/retry through exact-1-MiB
+operation fields. A G3
+import-IR regression keeps
+an intentionally unsorted named-face list unchanged while refusing repeated
+faces, repeated group names, and an over-ceiling label with zero stage
+publication.
 
 ## No-claim boundaries
 
@@ -444,13 +534,40 @@ identities across independent fresh ledgers.
   pause acknowledgement) arrive with the physics stage producers. Migration
   of the driver state to the v2 envelope waits on fs-exec's post-restart
   authorized-resume seam, which its CONTRACT names as unfinished.
+- The solve evidence cadence covers controlled visible-ID page progress,
+  controlled operation/artifact tiles, guarded text conversion, prehashed
+  sidecar checks, bounded descriptors and edge seals/pages, UTF-8 copy, JSON
+  cursors, canonical PLY decoding and writer-token comparison, Five-Explicits
+  and canonical byte comparison, project/source identity and validation,
+  entity resolution, assignment filtering/derivation, named-face ranges,
+  duplicate work, and exact edge-set comparison. SQL may materialize one
+  guarded operation field of at most 1 MiB before its at-most-64-KiB callback
+  slices, one bounded descriptor, or the bounded rows selected for a 64-ID
+  page/1,024-edge read; solve claims cancellation and accounting at the API
+  entry/callback/result boundaries, not inside the storage engine.
+  JSON/PLY cursor advancement is checkpointed, but its already-admitted input
+  bytes are not charged again per parser instruction. Standard-library
+  allocation, hash-table insertion, guarded text conversion, `parse_sexpr`
+  over at most 16 MiB, `findings`, canonical project/Five-Explicits rendering,
+  `resolve_entities`, and each bounded receipt-row formatting call remain
+  opaque between their pre/post checkpoints; derived render/receipt bytes and
+  accepted UTF-8/direct-comparison passes receive the conservative charges
+  described above, but no intra-call wall-time latency or peak-allocation
+  claim is made. Canonical project JSON and Five Explicits render once per
+  fresh invocation; resume caches them by fully attested retained-project
+  source hash and fully attests any distinct source before using its own
+  result. Lower-layer work outside these calls is not owned by this driver.
+- The order-preserving duplicate sets use a fixed standard-library hasher.
+  Their membership result is deterministic and their iteration order never
+  enters retained output; the implementation does not request a randomized
+  set seed.
 - Resume attestation proves consistency with this driver's retained canonical
   row/receipt/lineage format. Operation-content sidecars and artifact-edge
   seals detect divergence and post-seal mutation; they are not signatures,
   external producer authentication, or authorization against an actor that can
   manufacture an entirely canonical ledger history through the public ledger
-  API. That stronger threat model requires a separately authenticated producer
-  capability or signed receipt scheme.
+  API. That stronger authority model requires a separately authenticated
+  producer capability or signed receipt scheme.
 - Deterministic replay is claimed for retained stage artifacts, not for
   enforcement outcomes; kill -9 crash recovery of the ledger is fs-ledger's
   proven claim, and the driver's own kill -9 drill (resume to identical

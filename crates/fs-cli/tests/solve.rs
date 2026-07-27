@@ -6,14 +6,19 @@
 //! scripted clock and caller-owned cancellation gate.
 
 use fs_cli::{
-    CompletedStage, GeometryImportLimits, GeometryImportRun, RawGeometryLibrary,
-    SOLVE_DRIVER_VERSION, SolveDriverState, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage,
-    import_project_geometry, resume_solve, run_solve,
+    CompletedStage, GeometryImportLimits, GeometryImportRun, MAX_SOLVE_VISIBLE_OP_IDS,
+    RawGeometryLibrary, SOLVE_DRIVER_VERSION, SolveCancellationPlan, SolveDriverState,
+    SolveEvidencePhase, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage,
+    import_project_geometry, resume_solve, resume_solve_with_cancellation_plan, run_solve,
+    run_solve_with_cancellation_plan,
 };
 use fs_exec::solver::LegacySnapshotV1Adapter;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_io::quarantine::import_mesh;
-use fs_ledger::{EdgeRole, ExtensionTable, FiveExplicits, Ledger, OpOutcome, hash_bytes};
+use fs_io::{NamedFaceGroup, quarantine::import_mesh};
+use fs_ledger::{
+    CONTROLLED_ARTIFACT_TILE_LEN, CONTROLLED_OP_FIELD_TILE_LEN, EdgeRole, ExtensionTable,
+    FiveExplicits, Ledger, MAX_OP_FIELD_BYTES, OpOutcome, STORAGE_CHUNK_LEN, hash_bytes,
+};
 use fs_project::{
     Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl, Envelope,
     GeometryArtifact, GeometryAssignment, HalfSpaceSide, MeshSelector, Metadata, OutputRequest,
@@ -61,6 +66,19 @@ fn tetra_stl() -> Vec<u8> {
     stl.push_str(&facet(p1, p2, p3));
     stl.push_str("endsolid enclosure\n");
     stl.into_bytes()
+}
+
+fn storage_row_spanning_tetra_stl() -> Vec<u8> {
+    let base = tetra_stl();
+    let split = base
+        .windows(b"facet normal".len())
+        .position(|window| window == b"facet normal")
+        .expect("fixture contains a facet");
+    let mut padded = Vec::with_capacity(base.len() + STORAGE_CHUNK_LEN + 17);
+    padded.extend_from_slice(&base[..split]);
+    padded.resize(padded.len() + STORAGE_CHUNK_LEN + 17, b'\n');
+    padded.extend_from_slice(&base[split..]);
+    padded
 }
 
 fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -> ProjectSpec {
@@ -206,7 +224,12 @@ fn import_fixture(ledger: &Ledger, spec: &ProjectSpec, bytes: Vec<u8>) -> Geomet
         bytes,
         "m",
         0,
-        Vec::new(),
+        vec![NamedFaceGroup {
+            name: "fixture-all-faces".to_string(),
+            // Deliberately non-sorted: solve must preserve writer order while
+            // checking duplicates without a post-parse sort.
+            faces: vec![3, 1, 2, 0],
+        }],
     ));
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
@@ -224,7 +247,7 @@ fn reproduce_import_candidate(
     ir: &str,
     summary: &str,
 ) -> i64 {
-    reproduce_import_candidate_with_mesh(source, imported, target, ir, summary, None)
+    reproduce_import_candidate_with_overrides(source, imported, target, ir, summary, None, None)
 }
 
 fn reproduce_import_candidate_with_mesh(
@@ -234,6 +257,26 @@ fn reproduce_import_candidate_with_mesh(
     ir: &str,
     summary: &str,
     promoted_mesh_override: Option<&[u8]>,
+) -> i64 {
+    reproduce_import_candidate_with_overrides(
+        source,
+        imported,
+        target,
+        ir,
+        summary,
+        promoted_mesh_override,
+        None,
+    )
+}
+
+fn reproduce_import_candidate_with_overrides(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+    promoted_mesh_override: Option<&[u8]>,
+    promotion_receipt_override: Option<&[u8]>,
 ) -> i64 {
     let source_row = source
         .op(imported.op_id)
@@ -267,26 +310,24 @@ fn reproduce_import_candidate_with_mesh(
                 EdgeRole::Out,
             ),
         ] {
-            let bytes = if kind == "geometry-mesh-ply" {
-                promoted_mesh_override.map_or_else(
-                    || {
-                        source
-                            .get_artifact(&hash)
-                            .expect("read source artifact")
-                            .expect("source artifact exists")
-                    },
-                    <[u8]>::to_vec,
-                )
-            } else {
-                source
-                    .get_artifact(&hash)
-                    .expect("read source artifact")
-                    .expect("source artifact exists")
+            let override_bytes = match kind {
+                "geometry-mesh-ply" => promoted_mesh_override,
+                "geometry-import-receipt" => promotion_receipt_override,
+                _ => None,
             };
+            let bytes = override_bytes.map_or_else(
+                || {
+                    source
+                        .get_artifact(&hash)
+                        .expect("read source artifact")
+                        .expect("source artifact exists")
+                },
+                <[u8]>::to_vec,
+            );
             let copied = target
                 .put_artifact(kind, &bytes, None)
                 .expect("copy typed import artifact");
-            if kind == "geometry-mesh-ply" && promoted_mesh_override.is_some() {
+            if override_bytes.is_some() {
                 assert_eq!(copied.hash, hash_bytes(&bytes));
             } else {
                 assert_eq!(copied.hash, hash);
@@ -393,6 +434,63 @@ fn run_to_gap(ledger: &Ledger, decoded: &DecodedProject) -> (SolveRefusal, Vec<S
     let refusal = run_solve(ledger, &gate, &mut clock, decoded, &mut progress)
         .expect_err("slice 1 refuses at the first stage gap");
     (refusal, progress)
+}
+
+fn run_to_one_stage_prefix(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+) -> (SolveRefusal, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let gate_ref = &gate;
+    let mut calls = 0u64;
+    let mut clock = move || {
+        calls += 1;
+        if calls == 2 {
+            gate_ref.request();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    };
+    let mut progress = Vec::new();
+    let refusal = run_solve(ledger, &gate, &mut clock, decoded, &mut progress)
+        .expect_err("caller gate stops after the first durable stage");
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    (refusal, progress)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SolvePublicationCounts {
+    ops: u64,
+    artifacts: u64,
+    artifact_chunks: u64,
+    edges: u64,
+    artifact_output_seals: u64,
+    op_artifact_edge_seals: u64,
+    op_content_identities: u64,
+    imports: u64,
+}
+
+fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
+    SolvePublicationCounts {
+        ops: ledger.table_count("ops").expect("op count"),
+        artifacts: ledger.table_count("artifacts").expect("artifact count"),
+        artifact_chunks: ledger
+            .table_count("artifact_chunks")
+            .expect("artifact chunk count"),
+        edges: ledger.table_count("edges").expect("edge count"),
+        artifact_output_seals: ledger
+            .table_count("artifact_output_seals")
+            .expect("artifact-output-seal count"),
+        op_artifact_edge_seals: ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("op-edge-seal count"),
+        op_content_identities: ledger
+            .table_count("op_content_identities")
+            .expect("op-content-identity count"),
+        imports: ledger.table_count("imports").expect("import count"),
+    }
 }
 
 #[test]
@@ -545,6 +643,263 @@ fn g4_a_precancelled_solve_publishes_nothing() {
 }
 
 #[test]
+fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_phase() {
+    let phases = [
+        (SolveEvidencePhase::ProjectValidation, None, 0),
+        (SolveEvidencePhase::ProjectValidation, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 1),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 0),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 1),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 0),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 0),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 1),
+        (SolveEvidencePhase::ImportIrParse, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 0),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 2),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 0),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 1),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 17),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 0),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::OperationContentIdentity, Some(0), 0),
+        (
+            SolveEvidencePhase::OperationContentIdentity,
+            Some(0),
+            u64::MAX,
+        ),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 0),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 1),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 0),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 1),
+        (SolveEvidencePhase::ImportSummaryRead, None, 1),
+        (SolveEvidencePhase::ImportSummaryUtf8, None, 1),
+        (SolveEvidencePhase::ImportSummaryParse, None, 1),
+        (SolveEvidencePhase::RawSourceRead, Some(0), 1),
+        (SolveEvidencePhase::PromotionReceiptRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshPreflight, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshDecode, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshEncodeCompare, Some(0), 2),
+        (SolveEvidencePhase::NamedGroupFaceRange, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportRead, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportUtf8, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportParse, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 0),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::EntityResolution, None, 0),
+        (SolveEvidencePhase::EntityResolution, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 0),
+        (SolveEvidencePhase::AssignmentDerivation, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 2),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 0),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 1),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 2),
+        (SolveEvidencePhase::ReceiptDerivation, None, 0),
+        (SolveEvidencePhase::ReceiptDerivation, None, 1),
+        (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+        (SolveEvidencePhase::PrePublication, None, 0),
+    ];
+    assert_eq!(
+        phases.len(),
+        61,
+        "every fresh-run solve-owned evidence phase, canonical-render entry/completion/tile boundary, duplicate-set entry/face/name traversal, and final pre-publication boundary is listed"
+    );
+
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_one_stage_prefix(&prefix_ledger, &decoded);
+    let one_stage_prefix = solve_publication_counts(&prefix_ledger);
+    for (phase, source_index, after_units) in phases {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let before = solve_publication_counts(&ledger);
+        let gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(phase, source_index, after_units);
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+
+        let refusal = run_solve_with_cancellation_plan(
+            &ledger,
+            &gate,
+            &mut clock,
+            &decoded,
+            &mut progress,
+            &plan,
+        )
+        .expect_err("planned in-stage cancellation refuses");
+        assert!(
+            plan.fired(),
+            "phase {phase:?} reached its planned checkpoint"
+        );
+        assert_eq!(refusal.code, "cli-solve-cancelled", "phase {phase:?}");
+        let has_durable_prefix =
+            phase == SolveEvidencePhase::AssignmentDerivation && source_index.is_none();
+        if has_durable_prefix {
+            assert!(
+                refusal.fix.contains("--resume"),
+                "post-import phase {phase:?} recommends its durable prefix"
+            );
+        } else {
+            assert!(
+                refusal.fix.contains("retry the fresh solve"),
+                "zero-prefix phase {phase:?} gives actionable fresh-retry guidance"
+            );
+            assert!(
+                !refusal.fix.contains("--resume"),
+                "zero-prefix phase {phase:?} does not recommend an unavailable checkpoint"
+            );
+            assert!(
+                !refusal.what.contains("durable"),
+                "zero-prefix phase {phase:?} does not claim a durable checkpoint"
+            );
+        }
+        assert!(refusal.recorded_op.is_none(), "phase {phase:?}");
+        assert_eq!(
+            progress.len(),
+            usize::from(has_durable_prefix),
+            "phase {phase:?} reports exactly its durable prefix"
+        );
+        assert_eq!(
+            solve_publication_counts(&ledger),
+            if has_durable_prefix {
+                one_stage_prefix
+            } else {
+                before
+            },
+            "phase {phase:?} changes no publication beyond its durable prefix"
+        );
+    }
+}
+
+#[test]
+fn g4_chunked_raw_evidence_stops_before_a_later_storage_row_and_publishes_nothing() {
+    let bytes = storage_row_spanning_tetra_stl();
+    assert!(bytes.len() > STORAGE_CHUNK_LEN);
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let imported = import_fixture(&ledger, &spec, bytes);
+    let raw = imported.artifacts[0].raw_source;
+    let raw_info = ledger
+        .artifact_info(&raw)
+        .expect("raw info query")
+        .expect("raw artifact");
+    assert!(raw_info.chunk_count > 0, "fixture must span storage rows");
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(SolveEvidencePhase::RawSourceRead, Some(0), 65_536);
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &mut progress,
+        &plan,
+    )
+    .expect_err("planned chunked raw-evidence cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
+fn g4_exact_cap_promotion_receipt_stops_at_the_first_controlled_tile() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let entry = &imported.artifacts[0];
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    let exact_cap_receipt = vec![b'r'; STORAGE_CHUNK_LEN];
+    let exact_cap_hash = hash_bytes(&exact_cap_receipt);
+    let exact_cap_summary = valid_summary.replacen(
+        &entry.promotion_receipt.to_hex(),
+        &exact_cap_hash.to_hex(),
+        1,
+    );
+    assert_ne!(
+        exact_cap_summary, valid_summary,
+        "summary must bind the exact-cap receipt"
+    );
+
+    let ledger = Ledger::open(":memory:").expect("target ledger");
+    reproduce_import_candidate_with_overrides(
+        &source,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &exact_cap_summary,
+        None,
+        Some(&exact_cap_receipt),
+    );
+    let receipt_info = ledger
+        .artifact_info(&exact_cap_hash)
+        .expect("receipt descriptor query")
+        .expect("exact-cap receipt");
+    assert_eq!(receipt_info.len, STORAGE_CHUNK_LEN as u64);
+    assert_eq!(
+        receipt_info.chunk_count, 0,
+        "an artifact at the storage bound remains one inline SQL row"
+    );
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(
+        SolveEvidencePhase::PromotionReceiptRead,
+        Some(0),
+        CONTROLLED_ARTIFACT_TILE_LEN as u64,
+    );
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &mut progress,
+        &plan,
+    )
+    .expect_err("planned exact-cap receipt cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
 fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
     let bytes = tetra_stl();
     let spec = fixture_project(7, &bytes);
@@ -612,6 +967,223 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
     assert_eq!(
         reference_receipts, resumed_receipts,
         "stage evidence is bit-identical across interruption"
+    );
+}
+
+#[test]
+fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (gap, _) = run_to_gap(&ledger, &decoded);
+    let run = gap.run.expect("run id");
+    let before = solve_publication_counts(&ledger);
+
+    let phases = [
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 0),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 1),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 0),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 1),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 0),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 1),
+        (SolveEvidencePhase::EdgeSealRead, Some(0), 0),
+        (SolveEvidencePhase::EdgeSealRead, Some(0), 1),
+        (SolveEvidencePhase::ResumeStateRead, None, 1),
+        (SolveEvidencePhase::ResumeStateDecode, None, 0),
+        (SolveEvidencePhase::ResumeStateDecode, None, 1),
+        (SolveEvidencePhase::ResumeProjectRead, None, 1),
+        (SolveEvidencePhase::ResumeProjectUtf8, None, 1),
+        (SolveEvidencePhase::ResumeProjectParse, None, 0),
+        (SolveEvidencePhase::ResumeProjectParse, None, 1),
+        (SolveEvidencePhase::ProjectValidation, None, 0),
+        (SolveEvidencePhase::ProjectValidation, None, 1),
+        (SolveEvidencePhase::ResumeProjectCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 0),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 1),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 0),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 0),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::OperationContentIdentity, Some(0), 0),
+        (
+            SolveEvidencePhase::OperationContentIdentity,
+            Some(0),
+            u64::MAX,
+        ),
+        (SolveEvidencePhase::ResumeStageReceiptRead, None, 1),
+        (SolveEvidencePhase::ResumeStageReceiptUtf8, None, 1),
+        (SolveEvidencePhase::ResumeStageReceiptParse, None, 1),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            0,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            1,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            2,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            0,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            1,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            2,
+        ),
+        (SolveEvidencePhase::ImportIrParse, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 0),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 2),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 0),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 1),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 17),
+        (SolveEvidencePhase::ImportSummaryRead, None, 1),
+        (SolveEvidencePhase::ImportSummaryUtf8, None, 1),
+        (SolveEvidencePhase::ImportSummaryParse, None, 1),
+        (SolveEvidencePhase::RawSourceRead, Some(0), 1),
+        (SolveEvidencePhase::PromotionReceiptRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshPreflight, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshDecode, Some(0), 2),
+        (SolveEvidencePhase::PromotedMeshEncodeCompare, Some(0), 2),
+        (SolveEvidencePhase::NamedGroupFaceRange, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportRead, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportUtf8, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportParse, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 0),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::EntityResolution, None, 0),
+        (SolveEvidencePhase::EntityResolution, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 0),
+        (SolveEvidencePhase::AssignmentDerivation, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 2),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 0),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 1),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 2),
+        (SolveEvidencePhase::ReceiptDerivation, None, 0),
+        (SolveEvidencePhase::ReceiptDerivation, None, 1),
+        (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+    ];
+    assert_eq!(
+        phases.len(),
+        79,
+        "resume re-attestation lists every reachable read, UTF-8, opaque parse entry/completion, canonical-render entry/completion/tile, duplicate-set traversal, receipt entry/completion/tile, and canonical PLY phase"
+    );
+    for (phase, source_index, after_units) in phases {
+        let gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(phase, source_index, after_units);
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+        let refusal = resume_solve_with_cancellation_plan(
+            &ledger,
+            &gate,
+            &mut clock,
+            &run,
+            &mut progress,
+            &plan,
+        )
+        .expect_err("planned resume re-attestation cancellation refuses");
+        assert!(
+            plan.fired(),
+            "phase {phase:?} reached its planned checkpoint"
+        );
+        assert_eq!(refusal.code, "cli-solve-cancelled", "phase {phase:?}");
+        assert!(refusal.recorded_op.is_none(), "phase {phase:?}");
+        assert!(
+            progress.is_empty(),
+            "phase {phase:?} emitted no success line"
+        );
+        assert_eq!(
+            solve_publication_counts(&ledger),
+            before,
+            "phase {phase:?} changed no solve publication table"
+        );
+    }
+
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut progress)
+        .expect_err("unchanged durable prefix still reaches the known gap");
+    assert_eq!(retry.code, "cli-solve-stage-gap");
+    assert_eq!(retry.stage, Some("material-resolve"));
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        2,
+        "the normal retry preserves the complete durable stage prefix"
+    );
+}
+
+#[test]
+fn g4_resume_prepublication_cancellation_preserves_prefix_and_replay_identity() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let reference = Ledger::open(":memory:").expect("reference ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let (reference_gap, _) = run_to_gap(&reference, &decoded);
+    let reference_run = reference_gap.run.expect("reference run id");
+    let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
+
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (prefix_refusal, _) = run_to_one_stage_prefix(&ledger, &decoded);
+    let run = prefix_refusal.run.expect("run id");
+    assert_eq!(run, reference_run);
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 1);
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(SolveEvidencePhase::PrePublication, None, 1);
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal =
+        resume_solve_with_cancellation_plan(&ledger, &gate, &mut clock, &run, &mut progress, &plan)
+            .expect_err("assign-stage pre-publication cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 1);
+
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut retry_progress = Vec::new();
+    let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut retry_progress)
+        .expect_err("retry completes assign then reaches the known gap");
+    assert_eq!(retry.code, "cli-solve-stage-gap");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        reference_receipts,
+        "retry after pre-publication cancellation reproduces exact stage receipts"
     );
 }
 
@@ -1108,7 +1680,7 @@ fn g3_import_summary_requires_the_exact_versioned_schema_not_a_hash_substring() 
     .expect("valid summary UTF-8");
     let fake_summary = valid_summary.replacen(
         "frankensim.cli.geometry-import-receipt.v1",
-        "attacker.geometry-import-receipt.v1",
+        "alternate.geometry-import-receipt.v1",
         1,
     );
     reproduce_import_candidate(
@@ -1173,6 +1745,66 @@ fn g3_import_ir_requires_exact_writer_limits_and_policy_shapes() {
             progress.is_empty(),
             "{label} decoy must execute no solve stage"
         );
+    }
+}
+
+#[test]
+fn g3_import_ir_duplicate_checks_preserve_order_and_bound_labels() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let (valid_gap, _) = run_to_gap(&source, &decoded);
+    assert_eq!(valid_gap.stage, Some("material-resolve"));
+
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let canonical_group = "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,2,0]}]";
+    assert!(
+        source_row.ir.contains(canonical_group),
+        "the accepted writer fixture preserves deliberately non-sorted face order"
+    );
+
+    let duplicate_face = source_row.ir.replacen(
+        canonical_group,
+        "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,1,0]}]",
+        1,
+    );
+    let duplicate_name = source_row.ir.replacen(
+        canonical_group,
+        "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,2,0]},{\"name\":\"fixture-all-faces\",\"faces\":[0]}]",
+        1,
+    );
+    let oversized_name = source_row.ir.replacen(
+        "\"name\":\"fixture-all-faces\"",
+        &format!("\"name\":\"{}\"", "n".repeat(4097)),
+        1,
+    );
+    for (label, ir) in [
+        ("duplicate face", duplicate_face),
+        ("duplicate name", duplicate_name),
+        ("oversized name", oversized_name),
+    ] {
+        assert_ne!(ir, source_row.ir, "{label} mutation must change the IR");
+        let ledger = Ledger::open(":memory:").expect("isolated decoy ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label}: {refusal:?}"
+        );
+        assert!(progress.is_empty(), "{label} must execute no solve stage");
     }
 }
 
@@ -1370,6 +2002,145 @@ fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
         "the older valid import must still execute the solve prefix"
+    );
+}
+
+fn append_unrelated_completed_ops(ledger: &Ledger, count: usize) {
+    ledger.begin().expect("begin unrelated history transaction");
+    for index in 0..count {
+        let started = i64::try_from(index)
+            .expect("bounded fixture index fits i64")
+            .saturating_mul(2)
+            .saturating_add(10_000);
+        let op = ledger
+            .begin_op(
+                None,
+                "{\"schema\":\"unrelated.history.v1\"}",
+                &FiveExplicits {
+                    seed: b"unrelated-history",
+                    versions: "{}",
+                    budget: "{}",
+                    capability: "{}",
+                },
+                started,
+            )
+            .expect("append unrelated history op");
+        ledger
+            .finish_op(op, OpOutcome::Ok, None, started.saturating_add(1))
+            .expect("finish unrelated history op");
+    }
+    ledger.commit().expect("commit unrelated history");
+}
+
+fn exact_json_bytes(len: usize) -> String {
+    assert!(len >= 2);
+    format!("\"{}\"", "x".repeat(len - 2))
+}
+
+#[test]
+fn g3_multi_page_unrelated_history_still_finds_the_older_valid_import() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    append_unrelated_completed_ops(&ledger, 193);
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert!(
+        progress.iter().any(|line| line.contains("import-verify")),
+        "descending discovery must continue across multiple pages"
+    );
+}
+
+#[test]
+fn g4_cap_plus_one_history_refuses_explicitly_without_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    append_unrelated_completed_ops(&ledger, MAX_SOLVE_VISIBLE_OP_IDS);
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &mut progress)
+        .expect_err("history beyond the frozen invocation cap refuses");
+    assert_eq!(refusal.code, "cli-solve-work-envelope", "{refusal:?}");
+    assert!(
+        refusal.what.contains("visible operation ids"),
+        "{refusal:?}"
+    );
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
+fn g4_maximum_operation_fields_are_tiled_cancelled_and_retryable() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let session = vec![b's'; MAX_OP_FIELD_BYTES];
+    let seed = vec![b'r'; MAX_OP_FIELD_BYTES];
+    let ir = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let versions = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let budget = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let capability = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let unrelated = ledger
+        .begin_op(
+            Some(&session),
+            &ir,
+            &FiveExplicits {
+                seed: &seed,
+                versions: &versions,
+                budget: &budget,
+                capability: &capability,
+            },
+            100,
+        )
+        .expect("maximum-field unrelated operation");
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 101)
+        .expect("finish maximum-field unrelated operation");
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(
+        SolveEvidencePhase::CandidateOpRowRead,
+        Some(0),
+        u64::try_from(CONTROLLED_OP_FIELD_TILE_LEN).expect("tile size fits u64"),
+    );
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &mut progress,
+        &plan,
+    )
+    .expect_err("maximum-field controlled row read stops at a tile boundary");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+
+    let (retry, retry_progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(retry.code, "cli-solve-stage-gap", "{retry:?}");
+    assert!(
+        retry_progress
+            .iter()
+            .any(|line| line.contains("import-verify")),
+        "retry must skip the unrelated maximum-field row and find the valid import"
     );
 }
 

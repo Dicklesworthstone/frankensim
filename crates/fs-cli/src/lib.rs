@@ -20,9 +20,10 @@ pub use import::{
     RecordedImportRefusal, RetainedGeometryImport, import_project_geometry,
 };
 pub use solve::{
-    CompletedStage, SOLVE_DRIVER_VERSION, SOLVE_RUN_IDENTITY_DOMAIN, SolveDriverState,
-    SolveOutcome, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage, StageSummary, resume_solve,
-    run_solve,
+    CompletedStage, MAX_SOLVE_VISIBLE_OP_IDS, SOLVE_DRIVER_VERSION, SOLVE_RUN_IDENTITY_DOMAIN,
+    SolveCancellationPlan, SolveDriverState, SolveEvidencePhase, SolveOutcome, SolveRefusal,
+    SolveRunId, SolveRunStatus, SolveStage, StageSummary, resume_solve,
+    resume_solve_with_cancellation_plan, run_solve, run_solve_with_cancellation_plan,
 };
 
 /// Maximum project source accepted by the CLI.

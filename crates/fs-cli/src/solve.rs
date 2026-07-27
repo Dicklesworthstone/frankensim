@@ -21,19 +21,27 @@
 // refusal idiom (`GeometryImportRefusal`) is by-value for the same reason.
 #![allow(clippy::result_large_err)]
 
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
+use std::hash::BuildHasherDefault;
+use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use fs_blake3::hash_domain;
 use fs_blake3::identity::ContentId;
 use fs_exec::CancelGate;
 use fs_exec::solver::{
     LegacySnapshotExpectationV1, LegacySnapshotLimitsV1, LegacySnapshotV1Adapter,
-    LegacySolverStateV1, codec,
+    LegacySnapshotV1Error, LegacySolverStateV1, codec,
 };
 use fs_io::{MESH_ASSIGNMENT_SEMANTICS_VERSION, MeshSelector, NamedFaceGroup};
 use fs_ledger::{
-    ContentHash, EdgeRole, ExecMode, FiveExplicits, Ledger, LedgerError, MAIN_BRANCH,
-    OpArtifactEdge, OpOutcome, OpRow, hash_bytes,
+    ArtifactInfo, BoundedOpArtifactEdges, CONTROLLED_ARTIFACT_TILE_LEN, ContentHash,
+    ControlledOpRead, ControlledVisibleOpPage, EdgeRole, ExecMode, FiveExplicits, Ledger,
+    LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
+    OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
 use fs_project::{DecodedProject, GeometryArtifact, ProjectSpec, geometry_source_identity};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
@@ -85,6 +93,25 @@ const DRIVER_STATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Whole-envelope cap for a retained driver-state snapshot.
 const MAX_STATE_ENVELOPE_BYTES: u64 = 4 * 1024 * 1024;
 const STATE_HASH_POLL_BYTES: u32 = 64 * 1024;
+/// Maximum solve-owned byte work between evidence cancellation observations.
+const EVIDENCE_POLL_BYTES: usize = CONTROLLED_ARTIFACT_TILE_LEN;
+/// Longest canonical signed/unsigned 64-bit JSON integer spelling.
+const MAX_JSON_INTEGER_BYTES: usize = 20;
+/// Longest finite Rust `f64::to_string()` spelling. The negative smallest
+/// subnormal needs 327 bytes because finite `Display` uses fixed decimal text
+/// at that magnitude.
+const MAX_CANONICAL_F64_BYTES: usize = 327;
+/// Longest canonical decimal spelling of a `u32`.
+const MAX_CANONICAL_U32_BYTES: usize = 10;
+/// Separator-inclusive bound for one canonical writer vertex line.
+const MAX_CANONICAL_PLY_VERTEX_LINE_BYTES: usize = MAX_CANONICAL_F64_BYTES * 3 + 2;
+/// Separator-inclusive bound for one canonical writer triangle line.
+const MAX_CANONICAL_PLY_FACE_LINE_BYTES: usize = MAX_CANONICAL_U32_BYTES * 3 + 4;
+/// Solve-local ceiling for retained names and identities that are compared or
+/// hashed outside the JSON cursor. This retains the lower-layer 4-KiB default
+/// and keeps every individual scalar operation below one evidence tile.
+const MAX_SOLVE_EVIDENCE_LABEL_BYTES: usize = 4096;
+type SolveEvidenceSet<T> = HashSet<T, BuildHasherDefault<DefaultHasher>>;
 
 /// Read cap for stage receipts and import summaries consumed on resume.
 const MAX_RECEIPT_READ_BYTES: u64 = 4 * 1024 * 1024;
@@ -97,15 +124,355 @@ const MAX_OPAQUE_IMPORT_RECEIPT_BYTES: u64 = 4 * 1024 * 1024;
 /// Absolute project-wide solve-verification admitted-input/work envelope. The
 /// effective cap is the smaller of this value and the project's declared
 /// memory-budget value. This byte-total preflight is not a peak-allocation
-/// proof: parsed PLY validation can temporarily retain input, decoded soup, and
-/// canonical re-encoding at the same time.
+/// proof: evidence materialization, incremental UTF-8 copies, and parser-owned
+/// allocations can coexist within one candidate verification.
 const MAX_TOTAL_SOLVE_EVIDENCE_BYTES: u64 = 512 * 1024 * 1024;
+/// Invocation-wide cumulative work envelope for discovery and retained
+/// evidence re-attestation. This deterministic conservative byte-equivalent
+/// measure charges controlled input bytes once, accepted copy/comparison and
+/// derived-output bytes, plus fixed proxies for ids/items. It is not exact CPU
+/// accounting. The separate visible-id ceiling prevents a long history of tiny
+/// rows from avoiding this byte envelope.
+const MAX_SOLVE_INVOCATION_WORK_BYTES: u64 = 1024 * 1024 * 1024;
+/// Maximum visible operation IDs examined by one solve invocation.
+#[doc(hidden)]
+pub const MAX_SOLVE_VISIBLE_OP_IDS: usize = 8192;
+/// Maximum fixed-size descending pages consumed before an explicit refusal.
+const MAX_SOLVE_VISIBLE_OP_PAGES: usize =
+    MAX_SOLVE_VISIBLE_OP_IDS.div_ceil(MAX_VISIBLE_OP_PAGE_ROWS);
+/// Byte-equivalent work charged for one fixed-size operation id.
+const OP_ID_WORK_BYTES: u64 = 8;
+/// Fixed byte-equivalent work charged for one typed operation sidecar.
+const OP_CONTENT_IDENTITY_WORK_BYTES: u64 = 256;
+/// Byte-equivalent work charged for one role-qualified content-hash edge.
+const EDGE_ITEM_WORK_BYTES: u64 = 33;
+/// Byte-equivalent work charged for one bounded project/assignment item.
+const DERIVATION_ITEM_WORK_BYTES: u64 = 64;
 /// Edge scan cap per operation while locating retained evidence.
 const EDGE_SCAN_CAP: usize = 1024;
 /// Largest geometry set the solve evidence contract can attest completely.
 /// One import operation has at most `4 * sources + 1` typed edges, so 255
 /// sources fit under the ledger's 1024-edge bounded scan.
 const SOLVE_MAX_IMPORT_SOURCES: usize = 255;
+
+/// Stable solve evidence-verification phases exposed only for deterministic
+/// conformance-test cancellation plans.
+///
+/// Production callers request cancellation through [`CancelGate`] directly.
+/// This enum does not grant a callback or any publication authority.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveEvidencePhase {
+    /// Read one descending, frozen-high-water page of visible operation ids.
+    VisibleOpPage,
+    /// Retrieve one bounded candidate operation row.
+    CandidateOpRowRead,
+    /// Convert one guarded candidate text field after controlled delivery.
+    CandidateOpTextConversion,
+    /// Recompute one candidate operation's typed content identity.
+    OperationContentIdentity,
+    /// Render the project-derived Five Explicits.
+    FiveExplicitsRender,
+    /// Compare retained and re-rendered Five Explicits in bounded tiles.
+    FiveExplicitsCompare,
+    /// Render the canonical project JSON once for import-row comparison.
+    CanonicalProjectRender,
+    /// Validate one decoded project through its lower-layer validator.
+    ProjectValidation,
+    /// Derive the canonical project and solve-run identities.
+    ProjectIdentityDerive,
+    /// Re-derive the project's stable entity identities.
+    EntityResolution,
+    /// Derive assignment identities, rows, or the canonical assignment receipt.
+    AssignmentDerivation,
+    /// Construct one canonical stage receipt from already verified evidence.
+    ReceiptDerivation,
+    /// Retrieve one bounded operation edge page.
+    EdgePageRead,
+    /// Retrieve one bounded artifact descriptor used by discovery or re-attestation.
+    ArtifactDescriptorRead,
+    /// Retrieve one fixed operation-edge lineage seal.
+    EdgeSealRead,
+    /// Compare one bounded retained edge set with its exact expected set.
+    EdgeSetCompare,
+    /// Parse the retained geometry-import operation IR.
+    ImportIrParse,
+    /// Compare the import IR's embedded project with a canonical rendering.
+    ImportIrCanonicalCompare,
+    /// Check import-IR named-group face and name uniqueness without sorting.
+    ImportIrDuplicateCheck,
+    /// Materialize the retained geometry-import summary.
+    ImportSummaryRead,
+    /// Incrementally validate and copy the retained import summary as UTF-8.
+    ImportSummaryUtf8,
+    /// Parse the retained geometry-import summary.
+    ImportSummaryParse,
+    /// Verify one retained raw source without materializing it.
+    RawSourceRead,
+    /// Verify one opaque lower-layer promotion receipt.
+    PromotionReceiptRead,
+    /// Materialize one promoted canonical PLY.
+    PromotedMeshRead,
+    /// Check one promoted PLY's bounded canonical header and body shape.
+    PromotedMeshPreflight,
+    /// Decode and range-check one canonical promoted PLY payload.
+    PromotedMeshDecode,
+    /// Re-scan one promoted PLY for exact fs-io writer token spellings.
+    PromotedMeshEncodeCompare,
+    /// Range-check retained named-group face references in bounded tiles.
+    NamedGroupFaceRange,
+    /// Materialize one assignment report.
+    AssignmentReportRead,
+    /// Incrementally validate and copy one assignment report as UTF-8.
+    AssignmentReportUtf8,
+    /// Parse and re-attest one assignment report.
+    AssignmentReportParse,
+    /// Materialize the retained canonical project during resume.
+    ResumeProjectRead,
+    /// Incrementally validate and copy the retained canonical project.
+    ResumeProjectUtf8,
+    /// Strictly parse the retained project in one bounded opaque call.
+    ResumeProjectParse,
+    /// Compare the parser's canonical project with retained bytes in tiles.
+    ResumeProjectCanonicalCompare,
+    /// Materialize a retained driver checkpoint during resume.
+    ResumeStateRead,
+    /// Decode and inspect a retained driver checkpoint envelope.
+    ResumeStateDecode,
+    /// Materialize a retained stage receipt during resume.
+    ResumeStageReceiptRead,
+    /// Incrementally validate and copy a retained stage receipt as UTF-8.
+    ResumeStageReceiptUtf8,
+    /// Parse a retained import-verification receipt during resume.
+    ResumeStageReceiptParse,
+    /// Compare one reconstructed canonical stage receipt with retained bytes.
+    ///
+    /// The optional plan index is the completed-stage index for this phase.
+    ResumeStageReceiptCanonicalCompare,
+    /// Final gate observation after a successful stage body and before any
+    /// clock, charge, or ledger publication for that stage.
+    PrePublication,
+}
+
+/// Deterministic conformance-test plan that requests the supplied gate at one
+/// typed evidence-work checkpoint.
+///
+/// `after_units` is a phase-relative lower bound. Byte phases observe it at
+/// fixed boundaries no wider than [`EVIDENCE_POLL_BYTES`]; item and opaque-call
+/// phases observe it before and after each owned item/call. A plan can only
+/// request the gate once and cannot run caller code.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SolveCancellationPlan {
+    phase: SolveEvidencePhase,
+    /// Optional phase-defined item index: geometry-source index for import
+    /// evidence, or completed-stage index for canonical stage receipts.
+    source_index: Option<usize>,
+    after_units: u64,
+    fired: Cell<bool>,
+}
+
+impl SolveCancellationPlan {
+    /// Construct a one-shot deterministic cancellation request.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        phase: SolveEvidencePhase,
+        source_index: Option<usize>,
+        after_units: u64,
+    ) -> Self {
+        Self {
+            phase,
+            source_index,
+            after_units,
+            fired: Cell::new(false),
+        }
+    }
+
+    /// Whether this plan reached its requested checkpoint.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fired(&self) -> bool {
+        self.fired.get()
+    }
+
+    fn observe(
+        &self,
+        gate: &CancelGate,
+        phase: SolveEvidencePhase,
+        source_index: Option<usize>,
+        units: u64,
+    ) {
+        if !self.fired.get()
+            && self.phase == phase
+            && self.source_index == source_index
+            && units >= self.after_units
+        {
+            self.fired.set(true);
+            gate.request();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EvidenceCancelled;
+
+#[derive(Debug, Clone, Copy)]
+enum InvocationWorkExceeded {
+    CumulativeBytes { attempted: u64 },
+    VisibleIds { limit: usize },
+    VisiblePages { limit: usize },
+}
+
+#[derive(Debug, Default)]
+struct InvocationWorkLedger {
+    used: Cell<u64>,
+}
+
+impl InvocationWorkLedger {
+    fn charge(&self, bytes: u64) -> Result<u64, InvocationWorkExceeded> {
+        let attempted =
+            self.used
+                .get()
+                .checked_add(bytes)
+                .ok_or(InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                })?;
+        if attempted > MAX_SOLVE_INVOCATION_WORK_BYTES {
+            return Err(InvocationWorkExceeded::CumulativeBytes { attempted });
+        }
+        self.used.set(attempted);
+        Ok(attempted)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EvidenceWork<'a> {
+    gate: &'a CancelGate,
+    plan: Option<&'a SolveCancellationPlan>,
+    invocation: Option<&'a InvocationWorkLedger>,
+}
+
+impl<'a> EvidenceWork<'a> {
+    const fn new(
+        gate: &'a CancelGate,
+        plan: Option<&'a SolveCancellationPlan>,
+        invocation: &'a InvocationWorkLedger,
+    ) -> Self {
+        Self {
+            gate,
+            plan,
+            invocation: Some(invocation),
+        }
+    }
+
+    #[cfg(test)]
+    const fn unmetered(gate: &'a CancelGate, plan: Option<&'a SolveCancellationPlan>) -> Self {
+        Self {
+            gate,
+            plan,
+            invocation: None,
+        }
+    }
+
+    fn checkpoint(
+        self,
+        phase: SolveEvidencePhase,
+        source_index: Option<usize>,
+        units: u64,
+    ) -> Result<(), EvidenceCancelled> {
+        if let Some(plan) = self.plan {
+            plan.observe(self.gate, phase, source_index, units);
+        }
+        if self.gate.is_requested() {
+            Err(EvidenceCancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_requested(self) -> bool {
+        self.gate.is_requested()
+    }
+
+    fn charge(self, bytes: u64) -> Result<u64, InvocationWorkExceeded> {
+        self.invocation
+            .map_or(Ok(bytes), |meter| meter.charge(bytes))
+    }
+}
+
+#[derive(Debug)]
+enum EvidenceReadError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+    Ledger(LedgerError),
+}
+
+#[derive(Debug)]
+enum EvidenceUtf8Error {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+    Invalid(String),
+}
+
+#[derive(Debug)]
+enum EvidenceCompareError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+}
+
+#[derive(Debug)]
+enum ProjectRenderError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+    Invalid(String),
+}
+
+#[derive(Debug)]
+enum CandidateOpReadError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+    Ledger(LedgerError),
+}
+
+#[derive(Debug)]
+enum VisibleOpScanError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
+    Ledger(LedgerError),
+}
+
+#[derive(Default)]
+struct CandidateOpFields {
+    session: Vec<u8>,
+    ir: Vec<u8>,
+    seed: Vec<u8>,
+    versions: Vec<u8>,
+    budget: Vec<u8>,
+    capability: Vec<u8>,
+    diagnostic: Vec<u8>,
+}
+
+impl CandidateOpFields {
+    fn field_mut(&mut self, field: OpVariableField) -> &mut Vec<u8> {
+        match field {
+            OpVariableField::Session => &mut self.session,
+            OpVariableField::Ir => &mut self.ir,
+            OpVariableField::Seed => &mut self.seed,
+            OpVariableField::Versions => &mut self.versions,
+            OpVariableField::Budget => &mut self.budget,
+            OpVariableField::Capability => &mut self.capability,
+            OpVariableField::Diagnostic => &mut self.diagnostic,
+        }
+    }
+}
+
+struct ControlledCandidateOp {
+    row: OpRow,
+    branch: i64,
+    exec_mode: ExecMode,
+    prehashed_content: PrehashedOpContent,
+}
 
 /// Warn when consumed wall budget crosses these fractions of the grant.
 const BUDGET_WARN_FRACTIONS: [f64; 2] = [0.5, 0.9];
@@ -209,6 +576,10 @@ impl SolveRunId {
     #[must_use]
     pub fn derive(project: &DecodedProject) -> SolveRunId {
         let project_hash = project.hash();
+        Self::derive_with_project_hash(project, project_hash)
+    }
+
+    fn derive_with_project_hash(project: &DecodedProject, project_hash: ContentHash) -> SolveRunId {
         let spec = &project.spec;
         let mut preimage = Vec::with_capacity(128);
         preimage.extend_from_slice(project_hash.as_bytes());
@@ -523,6 +894,29 @@ struct ImportSummary {
     entries: Vec<VerifiedImport>,
 }
 
+#[derive(Clone, Copy)]
+struct RenderedExplicitsRef<'a> {
+    seed: &'a [u8],
+    versions: &'a str,
+    budget: &'a str,
+    capability: &'a str,
+    canonical_project_json: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct ImportCandidateLocator {
+    op: i64,
+    summary_artifact: ContentHash,
+}
+
+#[derive(Clone, Copy)]
+struct StageRowExpectation<'a> {
+    stage: SolveStage,
+    run: SolveRunId,
+    project_hash: ContentHash,
+    explicits: RenderedExplicitsRef<'a>,
+}
+
 #[derive(Debug, Clone)]
 struct ImportIrAttestation {
     limits: ImportIrLimits,
@@ -546,14 +940,38 @@ enum ImportPromotionPolicy {
 struct VerifiedResume {
     state: SolveDriverState,
     state_artifact: ContentHash,
-    project: DecodedProject,
+    attestation: Rc<ResumeImportCache>,
     context: StageContext,
+}
+
+#[derive(Debug)]
+struct ResumeImportCache {
+    source_hash: ContentHash,
+    project: DecodedProject,
+    project_hash: ContentHash,
+    versions: String,
+    budget: String,
+    capability: String,
+    seed: [u8; 8],
+    canonical_project_json: String,
+}
+
+impl ResumeImportCache {
+    fn expectations(&self) -> RenderedExplicitsRef<'_> {
+        RenderedExplicitsRef {
+            seed: &self.seed,
+            versions: &self.versions,
+            budget: &self.budget,
+            capability: &self.capability,
+            canonical_project_json: &self.canonical_project_json,
+        }
+    }
 }
 
 /// Everything a running or resumed solve needs in one place.
 struct SolveEngine<'a> {
     ledger: &'a Ledger,
-    gate: &'a CancelGate,
+    work: EvidenceWork<'a>,
     clock: &'a mut dyn FnMut() -> f64,
     spec: &'a ProjectSpec,
     canonical_source: &'a str,
@@ -586,7 +1004,51 @@ pub fn run_solve(
     project: &DecodedProject,
     progress_sink: &mut Vec<String>,
 ) -> Result<SolveOutcome, SolveRefusal> {
+    run_solve_inner(ledger, gate, clock, project, progress_sink, None)
+}
+
+/// Deterministic conformance-test entry point for requesting cancellation at
+/// one typed evidence-work checkpoint.
+///
+/// The plan can only request `gate`; it cannot execute caller code or publish
+/// ledger state.
+#[doc(hidden)]
+pub fn run_solve_with_cancellation_plan(
+    ledger: &Ledger,
+    gate: &CancelGate,
+    clock: &mut dyn FnMut() -> f64,
+    project: &DecodedProject,
+    progress_sink: &mut Vec<String>,
+    plan: &SolveCancellationPlan,
+) -> Result<SolveOutcome, SolveRefusal> {
+    run_solve_inner(ledger, gate, clock, project, progress_sink, Some(plan))
+}
+
+fn run_solve_inner<'a>(
+    ledger: &'a Ledger,
+    gate: &'a CancelGate,
+    clock: &'a mut dyn FnMut() -> f64,
+    project: &'a DecodedProject,
+    progress_sink: &mut Vec<String>,
+    plan: Option<&'a SolveCancellationPlan>,
+) -> Result<SolveOutcome, SolveRefusal> {
+    let invocation = InvocationWorkLedger::default();
+    let work = EvidenceWork::new(gate, plan, &invocation);
+    work.checkpoint(SolveEvidencePhase::ProjectValidation, None, 0)
+        .map_err(|_| cancelled_before_run_refusal())?;
     let findings = project.findings();
+    work.charge(u64::try_from(project.canonical.len()).map_err(|_| {
+        invocation_work_refusal(
+            None,
+            None,
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(None, None, error))?;
+    work.checkpoint(SolveEvidencePhase::ProjectValidation, None, 1)
+        .map_err(|_| cancelled_before_run_refusal())?;
     if !findings.is_empty() {
         return Err(SolveRefusal::plain(
             "cli-solve-project-invalid",
@@ -594,8 +1056,23 @@ pub fn run_solve(
             "run `frankensim validate` and repair every finding before solve",
         ));
     }
-    let run = SolveRunId::derive(project);
-    let mut engine = SolveEngine::open(ledger, gate, clock, project, run)?;
+    work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 0)
+        .map_err(|_| cancelled_before_run_refusal())?;
+    let project_hash = project.hash();
+    let run = SolveRunId::derive_with_project_hash(project, project_hash);
+    work.charge(u64::try_from(project.canonical.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            None,
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
+    work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 1)
+        .map_err(|_| cancelled_fresh_refusal(run, None))?;
+    let mut engine = SolveEngine::open(ledger, work, clock, project, project_hash, run, None)?;
     let state = SolveDriverState {
         run: *run.as_bytes(),
         project: *engine.project_hash.as_bytes(),
@@ -620,6 +1097,31 @@ pub fn resume_solve(
     run_id_hex: &str,
     progress_sink: &mut Vec<String>,
 ) -> Result<SolveOutcome, SolveRefusal> {
+    resume_solve_inner(ledger, gate, clock, run_id_hex, progress_sink, None)
+}
+
+/// Deterministic conformance-test entry point for requesting cancellation
+/// while resume re-attests retained evidence.
+#[doc(hidden)]
+pub fn resume_solve_with_cancellation_plan(
+    ledger: &Ledger,
+    gate: &CancelGate,
+    clock: &mut dyn FnMut() -> f64,
+    run_id_hex: &str,
+    progress_sink: &mut Vec<String>,
+    plan: &SolveCancellationPlan,
+) -> Result<SolveOutcome, SolveRefusal> {
+    resume_solve_inner(ledger, gate, clock, run_id_hex, progress_sink, Some(plan))
+}
+
+fn resume_solve_inner<'a>(
+    ledger: &'a Ledger,
+    gate: &'a CancelGate,
+    clock: &'a mut dyn FnMut() -> f64,
+    run_id_hex: &str,
+    progress_sink: &mut Vec<String>,
+    plan: Option<&'a SolveCancellationPlan>,
+) -> Result<SolveOutcome, SolveRefusal> {
     let run = SolveRunId::parse_hex(run_id_hex).ok_or_else(|| {
         SolveRefusal::plain(
             "cli-solve-run-id",
@@ -627,13 +1129,31 @@ pub fn resume_solve(
             "pass the run id printed by `frankensim solve`",
         )
     })?;
-    let verified = load_latest_state(ledger, run)?;
+    let invocation = InvocationWorkLedger::default();
+    let work = EvidenceWork::new(gate, plan, &invocation);
+    if work.is_requested() {
+        return Err(cancelled_resume_refusal(run));
+    }
+    let verified = load_latest_state(ledger, run, work)?;
     let VerifiedResume {
         state,
         state_artifact,
-        project,
+        attestation,
         context,
     } = verified;
+    let attestation = Rc::try_unwrap(attestation).unwrap_or_else(|_| {
+        unreachable!("latest-state selection releases every non-selected attestation reference")
+    });
+    let ResumeImportCache {
+        project,
+        project_hash,
+        versions,
+        budget,
+        capability,
+        seed,
+        ..
+    } = attestation;
+    let rendered_explicits = (versions, budget, capability, seed);
     if state.completed.len() >= SolveStage::ALL.len() {
         return Err(SolveRefusal::plain(
             "cli-solve-resume-complete",
@@ -641,7 +1161,15 @@ pub fn resume_solve(
             "use `frankensim report <run-id>` once reporting ships (f85xj.6.9)",
         ));
     }
-    let mut engine = SolveEngine::open(ledger, gate, clock, &project, run)?;
+    let mut engine = SolveEngine::open(
+        ledger,
+        work,
+        clock,
+        &project,
+        project_hash,
+        run,
+        Some(rendered_explicits),
+    )?;
     // Restore budget continuity: re-charge the recorded consumption so the
     // resumed run continues under the same grant instead of resetting it.
     if state.consumed_core_s > 0.0 || state.consumed_wall_s > 0.0 {
@@ -679,10 +1207,12 @@ pub fn resume_solve(
 impl<'a> SolveEngine<'a> {
     fn open(
         ledger: &'a Ledger,
-        gate: &'a CancelGate,
+        work: EvidenceWork<'a>,
         clock: &'a mut dyn FnMut() -> f64,
         project: &'a DecodedProject,
+        project_hash: ContentHash,
         run: SolveRunId,
+        rendered_explicits: Option<(String, String, String, [u8; 8])>,
     ) -> Result<SolveEngine<'a>, SolveRefusal> {
         if ledger.in_transaction() {
             return Err(SolveRefusal::plain(
@@ -691,16 +1221,44 @@ impl<'a> SolveEngine<'a> {
                 "commit or roll back before solve so stage groups stay atomic",
             ));
         }
-        let (versions_json, budget_json, capability_json, seed) = explicits(&project.spec)
-            .map_err(|refusal| SolveRefusal {
-                code: "cli-solve-project-invalid",
-                stage: None,
-                what: refusal.what,
-                fix: refusal.fix,
-                dependency: None,
-                run: Some(run.to_hex()),
-                recorded_op: None,
-            })?;
+        let (versions_json, budget_json, capability_json, seed) =
+            if let Some(rendered_explicits) = rendered_explicits {
+                rendered_explicits
+            } else {
+                work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 0)
+                    .map_err(|_| cancelled_fresh_refusal(run, None))?;
+                let rendered_explicits = explicits(&project.spec);
+                work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 1)
+                    .map_err(|_| cancelled_fresh_refusal(run, None))?;
+                let rendered_explicits = rendered_explicits.map_err(|refusal| SolveRefusal {
+                    code: "cli-solve-project-invalid",
+                    stage: None,
+                    what: refusal.what,
+                    fix: refusal.fix,
+                    dependency: None,
+                    run: Some(run.to_hex()),
+                    recorded_op: None,
+                })?;
+                let explicit_bytes = rendered_explicits
+                    .0
+                    .len()
+                    .checked_add(rendered_explicits.1.len())
+                    .and_then(|bytes| bytes.checked_add(rendered_explicits.2.len()))
+                    .and_then(|bytes| bytes.checked_add(rendered_explicits.3.len()))
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or_else(|| {
+                        invocation_work_refusal(
+                            Some(run),
+                            None,
+                            InvocationWorkExceeded::CumulativeBytes {
+                                attempted: u64::MAX,
+                            },
+                        )
+                    })?;
+                work.charge(explicit_bytes)
+                    .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
+                rendered_explicits
+            };
         let token = derive_capability_token(&project.spec, run)?;
         let governor = Governor::new();
         let session = token.session;
@@ -712,11 +1270,11 @@ impl<'a> SolveEngine<'a> {
             .map_err(|error| session_refusal(run, &error))?;
         Ok(SolveEngine {
             ledger,
-            gate,
+            work,
             clock,
             spec: &project.spec,
             canonical_source: &project.canonical,
-            project_hash: project.hash(),
+            project_hash,
             run,
             governor,
             session,
@@ -747,7 +1305,7 @@ impl<'a> SolveEngine<'a> {
             warned[index] = state.consumed_wall_s >= self.token.wall_s * fraction;
         }
         for stage in SolveStage::ALL.into_iter().skip(state.completed.len()) {
-            if self.gate.is_requested() {
+            if self.work.is_requested() {
                 return Err(self.cancelled_refusal(&state));
             }
             if let Some(dependency) = stage.gap_dependency() {
@@ -795,8 +1353,23 @@ impl<'a> SolveEngine<'a> {
             };
             let receipt_json = match body {
                 Ok(receipt) => receipt,
+                Err(refusal) if refusal.code == "cli-solve-cancelled" => {
+                    return Err(self.cancelled_refusal(&state));
+                }
+                Err(refusal) if refusal.code == "cli-solve-work-envelope" => return Err(refusal),
                 Err(refusal) => return Err(self.record_refusal(&state, stage, refusal)),
             };
+            if self
+                .work
+                .checkpoint(
+                    SolveEvidencePhase::PrePublication,
+                    None,
+                    u64::from(stage.ordinal()),
+                )
+                .is_err()
+            {
+                return Err(self.cancelled_refusal(&state));
+            }
             let finished = (self.clock)();
             let elapsed = finished - started;
             if !finished.is_finite() || !elapsed.is_finite() || elapsed < 0.0 {
@@ -934,6 +1507,9 @@ impl<'a> SolveEngine<'a> {
     }
 
     fn cancelled_refusal(&self, state: &SolveDriverState) -> SolveRefusal {
+        if state.completed.is_empty() {
+            return cancelled_fresh_refusal(self.run, SolveStage::from_ordinal(0));
+        }
         SolveRefusal {
             code: "cli-solve-cancelled",
             stage: SolveStage::from_ordinal(
@@ -967,8 +1543,33 @@ impl<'a> SolveEngine<'a> {
                 "declare geometry rows and import them before solve",
             ));
         }
-        let expected: Vec<String> = geometry.iter().map(geometry_source_identity).collect();
-        let summary = match find_import_summary(self.ledger, self.spec, self.project_hash) {
+        let canonical_project_json =
+            render_canonical_project_json(self.spec, self.work).map_err(|error| match error {
+                ProjectRenderError::Cancelled => cancelled_fresh_refusal(self.run, Some(stage)),
+                ProjectRenderError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(self.run), Some(stage), error)
+                }
+                ProjectRenderError::Invalid(problem) => SolveRefusal::staged(
+                    "cli-solve-project-invalid",
+                    stage,
+                    problem,
+                    "run `frankensim validate` and repair the canonical project renderer",
+                ),
+            })?;
+        let expectations = RenderedExplicitsRef {
+            seed: &self.seed,
+            versions: &self.versions_json,
+            budget: &self.budget_json,
+            capability: &self.capability_json,
+            canonical_project_json: &canonical_project_json,
+        };
+        let summary = match find_import_summary(
+            self.ledger,
+            self.spec,
+            self.project_hash,
+            self.work,
+            expectations,
+        ) {
             Ok(Some(summary)) => summary,
             Ok(None) => {
                 return Err(SolveRefusal::staged(
@@ -989,6 +1590,9 @@ impl<'a> SolveEngine<'a> {
                     "reduce or split the retained geometry evidence to the documented solve envelope",
                 ));
             }
+            Err(ImportSummaryError::WorkEnvelope(error)) => {
+                return Err(invocation_work_refusal(Some(self.run), Some(stage), error));
+            }
             Err(ImportSummaryError::Ledger(error)) => {
                 return Err(self.ledger_refusal(stage, &error));
             }
@@ -1000,47 +1604,40 @@ impl<'a> SolveEngine<'a> {
                     "re-run `frankensim import` for this exact project",
                 ));
             }
+            Err(ImportSummaryError::Cancelled) => {
+                return Err(cancelled_fresh_refusal(self.run, Some(stage)));
+            }
         };
         let ImportSummary {
             op_id: import_op,
             artifact: import_summary,
             entries,
         } = summary;
-        let mut found: Vec<&str> = entries
-            .iter()
-            .map(|entry| entry.source_identity.as_str())
-            .collect();
-        found.sort_unstable();
-        let mut wanted: Vec<&str> = expected.iter().map(String::as_str).collect();
-        wanted.sort_unstable();
-        if found != wanted {
-            return Err(SolveRefusal::staged(
-                "cli-solve-import-evidence",
-                stage,
-                format!(
-                    "retained import covers sources [{}] but the project declares [{}]",
-                    found.join(", "),
-                    wanted.join(", ")
-                ),
-                "re-run `frankensim import` so every declared geometry row is retained",
-            ));
-        }
+        // Summary parsing has already checked every entry, in order, against
+        // the same project geometry role and controlled source identity.
         // Candidate validation above streamed or materialized every retained
         // artifact exactly once under the solve evidence envelope.
         context.import_op = Some(import_op);
         context.import_summary = Some(import_summary);
         context.verified_imports = entries;
-        Ok(import_verify_receipt(
+        import_verify_receipt(
             self.run,
             self.project_hash,
             import_op,
             &context.verified_imports,
-        ))
+            self.work,
+        )
+        .map_err(|error| match error {
+            EvidenceCompareError::Cancelled => cancelled_fresh_refusal(self.run, Some(stage)),
+            EvidenceCompareError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(self.run), Some(stage), error)
+            }
+        })
     }
 
     /// Bind verified assignment evidence to the run's declared targets.
     fn stage_assign(&mut self, context: &StageContext) -> Result<String, SolveRefusal> {
-        assignment_receipt(self.spec, context, self.run)
+        assignment_receipt(self.spec, context, self.run, self.work, false)
     }
 
     /// Persist one completed stage as a ledgered op: stage receipt, sealed
@@ -1349,14 +1946,28 @@ fn import_verify_receipt(
     project_hash: ContentHash,
     import_op: i64,
     entries: &[VerifiedImport],
-) -> String {
+    work: EvidenceWork<'_>,
+) -> Result<String, EvidenceCompareError> {
+    let phase = SolveEvidencePhase::ReceiptDerivation;
+    work.checkpoint(phase, None, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
     let mut receipt = format!(
         "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"import_op\":{import_op},\"verified\":[",
         json_string(IMPORT_VERIFY_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         json_string(&project_hash.to_hex()),
     );
+    work.charge(u64::try_from(receipt.len()).map_err(|_| {
+        EvidenceCompareError::WorkEnvelope(InvocationWorkExceeded::CumulativeBytes {
+            attempted: u64::MAX,
+        })
+    })?)
+    .map_err(EvidenceCompareError::WorkEnvelope)?;
     for (index, entry) in entries.iter().enumerate() {
+        let units = u64::try_from(index).unwrap_or(u64::MAX);
+        work.checkpoint(phase, None, units)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        let before = receipt.len();
         if index > 0 {
             receipt.push(',');
         }
@@ -1370,24 +1981,75 @@ fn import_verify_receipt(
             json_string(&entry.promoted_mesh.to_hex()),
             json_string(&entry.assignment_report.to_hex()),
         );
+        let appended =
+            receipt
+                .len()
+                .checked_sub(before)
+                .ok_or(EvidenceCompareError::WorkEnvelope(
+                    InvocationWorkExceeded::CumulativeBytes {
+                        attempted: u64::MAX,
+                    },
+                ))?;
+        let charge = u64::try_from(appended)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(DERIVATION_ITEM_WORK_BYTES))
+            .ok_or(EvidenceCompareError::WorkEnvelope(
+                InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                },
+            ))?;
+        work.charge(charge)
+            .map_err(EvidenceCompareError::WorkEnvelope)?;
+        work.checkpoint(phase, None, units.saturating_add(1))
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
     }
+    let before = receipt.len();
     let _ = write!(
         receipt,
         "],\"authority\":{},\"no_claim\":{}}}",
         json_string(IMPORT_VERIFY_AUTHORITY),
         json_string(IMPORT_VERIFY_NO_CLAIM),
     );
-    receipt
+    let suffix = receipt
+        .len()
+        .checked_sub(before)
+        .ok_or(EvidenceCompareError::WorkEnvelope(
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        ))?;
+    work.charge(u64::try_from(suffix).map_err(|_| {
+        EvidenceCompareError::WorkEnvelope(InvocationWorkExceeded::CumulativeBytes {
+            attempted: u64::MAX,
+        })
+    })?)
+    .map_err(EvidenceCompareError::WorkEnvelope)?;
+    work.checkpoint(phase, None, u64::MAX)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    Ok(receipt)
 }
 
 fn assignment_receipt(
     spec: &ProjectSpec,
     context: &StageContext,
     run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
 ) -> Result<String, SolveRefusal> {
     let stage = SolveStage::Assign;
+    let cancelled = || {
+        if resume {
+            cancelled_resume_refusal(run)
+        } else {
+            cancelled_fresh_refusal(run, Some(stage))
+        }
+    };
+    work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 0)
+        .map_err(|_| cancelled())?;
     let assignments = spec.assignments.as_deref().unwrap_or(&[]);
     if assignments.is_empty() {
+        work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
+            .map_err(|_| cancelled())?;
         return Err(SolveRefusal::staged(
             "cli-solve-assignment",
             stage,
@@ -1396,23 +2058,64 @@ fn assignment_receipt(
         ));
     }
     let mut rows = String::new();
+    let mut assignment_units = 0u64;
     for (index, assignment) in assignments.iter().enumerate() {
-        let imported = context
-            .verified_imports
-            .iter()
-            .find(|entry| entry.role == assignment.artifact)
-            .ok_or_else(|| {
-                SolveRefusal::staged(
-                    "cli-solve-assignment",
-                    stage,
-                    format!(
-                        "assignment target `{}` references geometry role `{}` with no \
-                         verified import",
-                        assignment.target, assignment.artifact
-                    ),
-                    "verify the import stage covers every assigned geometry role",
-                )
+        work.checkpoint(
+            SolveEvidencePhase::AssignmentDerivation,
+            None,
+            assignment_units,
+        )
+        .map_err(|_| cancelled())?;
+        let mut imported = None;
+        for entry in &context.verified_imports {
+            let matches = evidence_bytes_equal(
+                entry.role.as_bytes(),
+                assignment.artifact.as_bytes(),
+                work,
+                SolveEvidencePhase::AssignmentDerivation,
+                None,
+            )
+            .map_err(|error| match error {
+                EvidenceCompareError::Cancelled => cancelled(),
+                EvidenceCompareError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(stage), error)
+                }
             })?;
+            work.charge(DERIVATION_ITEM_WORK_BYTES)
+                .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+            assignment_units = assignment_units.saturating_add(1);
+            work.checkpoint(
+                SolveEvidencePhase::AssignmentDerivation,
+                None,
+                assignment_units,
+            )
+            .map_err(|_| cancelled())?;
+            if matches {
+                imported = Some(entry);
+                break;
+            }
+        }
+        work.charge(DERIVATION_ITEM_WORK_BYTES)
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        assignment_units = assignment_units.saturating_add(1);
+        work.checkpoint(
+            SolveEvidencePhase::AssignmentDerivation,
+            None,
+            assignment_units,
+        )
+        .map_err(|_| cancelled())?;
+        let imported = imported.ok_or_else(|| {
+            SolveRefusal::staged(
+                "cli-solve-assignment",
+                stage,
+                format!(
+                    "assignment target `{}` references geometry role `{}` with no \
+                         verified import",
+                    assignment.target, assignment.artifact
+                ),
+                "verify the import stage covers every assigned geometry role",
+            )
+        })?;
         if index > 0 {
             rows.push(',');
         }
@@ -1426,13 +2129,26 @@ fn assignment_receipt(
             json_string(&imported.assignment_report.to_hex()),
         );
     }
-    Ok(format!(
+    let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"bindings\":[{rows}],\"authority\":\"declared targets \
          bound to verified import evidence\",\"no_claim\":\"selector re-resolution against \
          the mesh is the import's retained report; this stage does not re-run it\"}}",
         json_string(ASSIGN_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
-    ))
+    );
+    work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, u64::MAX)
+        .map_err(|_| cancelled())?;
+    work.charge(u64::try_from(receipt.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(stage),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    Ok(receipt)
 }
 
 fn progress_line(run: &str, stage: &str, ordinal: u32, status: &str, wall_s: f64) -> String {
@@ -1472,6 +2188,8 @@ fn finish_solve_transaction<T>(
 
 #[derive(Debug)]
 enum ImportSummaryError {
+    Cancelled,
+    WorkEnvelope(InvocationWorkExceeded),
     Ledger(LedgerError),
     Invalid(String),
     Unsupported(String),
@@ -1481,6 +2199,678 @@ impl From<LedgerError> for ImportSummaryError {
     fn from(error: LedgerError) -> Self {
         Self::Ledger(error)
     }
+}
+
+impl From<EvidenceReadError> for ImportSummaryError {
+    fn from(error: EvidenceReadError) -> Self {
+        match error {
+            EvidenceReadError::Cancelled => Self::Cancelled,
+            EvidenceReadError::WorkEnvelope(error) => Self::WorkEnvelope(error),
+            EvidenceReadError::Ledger(error) => Self::Ledger(error),
+        }
+    }
+}
+
+impl From<CandidateOpReadError> for ImportSummaryError {
+    fn from(error: CandidateOpReadError) -> Self {
+        match error {
+            CandidateOpReadError::Cancelled => Self::Cancelled,
+            CandidateOpReadError::WorkEnvelope(error) => Self::WorkEnvelope(error),
+            CandidateOpReadError::Ledger(error) => Self::Ledger(error),
+        }
+    }
+}
+
+impl From<VisibleOpScanError> for ImportSummaryError {
+    fn from(error: VisibleOpScanError) -> Self {
+        match error {
+            VisibleOpScanError::Cancelled => Self::Cancelled,
+            VisibleOpScanError::WorkEnvelope(error) => Self::WorkEnvelope(error),
+            VisibleOpScanError::Ledger(error) => Self::Ledger(error),
+        }
+    }
+}
+
+fn materialize_evidence_artifact(
+    ledger: &Ledger,
+    work: EvidenceWork<'_>,
+    artifact: ContentHash,
+    cap: u64,
+    phase: SolveEvidencePhase,
+    source_index: Option<usize>,
+) -> Result<Option<Vec<u8>>, EvidenceReadError> {
+    work.checkpoint(phase, source_index, 0)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let mut bytes = Vec::new();
+    let mut processed = 0u64;
+    let controlled = ledger.read_artifact_chunks_bounded_controlled(&artifact, cap, &mut |tile| {
+        if work.checkpoint(phase, source_index, processed).is_err() {
+            return ControlFlow::Break(EvidenceReadError::Cancelled);
+        }
+        let Ok(tile_len) = u64::try_from(tile.len()) else {
+            return ControlFlow::Break(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence materialization".to_string(),
+                problem: "tile length is outside the ledger byte range".to_string(),
+            }));
+        };
+        if let Err(error) = work.charge(tile_len) {
+            return ControlFlow::Break(EvidenceReadError::WorkEnvelope(error));
+        }
+        if bytes.try_reserve(tile.len()).is_err() {
+            return ControlFlow::Break(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence materialization".to_string(),
+                problem: "allocation refused under the admitted evidence envelope".to_string(),
+            }));
+        }
+        bytes.extend_from_slice(tile);
+        let Some(next) = processed.checked_add(tile_len) else {
+            return ControlFlow::Break(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence materialization".to_string(),
+                problem: "materialized byte count overflowed u64".to_string(),
+            }));
+        };
+        processed = next;
+        if work.checkpoint(phase, source_index, processed).is_err() {
+            return ControlFlow::Break(EvidenceReadError::Cancelled);
+        }
+        ControlFlow::Continue(())
+    });
+    work.checkpoint(phase, source_index, processed)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let controlled = controlled.map_err(EvidenceReadError::Ledger)?;
+    match controlled {
+        None => Ok(None),
+        Some(ControlFlow::Break(error)) => Err(error),
+        Some(ControlFlow::Continue(streamed)) if streamed == processed => Ok(Some(bytes)),
+        Some(ControlFlow::Continue(streamed)) => {
+            Err(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence materialization".to_string(),
+                problem: format!(
+                    "controlled read completed {streamed} bytes but delivered {processed}"
+                ),
+            }))
+        }
+    }
+}
+
+fn verify_evidence_artifact(
+    ledger: &Ledger,
+    work: EvidenceWork<'_>,
+    artifact: ContentHash,
+    cap: u64,
+    phase: SolveEvidencePhase,
+    source_index: Option<usize>,
+) -> Result<Option<u64>, EvidenceReadError> {
+    work.checkpoint(phase, source_index, 0)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let mut processed = 0u64;
+    let controlled = ledger.read_artifact_chunks_bounded_controlled(&artifact, cap, &mut |tile| {
+        if work.checkpoint(phase, source_index, processed).is_err() {
+            return ControlFlow::Break(EvidenceReadError::Cancelled);
+        }
+        let Ok(tile_len) = u64::try_from(tile.len()) else {
+            return ControlFlow::Break(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence verification".to_string(),
+                problem: "tile length is outside the ledger byte range".to_string(),
+            }));
+        };
+        if let Err(error) = work.charge(tile_len) {
+            return ControlFlow::Break(EvidenceReadError::WorkEnvelope(error));
+        }
+        let Some(next) = processed.checked_add(tile_len) else {
+            return ControlFlow::Break(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence verification".to_string(),
+                problem: "verified byte count overflowed u64".to_string(),
+            }));
+        };
+        processed = next;
+        if work.checkpoint(phase, source_index, processed).is_err() {
+            return ControlFlow::Break(EvidenceReadError::Cancelled);
+        }
+        ControlFlow::Continue(())
+    });
+    work.checkpoint(phase, source_index, processed)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let controlled = controlled.map_err(EvidenceReadError::Ledger)?;
+    match controlled {
+        None => Ok(None),
+        Some(ControlFlow::Break(error)) => Err(error),
+        Some(ControlFlow::Continue(streamed)) if streamed == processed => Ok(Some(streamed)),
+        Some(ControlFlow::Continue(streamed)) => {
+            Err(EvidenceReadError::Ledger(LedgerError::Invalid {
+                field: "solve evidence verification".to_string(),
+                problem: format!(
+                    "controlled read completed {streamed} bytes but delivered {processed}"
+                ),
+            }))
+        }
+    }
+}
+
+fn evidence_utf8_string(
+    bytes: &[u8],
+    work: EvidenceWork<'_>,
+    phase: SolveEvidencePhase,
+    source_index: Option<usize>,
+    label: &str,
+) -> Result<String, EvidenceUtf8Error> {
+    work.checkpoint(phase, source_index, 0)
+        .map_err(|_| EvidenceUtf8Error::Cancelled)?;
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let proposed_end = cursor
+            .checked_add(EVIDENCE_POLL_BYTES)
+            .unwrap_or(bytes.len())
+            .min(bytes.len());
+        let mut end = proposed_end;
+        if end < bytes.len() {
+            let mut backed_up = 0usize;
+            while end > cursor && bytes[end] & 0b1100_0000 == 0b1000_0000 {
+                end -= 1;
+                backed_up += 1;
+                if backed_up > 3 {
+                    end = proposed_end;
+                    break;
+                }
+            }
+        }
+        if end == cursor {
+            end = proposed_end;
+        }
+        let tile = &bytes[cursor..end];
+        let text = core::str::from_utf8(tile);
+        let inspected = u64::try_from(end)
+            .map_err(|_| EvidenceUtf8Error::Invalid(format!("{label} length is outside u64")))?;
+        work.checkpoint(phase, source_index, inspected)
+            .map_err(|_| EvidenceUtf8Error::Cancelled)?;
+        let text = text.map_err(|error| {
+            EvidenceUtf8Error::Invalid(format!(
+                "{label} is not UTF-8 at byte {}",
+                cursor.saturating_add(error.valid_up_to())
+            ))
+        })?;
+        let reserve = output.try_reserve(text.len());
+        work.checkpoint(phase, source_index, inspected)
+            .map_err(|_| EvidenceUtf8Error::Cancelled)?;
+        reserve.map_err(|_| {
+            EvidenceUtf8Error::Invalid(format!("{label} UTF-8 output allocation was refused"))
+        })?;
+        let tile_len = u64::try_from(tile.len()).map_err(|_| {
+            EvidenceUtf8Error::WorkEnvelope(InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            })
+        })?;
+        work.charge(tile_len)
+            .map_err(EvidenceUtf8Error::WorkEnvelope)?;
+        output.push_str(text);
+        cursor = end;
+        let processed = u64::try_from(cursor)
+            .map_err(|_| EvidenceUtf8Error::Invalid(format!("{label} length is outside u64")))?;
+        work.checkpoint(phase, source_index, processed)
+            .map_err(|_| EvidenceUtf8Error::Cancelled)?;
+    }
+    let completed = u64::try_from(cursor)
+        .map_err(|_| EvidenceUtf8Error::Invalid(format!("{label} length is outside u64")))?;
+    work.checkpoint(phase, source_index, completed)
+        .map_err(|_| EvidenceUtf8Error::Cancelled)?;
+    Ok(output)
+}
+
+fn evidence_bytes_equal(
+    left: &[u8],
+    right: &[u8],
+    work: EvidenceWork<'_>,
+    phase: SolveEvidencePhase,
+    source_index: Option<usize>,
+) -> Result<bool, EvidenceCompareError> {
+    work.checkpoint(phase, source_index, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    if left.len() != right.len() {
+        work.checkpoint(phase, source_index, 0)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        return Ok(false);
+    }
+    let mut compared = 0u64;
+    for (left_tile, right_tile) in left
+        .chunks(EVIDENCE_POLL_BYTES)
+        .zip(right.chunks(EVIDENCE_POLL_BYTES))
+    {
+        work.checkpoint(phase, source_index, compared)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        let matches = left_tile == right_tile;
+        let tile_len = u64::try_from(left_tile.len()).map_err(|_| {
+            EvidenceCompareError::WorkEnvelope(InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            })
+        })?;
+        compared = compared
+            .checked_add(tile_len)
+            .ok_or(EvidenceCompareError::WorkEnvelope(
+                InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                },
+            ))?;
+        work.checkpoint(phase, source_index, compared)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        work.charge(tile_len)
+            .map_err(EvidenceCompareError::WorkEnvelope)?;
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn render_canonical_project_json(
+    spec: &ProjectSpec,
+    work: EvidenceWork<'_>,
+) -> Result<String, ProjectRenderError> {
+    let phase = SolveEvidencePhase::CanonicalProjectRender;
+    work.checkpoint(phase, None, 0)
+        .map_err(|_| ProjectRenderError::Cancelled)?;
+    let rendered = fs_project::print_json(spec);
+    work.checkpoint(phase, None, 1)
+        .map_err(|_| ProjectRenderError::Cancelled)?;
+    let rendered = rendered.map_err(|error| {
+        ProjectRenderError::Invalid(format!("canonical project JSON failed: {error:?}"))
+    })?;
+    let bytes = u64::try_from(rendered.len()).map_err(|_| {
+        ProjectRenderError::WorkEnvelope(InvocationWorkExceeded::CumulativeBytes {
+            attempted: u64::MAX,
+        })
+    })?;
+    work.charge(bytes)
+        .map_err(ProjectRenderError::WorkEnvelope)?;
+    Ok(rendered)
+}
+
+fn five_explicits_match(
+    row: &OpRow,
+    expectations: RenderedExplicitsRef<'_>,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<bool, EvidenceCompareError> {
+    let phase = SolveEvidencePhase::FiveExplicitsCompare;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    let fields: [(&[u8], &[u8]); 4] = [
+        (row.seed.as_slice(), expectations.seed),
+        (row.versions.as_bytes(), expectations.versions.as_bytes()),
+        (row.budget.as_bytes(), expectations.budget.as_bytes()),
+        (
+            row.capability.as_bytes(),
+            expectations.capability.as_bytes(),
+        ),
+    ];
+    let mut compared = 0u64;
+    for (retained, expected) in fields {
+        if retained.len() != expected.len() {
+            let next = compared.saturating_add(1);
+            work.checkpoint(phase, plan_index, next)
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            work.charge(1).map_err(EvidenceCompareError::WorkEnvelope)?;
+            return Ok(false);
+        }
+        for (retained_tile, expected_tile) in retained
+            .chunks(EVIDENCE_POLL_BYTES)
+            .zip(expected.chunks(EVIDENCE_POLL_BYTES))
+        {
+            work.checkpoint(phase, plan_index, compared)
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            let matches = retained_tile == expected_tile;
+            let tile_len = u64::try_from(retained_tile.len()).unwrap_or(u64::MAX);
+            compared = compared.saturating_add(tile_len);
+            work.checkpoint(phase, plan_index, compared)
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            work.charge(tile_len)
+                .map_err(EvidenceCompareError::WorkEnvelope)?;
+            if !matches {
+                return Ok(false);
+            }
+        }
+    }
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    Ok(true)
+}
+
+fn geometry_source_identity_controlled(
+    artifact: &GeometryArtifact,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<String, EvidenceCompareError> {
+    let phase = SolveEvidencePhase::ProjectIdentityDerive;
+    let plan_index = Some(source_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    let identity = geometry_source_identity(artifact);
+    work.checkpoint(phase, plan_index, 1)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    let charge = u64::try_from(identity.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(DERIVATION_ITEM_WORK_BYTES))
+        .ok_or(EvidenceCompareError::WorkEnvelope(
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        ))?;
+    work.charge(charge)
+        .map_err(EvidenceCompareError::WorkEnvelope)?;
+    Ok(identity)
+}
+
+fn controlled_candidate_text(
+    op: i64,
+    field: &'static str,
+    bytes: Vec<u8>,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<String, CandidateOpReadError> {
+    let phase = SolveEvidencePhase::CandidateOpTextConversion;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    let converted = String::from_utf8(bytes);
+    work.checkpoint(phase, plan_index, 1)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    converted.map_err(|_| {
+        CandidateOpReadError::Ledger(LedgerError::OpCorrupt {
+            op,
+            detail: format!(
+                "controlled {field} delivery was not UTF-8 despite the guarded text-field read"
+            ),
+        })
+    })
+}
+
+fn read_visible_op_page(
+    ledger: &Ledger,
+    cursor: Option<VisibleOpCursor>,
+    work: EvidenceWork<'_>,
+    page_index: usize,
+) -> Result<VisibleOpPage, VisibleOpScanError> {
+    let phase = SolveEvidencePhase::VisibleOpPage;
+    let plan_index = Some(page_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| VisibleOpScanError::Cancelled)?;
+    let mut examined_rows = 0u64;
+    let controlled = ledger.visible_op_ids_page_controlled(
+        MAIN_BRANCH,
+        cursor,
+        MAX_VISIBLE_OP_PAGE_ROWS,
+        |progress| {
+            if work
+                .checkpoint(phase, plan_index, progress.examined_rows)
+                .is_err()
+            {
+                return ControlFlow::Break(VisibleOpScanError::Cancelled);
+            }
+            let Some(delta) = progress.examined_rows.checked_sub(examined_rows) else {
+                return ControlFlow::Break(VisibleOpScanError::Ledger(LedgerError::Invalid {
+                    field: "visible_op_page.progress".to_string(),
+                    problem: "controlled visible-op progress regressed".to_string(),
+                }));
+            };
+            let Some(charge) = delta.checked_mul(OP_ID_WORK_BYTES) else {
+                return ControlFlow::Break(VisibleOpScanError::WorkEnvelope(
+                    InvocationWorkExceeded::CumulativeBytes {
+                        attempted: u64::MAX,
+                    },
+                ));
+            };
+            if let Err(error) = work.charge(charge) {
+                return ControlFlow::Break(VisibleOpScanError::WorkEnvelope(error));
+            }
+            examined_rows = progress.examined_rows;
+            if work
+                .checkpoint(phase, plan_index, progress.examined_rows)
+                .is_err()
+            {
+                ControlFlow::Break(VisibleOpScanError::Cancelled)
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    );
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| VisibleOpScanError::Cancelled)?;
+    let controlled = controlled.map_err(VisibleOpScanError::Ledger)?;
+    match controlled {
+        ControlledVisibleOpPage::Break { reason, .. } => Err(reason),
+        ControlledVisibleOpPage::Complete(page) => Ok(page),
+    }
+}
+
+fn read_op_edges_controlled(
+    ledger: &Ledger,
+    op: i64,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<BoundedOpArtifactEdges, EvidenceReadError> {
+    let phase = SolveEvidencePhase::EdgePageRead;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let result = ledger.op_artifact_edges_bounded(op, EDGE_SCAN_CAP);
+    work.checkpoint(phase, plan_index, 1)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let page = result.map_err(EvidenceReadError::Ledger)?;
+    let observed_items = page
+        .edges
+        .len()
+        .checked_add(usize::from(page.truncated))
+        .and_then(|count| u64::try_from(count).ok())
+        .and_then(|count| count.checked_mul(EDGE_ITEM_WORK_BYTES))
+        .ok_or(EvidenceReadError::WorkEnvelope(
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        ))?;
+    work.charge(observed_items)
+        .map_err(EvidenceReadError::WorkEnvelope)?;
+    Ok(page)
+}
+
+fn read_artifact_info_controlled(
+    ledger: &Ledger,
+    artifact: &ContentHash,
+    work: EvidenceWork<'_>,
+    descriptor_index: usize,
+) -> Result<Option<ArtifactInfo>, EvidenceReadError> {
+    let phase = SolveEvidencePhase::ArtifactDescriptorRead;
+    let plan_index = Some(descriptor_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let result = ledger.artifact_info(artifact);
+    work.checkpoint(phase, plan_index, 1)
+        .map_err(|_| EvidenceReadError::Cancelled)?;
+    let info = result.map_err(EvidenceReadError::Ledger)?;
+    let variable_bytes = match info.as_ref() {
+        Some(info) => info
+            .kind
+            .len()
+            .checked_add(info.meta.as_ref().map_or(0, String::len))
+            .ok_or(EvidenceReadError::WorkEnvelope(
+                InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                },
+            ))?,
+        None => 0,
+    };
+    let charge = u64::try_from(variable_bytes)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(DERIVATION_ITEM_WORK_BYTES))
+        .ok_or(EvidenceReadError::WorkEnvelope(
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        ))?;
+    work.charge(charge)
+        .map_err(EvidenceReadError::WorkEnvelope)?;
+    Ok(info)
+}
+
+fn read_candidate_op(
+    ledger: &Ledger,
+    op: i64,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<Option<ControlledCandidateOp>, CandidateOpReadError> {
+    let phase = SolveEvidencePhase::CandidateOpRowRead;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    let mut fields = CandidateOpFields::default();
+    let mut delivered = 0u64;
+    let controlled = ledger.read_op_fields_controlled(op, |field, offset, tile| {
+        let callback_units = delivered.saturating_add(1);
+        if work.checkpoint(phase, plan_index, callback_units).is_err() {
+            return ControlFlow::Break(CandidateOpReadError::Cancelled);
+        }
+        let output = fields.field_mut(field);
+        let expected_offset = u64::try_from(output.len()).unwrap_or(u64::MAX);
+        if offset != expected_offset {
+            return ControlFlow::Break(CandidateOpReadError::Ledger(LedgerError::OpCorrupt {
+                op,
+                detail: format!(
+                    "controlled {} field resumed at byte {offset}, expected {expected_offset}",
+                    field.as_str()
+                ),
+            }));
+        }
+        let tile_len = u64::try_from(tile.len()).unwrap_or(u64::MAX);
+        if let Err(error) = work.charge(tile_len) {
+            return ControlFlow::Break(CandidateOpReadError::WorkEnvelope(error));
+        }
+        if output.try_reserve(tile.len()).is_err() {
+            return ControlFlow::Break(CandidateOpReadError::Ledger(LedgerError::Invalid {
+                field: format!("op.{field}", field = field.as_str()),
+                problem: format!(
+                    "allocation for controlled operation {op} field {} was refused",
+                    field.as_str()
+                ),
+            }));
+        }
+        output.extend_from_slice(tile);
+        delivered = delivered.saturating_add(tile_len);
+        if work
+            .checkpoint(phase, plan_index, delivered.saturating_add(1))
+            .is_err()
+        {
+            ControlFlow::Break(CandidateOpReadError::Cancelled)
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    let controlled = controlled.map_err(CandidateOpReadError::Ledger)?;
+    let complete = match controlled {
+        ControlledOpRead::NotFound => return Ok(None),
+        ControlledOpRead::Break(error) => return Err(error),
+        ControlledOpRead::Complete(complete) => complete,
+    };
+    let metadata = complete.metadata;
+    let exact_len = |field: &'static str,
+                     expected: Option<u64>,
+                     observed: usize|
+     -> Result<(), CandidateOpReadError> {
+        let observed = u64::try_from(observed).unwrap_or(u64::MAX);
+        if expected.map_or(observed == 0, |expected| expected == observed) {
+            Ok(())
+        } else {
+            Err(CandidateOpReadError::Ledger(LedgerError::OpCorrupt {
+                op,
+                detail: format!(
+                    "controlled {field} delivery length {observed} disagrees with metadata \
+                     length {expected:?}"
+                ),
+            }))
+        }
+    };
+    exact_len("session", metadata.session_len, fields.session.len())?;
+    exact_len("IR", Some(metadata.ir_len), fields.ir.len())?;
+    exact_len("seed", Some(metadata.seed_len), fields.seed.len())?;
+    exact_len(
+        "versions",
+        Some(metadata.versions_len),
+        fields.versions.len(),
+    )?;
+    exact_len("budget", Some(metadata.budget_len), fields.budget.len())?;
+    exact_len(
+        "capability",
+        Some(metadata.capability_len),
+        fields.capability.len(),
+    )?;
+    exact_len(
+        "diagnostic",
+        metadata.diagnostic_len,
+        fields.diagnostic.len(),
+    )?;
+    let session = metadata.session_len.map(|_| fields.session);
+    let diagnostic = if metadata.diagnostic_len.is_some() {
+        Some(controlled_candidate_text(
+            op,
+            "diagnostic",
+            fields.diagnostic,
+            work,
+            candidate_index,
+        )?)
+    } else {
+        None
+    };
+    let row = OpRow {
+        id: metadata.id,
+        session,
+        ir: controlled_candidate_text(op, "IR", fields.ir, work, candidate_index)?,
+        seed: fields.seed,
+        versions: controlled_candidate_text(
+            op,
+            "versions",
+            fields.versions,
+            work,
+            candidate_index,
+        )?,
+        budget: controlled_candidate_text(op, "budget", fields.budget, work, candidate_index)?,
+        capability: controlled_candidate_text(
+            op,
+            "capability",
+            fields.capability,
+            work,
+            candidate_index,
+        )?,
+        t_start: metadata.t_start,
+        t_end: metadata.t_end,
+        outcome: metadata.outcome.map(|outcome| outcome.as_str().to_string()),
+        diag: diagnostic,
+    };
+    Ok(Some(ControlledCandidateOp {
+        row,
+        branch: metadata.branch,
+        exec_mode: metadata.exec_mode,
+        prehashed_content: complete.prehashed_content,
+    }))
+}
+
+fn verify_candidate_op_identity(
+    ledger: &Ledger,
+    candidate: &ControlledCandidateOp,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<(), CandidateOpReadError> {
+    let phase = SolveEvidencePhase::OperationContentIdentity;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    let result = ledger.verify_op_content_identity_prehashed(&candidate.prehashed_content);
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| CandidateOpReadError::Cancelled)?;
+    work.charge(OP_CONTENT_IDENTITY_WORK_BYTES)
+        .map_err(CandidateOpReadError::WorkEnvelope)?;
+    result.map_err(CandidateOpReadError::Ledger)?;
+    Ok(())
 }
 
 /// Locate the latest completed canonical import op for this exact project.
@@ -1493,83 +2883,143 @@ fn find_import_summary(
     ledger: &Ledger,
     spec: &ProjectSpec,
     project_hash: ContentHash,
+    work: EvidenceWork<'_>,
+    expectations: RenderedExplicitsRef<'_>,
 ) -> Result<Option<ImportSummary>, ImportSummaryError> {
-    let mut ids = ledger.visible_op_ids(MAIN_BRANCH, None)?;
-    ids.sort_unstable_by(|a, b| b.cmp(a));
-    'candidate: for id in ids {
-        let Some(row) = ledger.op(id)? else {
-            continue;
-        };
-        let attestation = match attest_import_row(ledger, spec, id, &row) {
-            Ok(attestation) => attestation,
-            Err(ImportSummaryError::Invalid(_)) => continue,
-            Err(error @ ImportSummaryError::Unsupported(_))
-            | Err(error @ ImportSummaryError::Ledger(_)) => return Err(error),
-        };
-        let edges = ledger.op_artifact_edges_bounded(id, EDGE_SCAN_CAP)?;
-        if edges.truncated {
+    let mut cursor = None;
+    let mut page_index = 0usize;
+    let mut candidate_index = 0usize;
+    let mut visible_ids = 0usize;
+    loop {
+        if page_index >= MAX_SOLVE_VISIBLE_OP_PAGES {
+            return Err(ImportSummaryError::WorkEnvelope(
+                InvocationWorkExceeded::VisiblePages {
+                    limit: MAX_SOLVE_VISIBLE_OP_PAGES,
+                },
+            ));
+        }
+        let page = read_visible_op_page(ledger, cursor, work, page_index)?;
+        page_index = page_index.saturating_add(1);
+        if page.truncated != page.next_cursor.is_some() {
             return Err(ImportSummaryError::Ledger(LedgerError::Invalid {
-                field: "geometry_import_edges".to_string(),
-                problem: format!(
-                    "operation {id} exceeds the complete {EDGE_SCAN_CAP}-edge import scan"
-                ),
+                field: "visible_op_page".to_string(),
+                problem: "controlled page truncation and continuation disagree".to_string(),
             }));
         }
-        let expected_edge_count = attestation
-            .sources
-            .len()
-            .checked_mul(4)
-            .and_then(|count| count.checked_add(1))
-            .expect("solve source cap makes import edge count representable");
-        if edges.edges.len() != expected_edge_count {
-            continue;
-        }
-        let mut raw_inputs = 0usize;
-        let mut promotion_outputs = 0usize;
-        let mut mesh_outputs = 0usize;
-        let mut assignment_outputs = 0usize;
-        let mut summary_artifact = None;
-        for edge in &edges.edges {
-            let Some(info) = ledger.artifact_info(&edge.artifact)? else {
-                continue 'candidate;
+        'candidate: for id in page.op_ids {
+            if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
+                return Err(ImportSummaryError::WorkEnvelope(
+                    InvocationWorkExceeded::VisibleIds {
+                        limit: MAX_SOLVE_VISIBLE_OP_IDS,
+                    },
+                ));
+            }
+            visible_ids = visible_ids.saturating_add(1);
+            let this_candidate = candidate_index;
+            candidate_index = candidate_index.saturating_add(1);
+            let Some(candidate) = read_candidate_op(ledger, id, work, this_candidate)? else {
+                continue;
             };
-            match (edge.role, info.kind.as_str()) {
-                (EdgeRole::In, IMPORT_RAW_KIND) => raw_inputs += 1,
-                (EdgeRole::Out, IMPORT_PROMOTION_KIND) => promotion_outputs += 1,
-                (EdgeRole::Out, IMPORT_MESH_KIND) => mesh_outputs += 1,
-                (EdgeRole::Out, IMPORT_ASSIGNMENT_KIND) => assignment_outputs += 1,
-                (EdgeRole::Out, IMPORT_SUMMARY_KIND) if summary_artifact.is_none() => {
-                    summary_artifact = Some(edge.artifact);
+            let attestation = match attest_import_row(
+                ledger,
+                spec,
+                id,
+                &candidate,
+                work,
+                this_candidate,
+                expectations,
+            ) {
+                Ok(attestation) => attestation,
+                Err(ImportSummaryError::Invalid(_)) => continue,
+                Err(error @ ImportSummaryError::Cancelled)
+                | Err(error @ ImportSummaryError::WorkEnvelope(_))
+                | Err(error @ ImportSummaryError::Unsupported(_))
+                | Err(error @ ImportSummaryError::Ledger(_)) => return Err(error),
+            };
+            let edges = read_op_edges_controlled(ledger, id, work, this_candidate)?;
+            if edges.truncated {
+                return Err(ImportSummaryError::Ledger(LedgerError::Invalid {
+                    field: "geometry_import_edges".to_string(),
+                    problem: format!(
+                        "operation {id} exceeds the complete {EDGE_SCAN_CAP}-edge import scan"
+                    ),
+                }));
+            }
+            let expected_edge_count = attestation
+                .sources
+                .len()
+                .checked_mul(4)
+                .and_then(|count| count.checked_add(1))
+                .expect("solve source cap makes import edge count representable");
+            if edges.edges.len() != expected_edge_count {
+                continue;
+            }
+            let mut raw_inputs = 0usize;
+            let mut promotion_outputs = 0usize;
+            let mut mesh_outputs = 0usize;
+            let mut assignment_outputs = 0usize;
+            let mut summary_artifact = None;
+            for (descriptor_index, edge) in edges.edges.iter().enumerate() {
+                let Some(info) =
+                    read_artifact_info_controlled(ledger, &edge.artifact, work, descriptor_index)?
+                else {
+                    continue 'candidate;
+                };
+                match (edge.role, info.kind.as_str()) {
+                    (EdgeRole::In, IMPORT_RAW_KIND) => raw_inputs += 1,
+                    (EdgeRole::Out, IMPORT_PROMOTION_KIND) => promotion_outputs += 1,
+                    (EdgeRole::Out, IMPORT_MESH_KIND) => mesh_outputs += 1,
+                    (EdgeRole::Out, IMPORT_ASSIGNMENT_KIND) => assignment_outputs += 1,
+                    (EdgeRole::Out, IMPORT_SUMMARY_KIND) if summary_artifact.is_none() => {
+                        summary_artifact = Some(edge.artifact);
+                    }
+                    _ => continue 'candidate,
                 }
-                _ => continue 'candidate,
+            }
+            let source_count = attestation.sources.len();
+            if raw_inputs != source_count
+                || promotion_outputs != source_count
+                || mesh_outputs != source_count
+                || assignment_outputs != source_count
+            {
+                continue;
+            }
+            let Some(summary_artifact) = summary_artifact else {
+                continue;
+            };
+            match validate_import_evidence(
+                ledger,
+                spec,
+                project_hash,
+                id,
+                summary_artifact,
+                &attestation,
+                &edges.edges,
+                work,
+                this_candidate,
+            ) {
+                Ok(summary) => return Ok(Some(summary)),
+                Err(ImportSummaryError::Invalid(_)) => {}
+                Err(error @ ImportSummaryError::Cancelled)
+                | Err(error @ ImportSummaryError::WorkEnvelope(_))
+                | Err(error @ ImportSummaryError::Unsupported(_))
+                | Err(error @ ImportSummaryError::Ledger(_)) => return Err(error),
             }
         }
-        let source_count = attestation.sources.len();
-        if raw_inputs != source_count
-            || promotion_outputs != source_count
-            || mesh_outputs != source_count
-            || assignment_outputs != source_count
-        {
-            continue;
-        }
-        let Some(summary_artifact) = summary_artifact else {
-            continue;
-        };
-        match validate_import_evidence(
-            ledger,
-            spec,
-            project_hash,
-            id,
-            summary_artifact,
-            &attestation,
-        ) {
-            Ok(summary) => return Ok(Some(summary)),
-            Err(ImportSummaryError::Invalid(_)) => {}
-            Err(error @ ImportSummaryError::Unsupported(_))
-            | Err(error @ ImportSummaryError::Ledger(_)) => return Err(error),
+        match page.next_cursor {
+            Some(next) => {
+                if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
+                    return Err(ImportSummaryError::WorkEnvelope(
+                        InvocationWorkExceeded::VisibleIds {
+                            limit: MAX_SOLVE_VISIBLE_OP_IDS,
+                        },
+                    ));
+                }
+                cursor = Some(next);
+            }
+            None => return Ok(None),
         }
     }
-    Ok(None)
 }
 
 /// Load and independently attest the latest sealed driver state for a run.
@@ -1579,59 +3029,154 @@ fn find_import_summary(
 /// grants no authority. Resume eligibility comes exclusively from
 /// [`validate_resume_candidate`], which re-attests the complete canonical
 /// operation and checkpoint chain before a governor is opened.
-fn load_latest_state(ledger: &Ledger, run: SolveRunId) -> Result<VerifiedResume, SolveRefusal> {
-    let mut ids = ledger
-        .visible_op_ids(MAIN_BRANCH, None)
-        .map_err(|error| resume_ledger("scanning the ledger for the run failed", error))?;
-    ids.sort_unstable_by(|a, b| b.cmp(a));
+fn load_latest_state(
+    ledger: &Ledger,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+) -> Result<VerifiedResume, SolveRefusal> {
+    let mut cursor = None;
+    let mut page_index = 0usize;
+    let mut candidate_index = 0usize;
+    let mut visible_ids = 0usize;
     let mut best: Option<VerifiedResume> = None;
     let mut best_is_ambiguous = false;
-    for id in ids {
-        let Some(row) = ledger
-            .op(id)
-            .map_err(|error| resume_ledger("scanning the ledger for the run failed", error))?
-        else {
-            continue;
-        };
-        if !is_supported_stage_discovery_row(&row, run) {
-            continue;
+    let mut import_cache = None;
+    loop {
+        if page_index >= MAX_SOLVE_VISIBLE_OP_PAGES {
+            return Err(invocation_work_refusal(
+                Some(run),
+                Some(SolveStage::ImportVerify),
+                InvocationWorkExceeded::VisiblePages {
+                    limit: MAX_SOLVE_VISIBLE_OP_PAGES,
+                },
+            ));
         }
-        let edges = resume_edges(ledger, id)?;
-        for edge in &edges {
-            if edge.role != EdgeRole::Out {
-                continue;
+        let page =
+            read_visible_op_page(ledger, cursor, work, page_index).map_err(
+                |error| match error {
+                    VisibleOpScanError::Cancelled => cancelled_resume_refusal(run),
+                    VisibleOpScanError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                    }
+                    VisibleOpScanError::Ledger(error) => {
+                        resume_ledger("scanning the ledger for the run failed", error)
+                    }
+                },
+            )?;
+        page_index = page_index.saturating_add(1);
+        if page.truncated != page.next_cursor.is_some() {
+            return Err(resume_ledger(
+                "scanning the ledger for the run failed",
+                LedgerError::Invalid {
+                    field: "visible_op_page".to_string(),
+                    problem: "controlled page truncation and continuation disagree".to_string(),
+                },
+            ));
+        }
+        for id in page.op_ids {
+            if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
+                return Err(invocation_work_refusal(
+                    Some(run),
+                    Some(SolveStage::ImportVerify),
+                    InvocationWorkExceeded::VisibleIds {
+                        limit: MAX_SOLVE_VISIBLE_OP_IDS,
+                    },
+                ));
             }
-            let Some(info) = ledger.artifact_info(&edge.artifact).map_err(|error| {
-                resume_ledger("reading a retained driver-state descriptor failed", error)
-            })?
+            visible_ids = visible_ids.saturating_add(1);
+            let this_candidate = candidate_index;
+            candidate_index = candidate_index.saturating_add(1);
+            let Some(candidate) = read_candidate_op(ledger, id, work, this_candidate).map_err(
+                |error| match error {
+                    CandidateOpReadError::Cancelled => cancelled_resume_refusal(run),
+                    CandidateOpReadError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                    }
+                    CandidateOpReadError::Ledger(error) => {
+                        resume_ledger("scanning the ledger for the run failed", error)
+                    }
+                },
+            )?
             else {
                 continue;
             };
-            if info.kind != STAGE_STATE_KIND {
-                continue;
-            }
-            let state = decode_driver_state(ledger, run, edge.artifact)?;
-            validate_state_shape(&state, run)?;
-            if best
-                .as_ref()
-                .is_some_and(|existing| existing.state.completed.len() > state.completed.len())
+            if candidate.branch != MAIN_BRANCH
+                || candidate.exec_mode != ExecMode::Deterministic
+                || !is_supported_stage_discovery_row(&candidate.row, run)
             {
                 continue;
             }
-            let verified = validate_resume_candidate(ledger, run, state, edge.artifact, id)?;
-            match best.as_ref() {
-                Some(existing)
-                    if existing.state.completed.len() == verified.state.completed.len() =>
-                {
-                    best_is_ambiguous = true;
+            let edges = resume_edges(ledger, run, id, work, this_candidate)?;
+            for (descriptor_index, edge) in edges.iter().enumerate() {
+                if edge.role != EdgeRole::Out {
+                    continue;
                 }
-                Some(existing)
-                    if existing.state.completed.len() > verified.state.completed.len() => {}
-                _ => {
-                    best = Some(verified);
-                    best_is_ambiguous = false;
+                let Some(info) =
+                    read_artifact_info_controlled(ledger, &edge.artifact, work, descriptor_index)
+                        .map_err(|error| match error {
+                        EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceReadError::WorkEnvelope(error) => invocation_work_refusal(
+                            Some(run),
+                            Some(SolveStage::ImportVerify),
+                            error,
+                        ),
+                        EvidenceReadError::Ledger(error) => resume_ledger(
+                            "reading a retained driver-state descriptor failed",
+                            error,
+                        ),
+                    })?
+                else {
+                    continue;
+                };
+                if info.kind != STAGE_STATE_KIND {
+                    continue;
+                }
+                let state = decode_driver_state(ledger, run, edge.artifact, work)?;
+                validate_state_shape(&state, run)?;
+                if best
+                    .as_ref()
+                    .is_some_and(|existing| existing.state.completed.len() > state.completed.len())
+                {
+                    continue;
+                }
+                let verified = validate_resume_candidate(
+                    ledger,
+                    run,
+                    state,
+                    edge.artifact,
+                    id,
+                    work,
+                    &mut import_cache,
+                )?;
+                match best.as_ref() {
+                    Some(existing)
+                        if existing.state.completed.len() == verified.state.completed.len() =>
+                    {
+                        best_is_ambiguous = true;
+                    }
+                    Some(existing)
+                        if existing.state.completed.len() > verified.state.completed.len() => {}
+                    _ => {
+                        best = Some(verified);
+                        best_is_ambiguous = false;
+                    }
                 }
             }
+        }
+        match page.next_cursor {
+            Some(next) => {
+                if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
+                    return Err(invocation_work_refusal(
+                        Some(run),
+                        Some(SolveStage::ImportVerify),
+                        InvocationWorkExceeded::VisibleIds {
+                            limit: MAX_SOLVE_VISIBLE_OP_IDS,
+                        },
+                    ));
+                }
+                cursor = Some(next);
+            }
+            None => break,
         }
     }
     let best = best.ok_or_else(|| {
@@ -1648,6 +3193,7 @@ fn load_latest_state(ledger: &Ledger, run: SolveRunId) -> Result<VerifiedResume,
             run.to_hex()
         )));
     }
+    drop(import_cache);
     Ok(best)
 }
 
@@ -1707,35 +3253,61 @@ fn validate_resume_candidate(
     state: SolveDriverState,
     state_artifact: ContentHash,
     discovery_op: i64,
+    work: EvidenceWork<'_>,
+    import_cache: &mut Option<Rc<ResumeImportCache>>,
 ) -> Result<VerifiedResume, SolveRefusal> {
     validate_state_shape(&state, run)?;
     let first = state
         .completed
         .first()
         .expect("state shape requires a completed prefix");
-    let first_edges = resume_edges(ledger, first.op_id)?;
-    require_stage_edge_seal(ledger, first.op_id, first_edges.len())?;
-    let (project, project_source) = load_retained_project(ledger, &first_edges)?;
-    let project_hash = project.hash();
+    let first_edges = resume_edges(ledger, run, first.op_id, work, 0)?;
+    require_stage_edge_seal(ledger, run, first.op_id, first_edges.len(), work, 0)?;
+    let (project_source, retained_source) =
+        read_retained_project_source(ledger, run, &first_edges, work)?;
+    let attestation = if let Some(cached) = import_cache
+        .as_ref()
+        .filter(|cached| cached.source_hash == project_source)
+    {
+        let canonical_matches = evidence_bytes_equal(
+            cached.project.canonical.as_bytes(),
+            retained_source.as_bytes(),
+            work,
+            SolveEvidencePhase::ResumeProjectCanonicalCompare,
+            None,
+        )
+        .map_err(|error| match error {
+            EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+            EvidenceCompareError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+            }
+        })?;
+        if !canonical_matches {
+            return Err(resume_identity(
+                "the retained project source is not the cached canonical project",
+            ));
+        }
+        Rc::clone(cached)
+    } else {
+        let attested = Rc::new(attest_retained_project(
+            run,
+            project_source,
+            &retained_source,
+            work,
+        )?);
+        if import_cache.is_none() {
+            *import_cache = Some(Rc::clone(&attested));
+        }
+        attested
+    };
+    let project = &attestation.project;
+    let project_hash = attestation.project_hash;
+    let expectations = attestation.expectations();
     if state.project != *project_hash.as_bytes() {
         return Err(resume_identity(
             "the retained driver state carries a different project identity",
         ));
     }
-    let rederived = SolveRunId::derive(&project);
-    if rederived != run {
-        return Err(resume_identity(format!(
-            "retained project re-derives run `{}` but resume requested `{}`",
-            rederived.to_hex(),
-            run.to_hex()
-        )));
-    }
-    let (versions, budget, capability, seed) = explicits(&project.spec).map_err(|error| {
-        resume_identity(format!(
-            "the retained project cannot reproduce the stage Five Explicits: {}",
-            error.what
-        ))
-    })?;
 
     let mut context = StageContext::default();
     let mut predecessor_state = None;
@@ -1748,9 +3320,16 @@ fn validate_resume_candidate(
                 stage.name()
             )));
         }
-        let row = ledger
-            .op(completed.op_id)
-            .map_err(|error| resume_ledger("reading a completed solve operation failed", error))?
+        let candidate = read_candidate_op(ledger, completed.op_id, work, index)
+            .map_err(|error| match error {
+                CandidateOpReadError::Cancelled => cancelled_resume_refusal(run),
+                CandidateOpReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(stage), error)
+                }
+                CandidateOpReadError::Ledger(error) => {
+                    resume_ledger("reading a completed solve operation failed", error)
+                }
+            })?
             .ok_or_else(|| {
                 resume_identity(format!(
                     "completed stage {index} names missing operation {}",
@@ -1759,28 +3338,43 @@ fn validate_resume_candidate(
             })?;
         validate_stage_row(
             ledger,
-            &row,
-            stage,
-            run,
-            project_hash,
-            &seed,
-            &versions,
-            &budget,
-            &capability,
+            &candidate,
+            StageRowExpectation {
+                stage,
+                run,
+                project_hash,
+                explicits: expectations,
+            },
+            work,
+            index,
         )?;
         let edges = if index == 0 {
             first_edges.clone()
         } else {
-            resume_edges(ledger, completed.op_id)?
+            resume_edges(ledger, run, completed.op_id, work, index)?
         };
-        require_stage_edge_seal(ledger, completed.op_id, edges.len())?;
+        if index > 0 {
+            require_stage_edge_seal(ledger, run, completed.op_id, edges.len(), work, index)?;
+        }
         require_artifact_kind_resume(
             ledger,
+            run,
             completed.receipt,
             STAGE_RECEIPT_KIND,
             "stage receipt",
+            work,
+            index,
         )?;
-        if !has_edge(&edges, EdgeRole::Out, completed.receipt) {
+        let has_receipt =
+            has_edge_controlled(&edges, EdgeRole::Out, completed.receipt, work, index).map_err(
+                |error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                },
+            )?;
+        if !has_receipt {
             return Err(resume_identity(format!(
                 "stage `{}` receipt {} is not an Out edge of operation {}",
                 stage.name(),
@@ -1790,7 +3384,7 @@ fn validate_resume_candidate(
         }
 
         let checkpoint_outputs =
-            artifacts_with_kind_resume(ledger, &edges, EdgeRole::Out, STAGE_STATE_KIND)?;
+            artifacts_with_kind_resume(ledger, run, &edges, EdgeRole::Out, STAGE_STATE_KIND, work)?;
         if checkpoint_outputs.len() != 1 {
             return Err(resume_identity(format!(
                 "stage `{}` operation {} has {} checkpoint outputs; exactly one is required",
@@ -1800,11 +3394,20 @@ fn validate_resume_candidate(
             )));
         }
         let checkpoint_hash = checkpoint_outputs[0];
-        let checkpoint = decode_driver_state(ledger, run, checkpoint_hash)?;
+        let checkpoint = decode_driver_state(ledger, run, checkpoint_hash, work)?;
         validate_checkpoint_prefix(&checkpoint, &state, index, predecessor_checkpoint.as_ref())?;
 
         if let Some(predecessor) = predecessor_state {
-            if !has_edge(&edges, EdgeRole::In, predecessor) {
+            let has_predecessor =
+                has_edge_controlled(&edges, EdgeRole::In, predecessor, work, index).map_err(
+                    |error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    },
+                )?;
+            if !has_predecessor {
                 return Err(resume_identity(format!(
                     "stage `{}` operation {} does not consume predecessor checkpoint {}",
                     stage.name(),
@@ -1816,9 +3419,13 @@ fn validate_resume_candidate(
 
         let receipt_text = read_text_resume(
             ledger,
+            run,
             completed.receipt,
             MAX_RECEIPT_READ_BYTES,
             "stage receipt",
+            work,
+            SolveEvidencePhase::ResumeStageReceiptRead,
+            SolveEvidencePhase::ResumeStageReceiptUtf8,
         )?;
         let mut expected_edges = vec![
             (EdgeRole::Out, completed.receipt),
@@ -1827,8 +3434,14 @@ fn validate_resume_candidate(
         match stage {
             SolveStage::ImportVerify => {
                 expected_edges.push((EdgeRole::In, project_source));
-                let summary_inputs =
-                    artifacts_with_kind_resume(ledger, &edges, EdgeRole::In, IMPORT_SUMMARY_KIND)?;
+                let summary_inputs = artifacts_with_kind_resume(
+                    ledger,
+                    run,
+                    &edges,
+                    EdgeRole::In,
+                    IMPORT_SUMMARY_KIND,
+                    work,
+                )?;
                 if summary_inputs.len() != 1 {
                     return Err(resume_identity(format!(
                         "import-verify operation {} has {} geometry-import summary inputs; exactly one is required",
@@ -1837,18 +3450,42 @@ fn validate_resume_candidate(
                     )));
                 }
                 let summary_hash = summary_inputs[0];
-                let (import_op, receipt_entries) =
-                    parse_import_verify_receipt(&receipt_text, run, project_hash).map_err(
-                        |what| resume_identity(format!("invalid import-verify receipt: {what}")),
-                    )?;
+                let (import_op, _receipt_entries) = parse_import_verify_receipt(
+                    &receipt_text,
+                    run,
+                    project_hash,
+                    work,
+                )
+                .map_err(|error| match error {
+                    ImportSummaryError::Cancelled => cancelled_resume_refusal(run),
+                    ImportSummaryError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                    ImportSummaryError::Invalid(what) => {
+                        resume_identity(format!("invalid import-verify receipt: {what}"))
+                    }
+                    ImportSummaryError::Ledger(error) => {
+                        resume_ledger("parsing retained import-verify receipt failed", error)
+                    }
+                    ImportSummaryError::Unsupported(what) => resume_import_envelope(run, what),
+                })?;
                 let summary = validate_import_candidate(
                     ledger,
                     &project.spec,
                     project_hash,
-                    import_op,
-                    summary_hash,
+                    ImportCandidateLocator {
+                        op: import_op,
+                        summary_artifact: summary_hash,
+                    },
+                    work,
+                    index,
+                    expectations,
                 )
                 .map_err(|error| match error {
+                    ImportSummaryError::Cancelled => cancelled_resume_refusal(run),
+                    ImportSummaryError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
                     ImportSummaryError::Ledger(error) => {
                         resume_ledger("re-attesting retained import evidence failed", error)
                     }
@@ -1862,14 +3499,41 @@ fn validate_resume_candidate(
                         ),
                     ),
                 })?;
-                if receipt_entries != summary.entries {
-                    return Err(resume_identity(
-                        "the import-verify receipt entries differ from its exact import summary",
-                    ));
-                }
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
                 let expected_receipt =
-                    import_verify_receipt(run, project_hash, summary.op_id, &summary.entries);
-                if receipt_text != expected_receipt {
+                    import_verify_receipt(run, project_hash, summary.op_id, &summary.entries, work)
+                        .map_err(|error| match error {
+                            EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                            EvidenceCompareError::WorkEnvelope(error) => {
+                                invocation_work_refusal(Some(run), Some(stage), error)
+                            }
+                        })?;
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
                     return Err(resume_identity(
                         "the retained import-verify receipt is not the canonical driver receipt",
                     ));
@@ -1884,26 +3548,73 @@ fn validate_resume_candidate(
                 context.verified_imports = summary.entries;
             }
             SolveStage::Assign => {
-                let expected_receipt =
-                    assignment_receipt(&project.spec, &context, run).map_err(|error| {
-                        resume_identity(format!(
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let expected_receipt = assignment_receipt(&project.spec, &context, run, work, true);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let expected_receipt = match expected_receipt {
+                    Ok(receipt) => receipt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
                             "the retained assignment context cannot be reconstructed: {}",
                             error.what
-                        ))
-                    })?;
-                if receipt_text != expected_receipt {
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
                     return Err(resume_identity(
                         "the retained assignment receipt is not the canonical driver receipt",
                     ));
                 }
-                expected_edges.push((
-                    EdgeRole::In,
-                    predecessor_state.expect("assign follows import-verify"),
-                ));
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained assign stage has no verified import-stage predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
             }
             _ => unreachable!("completed unavailable stages were refused above"),
         }
-        require_exact_edges(stage, completed.op_id, &edges, &expected_edges)?;
+        require_exact_edges(
+            run,
+            stage,
+            completed.op_id,
+            &edges,
+            &expected_edges,
+            work,
+            index,
+        )?;
 
         if index + 1 == state.completed.len() {
             if discovery_op != completed.op_id {
@@ -1932,7 +3643,7 @@ fn validate_resume_candidate(
     Ok(VerifiedResume {
         state,
         state_artifact,
-        project,
+        attestation,
         context,
     })
 }
@@ -1978,18 +3689,20 @@ fn validate_state_shape(state: &SolveDriverState, run: SolveRunId) -> Result<(),
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_stage_row(
     ledger: &Ledger,
-    row: &OpRow,
-    stage: SolveStage,
-    run: SolveRunId,
-    project_hash: ContentHash,
-    seed: &[u8],
-    versions: &str,
-    budget: &str,
-    capability: &str,
+    candidate: &ControlledCandidateOp,
+    expected: StageRowExpectation<'_>,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let StageRowExpectation {
+        stage,
+        run,
+        project_hash,
+        explicits,
+    } = expected;
+    let row = &candidate.row;
     let ordinal = stage.ordinal();
     if row.id <= 0
         || row.session.as_deref() != Some(run.as_bytes().as_slice())
@@ -1998,10 +3711,6 @@ fn validate_stage_row(
         || row.t_start != i64::from(ordinal) * 2
         || row.t_end != Some(i64::from(ordinal) * 2 + 1)
         || row.ir != solve_stage_ir(stage, run, project_hash)
-        || row.seed != seed
-        || row.versions != versions
-        || row.budget != budget
-        || row.capability != capability
     {
         return Err(resume_identity(format!(
             "operation {} does not match canonical stage `{}` semantics",
@@ -2009,27 +3718,38 @@ fn validate_stage_row(
             stage.name()
         )));
     }
-    let execution = ledger
-        .op_execution_context(row.id)
-        .map_err(|error| resume_ledger("reading solve operation execution context failed", error))?
-        .ok_or_else(|| resume_identity(format!("operation {} has no execution context", row.id)))?;
-    if execution.branch != MAIN_BRANCH || execution.exec_mode != ExecMode::Deterministic {
+    let explicits_match = five_explicits_match(row, explicits, work, candidate_index).map_err(
+        |error| match error {
+            EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+            EvidenceCompareError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(stage), error)
+            }
+        },
+    )?;
+    if !explicits_match {
+        return Err(resume_identity(format!(
+            "operation {} does not match canonical stage `{}` Five Explicits",
+            row.id,
+            stage.name()
+        )));
+    }
+    if candidate.branch != MAIN_BRANCH || candidate.exec_mode != ExecMode::Deterministic {
         return Err(resume_identity(format!(
             "operation {} is not a deterministic main-branch stage operation",
             row.id
         )));
     }
-    ledger
-        .op_content_identity(row.id)
-        .map_err(|error| {
-            resume_ledger("validating solve operation content identity failed", error)
-        })?
-        .ok_or_else(|| {
-            resume_identity(format!(
-                "operation {} has no typed content-identity sidecar",
-                row.id
-            ))
-        })?;
+    verify_candidate_op_identity(ledger, candidate, work, candidate_index).map_err(|error| {
+        match error {
+            CandidateOpReadError::Cancelled => cancelled_resume_refusal(run),
+            CandidateOpReadError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(stage), error)
+            }
+            CandidateOpReadError::Ledger(error) => {
+                resume_ledger("validating solve operation content identity failed", error)
+            }
+        }
+    })?;
     Ok(())
 }
 
@@ -2064,10 +3784,25 @@ fn validate_checkpoint_prefix(
     Ok(())
 }
 
-fn resume_edges(ledger: &Ledger, op: i64) -> Result<Vec<OpArtifactEdge>, SolveRefusal> {
-    let edges = ledger
-        .op_artifact_edges_bounded(op, EDGE_SCAN_CAP)
-        .map_err(|error| resume_ledger("reading solve operation edges failed", error))?;
+fn resume_edges(
+    ledger: &Ledger,
+    run: SolveRunId,
+    op: i64,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<Vec<OpArtifactEdge>, SolveRefusal> {
+    let edges =
+        read_op_edges_controlled(ledger, op, work, candidate_index).map_err(
+            |error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading solve operation edges failed", error)
+                }
+            },
+        )?;
     if edges.truncated {
         return Err(resume_identity(format!(
             "operation {op} exceeds the complete {EDGE_SCAN_CAP}-edge resume scan"
@@ -2078,12 +3813,24 @@ fn resume_edges(ledger: &Ledger, op: i64) -> Result<Vec<OpArtifactEdge>, SolveRe
 
 fn require_stage_edge_seal(
     ledger: &Ledger,
+    run: SolveRunId,
     op: i64,
     edge_count: usize,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
-    let seal = ledger
-        .op_artifact_edge_seal(op)
-        .map_err(|error| resume_ledger("validating solve operation edge seal failed", error))?;
+    let phase = SolveEvidencePhase::EdgeSealRead;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let seal = ledger.op_artifact_edge_seal(op);
+    work.checkpoint(phase, plan_index, 1)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    work.charge(DERIVATION_ITEM_WORK_BYTES).map_err(|error| {
+        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+    })?;
+    let seal =
+        seal.map_err(|error| resume_ledger("validating solve operation edge seal failed", error))?;
     if seal != Some(edge_count) {
         return Err(resume_identity(format!(
             "operation {op} lacks the driver's exact {edge_count}-edge lineage seal"
@@ -2092,18 +3839,27 @@ fn require_stage_edge_seal(
     Ok(())
 }
 
-fn load_retained_project(
+fn read_retained_project_source(
     ledger: &Ledger,
+    run: SolveRunId,
     edges: &[OpArtifactEdge],
-) -> Result<(DecodedProject, ContentHash), SolveRefusal> {
+    work: EvidenceWork<'_>,
+) -> Result<(ContentHash, String), SolveRefusal> {
     let mut sources = Vec::new();
-    for edge in edges {
+    for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != EdgeRole::In {
             continue;
         }
-        let info = ledger
-            .artifact_info(&edge.artifact)
-            .map_err(|error| resume_ledger("reading the retained project failed", error))?
+        let info = read_artifact_info_controlled(ledger, &edge.artifact, work, descriptor_index)
+            .map_err(|error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading the retained project failed", error)
+                }
+            })?
             .ok_or_else(|| {
                 resume_identity(format!(
                     "the first stage links missing artifact {}",
@@ -2121,24 +3877,168 @@ fn load_retained_project(
         )));
     }
     let source_hash = sources[0];
-    let bytes = ledger
-        .get_artifact_bounded(&source_hash, crate::MAX_PROJECT_BYTES)
-        .map_err(|error| resume_ledger("reading the retained project failed", error))?
-        .ok_or_else(|| resume_identity("the retained project source is missing"))?;
-    let source = String::from_utf8(bytes)
-        .map_err(|_| resume_identity("the retained project source is not UTF-8"))?;
-    let project = fs_project::parse_sexpr(&source).map_err(|error| {
+    let bytes = materialize_evidence_artifact(
+        ledger,
+        work,
+        source_hash,
+        crate::MAX_PROJECT_BYTES,
+        SolveEvidencePhase::ResumeProjectRead,
+        None,
+    )
+    .map_err(|error| match error {
+        EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+        EvidenceReadError::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+        }
+        EvidenceReadError::Ledger(error) => {
+            resume_ledger("reading the retained project failed", error)
+        }
+    })?
+    .ok_or_else(|| resume_identity("the retained project source is missing"))?;
+    let source = evidence_utf8_string(
+        &bytes,
+        work,
+        SolveEvidencePhase::ResumeProjectUtf8,
+        None,
+        "retained project source",
+    )
+    .map_err(|error| match error {
+        EvidenceUtf8Error::Cancelled => cancelled_resume_refusal(run),
+        EvidenceUtf8Error::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+        }
+        EvidenceUtf8Error::Invalid(problem) => resume_identity(problem),
+    })?;
+    Ok((source_hash, source))
+}
+
+fn attest_retained_project(
+    run: SolveRunId,
+    source_hash: ContentHash,
+    source: &str,
+    work: EvidenceWork<'_>,
+) -> Result<ResumeImportCache, SolveRefusal> {
+    work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let project = fs_project::parse_sexpr(source);
+    work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 1)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let project = project.map_err(|error| {
         resume_identity(format!(
             "the retained project source no longer parses strictly: {} ({})",
             error.code, error.detail
         ))
     })?;
-    if !project.findings().is_empty() || project.canonical != source {
+    work.checkpoint(SolveEvidencePhase::ProjectValidation, None, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let findings = project.findings();
+    work.checkpoint(SolveEvidencePhase::ProjectValidation, None, 1)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    work.charge(u64::try_from(project.canonical.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(SolveStage::ImportVerify),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error))?;
+    if !findings.is_empty() {
+        return Err(resume_identity(
+            "the retained project source has validation findings",
+        ));
+    }
+    let canonical_matches = evidence_bytes_equal(
+        project.canonical.as_bytes(),
+        source.as_bytes(),
+        work,
+        SolveEvidencePhase::ResumeProjectCanonicalCompare,
+        None,
+    )
+    .map_err(|error| match error {
+        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+        EvidenceCompareError::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+        }
+    })?;
+    if !canonical_matches {
         return Err(resume_identity(
             "the retained project source is not the exact canonical project",
         ));
     }
-    Ok((project, source_hash))
+    work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let project_hash = project.hash();
+    let rederived = SolveRunId::derive_with_project_hash(&project, project_hash);
+    work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 1)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let identity_bytes = u64::try_from(project.canonical.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(SolveStage::ImportVerify),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?;
+    work.charge(identity_bytes).map_err(|error| {
+        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+    })?;
+    if rederived != run {
+        return Err(resume_identity(format!(
+            "retained project re-derives run `{}` but resume requested `{}`",
+            rederived.to_hex(),
+            run.to_hex()
+        )));
+    }
+    work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let rendered_explicits = explicits(&project.spec);
+    work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 1)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let (versions, budget, capability, seed) = rendered_explicits.map_err(|error| {
+        resume_identity(format!(
+            "the retained project cannot reproduce the stage Five Explicits: {}",
+            error.what
+        ))
+    })?;
+    let explicit_bytes = versions
+        .len()
+        .checked_add(budget.len())
+        .and_then(|bytes| bytes.checked_add(capability.len()))
+        .and_then(|bytes| bytes.checked_add(seed.len()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invocation_work_refusal(
+                Some(run),
+                Some(SolveStage::ImportVerify),
+                InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                },
+            )
+        })?;
+    work.charge(explicit_bytes).map_err(|error| {
+        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+    })?;
+    let canonical_project_json =
+        render_canonical_project_json(&project.spec, work).map_err(|error| match error {
+            ProjectRenderError::Cancelled => cancelled_resume_refusal(run),
+            ProjectRenderError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+            }
+            ProjectRenderError::Invalid(problem) => resume_identity(problem),
+        })?;
+    Ok(ResumeImportCache {
+        source_hash,
+        project,
+        project_hash,
+        versions,
+        budget,
+        capability,
+        seed,
+        canonical_project_json,
+    })
 }
 
 fn resume_identity(what: impl Into<String>) -> SolveRefusal {
@@ -2147,6 +4047,78 @@ fn resume_identity(what: impl Into<String>) -> SolveRefusal {
         what,
         "verify ledger integrity; codec validity alone cannot authorize resume",
     )
+}
+
+fn cancelled_before_run_refusal() -> SolveRefusal {
+    SolveRefusal::plain(
+        "cli-solve-cancelled",
+        "cancellation observed while validating the project before solve; no solve publication \
+         was made",
+        "retry the fresh solve with a new cancellation gate",
+    )
+}
+
+fn cancelled_fresh_refusal(run: SolveRunId, stage: Option<SolveStage>) -> SolveRefusal {
+    SolveRefusal {
+        code: "cli-solve-cancelled",
+        stage: stage.map(SolveStage::name),
+        what: "cancellation observed during bounded solve derivation; no new solve publication \
+               was made"
+            .to_string(),
+        fix: "retry the fresh solve with a new cancellation gate".to_string(),
+        dependency: None,
+        run: Some(run.to_hex()),
+        recorded_op: None,
+    }
+}
+
+fn invocation_work_refusal(
+    run: Option<SolveRunId>,
+    stage: Option<SolveStage>,
+    exceeded: InvocationWorkExceeded,
+) -> SolveRefusal {
+    let what = match exceeded {
+        InvocationWorkExceeded::CumulativeBytes { attempted } => format!(
+            "solve discovery and re-attestation attempted {attempted} cumulative work bytes above \
+             the invocation envelope {MAX_SOLVE_INVOCATION_WORK_BYTES}"
+        ),
+        InvocationWorkExceeded::VisibleIds { limit } => format!(
+            "solve discovery reached the invocation ceiling of {limit} visible operation ids \
+             while additional frozen-history rows remained"
+        ),
+        InvocationWorkExceeded::VisiblePages { limit } => format!(
+            "solve discovery reached the invocation ceiling of {limit} visible-operation pages \
+             while additional frozen-history rows remained"
+        ),
+    };
+    SolveRefusal {
+        code: "cli-solve-work-envelope",
+        stage: stage.map(SolveStage::name),
+        what,
+        fix: "compact or split unrelated ledger history, or reduce retained candidate evidence, \
+              then retry; the driver will not report a false not-found result"
+            .to_string(),
+        dependency: None,
+        run: run.map(|run| run.to_hex()),
+        recorded_op: None,
+    }
+}
+
+fn cancelled_resume_refusal(run: SolveRunId) -> SolveRefusal {
+    SolveRefusal {
+        code: "cli-solve-cancelled",
+        stage: Some(SolveStage::ImportVerify.name()),
+        what: "cancellation observed while re-attesting retained solve evidence; no new solve \
+               publication was made"
+            .to_string(),
+        fix: format!(
+            "retry `frankensim solve --resume {} <ledger>` with a fresh cancellation gate",
+            run.to_hex()
+        ),
+        dependency: None,
+        run: Some(run.to_hex()),
+        recorded_op: None,
+    }
 }
 
 fn resume_import_envelope(run: SolveRunId, what: impl Into<String>) -> SolveRefusal {
@@ -2174,55 +4146,95 @@ fn decode_driver_state(
     ledger: &Ledger,
     run: SolveRunId,
     artifact: ContentHash,
+    work: EvidenceWork<'_>,
 ) -> Result<SolveDriverState, SolveRefusal> {
-    let bytes = ledger
-        .get_artifact_bounded(&artifact, MAX_STATE_ENVELOPE_BYTES)
-        .map_err(|error| resume_ledger("reading a retained driver checkpoint failed", error))?
-        .ok_or_else(|| {
-            resume_identity(format!(
-                "retained driver checkpoint {} is missing",
-                artifact.to_hex()
-            ))
-        })?;
-    if hash_bytes(&bytes) != artifact {
-        return Err(resume_identity(format!(
-            "retained driver checkpoint {} does not hash to its artifact identity",
+    let bytes = materialize_evidence_artifact(
+        ledger,
+        work,
+        artifact,
+        MAX_STATE_ENVELOPE_BYTES,
+        SolveEvidencePhase::ResumeStateRead,
+        None,
+    )
+    .map_err(|error| match error {
+        EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+        EvidenceReadError::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+        }
+        EvidenceReadError::Ledger(error) => {
+            resume_ledger("reading a retained driver checkpoint failed", error)
+        }
+    })?
+    .ok_or_else(|| {
+        resume_identity(format!(
+            "retained driver checkpoint {} is missing",
             artifact.to_hex()
-        )));
-    }
+        ))
+    })?;
+    // The completing controlled ledger read above already validates and
+    // supplies the exact content identity. Parsing that fixed 32-byte identity
+    // avoids a second whole-envelope hash pass; a callback stop returns before
+    // this decode path.
     // This self-derived expectation is deliberately only a bounded codec and
     // corruption check. `validate_resume_candidate` supplies the independent
     // semantic/lineage admission that makes the decoded value usable.
     let expectation = LegacySnapshotExpectationV1::new(
-        ContentId::of_bytes(&bytes),
+        ContentId::parse_slice(artifact.as_bytes()).expect("ledger content hash is 32 bytes"),
         DRIVER_STATE_TYPE_ID_V1,
         DRIVER_STATE_SCHEMA_VERSION_V1,
         envelope_provenance(run),
     );
     let limits = LegacySnapshotLimitsV1::new(MAX_STATE_ENVELOPE_BYTES, STATE_HASH_POLL_BYTES);
+    let mut decode_polls = 0u64;
+    work.checkpoint(SolveEvidencePhase::ResumeStateDecode, None, 0)
+        .map_err(|_| cancelled_resume_refusal(run))?;
     let opened = LegacySnapshotV1Adapter::<SolveDriverState>::open_expected(
         &bytes,
         expectation,
         limits,
-        fs_blake3::identity::NeverCancel,
-    )
-    .map_err(|error| {
-        resume_identity(format!(
-            "the retained driver state failed bounded envelope admission: {error:?}"
-        ))
+        || {
+            let units = decode_polls.saturating_mul(u64::from(STATE_HASH_POLL_BYTES));
+            decode_polls = decode_polls.saturating_add(1);
+            work.checkpoint(SolveEvidencePhase::ResumeStateDecode, None, units)
+                .is_err()
+        },
+    );
+    let decoded_units = u64::try_from(bytes.len()).map_err(|_| {
+        resume_identity("the retained driver state length is outside the decode checkpoint range")
     })?;
-    Ok(opened.state().clone())
+    work.checkpoint(SolveEvidencePhase::ResumeStateDecode, None, decoded_units)
+        .map_err(|_| cancelled_resume_refusal(run))?;
+    let opened = opened.map_err(|error| {
+        if matches!(error, LegacySnapshotV1Error::Cancelled { .. }) {
+            cancelled_resume_refusal(run)
+        } else {
+            resume_identity(format!(
+                "the retained driver state failed bounded envelope admission: {error:?}"
+            ))
+        }
+    })?;
+    Ok(opened.into_parts().0)
 }
 
 fn require_artifact_kind_resume(
     ledger: &Ledger,
+    run: SolveRunId,
     artifact: ContentHash,
     expected_kind: &str,
     label: &str,
+    work: EvidenceWork<'_>,
+    descriptor_index: usize,
 ) -> Result<(), SolveRefusal> {
-    let info = ledger
-        .artifact_info(&artifact)
-        .map_err(|error| resume_ledger("reading an artifact descriptor failed", error))?
+    let info = read_artifact_info_controlled(ledger, &artifact, work, descriptor_index)
+        .map_err(|error| match error {
+            EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+            EvidenceReadError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+            }
+            EvidenceReadError::Ledger(error) => {
+                resume_ledger("reading an artifact descriptor failed", error)
+            }
+        })?
         .ok_or_else(|| {
             resume_identity(format!(
                 "the retained {label} {} is missing",
@@ -2241,18 +4253,27 @@ fn require_artifact_kind_resume(
 
 fn artifacts_with_kind_resume(
     ledger: &Ledger,
+    run: SolveRunId,
     edges: &[OpArtifactEdge],
     role: EdgeRole,
     kind: &str,
+    work: EvidenceWork<'_>,
 ) -> Result<Vec<ContentHash>, SolveRefusal> {
     let mut matches = Vec::new();
-    for edge in edges {
+    for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != role {
             continue;
         }
-        let info = ledger
-            .artifact_info(&edge.artifact)
-            .map_err(|error| resume_ledger("reading an artifact descriptor failed", error))?
+        let info = read_artifact_info_controlled(ledger, &edge.artifact, work, descriptor_index)
+            .map_err(|error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading an artifact descriptor failed", error)
+                }
+            })?
             .ok_or_else(|| {
                 resume_identity(format!(
                     "operation lineage names missing artifact {}",
@@ -2268,52 +4289,154 @@ fn artifacts_with_kind_resume(
 
 fn read_text_resume(
     ledger: &Ledger,
+    run: SolveRunId,
     artifact: ContentHash,
     cap: u64,
     label: &str,
+    work: EvidenceWork<'_>,
+    read_phase: SolveEvidencePhase,
+    text_phase: SolveEvidencePhase,
 ) -> Result<String, SolveRefusal> {
-    let bytes = ledger
-        .get_artifact_bounded(&artifact, cap)
-        .map_err(|error| resume_ledger(&format!("reading the retained {label} failed"), error))?
+    let bytes = materialize_evidence_artifact(ledger, work, artifact, cap, read_phase, None)
+        .map_err(|error| match error {
+            EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+            EvidenceReadError::WorkEnvelope(error) => {
+                invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+            }
+            EvidenceReadError::Ledger(error) => {
+                resume_ledger(&format!("reading the retained {label} failed"), error)
+            }
+        })?
         .ok_or_else(|| {
             resume_identity(format!(
                 "the retained {label} {} is missing",
                 artifact.to_hex()
             ))
         })?;
-    String::from_utf8(bytes).map_err(|_| {
-        resume_identity(format!(
-            "the retained {label} {} is not UTF-8",
+    evidence_utf8_string(&bytes, work, text_phase, None, label).map_err(|error| match error {
+        EvidenceUtf8Error::Cancelled => cancelled_resume_refusal(run),
+        EvidenceUtf8Error::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+        }
+        EvidenceUtf8Error::Invalid(problem) => resume_identity(format!(
+            "the retained {label} {} is invalid: {problem}",
             artifact.to_hex()
-        ))
+        )),
     })
 }
 
-fn has_edge(edges: &[OpArtifactEdge], role: EdgeRole, artifact: ContentHash) -> bool {
-    edges
-        .iter()
-        .any(|edge| edge.role == role && edge.artifact == artifact)
+fn has_edge_controlled(
+    edges: &[OpArtifactEdge],
+    role: EdgeRole,
+    artifact: ContentHash,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<bool, EvidenceCompareError> {
+    let phase = SolveEvidencePhase::EdgeSetCompare;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    for (index, edge) in edges.iter().enumerate() {
+        let units = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        work.checkpoint(phase, plan_index, units)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        let matches = edge.role == role && edge.artifact == artifact;
+        work.checkpoint(phase, plan_index, units.saturating_add(1))
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        work.charge(EDGE_ITEM_WORK_BYTES)
+            .map_err(EvidenceCompareError::WorkEnvelope)?;
+        if matches {
+            work.checkpoint(phase, plan_index, u64::MAX)
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            return Ok(true);
+        }
+    }
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    Ok(false)
 }
 
-fn edge_sets_match(edges: &[OpArtifactEdge], expected: &[(EdgeRole, ContentHash)]) -> bool {
-    edges.len() == expected.len()
-        && expected
-            .iter()
-            .all(|(role, artifact)| has_edge(edges, *role, *artifact))
-        && edges.iter().all(|edge| {
-            expected
-                .iter()
-                .any(|(role, artifact)| edge.role == *role && edge.artifact == *artifact)
-        })
+fn edge_sets_match_controlled(
+    edges: &[OpArtifactEdge],
+    expected: &[(EdgeRole, ContentHash)],
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<bool, EvidenceCompareError> {
+    let phase = SolveEvidencePhase::EdgeSetCompare;
+    let plan_index = Some(candidate_index);
+    work.checkpoint(phase, plan_index, 0)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    if edges.len() != expected.len() {
+        work.checkpoint(phase, plan_index, 1)
+            .map_err(|_| EvidenceCompareError::Cancelled)?;
+        work.charge(1).map_err(EvidenceCompareError::WorkEnvelope)?;
+        return Ok(false);
+    }
+    let mut comparisons = 0u64;
+    for (role, artifact) in expected {
+        let mut found = false;
+        for edge in edges {
+            work.checkpoint(phase, plan_index, comparisons.saturating_add(1))
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            let matches = edge.role == *role && edge.artifact == *artifact;
+            comparisons = comparisons.saturating_add(1);
+            work.checkpoint(phase, plan_index, comparisons.saturating_add(1))
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            work.charge(EDGE_ITEM_WORK_BYTES)
+                .map_err(EvidenceCompareError::WorkEnvelope)?;
+            if matches {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+    }
+    for edge in edges {
+        let mut found = false;
+        for (role, artifact) in expected {
+            work.checkpoint(phase, plan_index, comparisons.saturating_add(1))
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            let matches = edge.role == *role && edge.artifact == *artifact;
+            comparisons = comparisons.saturating_add(1);
+            work.checkpoint(phase, plan_index, comparisons.saturating_add(1))
+                .map_err(|_| EvidenceCompareError::Cancelled)?;
+            work.charge(EDGE_ITEM_WORK_BYTES)
+                .map_err(EvidenceCompareError::WorkEnvelope)?;
+            if matches {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+    }
+    work.checkpoint(phase, plan_index, u64::MAX)
+        .map_err(|_| EvidenceCompareError::Cancelled)?;
+    Ok(true)
 }
 
 fn require_exact_edges(
+    run: SolveRunId,
     stage: SolveStage,
     op: i64,
     edges: &[OpArtifactEdge],
     expected: &[(EdgeRole, ContentHash)],
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
-    if !edge_sets_match(edges, expected) {
+    let matches =
+        edge_sets_match_controlled(edges, expected, work, candidate_index).map_err(|error| {
+            match error {
+                EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceCompareError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(stage), error)
+                }
+            }
+        })?;
+    if !matches {
         return Err(resume_identity(format!(
             "stage `{}` operation {op} has {} artifact edges, not the driver's exact {}-edge set",
             stage.name(),
@@ -2328,13 +4451,33 @@ fn validate_import_candidate(
     ledger: &Ledger,
     spec: &ProjectSpec,
     project_hash: ContentHash,
-    op: i64,
-    summary_artifact: ContentHash,
+    locator: ImportCandidateLocator,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+    expectations: RenderedExplicitsRef<'_>,
 ) -> Result<ImportSummary, ImportSummaryError> {
-    let row = ledger.op(op)?.ok_or_else(|| {
+    let ImportCandidateLocator {
+        op,
+        summary_artifact,
+    } = locator;
+    let candidate = read_candidate_op(ledger, op, work, candidate_index)?.ok_or_else(|| {
         ImportSummaryError::Invalid(format!("import summary names missing operation {op}"))
     })?;
-    let attestation = attest_import_row(ledger, spec, op, &row)?;
+    let attestation = attest_import_row(
+        ledger,
+        spec,
+        op,
+        &candidate,
+        work,
+        candidate_index,
+        expectations,
+    )?;
+    let edges = read_op_edges_controlled(ledger, op, work, candidate_index)?;
+    if edges.truncated {
+        return Err(ImportSummaryError::Invalid(format!(
+            "import operation {op} exceeds the complete {EDGE_SCAN_CAP}-edge scan"
+        )));
+    }
     validate_import_evidence(
         ledger,
         spec,
@@ -2342,6 +4485,9 @@ fn validate_import_candidate(
         op,
         summary_artifact,
         &attestation,
+        &edges.edges,
+        work,
+        candidate_index,
     )
 }
 
@@ -2349,8 +4495,12 @@ fn attest_import_row(
     ledger: &Ledger,
     spec: &ProjectSpec,
     op: i64,
-    row: &OpRow,
+    candidate: &ControlledCandidateOp,
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+    expectations: RenderedExplicitsRef<'_>,
 ) -> Result<ImportIrAttestation, ImportSummaryError> {
+    let row = &candidate.row;
     if op <= 0
         || row.id != op
         || row.session.is_some()
@@ -2363,41 +4513,30 @@ fn attest_import_row(
             "operation {op} is not a canonical completed import operation"
         )));
     }
-    let attestation = validate_import_ir(&row.ir, spec).map_err(ImportSummaryError::Invalid)?;
+    let attestation = validate_import_ir(&row.ir, spec, expectations.canonical_project_json, work)?;
     if attestation.sources.len() > SOLVE_MAX_IMPORT_SOURCES {
         return Err(ImportSummaryError::Unsupported(format!(
             "import operation {op} carries {} sources above the solve evidence cap {SOLVE_MAX_IMPORT_SOURCES}",
             attestation.sources.len()
         )));
     }
-    let (versions, budget, capability, seed) = explicits(spec).map_err(|error| {
-        ImportSummaryError::Invalid(format!(
-            "project cannot reproduce import Five Explicits: {}",
-            error.what
-        ))
-    })?;
-    if row.seed.as_slice() != seed
-        || row.versions != versions
-        || row.budget != budget
-        || row.capability != capability
-    {
+    let explicits_match = five_explicits_match(row, expectations, work, candidate_index).map_err(
+        |error| match error {
+            EvidenceCompareError::Cancelled => ImportSummaryError::Cancelled,
+            EvidenceCompareError::WorkEnvelope(error) => ImportSummaryError::WorkEnvelope(error),
+        },
+    )?;
+    if !explicits_match {
         return Err(ImportSummaryError::Invalid(format!(
             "import operation {op} does not carry the project's exact Five Explicits"
         )));
     }
-    let execution = ledger.op_execution_context(op)?.ok_or_else(|| {
-        ImportSummaryError::Invalid(format!("import operation {op} has no execution context"))
-    })?;
-    if execution.branch != MAIN_BRANCH || execution.exec_mode != ExecMode::Deterministic {
+    if candidate.branch != MAIN_BRANCH || candidate.exec_mode != ExecMode::Deterministic {
         return Err(ImportSummaryError::Invalid(format!(
             "import operation {op} is not deterministic on the main branch"
         )));
     }
-    ledger.op_content_identity(op)?.ok_or_else(|| {
-        ImportSummaryError::Invalid(format!(
-            "import operation {op} has no typed content-identity sidecar"
-        ))
-    })?;
+    verify_candidate_op_identity(ledger, candidate, work, candidate_index)?;
     Ok(attestation)
 }
 
@@ -2408,14 +4547,22 @@ fn validate_import_evidence(
     op: i64,
     summary_artifact: ContentHash,
     attestation: &ImportIrAttestation,
+    edges: &[OpArtifactEdge],
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
 ) -> Result<ImportSummary, ImportSummaryError> {
-    let bounded = ledger.op_artifact_edges_bounded(op, EDGE_SCAN_CAP)?;
-    if bounded.truncated {
-        return Err(ImportSummaryError::Invalid(format!(
-            "import operation {op} exceeds the complete {EDGE_SCAN_CAP}-edge scan"
-        )));
-    }
-    if !has_edge(&bounded.edges, EdgeRole::Out, summary_artifact) {
+    let has_summary = has_edge_controlled(
+        edges,
+        EdgeRole::Out,
+        summary_artifact,
+        work,
+        candidate_index,
+    )
+    .map_err(|error| match error {
+        EvidenceCompareError::Cancelled => ImportSummaryError::Cancelled,
+        EvidenceCompareError::WorkEnvelope(error) => ImportSummaryError::WorkEnvelope(error),
+    })?;
+    if !has_summary {
         return Err(ImportSummaryError::Invalid(format!(
             "summary {} is not an Out edge of import operation {op}",
             summary_artifact.to_hex()
@@ -2426,63 +4573,105 @@ fn validate_import_evidence(
         summary_artifact,
         IMPORT_SUMMARY_KIND,
         "import summary",
+        work,
+        0,
     )?;
-    let summary_len = import_artifact_len(ledger, summary_artifact, "import summary")?;
+    let summary_len = import_artifact_len(ledger, summary_artifact, "import summary", work, 0)?;
     if summary_len > MAX_RECEIPT_READ_BYTES {
         return Err(ImportSummaryError::Unsupported(format!(
             "import summary is {summary_len} bytes above the solve receipt envelope {MAX_RECEIPT_READ_BYTES}"
         )));
     }
-    let bytes = ledger
-        .get_artifact_bounded(&summary_artifact, MAX_RECEIPT_READ_BYTES)?
-        .ok_or_else(|| {
-            ImportSummaryError::Invalid(format!(
-                "import summary {} is missing",
-                summary_artifact.to_hex()
-            ))
-        })?;
-    let text = String::from_utf8(bytes).map_err(|_| {
+    let bytes = materialize_evidence_artifact(
+        ledger,
+        work,
+        summary_artifact,
+        MAX_RECEIPT_READ_BYTES,
+        SolveEvidencePhase::ImportSummaryRead,
+        None,
+    )?
+    .ok_or_else(|| {
         ImportSummaryError::Invalid(format!(
-            "import summary {} is not UTF-8",
+            "import summary {} is missing",
             summary_artifact.to_hex()
         ))
     })?;
-    let entries = parse_geometry_import_summary(&text, spec, project_hash)
-        .map_err(ImportSummaryError::Invalid)?;
+    let text = evidence_utf8_string(
+        &bytes,
+        work,
+        SolveEvidencePhase::ImportSummaryUtf8,
+        None,
+        "import summary",
+    )
+    .map_err(|error| match error {
+        EvidenceUtf8Error::Cancelled => ImportSummaryError::Cancelled,
+        EvidenceUtf8Error::WorkEnvelope(error) => ImportSummaryError::WorkEnvelope(error),
+        EvidenceUtf8Error::Invalid(problem) => ImportSummaryError::Invalid(format!(
+            "import summary {} is invalid: {problem}",
+            summary_artifact.to_hex()
+        )),
+    })?;
+    let entries = parse_geometry_import_summary(&text, spec, project_hash, work)?;
     let mut expected_edges = vec![(EdgeRole::Out, summary_artifact)];
-    for entry in &entries {
-        require_import_artifact_kind(ledger, entry.raw_source, IMPORT_RAW_KIND, "raw source")?;
+    for (source_index, entry) in entries.iter().enumerate() {
+        let descriptor_base = source_index.saturating_mul(4).saturating_add(1);
+        require_import_artifact_kind(
+            ledger,
+            entry.raw_source,
+            IMPORT_RAW_KIND,
+            "raw source",
+            work,
+            descriptor_base,
+        )?;
         require_import_artifact_kind(
             ledger,
             entry.promotion_receipt,
             IMPORT_PROMOTION_KIND,
             "promotion receipt",
+            work,
+            descriptor_base.saturating_add(1),
         )?;
         require_import_artifact_kind(
             ledger,
             entry.promoted_mesh,
             IMPORT_MESH_KIND,
             "promoted mesh",
+            work,
+            descriptor_base.saturating_add(2),
         )?;
         require_import_artifact_kind(
             ledger,
             entry.assignment_report,
             IMPORT_ASSIGNMENT_KIND,
             "assignment report",
+            work,
+            descriptor_base.saturating_add(3),
         )?;
         expected_edges.push((EdgeRole::In, entry.raw_source));
         expected_edges.push((EdgeRole::Out, entry.promotion_receipt));
         expected_edges.push((EdgeRole::Out, entry.promoted_mesh));
         expected_edges.push((EdgeRole::Out, entry.assignment_report));
     }
-    if !edge_sets_match(&bounded.edges, &expected_edges) {
+    let edges_match = edge_sets_match_controlled(edges, &expected_edges, work, candidate_index)
+        .map_err(|error| match error {
+            EvidenceCompareError::Cancelled => ImportSummaryError::Cancelled,
+            EvidenceCompareError::WorkEnvelope(error) => ImportSummaryError::WorkEnvelope(error),
+        })?;
+    if !edges_match {
         return Err(ImportSummaryError::Invalid(format!(
             "import operation {op} has {} artifact edges, not the exact typed {}-edge set",
-            bounded.edges.len(),
+            edges.len(),
             expected_edges.len()
         )));
     }
-    validate_import_admission_evidence(ledger, spec, summary_artifact, &entries, attestation)?;
+    validate_import_admission_evidence(
+        ledger,
+        spec,
+        summary_artifact,
+        &entries,
+        attestation,
+        work,
+    )?;
     Ok(ImportSummary {
         op_id: op,
         artifact: summary_artifact,
@@ -2495,10 +4684,16 @@ fn require_import_artifact_kind(
     artifact: ContentHash,
     expected_kind: &str,
     label: &str,
+    work: EvidenceWork<'_>,
+    descriptor_index: usize,
 ) -> Result<(), ImportSummaryError> {
-    let info = ledger.artifact_info(&artifact)?.ok_or_else(|| {
-        ImportSummaryError::Invalid(format!("{label} artifact {} is missing", artifact.to_hex()))
-    })?;
+    let info = read_artifact_info_controlled(ledger, &artifact, work, descriptor_index)?
+        .ok_or_else(|| {
+            ImportSummaryError::Invalid(format!(
+                "{label} artifact {} is missing",
+                artifact.to_hex()
+            ))
+        })?;
     if info.kind != expected_kind {
         return Err(ImportSummaryError::Invalid(format!(
             "{label} artifact {} has kind `{}`, not `{expected_kind}`",
@@ -2516,6 +4711,7 @@ fn validate_import_admission_evidence(
     summary_artifact: ContentHash,
     entries: &[VerifiedImport],
     attestation: &ImportIrAttestation,
+    work: EvidenceWork<'_>,
 ) -> Result<(), ImportSummaryError> {
     let geometry = spec.geometry.as_deref().unwrap_or(&[]);
     if entries.len() != geometry.len() || attestation.sources.len() != geometry.len() {
@@ -2532,7 +4728,23 @@ fn validate_import_admission_evidence(
         )));
     }
     let mut entity_violations = Vec::new();
+    work.checkpoint(SolveEvidencePhase::EntityResolution, None, 0)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
     let entity_ids = spec.resolve_entities(&mut entity_violations);
+    work.checkpoint(SolveEvidencePhase::EntityResolution, None, 1)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    let entity_items = entity_ids
+        .len()
+        .checked_add(entity_violations.len())
+        .and_then(|count| u64::try_from(count).ok())
+        .and_then(|count| count.checked_mul(DERIVATION_ITEM_WORK_BYTES))
+        .ok_or(ImportSummaryError::WorkEnvelope(
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        ))?;
+    work.charge(entity_items)
+        .map_err(ImportSummaryError::WorkEnvelope)?;
     if !entity_violations.is_empty() {
         return Err(ImportSummaryError::Invalid(
             "project entity identities cannot be re-derived for assignment evidence".to_string(),
@@ -2562,9 +4774,16 @@ fn validate_import_admission_evidence(
     let raw_stream_cap = source_cap.min(solve_total_cap);
     let mut preflight_raw_bytes = 0u64;
     let mut preflight_evidence_bytes =
-        import_artifact_len(ledger, summary_artifact, "import summary")?;
+        import_artifact_len(ledger, summary_artifact, "import summary", work, 0)?;
     for (source_index, entry) in entries.iter().enumerate() {
-        let raw_len = import_artifact_len(ledger, entry.raw_source, "raw source")?;
+        let descriptor_base = source_index.saturating_mul(4).saturating_add(1);
+        let raw_len = import_artifact_len(
+            ledger,
+            entry.raw_source,
+            "raw source",
+            work,
+            descriptor_base,
+        )?;
         if raw_len > source_cap {
             return Err(ImportSummaryError::Invalid(format!(
                 "source {source_index} raw artifact is {raw_len} bytes above max_source_bytes {}",
@@ -2576,20 +4795,37 @@ fn validate_import_admission_evidence(
                 "aggregate retained raw-source byte count overflowed u64".to_string(),
             )
         })?;
-        let promotion_len =
-            import_artifact_len(ledger, entry.promotion_receipt, "promotion receipt")?;
+        let promotion_len = import_artifact_len(
+            ledger,
+            entry.promotion_receipt,
+            "promotion receipt",
+            work,
+            descriptor_base.saturating_add(1),
+        )?;
         if promotion_len > MAX_OPAQUE_IMPORT_RECEIPT_BYTES {
             return Err(ImportSummaryError::Unsupported(format!(
                 "source {source_index} promotion receipt is {promotion_len} bytes above the solve opaque-receipt envelope {MAX_OPAQUE_IMPORT_RECEIPT_BYTES}"
             )));
         }
-        let mesh_len = import_artifact_len(ledger, entry.promoted_mesh, "promoted mesh")?;
+        let mesh_len = import_artifact_len(
+            ledger,
+            entry.promoted_mesh,
+            "promoted mesh",
+            work,
+            descriptor_base.saturating_add(2),
+        )?;
         if mesh_len > MAX_PARSED_EVIDENCE_BYTES {
             return Err(ImportSummaryError::Unsupported(format!(
                 "source {source_index} promoted mesh is {mesh_len} bytes above the solve parse envelope {MAX_PARSED_EVIDENCE_BYTES}"
             )));
         }
-        let report_len = import_artifact_len(ledger, entry.assignment_report, "assignment report")?;
+        let report_len = import_artifact_len(
+            ledger,
+            entry.assignment_report,
+            "assignment report",
+            work,
+            descriptor_base.saturating_add(3),
+        )?;
         if report_len > MAX_PARSED_EVIDENCE_BYTES {
             return Err(ImportSummaryError::Unsupported(format!(
                 "source {source_index} assignment report is {report_len} bytes above the solve parse envelope {MAX_PARSED_EVIDENCE_BYTES}"
@@ -2627,10 +4863,13 @@ fn validate_import_admission_evidence(
         .zip(&attestation.sources)
         .enumerate()
     {
-        if entry.source_identity.len() > attestation.limits.max_label_bytes {
+        let effective_label_max = attestation
+            .limits
+            .max_label_bytes
+            .min(MAX_SOLVE_EVIDENCE_LABEL_BYTES);
+        if entry.source_identity.len() > effective_label_max {
             return Err(ImportSummaryError::Invalid(format!(
-                "source {source_index} identity exceeds max_label_bytes {}",
-                attestation.limits.max_label_bytes
+                "source {source_index} identity exceeds the effective solve label ceiling {effective_label_max}"
             )));
         }
         // These policy values are retained so they are never silently
@@ -2651,21 +4890,37 @@ fn validate_import_admission_evidence(
             }
         }
 
-        let raw_len = ledger
-            .read_artifact_chunks_bounded(&entry.raw_source, raw_stream_cap, &mut |_| {})
+        let raw_len = verify_evidence_artifact(
+            ledger,
+            work,
+            entry.raw_source,
+            raw_stream_cap,
+            SolveEvidencePhase::RawSourceRead,
+            Some(source_index),
+        )
             .map_err(|error| match error {
-                LedgerError::ArtifactReadLimit { observed, .. } if observed > source_cap => {
+                EvidenceReadError::Cancelled => ImportSummaryError::Cancelled,
+                EvidenceReadError::WorkEnvelope(error) => {
+                    ImportSummaryError::WorkEnvelope(error)
+                }
+                EvidenceReadError::Ledger(LedgerError::ArtifactReadLimit {
+                    observed,
+                    ..
+                }) if observed > source_cap => {
                     ImportSummaryError::Invalid(format!(
                         "source {source_index} raw artifact exceeds max_source_bytes {}",
                         attestation.limits.max_source_bytes
                     ))
                 }
-                LedgerError::ArtifactReadLimit { observed, .. } => {
+                EvidenceReadError::Ledger(LedgerError::ArtifactReadLimit {
+                    observed,
+                    ..
+                }) => {
                     ImportSummaryError::Unsupported(format!(
                         "source {source_index} raw artifact is {observed} bytes above the effective solve stream envelope {raw_stream_cap}"
                     ))
                 }
-                error => ImportSummaryError::Ledger(error),
+                EvidenceReadError::Ledger(error) => ImportSummaryError::Ledger(error),
             })?
             .ok_or_else(|| {
                 ImportSummaryError::Invalid(format!(
@@ -2684,117 +4939,185 @@ fn validate_import_admission_evidence(
                 attestation.limits.max_total_source_bytes
             )));
         }
-        ledger
-            .read_artifact_chunks_bounded(
-                &entry.promotion_receipt,
-                MAX_OPAQUE_IMPORT_RECEIPT_BYTES,
-                &mut |_| {},
-            )?
-            .ok_or_else(|| {
-                ImportSummaryError::Invalid(format!(
-                    "source {source_index} promotion receipt {} is missing",
-                    entry.promotion_receipt.to_hex()
-                ))
-            })?;
+        verify_evidence_artifact(
+            ledger,
+            work,
+            entry.promotion_receipt,
+            MAX_OPAQUE_IMPORT_RECEIPT_BYTES,
+            SolveEvidencePhase::PromotionReceiptRead,
+            Some(source_index),
+        )?
+        .ok_or_else(|| {
+            ImportSummaryError::Invalid(format!(
+                "source {source_index} promotion receipt {} is missing",
+                entry.promotion_receipt.to_hex()
+            ))
+        })?;
 
         let mesh_bytes = read_parsed_import_artifact(
             ledger,
+            work,
             entry.promoted_mesh,
             "promoted mesh",
             source_index,
+            SolveEvidencePhase::PromotedMeshRead,
         )?;
-        preflight_canonical_ply(
+        let ply_shape = match preflight_canonical_ply(
             &mesh_bytes,
             attestation.limits.max_mesh_vertices,
             attestation.limits.max_mesh_faces,
-        )
-        .map_err(|what| {
-            ImportSummaryError::Invalid(format!(
-                "source {source_index} promoted PLY is not canonical: {what}"
-            ))
-        })?;
-        let soup = fs_io::ply::read_ply(&mesh_bytes).map_err(|error| {
-            ImportSummaryError::Invalid(format!(
-                "source {source_index} promoted PLY does not parse: {error}"
-            ))
-        })?;
-        if fs_io::ply::write_ply(&soup).as_bytes() != mesh_bytes {
-            return Err(ImportSummaryError::Invalid(format!(
-                "source {source_index} promoted PLY is not the exact canonical writer output"
-            )));
-        }
-        if soup.positions.len() > attestation.limits.max_mesh_vertices
-            || soup.triangles.len() > attestation.limits.max_mesh_faces
-        {
-            return Err(ImportSummaryError::Invalid(format!(
-                "source {source_index} promoted mesh has {} vertices and {} faces above import IR caps {} and {}",
-                soup.positions.len(),
-                soup.triangles.len(),
-                attestation.limits.max_mesh_vertices,
-                attestation.limits.max_mesh_faces
-            )));
-        }
-        for group in &source.named_groups {
-            if group.faces.iter().any(|face| {
-                usize::try_from(*face).map_or(true, |face| face >= soup.triangles.len())
-            }) {
+            work,
+            source_index,
+        ) {
+            Ok(shape) => shape,
+            Err(ImportSummaryError::Cancelled) => return Err(ImportSummaryError::Cancelled),
+            Err(ImportSummaryError::Invalid(what)) => {
                 return Err(ImportSummaryError::Invalid(format!(
-                    "source {source_index} named group `{}` references a face outside the promoted mesh",
-                    group.name
+                    "source {source_index} promoted PLY is not canonical: {what}"
                 )));
             }
-        }
+            Err(error) => return Err(error),
+        };
+        validate_canonical_ply_payload(&mesh_bytes, ply_shape, work, source_index).map_err(
+            |error| match error {
+                ImportSummaryError::Cancelled => ImportSummaryError::Cancelled,
+                ImportSummaryError::Invalid(what) => ImportSummaryError::Invalid(format!(
+                    "source {source_index} promoted PLY does not decode canonically: {what}"
+                )),
+                error => error,
+            },
+        )?;
+        verify_canonical_ply_writer_spelling(&mesh_bytes, ply_shape, work, source_index).map_err(
+            |error| match error {
+                ImportSummaryError::Cancelled => ImportSummaryError::Cancelled,
+                ImportSummaryError::Invalid(what) => ImportSummaryError::Invalid(format!(
+                    "source {source_index} promoted PLY is not exact writer output: {what}"
+                )),
+                error => error,
+            },
+        )?;
+        validate_named_group_face_ranges(
+            &source.named_groups,
+            ply_shape.faces,
+            work,
+            source_index,
+        )?;
 
-        let rows: Vec<_> = assignments
-            .iter()
-            .filter(|assignment| assignment.artifact == artifact.role)
-            .collect();
+        let assignment_phase = SolveEvidencePhase::AssignmentDerivation;
+        let assignment_plan_index = Some(source_index);
+        work.checkpoint(assignment_phase, assignment_plan_index, 0)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        let mut assignment_units = 0u64;
+        let mut rows = Vec::new();
+        let reserve = rows.try_reserve_exact(assignments.len());
+        work.checkpoint(assignment_phase, assignment_plan_index, 1)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        reserve.map_err(|_| {
+            ImportSummaryError::Invalid("assignment-row filter allocation was refused".to_string())
+        })?;
+        for assignment in assignments {
+            work.checkpoint(
+                assignment_phase,
+                assignment_plan_index,
+                assignment_units.saturating_add(2),
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            let selected = assignment.artifact == artifact.role;
+            assignment_units = assignment_units.saturating_add(1);
+            work.checkpoint(
+                assignment_phase,
+                assignment_plan_index,
+                assignment_units.saturating_add(2),
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            work.charge(DERIVATION_ITEM_WORK_BYTES)
+                .map_err(ImportSummaryError::WorkEnvelope)?;
+            if selected {
+                rows.push(assignment);
+            }
+        }
         let mut expected_subjects = Vec::new();
-        expected_subjects
-            .try_reserve_exact(rows.len())
-            .map_err(|_| {
-                ImportSummaryError::Invalid(
-                    "assignment subject-attestation allocation refused".to_string(),
-                )
-            })?;
+        let reserve = expected_subjects.try_reserve_exact(rows.len());
+        work.checkpoint(
+            assignment_phase,
+            assignment_plan_index,
+            assignment_units.saturating_add(2),
+        )
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+        reserve.map_err(|_| {
+            ImportSummaryError::Invalid(
+                "assignment subject-attestation allocation refused".to_string(),
+            )
+        })?;
         let mut geometric_requests = 0u64;
         for row in &rows {
-            let entity = entity_ids.get(&row.target).ok_or_else(|| {
-                ImportSummaryError::Invalid(format!(
-                    "assignment target `{}` has no re-derived entity identity",
-                    row.target
-                ))
-            })?;
-            let subject = entity.token();
-            if subject.len() > attestation.limits.max_label_bytes {
-                return Err(ImportSummaryError::Invalid(format!(
-                    "assignment subject `{subject}` exceeds max_label_bytes {}",
-                    attestation.limits.max_label_bytes
-                )));
-            }
-            if let MeshSelector::NamedGroup { name } = &row.selector {
-                if name.len() > attestation.limits.max_label_bytes {
+            work.checkpoint(
+                assignment_phase,
+                assignment_plan_index,
+                assignment_units.saturating_add(2),
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            let derived = (|| -> Result<(String, bool), ImportSummaryError> {
+                let entity = entity_ids.get(&row.target).ok_or_else(|| {
+                    ImportSummaryError::Invalid(format!(
+                        "assignment target `{}` has no re-derived entity identity",
+                        row.target
+                    ))
+                })?;
+                let subject = entity.token();
+                if subject.len() > effective_label_max {
                     return Err(ImportSummaryError::Invalid(format!(
-                        "named-group selector `{name}` exceeds max_label_bytes {}",
-                        attestation.limits.max_label_bytes
+                        "assignment subject `{subject}` exceeds the effective solve label ceiling {effective_label_max}"
                     )));
                 }
-            }
-            if let MeshSelector::ExplicitFaceSet { faces, .. } = &row.selector {
-                if faces.len() > attestation.limits.max_selected_faces {
-                    return Err(ImportSummaryError::Invalid(format!(
-                        "assignment `{}` explicit face set exceeds max_selected_faces {}",
-                        row.target, attestation.limits.max_selected_faces
-                    )));
+                if let MeshSelector::NamedGroup { name } = &row.selector {
+                    if name.len() > effective_label_max {
+                        return Err(ImportSummaryError::Invalid(format!(
+                            "named-group selector `{name}` exceeds the effective solve label ceiling {effective_label_max}"
+                        )));
+                    }
                 }
-            }
-            if matches!(
-                &row.selector,
-                MeshSelector::HalfSpace { .. }
-                    | MeshSelector::Box { .. }
-                    | MeshSelector::Cylinder { .. }
-                    | MeshSelector::NearestDatum { .. }
-            ) {
+                if let MeshSelector::ExplicitFaceSet { faces, .. } = &row.selector {
+                    if faces.len() > attestation.limits.max_selected_faces {
+                        return Err(ImportSummaryError::Invalid(format!(
+                            "assignment `{}` explicit face set exceeds max_selected_faces {}",
+                            row.target, attestation.limits.max_selected_faces
+                        )));
+                    }
+                }
+                let geometric = matches!(
+                    &row.selector,
+                    MeshSelector::HalfSpace { .. }
+                        | MeshSelector::Box { .. }
+                        | MeshSelector::Cylinder { .. }
+                        | MeshSelector::NearestDatum { .. }
+                );
+                Ok((subject, geometric))
+            })();
+            assignment_units = assignment_units.saturating_add(1);
+            work.checkpoint(
+                assignment_phase,
+                assignment_plan_index,
+                assignment_units.saturating_add(2),
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            let extra_items = match &row.selector {
+                MeshSelector::ExplicitFaceSet { faces, .. } => faces.len(),
+                _ => 0,
+            };
+            let charge = u64::try_from(extra_items)
+                .ok()
+                .and_then(|items| items.checked_mul(4))
+                .and_then(|bytes| bytes.checked_add(DERIVATION_ITEM_WORK_BYTES))
+                .ok_or(ImportSummaryError::WorkEnvelope(
+                    InvocationWorkExceeded::CumulativeBytes {
+                        attempted: u64::MAX,
+                    },
+                ))?;
+            work.charge(charge)
+                .map_err(ImportSummaryError::WorkEnvelope)?;
+            let (subject, geometric) = derived?;
+            if geometric {
                 geometric_requests = geometric_requests.checked_add(1).ok_or_else(|| {
                     ImportSummaryError::Invalid(
                         "geometric assignment request count overflowed u64".to_string(),
@@ -2803,7 +5126,9 @@ fn validate_import_admission_evidence(
             }
             expected_subjects.push((subject, row.allow_overlap));
         }
-        let face_count = u64::try_from(soup.triangles.len()).map_err(|_| {
+        work.checkpoint(assignment_phase, assignment_plan_index, u64::MAX)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        let face_count = u64::try_from(ply_shape.faces).map_err(|_| {
             ImportSummaryError::Invalid(
                 "promoted mesh face count is outside the predicate-work range".to_string(),
             )
@@ -2822,26 +5147,41 @@ fn validate_import_admission_evidence(
 
         let report_bytes = read_parsed_import_artifact(
             ledger,
+            work,
             entry.assignment_report,
             "assignment report",
             source_index,
+            SolveEvidencePhase::AssignmentReportRead,
         )?;
-        let report_text = core::str::from_utf8(&report_bytes).map_err(|_| {
-            ImportSummaryError::Invalid(format!(
-                "source {source_index} assignment report is not UTF-8"
-            ))
+        let report_text = evidence_utf8_string(
+            &report_bytes,
+            work,
+            SolveEvidencePhase::AssignmentReportUtf8,
+            Some(source_index),
+            "assignment report",
+        )
+        .map_err(|error| match error {
+            EvidenceUtf8Error::Cancelled => ImportSummaryError::Cancelled,
+            EvidenceUtf8Error::WorkEnvelope(error) => ImportSummaryError::WorkEnvelope(error),
+            EvidenceUtf8Error::Invalid(problem) => ImportSummaryError::Invalid(format!(
+                "source {source_index} assignment report is invalid: {problem}"
+            )),
         })?;
         let selected = parse_assignment_report_counts(
-            report_text,
+            &report_text,
             &entry.source_identity,
             &source.length_unit,
             &expected_subjects,
-            soup.triangles.len(),
+            ply_shape.faces,
+            work,
+            source_index,
         )
-        .map_err(|what| {
-            ImportSummaryError::Invalid(format!(
+        .map_err(|error| match error {
+            ImportSummaryError::Cancelled => ImportSummaryError::Cancelled,
+            ImportSummaryError::Invalid(what) => ImportSummaryError::Invalid(format!(
                 "source {source_index} assignment report is not canonical: {what}"
-            ))
+            )),
+            error => error,
         })?;
         total_selected_faces = total_selected_faces.checked_add(selected).ok_or_else(|| {
             ImportSummaryError::Invalid(
@@ -2862,9 +5202,10 @@ fn import_artifact_len(
     ledger: &Ledger,
     artifact: ContentHash,
     label: &str,
+    work: EvidenceWork<'_>,
+    descriptor_index: usize,
 ) -> Result<u64, ImportSummaryError> {
-    ledger
-        .artifact_info(&artifact)?
+    read_artifact_info_controlled(ledger, &artifact, work, descriptor_index)?
         .map(|info| info.len)
         .ok_or_else(|| {
             ImportSummaryError::Invalid(format!(
@@ -2876,98 +5217,194 @@ fn import_artifact_len(
 
 fn read_parsed_import_artifact(
     ledger: &Ledger,
+    work: EvidenceWork<'_>,
     artifact: ContentHash,
     label: &str,
     source_index: usize,
+    phase: SolveEvidencePhase,
 ) -> Result<Vec<u8>, ImportSummaryError> {
-    let info = ledger.artifact_info(&artifact)?.ok_or_else(|| {
-        ImportSummaryError::Invalid(format!(
-            "source {source_index} {label} artifact {} is missing",
-            artifact.to_hex()
-        ))
-    })?;
+    let info =
+        read_artifact_info_controlled(ledger, &artifact, work, source_index)?.ok_or_else(|| {
+            ImportSummaryError::Invalid(format!(
+                "source {source_index} {label} artifact {} is missing",
+                artifact.to_hex()
+            ))
+        })?;
     if info.len > MAX_PARSED_EVIDENCE_BYTES {
         return Err(ImportSummaryError::Unsupported(format!(
             "source {source_index} {label} is {} bytes above the solve parse envelope {MAX_PARSED_EVIDENCE_BYTES}",
             info.len
         )));
     }
-    ledger
-        .get_artifact_bounded(&artifact, MAX_PARSED_EVIDENCE_BYTES)?
-        .ok_or_else(|| {
-            ImportSummaryError::Invalid(format!(
-                "source {source_index} {label} artifact {} disappeared",
-                artifact.to_hex()
-            ))
-        })
+    materialize_evidence_artifact(
+        ledger,
+        work,
+        artifact,
+        MAX_PARSED_EVIDENCE_BYTES,
+        phase,
+        Some(source_index),
+    )?
+    .ok_or_else(|| {
+        ImportSummaryError::Invalid(format!(
+            "source {source_index} {label} artifact {} disappeared",
+            artifact.to_hex()
+        ))
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanonicalPlyShape {
+    body_start: usize,
+    vertices: usize,
+    faces: usize,
 }
 
 fn preflight_canonical_ply(
     bytes: &[u8],
     max_vertices: usize,
     max_faces: usize,
-) -> Result<(), String> {
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<CanonicalPlyShape, ImportSummaryError> {
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshPreflight,
+        Some(source_index),
+        0,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    let result = preflight_canonical_ply_inner(bytes, max_vertices, max_faces, work, source_index);
+    let completion_units = u64::try_from(bytes.len()).map_err(|_| {
+        ImportSummaryError::Invalid("PLY artifact length is outside u64".to_string())
+    })?;
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshPreflight,
+        Some(source_index),
+        completion_units,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    result
+}
+
+fn preflight_canonical_ply_inner(
+    bytes: &[u8],
+    max_vertices: usize,
+    max_faces: usize,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<CanonicalPlyShape, ImportSummaryError> {
     const END_HEADER: &[u8] = b"end_header\n";
-    let header_end = bytes
+    const MAX_CANONICAL_HEADER_BYTES: usize = 256;
+    let header_prefix = &bytes[..bytes.len().min(MAX_CANONICAL_HEADER_BYTES)];
+    let header_end = header_prefix
         .windows(END_HEADER.len())
         .position(|window| window == END_HEADER)
         .and_then(|offset| offset.checked_add(END_HEADER.len()))
-        .ok_or_else(|| "the exact `end_header\\n` terminator is missing".to_string())?;
+        .ok_or_else(|| {
+            ImportSummaryError::Invalid(
+                "the exact bounded `end_header\\n` terminator is missing".to_string(),
+            )
+        })?;
     let header = core::str::from_utf8(&bytes[..header_end])
-        .map_err(|_| "the header is not UTF-8".to_string())?;
-    let header = header
-        .strip_suffix('\n')
-        .ok_or_else(|| "the header is not newline-terminated".to_string())?;
+        .map_err(|_| ImportSummaryError::Invalid("the header is not UTF-8".to_string()))?;
+    let header = header.strip_suffix('\n').ok_or_else(|| {
+        ImportSummaryError::Invalid("the header is not newline-terminated".to_string())
+    })?;
     let mut lines = header.split('\n');
     if lines.next() != Some("ply") || lines.next() != Some("format ascii 1.0") {
-        return Err("the magic or ASCII format line differs from the fs-io writer".to_string());
+        return Err(ImportSummaryError::Invalid(
+            "the magic or ASCII format line differs from the fs-io writer".to_string(),
+        ));
     }
     let vertices = parse_canonical_ply_count(
-        lines
-            .next()
-            .ok_or_else(|| "the vertex element line is missing".to_string())?,
+        lines.next().ok_or_else(|| {
+            ImportSummaryError::Invalid("the vertex element line is missing".to_string())
+        })?,
         "element vertex ",
         "vertex",
-    )?;
+    )
+    .map_err(ImportSummaryError::Invalid)?;
     if lines.next() != Some("property double x")
         || lines.next() != Some("property double y")
         || lines.next() != Some("property double z")
     {
-        return Err("the vertex property lines differ from the fs-io writer".to_string());
+        return Err(ImportSummaryError::Invalid(
+            "the vertex property lines differ from the fs-io writer".to_string(),
+        ));
     }
     let faces = parse_canonical_ply_count(
-        lines
-            .next()
-            .ok_or_else(|| "the face element line is missing".to_string())?,
+        lines.next().ok_or_else(|| {
+            ImportSummaryError::Invalid("the face element line is missing".to_string())
+        })?,
         "element face ",
         "face",
-    )?;
+    )
+    .map_err(ImportSummaryError::Invalid)?;
     if lines.next() != Some("property list uchar uint vertex_indices")
         || lines.next() != Some("end_header")
         || lines.next().is_some()
     {
-        return Err("the face property or header shape differs from the fs-io writer".to_string());
+        return Err(ImportSummaryError::Invalid(
+            "the face property or header shape differs from the fs-io writer".to_string(),
+        ));
     }
     if vertices > max_vertices || faces > max_faces {
-        return Err(format!(
+        return Err(ImportSummaryError::Invalid(format!(
             "declared counts {vertices} vertices and {faces} faces exceed frozen caps {max_vertices} and {max_faces}"
+        )));
+    }
+    if vertices == 0 || faces == 0 {
+        return Err(ImportSummaryError::Invalid(
+            "the canonical promoted mesh must contain at least one vertex and one face".to_string(),
         ));
     }
 
-    let expected_records = vertices
-        .checked_add(faces)
-        .ok_or_else(|| "the declared body-record count overflows usize".to_string())?;
+    let expected_records = vertices.checked_add(faces).ok_or_else(|| {
+        ImportSummaryError::Invalid("the declared body-record count overflows usize".to_string())
+    })?;
     let body = &bytes[header_end..];
     if !body.is_empty() && body.last() != Some(&b'\n') {
-        return Err("the body is not newline-terminated".to_string());
-    }
-    let body_records = body.iter().filter(|byte| **byte == b'\n').count();
-    if body_records != expected_records {
-        return Err(format!(
-            "the body has {body_records} newline-terminated records but the header declares {expected_records}"
+        return Err(ImportSummaryError::Invalid(
+            "the body is not newline-terminated".to_string(),
         ));
     }
-    Ok(())
+    let mut body_records = 0usize;
+    let mut inspected = 0u64;
+    for tile in body.chunks(EVIDENCE_POLL_BYTES) {
+        work.checkpoint(
+            SolveEvidencePhase::PromotedMeshPreflight,
+            Some(source_index),
+            inspected,
+        )
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+        body_records = body_records
+            .checked_add(tile.iter().filter(|byte| **byte == b'\n').count())
+            .ok_or_else(|| {
+                ImportSummaryError::Invalid("PLY body-record count overflowed usize".to_string())
+            })?;
+        inspected = inspected
+            .checked_add(u64::try_from(tile.len()).map_err(|_| {
+                ImportSummaryError::Invalid("PLY body length is outside u64".to_string())
+            })?)
+            .ok_or_else(|| {
+                ImportSummaryError::Invalid("PLY body byte count overflowed u64".to_string())
+            })?;
+        work.checkpoint(
+            SolveEvidencePhase::PromotedMeshPreflight,
+            Some(source_index),
+            inspected,
+        )
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    }
+    if body_records != expected_records {
+        return Err(ImportSummaryError::Invalid(format!(
+            "the body has {body_records} newline-terminated records but the header declares {expected_records}"
+        )));
+    }
+    Ok(CanonicalPlyShape {
+        body_start: header_end,
+        vertices,
+        faces,
+    })
 }
 
 fn parse_canonical_ply_count(line: &str, prefix: &str, label: &str) -> Result<usize, String> {
@@ -2975,6 +5412,7 @@ fn parse_canonical_ply_count(line: &str, prefix: &str, label: &str) -> Result<us
         .strip_prefix(prefix)
         .ok_or_else(|| format!("the {label} element line differs from the fs-io writer"))?;
     if spelling.is_empty()
+        || spelling.len() > MAX_JSON_INTEGER_BYTES
         || !spelling.bytes().all(|byte| byte.is_ascii_digit())
         || (spelling.len() > 1 && spelling.starts_with('0'))
     {
@@ -2993,14 +5431,406 @@ fn parse_canonical_ply_count(line: &str, prefix: &str, label: &str) -> Result<us
     Ok(count)
 }
 
+fn validate_canonical_ply_payload(
+    bytes: &[u8],
+    shape: CanonicalPlyShape,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<(), ImportSummaryError> {
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshDecode,
+        Some(source_index),
+        0,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    let result = walk_canonical_ply_payload(
+        bytes,
+        shape,
+        work,
+        source_index,
+        SolveEvidencePhase::PromotedMeshDecode,
+        false,
+    );
+    let completion_units = u64::try_from(bytes.len()).map_err(|_| {
+        ImportSummaryError::Invalid("PLY artifact length is outside u64".to_string())
+    })?;
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshDecode,
+        Some(source_index),
+        completion_units,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    result
+}
+
+fn verify_canonical_ply_writer_spelling(
+    bytes: &[u8],
+    shape: CanonicalPlyShape,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<(), ImportSummaryError> {
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshEncodeCompare,
+        Some(source_index),
+        0,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    let result = walk_canonical_ply_payload(
+        bytes,
+        shape,
+        work,
+        source_index,
+        SolveEvidencePhase::PromotedMeshEncodeCompare,
+        true,
+    );
+    let completion_units = u64::try_from(bytes.len()).map_err(|_| {
+        ImportSummaryError::Invalid("PLY artifact length is outside u64".to_string())
+    })?;
+    work.checkpoint(
+        SolveEvidencePhase::PromotedMeshEncodeCompare,
+        Some(source_index),
+        completion_units,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    result
+}
+
+fn walk_canonical_ply_payload(
+    bytes: &[u8],
+    shape: CanonicalPlyShape,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+    phase: SolveEvidencePhase,
+    require_writer_spelling: bool,
+) -> Result<(), ImportSummaryError> {
+    work.checkpoint(phase, Some(source_index), 0)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    let body = bytes.get(shape.body_start..).ok_or_else(|| {
+        ImportSummaryError::Invalid(
+            "the canonical PLY body offset is outside the retained artifact".to_string(),
+        )
+    })?;
+    let mut cursor = 0usize;
+    for record in 0..shape.vertices {
+        let line = next_bounded_ply_line(
+            body,
+            &mut cursor,
+            MAX_CANONICAL_PLY_VERTEX_LINE_BYTES,
+            work,
+            source_index,
+            phase,
+            "vertex",
+            record,
+        );
+        let current = u64::try_from(cursor).map_err(|_| {
+            ImportSummaryError::Invalid("PLY body cursor is outside u64".to_string())
+        })?;
+        work.checkpoint(phase, Some(source_index), current)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        let line = line?;
+        let parsed = parse_canonical_ply_vertex_line(line, require_writer_spelling);
+        work.checkpoint(phase, Some(source_index), current)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        parsed.map_err(|problem| {
+            ImportSummaryError::Invalid(format!("vertex record {record}: {problem}"))
+        })?;
+    }
+    for record in 0..shape.faces {
+        let line = next_bounded_ply_line(
+            body,
+            &mut cursor,
+            MAX_CANONICAL_PLY_FACE_LINE_BYTES,
+            work,
+            source_index,
+            phase,
+            "face",
+            record,
+        );
+        let current = u64::try_from(cursor).map_err(|_| {
+            ImportSummaryError::Invalid("PLY body cursor is outside u64".to_string())
+        })?;
+        work.checkpoint(phase, Some(source_index), current)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        let line = line?;
+        let parsed = parse_canonical_ply_face_line(line, shape.vertices, require_writer_spelling);
+        work.checkpoint(phase, Some(source_index), current)
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+        parsed.map_err(|problem| {
+            ImportSummaryError::Invalid(format!("face record {record}: {problem}"))
+        })?;
+    }
+    let completion = u64::try_from(cursor)
+        .map_err(|_| ImportSummaryError::Invalid("PLY body cursor is outside u64".to_string()))?;
+    work.checkpoint(phase, Some(source_index), completion)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    if cursor != body.len() {
+        return Err(ImportSummaryError::Invalid(format!(
+            "canonical PLY parser consumed {cursor} of {} body bytes",
+            body.len()
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn next_bounded_ply_line<'a>(
+    body: &'a [u8],
+    cursor: &mut usize,
+    max_line_bytes: usize,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+    phase: SolveEvidencePhase,
+    record_kind: &str,
+    record: usize,
+) -> Result<&'a str, ImportSummaryError> {
+    debug_assert!(max_line_bytes < EVIDENCE_POLL_BYTES);
+    let before = u64::try_from(*cursor).map_err(|_| {
+        ImportSummaryError::Invalid("PLY body cursor is outside the cancellation range".to_string())
+    })?;
+    work.checkpoint(phase, Some(source_index), before)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    let remaining = body.get(*cursor..).ok_or_else(|| {
+        ImportSummaryError::Invalid("PLY body cursor advanced past the artifact".to_string())
+    })?;
+    let search_bytes = max_line_bytes.checked_add(1).ok_or_else(|| {
+        ImportSummaryError::Invalid("PLY line-search bound overflowed usize".to_string())
+    })?;
+    let inspected = &remaining[..remaining.len().min(search_bytes)];
+    let newline = inspected
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or_else(|| {
+            if remaining.len() > max_line_bytes {
+                ImportSummaryError::Invalid(format!(
+                    "{record_kind} record {record} exceeds the {max_line_bytes}-byte canonical line bound"
+                ))
+            } else {
+                ImportSummaryError::Invalid(format!(
+                    "{record_kind} record {record} is not newline-terminated"
+                ))
+            }
+        })?;
+    if newline > max_line_bytes {
+        return Err(ImportSummaryError::Invalid(format!(
+            "{record_kind} record {record} exceeds the {max_line_bytes}-byte canonical line bound"
+        )));
+    }
+    let line = core::str::from_utf8(&remaining[..newline]).map_err(|_| {
+        ImportSummaryError::Invalid(format!(
+            "{record_kind} record {record} is not ASCII-compatible UTF-8"
+        ))
+    })?;
+    *cursor = cursor
+        .checked_add(newline)
+        .and_then(|offset| offset.checked_add(1))
+        .ok_or_else(|| {
+            ImportSummaryError::Invalid("PLY body cursor overflowed usize".to_string())
+        })?;
+    let after = u64::try_from(*cursor).map_err(|_| {
+        ImportSummaryError::Invalid("PLY body cursor is outside the cancellation range".to_string())
+    })?;
+    work.checkpoint(phase, Some(source_index), after)
+        .map_err(|_| ImportSummaryError::Cancelled)?;
+    Ok(line)
+}
+
+fn parse_canonical_ply_vertex_line(
+    line: &str,
+    require_writer_spelling: bool,
+) -> Result<(), String> {
+    let mut fields = line.split(' ');
+    let x = fields
+        .next()
+        .ok_or_else(|| "x coordinate is missing".to_string())?;
+    let y = fields
+        .next()
+        .ok_or_else(|| "y coordinate is missing".to_string())?;
+    let z = fields
+        .next()
+        .ok_or_else(|| "z coordinate is missing".to_string())?;
+    if fields.next().is_some() {
+        return Err("vertex line does not contain exactly three single-space fields".to_string());
+    }
+    for (axis, spelling) in [("x", x), ("y", y), ("z", z)] {
+        if spelling.is_empty() || spelling.len() > MAX_CANONICAL_F64_BYTES {
+            return Err(format!(
+                "{axis} coordinate exceeds the {MAX_CANONICAL_F64_BYTES}-byte finite-f64 token bound"
+            ));
+        }
+        let value = spelling
+            .parse::<f64>()
+            .map_err(|_| format!("{axis} coordinate is not an f64"))?;
+        if !value.is_finite() {
+            return Err(format!("{axis} coordinate is not finite"));
+        }
+        if require_writer_spelling && value.to_string() != spelling {
+            return Err(format!(
+                "{axis} coordinate is not the writer's canonical finite-f64 spelling"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_canonical_ply_face_line(
+    line: &str,
+    vertices: usize,
+    require_writer_spelling: bool,
+) -> Result<(), String> {
+    let mut fields = line.split(' ');
+    if fields.next() != Some("3") {
+        return Err("face line does not begin with the canonical triangle arity `3`".to_string());
+    }
+    let a = fields
+        .next()
+        .ok_or_else(|| "first face index is missing".to_string())?;
+    let b = fields
+        .next()
+        .ok_or_else(|| "second face index is missing".to_string())?;
+    let c = fields
+        .next()
+        .ok_or_else(|| "third face index is missing".to_string())?;
+    if fields.next().is_some() {
+        return Err("face line does not contain exactly four single-space fields".to_string());
+    }
+    for (ordinal, spelling) in [("first", a), ("second", b), ("third", c)] {
+        if spelling.is_empty()
+            || spelling.len() > MAX_CANONICAL_U32_BYTES
+            || !spelling.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(format!(
+                "{ordinal} face index exceeds the {MAX_CANONICAL_U32_BYTES}-byte unsigned token bound"
+            ));
+        }
+        let value = spelling
+            .parse::<u32>()
+            .map_err(|_| format!("{ordinal} face index is outside u32"))?;
+        let value_usize =
+            usize::try_from(value).map_err(|_| format!("{ordinal} face index is outside usize"))?;
+        if value_usize >= vertices {
+            return Err(format!(
+                "{ordinal} face index {value} is outside the {vertices}-vertex mesh"
+            ));
+        }
+        if require_writer_spelling && value.to_string() != spelling {
+            return Err(format!(
+                "{ordinal} face index is not the writer's canonical u32 spelling"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_named_group_face_ranges(
+    groups: &[NamedFaceGroup],
+    mesh_faces: usize,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<(), ImportSummaryError> {
+    const FACE_REFERENCES_PER_TILE: usize = EVIDENCE_POLL_BYTES / core::mem::size_of::<u32>();
+
+    let mut inspected_bytes = 0u64;
+    work.checkpoint(
+        SolveEvidencePhase::NamedGroupFaceRange,
+        Some(source_index),
+        inspected_bytes,
+    )
+    .map_err(|_| ImportSummaryError::Cancelled)?;
+    for group in groups {
+        for tile in group.faces.chunks(FACE_REFERENCES_PER_TILE) {
+            work.checkpoint(
+                SolveEvidencePhase::NamedGroupFaceRange,
+                Some(source_index),
+                inspected_bytes,
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            let mut range_error = None;
+            let mut inspected_faces = 0usize;
+            for face in tile {
+                inspected_faces += 1;
+                let face = match usize::try_from(*face) {
+                    Ok(face) => face,
+                    Err(_) => {
+                        range_error = Some(format!(
+                            "source {source_index} named group `{}` carries a face outside usize",
+                            group.name
+                        ));
+                        break;
+                    }
+                };
+                if face >= mesh_faces {
+                    range_error = Some(format!(
+                        "source {source_index} named group `{}` references face {face} outside the {mesh_faces}-face promoted mesh",
+                        group.name
+                    ));
+                    break;
+                }
+            }
+            let tile_bytes = inspected_faces
+                .checked_mul(core::mem::size_of::<u32>())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(|| {
+                    ImportSummaryError::Invalid(
+                        "named-group face-range work overflowed u64".to_string(),
+                    )
+                })?;
+            inspected_bytes = inspected_bytes.checked_add(tile_bytes).ok_or_else(|| {
+                ImportSummaryError::Invalid(
+                    "named-group face-range byte count overflowed u64".to_string(),
+                )
+            })?;
+            work.checkpoint(
+                SolveEvidencePhase::NamedGroupFaceRange,
+                Some(source_index),
+                inspected_bytes,
+            )
+            .map_err(|_| ImportSummaryError::Cancelled)?;
+            if let Some(problem) = range_error {
+                return Err(ImportSummaryError::Invalid(problem));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_assignment_report_counts(
     text: &str,
     expected_source: &str,
     expected_unit: &str,
     expected_assignments: &[(String, bool)],
     mesh_faces: usize,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+) -> Result<usize, ImportSummaryError> {
+    let mut cursor = JsonCursor::with_work(
+        text,
+        work,
+        SolveEvidencePhase::AssignmentReportParse,
+        Some(source_index),
+    );
+    let result = parse_assignment_report_counts_cursor(
+        &mut cursor,
+        expected_source,
+        expected_unit,
+        expected_assignments,
+        mesh_faces,
+    );
+    let final_poll = cursor.checkpoint_current("after assignment-report parsing");
+    if cursor.cancellation_observed() {
+        Err(ImportSummaryError::Cancelled)
+    } else {
+        final_poll.map_err(ImportSummaryError::Invalid)?;
+        result.map_err(ImportSummaryError::Invalid)
+    }
+}
+
+fn parse_assignment_report_counts_cursor(
+    cursor: &mut JsonCursor<'_>,
+    expected_source: &str,
+    expected_unit: &str,
+    expected_assignments: &[(String, bool)],
+    mesh_faces: usize,
 ) -> Result<usize, String> {
-    let mut cursor = JsonCursor::new(text);
     cursor.expect("{\"kind\":")?;
     if cursor.parse_string()? != "mesh-assignment-receipt" {
         return Err("kind is not mesh-assignment-receipt".to_string());
@@ -3010,11 +5840,23 @@ fn parse_assignment_report_counts(
         return Err("version does not match the fs-io writer".to_string());
     }
     cursor.expect(",\"source_identity\":")?;
-    if cursor.parse_string()? != expected_source {
+    let source_identity = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &source_identity,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "assignment-report source identity",
+    )?;
+    if source_identity != expected_source {
         return Err("source identity differs from the import summary".to_string());
     }
     cursor.expect(",\"length_unit\":")?;
-    if cursor.parse_string()? != expected_unit {
+    let length_unit = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &length_unit,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "assignment-report length unit",
+    )?;
+    if length_unit != expected_unit {
         return Err("length unit differs from the import IR".to_string());
     }
     for field in [
@@ -3034,7 +5876,13 @@ fn parse_assignment_report_counts(
             cursor.expect(",")?;
         }
         cursor.expect("{\"subject\":")?;
-        if cursor.parse_string()? != *expected_subject {
+        let subject = cursor.parse_string()?;
+        require_solve_evidence_label(
+            &subject,
+            MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+            "assignment-report subject",
+        )?;
+        if subject != *expected_subject {
             return Err(format!("assignment row {index} has the wrong subject"));
         }
         cursor.expect(",\"selector_fingerprint\":")?;
@@ -3064,9 +5912,9 @@ fn parse_assignment_report_counts(
             let _ = cursor.parse_canonical_finite_f64()?;
         }
         cursor.expect(",\"bounds_min\":[")?;
-        parse_finite_vector3(&mut cursor)?;
+        parse_finite_vector3(cursor)?;
         cursor.expect("],\"bounds_max\":[")?;
-        parse_finite_vector3(&mut cursor)?;
+        parse_finite_vector3(cursor)?;
         cursor.expect("],\"allow_overlap\":")?;
         cursor.expect(if *expected_overlap { "true" } else { "false" })?;
         cursor.expect("}")?;
@@ -3106,8 +5954,31 @@ fn parse_finite_vector3(cursor: &mut JsonCursor<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_import_ir(ir: &str, spec: &ProjectSpec) -> Result<ImportIrAttestation, String> {
-    let mut cursor = JsonCursor::new(ir);
+fn validate_import_ir(
+    ir: &str,
+    spec: &ProjectSpec,
+    canonical_project_json: &str,
+    work: EvidenceWork<'_>,
+) -> Result<ImportIrAttestation, ImportSummaryError> {
+    let mut cursor = JsonCursor::with_work(ir, work, SolveEvidencePhase::ImportIrParse, None);
+    let result = validate_import_ir_cursor(&mut cursor, spec, canonical_project_json, work);
+    let final_poll = cursor.checkpoint_current("after import-IR parsing");
+    if let Some(error) = cursor.work_exceeded {
+        Err(ImportSummaryError::WorkEnvelope(error))
+    } else if cursor.cancellation_observed() {
+        Err(ImportSummaryError::Cancelled)
+    } else {
+        final_poll.map_err(ImportSummaryError::Invalid)?;
+        result.map_err(ImportSummaryError::Invalid)
+    }
+}
+
+fn validate_import_ir_cursor(
+    cursor: &mut JsonCursor<'_>,
+    spec: &ProjectSpec,
+    canonical_project_json: &str,
+    work: EvidenceWork<'_>,
+) -> Result<ImportIrAttestation, String> {
     cursor.expect("{\"schema\":")?;
     let schema = cursor.parse_string()?;
     if schema != IMPORT_IR_SCHEMA {
@@ -3117,12 +5988,30 @@ fn validate_import_ir(ir: &str, spec: &ProjectSpec) -> Result<ImportIrAttestatio
     }
     cursor.expect(",\"project\":")?;
     let project_json = cursor.take_value()?;
-    let canonical_project = fs_project::print_json(spec)
-        .map_err(|error| format!("canonical project JSON failed: {error:?}"))?;
-    if project_json != canonical_project {
+    let canonical_matches = match evidence_bytes_equal(
+        project_json.as_bytes(),
+        canonical_project_json.as_bytes(),
+        work,
+        SolveEvidencePhase::ImportIrCanonicalCompare,
+        None,
+    ) {
+        Ok(matches) => matches,
+        Err(EvidenceCompareError::Cancelled) => {
+            cursor.cancelled = true;
+            return Err("solve evidence canonical-project comparison stopped".to_string());
+        }
+        Err(EvidenceCompareError::WorkEnvelope(error)) => {
+            cursor.work_exceeded = Some(error);
+            return Err(
+                "solve evidence canonical-project comparison exceeded the work envelope"
+                    .to_string(),
+            );
+        }
+    };
+    if !canonical_matches {
         return Err("import IR does not embed the exact canonical project JSON".to_string());
     }
-    let limits = parse_import_ir_limits(&mut cursor)?;
+    let limits = parse_import_ir_limits(cursor)?;
     cursor.expect(",\"sources\":[")?;
     let geometry = spec.geometry.as_deref().unwrap_or(&[]);
     if geometry.len() > limits.max_sources {
@@ -3142,7 +6031,24 @@ fn validate_import_ir(ir: &str, spec: &ProjectSpec) -> Result<ImportIrAttestatio
         }
         cursor.expect("{\"source_identity\":")?;
         let source_identity = cursor.parse_string()?;
-        let expected_identity = geometry_source_identity(artifact);
+        require_solve_evidence_label(
+            &source_identity,
+            limits.max_label_bytes,
+            &format!("import IR source {index} identity"),
+        )?;
+        let expected_identity = match geometry_source_identity_controlled(artifact, work, index) {
+            Ok(identity) => identity,
+            Err(EvidenceCompareError::Cancelled) => {
+                cursor.cancelled = true;
+                return Err("project source-identity derivation stopped".to_string());
+            }
+            Err(EvidenceCompareError::WorkEnvelope(error)) => {
+                cursor.work_exceeded = Some(error);
+                return Err(
+                    "project source-identity derivation exceeded the work envelope".to_string(),
+                );
+            }
+        };
         if source_identity != expected_identity {
             return Err(format!(
                 "import IR source {index} identity `{source_identity}` does not match `{expected_identity}`"
@@ -3150,11 +6056,7 @@ fn validate_import_ir(ir: &str, spec: &ProjectSpec) -> Result<ImportIrAttestatio
         }
         cursor.expect(",\"policy\":")?;
         sources.push(parse_import_ir_policy(
-            &mut cursor,
-            spec,
-            artifact,
-            index,
-            limits,
+            cursor, spec, artifact, index, limits, work,
         )?);
         cursor.expect("}")?;
     }
@@ -3240,6 +6142,7 @@ fn parse_import_ir_policy(
     artifact: &GeometryArtifact,
     source_index: usize,
     limits: ImportIrLimits,
+    work: EvidenceWork<'_>,
 ) -> Result<ImportIrSource, String> {
     cursor.expect("{\"kind\":")?;
     let kind = cursor.parse_string()?;
@@ -3263,7 +6166,7 @@ fn parse_import_ir_policy(
             cursor.expect(",\"max_hole_edges\":")?;
             let max_hole_edges = cursor.parse_usize()?;
             cursor.expect(",\"named_groups\":")?;
-            let named_groups = parse_import_ir_named_groups(cursor, source_index, limits)?;
+            let named_groups = parse_import_ir_named_groups(cursor, source_index, limits, work)?;
             ImportIrSource {
                 length_unit,
                 named_groups,
@@ -3314,7 +6217,7 @@ fn parse_import_ir_policy(
                 ));
             }
             cursor.expect(",\"named_groups\":")?;
-            let named_groups = parse_import_ir_named_groups(cursor, source_index, limits)?;
+            let named_groups = parse_import_ir_named_groups(cursor, source_index, limits, work)?;
             ImportIrSource {
                 length_unit,
                 named_groups,
@@ -3334,6 +6237,22 @@ fn parse_import_ir_policy(
     Ok(source)
 }
 
+fn require_solve_evidence_label(
+    value: &str,
+    declared_max: usize,
+    label: &str,
+) -> Result<(), String> {
+    let effective_max = declared_max.min(MAX_SOLVE_EVIDENCE_LABEL_BYTES);
+    if value.len() > effective_max {
+        Err(format!(
+            "{label} is {} bytes above the solve label ceiling {effective_max}",
+            value.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_import_ir_unit(
     spec: &ProjectSpec,
     artifact: &GeometryArtifact,
@@ -3341,11 +6260,12 @@ fn validate_import_ir_unit(
     unit: &str,
     max_label_bytes: usize,
 ) -> Result<(), String> {
-    if unit.is_empty()
-        || unit.trim() != unit
-        || unit.len() > max_label_bytes
-        || unit.chars().any(char::is_control)
-    {
+    require_solve_evidence_label(
+        unit,
+        max_label_bytes,
+        &format!("import IR source {source_index} length unit"),
+    )?;
+    if unit.is_empty() || unit.trim() != unit || unit.chars().any(char::is_control) {
         return Err(format!(
             "import IR source {source_index} carries an invalid length-unit spelling"
         ));
@@ -3367,14 +6287,38 @@ fn validate_import_ir_unit(
     Ok(())
 }
 
+fn import_ir_duplicate_checkpoint(
+    cursor: &mut JsonCursor<'_>,
+    work: EvidenceWork<'_>,
+    source_index: usize,
+    units: u64,
+    context: &str,
+) -> Result<(), String> {
+    if work
+        .checkpoint(
+            SolveEvidencePhase::ImportIrDuplicateCheck,
+            Some(source_index),
+            units,
+        )
+        .is_err()
+    {
+        cursor.cancelled = true;
+        Err(format!("solve evidence parsing stopped {context}"))
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_import_ir_named_groups(
     cursor: &mut JsonCursor<'_>,
     source_index: usize,
     limits: ImportIrLimits,
+    work: EvidenceWork<'_>,
 ) -> Result<Vec<NamedFaceGroup>, String> {
     cursor.expect("[")?;
     let mut groups = 0usize;
     let mut face_references = 0usize;
+    let mut duplicate_units = 0u64;
     let mut named_groups = Vec::new();
     if cursor.peek() != Some(b']') {
         loop {
@@ -3389,18 +6333,20 @@ fn parse_import_ir_named_groups(
             }
             cursor.expect("{\"name\":")?;
             let name = cursor.parse_string()?;
-            if name.is_empty()
-                || name.trim() != name
-                || name.len() > limits.max_label_bytes
-                || name.chars().any(char::is_control)
-            {
+            require_solve_evidence_label(
+                &name,
+                limits.max_label_bytes,
+                &format!("import IR source {source_index} named-group label"),
+            )?;
+            if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
                 return Err(format!(
                     "import IR source {source_index} named-group label is not nonempty, trim-canonical, control-free, and bounded"
                 ));
             }
-            named_groups
-                .try_reserve(1)
-                .map_err(|_| "import IR named-group allocation refused".to_string())?;
+            cursor.checkpoint_current("before named-group allocation")?;
+            let group_reserve = named_groups.try_reserve(1);
+            cursor.checkpoint_current("after named-group allocation")?;
+            group_reserve.map_err(|_| "import IR named-group allocation refused".to_string())?;
             cursor.expect(",\"faces\":[")?;
             if cursor.peek() == Some(b']') {
                 return Err(format!(
@@ -3422,8 +6368,10 @@ fn parse_import_ir_named_groups(
                         limits.max_group_faces
                     ));
                 }
-                group_faces
-                    .try_reserve(1)
+                cursor.checkpoint_current("before named-group face allocation")?;
+                let face_reserve = group_faces.try_reserve(1);
+                cursor.checkpoint_current("after named-group face allocation")?;
+                face_reserve
                     .map_err(|_| "import IR named-group face allocation refused".to_string())?;
                 group_faces.push(face);
                 match cursor.peek() {
@@ -3434,15 +6382,67 @@ fn parse_import_ir_named_groups(
                     }
                 }
             }
-            group_faces.sort_unstable();
-            if let Some(duplicate) = group_faces
-                .windows(2)
-                .find(|window| window[0] == window[1])
-                .map(|window| window[0])
-            {
-                return Err(format!(
-                    "import IR source {source_index} named group repeats face {duplicate}"
-                ));
+            import_ir_duplicate_checkpoint(
+                cursor,
+                work,
+                source_index,
+                duplicate_units,
+                "before named-group face-set allocation",
+            )?;
+            let mut seen_faces = SolveEvidenceSet::default();
+            let reserve = seen_faces.try_reserve(group_faces.len());
+            import_ir_duplicate_checkpoint(
+                cursor,
+                work,
+                source_index,
+                duplicate_units,
+                "after named-group face-set allocation",
+            )?;
+            reserve.map_err(|_| {
+                "import IR named-group face duplicate-set allocation refused".to_string()
+            })?;
+            let faces_per_tile = (EVIDENCE_POLL_BYTES / core::mem::size_of::<u32>()).max(1);
+            for tile in group_faces.chunks(faces_per_tile) {
+                import_ir_duplicate_checkpoint(
+                    cursor,
+                    work,
+                    source_index,
+                    duplicate_units,
+                    "before named-group face duplicate tile",
+                )?;
+                let mut duplicate = None;
+                let mut inspected = 0usize;
+                for face in tile {
+                    inspected += 1;
+                    if !seen_faces.insert(*face) {
+                        duplicate = Some(*face);
+                        break;
+                    }
+                }
+                let inspected_bytes = inspected
+                    .checked_mul(core::mem::size_of::<u32>())
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or_else(|| {
+                        "import IR named-group duplicate-work count overflowed u64".to_string()
+                    })?;
+                duplicate_units =
+                    duplicate_units
+                        .checked_add(inspected_bytes)
+                        .ok_or_else(|| {
+                            "import IR named-group duplicate-work count overflowed u64".to_string()
+                        })?;
+                import_ir_duplicate_checkpoint(
+                    cursor,
+                    work,
+                    source_index,
+                    duplicate_units,
+                    "after named-group face duplicate tile",
+                )?;
+                if let Some(duplicate) = duplicate {
+                    return Err(format!(
+                        "import IR source {source_index} named group repeats face {duplicate}"
+                    ));
+                }
             }
             named_groups.push(NamedFaceGroup {
                 name,
@@ -3459,17 +6459,63 @@ fn parse_import_ir_named_groups(
         }
     }
     cursor.expect("]")?;
-    let mut group_order: Vec<usize> = (0..named_groups.len()).collect();
-    group_order
-        .sort_unstable_by(|left, right| named_groups[*left].name.cmp(&named_groups[*right].name));
-    if let Some(duplicate) = group_order
-        .windows(2)
-        .find(|window| named_groups[window[0]].name == named_groups[window[1]].name)
-    {
-        return Err(format!(
-            "import IR source {source_index} repeats named group `{}`",
-            named_groups[duplicate[0]].name
-        ));
+    import_ir_duplicate_checkpoint(
+        cursor,
+        work,
+        source_index,
+        duplicate_units,
+        "before named-group name-set allocation",
+    )?;
+    let mut seen_names = SolveEvidenceSet::default();
+    let reserve = seen_names.try_reserve(named_groups.len());
+    import_ir_duplicate_checkpoint(
+        cursor,
+        work,
+        source_index,
+        duplicate_units,
+        "after named-group name-set allocation",
+    )?;
+    reserve
+        .map_err(|_| "import IR named-group name duplicate-set allocation refused".to_string())?;
+    for group in &named_groups {
+        import_ir_duplicate_checkpoint(
+            cursor,
+            work,
+            source_index,
+            duplicate_units,
+            "before named-group name duplicate item",
+        )?;
+        let mut key = String::new();
+        let key_reserve = key.try_reserve_exact(group.name.len());
+        import_ir_duplicate_checkpoint(
+            cursor,
+            work,
+            source_index,
+            duplicate_units,
+            "after named-group name-key allocation",
+        )?;
+        key_reserve
+            .map_err(|_| "import IR named-group duplicate-key allocation refused".to_string())?;
+        key.push_str(&group.name);
+        let inserted = seen_names.insert(key);
+        let name_bytes = u64::try_from(group.name.len())
+            .map_err(|_| "import IR named-group name length is outside u64".to_string())?;
+        duplicate_units = duplicate_units.checked_add(name_bytes).ok_or_else(|| {
+            "import IR named-group duplicate-work count overflowed u64".to_string()
+        })?;
+        import_ir_duplicate_checkpoint(
+            cursor,
+            work,
+            source_index,
+            duplicate_units,
+            "after named-group name duplicate item",
+        )?;
+        if !inserted {
+            return Err(format!(
+                "import IR source {source_index} repeats named group `{}`",
+                group.name
+            ));
+        }
     }
     Ok(named_groups)
 }
@@ -3478,8 +6524,28 @@ fn parse_geometry_import_summary(
     text: &str,
     spec: &ProjectSpec,
     project_hash: ContentHash,
+    work: EvidenceWork<'_>,
+) -> Result<Vec<VerifiedImport>, ImportSummaryError> {
+    let mut cursor =
+        JsonCursor::with_work(text, work, SolveEvidencePhase::ImportSummaryParse, None);
+    let result = parse_geometry_import_summary_cursor(&mut cursor, spec, project_hash, work);
+    let final_poll = cursor.checkpoint_current("after import-summary parsing");
+    if let Some(error) = cursor.work_exceeded {
+        Err(ImportSummaryError::WorkEnvelope(error))
+    } else if cursor.cancellation_observed() {
+        Err(ImportSummaryError::Cancelled)
+    } else {
+        final_poll.map_err(ImportSummaryError::Invalid)?;
+        result.map_err(ImportSummaryError::Invalid)
+    }
+}
+
+fn parse_geometry_import_summary_cursor(
+    cursor: &mut JsonCursor<'_>,
+    spec: &ProjectSpec,
+    project_hash: ContentHash,
+    work: EvidenceWork<'_>,
 ) -> Result<Vec<VerifiedImport>, String> {
-    let mut cursor = JsonCursor::new(text);
     cursor.expect("{\"schema\":")?;
     let schema = cursor.parse_string()?;
     if schema != IMPORT_SUMMARY_SCHEMA {
@@ -3499,7 +6565,7 @@ fn parse_geometry_import_summary(
     let mut entries = Vec::new();
     if cursor.peek() != Some(b']') {
         loop {
-            entries.push(parse_geometry_import_entry(&mut cursor, project_hash)?);
+            entries.push(parse_geometry_import_entry(cursor, project_hash)?);
             match cursor.peek() {
                 Some(b',') => cursor.expect(",")?,
                 Some(b']') => break,
@@ -3534,7 +6600,19 @@ fn parse_geometry_import_summary(
         ));
     }
     for (index, (entry, artifact)) in entries.iter().zip(geometry).enumerate() {
-        let expected_identity = geometry_source_identity(artifact);
+        let expected_identity = match geometry_source_identity_controlled(artifact, work, index) {
+            Ok(identity) => identity,
+            Err(EvidenceCompareError::Cancelled) => {
+                cursor.cancelled = true;
+                return Err("project source-identity derivation stopped".to_string());
+            }
+            Err(EvidenceCompareError::WorkEnvelope(error)) => {
+                cursor.work_exceeded = Some(error);
+                return Err(
+                    "project source-identity derivation exceeded the work envelope".to_string(),
+                );
+            }
+        };
         if entry.role != artifact.role || entry.source_identity != expected_identity {
             return Err(format!(
                 "summary artifact {index} does not match project role `{}` and source identity `{expected_identity}`",
@@ -3551,12 +6629,19 @@ fn parse_geometry_import_entry(
 ) -> Result<VerifiedImport, String> {
     cursor.expect("{\"role\":")?;
     let role = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &role,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "summary artifact role",
+    )?;
     cursor.expect(",\"source_label\":")?;
     let source_label = cursor.parse_string()?;
-    if source_label.is_empty()
-        || source_label.len() > 4096
-        || source_label.chars().any(char::is_control)
-    {
+    require_solve_evidence_label(
+        &source_label,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "summary source label",
+    )?;
+    if source_label.is_empty() || source_label.chars().any(char::is_control) {
         return Err("summary source label violates the import writer bound".to_string());
     }
     cursor.expect(",\"source_label_authority\":")?;
@@ -3566,6 +6651,11 @@ fn parse_geometry_import_entry(
     }
     cursor.expect(",\"source_identity\":")?;
     let source_identity = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &source_identity,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "summary source identity",
+    )?;
     cursor.expect(",\"raw_source\":")?;
     let raw_source = parse_hash_string(cursor, "raw_source")?;
     cursor.expect(",\"promotion_receipt\":")?;
@@ -3576,6 +6666,15 @@ fn parse_geometry_import_entry(
     let assignment_report = parse_hash_string(cursor, "assignment_report")?;
     cursor.expect(",\"import_record\":")?;
     let import_record = cursor.parse_string()?;
+    let max_import_record_bytes = MAX_SOLVE_EVIDENCE_LABEL_BYTES
+        .checked_add(65)
+        .expect("solve label ceiling plus hash separator fits usize");
+    if import_record.len() > max_import_record_bytes {
+        return Err(format!(
+            "summary import record is {} bytes above the solve composite-record ceiling {max_import_record_bytes}",
+            import_record.len()
+        ));
+    }
     let expected_record = format!("{}:{source_identity}", project_hash.to_hex());
     if import_record != expected_record {
         return Err(format!(
@@ -3597,8 +6696,29 @@ fn parse_import_verify_receipt(
     text: &str,
     run: SolveRunId,
     project_hash: ContentHash,
+    work: EvidenceWork<'_>,
+) -> Result<(i64, Vec<VerifiedImport>), ImportSummaryError> {
+    let mut cursor = JsonCursor::with_work(
+        text,
+        work,
+        SolveEvidencePhase::ResumeStageReceiptParse,
+        None,
+    );
+    let result = parse_import_verify_receipt_cursor(&mut cursor, run, project_hash);
+    let final_poll = cursor.checkpoint_current("after stage-receipt parsing");
+    if cursor.cancellation_observed() {
+        Err(ImportSummaryError::Cancelled)
+    } else {
+        final_poll.map_err(ImportSummaryError::Invalid)?;
+        result.map_err(ImportSummaryError::Invalid)
+    }
+}
+
+fn parse_import_verify_receipt_cursor(
+    cursor: &mut JsonCursor<'_>,
+    run: SolveRunId,
+    project_hash: ContentHash,
 ) -> Result<(i64, Vec<VerifiedImport>), String> {
-    let mut cursor = JsonCursor::new(text);
     cursor.expect("{\"schema\":")?;
     let schema = cursor.parse_string()?;
     if schema != IMPORT_VERIFY_RECEIPT_SCHEMA {
@@ -3631,7 +6751,7 @@ fn parse_import_verify_receipt(
     let mut entries = Vec::new();
     if cursor.peek() != Some(b']') {
         loop {
-            entries.push(parse_verified_import_entry(&mut cursor)?);
+            entries.push(parse_verified_import_entry(cursor)?);
             match cursor.peek() {
                 Some(b',') => cursor.expect(",")?,
                 Some(b']') => break,
@@ -3661,8 +6781,18 @@ fn parse_import_verify_receipt(
 fn parse_verified_import_entry(cursor: &mut JsonCursor<'_>) -> Result<VerifiedImport, String> {
     cursor.expect("{\"role\":")?;
     let role = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &role,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "stage-receipt artifact role",
+    )?;
     cursor.expect(",\"source_identity\":")?;
     let source_identity = cursor.parse_string()?;
+    require_solve_evidence_label(
+        &source_identity,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        "stage-receipt source identity",
+    )?;
     cursor.expect(",\"raw_source\":")?;
     let raw_source = parse_hash_string(cursor, "raw_source")?;
     cursor.expect(",\"promotion_receipt\":")?;
@@ -3697,11 +6827,48 @@ fn parse_hash_string(cursor: &mut JsonCursor<'_>, field: &str) -> Result<Content
 struct JsonCursor<'a> {
     input: &'a str,
     pos: usize,
+    poll: Option<JsonPoll<'a>>,
+    cancelled: bool,
+    work_exceeded: Option<InvocationWorkExceeded>,
+}
+
+struct JsonPoll<'a> {
+    work: EvidenceWork<'a>,
+    phase: SolveEvidencePhase,
+    source_index: Option<usize>,
+    next_boundary: u64,
 }
 
 impl<'a> JsonCursor<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            poll: None,
+            cancelled: false,
+            work_exceeded: None,
+        }
+    }
+
+    fn with_work(
+        input: &'a str,
+        work: EvidenceWork<'a>,
+        phase: SolveEvidencePhase,
+        source_index: Option<usize>,
+    ) -> Self {
+        let cancelled = work.checkpoint(phase, source_index, 0).is_err();
+        Self {
+            input,
+            pos: 0,
+            poll: Some(JsonPoll {
+                work,
+                phase,
+                source_index,
+                next_boundary: u64::try_from(EVIDENCE_POLL_BYTES).expect("stride fits u64"),
+            }),
+            cancelled,
+            work_exceeded: None,
+        }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -3713,20 +6880,98 @@ impl<'a> JsonCursor<'a> {
     }
 
     fn expect(&mut self, expected: &str) -> Result<(), String> {
+        if self.cancelled {
+            return Err("solve evidence parsing stopped at phase entry".to_string());
+        }
         if self.input[self.pos..].starts_with(expected) {
-            self.pos += expected.len();
-            Ok(())
+            self.advance(expected.len())
         } else {
             Err(self.problem(&format!("expected `{expected}`")))
         }
     }
 
-    fn finish(&self) -> Result<(), String> {
+    fn finish(&mut self) -> Result<(), String> {
+        if self.cancelled {
+            return Err("solve evidence parsing stopped at phase entry".to_string());
+        }
         if self.pos == self.input.len() {
+            self.poll_completion()?;
             Ok(())
         } else {
             Err(self.problem("trailing bytes after complete JSON value"))
         }
+    }
+
+    fn cancellation_observed(&self) -> bool {
+        self.cancelled
+    }
+
+    fn checkpoint_current(&mut self, context: &str) -> Result<(), String> {
+        if self.cancelled {
+            return Err(format!("solve evidence parsing stopped {context}"));
+        }
+        let Some(poll) = &self.poll else {
+            return Ok(());
+        };
+        let units =
+            u64::try_from(self.pos).map_err(|_| "JSON cursor is outside u64".to_string())?;
+        if poll
+            .work
+            .checkpoint(poll.phase, poll.source_index, units)
+            .is_err()
+        {
+            self.cancelled = true;
+            Err(format!("solve evidence parsing stopped {context}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn advance(&mut self, bytes: usize) -> Result<(), String> {
+        if self.cancelled {
+            return Err("solve evidence parsing stopped at phase entry".to_string());
+        }
+        let end = self
+            .pos
+            .checked_add(bytes)
+            .ok_or_else(|| self.problem("JSON cursor offset overflow"))?;
+        if end > self.input.len() {
+            return Err(self.problem("JSON cursor advanced past input"));
+        }
+        if let Some(poll) = &mut self.poll {
+            let end_units =
+                u64::try_from(end).map_err(|_| "JSON cursor is outside u64".to_string())?;
+            while poll.next_boundary <= end_units {
+                if poll
+                    .work
+                    .checkpoint(poll.phase, poll.source_index, poll.next_boundary)
+                    .is_err()
+                {
+                    self.cancelled = true;
+                    return Err("solve evidence parsing stopped at a fixed checkpoint".to_string());
+                }
+                poll.next_boundary = poll
+                    .next_boundary
+                    .saturating_add(u64::try_from(EVIDENCE_POLL_BYTES).expect("stride fits u64"));
+            }
+            self.pos = end;
+            if poll.work.plan.is_some()
+                && poll
+                    .work
+                    .checkpoint(poll.phase, poll.source_index, end_units)
+                    .is_err()
+            {
+                self.cancelled = true;
+                return Err("solve evidence parsing stopped at a planned checkpoint".to_string());
+            }
+            return Ok(());
+        }
+        self.pos = end;
+        Ok(())
+    }
+
+    fn poll_completion(&mut self) -> Result<(), String> {
+        self.checkpoint_current("at completion")
     }
 
     fn parse_string(&mut self) -> Result<String, String> {
@@ -3737,7 +6982,7 @@ impl<'a> JsonCursor<'a> {
                 .chars()
                 .next()
                 .ok_or_else(|| self.problem("unterminated JSON string"))?;
-            self.pos += character.len_utf8();
+            self.advance(character.len_utf8())?;
             match character {
                 '"' => return Ok(value),
                 '\\' => {
@@ -3745,7 +6990,7 @@ impl<'a> JsonCursor<'a> {
                         .chars()
                         .next()
                         .ok_or_else(|| self.problem("unterminated JSON escape"))?;
-                    self.pos += escape.len_utf8();
+                    self.advance(escape.len_utf8())?;
                     match escape {
                         '"' => value.push('"'),
                         '\\' => value.push('\\'),
@@ -3790,31 +7035,37 @@ impl<'a> JsonCursor<'a> {
         {
             return Err(self.problem("non-lowercase-hex Unicode escape"));
         }
-        self.pos = end;
-        u16::from_str_radix(digits, 16).map_err(|_| self.problem("invalid Unicode escape"))
+        let value =
+            u16::from_str_radix(digits, 16).map_err(|_| self.problem("invalid Unicode escape"))?;
+        self.advance(4)?;
+        Ok(value)
     }
 
     fn parse_i64(&mut self) -> Result<i64, String> {
         let start = self.pos;
         if self.peek() == Some(b'-') {
-            self.pos += 1;
+            self.advance(1)?;
         }
         match self.peek() {
             Some(b'0') => {
-                self.pos += 1;
+                self.advance(1)?;
                 if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.problem("leading zero in JSON integer"));
                 }
             }
             Some(b'1'..=b'9') => {
-                self.pos += 1;
+                self.advance(1)?;
                 while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    self.pos += 1;
+                    self.advance(1)?;
                 }
             }
             _ => return Err(self.problem("expected JSON integer")),
         }
-        self.input[start..self.pos]
+        let spelling = &self.input[start..self.pos];
+        if spelling.len() > MAX_JSON_INTEGER_BYTES {
+            return Err(self.problem("JSON integer exceeds the canonical i64 width"));
+        }
+        spelling
             .parse::<i64>()
             .map_err(|_| self.problem("JSON integer is outside i64"))
     }
@@ -3823,20 +7074,24 @@ impl<'a> JsonCursor<'a> {
         let start = self.pos;
         match self.peek() {
             Some(b'0') => {
-                self.pos += 1;
+                self.advance(1)?;
                 if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.problem("leading zero in JSON unsigned integer"));
                 }
             }
             Some(b'1'..=b'9') => {
-                self.pos += 1;
+                self.advance(1)?;
                 while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    self.pos += 1;
+                    self.advance(1)?;
                 }
             }
             _ => return Err(self.problem("expected JSON unsigned integer")),
         }
-        self.input[start..self.pos]
+        let spelling = &self.input[start..self.pos];
+        if spelling.len() > MAX_JSON_INTEGER_BYTES {
+            return Err(self.problem("JSON unsigned integer exceeds the canonical u64 width"));
+        }
+        spelling
             .parse::<u64>()
             .map_err(|_| self.problem("JSON unsigned integer is outside u64"))
     }
@@ -3850,6 +7105,9 @@ impl<'a> JsonCursor<'a> {
         let start = self.pos;
         self.skip_number()?;
         let spelling = &self.input[start..self.pos];
+        if spelling.len() > MAX_CANONICAL_F64_BYTES {
+            return Err(self.problem("JSON number exceeds the canonical finite-f64 width"));
+        }
         let value = spelling
             .parse::<f64>()
             .map_err(|_| self.problem("JSON number is outside f64"))?;
@@ -3878,9 +7136,9 @@ impl<'a> JsonCursor<'a> {
                 Ok(())
             }
             Some(b'{') => {
-                self.pos += 1;
+                self.advance(1)?;
                 if self.peek() == Some(b'}') {
-                    self.pos += 1;
+                    self.advance(1)?;
                     return Ok(());
                 }
                 loop {
@@ -3888,9 +7146,9 @@ impl<'a> JsonCursor<'a> {
                     self.expect(":")?;
                     self.skip_value(depth + 1)?;
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => self.advance(1)?,
                         Some(b'}') => {
-                            self.pos += 1;
+                            self.advance(1)?;
                             return Ok(());
                         }
                         _ => return Err(self.problem("expected `,` or `}` in JSON object")),
@@ -3898,17 +7156,17 @@ impl<'a> JsonCursor<'a> {
                 }
             }
             Some(b'[') => {
-                self.pos += 1;
+                self.advance(1)?;
                 if self.peek() == Some(b']') {
-                    self.pos += 1;
+                    self.advance(1)?;
                     return Ok(());
                 }
                 loop {
                     self.skip_value(depth + 1)?;
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => self.advance(1)?,
                         Some(b']') => {
-                            self.pos += 1;
+                            self.advance(1)?;
                             return Ok(());
                         }
                         _ => return Err(self.problem("expected `,` or `]` in JSON array")),
@@ -3925,46 +7183,423 @@ impl<'a> JsonCursor<'a> {
 
     fn skip_number(&mut self) -> Result<(), String> {
         if self.peek() == Some(b'-') {
-            self.pos += 1;
+            self.advance(1)?;
         }
         match self.peek() {
             Some(b'0') => {
-                self.pos += 1;
+                self.advance(1)?;
                 if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.problem("leading zero in JSON number"));
                 }
             }
             Some(b'1'..=b'9') => {
-                self.pos += 1;
+                self.advance(1)?;
                 while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    self.pos += 1;
+                    self.advance(1)?;
                 }
             }
             _ => return Err(self.problem("invalid JSON number")),
         }
         if self.peek() == Some(b'.') {
-            self.pos += 1;
+            self.advance(1)?;
             let fraction_start = self.pos;
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.pos += 1;
+                self.advance(1)?;
             }
             if self.pos == fraction_start {
                 return Err(self.problem("empty JSON number fraction"));
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.pos += 1;
+            self.advance(1)?;
             if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.pos += 1;
+                self.advance(1)?;
             }
             let exponent_start = self.pos;
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.pos += 1;
+                self.advance(1)?;
             }
             if self.pos == exponent_start {
                 return Err(self.problem("empty JSON number exponent"));
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EVIDENCE_POLL_BYTES, EvidenceReadError, EvidenceUtf8Error, EvidenceWork,
+        InvocationWorkExceeded, InvocationWorkLedger, JsonCursor, MAX_CANONICAL_F64_BYTES,
+        MAX_CANONICAL_PLY_VERTEX_LINE_BYTES, MAX_SOLVE_EVIDENCE_LABEL_BYTES,
+        MAX_SOLVE_INVOCATION_WORK_BYTES, SolveCancellationPlan, SolveEvidencePhase,
+        evidence_bytes_equal, evidence_utf8_string, materialize_evidence_artifact,
+        parse_canonical_ply_face_line, parse_canonical_ply_vertex_line, preflight_canonical_ply,
+        require_solve_evidence_label, validate_named_group_face_ranges, verify_evidence_artifact,
+    };
+    use fs_exec::CancelGate;
+    use fs_io::NamedFaceGroup;
+    use fs_ledger::{Ledger, hash_bytes};
+
+    #[test]
+    fn invocation_work_ledger_admits_exact_cap_and_refuses_plus_one_without_advancing() {
+        let meter = InvocationWorkLedger::default();
+        assert_eq!(
+            meter
+                .charge(MAX_SOLVE_INVOCATION_WORK_BYTES)
+                .expect("the exact invocation-work cap is admitted"),
+            MAX_SOLVE_INVOCATION_WORK_BYTES
+        );
+        let attempted = MAX_SOLVE_INVOCATION_WORK_BYTES
+            .checked_add(1)
+            .expect("1-GiB cap plus one fits u64");
+        assert!(matches!(
+            meter.charge(1),
+            Err(InvocationWorkExceeded::CumulativeBytes {
+                attempted: observed
+            }) if observed == attempted
+        ));
+        assert_eq!(
+            meter.used.get(),
+            MAX_SOLVE_INVOCATION_WORK_BYTES,
+            "a refused charge must not advance deterministic work accounting"
+        );
+        assert_eq!(
+            meter.charge(0).expect("zero-byte retry remains admitted"),
+            MAX_SOLVE_INVOCATION_WORK_BYTES
+        );
+    }
+
+    #[test]
+    fn utf8_copy_and_direct_comparison_charge_each_accepted_tile_once() {
+        let gate = CancelGate::new_clock_free();
+        let utf8_meter = InvocationWorkLedger::default();
+        let decoded = evidence_utf8_string(
+            b"abc",
+            EvidenceWork::new(&gate, None, &utf8_meter),
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            "charged UTF-8",
+        )
+        .expect("valid UTF-8 is copied");
+        assert_eq!(decoded, "abc");
+        assert_eq!(utf8_meter.used.get(), 3);
+
+        let compare_meter = InvocationWorkLedger::default();
+        assert!(
+            evidence_bytes_equal(
+                b"abc",
+                b"abc",
+                EvidenceWork::new(&gate, None, &compare_meter),
+                SolveEvidencePhase::ImportIrCanonicalCompare,
+                None,
+            )
+            .expect("equal bytes compare")
+        );
+        assert_eq!(compare_meter.used.get(), 3);
+
+        let invalid_meter = InvocationWorkLedger::default();
+        assert!(matches!(
+            evidence_utf8_string(
+                &[0x80],
+                EvidenceWork::new(&gate, None, &invalid_meter),
+                SolveEvidencePhase::ImportSummaryUtf8,
+                None,
+                "invalid UTF-8",
+            ),
+            Err(EvidenceUtf8Error::Invalid(_))
+        ));
+        assert_eq!(
+            invalid_meter.used.get(),
+            0,
+            "a rejected UTF-8 tile is not charged as accepted copy work"
+        );
+    }
+
+    #[test]
+    fn canonical_ply_finite_float_bound_covers_writer_extremes() {
+        let smallest_subnormal = f64::from_bits(1);
+        let cases = [
+            ("maximum", f64::MAX, 309usize),
+            ("minimum-positive", f64::MIN_POSITIVE, 326),
+            ("smallest-subnormal", smallest_subnormal, 326),
+            ("negative-smallest-subnormal", -smallest_subnormal, 327),
+            ("negative-zero", -0.0, 2),
+        ];
+        for (label, value, expected_len) in cases {
+            let spelling = value.to_string();
+            assert_eq!(
+                spelling.len(),
+                expected_len,
+                "{label} writer spelling changed"
+            );
+            assert!(
+                spelling.len() <= MAX_CANONICAL_F64_BYTES,
+                "{label} exceeds the solve finite-f64 token bound"
+            );
+            let line = format!("{spelling} {spelling} {spelling}");
+            assert!(line.len() <= MAX_CANONICAL_PLY_VERTEX_LINE_BYTES);
+            parse_canonical_ply_vertex_line(&line, true)
+                .unwrap_or_else(|error| panic!("{label} writer line refused: {error}"));
+        }
+        parse_canonical_ply_face_line("3 0 1 2", 3, true).expect("canonical in-range triangle");
+        assert!(
+            parse_canonical_ply_face_line("3 00 1 2", 3, true)
+                .expect_err("leading zero is not writer output")
+                .contains("canonical u32")
+        );
+        assert!(
+            parse_canonical_ply_face_line("3 0 1 3", 3, true)
+                .expect_err("index equal to vertex count is out of range")
+                .contains("outside")
+        );
+    }
+
+    #[test]
+    fn incremental_utf8_handles_boundaries_errors_empty_and_cancellation() {
+        let gate = CancelGate::new_clock_free();
+        let mut split_scalar = vec![b'a'; EVIDENCE_POLL_BYTES - 1];
+        split_scalar.extend_from_slice("🦀z".as_bytes());
+        let decoded = evidence_utf8_string(
+            &split_scalar,
+            EvidenceWork::unmetered(&gate, None),
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            "split scalar",
+        )
+        .expect("four-byte scalar crossing the tile boundary is valid");
+        let mut expected = "a".repeat(EVIDENCE_POLL_BYTES - 1);
+        expected.push_str("🦀z");
+        assert_eq!(decoded, expected);
+
+        let invalid_gate = CancelGate::new_clock_free();
+        let mut invalid = vec![b'a'; EVIDENCE_POLL_BYTES];
+        invalid.push(0x80);
+        invalid.push(b'z');
+        let error = evidence_utf8_string(
+            &invalid,
+            EvidenceWork::unmetered(&invalid_gate, None),
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            "invalid boundary",
+        )
+        .expect_err("a standalone continuation byte is invalid");
+        assert!(
+            matches!(
+                &error,
+                EvidenceUtf8Error::Invalid(problem)
+                    if problem.contains(&format!("byte {EVIDENCE_POLL_BYTES}"))
+            ),
+            "{error:?}"
+        );
+
+        let empty_gate = CancelGate::new_clock_free();
+        assert_eq!(
+            evidence_utf8_string(
+                b"",
+                EvidenceWork::unmetered(&empty_gate, None),
+                SolveEvidencePhase::ImportSummaryUtf8,
+                None,
+                "empty",
+            )
+            .expect("empty UTF-8"),
+            ""
+        );
+
+        let cancel_gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            EVIDENCE_POLL_BYTES as u64,
+        );
+        let cancelled = evidence_utf8_string(
+            &vec![b'a'; EVIDENCE_POLL_BYTES + 1],
+            EvidenceWork::unmetered(&cancel_gate, Some(&plan)),
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            "cancelled",
+        );
+        assert!(matches!(cancelled, Err(EvidenceUtf8Error::Cancelled)));
+        assert!(plan.fired());
+
+        let invalid_cancel_gate = CancelGate::new_clock_free();
+        let invalid_plan =
+            SolveCancellationPlan::new(SolveEvidencePhase::ImportSummaryUtf8, None, 1);
+        let invalid_cancelled = evidence_utf8_string(
+            &[0x80],
+            EvidenceWork::unmetered(&invalid_cancel_gate, Some(&invalid_plan)),
+            SolveEvidencePhase::ImportSummaryUtf8,
+            None,
+            "planned invalid",
+        );
+        assert!(matches!(
+            invalid_cancelled,
+            Err(EvidenceUtf8Error::Cancelled)
+        ));
+        assert!(invalid_plan.fired());
+    }
+
+    #[test]
+    fn json_cursor_phase_entry_prioritizes_immediate_cancellation() {
+        let malformed_gate = CancelGate::new_clock_free();
+        malformed_gate.request();
+        let mut malformed = JsonCursor::with_work(
+            "!",
+            EvidenceWork::unmetered(&malformed_gate, None),
+            SolveEvidencePhase::ImportIrParse,
+            None,
+        );
+        assert!(malformed.cancellation_observed());
+        assert!(
+            malformed
+                .expect("{")
+                .expect_err("requested gate stops before inspecting the first invalid byte")
+                .contains("phase entry")
+        );
+        assert_eq!(malformed.pos, 0);
+
+        let valid_gate = CancelGate::new_clock_free();
+        valid_gate.request();
+        let mut valid = JsonCursor::with_work(
+            "{}",
+            EvidenceWork::unmetered(&valid_gate, None),
+            SolveEvidencePhase::ImportIrParse,
+            None,
+        );
+        assert!(
+            valid
+                .expect("{")
+                .expect_err("requested gate stops valid input at phase entry")
+                .contains("phase entry")
+        );
+        assert_eq!(valid.pos, 0);
+
+        let planned_gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(SolveEvidencePhase::ImportIrParse, None, 0);
+        let planned = JsonCursor::with_work(
+            "{}",
+            EvidenceWork::unmetered(&planned_gate, Some(&plan)),
+            SolveEvidencePhase::ImportIrParse,
+            None,
+        );
+        assert!(plan.fired());
+        assert!(planned.cancellation_observed());
+        assert!(planned_gate.is_requested());
+
+        let late_gate = CancelGate::new_clock_free();
+        let mut late = JsonCursor::with_work(
+            "{!",
+            EvidenceWork::unmetered(&late_gate, None),
+            SolveEvidencePhase::ImportIrParse,
+            None,
+        );
+        late.expect("{").expect("first token");
+        late_gate.request();
+        let syntax = late.expect("\"schema\":");
+        assert!(syntax.is_err(), "the next token is deliberately invalid");
+        assert!(
+            late.checkpoint_current("after deliberate syntax error")
+                .is_err()
+        );
+        assert!(late.cancellation_observed());
+    }
+
+    #[test]
+    fn evidence_reads_observe_phase_entry_before_empty_or_missing_dispatch() {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        let empty = ledger
+            .put_artifact("empty-evidence", b"", None)
+            .expect("empty artifact");
+        let empty_gate = CancelGate::new_clock_free();
+        let empty_plan = SolveCancellationPlan::new(SolveEvidencePhase::RawSourceRead, Some(0), 0);
+        let empty_result = materialize_evidence_artifact(
+            &ledger,
+            EvidenceWork::unmetered(&empty_gate, Some(&empty_plan)),
+            empty.hash,
+            0,
+            SolveEvidencePhase::RawSourceRead,
+            Some(0),
+        );
+        assert!(matches!(empty_result, Err(EvidenceReadError::Cancelled)));
+        assert!(empty_plan.fired());
+
+        let missing_gate = CancelGate::new_clock_free();
+        missing_gate.request();
+        let missing = hash_bytes(b"missing-evidence-artifact");
+        let missing_result = verify_evidence_artifact(
+            &ledger,
+            EvidenceWork::unmetered(&missing_gate, None),
+            missing,
+            1,
+            SolveEvidencePhase::PromotionReceiptRead,
+            Some(0),
+        );
+        assert!(matches!(missing_result, Err(EvidenceReadError::Cancelled)));
+    }
+
+    #[test]
+    fn bounded_error_paths_poll_before_classifying_the_result() {
+        let compare_gate = CancelGate::new_clock_free();
+        let compare_plan =
+            SolveCancellationPlan::new(SolveEvidencePhase::ResumeProjectCanonicalCompare, None, 1);
+        let compared = evidence_bytes_equal(
+            b"a",
+            b"b",
+            EvidenceWork::unmetered(&compare_gate, Some(&compare_plan)),
+            SolveEvidencePhase::ResumeProjectCanonicalCompare,
+            None,
+        );
+        assert!(compared.is_err(), "post-compare checkpoint wins");
+        assert!(compare_plan.fired());
+
+        let range_gate = CancelGate::new_clock_free();
+        let range_plan =
+            SolveCancellationPlan::new(SolveEvidencePhase::NamedGroupFaceRange, Some(0), 4);
+        let groups = [NamedFaceGroup {
+            name: "bounded-group".to_string(),
+            faces: vec![4],
+        }];
+        let range = validate_named_group_face_ranges(
+            &groups,
+            4,
+            EvidenceWork::unmetered(&range_gate, Some(&range_plan)),
+            0,
+        );
+        assert!(matches!(range, Err(super::ImportSummaryError::Cancelled)));
+        assert!(range_plan.fired());
+
+        let preflight_gate = CancelGate::new_clock_free();
+        let preflight_plan =
+            SolveCancellationPlan::new(SolveEvidencePhase::PromotedMeshPreflight, Some(0), 3);
+        let preflight = preflight_canonical_ply(
+            b"bad",
+            1,
+            1,
+            EvidenceWork::unmetered(&preflight_gate, Some(&preflight_plan)),
+            0,
+        );
+        assert!(matches!(
+            preflight,
+            Err(super::ImportSummaryError::Cancelled)
+        ));
+        assert!(preflight_plan.fired());
+    }
+
+    #[test]
+    fn solve_evidence_label_ceiling_is_explicit_at_the_boundary() {
+        let exact = "l".repeat(MAX_SOLVE_EVIDENCE_LABEL_BYTES);
+        require_solve_evidence_label(&exact, usize::MAX, "exact solve-label boundary fixture")
+            .expect("exact 4-KiB label is admitted");
+        let oversized = format!("{exact}x");
+        assert!(
+            require_solve_evidence_label(
+                &oversized,
+                usize::MAX,
+                "oversized solve-label boundary fixture",
+            )
+            .expect_err("limit plus one is refused")
+            .contains("solve label ceiling")
+        );
     }
 }
