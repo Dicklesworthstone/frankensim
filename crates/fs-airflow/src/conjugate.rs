@@ -408,6 +408,17 @@ pub struct SolidRegionState {
     /// `∫ h (T_h − T_ref) dA` over the region, W (positive = leaving the
     /// solid).
     pub heat_rate_w: f64,
+    /// Area-weighted mean `T_ref` the solid actually solved against, K.
+    ///
+    /// `None` makes no claim and skips the wiring cross-check. A supplied
+    /// value must agree with the reference this driver sent for the region,
+    /// or the exchange refuses with
+    /// [`AirflowError::ReferenceTemperatureMismatch`]: the watt gate alone
+    /// cannot see a reference-wiring error smaller than `hA` times its
+    /// tolerance, while this check is denominated directly in kelvin.
+    /// [`fs_conduction::RobinFlux`] returns the value for free, so
+    /// [`SolidRegionState::from_robin_flux`] always claims it.
+    pub mean_reference_temperature_k: Option<f64>,
 }
 
 impl SolidRegionState {
@@ -419,24 +430,35 @@ impl SolidRegionState {
             area_m2: flux.area_m2,
             mean_wall_temperature_k: flux.mean_wall_temperature_k,
             heat_rate_w: flux.heat_rate_w,
+            mean_reference_temperature_k: Some(flux.mean_reference_temperature_k),
         }
     }
 }
+
+/// The largest fixed relaxation factor this driver admits.
+///
+/// `ω = 0` never moves the reference and stalls by construction — a config
+/// fault the non-convergence refusal would otherwise misattribute — and
+/// nothing above classical over-relaxation has convergence theory for this
+/// staggered seam, so both refuse at admission instead of burning
+/// `max_iterations` of solid solves first.
+const MAX_FIXED_OMEGA: f64 = 2.0;
 
 /// How the outer fixed point is relaxed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Relaxation {
     /// A constant `ω`. `ω = 1` is plain Gauss-Seidel staggering.
     Fixed {
-        /// The relaxation factor.
+        /// The relaxation factor, admitted in `(0, 2]`.
         omega: f64,
     },
     /// Scalar Aitken Δ² dynamic relaxation from [`fs_couple::AitkenRelaxation`],
     /// driven by the area-weighted mean reference-temperature residual.
     Aitken {
-        /// Starting `ω`.
+        /// Starting `ω`, admitted in `(0, omega_max]`.
         omega_init: f64,
-        /// Magnitude cap on `ω`.
+        /// Magnitude cap on `ω`. The secant update may drive `ω` negative;
+        /// the cap bounds its magnitude and is the caller's own risk budget.
         omega_max: f64,
     },
 }
@@ -455,16 +477,35 @@ pub struct ConjugateConfig {
     pub temperature_tolerance_k: f64,
     /// Outer iterations allowed before a typed non-convergence refusal.
     pub max_iterations: usize,
-    /// The largest per-region interface imbalance admitted at convergence, W.
+    /// The absolute floor of the per-region interface-imbalance gate, W.
     ///
     /// The temperature criterion alone CANNOT bound this: a small reference
     /// change in kelvin only bounds a heat rate once multiplied by a
     /// conductance, so a converged temperature is not evidence of a closed
-    /// interface. A run that meets the temperature criterion but not this one
-    /// refuses with [`AirflowError::ConjugateBalanceUnclosed`] rather than
-    /// returning an answer whose two sides disagree about the heat crossing
-    /// the same surface.
+    /// interface. A run that meets the temperature criterion but not the
+    /// balance gate refuses with [`AirflowError::ConjugateBalanceUnclosed`]
+    /// rather than returning an answer whose two sides disagree about the
+    /// heat crossing the same surface.
+    ///
+    /// This is a FLOOR, not the whole gate: the admitted imbalance is
+    /// `max(balance_tolerance_w, balance_relative_tolerance * scale)` with
+    /// `scale = max_j max(|Q_solid,j|, |Q_air,j|)`. The floor exists so an
+    /// all-but-zero-power interface (scale ≈ 0) still admits floating-point
+    /// dust instead of demanding exact zeros.
     pub balance_tolerance_w: f64,
+    /// The relative half of the imbalance gate, dimensionless in `[0, 1)`.
+    ///
+    /// An absolute watt threshold alone is scale-dependent in both failure
+    /// directions: at milliwatt scale a dropped-face wiring fault produces an
+    /// imbalance far below any fixed constant chosen for watt-scale runs and
+    /// PASSES, while at kilowatt scale legitimate floating-point residue can
+    /// exceed the same constant and spuriously refuses. Scaling the gate by
+    /// the interface's own heat-rate magnitude makes its sensitivity
+    /// scale-free: wiring faults sit at `O(scale)` and floating-point residue
+    /// at `O(1e-12 · scale)`, so a per-million threshold separates them at
+    /// every wattage. `0.0` disables the relative term and gates on the
+    /// absolute floor alone.
+    pub balance_relative_tolerance: f64,
     /// Relaxation scheme.
     pub relaxation: Relaxation,
 }
@@ -474,7 +515,8 @@ impl Default for ConjugateConfig {
         ConjugateConfig {
             temperature_tolerance_k: 1.0e-9,
             max_iterations: 100,
-            balance_tolerance_w: 1.0e-6,
+            balance_tolerance_w: 1.0e-12,
+            balance_relative_tolerance: 1.0e-6,
             relaxation: Relaxation::default(),
         }
     }
@@ -596,10 +638,14 @@ impl ConjugateSolution {
 /// [`AirflowError::SolidResponseArity`] or
 /// [`AirflowError::SegmentRegionMismatch`] when the callback's response does
 /// not line up with the declared path;
+/// [`AirflowError::ReferenceTemperatureMismatch`] when the callback claims a
+/// solved-against reference that is not the one this driver sent;
 /// [`AirflowError::InvalidConjugateInput`] for a malformed stop rule or
-/// relaxation;
+/// relaxation (an inert `ω ≤ 0` or `ω` beyond over-relaxation refuses here,
+/// not as a non-convergence);
 /// [`AirflowError::NonFiniteCoupling`] if the exchange produces a non-finite
-/// quantity; plus whatever the callback itself returns.
+/// quantity, including a reference vector the relaxation itself overflowed;
+/// plus whatever the callback itself returns.
 pub fn solve_conjugate<F>(
     cx: &Cx<'_>,
     path: &AirPath,
@@ -648,6 +694,14 @@ where
         config.temperature_tolerance_k,
     )?;
     finite_positive("conjugate balance tolerance", config.balance_tolerance_w)?;
+    // NaN fails the range test, so this refusal is also the finiteness gate.
+    // 1.0 would admit a fully open interface: refuse it as a config fault.
+    if !(0.0..1.0).contains(&config.balance_relative_tolerance) {
+        return Err(AirflowError::InvalidConjugateInput {
+            field: "conjugate relative balance tolerance",
+            value_bits: config.balance_relative_tolerance.to_bits(),
+        });
+    }
     if initial_references_k.len() != path.segments().len() {
         return Err(AirflowError::SolidResponseArity {
             expected: path.segments().len(),
@@ -677,7 +731,7 @@ where
         })?;
 
         let response = solid(cx, &reference)?;
-        check_response_matches_path(path, &response)?;
+        check_response_matches_path(path, &reference, &response)?;
 
         let walls: Vec<f64> = response
             .iter()
@@ -731,12 +785,24 @@ where
                     iteration + 1,
                     audit.max_generation(),
                 ),
-                config.balance_tolerance_w,
+                config,
             );
         }
 
         for (slot, &next) in reference.iter_mut().zip(&updated) {
             *slot += omega * (next - *slot);
+        }
+        // Attribute an overflow to the stage that produced it. Without this,
+        // the poisoned reference is first refused deep inside the caller's
+        // solid callback (or by the response gate), blaming the solid for a
+        // relaxation-configuration fault.
+        for &slot in &reference {
+            if !slot.is_finite() {
+                return Err(AirflowError::NonFiniteCoupling {
+                    stage: "relaxed reference temperature",
+                    value_bits: slot.to_bits(),
+                });
+            }
         }
     }
 
@@ -941,18 +1007,35 @@ fn fixed_point_residual(
 /// The temperature criterion does not bound watts, so a converged exchange
 /// must still close its interface before it is an answer.
 ///
+/// The admitted imbalance is the HYBRID threshold
+/// `max(balance_tolerance_w, balance_relative_tolerance * scale)` with
+/// `scale = max_j max(|Q_solid,j|, |Q_air,j|)` taken from the same response
+/// being judged, so the gate's sensitivity does not depend on whether the
+/// interface moves microwatts or kilowatts. The refusal reports the
+/// EFFECTIVE threshold, not the configured floor.
+///
 /// NaN-safe by construction: `max_region_imbalance_w` poisons to NaN if any
 /// region did, and `NaN.partial_cmp(_)` is `None`, so an unorderable
-/// imbalance takes the refusal branch.
+/// imbalance takes the refusal branch regardless of what the scale fold
+/// produced.
 fn admit_converged(
     solution: ConjugateSolution,
-    balance_tolerance_w: f64,
+    config: &ConjugateConfig,
 ) -> Result<ConjugateSolution, AirflowError> {
+    let scale = solution
+        .balance
+        .regions
+        .iter()
+        .map(|row| row.solid_heat_rate_w.abs().max(row.air_heat_rate_w.abs()))
+        .fold(0.0_f64, f64::max);
+    let threshold = config
+        .balance_tolerance_w
+        .max(config.balance_relative_tolerance * scale);
     if matches!(
         solution
             .balance
             .max_region_imbalance_w
-            .partial_cmp(&balance_tolerance_w),
+            .partial_cmp(&threshold),
         Some(Ordering::Less | Ordering::Equal)
     ) {
         return Ok(solution);
@@ -960,7 +1043,7 @@ fn admit_converged(
     Err(AirflowError::ConjugateBalanceUnclosed {
         iterations: solution.iterations,
         max_region_imbalance_bits: solution.balance.max_region_imbalance_w.to_bits(),
-        tolerance_bits: balance_tolerance_w.to_bits(),
+        tolerance_bits: threshold.to_bits(),
     })
 }
 
@@ -969,6 +1052,7 @@ fn admit_converged(
 /// another surface's air, which no downstream number would reveal.
 fn check_response_matches_path(
     path: &AirPath,
+    sent_references_k: &[f64],
     response: &[SolidRegionState],
 ) -> Result<(), AirflowError> {
     if response.len() != path.segments().len() {
@@ -1007,15 +1091,44 @@ fn check_response_matches_path(
                 reported_bits: state.area_m2.to_bits(),
             });
         }
+        // When the solid claims which reference it solved against, hold it to
+        // the reference this driver actually sent. The watt gate cannot see a
+        // reference-wiring error smaller than hA times its tolerance; this
+        // check is denominated directly in kelvin. The driver sends one
+        // uniform reference per region, so the area-weighted mean must equal
+        // it up to accumulation rounding. `None` makes no claim.
+        if let Some(reported) = state.mean_reference_temperature_k {
+            finite("solid reference temperature", reported)?;
+            let sent = sent_references_k[index];
+            if (reported - sent).abs() > 1.0e-9 * sent.abs().max(1.0) {
+                return Err(AirflowError::ReferenceTemperatureMismatch {
+                    index,
+                    region: state.region.clone(),
+                    sent_bits: sent.to_bits(),
+                    reported_bits: reported.to_bits(),
+                });
+            }
+        }
     }
     Ok(())
 }
 
 /// Validate a relaxation scheme and build its relaxer, if it has one.
+///
+/// Inert (`ω ≤ 0`) and beyond-over-relaxation factors refuse HERE, with a
+/// config-attributed diagnostic, because admitting them produces a guaranteed
+/// or near-guaranteed stall that [`AirflowError::ConjugateNotConverged`]
+/// would then blame on convergence rather than on the configuration.
 fn admit_relaxation(relaxation: Relaxation) -> Result<Option<AitkenRelaxation>, AirflowError> {
     match relaxation {
         Relaxation::Fixed { omega } => {
             finite("conjugate relaxation omega", omega)?;
+            if !(omega > 0.0 && omega <= MAX_FIXED_OMEGA) {
+                return Err(AirflowError::InvalidConjugateInput {
+                    field: "conjugate relaxation omega",
+                    value_bits: omega.to_bits(),
+                });
+            }
             Ok(None)
         }
         Relaxation::Aitken {
@@ -1024,6 +1137,12 @@ fn admit_relaxation(relaxation: Relaxation) -> Result<Option<AitkenRelaxation>, 
         } => {
             finite("conjugate relaxation omega", omega_init)?;
             finite_positive("conjugate relaxation omega cap", omega_max)?;
+            if !(omega_init > 0.0 && omega_init <= omega_max) {
+                return Err(AirflowError::InvalidConjugateInput {
+                    field: "conjugate relaxation omega",
+                    value_bits: omega_init.to_bits(),
+                });
+            }
             Ok(Some(AitkenRelaxation::new(omega_init, omega_max)))
         }
     }

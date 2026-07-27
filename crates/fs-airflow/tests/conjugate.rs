@@ -331,6 +331,9 @@ fn lumped_solid(
             area_m2: *area,
             mean_wall_temperature_k: solid_temperature,
             heat_rate_w: area * htc * (solid_temperature - t_ref),
+            // Claim the reference actually used, so every lumped test also
+            // exercises the reference-wiring cross-check live.
+            mean_reference_temperature_k: Some(*t_ref),
         })
         .collect()
 }
@@ -356,6 +359,7 @@ fn the_coupled_fixed_point_reproduces_its_closed_form_solution() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
 
     let solution = with_cx(|cx| {
@@ -405,6 +409,7 @@ fn the_history_is_a_complete_monotone_replay_record() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let solution = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
@@ -460,6 +465,7 @@ fn aitken_relaxation_reaches_the_same_fixed_point() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let aitken = ConjugateConfig {
         relaxation: Relaxation::Aitken {
@@ -497,6 +503,7 @@ fn exhausting_the_iteration_budget_refuses_with_a_diagnosis() {
         max_iterations: 2,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let error = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
@@ -529,6 +536,7 @@ fn cancellation_stops_at_an_outer_iteration_boundary() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let gate = CancelGate::new();
     let mut calls = 0_usize;
@@ -567,6 +575,7 @@ fn the_per_region_balance_closes_at_the_fixed_point() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let solution = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
@@ -600,6 +609,7 @@ fn the_per_region_balance_is_sensitive_to_a_wiring_fault() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let error = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
@@ -631,6 +641,196 @@ fn the_per_region_balance_is_sensitive_to_a_wiring_fault() {
         }
         other => panic!("expected a balance refusal, got {other:?}"),
     }
+}
+
+#[test]
+fn the_watt_gate_scales_with_the_interface_not_an_absolute_constant() {
+    // The SAME dropped-face fault as above, at microwatt scale. Under an
+    // absolute-only 1e-6 W gate this mis-wired run RETURNED Ok: the fault's
+    // whole signal sits below a constant chosen for watt-scale runs, and a
+    // mW-vs-W unit mistake shrinks signal and gate sensitivity together.
+    // Keying the gate to the interface's own heat-rate magnitude makes the
+    // O(scale) fault refuse at every wattage.
+    let power_w = 2.0e-6;
+    let (path, regions) = lumped_fixture(4);
+    let config = ConjugateConfig {
+        temperature_tolerance_k: 1.0e-12,
+        max_iterations: 200,
+        relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
+    };
+    let error = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            let mut states = lumped_solid(&regions, power_w, references);
+            states[2].heat_rate_w *= 0.5;
+            Ok(states)
+        })
+        .expect_err("the microwatt dropped-face fault must refuse too")
+    });
+    match error {
+        AirflowError::ConjugateBalanceUnclosed {
+            max_region_imbalance_bits,
+            tolerance_bits,
+            ..
+        } => {
+            let imbalance = f64::from_bits(max_region_imbalance_bits);
+            assert!(
+                imbalance < 1.0e-6,
+                "the whole point: this signal hides under a watt-scale absolute \
+                 gate, saw {imbalance} W"
+            );
+            assert!(imbalance > 0.0, "a zero imbalance proves nothing");
+            assert!(imbalance > f64::from_bits(tolerance_bits));
+        }
+        other => panic!("expected a balance refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_relative_term_admits_legitimate_floating_point_residue_at_scale() {
+    // Force admission to come from the relative term ALONE: an absolute floor
+    // of 1e-300 W admits no real residue by itself, while a legitimate 45 W
+    // fixed point closes its interface only to floating-point residue — above
+    // any such floor, far below one part per million of scale. If the
+    // relative term were dead, this run would refuse.
+    let power_w = 45.0;
+    let (path, regions) = lumped_fixture(4);
+    let config = ConjugateConfig {
+        temperature_tolerance_k: 1.0e-12,
+        max_iterations: 200,
+        balance_tolerance_w: 1.0e-300,
+        relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
+    };
+    let solution = with_cx(|cx| {
+        solve_conjugate(cx, &path, &config, |_, references| {
+            Ok(lumped_solid(&regions, power_w, references))
+        })
+        .expect("the relative term admits scale-proportional residue")
+    });
+    assert!(
+        solution.balance.max_region_imbalance_w > 1.0e-300,
+        "residue {} W should exceed the absolute floor, or this test proves \
+         nothing about the relative term",
+        solution.balance.max_region_imbalance_w
+    );
+}
+
+#[test]
+fn inert_and_oversized_relaxation_factors_refuse_at_admission() {
+    // ω = 0 never moves the reference: admitting it burns max_iterations of
+    // solid solves and then blames convergence for a configuration fault.
+    let (path, regions) = lumped_fixture(2);
+    for relaxation in [
+        Relaxation::Fixed { omega: 0.0 },
+        Relaxation::Fixed { omega: -0.5 },
+        Relaxation::Fixed { omega: 2.5 },
+        Relaxation::Aitken {
+            omega_init: 0.0,
+            omega_max: 2.0,
+        },
+        Relaxation::Aitken {
+            omega_init: 3.0,
+            omega_max: 2.0,
+        },
+    ] {
+        let config = ConjugateConfig {
+            relaxation,
+            ..ConjugateConfig::default()
+        };
+        let error = with_cx(|cx| {
+            solve_conjugate(cx, &path, &config, |_, references| {
+                Ok(lumped_solid(&regions, 10.0, references))
+            })
+            .expect_err("a stalling relaxation must refuse at admission")
+        });
+        assert!(
+            matches!(
+                error,
+                AirflowError::InvalidConjugateInput {
+                    field: "conjugate relaxation omega",
+                    ..
+                }
+            ),
+            "{relaxation:?} must refuse as a config fault, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_relaxation_overflow_is_attributed_to_the_relaxation_not_the_solid() {
+    // An admissible-but-reckless Aitken magnitude cap combined with a far-off
+    // resumed reference overflows the relaxed vector. The refusal must name
+    // the relaxation stage: the solid answered honestly, and blaming it sends
+    // the caller debugging the wrong component.
+    let (path, regions) = lumped_fixture(2);
+    let config = ConjugateConfig {
+        relaxation: Relaxation::Aitken {
+            omega_init: 1.0e300,
+            omega_max: 1.0e300,
+        },
+        ..ConjugateConfig::default()
+    };
+    let initial = vec![1.0e30; 2];
+    let error = with_cx(|cx| {
+        solve_conjugate_from(cx, &path, &config, &initial, |_, references| {
+            Ok(lumped_solid(&regions, 10.0, references))
+        })
+        .expect_err("an overflowed relaxation must refuse")
+    });
+    assert!(
+        matches!(
+            error,
+            AirflowError::NonFiniteCoupling {
+                stage: "relaxed reference temperature",
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn a_mis_reported_reference_temperature_refuses() {
+    // The watt gate cannot see a reference-wiring error smaller than hA times
+    // its tolerance; the kelvin-denominated cross-check catches it directly.
+    let (path, regions) = lumped_fixture(3);
+    let error = with_cx(|cx| {
+        solve_conjugate(cx, &path, &ConjugateConfig::default(), |_, references| {
+            let mut states = lumped_solid(&regions, 30.0, references);
+            states[1].mean_reference_temperature_k = Some(references[1] + 5.0);
+            Ok(states)
+        })
+        .expect_err("a solid that solved a different reference must refuse")
+    });
+    match error {
+        AirflowError::ReferenceTemperatureMismatch {
+            index,
+            region,
+            sent_bits,
+            reported_bits,
+        } => {
+            assert_eq!(index, 1);
+            assert_eq!(region, path.segments()[1].region());
+            let drift = f64::from_bits(reported_bits) - f64::from_bits(sent_bits);
+            assert!((drift - 5.0).abs() < 1.0e-9, "drift {drift}");
+        }
+        other => panic!("expected a reference mismatch, got {other:?}"),
+    }
+
+    // A response that makes no claim is admitted: `None` is a documented
+    // no-claim boundary, not a wiring proof.
+    let solution = with_cx(|cx| {
+        solve_conjugate(cx, &path, &ConjugateConfig::default(), |_, references| {
+            let mut states = lumped_solid(&regions, 30.0, references);
+            for state in &mut states {
+                state.mean_reference_temperature_k = None;
+            }
+            Ok(states)
+        })
+        .expect("a no-claim response is admitted")
+    });
+    assert_eq!(solution.balance.regions.len(), 3);
 }
 
 #[test]
@@ -692,6 +892,7 @@ fn resuming_from_an_actual_cancellation_completes_the_exchange() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let uninterrupted = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {
@@ -1079,6 +1280,7 @@ fn resuming_from_a_checkpoint_reproduces_the_uninterrupted_tail_bitwise() {
         max_iterations: 200,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     };
     let full = with_cx(|cx| {
         solve_conjugate(cx, &path, &config, |_, references| {

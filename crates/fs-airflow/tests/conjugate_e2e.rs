@@ -338,6 +338,7 @@ fn config() -> ConjugateConfig {
         max_iterations: 60,
         balance_tolerance_w: 1.0e-6,
         relaxation: Relaxation::Fixed { omega: 1.0 },
+        ..ConjugateConfig::default()
     }
 }
 

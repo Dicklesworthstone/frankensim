@@ -299,12 +299,47 @@ None.
   separately inspectable.
 - The convergence criterion is TWO gates, not one. A reference-temperature
   residual in kelvin cannot bound an interface heat rate in watts without a
-  conductance, so `ConjugateConfig::balance_tolerance_w` is a separate declared
+  conductance, so the interface-imbalance gate is a separate declared
   obligation and a run that meets the temperature criterion while its worst
   per-region imbalance exceeds it refuses with
   `AirflowError::ConjugateBalanceUnclosed`. The dropped-face fixture proves the
   gap is real: it reaches its temperature fixed point and is caught only by the
   watt gate.
+- The watt gate is HYBRID, not a constant. The admitted imbalance is
+  `max(balance_tolerance_w, balance_relative_tolerance * scale)` with
+  `scale = max_j max(|Q_solid,j|, |Q_air,j|)` from the response being judged,
+  and the refusal reports that effective threshold. An absolute constant alone
+  is scale-dependent in both directions — a microwatt-scale wiring fault hides
+  under a watt-scale constant (measured: the dropped-face fault at 2e-6 W
+  produces ~2.5e-7 W of signal), and kilowatt-scale floating-point residue can
+  spuriously refuse — and a mW-vs-W unit mistake shrinks signal and gate
+  together, which is exactly when the gate is needed most.
+  `balance_relative_tolerance` admits `[0, 1)`; `0` restores a purely absolute
+  gate. The gate still cannot certify anything smaller than the floor on an
+  interface whose true scale is zero.
+- Relaxation factors are ADMITTED, not merely finite. `Fixed` requires
+  `0 < ω ≤ 2` and `Aitken` requires `0 < ω_init ≤ ω_max`; an inert `ω = 0`
+  or beyond-over-relaxation factor refuses at admission as
+  `InvalidConjugateInput` instead of stalling for `max_iterations` solid
+  solves and blaming convergence. A reference vector the relaxation itself
+  overflows refuses as `NonFiniteCoupling` at the "relaxed reference
+  temperature" stage, attributed to the relaxation rather than to the next
+  solid solve. `ω_max` is otherwise uncapped and is the caller's own risk
+  budget.
+- `SolidRegionState::mean_reference_temperature_k` is an OPTIONAL wiring
+  claim. `Some` is held to the reference vector the driver sent (within
+  1e-9 relative, kelvin-denominated) and refuses as
+  `ReferenceTemperatureMismatch`; `None` makes no claim and skips the check —
+  it is a no-claim boundary, not a wiring proof. `from_robin_flux` always
+  claims, because `fs_conduction::RobinFlux` carries the value for free. The
+  watt gate cannot see a reference-wiring error smaller than `hA` times its
+  tolerance; this check is denominated directly in kelvin.
+- `SegmentRefinementTransfer::{restrict, prolongate}` POISON a state whose
+  arity disagrees with the bound path: the infallible `fs_ladder::Transfer`
+  contract cannot refuse, so the mismatch returns all-NaN at the correct
+  output arity rather than silently truncating the downstream-most entries or
+  restricting a partial block with full-block weights. Downstream response
+  gates refuse non-finite walls.
 - "Exact" in this crate's conjugate documentation means exact in REAL
   arithmetic. Measured floating-point bands on the current fixtures: segment
   refinement holds the outlet to 1e-10 K and the heat rate to 1e-8 W up to

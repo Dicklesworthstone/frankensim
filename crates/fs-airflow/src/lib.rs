@@ -1409,6 +1409,19 @@ pub enum AirflowError {
         /// Raw IEEE-754 bits of the area the solid side reported, m^2.
         reported_bits: u64,
     },
+    /// The solid's reported mean reference temperature disagrees with the
+    /// reference the conjugate driver sent — the two sides solved different
+    /// problems, whatever their heat rates say.
+    ReferenceTemperatureMismatch {
+        /// Zero-based position in the declared path.
+        index: usize,
+        /// The region carrying the mismatch.
+        region: String,
+        /// Raw IEEE-754 bits of the reference the driver sent, K.
+        sent_bits: u64,
+        /// Raw IEEE-754 bits of the reference the solid reported, K.
+        reported_bits: u64,
+    },
 }
 
 impl fmt::Display for AirflowError {
@@ -1573,10 +1586,13 @@ impl fmt::Display for AirflowError {
                 formatter,
                 "conjugate exchange met its temperature criterion in {iterations} \
                  iteration(s) but its worst per-region interface imbalance {} W \
-                 exceeds the declared {} W; a converged temperature does not bound \
-                 a heat rate, so this is refused rather than returned; fix: check \
-                 that every declared region's area and heat rate come from the same \
-                 solve, or widen balance_tolerance_w deliberately",
+                 exceeds the effective threshold {} W (the larger of the absolute \
+                 floor and the relative tolerance times the interface's own \
+                 heat-rate scale); a converged temperature does not bound a heat \
+                 rate, so this is refused rather than returned; fix: check that \
+                 every declared region's area and heat rate come from the same \
+                 solve, or widen balance_tolerance_w or balance_relative_tolerance \
+                 deliberately",
                 f64::from_bits(*max_region_imbalance_bits),
                 f64::from_bits(*tolerance_bits)
             ),
@@ -1591,6 +1607,19 @@ impl fmt::Display for AirflowError {
                  solid side integrated over {} m^2; fix: the two sides must exchange \
                  heat across the same surface",
                 f64::from_bits(*declared_bits),
+                f64::from_bits(*reported_bits)
+            ),
+            Self::ReferenceTemperatureMismatch {
+                index,
+                region,
+                sent_bits,
+                reported_bits,
+            } => write!(
+                formatter,
+                "air-path position {index} ('{region}') was sent reference {} K but the \
+                 solid reports solving against {} K; fix: the solid must apply exactly \
+                 the reference vector the conjugate driver supplied",
+                f64::from_bits(*sent_bits),
                 f64::from_bits(*reported_bits)
             ),
         }
