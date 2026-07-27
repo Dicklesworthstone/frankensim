@@ -228,7 +228,7 @@ impl
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Axes {
     subject: SpectralSubjectId,
     scalar: SpectralScalarFieldV1,
@@ -251,7 +251,7 @@ fn axes(
         scalar,
         class,
         scaling: scaling(dims, 1.0, seed.wrapping_add(20)),
-        domain: metric,
+        domain: metric.clone(),
         codomain: metric,
     }
 }
@@ -300,12 +300,12 @@ fn default_spec(
     scope: CompletenessScopeV1,
 ) -> SpectralProblemSpecV1 {
     problem_spec(
-        axes,
+        axes.clone(),
         structures,
         regularity,
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Unknown,
             ZeroPaddingConventionV1::Unknown,
         ),
@@ -328,8 +328,8 @@ fn structure_claim_with_seed(
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         property,
         support,
         disposition,
@@ -356,7 +356,7 @@ fn structure_claim(
     seed: u8,
 ) -> StructureClaimV1 {
     structure_claim_with_seed(
-        axes,
+        axes.clone(),
         property,
         support,
         disposition,
@@ -377,8 +377,8 @@ fn regularity_claim(
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         class,
         disposition,
     )
@@ -479,8 +479,8 @@ fn legacy_and_unknown_schema_versions_fail_closed_before_identity_admission() {
             StructureProfileV1::new(Vec::new()),
             axes.scaling,
             SpectralSpaceContextV1::new(
-                axes.domain,
-                axes.codomain,
+                axes.domain.clone(),
+                axes.codomain.clone(),
                 GaugeConventionV1::Unknown,
                 ZeroPaddingConventionV1::Unknown,
             ),
@@ -507,8 +507,8 @@ fn authority_typestate_checks_subject_preimage_anchor_verifier_and_policy() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -585,8 +585,8 @@ fn configured_root_refuses_permit_all_bindings_outside_its_configuration() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -687,8 +687,8 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -702,8 +702,8 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::RegularPencil,
         WitnessDispositionV1::Witnessed,
     )
@@ -764,7 +764,7 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
 fn proposition_relabeling_and_problem_replay_fail_closed() {
     let axes = standard_axes(2, 4);
     let self_adjoint = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -777,10 +777,10 @@ fn proposition_relabeling_and_problem_replay_fail_closed() {
         self_adjoint.disposition(),
         self_adjoint.tolerance(),
         self_adjoint.norm(),
-        *self_adjoint.witness(),
+        self_adjoint.witness().clone(),
     );
     let report = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![relabeled],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -794,11 +794,11 @@ fn proposition_relabeling_and_problem_replay_fail_closed() {
 
     let changed_subject = Axes {
         subject: subject(99),
-        ..axes
+        ..axes.clone()
     };
     let report = validate_problem(default_spec(
         changed_subject,
-        vec![self_adjoint],
+        vec![self_adjoint.clone()],
         Vec::new(),
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -821,9 +821,9 @@ fn proposition_relabeling_and_problem_replay_fail_closed() {
     let report = validate_problem(default_spec(
         Axes {
             scaling: rebound_scaling,
-            ..axes
+            ..axes.clone()
         },
-        vec![self_adjoint],
+        vec![self_adjoint.clone()],
         Vec::new(),
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -843,13 +843,13 @@ fn proposition_relabeling_and_problem_replay_fail_closed() {
 fn specialized_methods_require_exact_structure_and_typed_support() {
     let axes = standard_axes(3, 4);
     let finite = regularity_claim(
-        axes,
+        axes.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
         3,
     );
     let approximate = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -857,9 +857,9 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
         4,
     );
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![approximate],
-        vec![finite],
+        vec![finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -875,7 +875,7 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
     );
 
     let exact = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -883,9 +883,9 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
         5,
     );
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![exact],
-        vec![finite],
+        vec![finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -893,7 +893,7 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
     assert!(assess_method_class(&problem, SpectralMethodClassV1::SelfAdjointLanczos).is_ok());
 
     let contradicted = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Contradicted,
@@ -901,9 +901,9 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
         6,
     );
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![contradicted],
-        vec![finite],
+        vec![finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -919,7 +919,7 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
     )));
 
     let hamiltonian = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Hamiltonian,
         StructureSupportV1::SymplecticForm(form_id(7)),
         WitnessDispositionV1::Witnessed,
@@ -927,7 +927,7 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
         7,
     );
     let contradicted_other_form = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Hamiltonian,
         StructureSupportV1::SymplecticForm(form_id(8)),
         WitnessDispositionV1::Contradicted,
@@ -935,9 +935,9 @@ fn specialized_methods_require_exact_structure_and_typed_support() {
         8,
     );
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![hamiltonian, contradicted_other_form],
-        vec![finite],
+        vec![finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -968,7 +968,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         4,
     );
     let hdp = structure_claim(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(generalized.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -976,8 +976,8 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         70,
     );
     let problem = validate_problem(default_spec(
-        generalized,
-        vec![hdp],
+        generalized.clone(),
+        vec![hdp.clone()],
         Vec::new(),
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -993,13 +993,13 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
 
     let symplectic_axes = standard_axes(72, 4);
     let symplectic_finite = regularity_claim(
-        symplectic_axes,
+        symplectic_axes.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
         72,
     );
     let symplectic = structure_claim(
-        symplectic_axes,
+        symplectic_axes.clone(),
         StructurePropertyV1::Symplectic,
         StructureSupportV1::SymplecticForm(form_id(72)),
         WitnessDispositionV1::Witnessed,
@@ -1007,9 +1007,9 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         73,
     );
     let problem = validate_problem(default_spec(
-        symplectic_axes,
+        symplectic_axes.clone(),
         vec![symplectic],
-        vec![symplectic_finite],
+        vec![symplectic_finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1022,7 +1022,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         .is_ok()
     );
     let j_self_adjoint = structure_claim(
-        symplectic_axes,
+        symplectic_axes.clone(),
         StructurePropertyV1::JSelfAdjoint,
         StructureSupportV1::KreinForm(form_id(73)),
         WitnessDispositionV1::Witnessed,
@@ -1030,9 +1030,9 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         74,
     );
     let positive_problem = validate_problem(default_spec(
-        symplectic_axes,
+        symplectic_axes.clone(),
         vec![j_self_adjoint],
-        vec![symplectic_finite],
+        vec![symplectic_finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1069,18 +1069,18 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         },
     );
     let indefinite_axes = Axes {
-        domain: indefinite_metric,
-        codomain: indefinite_metric,
-        ..symplectic_axes
+        domain: indefinite_metric.clone(),
+        codomain: indefinite_metric.clone(),
+        ..symplectic_axes.clone()
     };
     let indefinite_finite = regularity_claim(
-        indefinite_axes,
+        indefinite_axes.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
         76,
     );
     let j_self_adjoint = structure_claim(
-        indefinite_axes,
+        indefinite_axes.clone(),
         StructurePropertyV1::JSelfAdjoint,
         StructureSupportV1::KreinForm(form_id(74)),
         WitnessDispositionV1::Witnessed,
@@ -1088,7 +1088,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         77,
     );
     let metric_self_adjoint = structure_claim(
-        indefinite_axes,
+        indefinite_axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(indefinite_metric.id()),
         WitnessDispositionV1::Witnessed,
@@ -1096,7 +1096,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         78,
     );
     let problem = validate_problem(default_spec(
-        indefinite_axes,
+        indefinite_axes.clone(),
         vec![j_self_adjoint, metric_self_adjoint],
         vec![indefinite_finite],
         SpectralOrderingV1::SetValued,
@@ -1114,7 +1114,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     )));
 
     let nonnormal = structure_claim(
-        symplectic_axes,
+        symplectic_axes.clone(),
         StructurePropertyV1::Nonnormal,
         StructureSupportV1::InnerProduct(symplectic_axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -1122,9 +1122,9 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         79,
     );
     let problem = validate_problem(default_spec(
-        symplectic_axes,
+        symplectic_axes.clone(),
         vec![nonnormal],
-        vec![symplectic_finite],
+        vec![symplectic_finite.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1136,7 +1136,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
 fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     let axes = standard_axes(8, 4);
     let bare = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::RealAscending,
@@ -1149,7 +1149,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
 
     let conjugate = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::RealConjugatePairs,
         StructureSupportV1::Conjugation(form_id(8)),
         WitnessDispositionV1::Witnessed,
@@ -1158,7 +1158,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
     assert!(
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             vec![conjugate],
             Vec::new(),
             SpectralOrderingV1::RealAscending,
@@ -1168,7 +1168,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
 
     let approximate = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -1177,7 +1177,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
     assert!(
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             vec![approximate],
             Vec::new(),
             SpectralOrderingV1::RealAscending,
@@ -1187,7 +1187,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
 
     let exact = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -1196,7 +1196,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
     assert!(
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             vec![exact],
             Vec::new(),
             SpectralOrderingV1::RealAscending,
@@ -1206,7 +1206,7 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
     );
 
     let self_adjoint = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -1214,8 +1214,8 @@ fn real_scalar_and_conjugate_pairs_do_not_forge_real_spectrum_ordering() {
         11,
     );
     let theorem_closed = validate_problem(default_spec(
-        axes,
-        vec![self_adjoint],
+        axes.clone(),
+        vec![self_adjoint.clone()],
         Vec::new(),
         SpectralOrderingV1::RealAscending,
         CompletenessScopeV1::CandidateOnly,
@@ -1241,17 +1241,17 @@ fn descriptor_polynomial_and_floquet_obligations_cross_route_exactly() {
         3,
     );
     let descriptor_problem = validate_problem(default_spec(
-        descriptor_axes,
+        descriptor_axes.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                descriptor_axes,
+                descriptor_axes.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 11,
             ),
             regularity_claim(
-                descriptor_axes,
+                descriptor_axes.clone(),
                 RegularityClassV1::RegularPolynomial { grade: 2 },
                 WitnessDispositionV1::Witnessed,
                 12,
@@ -1291,10 +1291,10 @@ fn descriptor_polynomial_and_floquet_obligations_cross_route_exactly() {
         4,
     );
     let floquet_problem = validate_problem(default_spec(
-        floquet_axes,
+        floquet_axes.clone(),
         Vec::new(),
         vec![regularity_claim(
-            floquet_axes,
+            floquet_axes.clone(),
             RegularityClassV1::WellPosedMonodromy,
             WitnessDispositionV1::Witnessed,
             13,
@@ -1354,10 +1354,10 @@ fn operator_function_no_claim_is_classifiable_but_not_executable() {
     );
     let axes = axes(15, class, SpectralScalarFieldV1::Complex, Dims::NONE, 4);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         vec![regularity_claim(
-            axes,
+            axes.clone(),
             RegularityClassV1::AnalyticOperatorFunction,
             WitnessDispositionV1::Witnessed,
             15,
@@ -1401,7 +1401,7 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
     let conflicting_metric =
         SpectralMetricV1::new(axes.domain.id(), 4, MetricDefinitenessV1::Euclidean);
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
@@ -1425,11 +1425,11 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         MetricDefinitenessV1::Euclidean,
     );
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            fabricated_euclidean,
+            fabricated_euclidean.clone(),
             fabricated_euclidean,
             GaugeConventionV1::Unknown,
             ZeroPaddingConventionV1::Unknown,
@@ -1453,8 +1453,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         GaugePropositionV1::Fixed {
             nullity: 1,
             gauge: fixed_gauge,
@@ -1463,17 +1463,17 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
     .unwrap();
     let gauge_witness = admit_receipt(gauge_receipt, 17);
     let valid_spaces = SpectralSpaceContextV1::new(
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         GaugeConventionV1::Fixed {
             nullity: 1,
             gauge: fixed_gauge,
-            witness: gauge_witness,
+            witness: gauge_witness.clone(),
         },
         ZeroPaddingConventionV1::Unknown,
     );
     let fixed_problem = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         valid_spaces,
@@ -1484,16 +1484,16 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
     assert_eq!(fixed_problem.known_algebraic_cardinality(), Some(4));
 
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Fixed {
                 nullity: 1,
                 gauge: gauge_artifact_id(18),
-                witness: gauge_witness,
+                witness: gauge_witness.clone(),
             },
             ZeroPaddingConventionV1::Unknown,
         ),
@@ -1508,17 +1508,17 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
 
     let quotient_a = quotient_map_id(18);
     let rebound_spaces = SpectralSpaceContextV1::new(
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         GaugeConventionV1::Quotiented {
             nullity: 1,
             quotient: quotient_a,
-            witness: gauge_witness,
+            witness: gauge_witness.clone(),
         },
         ZeroPaddingConventionV1::Unknown,
     );
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         rebound_spaces,
@@ -1537,8 +1537,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugePropositionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_a,
@@ -1548,16 +1548,16 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         18,
     );
     let quotient_problem = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_a,
-                witness: quotient_witness_a,
+                witness: quotient_witness_a.clone(),
             },
             ZeroPaddingConventionV1::Unknown,
         ),
@@ -1572,16 +1572,16 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
 
     let quotient_b = quotient_map_id(19);
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_b,
-                witness: quotient_witness_a,
+                witness: quotient_witness_a.clone(),
             },
             ZeroPaddingConventionV1::Unknown,
         ),
@@ -1603,8 +1603,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugePropositionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_b,
@@ -1614,7 +1614,7 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         19,
     );
     let induced_structure = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -1622,19 +1622,19 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         20,
     );
     let induced_regularity = regularity_claim(
-        axes,
+        axes.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
         20,
     );
     let quotient_with_claims = |quotient, witness| {
         validate_problem(problem_spec(
-            axes,
-            vec![induced_structure],
-            vec![induced_regularity],
+            axes.clone(),
+            vec![induced_structure.clone()],
+            vec![induced_regularity.clone()],
             SpectralSpaceContextV1::new(
-                axes.domain,
-                axes.codomain,
+                axes.domain.clone(),
+                axes.codomain.clone(),
                 GaugeConventionV1::Quotiented {
                     nullity: 1,
                     quotient,
@@ -1648,7 +1648,7 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         .unwrap()
     };
     let induced_a = quotient_with_claims(quotient_a, quotient_witness_a);
-    let induced_b = quotient_with_claims(quotient_b, quotient_witness_b);
+    let induced_b = quotient_with_claims(quotient_b, quotient_witness_b.clone());
     assert_ne!(induced_a.problem_id(), induced_b.problem_id());
 
     let quotient_a_padding = admit_receipt(
@@ -1657,8 +1657,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeContextV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_a,
@@ -1669,16 +1669,16 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         20,
     );
     let report = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_b,
-                witness: quotient_witness_b,
+                witness: quotient_witness_b.clone(),
             },
             ZeroPaddingConventionV1::Omitted {
                 count: 1,
@@ -1695,16 +1695,16 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
     )));
 
     let quotient_problem_b = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: 1,
                 quotient: quotient_b,
-                witness: quotient_witness_b,
+                witness: quotient_witness_b.clone(),
             },
             ZeroPaddingConventionV1::Unknown,
         ),
@@ -1729,8 +1729,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugePropositionV1::Quotiented {
                 nullity: large_nullity,
                 quotient: large_quotient,
@@ -1745,8 +1745,8 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeContextV1::Quotiented {
                 nullity: large_nullity,
                 quotient: large_quotient,
@@ -1759,12 +1759,12 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
         21,
     );
     let large_pre_reduction_nullity = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: large_nullity,
                 quotient: large_quotient,
@@ -1812,7 +1812,7 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
         ..standard
     };
     let self_adjoint = structure_claim(
-        cross_space,
+        cross_space.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(cross_space.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -1820,8 +1820,8 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
         17,
     );
     let report = validate_problem(default_spec(
-        cross_space,
-        vec![self_adjoint],
+        cross_space.clone(),
+        vec![self_adjoint.clone()],
         Vec::new(),
         SpectralOrderingV1::RealAscending,
         CompletenessScopeV1::CandidateOnly,
@@ -1849,7 +1849,7 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
         (StructurePropertyV1::Nonnormal, 20),
     ] {
         let claim = structure_claim(
-            cross_space,
+            cross_space.clone(),
             property,
             StructureSupportV1::InnerProduct(cross_space.domain.id()),
             WitnessDispositionV1::Witnessed,
@@ -1857,7 +1857,7 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
             seed,
         );
         let report = validate_problem(default_spec(
-            cross_space,
+            cross_space.clone(),
             vec![claim],
             Vec::new(),
             SpectralOrderingV1::SetValued,
@@ -1911,7 +1911,7 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
         ..generalized
     };
     let hermitian_definite = structure_claim(
-        cross_pencil,
+        cross_pencil.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(cross_pencil.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -1919,7 +1919,7 @@ fn inner_product_structure_requires_one_shared_admitted_operator_space() {
         22,
     );
     let report = validate_problem(default_spec(
-        cross_pencil,
+        cross_pencil.clone(),
         vec![hermitian_definite],
         Vec::new(),
         SpectralOrderingV1::RealAscending,
@@ -1961,12 +1961,12 @@ fn unresolved_metric_definiteness_cannot_admit_adjoint_structure() {
         MetricDefinitenessV1::Unknown,
     );
     let axes = Axes {
-        domain: unresolved,
-        codomain: unresolved,
+        domain: unresolved.clone(),
+        codomain: unresolved.clone(),
         ..base
     };
     let claim = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         StructureSupportV1::InnerProduct(unresolved.id()),
         WitnessDispositionV1::Witnessed,
@@ -1974,7 +1974,7 @@ fn unresolved_metric_definiteness_cannot_admit_adjoint_structure() {
         20,
     );
     let report = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![claim],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -1998,7 +1998,7 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
     let axes = standard_axes(23, 3);
     let support = StructureSupportV1::InnerProduct(axes.domain.id());
     let normal_refuted = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         support,
         WitnessDispositionV1::Contradicted,
@@ -2006,7 +2006,7 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
         23,
     );
     let nonnormal_refuted = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Nonnormal,
         support,
         WitnessDispositionV1::Contradicted,
@@ -2014,8 +2014,8 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
         24,
     );
     let report = validate_problem(default_spec(
-        axes,
-        vec![normal_refuted, nonnormal_refuted],
+        axes.clone(),
+        vec![normal_refuted.clone(), nonnormal_refuted],
         Vec::new(),
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -2029,7 +2029,7 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
     );
 
     let nonnormal_witnessed = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Nonnormal,
         support,
         WitnessDispositionV1::Witnessed,
@@ -2038,7 +2038,7 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
     );
     assert!(
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             vec![normal_refuted, nonnormal_witnessed],
             Vec::new(),
             SpectralOrderingV1::SetValued,
@@ -2053,7 +2053,7 @@ fn exact_normality_complements_cannot_both_be_contradicted() {
 fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics() {
     let axes = standard_axes(17, 4);
     let unknown = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -2076,8 +2076,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugePropositionV1::None,
         )
         .unwrap(),
@@ -2089,8 +2089,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeContextV1::CertifiedNone,
             ZeroPaddingPropositionV1::NonePresent,
         )
@@ -2098,12 +2098,12 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
         18,
     );
     let explicit = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::CertifiedNone { witness: gauge },
             ZeroPaddingConventionV1::CertifiedNonePresent {
                 witness: zero_padding,
@@ -2131,8 +2131,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugePropositionV1::Fixed {
                 nullity: 1,
                 gauge: fixed_gauge,
@@ -2147,8 +2147,8 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeContextV1::Fixed {
                 nullity: 1,
                 gauge: fixed_gauge,
@@ -2159,12 +2159,12 @@ fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics()
         20,
     );
     let inconsistent = validate_problem(problem_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             GaugeConventionV1::Fixed {
                 nullity: 1,
                 gauge: fixed_gauge,
@@ -2240,7 +2240,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
         .map(|index| {
             let byte = u8::try_from(index).unwrap();
             structure_claim_with_seed(
-                axes,
+                axes.clone(),
                 StructurePropertyV1::SelfAdjoint,
                 StructureSupportV1::InnerProduct(axes.domain.id()),
                 WitnessDispositionV1::Witnessed,
@@ -2251,7 +2251,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
         })
         .collect();
     let at_limit = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         at_limit_claims,
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -2261,7 +2261,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     assert_eq!(at_limit.structure_claims().len(), MAX_STRUCTURE_CLAIMS_V1);
 
     let claim = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -2270,7 +2270,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     );
 
     let over_limit = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![claim; MAX_STRUCTURE_CLAIMS_V1 + 1],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -2306,31 +2306,31 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     );
     let regularity_at_limit = vec![
         regularity_claim(
-            descriptor_axes,
+            descriptor_axes.clone(),
             RegularityClassV1::FiniteDimensional,
             WitnessDispositionV1::Witnessed,
             21,
         ),
         regularity_claim(
-            descriptor_axes,
+            descriptor_axes.clone(),
             RegularityClassV1::RegularPencil,
             WitnessDispositionV1::Witnessed,
             22,
         ),
         regularity_claim(
-            descriptor_axes,
+            descriptor_axes.clone(),
             RegularityClassV1::InvertiblePencilWeight,
             WitnessDispositionV1::Witnessed,
             23,
         ),
         regularity_claim(
-            descriptor_axes,
+            descriptor_axes.clone(),
             RegularityClassV1::RegularDescriptor,
             WitnessDispositionV1::Witnessed,
             24,
         ),
         regularity_claim(
-            descriptor_axes,
+            descriptor_axes.clone(),
             RegularityClassV1::WellPosedMonodromy,
             WitnessDispositionV1::Witnessed,
             25,
@@ -2338,7 +2338,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     ];
     assert_eq!(regularity_at_limit.len(), MAX_REGULARITY_CLAIMS_V1);
     let at_limit = validate_problem(default_spec(
-        descriptor_axes,
+        descriptor_axes.clone(),
         Vec::new(),
         regularity_at_limit,
         SpectralOrderingV1::SetValued,
@@ -2348,13 +2348,13 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     assert_eq!(at_limit.regularity_claims().len(), MAX_REGULARITY_CLAIMS_V1);
 
     let duplicate = regularity_claim(
-        descriptor_axes,
+        descriptor_axes.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
         26,
     );
     let over_limit = validate_problem(default_spec(
-        descriptor_axes,
+        descriptor_axes.clone(),
         Vec::new(),
         vec![duplicate; MAX_REGULARITY_CLAIMS_V1 + 1],
         SpectralOrderingV1::SetValued,
@@ -2382,7 +2382,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     );
     let axes = axes(21, class, SpectralScalarFieldV1::Complex, Dims::NONE, 2);
     let gyroscopic = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Gyroscopic,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -2390,7 +2390,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         21,
     );
     let palindromic = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Palindromic {
             parity: PalindromicParityV1::Palindromic,
             involution: PolynomialInvolutionV1::ConjugateTranspose,
@@ -2401,13 +2401,13 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         22,
     );
     let descriptor = regularity_claim(
-        axes,
+        axes.clone(),
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
         23,
     );
     let polynomial = regularity_claim(
-        axes,
+        axes.clone(),
         RegularityClassV1::RegularPolynomial { grade: 2 },
         WitnessDispositionV1::Witnessed,
         24,
@@ -2417,17 +2417,17 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         infinity_policy: InfiniteEigenvaluePolicyV1::ExcludeWithCount,
     };
     let first = validate_problem(default_spec(
-        axes,
-        vec![gyroscopic, palindromic],
-        vec![descriptor, polynomial],
+        axes.clone(),
+        vec![gyroscopic.clone(), palindromic.clone()],
+        vec![descriptor.clone(), polynomial.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
     .unwrap();
     let permuted = validate_problem(default_spec(
-        axes,
-        vec![palindromic, gyroscopic],
-        vec![polynomial, descriptor],
+        axes.clone(),
+        vec![palindromic.clone(), gyroscopic.clone()],
+        vec![polynomial.clone(), descriptor.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
@@ -2461,9 +2461,9 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     assert_eq!(first.problem_id().to_hex().len(), 64);
 
     let retargeted = validate_problem(default_spec(
-        axes,
-        vec![gyroscopic, palindromic],
-        vec![descriptor, polynomial],
+        axes.clone(),
+        vec![gyroscopic.clone(), palindromic.clone()],
+        vec![descriptor.clone(), polynomial.clone()],
         SpectralOrderingV1::MagnitudeAscending {
             tie_break: ComplexTieBreakV1::RealThenImagThenLineage,
         },
@@ -2474,7 +2474,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     assert_ne!(first.identity_receipt(), retargeted.identity_receipt());
 
     let reanchored_gyroscopic = structure_claim_with_seed(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Gyroscopic,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -2483,9 +2483,9 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         99,
     );
     let reanchored = validate_problem(default_spec(
-        axes,
-        vec![reanchored_gyroscopic, palindromic],
-        vec![descriptor, polynomial],
+        axes.clone(),
+        vec![reanchored_gyroscopic, palindromic.clone()],
+        vec![descriptor.clone(), polynomial.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
@@ -2498,8 +2498,8 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
     )
@@ -2536,9 +2536,9 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         .unwrap(),
     );
     let reobserved = validate_problem(default_spec(
-        axes,
-        vec![gyroscopic, palindromic],
-        vec![reobserved_descriptor, polynomial],
+        axes.clone(),
+        vec![gyroscopic.clone(), palindromic.clone()],
+        vec![reobserved_descriptor, polynomial.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
@@ -2570,9 +2570,9 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         .unwrap(),
     );
     let changed_length_problem = validate_problem(default_spec(
-        axes,
-        vec![gyroscopic, palindromic],
-        vec![changed_length_descriptor, polynomial],
+        axes.clone(),
+        vec![gyroscopic.clone(), palindromic.clone()],
+        vec![changed_length_descriptor, polynomial.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
@@ -2605,9 +2605,9 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         .unwrap(),
     );
     let changed_policy_problem = validate_problem(default_spec(
-        axes,
-        vec![gyroscopic, palindromic],
-        vec![changed_policy_descriptor, polynomial],
+        axes.clone(),
+        vec![gyroscopic.clone(), palindromic.clone()],
+        vec![changed_policy_descriptor, polynomial.clone()],
         SpectralOrderingV1::SetValued,
         scope,
     ))
@@ -2619,7 +2619,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
 fn truth_evidence_is_bound_to_problem_result_set_and_proposition_family() {
     let axes = standard_axes(25, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -2644,7 +2644,7 @@ fn truth_evidence_is_bound_to_problem_result_set_and_proposition_family() {
 
     let changed_axes = Axes {
         subject: subject(26),
-        ..axes
+        ..axes.clone()
     };
     let changed_problem = validate_problem(default_spec(
         changed_axes,
@@ -2678,7 +2678,7 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
     let region = region_id(27);
     let axes = standard_axes(27, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::NamedRegion { region },
@@ -2725,7 +2725,7 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
 
     let other_region = region_id(28);
     let other_problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::NamedRegion {
@@ -2786,7 +2786,7 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
         )
     };
     let unestablished = validate_problem(default_spec(
-        descriptor_axes,
+        descriptor_axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::NamedRegion { region },
@@ -2805,17 +2805,17 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
     );
 
     let established = validate_problem(default_spec(
-        descriptor_axes,
+        descriptor_axes.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                descriptor_axes,
+                descriptor_axes.clone(),
                 RegularityClassV1::RegularPencil,
                 WitnessDispositionV1::Witnessed,
                 30,
             ),
             regularity_claim(
-                descriptor_axes,
+                descriptor_axes.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 31,
@@ -2835,7 +2835,7 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
 fn partial_cluster_closure_overrun_never_splits_repeated_boundary_cluster() {
     let axes = standard_axes(29, 4);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::MagnitudeAscending {
@@ -2858,7 +2858,7 @@ fn partial_cluster_closure_overrun_never_splits_repeated_boundary_cluster() {
         2,
         30,
     );
-    let clusters = vec![first, boundary_cluster];
+    let clusters = vec![first, boundary_cluster.clone()];
     let result_set = spectral_result_set_receipt(&clusters).unwrap().id();
     let status = PartialCoverageStatusV1::ClusterClosureOverrun {
         boundary_cluster: boundary_cluster.id(),
@@ -2890,7 +2890,7 @@ fn partial_cluster_closure_overrun_never_splits_repeated_boundary_cluster() {
     };
     let draft = SpectralTruthDraftV1::new(
         SpectralResultAuthorityV1::NoClaim,
-        coverage,
+        coverage.clone(),
         clusters.clone(),
         boundary,
         SpectralTerminationV1::Completed,
@@ -2916,7 +2916,7 @@ fn partial_cluster_closure_overrun_never_splits_repeated_boundary_cluster() {
 fn ordinary_full_spectrum_requires_exact_count_and_full_boundary() {
     let axes = standard_axes(33, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -2958,7 +2958,7 @@ fn ordinary_full_spectrum_requires_exact_count_and_full_boundary() {
     };
     let draft = SpectralTruthDraftV1::new(
         SpectralResultAuthorityV1::NoClaim,
-        coverage,
+        coverage.clone(),
         clusters.clone(),
         ScopeBoundaryStateV1::FullSpectrum,
         SpectralTerminationV1::Completed,
@@ -2997,20 +2997,20 @@ fn descriptor_full_problem(
     let axes = axes(seed, class, SpectralScalarFieldV1::Complex, Dims::NONE, 2);
     let regularity = vec![
         regularity_claim(
-            axes,
+            axes.clone(),
             RegularityClassV1::RegularPencil,
             WitnessDispositionV1::Witnessed,
             seed,
         ),
         regularity_claim(
-            axes,
+            axes.clone(),
             RegularityClassV1::RegularDescriptor,
             WitnessDispositionV1::Witnessed,
             seed.wrapping_add(1),
         ),
     ];
     validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         regularity,
         SpectralOrderingV1::SetValued,
@@ -3119,7 +3119,7 @@ fn satisfied_partial_draft(problem: &ValidatedSpectralProblemV1, seed: u8) -> Sp
 fn incomplete_partial_truth_retains_bounded_evidence_without_claiming_completion() {
     let axes = standard_axes(35, 3);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::MagnitudeAscending {
@@ -3194,7 +3194,7 @@ fn descriptor_full_truth_accounts_for_included_and_excluded_infinity() {
         1,
         37,
     );
-    let included_clusters = vec![finite, projective];
+    let included_clusters = vec![finite, projective.clone()];
     let included_set = spectral_result_set_receipt(&included_clusters)
         .unwrap()
         .id();
@@ -3296,10 +3296,10 @@ fn descriptor_full_truth_accounts_for_included_and_excluded_infinity() {
 fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure() {
     let finite_space = standard_axes(42, 2);
     let report = validate_problem(default_spec(
-        finite_space,
+        finite_space.clone(),
         Vec::new(),
         vec![regularity_claim(
-            finite_space,
+            finite_space.clone(),
             RegularityClassV1::FiniteDimensional,
             WitnessDispositionV1::Contradicted,
             42,
@@ -3333,10 +3333,10 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     };
 
     let report = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         vec![regularity_claim(
-            generalized,
+            generalized.clone(),
             RegularityClassV1::FiniteDimensional,
             WitnessDispositionV1::Contradicted,
             43,
@@ -3351,17 +3351,17 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     )));
 
     let contradictory_equation = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::RegularPencil,
                 WitnessDispositionV1::Contradicted,
                 43,
             ),
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 44,
@@ -3385,17 +3385,17 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     ));
 
     let contradictory_descriptor = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::RegularPencil,
                 WitnessDispositionV1::Witnessed,
                 46,
             ),
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Contradicted,
                 47,
@@ -3419,7 +3419,7 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     ));
 
     let unestablished = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -3440,7 +3440,7 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     ));
 
     let hdp = structure_claim(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(generalized.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -3448,10 +3448,10 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
         50,
     );
     let theorem_backed = validate_problem(default_spec(
-        generalized,
-        vec![hdp],
+        generalized.clone(),
+        vec![hdp.clone()],
         vec![regularity_claim(
-            generalized,
+            generalized.clone(),
             RegularityClassV1::RegularDescriptor,
             WitnessDispositionV1::Witnessed,
             51,
@@ -3470,17 +3470,17 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     );
 
     let weight_backed = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::InvertiblePencilWeight,
                 WitnessDispositionV1::Witnessed,
                 59,
             ),
             regularity_claim(
-                generalized,
+                generalized.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 60,
@@ -3521,17 +3521,17 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
         infinity_policy: InfiniteEigenvaluePolicyV1::ExcludeWithCount,
     };
     let contradicted_polynomial = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::RegularPolynomial { grade: 2 },
                 WitnessDispositionV1::Contradicted,
                 53,
             ),
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 54,
@@ -3555,17 +3555,17 @@ fn full_completeness_requires_admitted_regularity_and_consumes_theorem_closure()
     ));
 
     let leading_backed = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade: 2 },
                 WitnessDispositionV1::Witnessed,
                 56,
             ),
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 57,
@@ -3613,20 +3613,20 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
     );
     let generalized_regularity = vec![
         regularity_claim(
-            generalized,
+            generalized.clone(),
             RegularityClassV1::InvertiblePencilWeight,
             WitnessDispositionV1::Witnessed,
             90,
         ),
         regularity_claim(
-            generalized,
+            generalized.clone(),
             RegularityClassV1::RegularDescriptor,
             WitnessDispositionV1::Witnessed,
             91,
         ),
     ];
     let generalized_candidates = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         generalized_regularity.clone(),
         SpectralOrderingV1::SetValued,
@@ -3696,7 +3696,7 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
     );
 
     let generalized_partial = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         Vec::new(),
         generalized_regularity,
         SpectralOrderingV1::Projective {
@@ -3714,7 +3714,9 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
         1,
         93,
     );
-    let result_set = spectral_result_set_receipt(&[projective]).unwrap().id();
+    let result_set = spectral_result_set_receipt(&[projective.clone()])
+        .unwrap()
+        .id();
     let status = PartialCoverageStatusV1::Satisfied;
     let lower = PositiveFiniteV1::new(0.25).unwrap();
     let norm = norm_id(92);
@@ -3774,17 +3776,17 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
         2,
     );
     let polynomial_candidates = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade: 2 },
                 WitnessDispositionV1::Witnessed,
                 96,
             ),
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 97,
@@ -3802,7 +3804,9 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
         InternalClusterStateV1::NoClaim,
     )
     .unwrap();
-    let result_set = spectral_result_set_receipt(&[projective]).unwrap().id();
+    let result_set = spectral_result_set_receipt(&[projective.clone()])
+        .unwrap()
+        .id();
     let report = SpectralTruthV1::new(
         &polynomial_candidates,
         SpectralTruthDraftV1::new(
@@ -3831,7 +3835,7 @@ fn invertibility_excludes_favorable_projective_truth_in_every_coverage_mode() {
 fn projective_clusters_and_no_result_claims_fail_closed() {
     let axes = standard_axes(43, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -3899,7 +3903,7 @@ fn cluster_truth_rejects_impossible_multiplicity_and_internal_states() {
 
     let axes = standard_axes(44, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -3987,7 +3991,7 @@ fn cluster_truth_rejects_impossible_multiplicity_and_internal_states() {
 fn truth_resource_caps_precede_sorting_hashing_and_reference_scans() {
     let axes = standard_axes(45, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4022,8 +4026,8 @@ fn truth_resource_caps_precede_sorting_hashing_and_reference_scans() {
             axes.scalar,
             axes.class,
             axes.scaling,
-            axes.domain,
-            axes.codomain,
+            axes.domain.clone(),
+            axes.codomain.clone(),
             RegularityClassV1::FiniteDimensional,
             WitnessDispositionV1::Witnessed,
         )
@@ -4060,7 +4064,7 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
     let region = region_id(46);
     let axes = standard_axes(46, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::NamedRegion { region },
@@ -4072,7 +4076,7 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
     .unwrap();
     let first = candidate_cluster(cluster_id(46));
     let second = candidate_cluster(cluster_id(47));
-    let clusters = vec![first, second];
+    let clusters = vec![first.clone(), second.clone()];
     let result_set = spectral_result_set_receipt(&clusters).unwrap().id();
     let included = vec![second.id(), first.id(), first.id()];
     let witness = truth_witness(
@@ -4092,17 +4096,20 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
             ScopeBoundaryStateV1::Region(RegionBoundaryStateV1::IntersectionsResolved {
                 included,
                 excluded_algebraic: 0,
-                witness,
+                witness: witness.clone(),
             }),
             SpectralTerminationV1::Completed,
         )
     };
-    let first_report =
-        SpectralTruthV1::new(&problem, make(vec![first, second], included.clone())).unwrap_err();
+    let first_report = SpectralTruthV1::new(
+        &problem,
+        make(vec![first.clone(), second.clone()], included.clone()),
+    )
+    .unwrap_err();
     let second_report = SpectralTruthV1::new(
         &problem,
         make(
-            vec![second, first],
+            vec![second.clone(), first.clone()],
             vec![first.id(), second.id(), first.id()],
         ),
     )
@@ -4135,8 +4142,11 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
             SpectralTerminationV1::Completed,
         )
     };
-    let first = SpectralTruthV1::new(&problem, duplicate_draft(vec![duplicate_a, duplicate_b]))
-        .unwrap_err();
+    let first = SpectralTruthV1::new(
+        &problem,
+        duplicate_draft(vec![duplicate_a.clone(), duplicate_b.clone()]),
+    )
+    .unwrap_err();
     let second = SpectralTruthV1::new(&problem, duplicate_draft(vec![duplicate_b, duplicate_a]))
         .unwrap_err();
     assert_eq!(first, second);
@@ -4162,9 +4172,10 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
         exact_cluster(partial_problem.problem_id(), duplicate_id, enclosure, 1, 49);
     let multiplicity_two =
         exact_cluster(partial_problem.problem_id(), duplicate_id, enclosure, 2, 50);
-    let result_set = spectral_result_set_receipt(&[multiplicity_one, multiplicity_two])
-        .unwrap()
-        .id();
+    let result_set =
+        spectral_result_set_receipt(&[multiplicity_one.clone(), multiplicity_two.clone()])
+            .unwrap()
+            .id();
     let status = PartialCoverageStatusV1::ClusterClosureOverrun {
         boundary_cluster: duplicate_id,
         preceding_algebraic: 1,
@@ -4192,19 +4203,19 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
             SpectralCoverageV1::Partial {
                 returned_algebraic: 3,
                 status,
-                witness: coverage_witness,
+                witness: coverage_witness.clone(),
             },
             clusters,
             ScopeBoundaryStateV1::Partial(PartialBoundaryStateV1::ClusterClosed {
                 cluster: duplicate_id,
-                witness: boundary_witness,
+                witness: boundary_witness.clone(),
             }),
             SpectralTerminationV1::Completed,
         )
     };
     let one_first = SpectralTruthV1::new(
         &partial_problem,
-        duplicate_partial_draft(vec![multiplicity_one, multiplicity_two]),
+        duplicate_partial_draft(vec![multiplicity_one.clone(), multiplicity_two.clone()]),
     )
     .unwrap_err();
     let two_first = SpectralTruthV1::new(
@@ -4224,7 +4235,7 @@ fn deterministic_reports_canonicalize_cluster_and_reference_order() {
 fn exact_theorem_closure_is_support_and_definiteness_aware() {
     let axes = standard_axes(47, 4);
     let self_adjoint = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -4232,7 +4243,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         47,
     );
     let nonnormal = structure_claim(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Nonnormal,
         StructureSupportV1::InnerProduct(axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -4240,7 +4251,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         48,
     );
     let report = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![self_adjoint, nonnormal],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4270,7 +4281,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
     );
     let support = StructureSupportV1::InnerProduct(generalized.domain.id());
     let hermitian_definite = structure_claim(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         support,
         WitnessDispositionV1::Witnessed,
@@ -4278,7 +4289,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         48,
     );
     let contradicted_self_adjoint = structure_claim(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::SelfAdjoint,
         support,
         WitnessDispositionV1::Contradicted,
@@ -4286,7 +4297,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         49,
     );
     let report = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         vec![hermitian_definite, contradicted_self_adjoint],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4309,12 +4320,12 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         MetricDefinitenessV1::Unknown,
     );
     let indefinite_axes = Axes {
-        domain: unknown_metric,
-        codomain: unknown_metric,
-        ..raw
+        domain: unknown_metric.clone(),
+        codomain: unknown_metric.clone(),
+        ..raw.clone()
     };
     let self_adjoint = structure_claim(
-        indefinite_axes,
+        indefinite_axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(unknown_metric.id()),
         WitnessDispositionV1::Witnessed,
@@ -4322,7 +4333,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         49,
     );
     let nonreal = structure_claim(
-        indefinite_axes,
+        indefinite_axes.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Contradicted,
@@ -4331,7 +4342,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
     );
     assert!(
         validate_problem(default_spec(
-            indefinite_axes,
+            indefinite_axes.clone(),
             vec![self_adjoint, nonreal],
             Vec::new(),
             SpectralOrderingV1::SetValued,
@@ -4360,12 +4371,12 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         },
     );
     let singular_axes = Axes {
-        domain: singular_metric,
+        domain: singular_metric.clone(),
         codomain: singular_metric,
         ..raw
     };
     let singular_self_adjoint = structure_claim(
-        singular_axes,
+        singular_axes.clone(),
         StructurePropertyV1::SelfAdjoint,
         StructureSupportV1::InnerProduct(singular_id),
         WitnessDispositionV1::Witnessed,
@@ -4394,7 +4405,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
     let axes = standard_axes(50, 3);
     let support = StructureSupportV1::InnerProduct(axes.domain.id());
     let loose_witness = structure_claim_with_seed(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         support,
         WitnessDispositionV1::Witnessed,
@@ -4403,7 +4414,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         50,
     );
     let tight_contradiction = structure_claim_with_seed(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         support,
         WitnessDispositionV1::Contradicted,
@@ -4413,7 +4424,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
     );
     assert!(
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             vec![loose_witness, tight_contradiction],
             Vec::new(),
             SpectralOrderingV1::SetValued,
@@ -4424,7 +4435,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
     );
 
     let tight_witness = structure_claim_with_seed(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         support,
         WitnessDispositionV1::Witnessed,
@@ -4433,7 +4444,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         52,
     );
     let loose_contradiction = structure_claim_with_seed(
-        axes,
+        axes.clone(),
         StructurePropertyV1::Normal,
         support,
         WitnessDispositionV1::Contradicted,
@@ -4442,7 +4453,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         53,
     );
     let report = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         vec![tight_witness, loose_contradiction],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4471,7 +4482,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
     );
     let support = StructureSupportV1::InnerProduct(generalized.domain.id());
     let exact_hdp = structure_claim_with_seed(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         support,
         WitnessDispositionV1::Witnessed,
@@ -4480,7 +4491,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         54,
     );
     let cross_norm_contradiction = structure_claim_with_seed(
-        generalized,
+        generalized.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         support,
         WitnessDispositionV1::Contradicted,
@@ -4489,7 +4500,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         55,
     );
     let report = validate_problem(default_spec(
-        generalized,
+        generalized.clone(),
         vec![exact_hdp, cross_norm_contradiction],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4509,7 +4520,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
 fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
     let standard = standard_axes(51, 2);
     let palindromic = structure_claim(
-        standard,
+        standard.clone(),
         StructurePropertyV1::Palindromic {
             parity: PalindromicParityV1::Palindromic,
             involution: PolynomialInvolutionV1::ConjugateTranspose,
@@ -4520,7 +4531,7 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
         51,
     );
     let report = validate_problem(default_spec(
-        standard,
+        standard.clone(),
         vec![palindromic],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4542,13 +4553,13 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
     );
     let polynomial = axes(52, class, SpectralScalarFieldV1::Complex, Dims::NONE, 2);
     let regular = regularity_claim(
-        polynomial,
+        polynomial.clone(),
         RegularityClassV1::RegularPolynomial { grade: 2 },
         WitnessDispositionV1::Witnessed,
         52,
     );
     let report = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
         vec![regular],
         SpectralOrderingV1::SetValued,
@@ -4563,15 +4574,15 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
     )));
 
     let leading = regularity_claim(
-        polynomial,
+        polynomial.clone(),
         RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade: 2 },
         WitnessDispositionV1::Witnessed,
         53,
     );
     let leading_problem = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
-        vec![leading],
+        vec![leading.clone()],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -4579,15 +4590,15 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
     assert_eq!(leading_problem.known_algebraic_cardinality(), Some(4));
     assert!(assess_method_class(&leading_problem, SpectralMethodClassV1::PolynomialKrylov).is_ok());
     let contradicted_regular = regularity_claim(
-        polynomial,
+        polynomial.clone(),
         RegularityClassV1::RegularPolynomial { grade: 2 },
         WitnessDispositionV1::Contradicted,
         54,
     );
     let report = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
-        vec![leading, contradicted_regular],
+        vec![leading.clone(), contradicted_regular],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -4613,7 +4624,7 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
         2,
     );
     let hdp = structure_claim(
-        raw_pencil,
+        raw_pencil.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(raw_pencil.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -4621,14 +4632,14 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
         55,
     );
     let contradicted_regular = regularity_claim(
-        raw_pencil,
+        raw_pencil.clone(),
         RegularityClassV1::RegularPencil,
         WitnessDispositionV1::Contradicted,
         56,
     );
     let report = validate_problem(default_spec(
-        raw_pencil,
-        vec![hdp],
+        raw_pencil.clone(),
+        vec![hdp.clone()],
         vec![contradicted_regular],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -4649,12 +4660,12 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
         MetricDefinitenessV1::Unknown,
     );
     let pencil = Axes {
-        domain: unknown_metric,
-        codomain: unknown_metric,
+        domain: unknown_metric.clone(),
+        codomain: unknown_metric.clone(),
         ..raw_pencil
     };
     let hdp = structure_claim(
-        pencil,
+        pencil.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(unknown_metric.id()),
         WitnessDispositionV1::Witnessed,
@@ -4662,8 +4673,8 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
         54,
     );
     let report = validate_problem(default_spec(
-        pencil,
-        vec![hdp],
+        pencil.clone(),
+        vec![hdp.clone()],
         Vec::new(),
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
@@ -4682,7 +4693,7 @@ fn equation_specific_structure_and_ordinary_finite_semantics_fail_closed() {
 fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
     let standard = standard_axes(54, 2);
     let report = validate_problem(default_spec(
-        standard,
+        standard.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::MagnitudeAscending {
@@ -4697,7 +4708,7 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
     )));
 
     let real_spectrum = structure_claim(
-        standard,
+        standard.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -4705,7 +4716,7 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
         54,
     );
     let problem = validate_problem(default_spec(
-        standard,
+        standard.clone(),
         vec![real_spectrum],
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -4768,9 +4779,9 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
         2,
     );
     let projective_problem = validate_problem(default_spec(
-        descriptor,
+        descriptor.clone(),
         vec![structure_claim(
-            descriptor,
+            descriptor.clone(),
             StructurePropertyV1::RealSpectrum,
             StructureSupportV1::FormFree,
             WitnessDispositionV1::Witnessed,
@@ -4779,13 +4790,13 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
         )],
         vec![
             regularity_claim(
-                descriptor,
+                descriptor.clone(),
                 RegularityClassV1::RegularPencil,
                 WitnessDispositionV1::Witnessed,
                 58,
             ),
             regularity_claim(
-                descriptor,
+                descriptor.clone(),
                 RegularityClassV1::RegularDescriptor,
                 WitnessDispositionV1::Witnessed,
                 59,
@@ -4832,7 +4843,7 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
     );
 
     let no_structure = validate_problem(default_spec(
-        standard,
+        standard.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -5016,8 +5027,8 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
             polynomial_axes.scalar,
             polynomial_axes.class,
             polynomial_axes.scaling,
-            polynomial_axes.domain,
-            polynomial_axes.codomain,
+            polynomial_axes.domain.clone(),
+            polynomial_axes.codomain.clone(),
             GaugePropositionV1::Quotiented {
                 nullity: 3,
                 quotient,
@@ -5027,18 +5038,18 @@ fn real_spectrum_truth_and_total_cardinality_do_not_depend_on_ordering() {
         62,
     );
     let leading = regularity_claim(
-        polynomial_axes,
+        polynomial_axes.clone(),
         RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade: 2 },
         WitnessDispositionV1::Witnessed,
         63,
     );
     let quotient_problem = validate_problem(problem_spec(
-        polynomial_axes,
+        polynomial_axes.clone(),
         Vec::new(),
-        vec![leading],
+        vec![leading.clone()],
         SpectralSpaceContextV1::new(
-            polynomial_axes.domain,
-            polynomial_axes.codomain,
+            polynomial_axes.domain.clone(),
+            polynomial_axes.codomain.clone(),
             GaugeConventionV1::Quotiented {
                 nullity: 3,
                 quotient,
@@ -5224,7 +5235,7 @@ fn multiplicity_and_projective_truth_cannot_be_replayed_or_duplicated() {
         )),
         MultiplicityClaimV1::Exact {
             value: 1,
-            witness: stale_multiplicity_witness,
+            witness: stale_multiplicity_witness.clone(),
         },
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::Simple,
@@ -5306,7 +5317,7 @@ fn region_boundary_policy_is_enforced_even_for_candidate_coverage() {
     let region = region_id(64);
     let axes = standard_axes(64, 2);
     let problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -5348,7 +5359,7 @@ fn region_boundary_policy_is_enforced_even_for_candidate_coverage() {
     )));
 
     let open_problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -5359,7 +5370,7 @@ fn region_boundary_policy_is_enforced_even_for_candidate_coverage() {
     ))
     .unwrap();
     let cluster = candidate_cluster(cluster_id(64));
-    let open_clusters = vec![cluster];
+    let open_clusters = vec![cluster.clone()];
     let open_set = spectral_result_set_receipt(&open_clusters).unwrap().id();
     let open_witness = truth_witness(
         open_problem.problem_id(),
@@ -5427,7 +5438,7 @@ fn region_boundary_policy_is_enforced_even_for_candidate_coverage() {
         2,
         67,
     );
-    let complete_set = spectral_result_set_receipt(&[complete_cluster])
+    let complete_set = spectral_result_set_receipt(&[complete_cluster.clone()])
         .unwrap()
         .id();
     let complete_boundary = truth_witness(
@@ -5471,7 +5482,7 @@ fn region_boundary_policy_is_enforced_even_for_candidate_coverage() {
     )));
 
     let refuse_problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -5517,7 +5528,7 @@ fn signed_zero_is_canonical_in_sealed_problem_and_truth_objects() {
     let axes = standard_axes(65, 2);
     let make_problem = |zero: f64| {
         validate_problem(default_spec(
-            axes,
+            axes.clone(),
             Vec::new(),
             Vec::new(),
             SpectralOrderingV1::NearestShift {
@@ -5540,7 +5551,7 @@ fn signed_zero_is_canonical_in_sealed_problem_and_truth_objects() {
     assert_eq!(imag.to_bits(), 0.0f64.to_bits());
 
     let truth_problem = validate_problem(default_spec(
-        axes,
+        axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::SetValued,
@@ -5590,7 +5601,7 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     );
     let projective_axes = axes(79, class, SpectralScalarFieldV1::Complex, Dims::NONE, 3);
     let report = validate_problem(default_spec(
-        projective_axes,
+        projective_axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::MagnitudeAscending {
@@ -5605,7 +5616,7 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     )));
 
     let literal_real = structure_claim(
-        projective_axes,
+        projective_axes.clone(),
         StructurePropertyV1::RealSpectrum,
         StructureSupportV1::FormFree,
         WitnessDispositionV1::Witnessed,
@@ -5613,7 +5624,7 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
         79,
     );
     let report = validate_problem(default_spec(
-        projective_axes,
+        projective_axes.clone(),
         vec![literal_real],
         Vec::new(),
         SpectralOrderingV1::RealAscending,
@@ -5668,7 +5679,7 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     }
 
     let unestablished = validate_problem(default_spec(
-        projective_axes,
+        projective_axes.clone(),
         Vec::new(),
         Vec::new(),
         SpectralOrderingV1::Projective {
@@ -5688,7 +5699,7 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     );
 
     let hdp = structure_claim(
-        projective_axes,
+        projective_axes.clone(),
         StructurePropertyV1::HermitianDefinitePencil,
         StructureSupportV1::InnerProduct(projective_axes.domain.id()),
         WitnessDispositionV1::Witnessed,
@@ -5696,15 +5707,15 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
         80,
     );
     let regular_descriptor = regularity_claim(
-        projective_axes,
+        projective_axes.clone(),
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
         81,
     );
     let report = validate_problem(default_spec(
-        projective_axes,
-        vec![hdp],
-        vec![regular_descriptor],
+        projective_axes.clone(),
+        vec![hdp.clone()],
+        vec![regular_descriptor.clone()],
         SpectralOrderingV1::Projective {
             chart: SpectralProjectiveChartId::from_bytes([80; 32]),
             infinity: ProjectiveInfinityPlacementV1::Last,
@@ -5719,9 +5730,9 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     )));
 
     let established = validate_problem(default_spec(
-        projective_axes,
-        vec![hdp],
-        vec![regular_descriptor],
+        projective_axes.clone(),
+        vec![hdp.clone()],
+        vec![regular_descriptor.clone()],
         SpectralOrderingV1::Projective {
             chart: SpectralProjectiveChartId::from_bytes([81; 32]),
             infinity: ProjectiveInfinityPlacementV1::Last,
@@ -5733,9 +5744,9 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     assert!(SpectralTruthV1::new(&established, satisfied_partial_draft(&established, 81)).is_ok());
 
     let finite_real_prefix = validate_problem(default_spec(
-        projective_axes,
-        vec![hdp],
-        vec![regular_descriptor],
+        projective_axes.clone(),
+        vec![hdp.clone()],
+        vec![regular_descriptor.clone()],
         SpectralOrderingV1::RealAscending,
         CompletenessScopeV1::Partial { requested: 1 },
     ))
@@ -5765,21 +5776,21 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
         3,
     );
     let leading = regularity_claim(
-        polynomial,
+        polynomial.clone(),
         RegularityClassV1::InvertiblePolynomialLeadingCoefficient { grade: 2 },
         WitnessDispositionV1::Witnessed,
         82,
     );
     let descriptor = regularity_claim(
-        polynomial,
+        polynomial.clone(),
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
         83,
     );
     let report = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
-        vec![leading, descriptor],
+        vec![leading.clone(), descriptor.clone()],
         SpectralOrderingV1::Projective {
             chart: SpectralProjectiveChartId::from_bytes([82; 32]),
             infinity: ProjectiveInfinityPlacementV1::Last,
@@ -5794,9 +5805,9 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     )));
 
     let finite_magnitude_prefix = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
-        vec![leading, descriptor],
+        vec![leading.clone(), descriptor.clone()],
         SpectralOrderingV1::MagnitudeAscending {
             tie_break: ComplexTieBreakV1::RealThenImagThenLineage,
         },
@@ -5813,16 +5824,16 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
     );
 
     let contradicted_polynomial = validate_problem(default_spec(
-        polynomial,
+        polynomial.clone(),
         Vec::new(),
         vec![
             regularity_claim(
-                polynomial,
+                polynomial.clone(),
                 RegularityClassV1::RegularPolynomial { grade: 2 },
                 WitnessDispositionV1::Contradicted,
                 84,
             ),
-            descriptor,
+            descriptor.clone(),
         ],
         SpectralOrderingV1::Projective {
             chart: SpectralProjectiveChartId::from_bytes([84; 32]),
@@ -5893,7 +5904,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         exact_multiplicity,
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::ProvenDegenerate {
-            witness: degeneracy_witness,
+            witness: degeneracy_witness.clone(),
         },
     )
     .unwrap();
@@ -5933,7 +5944,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         bounded_multiplicity,
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::ProvenDegenerate {
-            witness: degeneracy_witness,
+            witness: degeneracy_witness.clone(),
         },
     )
     .unwrap();
@@ -5974,7 +5985,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         },
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::ProvenDegenerate {
-            witness: degeneracy_witness,
+            witness: degeneracy_witness.clone(),
         },
     )
     .unwrap();
@@ -6015,7 +6026,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
     let resolved = SpectralClusterV1::new(
         resolved_id,
         SpectralLocalizationV1::candidate(enclosure),
-        resolved_algebraic,
+        resolved_algebraic.clone(),
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::Resolved {
             lower,
@@ -6059,7 +6070,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         SpectralClusterV1::new(
             cluster_id(81),
             SpectralLocalizationV1::candidate(enclosure),
-            resolved_algebraic,
+            resolved_algebraic.clone(),
             MultiplicityClaimV1::Unknown,
             InternalClusterStateV1::UndefinedSeparation {
                 reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
@@ -6177,7 +6188,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
     let no_claim = SpectralClusterV1::new(
         projective_id,
         SpectralLocalizationV1::candidate(projective_enclosure),
-        projective_multiplicity,
+        projective_multiplicity.clone(),
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::NoClaim,
     )
@@ -6185,7 +6196,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
     let unknown = SpectralClusterV1::new(
         projective_id,
         SpectralLocalizationV1::candidate(projective_enclosure),
-        projective_multiplicity,
+        projective_multiplicity.clone(),
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::Unknown {
             reason: UnknownSeparationReasonV1::MissingEvidence,
@@ -6195,7 +6206,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
     let undefined = SpectralClusterV1::new(
         projective_id,
         SpectralLocalizationV1::candidate(projective_enclosure),
-        projective_multiplicity,
+        projective_multiplicity.clone(),
         MultiplicityClaimV1::Unknown,
         InternalClusterStateV1::UndefinedSeparation {
             reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
@@ -6204,7 +6215,7 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
     .unwrap();
     let no_claim_receipt = spectral_result_set_receipt(&[no_claim]).unwrap();
     let unknown_receipt = spectral_result_set_receipt(&[unknown]).unwrap();
-    let undefined_receipt = spectral_result_set_receipt(&[undefined]).unwrap();
+    let undefined_receipt = spectral_result_set_receipt(&[undefined.clone()]).unwrap();
     assert_ne!(no_claim_receipt, unknown_receipt);
     assert_ne!(no_claim_receipt, undefined_receipt);
     assert_ne!(unknown_receipt, undefined_receipt);
@@ -6258,8 +6269,8 @@ fn self_configured_root_witnesses_fail_the_pinned_charter() {
         axes.scalar,
         axes.class,
         axes.scaling,
-        axes.domain,
-        axes.codomain,
+        axes.domain.clone(),
+        axes.codomain.clone(),
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
     )
@@ -6294,7 +6305,7 @@ fn self_configured_root_witnesses_fail_the_pinned_charter() {
 
     // Every identity axis matches between the pair; only the charter differs.
     assert_eq!(
-        AdmittedSpectralWitnessV1::from_authority(&rogue_admitted, rogue_witness, pinned),
+        AdmittedSpectralWitnessV1::from_authority(&rogue_admitted, rogue_witness.clone(), pinned),
         Err(SpectralPromotionBindingErrorV1::RootCharter)
     );
     // The pair passes when the consumer pins the ROGUE charter — proving the
