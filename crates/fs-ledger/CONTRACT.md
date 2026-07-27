@@ -64,13 +64,20 @@ validation.
   re-exported here unchanged — same paths, same bits.
 - Artifacts: `put_artifact` (≤ `STORAGE_CHUNK_LEN` inline; larger stored as
   `artifact_chunks` rows because fsqlite has no incremental-blob API),
-  `ArtifactWriter` (streaming; hashes incrementally, stages chunks under a
-  provisional key inside a writer-owned transaction, promotes on `finish`),
+  `ArtifactWriter` (streaming; exclusively borrows `&mut Ledger`, hashes
+  incrementally, retains at most one chunk of logical tail bytes with capped
+  geometric requested-capacity growth, and stages preceding full chunks
+  directly from caller slices under a provisional key inside a writer-owned
+  transaction; its first preflight, allocation, or SQL failure poisons the
+  writer so `finish` rolls back, while success promotes on `finish`),
   `get_artifact` / `read_artifact_chunks` / `artifact_info`, plus
   `get_artifact_bounded` / `read_artifact_chunks_bounded` for consumers that
   must refuse above a caller-supplied payload cap before any byte callback or
   result-buffer allocation,
-  `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`.
+  `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`. The
+  tail bound is on retained logical bytes and requested capacity; allocators
+  may round capacity upward, and it is not a claim that multi-GiB writer
+  transactions are operationally feasible.
 - Final operating-envelope demotion receipts:
   `put_regime_demotion_receipt` stores the exact canonical `fs-regime`
   receipt bytes under the dedicated `regime-output-demotion-receipt-v1`

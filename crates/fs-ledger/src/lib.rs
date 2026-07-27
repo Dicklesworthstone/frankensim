@@ -2629,10 +2629,6 @@ fn int_from_usize(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-fn int_from_u64(n: u64) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
-}
-
 fn normalize_schema_sql(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -4358,12 +4354,23 @@ impl Ledger {
 
     /// Begin a streaming artifact write (for fields too large to hold in
     /// memory). The writer owns a transaction: a crash or drop before
-    /// `finish` leaves zero residue.
+    /// `finish` leaves zero residue. Its exclusive borrow prevents safe
+    /// callers from committing, rolling back, or otherwise using this
+    /// [`Ledger`] until the writer is finished or dropped.
+    ///
+    /// ```compile_fail
+    /// use fs_ledger::Ledger;
+    ///
+    /// let mut ledger = Ledger::open(":memory:").unwrap();
+    /// let writer = ledger.artifact_writer("field").unwrap();
+    /// ledger.commit().unwrap();
+    /// drop(writer);
+    /// ```
     ///
     /// # Errors
     /// [`LedgerError::WriterInTransaction`] if an explicit transaction is
     /// open; engine errors otherwise.
-    pub fn artifact_writer(&self, kind: &str) -> Result<ArtifactWriter<'_>, LedgerError> {
+    pub fn artifact_writer(&mut self, kind: &str) -> Result<ArtifactWriter<'_>, LedgerError> {
         self.validate_artifact_inputs(kind, None)?;
         if self.conn.in_transaction() {
             return Err(LedgerError::WriterInTransaction);
@@ -4377,6 +4384,7 @@ impl Ledger {
             next_seq: 0,
             buf: Vec::new(),
             len: 0,
+            poisoned_by: None,
             finished: false,
         })
     }
@@ -6495,6 +6503,20 @@ impl Ledger {
 // ---------------------------------------------------------------------------
 
 static WRITER_NONCE: AtomicU64 = AtomicU64::new(0);
+const STREAM_TAIL_GROWTH_FLOOR: usize = 4 * 1024;
+
+fn stream_tail_growth_target(current_capacity: usize, required_len: usize) -> Option<usize> {
+    if required_len <= current_capacity {
+        return None;
+    }
+    let doubled = current_capacity.checked_mul(2).unwrap_or(STORAGE_CHUNK_LEN);
+    Some(
+        required_len
+            .max(doubled)
+            .max(STREAM_TAIL_GROWTH_FLOOR)
+            .min(STORAGE_CHUNK_LEN),
+    )
+}
 
 /// A provisional (non-content) chunk key for staging streamed chunks inside
 /// the writer's transaction. Collision with a real BLAKE3 content hash would
@@ -6514,13 +6536,14 @@ fn provisional_key() -> [u8; 32] {
 /// `finish` resolves dedupe, rewrites the key to the final content hash, and
 /// commits. Dropping without `finish` rolls everything back.
 pub struct ArtifactWriter<'a> {
-    ledger: &'a Ledger,
+    ledger: &'a mut Ledger,
     kind: String,
     hasher: Blake3,
     provisional: [u8; 32],
     next_seq: i64,
     buf: Vec<u8>,
     len: u64,
+    poisoned_by: Option<LedgerError>,
     finished: bool,
 }
 
@@ -6528,20 +6551,189 @@ impl ArtifactWriter<'_> {
     /// Absorb more bytes.
     ///
     /// # Errors
-    /// Engine errors while flushing full chunks.
+    /// [`LedgerError::Invalid`] if the exact total length/chunk sequence is
+    /// not representable or the bounded tail buffer cannot grow; engine
+    /// errors while staging full chunks. The first error poisons the writer:
+    /// later calls return that same error and `finish` rolls back.
     pub fn write(&mut self, data: &[u8]) -> Result<(), LedgerError> {
+        if let Some(error) = &self.poisoned_by {
+            return Err(error.clone());
+        }
+
+        let new_len = match self.preflight_write(data.len()) {
+            Ok(new_len) => new_len,
+            Err(error) => return Err(self.poison(error)),
+        };
         self.hasher.update(data);
-        self.len += data.len() as u64;
-        self.buf.extend_from_slice(data);
-        while self.buf.len() > STORAGE_CHUNK_LEN {
-            let rest = self.buf.split_off(STORAGE_CHUNK_LEN);
-            let full = std::mem::replace(&mut self.buf, rest);
-            self.flush_chunk(&full)?;
+        self.len = new_len;
+
+        let mut remaining = data;
+        if !self.buf.is_empty() {
+            let available = STORAGE_CHUNK_LEN.saturating_sub(self.buf.len());
+            let fill = available.min(remaining.len());
+            if let Err(error) = self.buffer_tail(&remaining[..fill]) {
+                return Err(self.poison(error));
+            }
+            remaining = &remaining[fill..];
+            if remaining.is_empty() {
+                return Ok(());
+            }
+            if let Err(error) = self.flush_buffered_chunk() {
+                return Err(self.poison(error));
+            }
+        }
+
+        // Leave the final <=1 chunk buffered so an artifact of exactly
+        // STORAGE_CHUNK_LEN bytes retains the inline representation. Every
+        // preceding full chunk is staged directly from the caller's slice:
+        // no whole-input buffer and no suffix copying.
+        while remaining.len() > STORAGE_CHUNK_LEN {
+            let (full, rest) = remaining.split_at(STORAGE_CHUNK_LEN);
+            if let Err(error) = self.stage_chunk(full) {
+                return Err(self.poison(error));
+            }
+            remaining = rest;
+        }
+        if let Err(error) = self.buffer_tail(remaining) {
+            return Err(self.poison(error));
         }
         Ok(())
     }
 
-    fn flush_chunk(&mut self, chunk: &[u8]) -> Result<(), LedgerError> {
+    fn preflight_write(&self, data_len: usize) -> Result<u64, LedgerError> {
+        if self.buf.len() > STORAGE_CHUNK_LEN {
+            return Err(LedgerError::Invalid {
+                field: "artifact_buffer".to_string(),
+                problem: format!(
+                    "streaming tail contains {} bytes, exceeding the one-chunk bound of \
+                     {STORAGE_CHUNK_LEN}",
+                    self.buf.len()
+                ),
+            });
+        }
+        let additional = u64::try_from(data_len).map_err(|_| LedgerError::Invalid {
+            field: "artifact_len".to_string(),
+            problem: format!("write length {data_len} cannot be represented as u64"),
+        })?;
+        let new_len = self
+            .len
+            .checked_add(additional)
+            .ok_or_else(|| LedgerError::Invalid {
+                field: "artifact_len".to_string(),
+                problem: format!(
+                    "streaming artifact length {} + {additional} bytes overflows u64",
+                    self.len
+                ),
+            })?;
+        i64::try_from(new_len).map_err(|_| LedgerError::Invalid {
+            field: "artifact_len".to_string(),
+            problem: format!(
+                "streaming artifact length {new_len} exceeds the exact SQLite INTEGER maximum {}",
+                i64::MAX
+            ),
+        })?;
+
+        let pending_len =
+            self.buf
+                .len()
+                .checked_add(data_len)
+                .ok_or_else(|| LedgerError::Invalid {
+                    field: "artifact_buffer".to_string(),
+                    problem: format!(
+                        "streaming tail length {} + {data_len} bytes overflows usize",
+                        self.buf.len()
+                    ),
+                })?;
+        let pending_chunks = if pending_len == 0 {
+            0
+        } else {
+            (pending_len - 1) / STORAGE_CHUNK_LEN + 1
+        };
+        let pending_chunks = i64::try_from(pending_chunks).map_err(|_| LedgerError::Invalid {
+            field: "artifact_chunk_sequence".to_string(),
+            problem: format!(
+                "{pending_chunks} pending chunks cannot be represented as SQLite INTEGER"
+            ),
+        })?;
+        if self.next_seq < 0 || self.next_seq.checked_add(pending_chunks).is_none() {
+            return Err(LedgerError::Invalid {
+                field: "artifact_chunk_sequence".to_string(),
+                problem: format!(
+                    "chunk sequence {} cannot advance by {pending_chunks} without overflow",
+                    self.next_seq
+                ),
+            });
+        }
+        Ok(new_len)
+    }
+
+    fn buffer_tail(&mut self, data: &[u8]) -> Result<(), LedgerError> {
+        let buffered =
+            self.buf
+                .len()
+                .checked_add(data.len())
+                .ok_or_else(|| LedgerError::Invalid {
+                    field: "artifact_buffer".to_string(),
+                    problem: "streaming tail length overflows usize".to_string(),
+                })?;
+        if buffered > STORAGE_CHUNK_LEN {
+            return Err(LedgerError::Invalid {
+                field: "artifact_buffer".to_string(),
+                problem: format!(
+                    "streaming tail would contain {buffered} bytes, exceeding the one-chunk \
+                     bound of {STORAGE_CHUNK_LEN}"
+                ),
+            });
+        }
+        if let Some(target_capacity) = stream_tail_growth_target(self.buf.capacity(), buffered) {
+            let additional_capacity =
+                target_capacity.checked_sub(self.buf.len()).ok_or_else(|| {
+                    LedgerError::Invalid {
+                        field: "artifact_buffer".to_string(),
+                        problem: format!(
+                            "streaming-tail capacity target {target_capacity} is below its current \
+                         length {}",
+                            self.buf.len()
+                        ),
+                    }
+                })?;
+            self.buf
+                .try_reserve_exact(additional_capacity)
+                .map_err(|error| LedgerError::Invalid {
+                    field: "artifact_buffer".to_string(),
+                    problem: format!(
+                        "could not grow streaming-tail capacity from {} to {target_capacity} bytes \
+                         ({error}); the writer is poisoned and its transaction will roll back",
+                        self.buf.capacity()
+                    ),
+                })?;
+        }
+        // Capped geometric growth limits the requested capacity to one
+        // storage chunk while keeping repeated small appends amortized-linear.
+        self.buf.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn stage_chunk(&mut self, chunk: &[u8]) -> Result<(), LedgerError> {
+        if chunk.is_empty() || chunk.len() > STORAGE_CHUNK_LEN {
+            return Err(LedgerError::Invalid {
+                field: "artifact_chunk".to_string(),
+                problem: format!(
+                    "streamed chunk length {} is outside 1..={STORAGE_CHUNK_LEN}",
+                    chunk.len()
+                ),
+            });
+        }
+        let next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or_else(|| LedgerError::Invalid {
+                field: "artifact_chunk_sequence".to_string(),
+                problem: format!(
+                    "chunk sequence {} cannot advance by one without overflow",
+                    self.next_seq
+                ),
+            })?;
         self.ledger
             .conn
             .prepare("INSERT INTO artifact_chunks(hash, seq, bytes) VALUES (?1, ?2, ?3)")
@@ -6552,8 +6744,24 @@ impl ArtifactWriter<'_> {
                 blob_param(chunk),
             ])
             .map_err(|e| sql_err("stream chunk insert", &e))?;
-        self.next_seq += 1;
+        self.next_seq = next_seq;
         Ok(())
+    }
+
+    fn flush_buffered_chunk(&mut self) -> Result<(), LedgerError> {
+        let chunk = std::mem::take(&mut self.buf);
+        let result = self.stage_chunk(&chunk);
+        self.buf = chunk;
+        if result.is_ok() {
+            self.buf.clear();
+        }
+        result
+    }
+
+    fn poison(&mut self, error: LedgerError) -> LedgerError {
+        debug_assert!(self.poisoned_by.is_none());
+        self.poisoned_by = Some(error.clone());
+        error
     }
 
     /// Finalize: dedupe, promote staged chunks to the content hash, commit.
@@ -6562,7 +6770,10 @@ impl ArtifactWriter<'_> {
     /// Engine errors; on error the transaction is rolled back and nothing
     /// is stored.
     pub fn finish(mut self, meta: Option<&str>) -> Result<PutReceipt, LedgerError> {
-        let result = self.finish_inner(meta);
+        let result = match self.poisoned_by.take() {
+            Some(error) => Err(error),
+            None => self.finish_inner(meta),
+        };
         self.finished = true;
         if result.is_err() {
             let _ = self.ledger.rollback();
@@ -6597,9 +6808,15 @@ impl ArtifactWriter<'_> {
             self.ledger.commit()?;
             return Ok(receipt);
         }
+        let stored_len = i64::try_from(self.len).map_err(|_| LedgerError::Invalid {
+            field: "artifact_len".to_string(),
+            problem: format!(
+                "streaming artifact length {} cannot be stored exactly as SQLite INTEGER",
+                self.len
+            ),
+        })?;
         if !self.buf.is_empty() {
-            let tail = std::mem::take(&mut self.buf);
-            self.flush_chunk(&tail)?;
+            self.flush_buffered_chunk()?;
         }
         self.ledger
             .conn
@@ -6617,7 +6834,7 @@ impl ArtifactWriter<'_> {
             .execute_with_params(&[
                 blob_param(h.as_bytes()),
                 text_param(&self.kind),
-                SqliteValue::Integer(int_from_u64(self.len)),
+                SqliteValue::Integer(stored_len),
                 SqliteValue::Integer(self.next_seq),
                 opt_text_param(meta),
                 SqliteValue::Integer(now_wall_ns()),
@@ -8592,7 +8809,7 @@ mod tests {
 
     #[test]
     fn dedupe_refuses_existing_same_length_corruption() {
-        let ledger = mem();
+        let mut ledger = mem();
         let receipt = ledger.put_artifact("blob", b"abc", None).unwrap();
         ledger
             .conn
@@ -8711,7 +8928,7 @@ mod tests {
             .prepare("UPDATE artifacts SET len = ?1 WHERE hash = ?2")
             .unwrap()
             .execute_with_params(&[
-                SqliteValue::Integer(int_from_u64(cap + 1)),
+                SqliteValue::Integer(i64::try_from(cap + 1).unwrap()),
                 blob_param(hostile_metadata.hash.as_bytes()),
             ])
             .unwrap();
@@ -8774,7 +8991,7 @@ mod tests {
 
     #[test]
     fn artifact_envelope_write_limits_fail_closed() {
-        let ledger = mem();
+        let mut ledger = mem();
         let oversized_kind = "k".repeat(MAX_ARTIFACT_KIND_BYTES + 1);
         let error = ledger
             .put_artifact(&oversized_kind, b"kind", None)
@@ -10101,7 +10318,7 @@ mod tests {
 
     #[test]
     fn writer_streams_and_dedupes() {
-        let l = mem();
+        let mut l = mem();
         let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         let mut w = l.artifact_writer("field").unwrap();
         for piece in data.chunks(7919) {
@@ -10121,8 +10338,242 @@ mod tests {
     }
 
     #[test]
+    fn stream_tail_growth_policy_is_capped_and_geometric() {
+        let mut policy_capacity = 0usize;
+        let mut growths = 0usize;
+
+        for required_len in 1..=STORAGE_CHUNK_LEN {
+            if let Some(target) = stream_tail_growth_target(policy_capacity, required_len) {
+                assert!(target >= required_len);
+                assert!(target <= STORAGE_CHUNK_LEN);
+                if policy_capacity > 0 {
+                    let doubled = policy_capacity
+                        .checked_mul(2)
+                        .unwrap_or(STORAGE_CHUNK_LEN)
+                        .min(STORAGE_CHUNK_LEN);
+                    assert!(target >= doubled);
+                }
+                policy_capacity = target;
+                growths += 1;
+            } else {
+                assert!(required_len <= policy_capacity);
+            }
+        }
+
+        assert_eq!(policy_capacity, STORAGE_CHUNK_LEN);
+        assert!(
+            growths <= usize::try_from(usize::BITS).unwrap(),
+            "geometric policy made {growths} requested-capacity transitions"
+        );
+    }
+
+    #[test]
+    fn single_stream_write_stages_full_chunks_directly_with_bounded_tail() {
+        let mut l = mem();
+        let data: Vec<u8> = (0..(2 * STORAGE_CHUNK_LEN + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut w = l.artifact_writer("field").unwrap();
+
+        w.write(&data).unwrap();
+
+        assert_eq!(w.next_seq, 2);
+        assert_eq!(w.buf.as_slice(), &data[2 * STORAGE_CHUNK_LEN..]);
+        assert_eq!(w.buf.len(), 17);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 2);
+
+        let receipt = w.finish(None).unwrap();
+        assert_eq!(receipt.hash, hash_bytes(&data));
+        assert_eq!(receipt.len, u64::try_from(data.len()).unwrap());
+        assert!(!receipt.deduped);
+        assert!(receipt.chunked);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 3);
+        assert_eq!(l.get_artifact(&receipt.hash).unwrap().unwrap(), data);
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
+    fn partial_stream_tail_flushes_before_direct_chunks_and_new_tail() {
+        let mut l = mem();
+        let prefix = vec![0x3C; 17];
+        let suffix: Vec<u8> = (0..(2 * STORAGE_CHUNK_LEN + 7))
+            .map(|i| (i % 241) as u8)
+            .collect();
+        let mut expected = Vec::with_capacity(prefix.len() + suffix.len());
+        expected.extend_from_slice(&prefix);
+        expected.extend_from_slice(&suffix);
+        let mut w = l.artifact_writer("field").unwrap();
+
+        w.write(&prefix).unwrap();
+        assert_eq!(w.next_seq, 0);
+        assert_eq!(w.buf.as_slice(), prefix.as_slice());
+        w.write(&suffix).unwrap();
+
+        assert_eq!(w.next_seq, 2);
+        assert_eq!(w.buf.as_slice(), &suffix[suffix.len() - 24..]);
+        assert_eq!(w.buf.len(), 24);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 2);
+
+        let receipt = w.finish(None).unwrap();
+        assert_eq!(receipt.hash, hash_bytes(&expected));
+        assert_eq!(receipt.len, u64::try_from(expected.len()).unwrap());
+        assert!(receipt.chunked);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 3);
+        assert_eq!(l.get_artifact(&receipt.hash).unwrap().unwrap(), expected);
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
+    fn failed_stream_chunk_insert_poisons_writer_and_rolls_back() {
+        let mut l = mem();
+        l.conn
+            .execute(
+                "CREATE TRIGGER fail_stream_chunk_insert \
+                 BEFORE INSERT ON artifact_chunks \
+                 WHEN NEW.seq = 0 \
+                 BEGIN \
+                   SELECT RAISE(ABORT, 'injected stream chunk failure'); \
+                 END",
+            )
+            .unwrap();
+
+        let data = vec![0xA5; STORAGE_CHUNK_LEN];
+        let mut w = l.artifact_writer("field").unwrap();
+        w.write(&data).unwrap();
+        assert_eq!(w.buf.as_slice(), data.as_slice());
+        assert_eq!(w.buf.len(), STORAGE_CHUNK_LEN);
+
+        let write_error = w.write(b"x").unwrap_err();
+        assert_eq!(write_error.code(), "LedgerSql");
+        assert!(
+            write_error
+                .to_string()
+                .contains("injected stream chunk failure")
+        );
+        assert_eq!(w.buf.as_slice(), data.as_slice());
+        assert_eq!(
+            w.len,
+            u64::try_from(STORAGE_CHUNK_LEN).unwrap() + 1,
+            "the rejected post-admission INSERT remains part of the poisoned writer state"
+        );
+        let mut expected_hash = Blake3::new();
+        expected_hash.update(&data);
+        expected_hash.update(b"x");
+        assert_eq!(w.hasher.finalize(), expected_hash.finalize());
+        assert_eq!(w.next_seq, 0);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 0);
+
+        let poisoned_hash = w.hasher.finalize();
+        assert_eq!(w.write(b"must not be accepted").unwrap_err(), write_error);
+        assert_eq!(w.buf.as_slice(), data.as_slice());
+        assert_eq!(w.hasher.finalize(), poisoned_hash);
+
+        let finish_error = w.finish(None).unwrap_err();
+        assert_eq!(finish_error, write_error);
+        assert_eq!(l.table_count("artifacts").unwrap(), 0);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 0);
+        assert!(!l.in_transaction());
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
+    fn failed_direct_stream_chunk_rolls_back_earlier_staged_rows() {
+        let mut l = mem();
+        l.conn
+            .execute(
+                "CREATE TRIGGER fail_second_direct_stream_chunk \
+                 BEFORE INSERT ON artifact_chunks \
+                 WHEN NEW.seq = 1 \
+                 BEGIN \
+                   SELECT RAISE(ABORT, 'injected second direct stream chunk failure'); \
+                 END",
+            )
+            .unwrap();
+
+        let data = vec![0x5A; 2 * STORAGE_CHUNK_LEN + 1];
+        let mut w = l.artifact_writer("field").unwrap();
+        let write_error = w.write(&data).unwrap_err();
+        assert_eq!(write_error.code(), "LedgerSql");
+        assert!(
+            write_error
+                .to_string()
+                .contains("injected second direct stream chunk failure")
+        );
+        assert_eq!(w.len, u64::try_from(data.len()).unwrap());
+        assert_eq!(w.hasher.finalize(), hash_bytes(&data));
+        assert_eq!(w.next_seq, 1);
+        assert!(w.buf.is_empty());
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 1);
+
+        assert_eq!(w.write(b"must not be accepted").unwrap_err(), write_error);
+        assert_eq!(w.next_seq, 1);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 1);
+        assert_eq!(w.finish(None).unwrap_err(), write_error);
+        assert_eq!(l.table_count("artifacts").unwrap(), 0);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 0);
+        assert!(!l.in_transaction());
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
+    fn unrepresentable_stream_length_poison_is_sticky_and_precedes_mutation() {
+        let mut l = mem();
+        let mut w = l.artifact_writer("field").unwrap();
+        w.len = u64::try_from(i64::MAX).unwrap();
+        let empty_hash = hash_bytes(b"");
+
+        let write_error = w.write(b"x").unwrap_err();
+        assert!(matches!(
+            &write_error,
+            LedgerError::Invalid { field, .. } if field == "artifact_len"
+        ));
+        assert_eq!(w.len, u64::try_from(i64::MAX).unwrap());
+        assert_eq!(w.next_seq, 0);
+        assert!(w.buf.is_empty());
+        assert_eq!(w.hasher.finalize(), empty_hash);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 0);
+
+        assert_eq!(w.write(b"must not be accepted").unwrap_err(), write_error);
+        assert_eq!(w.len, u64::try_from(i64::MAX).unwrap());
+        assert_eq!(w.hasher.finalize(), empty_hash);
+        assert_eq!(w.finish(None).unwrap_err(), write_error);
+        assert_eq!(l.table_count("artifacts").unwrap(), 0);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 0);
+        assert!(!l.in_transaction());
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
+    fn overflowing_stream_sequence_poison_is_sticky_and_precedes_mutation() {
+        let mut l = mem();
+        let mut w = l.artifact_writer("field").unwrap();
+        w.next_seq = i64::MAX;
+        let empty_hash = hash_bytes(b"");
+
+        let write_error = w.write(b"x").unwrap_err();
+        assert!(matches!(
+            &write_error,
+            LedgerError::Invalid { field, .. } if field == "artifact_chunk_sequence"
+        ));
+        assert_eq!(w.len, 0);
+        assert_eq!(w.next_seq, i64::MAX);
+        assert!(w.buf.is_empty());
+        assert_eq!(w.hasher.finalize(), empty_hash);
+        assert_eq!(w.ledger.table_count("artifact_chunks").unwrap(), 0);
+
+        assert_eq!(w.write(b"must not be accepted").unwrap_err(), write_error);
+        assert_eq!(w.len, 0);
+        assert_eq!(w.hasher.finalize(), empty_hash);
+        assert_eq!(w.finish(None).unwrap_err(), write_error);
+        assert_eq!(l.table_count("artifacts").unwrap(), 0);
+        assert_eq!(l.table_count("artifact_chunks").unwrap(), 0);
+        assert!(!l.in_transaction());
+        assert!(l.lint().unwrap().is_clean());
+    }
+
+    #[test]
     fn dropped_writer_leaves_zero_residue() {
-        let l = mem();
+        let mut l = mem();
         let mut w = l.artifact_writer("field").unwrap();
         w.write(&[7u8; 10_000]).unwrap();
         drop(w);
@@ -10134,7 +10585,7 @@ mod tests {
 
     #[test]
     fn writer_rejected_inside_transaction() {
-        let l = mem();
+        let mut l = mem();
         l.begin().unwrap();
         let err = l
             .artifact_writer("field")

@@ -701,7 +701,7 @@ fn ledger_003e_checked_identity_re_attests_exact_mutation_guards() {
 #[test]
 fn ledger_004_dedupe_and_chunked_round_trip() {
     let db = temp_db("chunk");
-    let l = Ledger::open(&db).expect("open");
+    let mut l = Ledger::open(&db).expect("open");
     // Strictly larger than one storage chunk → chunk rows.
     let big = official_pattern(STORAGE_CHUNK_LEN + STORAGE_CHUNK_LEN / 2 + 17);
     let r1 = l
@@ -1202,7 +1202,7 @@ fn ledger_012_artifact_envelope_conflicts() {
 
     // Recommit: the exact same envelope dedupes idempotently.
     let db = temp_db("env-recommit");
-    let l = Ledger::open(&db).expect("open");
+    let mut l = Ledger::open(&db).expect("open");
     let first = l
         .put_artifact("field", bytes, Some(r#"{"units":"Pa"}"#))
         .expect("first put");
