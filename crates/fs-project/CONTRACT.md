@@ -407,9 +407,14 @@ refuse atomically.
   tracked upstream. The adapter's BLAKE3 source identity binds that field and
   the complete geometry row exactly, but cannot strengthen the importer's
   underlying FNV collision guarantee or authenticate the supplied mesh.
-- The schema freeze (e16, bead .16.5) has NOT happened: version 1 is the
-  first implemented version, not yet a frozen public promise. The migration
-  machinery exists so the freeze can be honest when it lands.
+- The schema freeze (e16, bead .16.5) HAS happened: `project.fsim` is a
+  frozen record in `schema-policy.json` at version 1, enforced by
+  `xtask check-schemas` (version constant read from source, migration
+  obligation `auto-migration-receipt`, proven by the synthetic-migration
+  test). Accretion follows the policy row: optional fields with receipted
+  defaults may be added only if every prior document stays loadable with a
+  stable canonical hash. Because there is no crates.io release yet, the
+  freeze binds the tree and the `check-all` gate, not a published artifact.
 - Validation is structural and dimensional; it makes no physics claim (a
   well-formed project can still describe an unsolvable or nonsensical study).
 - The f85xj.17.3 finite-mesh audit finds bounded proximity candidates between

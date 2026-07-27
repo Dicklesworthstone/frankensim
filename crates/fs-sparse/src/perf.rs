@@ -34,7 +34,7 @@ struct TileOut {
 }
 
 fn bounded_worker_count(requested: usize, useful_rows: usize) -> usize {
-    let host_parallelism = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let host_parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     requested
         .max(1)
         .min(useful_rows.max(1))
