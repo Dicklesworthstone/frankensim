@@ -11,7 +11,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{ContentHash, hash_domain};
-use fs_conduction::{ConductionMesh, ConductionSolution};
+use fs_conduction::{ConductionMesh, ConductionSolution, ProvenanceClass};
 use fs_evidence::uncertainty::{
     BudgetTotal, EngineeringUncertaintyBudget, EngineeringUncertaintyKind,
     EngineeringUncertaintyTerm, TermValue, UncertaintyArtifactRef, UncertaintyError,
@@ -751,7 +751,11 @@ pub fn extract_thermal_qois(
     // A declared refinement-ladder half-width is the ONLY route by which the
     // junction maximum acquires a known Discretization term. Absent a receipt
     // the term stays a named Unknown; nothing here manufactures one.
-    let mut maximum_known = Vec::new();
+    // Every temperature QoI carries the same provenance-specific Parameters
+    // gap, so a caller-declared conductivity can never read like a
+    // receipt-backed one.
+    let parameter_term = material_parameter_term(solution, solution_id)?;
+    let mut maximum_known = vec![parameter_term.clone()];
     if let (Some(receipt), Some(identity)) = (discretization, discretization_id) {
         maximum_known.push((
             EngineeringUncertaintyKind::Discretization,
@@ -788,7 +792,12 @@ pub fn extract_thermal_qois(
                 temperature_model.clone(),
                 mean_identity,
             ),
-            uncertainty: unknown_budget("thermal-surface-mean", "kelvin", mean_identity, &[])?,
+            uncertainty: unknown_budget(
+                "thermal-surface-mean",
+                "kelvin",
+                mean_identity,
+                std::slice::from_ref(&parameter_term),
+            )?,
         },
         spread: ThermalQoi {
             evidence: no_claim_temperature(
@@ -796,7 +805,12 @@ pub fn extract_thermal_qois(
                 temperature_model.clone(),
                 spread_identity,
             ),
-            uncertainty: unknown_budget("thermal-surface-spread", "kelvin", spread_identity, &[])?,
+            uncertainty: unknown_budget(
+                "thermal-surface-spread",
+                "kelvin",
+                spread_identity,
+                std::slice::from_ref(&parameter_term),
+            )?,
         },
         face_mean_standard_deviation: ThermalQoi {
             evidence: no_claim_temperature(
@@ -808,7 +822,7 @@ pub fn extract_thermal_qois(
                 "thermal-surface-face-mean-std",
                 "kelvin",
                 std_identity,
-                &[],
+                std::slice::from_ref(&parameter_term),
             )?,
         },
     };
@@ -994,17 +1008,74 @@ fn no_claim_temperature(
     }
 }
 
+/// The card naming where this solve's conductivity numbers came from.
+///
+/// Declared and receipt-backed material provenance must not present the same
+/// machine-readable evidence: `ProvenanceClass::Declared` says there is no
+/// material provenance at all, which is strictly weaker than a retained
+/// `fs-matdb` receipt. Before this existed the class reached only the identity
+/// hash, so two solves with different material authority were distinguishable
+/// by digest but read identically to a reviewer.
+fn material_provenance_card(provenance: ProvenanceClass) -> &'static str {
+    match provenance {
+        ProvenanceClass::MatdbReceipts => "fs-conduction:material-matdb-receipts",
+        ProvenanceClass::Declared => "fs-conduction:material-declared",
+    }
+}
+
+/// The `Parameters` gap reason, specialized by material authority.
+fn material_parameter_gap(provenance: ProvenanceClass) -> &'static str {
+    match provenance {
+        ProvenanceClass::MatdbReceipts => {
+            "material receipts are retained but no complete parameter propagation reaches this QoI"
+        }
+        ProvenanceClass::Declared => {
+            "the conductivity values are caller-declared with no material receipt, so there is no parameter authority to propagate"
+        }
+    }
+}
+
 fn conduction_model(solution: &ConductionSolution) -> ModelEvidence {
+    let provenance = solution.report.material_provenance;
     ModelEvidence {
-        cards: vec!["fs-conduction:steady-p1".to_string()],
+        cards: vec![
+            "fs-conduction:steady-p1".to_string(),
+            material_provenance_card(provenance).to_string(),
+        ],
         assumptions: vec![format!(
-            "temperature QoI is a direct functional of a steady P1 field with {} material receipt(s); no DWR-to-QoI bound is attached",
+            "temperature QoI is a direct functional of a steady P1 field whose conductivity provenance is {} with {} material receipt(s); no DWR-to-QoI bound is attached",
+            provenance.tag(),
             solution.report.material_receipts
         )],
         validity: ValidityDomain::unconstrained(),
         discrepancy_rel: f64::INFINITY,
         in_domain: true,
     }
+}
+
+/// The provenance-specific `Parameters` term every temperature QoI carries.
+///
+/// It stays `Unknown` in both cases — neither authority supplies a propagation
+/// theorem — but the named reason distinguishes "receipts exist, propagation
+/// does not" from "no material authority exists at all".
+fn material_parameter_term(
+    solution: &ConductionSolution,
+    solution_id: ContentHash,
+) -> Result<
+    (
+        EngineeringUncertaintyKind,
+        TermValue,
+        &'static str,
+        ContentHash,
+    ),
+    QoiError,
+> {
+    Ok((
+        EngineeringUncertaintyKind::Parameters,
+        TermValue::unknown(material_parameter_gap(solution.report.material_provenance))?,
+        "thermal-qoi-material-provenance",
+        solution_id,
+    ))
 }
 
 fn unknown_budget(
@@ -1112,6 +1183,41 @@ fn validate_solution(mesh: &ConductionMesh, solution: &ConductionSolution) -> Re
         return Err(QoiError::invalid(
             "temperature field",
             "every nodal temperature must be finite",
+        ));
+    }
+    // `ConductionSolution` has public fields, so this seam validates the
+    // report the same way it already validates the field. The production
+    // solver fails closed on a non-converged linear solve
+    // (`ConductionError::LinearSolveFailed`), so a caller reaching here with
+    // one has assembled the report by hand; a QoI taken from an algebraically
+    // unconverged field is unsupported, not merely weaker.
+    if let Some(record) = solution
+        .report
+        .linear
+        .iter()
+        .find(|record| !record.converged_true)
+    {
+        return Err(QoiError::invalid(
+            "conduction report",
+            format!(
+                "linear solve at nonlinear iteration {} ({}) reported true relative residual {} without converging{}",
+                record.nonlinear_iteration,
+                record.method,
+                record.true_relative_residual,
+                match &record.stall {
+                    Some(stall) => format!("; retained stall diagnosis {stall:?}"),
+                    None => String::new(),
+                }
+            ),
+        ));
+    }
+    // A claim of retained receipts with no receipts is self-contradictory.
+    if solution.report.material_provenance == ProvenanceClass::MatdbReceipts
+        && solution.report.material_receipts == 0
+    {
+        return Err(QoiError::invalid(
+            "conduction report",
+            "material provenance claims retained matdb receipts while reporting zero of them",
         ));
     }
     Ok(())

@@ -14,8 +14,8 @@ use fs_airflow::{
 };
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::{
-    ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, ProvenanceClass,
-    StopReason,
+    ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, LinearSolveEvidence,
+    ProvenanceClass, StopReason,
 };
 use fs_convection::{CorrelationId, correlation_catalog};
 use fs_evidence::uncertainty::{
@@ -27,6 +27,7 @@ use fs_regime::{
     EnvelopeCoverage, OperatingPoint as RegimeOperatingPoint, OverrideAcknowledgement,
     RegimeAuditCard,
 };
+use fs_solver::krylov::ResidualClaim;
 
 fn source(id: &str) -> SourceProvenance {
     SourceProvenance::new("retained synthetic G0 source", id)
@@ -1258,4 +1259,168 @@ fn a_common_temperature_offset_leaves_the_margin_invariant() {
             < 1.0e-9,
         "a common offset must shift the mean by exactly that offset"
     );
+}
+
+/// Upstream-evidence mutation sweep. Each case degrades exactly one upstream
+/// evidence slice and asserts the producer refuses or demotes with a stable
+/// diagnostic, rather than emitting a QoI that reads like the undegraded one.
+#[test]
+fn degrading_any_upstream_evidence_slice_refuses_or_demotes() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+
+    // Baseline is admissible, so every refusal below is caused by the single
+    // mutation and not by the fixture.
+    let base = extract_fixture_qois(&mesh, &solution, &operating);
+
+    // (1) Material authority: a caller-declared conductivity has NO material
+    // provenance. It must not read like a receipt-backed solve.
+    let mut declared = solution.clone();
+    declared.report.material_provenance = ProvenanceClass::Declared;
+    declared.report.material_receipts = 0;
+    let declared_qois = extract_fixture_qois(&mesh, &declared, &operating);
+
+    assert!(
+        base.junction_maximum
+            .qoi
+            .evidence
+            .model
+            .cards
+            .iter()
+            .any(|card| card == "fs-conduction:material-matdb-receipts"),
+        "a receipt-backed solve must name its material authority"
+    );
+    assert!(
+        declared_qois
+            .junction_maximum
+            .qoi
+            .evidence
+            .model
+            .cards
+            .iter()
+            .any(|card| card == "fs-conduction:material-declared"),
+        "a declared-conductivity solve must name that it has no material receipt"
+    );
+    assert_ne!(
+        base.junction_maximum.qoi.evidence.model.cards,
+        declared_qois.junction_maximum.qoi.evidence.model.cards,
+        "material authority must be visible in the evidence, not only in the digest"
+    );
+
+    // The Parameters gap must name WHICH gap it is, in every temperature QoI.
+    for (label, base_qoi, declared_qoi) in [
+        (
+            "junction maximum",
+            &base.junction_maximum.qoi,
+            &declared_qois.junction_maximum.qoi,
+        ),
+        (
+            "surface mean",
+            &base.uniformity.mean_temperature,
+            &declared_qois.uniformity.mean_temperature,
+        ),
+        (
+            "thermal margin",
+            &base.thermal_margin,
+            &declared_qois.thermal_margin,
+        ),
+    ] {
+        let reason = |qoi: &fs_airflow::qoi::ThermalQoi<Temperature>| match qoi
+            .uncertainty
+            .term(EngineeringUncertaintyKind::Parameters)
+            .value()
+        {
+            TermValue::Unknown { reason } => reason.clone(),
+            other => panic!("{label} parameters term must stay Unknown, got {other:?}"),
+        };
+        assert_ne!(
+            reason(base_qoi),
+            reason(declared_qoi),
+            "{label} must distinguish declared material authority from receipt-backed"
+        );
+        assert!(
+            reason(declared_qoi).contains("caller-declared"),
+            "{label} must name the declared-authority gap, got: {}",
+            reason(declared_qoi)
+        );
+    }
+    // The margin reaches the correct reason only by inheriting it, which is
+    // the propagation seam doing real work rather than being decorative.
+
+    // (2) A claim of retained receipts with zero receipts is self-contradictory.
+    let mut contradictory = solution.clone();
+    contradictory.report.material_receipts = 0;
+    let (junction, surface, power) = declarations(&mesh);
+    let refusal = extract_thermal_qois(
+        &mesh,
+        &contradictory,
+        &operating,
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement_at(380.0, 1.25)),
+            discretization: None,
+        },
+    )
+    .expect_err("receipts claimed with none retained must refuse");
+    match &refusal {
+        QoiError::InvalidInput { field, detail } => {
+            assert_eq!(*field, "conduction report");
+            assert!(
+                detail.contains("zero"),
+                "diagnostic must name the contradiction, got: {detail}"
+            );
+        }
+        other => panic!("expected a typed refusal, got {other:?}"),
+    }
+
+    // (3) An algebraically unconverged linear solve is unsupported, not weaker.
+    let mut unconverged = solution.clone();
+    unconverged.report.linear.push(LinearSolveEvidence {
+        nonlinear_iteration: 1,
+        method: "pcg",
+        iterations: 500,
+        reported: ResidualClaim::RecursiveEstimate(1.0e-11),
+        true_relative_residual: 3.2e-2,
+        converged_true: false,
+        stall: None,
+    });
+    let refusal = extract_thermal_qois(
+        &mesh,
+        &unconverged,
+        &operating,
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement_at(380.0, 1.25)),
+            discretization: None,
+        },
+    )
+    .expect_err("a non-converged linear solve must refuse");
+    match &refusal {
+        QoiError::InvalidInput { field, detail } => {
+            assert_eq!(*field, "conduction report");
+            assert!(
+                detail.contains("without converging") && detail.contains("pcg"),
+                "diagnostic must name the failing solve, got: {detail}"
+            );
+        }
+        other => panic!("expected a typed refusal, got {other:?}"),
+    }
+
+    // A converged record with the same shape must still be admissible, which
+    // proves the guard keys on convergence and not merely on the vec length.
+    let mut converged = solution.clone();
+    converged.report.linear.push(LinearSolveEvidence {
+        nonlinear_iteration: 1,
+        method: "pcg",
+        iterations: 12,
+        reported: ResidualClaim::RecursiveEstimate(1.0e-11),
+        true_relative_residual: 1.0e-11,
+        converged_true: true,
+        stall: None,
+    });
+    extract_fixture_qois(&mesh, &converged, &operating);
 }
