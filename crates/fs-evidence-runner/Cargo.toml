@@ -1,0 +1,18 @@
+[package]
+name = "fs-evidence-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Pure, bounded Runner V2 evidence-schema validation and non-authoritative orchestration contracts."
+
+[package.metadata.frankensim]
+layer = "TOOL"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+
+[lints]
+workspace = true

@@ -145,6 +145,7 @@ members = [
     "crates/fs-airflow",
     "crates/fs-project",
     "crates/fs-cli",
+    "crates/fs-evidence-runner",
     "xtask",
 ]
 

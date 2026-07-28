@@ -845,6 +845,7 @@ dependencies = [
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",
+ "fs-solver",
 ]
 
 [[package]]
@@ -1200,6 +1201,13 @@ dependencies = [
  "fs-blake3",
  "fs-obs",
  "fs-propcheck",
+]
+
+[[package]]
+name = "fs-evidence-runner"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
 ]
 
 [[package]]
