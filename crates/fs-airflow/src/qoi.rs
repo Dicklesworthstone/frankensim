@@ -352,6 +352,64 @@ pub struct ThermalQoiDeclarations<'a> {
     pub discretization: Option<&'a DiscretizationReceipt>,
 }
 
+/// What a QoI's scalar MEANS, beyond the dimension its type already fixes.
+///
+/// A dimension decides whether two values are unit-compatible. It does not
+/// decide whether they mean the same thing, and kelvin is where that gap
+/// bites: a junction temperature and a thermal margin are both
+/// [`Temperature`] carrying the unit label `kelvin`, but only the margin may
+/// be negative, and only the absolute one has a meaningful conversion to a
+/// Celsius reading. Rendering a `-3 K` margin as `-276.15 degC` is not an
+/// error of rounding; it is an error of 273.15.
+///
+/// [`fs_qty::semantic::QuantityKind`] draws the same line one layer down and
+/// is the authority for the rule this enum enforces. It is not reused
+/// directly because it carries no mechanical-power variant — only
+/// `AcousticPower` — and fan input power is mechanical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThermalQoiKind {
+    /// Affine absolute thermodynamic temperature. Never negative.
+    AbsoluteTemperature,
+    /// Linear temperature interval.
+    ///
+    /// May be negative, and the negative case is load-bearing: a negative
+    /// thermal margin is the design missing its requirement, which is the
+    /// most decision-relevant scalar this producer emits.
+    TemperatureDifference,
+    /// Enclosure pressure drop at the solved operating point.
+    Pressure,
+    /// Mechanical fan input power.
+    Power,
+}
+
+impl ThermalQoiKind {
+    /// Whether a negative scalar is meaningful for this kind.
+    ///
+    /// This mirrors the domain rule `fs_qty::semantic` applies to
+    /// `AbsoluteTemperature`, so the discriminant is enforced rather than
+    /// merely recorded.
+    #[must_use]
+    pub const fn admits_negative(self) -> bool {
+        match self {
+            ThermalQoiKind::TemperatureDifference => true,
+            ThermalQoiKind::AbsoluteTemperature
+            | ThermalQoiKind::Pressure
+            | ThermalQoiKind::Power => false,
+        }
+    }
+
+    /// Stable machine-readable discriminant for receipts and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ThermalQoiKind::AbsoluteTemperature => "absolute-temperature",
+            ThermalQoiKind::TemperatureDifference => "temperature-difference",
+            ThermalQoiKind::Pressure => "pressure",
+            ThermalQoiKind::Power => "power",
+        }
+    }
+}
+
 /// One typed QoI with its legacy evidence carrier and rich engineering budget.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalQoi<T> {
@@ -359,6 +417,9 @@ pub struct ThermalQoi<T> {
     pub evidence: Evidence<T>,
     /// Exactly-eight-source engineering uncertainty budget.
     pub uncertainty: EngineeringUncertaintyBudget,
+    /// What this scalar means beyond its unit, so a consumer never has to
+    /// infer absolute-versus-interval semantics from the field name.
+    pub kind: ThermalQoiKind,
 }
 
 /// Deterministically selected maximum and its canonical vertex witness.
@@ -770,12 +831,17 @@ pub fn extract_thermal_qois(
         maximum_identity,
         &maximum_known,
     )?;
-    let maximum_evidence =
-        no_claim_temperature(maximum, temperature_model.clone(), maximum_identity);
+    let maximum_evidence = no_claim_temperature(
+        ThermalQoiKind::AbsoluteTemperature,
+        maximum,
+        temperature_model.clone(),
+        maximum_identity,
+    )?;
     let junction_maximum = JunctionMaximum {
         qoi: ThermalQoi {
             evidence: maximum_evidence,
             uncertainty: maximum_budget,
+            kind: ThermalQoiKind::AbsoluteTemperature,
         },
         vertex: maximum_vertex,
     };
@@ -810,6 +876,7 @@ pub fn extract_thermal_qois(
                 operating_id,
             )],
         )?,
+        kind: ThermalQoiKind::Pressure,
     };
 
     let fan_power_qoi = fan_power_qoi(operating_point, fan_power, operating_id, fan_id)?;
@@ -838,10 +905,12 @@ pub fn extract_thermal_qois(
     // term of its own: it is exact by declaration, not a measured quantity.
     let thermal_margin = ThermalQoi {
         evidence: no_claim_temperature(
+            ThermalQoiKind::TemperatureDifference,
             Temperature::new(margin),
             temperature_model,
             margin_identity,
-        ),
+        )?,
+        kind: ThermalQoiKind::TemperatureDifference,
         uncertainty: propagate_budget(
             &junction_maximum.qoi.uncertainty,
             "thermal-margin",
@@ -884,39 +953,49 @@ fn surface_uniformity(
     let std_identity = qoi_identity("surface-face-mean-std", &[solution_id], &surface_region_id);
     let known = std::slice::from_ref(parameter_term);
     Ok(SurfaceUniformity {
+        // The mean is an absolute temperature; the spread and the dispersion
+        // of face means are intervals between two of them. All three share
+        // `Temperature` and the label `kelvin`, which is exactly why the
+        // distinction has to be carried rather than inferred.
         mean_temperature: ThermalQoi {
             evidence: no_claim_temperature(
+                ThermalQoiKind::AbsoluteTemperature,
                 Temperature::new(surface.mean),
                 temperature_model.clone(),
                 mean_identity,
-            ),
+            )?,
             uncertainty: unknown_budget("thermal-surface-mean", "kelvin", mean_identity, known)?,
+            kind: ThermalQoiKind::AbsoluteTemperature,
         },
         spread: ThermalQoi {
             evidence: no_claim_temperature(
+                ThermalQoiKind::TemperatureDifference,
                 Temperature::new(surface.spread),
                 temperature_model.clone(),
                 spread_identity,
-            ),
+            )?,
             uncertainty: unknown_budget(
                 "thermal-surface-spread",
                 "kelvin",
                 spread_identity,
                 known,
             )?,
+            kind: ThermalQoiKind::TemperatureDifference,
         },
         face_mean_standard_deviation: ThermalQoi {
             evidence: no_claim_temperature(
+                ThermalQoiKind::TemperatureDifference,
                 Temperature::new(surface.standard_deviation),
                 temperature_model.clone(),
                 std_identity,
-            ),
+            )?,
             uncertainty: unknown_budget(
                 "thermal-surface-face-mean-std",
                 "kelvin",
                 std_identity,
                 known,
             )?,
+            kind: ThermalQoiKind::TemperatureDifference,
         },
     })
 }
@@ -1011,15 +1090,34 @@ fn fan_power_qoi(
     Ok(ThermalQoi {
         evidence,
         uncertainty,
+        kind: ThermalQoiKind::Power,
     })
 }
 
+/// Build a temperature QoI's evidence under its declared semantic kind.
+///
+/// The kind is enforced here rather than merely recorded: an absolute
+/// thermodynamic temperature below zero kelvin is not a physical solve
+/// result, so it refuses instead of travelling downstream wearing a unit
+/// label that makes it look ordinary. A temperature difference takes the same
+/// path and is deliberately unconstrained in sign.
 fn no_claim_temperature(
+    kind: ThermalQoiKind,
     value: Temperature,
     model: ModelEvidence,
     identity: ContentHash,
-) -> Evidence<Temperature> {
-    Evidence {
+) -> Result<Evidence<Temperature>, QoiError> {
+    if !kind.admits_negative() && value.value() < 0.0 {
+        return Err(QoiError::invalid(
+            "temperature quantity kind",
+            format!(
+                "a QoI declared `{}` carries {} K, but an absolute thermodynamic temperature is never negative",
+                kind.as_str(),
+                value.value()
+            ),
+        ));
+    }
+    Ok(Evidence {
         value,
         qoi: value.value(),
         numerical: NumericalCertificate::no_claim(),
@@ -1028,7 +1126,7 @@ fn no_claim_temperature(
         sensitivity: SensitivitySummary::default(),
         provenance: ProvenanceHash::of_bytes(identity.as_bytes()),
         adjoint_ref: None,
-    }
+    })
 }
 
 /// The card naming where this solve's conductivity numbers came from.

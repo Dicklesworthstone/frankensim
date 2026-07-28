@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use fs_airflow::qoi::{
     DiscretizationReceipt, FanPowerSpec, JunctionRegion, QoiError, SafetyFactorAuthority,
     SurfaceRegion, ThermalOutputAuditError, ThermalQoiCardUse, ThermalQoiDeclarations,
-    ThermalRequirement, extract_thermal_qois,
+    ThermalQoiKind, ThermalRequirement, extract_thermal_qois,
 };
 use fs_airflow::{
     AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
@@ -358,6 +358,123 @@ fn every_reference_qoi_emits_an_eight_term_budget_without_laundering_unknowns() 
             .value(),
         TermValue::IntervalBound { .. }
     ));
+}
+
+#[test]
+fn every_emitted_qoi_declares_what_its_scalar_means_beyond_its_unit() {
+    let (qois, _) = extract_fixture_run();
+
+    assert_eq!(
+        qois.junction_maximum.qoi.kind,
+        ThermalQoiKind::AbsoluteTemperature
+    );
+    assert_eq!(
+        qois.uniformity.mean_temperature.kind,
+        ThermalQoiKind::AbsoluteTemperature
+    );
+    assert_eq!(
+        qois.uniformity.spread.kind,
+        ThermalQoiKind::TemperatureDifference
+    );
+    assert_eq!(
+        qois.uniformity.face_mean_standard_deviation.kind,
+        ThermalQoiKind::TemperatureDifference
+    );
+    assert_eq!(
+        qois.thermal_margin.kind,
+        ThermalQoiKind::TemperatureDifference
+    );
+    assert_eq!(qois.pressure_drop.kind, ThermalQoiKind::Pressure);
+    assert_eq!(qois.fan_power.kind, ThermalQoiKind::Power);
+
+    // This is the ambiguity the discriminant exists to remove: all five
+    // temperature QoIs are `Temperature` carrying the unit label `kelvin`, so
+    // unit and Rust type together still cannot separate the two absolute ones
+    // from the three intervals.
+    for budget in [
+        &qois.junction_maximum.qoi.uncertainty,
+        &qois.uniformity.mean_temperature.uncertainty,
+        &qois.uniformity.spread.uncertainty,
+        &qois.uniformity.face_mean_standard_deviation.uncertainty,
+        &qois.thermal_margin.uncertainty,
+    ] {
+        assert_eq!(budget.unit(), "kelvin");
+    }
+}
+
+#[test]
+fn a_negative_thermal_margin_is_an_admissible_interval_never_an_absolute_temperature() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    // The fixture's junction maximum is 360 K, so a 350 K effective limit is
+    // the design MISSING its requirement -- the case the product exists to
+    // report, and the one where absolute/interval confusion is most costly.
+    let qois = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(350.0, 1.0),
+        None,
+    );
+
+    let margin = qois.thermal_margin.evidence.value.value();
+    assert_eq!(margin, -10.0, "the fixture must actually violate its limit");
+    assert_eq!(
+        qois.thermal_margin.kind,
+        ThermalQoiKind::TemperatureDifference
+    );
+    assert!(qois.thermal_margin.kind.admits_negative());
+    // The same scalar under the other kind is inadmissible, which is what
+    // makes the discriminant load-bearing rather than decorative.
+    assert!(!ThermalQoiKind::AbsoluteTemperature.admits_negative());
+    assert_eq!(
+        ThermalQoiKind::TemperatureDifference.as_str(),
+        "temperature-difference"
+    );
+}
+
+#[test]
+fn an_absolute_temperature_below_zero_kelvin_refuses_instead_of_travelling_downstream() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    let (junction, surface, power) = declarations(&mesh);
+    let requirement = requirement_at(380.0, 1.25);
+
+    let below_zero = linear_in_z(&mesh, &solution, -50.0, 0.0);
+    let error = extract_thermal_qois(
+        &mesh,
+        &below_zero,
+        &operating,
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
+    )
+    .expect_err("a negative absolute temperature is not a physical solve result");
+    match error {
+        QoiError::InvalidInput { field, detail } => {
+            assert_eq!(field, "temperature quantity kind");
+            assert!(
+                detail.contains("absolute-temperature"),
+                "the refusal names the kind it enforced: {detail}"
+            );
+        }
+        other => panic!("expected a quantity-kind refusal, got {other:?}"),
+    }
+
+    // Positive control: the same CONSTANT field moved above zero admits, so
+    // the refusal keys on the sign and not on the field being uniform.
+    let above_zero = linear_in_z(&mesh, &solution, 300.0, 0.0);
+    let admitted = extract_fixture_qois(&mesh, &above_zero, &operating);
+    assert_eq!(
+        admitted.junction_maximum.qoi.evidence.value.value(),
+        300.0,
+        "the control must reach the same code path and pass it"
+    );
+    assert_eq!(admitted.uniformity.spread.evidence.value.value(), 0.0);
 }
 
 #[test]

@@ -136,6 +136,22 @@ CHT ladder's correlation-rung transfer.
   solver/algebraic, discretization, geometry, parameters, boundary conditions,
   model form, and measurement. A missing propagation theorem/receipt is a
   named `Unknown`, never `Negligible` or zero.
+- Every emitted `ThermalQoi<T>` also carries a `ThermalQoiKind` stating what its
+  scalar MEANS beyond its dimension. Five of the seven emitted records are
+  `Temperature` labelled `kelvin`, but the junction maximum and surface mean are
+  `AbsoluteTemperature` while the spread, face-mean standard deviation, and
+  thermal margin are `TemperatureDifference`. Unit and Rust type together cannot
+  separate them, so a consumer must read this discriminant rather than infer
+  semantics from a field name: only an interval may be negative, and only an
+  absolute value has a meaningful Celsius reading. `fs_qty::semantic::QuantityKind`
+  is the authority for this distinction; it is not reused directly because it
+  carries no mechanical-power variant, and fan input power is mechanical.
+- The kind is enforced, not merely recorded: a QoI whose kind forbids a negative
+  scalar refuses if one is produced, so a below-absolute-zero junction maximum
+  fails closed instead of travelling downstream wearing an ordinary unit label.
+  A negative `thermal_margin` is admitted and is load-bearing — it is the design
+  missing its requirement. The final-envelope audit demotes evidence but never
+  rewrites a kind: what a scalar means is not a function of its authority.
 - `ThermalQoiSet::audit_operating_envelope` is the mandatory final E05.10
   product gate. It requires exactly one consumed-card declaration for each of
   the seven emitted records, derives each incoming color from the actual
