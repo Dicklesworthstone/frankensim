@@ -6,11 +6,11 @@
 //! scripted clock and caller-owned cancellation gate.
 
 use fs_cli::{
-    CompletedStage, GeometryImportLimits, GeometryImportRun, MAX_SOLVE_VISIBLE_OP_IDS,
-    RawGeometryLibrary, SOLVE_DRIVER_VERSION, SolveCancellationPlan, SolveDriverState,
-    SolveEvidencePhase, SolveRefusal, SolveRunId, SolveRunStatus, SolveStage,
-    import_project_geometry, resume_solve, resume_solve_with_cancellation_plan, run_solve,
-    run_solve_with_cancellation_plan,
+    CardPackKind, CardPackSet, CompletedStage, GeometryImportLimits, GeometryImportRun,
+    MAX_SOLVE_VISIBLE_OP_IDS, RawCardPack, RawGeometryLibrary, SOLVE_DRIVER_VERSION,
+    SolveCancellationPlan, SolveDriverState, SolveEvidencePhase, SolveRefusal, SolveRunId,
+    SolveRunStatus, SolveStage, import_project_geometry, resume_solve,
+    resume_solve_with_cancellation_plan, run_solve, run_solve_with_cancellation_plan,
 };
 use fs_exec::solver::LegacySnapshotV1Adapter;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -21,10 +21,10 @@ use fs_ledger::{
 };
 use fs_project::{
     Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl, Envelope,
-    GeometryArtifact, GeometryAssignment, HalfSpaceSide, MeshSelector, Metadata, OutputRequest,
-    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
-    Versions, print_sexpr,
+    GeometryArtifact, GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata,
+    OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
+    ThermalLimit, UnitsDoctrine, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
 
@@ -79,6 +79,109 @@ fn storage_row_spanning_tetra_stl() -> Vec<u8> {
     padded.resize(padded.len() + STORAGE_CHUNK_LEN + 17, b'\n');
     padded.extend_from_slice(&base[split..]);
     padded
+}
+
+const CARD_FIXTURE_DOMAIN: &str = "org.frankensim.fs-cli.tests.solve-card-fixture.v1";
+const CONDUCTIVITY_DIMS: fs_qty::Dims = fs_qty::Dims([1, 1, -3, -1, 0, 0]);
+
+/// Build one canonical `FSMCDPK\0` payload for the fixture project's region.
+///
+/// The claim's validity domain deliberately covers the fixture's admitted
+/// binding range at both endpoints; a narrower domain is what
+/// `project-binding-domain-uncovered` exists to catch.
+fn material_pack_bytes(chemistry: &str, pack_id: &str) -> Vec<u8> {
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
+        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
+        UncertaintyModel,
+    };
+    let provenance = || Provenance {
+        source: "solve fixture conductivity table".to_string(),
+        license: "CC-BY-4.0; redistribution permitted with attribution".to_string(),
+        artifact: Some(fs_blake3::hash_domain(
+            CARD_FIXTURE_DOMAIN,
+            b"fixture-table",
+        )),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "solve fixture coupon".to_string(),
+            method: "solve fixture campaign".to_string(),
+            artifact: fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"raw-observation"),
+            caveats: "fixture value; not a seed-dataset authority".to_string(),
+            provenance: provenance(),
+        })
+        .expect("licensed observation inserts");
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
+            value: PropertyValue::Scalar {
+                value: 167.0,
+                dims: CONDUCTIVITY_DIMS,
+            },
+            validity: fs_evidence::ValidityDomain::unconstrained().with("T", 200.0, 450.0),
+            uncertainty: UncertaintyModel::HalfWidth {
+                half_width: 3.0,
+                confidence: 0.95,
+            },
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .expect("conductivity claim inserts");
+    let claims_pack = NormalizedPack::new(
+        pack_id,
+        "frankensim-material-card-pack-compiler-v1",
+        fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"source-envelope"),
+        "CC-BY-4.0: redistribution permitted with attribution",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("claim pack admits");
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: chemistry.to_string(),
+            phase: "wrought".to_string(),
+            process: "T6".to_string(),
+            revision: 0,
+        },
+        claims_pack,
+    )
+    .expect("material-card pack admits")
+    .to_bytes()
+}
+
+fn fixture_pack_bytes() -> Vec<u8> {
+    material_pack_bytes("AA6061", "solve-fixture-pack")
+}
+
+fn raw_pack(kind: CardPackKind, source: &str, bytes: Vec<u8>) -> RawCardPack {
+    RawCardPack {
+        kind,
+        source: source.to_string(),
+        bytes,
+        expect: None,
+    }
+}
+
+/// The fixture project's admitted card-pack set.
+fn fixture_cards() -> CardPackSet {
+    CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/aa6061.fsmcdpk",
+        fixture_pack_bytes(),
+    )])
+    .expect("the fixture pack admits")
+}
+
+/// The card hash the fixture project's material binding must name, and the
+/// exact material-state rendering its `:state` field must match.
+fn fixture_card_identity() -> (String, String) {
+    let cards = fixture_cards();
+    let pack = &cards.materials()[0];
+    (pack.card().to_hex(), pack.identity().to_string())
 }
 
 fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -> ProjectSpec {
@@ -146,7 +249,17 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
                 expect_id: None,
             },
         ]),
-        materials: Some(Vec::new()),
+        materials: Some(vec![MaterialBinding {
+            region: "air".to_string(),
+            card: fixture_card_identity().0,
+            claim: None,
+            state: fixture_card_identity().1,
+            // Covers the declared envelope and every thermal limit, which is
+            // what `project-material-envelope-uncovered` requires.
+            temp_lo: kelvin(233.15),
+            temp_hi: kelvin(398.15),
+            source: "solve-fixture".to_string(),
+        }]),
         interface_cards: Some(Vec::new()),
         perfect_contacts: None,
         power: Some(vec![PowerDissipation {
@@ -432,8 +545,15 @@ fn run_to_gap(ledger: &Ledger, decoded: &DecodedProject) -> (SolveRefusal, Vec<S
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
     let mut progress = Vec::new();
-    let refusal = run_solve(ledger, &gate, &mut clock, decoded, &mut progress)
-        .expect_err("slice 1 refuses at the first stage gap");
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("slice 1 refuses at the first stage gap");
     (refusal, progress)
 }
 
@@ -441,12 +561,25 @@ fn run_to_one_stage_prefix(
     ledger: &Ledger,
     decoded: &DecodedProject,
 ) -> (SolveRefusal, Vec<String>) {
+    run_to_stage_prefix(ledger, decoded, 1)
+}
+
+/// Stop a fresh run after exactly `stages` durable stages.
+///
+/// The driver calls the clock twice per stage (start and finish), so
+/// requesting the gate on call `2 * stages` lands after that stage published
+/// and before the next stage's gate poll.
+fn run_to_stage_prefix(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+    stages: u64,
+) -> (SolveRefusal, Vec<String>) {
     let gate = CancelGate::new_clock_free();
     let gate_ref = &gate;
     let mut calls = 0u64;
     let mut clock = move || {
         calls += 1;
-        if calls == 2 {
+        if calls == 2 * stages {
             gate_ref.request();
         }
         #[allow(clippy::cast_precision_loss)]
@@ -455,8 +588,15 @@ fn run_to_one_stage_prefix(
         }
     };
     let mut progress = Vec::new();
-    let refusal = run_solve(ledger, &gate, &mut clock, decoded, &mut progress)
-        .expect_err("caller gate stops after the first durable stage");
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("caller gate stops after the first durable stage");
     assert_eq!(refusal.code, "cli-solve-cancelled");
     (refusal, progress)
 }
@@ -497,7 +637,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 2,
+        SOLVE_DRIVER_VERSION, 3,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -505,15 +645,15 @@ fn g0_run_identity_is_deterministic_and_input_sensitive() {
     let base = decode(&fixture_project(7, &bytes));
     let again = decode(&fixture_project(7, &bytes));
     assert_eq!(
-        SolveRunId::derive(&base).to_hex(),
-        SolveRunId::derive(&again).to_hex(),
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&again, &fixture_cards()).to_hex(),
         "identical projects derive identical run ids"
     );
 
     let seed_moved = decode(&fixture_project(8, &bytes));
     assert_ne!(
-        SolveRunId::derive(&base).to_hex(),
-        SolveRunId::derive(&seed_moved).to_hex(),
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&seed_moved, &fixture_cards()).to_hex(),
         "the RNG root seed is identity-bearing"
     );
 
@@ -525,9 +665,31 @@ fn g0_run_identity_is_deterministic_and_input_sensitive() {
         .workspace = "22".repeat(20);
     let workspace_moved = decode(&workspace_moved_spec);
     assert_ne!(
-        SolveRunId::derive(&base).to_hex(),
-        SolveRunId::derive(&workspace_moved).to_hex(),
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&workspace_moved, &fixture_cards()).to_hex(),
         "the declared workspace version is identity-bearing"
+    );
+
+    // The admitted card packs are identity-bearing, but only by content:
+    // supplying the same pack from a different path, or in a different flag
+    // order, must not move the run.
+    let reordered = CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "some/other/path/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+    ])
+    .expect("the repeated pack is idempotent");
+    assert_eq!(
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&base, &reordered).to_hex(),
+        "caller paths and flag order are not identity-bearing"
     );
 }
 
@@ -542,19 +704,25 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap");
-    assert_eq!(refusal.stage, Some("material-resolve"));
-    assert_eq!(refusal.dependency, Some("frankensim-hp7tb"));
+    assert_eq!(refusal.stage, Some("flow-network"));
+    assert_eq!(refusal.dependency, Some("frankensim-frn2i"));
     assert!(refusal.recorded_op.is_some(), "the gap refusal is ledgered");
     let run = refusal.run.clone().expect("run id derived");
-    assert_eq!(run, SolveRunId::derive(&decoded).to_hex());
+    assert_eq!(run, SolveRunId::derive(&decoded, &fixture_cards()).to_hex());
 
-    // Two completed stage ops plus one recorded refusal op landed.
+    // Three completed stage ops plus one recorded refusal op landed.
     let ops_after_solve = ledger.table_count("ops").expect("count");
-    assert_eq!(ops_after_solve, ops_after_import + 3);
+    assert_eq!(ops_after_solve, ops_after_import + 4);
 
-    // Both real stages reported progress.
+    // Every executing stage reported progress.
     assert!(progress.iter().any(|line| line.contains("import-verify")));
     assert!(progress.iter().any(|line| line.contains("\"assign\"")));
+    assert!(
+        progress
+            .iter()
+            .any(|line| line.contains("material-resolve")),
+        "material-resolve now executes rather than refusing"
+    );
 
     // Every solve op carries the run identity as its session.
     let run_id = SolveRunId::parse_hex(&run).expect("hex");
@@ -570,7 +738,232 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
                 .is_some_and(|row| row.session.as_deref() == Some(run_id.as_bytes().as_slice()))
         })
         .collect();
-    assert_eq!(solve_ops.len(), 3, "two stages plus the recorded refusal");
+    assert_eq!(solve_ops.len(), 4, "three stages plus the recorded refusal");
+}
+
+/// The `material-resolve` stage's own evidence: the reference project's
+/// declared binding resolves against a real pack file, the receipt names the
+/// selected claim and its replayable usage receipts, and those receipts are
+/// retained as ledger artifacts.
+#[test]
+fn g0_material_resolve_binds_the_reference_project_from_a_real_pack() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (refusal, _) = run_to_gap(&ledger, &decoded);
+    assert_eq!(
+        refusal.stage,
+        Some("flow-network"),
+        "material-resolve passed"
+    );
+    let run = refusal.run.clone().expect("run");
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 3, "three stages retained a receipt");
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[2])).expect("receipt is utf-8");
+
+    assert!(receipt.contains("\"schema\":\"frankensim.cli.solve-material-resolve-receipt.v1\""));
+    assert_balanced_json(&receipt);
+    let (card_hex, state) = fixture_card_identity();
+    assert!(
+        receipt.contains(&card_hex),
+        "the receipt names the bound card"
+    );
+    assert!(
+        receipt.contains(&state),
+        "the receipt names the card's material-state identity"
+    );
+    assert!(receipt.contains("\"target_kind\":\"region\""));
+    assert!(receipt.contains("\"target\":\"air\""));
+    assert!(receipt.contains("\"property\":\"thermal-conductivity\""));
+    assert!(
+        receipt.contains("\"value_lo\":167"),
+        "resolved conductivity"
+    );
+    assert!(
+        receipt.contains("\"unstated_uncertainty\":false"),
+        "the fixture claim states its uncertainty"
+    );
+    assert!(
+        receipt.contains("\"kind\":\"half-width\""),
+        "the claim's stated uncertainty travels verbatim"
+    );
+    assert!(
+        !receipt.contains("fixtures/aa6061.fsmcdpk"),
+        "caller paths must never reach a receipt"
+    );
+    assert!(
+        receipt.contains(&fixture_cards().root().to_hex()),
+        "the receipt pins the canonical pack-set root"
+    );
+
+    // The claim-usage receipts are retained, not merely hashed: two endpoints
+    // of one property on one binding.
+    let usages = artifacts_of_kind(&ledger, "solve-material-usage-receipt");
+    assert_eq!(usages, 2, "lo and hi endpoint usage receipts are retained");
+
+    // The packs themselves are retained against the run's first operation.
+    assert_eq!(artifacts_of_kind(&ledger, "solve-material-card-pack"), 1);
+}
+
+/// A different pack set is a different run, and a project whose binding names
+/// a card no pack supplies refuses with the binding layer's own code.
+#[test]
+fn g3_pack_set_identity_and_unknown_cards_fail_closed() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let other = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/other.fsmcdpk",
+        material_pack_bytes("Cu-OFE", "solve-fixture-other"),
+    )])
+    .expect("admits");
+    assert_ne!(
+        SolveRunId::derive(&decoded, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&decoded, &other).to_hex(),
+        "the admitted pack set is part of run identity"
+    );
+    assert_ne!(
+        SolveRunId::derive(&decoded, &CardPackSet::empty()).to_hex(),
+        SolveRunId::derive(&decoded, &fixture_cards()).to_hex(),
+    );
+
+    // Solving with a pack set that does not supply the declared card refuses
+    // with the binding layer's own diagnostic, at the material-resolve stage.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, tetra_stl());
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &other, &mut progress)
+        .expect_err("an unsupplied card cannot resolve");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert_eq!(refusal.code, "project-material-card-unknown");
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the binding refusal is ledgered like any other stage refusal"
+    );
+}
+
+/// Cancelling before `material-resolve` and resuming must recover the packs
+/// from the ledger — the resume grammar has no pack flags at all — and land
+/// on the identical stage evidence.
+#[test]
+fn g4_resume_recovers_card_packs_and_reproduces_material_evidence() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (cancelled, _) = run_to_one_stage_prefix(&ledger, &decoded);
+    let run = cancelled.run.clone().expect("run id");
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("resume runs the remaining prefix and stops at the first gap");
+    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(
+        resumed.stage,
+        Some("flow-network"),
+        "resume executed material-resolve from ledger-recovered packs"
+    );
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 3);
+    let resumed_receipt = artifact_bytes(&ledger, &receipts[2]);
+
+    // An uninterrupted run of the same project and packs must produce the
+    // byte-identical material-resolve receipt.
+    let fresh_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&fresh_ledger, &spec, tetra_stl());
+    let (fresh_refusal, _) = run_to_gap(&fresh_ledger, &decoded);
+    let fresh_run = fresh_refusal.run.clone().expect("run");
+    let fresh_receipts = stage_receipt_hashes(&fresh_ledger, &fresh_run);
+    let fresh_receipt = artifact_bytes(&fresh_ledger, &fresh_receipts[2]);
+    assert_eq!(
+        resumed_receipt, fresh_receipt,
+        "cancel/resume and uninterrupted runs share one semantic stage root"
+    );
+}
+
+fn artifacts_of_kind(ledger: &Ledger, kind: &str) -> usize {
+    let ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    let mut seen = std::collections::BTreeSet::new();
+    for id in ids {
+        let edges = ledger.op_artifact_edges_bounded(id, 1024).expect("edges");
+        for edge in &edges.edges {
+            if ledger
+                .artifact_info(&edge.artifact)
+                .expect("info")
+                .is_some_and(|info| info.kind == kind)
+            {
+                seen.insert(edge.artifact.to_hex());
+            }
+        }
+    }
+    seen.len()
+}
+
+/// Structural guard on a hand-built receipt: exactly one top-level object,
+/// balanced brackets outside strings, and no unterminated string. A receipt is
+/// assembled by `format!`, so a mis-escaped brace is a live defect class that
+/// substring assertions alone would not catch.
+fn assert_balanced_json(text: &str) {
+    let bytes = text.as_bytes();
+    let (mut depth, mut in_string, mut escaped, mut closed_top) = (0i32, false, false, false);
+    for (index, byte) in bytes.iter().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                assert!(!closed_top, "content after the top-level object at {index}");
+                depth += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                assert!(depth >= 0, "unbalanced close at byte {index}");
+                if depth == 0 {
+                    closed_top = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(!in_string, "receipt ends inside a string literal");
+    assert_eq!(depth, 0, "receipt brackets are unbalanced");
+    assert!(closed_top, "receipt has no closed top-level object");
+}
+
+/// Materialize one retained artifact by its hex content address.
+fn artifact_bytes(ledger: &Ledger, hex: &str) -> Vec<u8> {
+    let hash = fs_ledger::ContentHash::from_hex(hex).expect("hex content address");
+    let mut bytes = Vec::new();
+    ledger
+        .read_artifact_chunks_bounded(&hash, 4 * 1024 * 1024, &mut |tile| {
+            bytes.extend_from_slice(tile);
+        })
+        .expect("read")
+        .expect("artifact present");
+    bytes
 }
 
 #[test]
@@ -597,8 +990,15 @@ fn run_to_gap_expect_code(
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
     let mut progress = Vec::new();
-    let refusal =
-        run_solve(ledger, &gate, &mut clock, decoded, &mut progress).expect_err("refusal expected");
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("refusal expected");
     assert_eq!(refusal.code, code, "{refusal:?}");
     (refusal, progress)
 }
@@ -631,8 +1031,15 @@ fn g4_a_precancelled_solve_publishes_nothing() {
     gate.request();
     let mut clock = benign_clock();
     let mut progress = Vec::new();
-    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &mut progress)
-        .expect_err("pre-cancelled run refuses");
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("pre-cancelled run refuses");
     assert_eq!(refusal.code, "cli-solve-cancelled");
     assert!(refusal.recorded_op.is_none());
 
@@ -710,11 +1117,19 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
         (SolveEvidencePhase::ReceiptDerivation, None, 0),
         (SolveEvidencePhase::ReceiptDerivation, None, 1),
         (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 0),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 1),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 2),
+        (
+            SolveEvidencePhase::MaterialBindingResolution,
+            None,
+            u64::MAX,
+        ),
         (SolveEvidencePhase::PrePublication, None, 0),
     ];
     assert_eq!(
         phases.len(),
-        61,
+        65,
         "every fresh-run solve-owned evidence phase, canonical-render entry/completion/tile boundary, duplicate-set entry/face/name traversal, and final pre-publication boundary is listed"
     );
 
@@ -723,8 +1138,12 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
     let decoded = decode(&spec);
     let prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
     import_fixture(&prefix_ledger, &spec, bytes.clone());
-    let _ = run_to_one_stage_prefix(&prefix_ledger, &decoded);
+    let _ = run_to_stage_prefix(&prefix_ledger, &decoded, 1);
     let one_stage_prefix = solve_publication_counts(&prefix_ledger);
+    let two_prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&two_prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_stage_prefix(&two_prefix_ledger, &decoded, 2);
+    let two_stage_prefix = solve_publication_counts(&two_prefix_ledger);
     for (phase, source_index, after_units) in phases {
         let ledger = Ledger::open(":memory:").expect("ledger");
         import_fixture(&ledger, &spec, bytes.clone());
@@ -739,6 +1158,7 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
             &gate,
             &mut clock,
             &decoded,
+            &fixture_cards(),
             &mut progress,
             &plan,
         )
@@ -748,8 +1168,16 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
             "phase {phase:?} reached its planned checkpoint"
         );
         assert_eq!(refusal.code, "cli-solve-cancelled", "phase {phase:?}");
-        let has_durable_prefix =
-            phase == SolveEvidencePhase::AssignmentDerivation && source_index.is_none();
+        // How many stages already published when this phase runs. The
+        // assignment phase also re-attests retained reports during
+        // import-verify, which is why only its source-index-free spelling
+        // sits inside the assign stage.
+        let durable_stages = match phase {
+            SolveEvidencePhase::MaterialBindingResolution => 2,
+            SolveEvidencePhase::AssignmentDerivation if source_index.is_none() => 1,
+            _ => 0,
+        };
+        let has_durable_prefix = durable_stages > 0;
         if has_durable_prefix {
             assert!(
                 refusal.fix.contains("--resume"),
@@ -772,15 +1200,15 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
         assert!(refusal.recorded_op.is_none(), "phase {phase:?}");
         assert_eq!(
             progress.len(),
-            usize::from(has_durable_prefix),
+            durable_stages,
             "phase {phase:?} reports exactly its durable prefix"
         );
         assert_eq!(
             solve_publication_counts(&ledger),
-            if has_durable_prefix {
-                one_stage_prefix
-            } else {
-                before
+            match durable_stages {
+                0 => before,
+                1 => one_stage_prefix,
+                _ => two_stage_prefix,
             },
             "phase {phase:?} changes no publication beyond its durable prefix"
         );
@@ -812,6 +1240,7 @@ fn g4_chunked_raw_evidence_stops_before_a_later_storage_row_and_publishes_nothin
         &gate,
         &mut clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
         &plan,
     )
@@ -889,6 +1318,7 @@ fn g4_exact_cap_promotion_receipt_stops_at_the_first_controlled_tile() {
         &gate,
         &mut clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
         &plan,
     )
@@ -935,6 +1365,7 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
         &gate,
         &mut cancelling_clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
     )
     .expect_err("cancellation refuses");
@@ -957,14 +1388,14 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
     )
     .expect_err("resume still refuses at the gap");
     assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("material-resolve"));
-    assert_eq!(resumed.dependency, Some("frankensim-hp7tb"));
+    assert_eq!(resumed.stage, Some("flow-network"));
+    assert_eq!(resumed.dependency, Some("frankensim-frn2i"));
 
     // The interrupted-then-resumed evidence equals the uninterrupted run's:
     // identical stage receipt artifact hashes, in order.
     let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
     let resumed_receipts = stage_receipt_hashes(&interrupted, &run);
-    assert_eq!(reference_receipts.len(), 2);
+    assert_eq!(reference_receipts.len(), 3);
     assert_eq!(
         reference_receipts, resumed_receipts,
         "stage evidence is bit-identical across interruption"
@@ -1090,10 +1521,14 @@ fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
         (SolveEvidencePhase::ReceiptDerivation, None, 0),
         (SolveEvidencePhase::ReceiptDerivation, None, 1),
         (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+        (SolveEvidencePhase::ResumeCardPackRead, Some(0), 0),
+        (SolveEvidencePhase::ResumeCardPackRead, Some(0), 1),
+        (SolveEvidencePhase::ResumeCardPackDecode, Some(0), 0),
+        (SolveEvidencePhase::ResumeCardPackDecode, Some(0), 1),
     ];
     assert_eq!(
         phases.len(),
-        79,
+        83,
         "resume re-attestation lists every reachable read, UTF-8, opaque parse entry/completion, canonical-render entry/completion/tile, duplicate-set traversal, receipt entry/completion/tile, and canonical PLY phase"
     );
     for (phase, source_index, after_units) in phases {
@@ -1133,10 +1568,10 @@ fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
     let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut progress)
         .expect_err("unchanged durable prefix still reaches the known gap");
     assert_eq!(retry.code, "cli-solve-stage-gap");
-    assert_eq!(retry.stage, Some("material-resolve"));
+    assert_eq!(retry.stage, Some("flow-network"));
     assert_eq!(
         stage_receipt_hashes(&ledger, &run).len(),
-        2,
+        3,
         "the normal retry preserves the complete durable stage prefix"
     );
 }
@@ -1237,7 +1672,7 @@ fn g5_independent_fresh_runs_retain_identical_stage_evidence() {
         let run = refusal.run.clone().expect("run id");
         all_receipts.push(stage_receipt_hashes(&ledger, &run));
     }
-    assert_eq!(all_receipts[0].len(), 2);
+    assert_eq!(all_receipts[0].len(), 3);
     assert_eq!(
         all_receipts[0], all_receipts[1],
         "replay reproduces identical content identities"
@@ -1270,6 +1705,7 @@ fn g0_budget_enforcement_stops_the_run_with_an_honest_resumable_partial() {
         &gate,
         &mut expensive_clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
     )
     .expect("budget exhaustion is an honest outcome, not a refusal");
@@ -1333,7 +1769,7 @@ fn g3_publicly_sealed_state_without_authoritative_lineage_refuses_before_publica
     let decoded = decode(&spec);
     let ledger = Ledger::open(":memory:").expect("ledger");
     let imported = import_fixture(&ledger, &spec, bytes);
-    let run = SolveRunId::derive(&decoded);
+    let run = SolveRunId::derive(&decoded, &fixture_cards());
 
     let project_source = ledger
         .put_artifact("solve-project-source", decoded.canonical.as_bytes(), None)
@@ -1448,7 +1884,7 @@ fn g3_forged_higher_checkpoint_with_substituted_predecessor_refuses_before_publi
     let bytes = tetra_stl();
     let spec = fixture_project(7, &bytes);
     let decoded = decode(&spec);
-    let run = SolveRunId::derive(&decoded);
+    let run = SolveRunId::derive(&decoded, &fixture_cards());
 
     // Produce the canonical assign row, receipt, and checkpoint in an
     // independent reference ledger.
@@ -1508,6 +1944,7 @@ fn g3_forged_higher_checkpoint_with_substituted_predecessor_refuses_before_publi
         &gate,
         &mut cancelling_clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
     )
     .expect_err("target stops after import verification");
@@ -1757,7 +2194,7 @@ fn g3_import_ir_duplicate_checks_preserve_order_and_bound_labels() {
     let source = Ledger::open(":memory:").expect("source ledger");
     let imported = import_fixture(&source, &spec, bytes);
     let (valid_gap, _) = run_to_gap(&source, &decoded);
-    assert_eq!(valid_gap.stage, Some("material-resolve"));
+    assert_eq!(valid_gap.stage, Some("flow-network"));
 
     let source_row = source
         .op(imported.op_id)
@@ -1999,7 +2436,7 @@ fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert_eq!(refusal.stage, Some("flow-network"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
         "the older valid import must still execute the solve prefix"
@@ -2049,7 +2486,7 @@ fn g3_multi_page_unrelated_history_still_finds_the_older_valid_import() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert_eq!(refusal.stage, Some("flow-network"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
         "descending discovery must continue across multiple pages"
@@ -2069,8 +2506,15 @@ fn g4_cap_plus_one_history_refuses_explicitly_without_publication() {
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
     let mut progress = Vec::new();
-    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &mut progress)
-        .expect_err("history beyond the frozen invocation cap refuses");
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("history beyond the frozen invocation cap refuses");
     assert_eq!(refusal.code, "cli-solve-work-envelope", "{refusal:?}");
     assert!(
         refusal.what.contains("visible operation ids"),
@@ -2125,6 +2569,7 @@ fn g4_maximum_operation_fields_are_tiled_cancelled_and_retryable() {
         &gate,
         &mut clock,
         &decoded,
+        &fixture_cards(),
         &mut progress,
         &plan,
     )
@@ -2156,7 +2601,7 @@ fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
     let run_hex = initial.run.expect("run id");
     let run = SolveRunId::parse_hex(&run_hex).expect("run id parses");
     let receipts_before = stage_receipt_hashes(&ledger, &run_hex);
-    assert_eq!(receipts_before.len(), 2, "fixture has a valid checkpoint");
+    assert_eq!(receipts_before.len(), 3, "fixture has a valid checkpoint");
 
     ledger.begin().expect("begin wide fixture transaction");
     let unrelated = ledger
@@ -2191,7 +2636,7 @@ fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
     let refusal = resume_solve(&ledger, &gate, &mut clock, &run_hex, &mut progress)
         .expect_err("valid checkpoint resumes to the known stage gap");
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert_eq!(refusal.stage, Some("flow-network"));
     assert!(progress.is_empty(), "no new stage executes before the gap");
     assert_eq!(
         stage_receipt_hashes(&ledger, &run_hex),
@@ -2275,10 +2720,7 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
     );
     assert_eq!(SolveStage::ImportVerify.gap_dependency(), None);
     assert_eq!(SolveStage::Assign.gap_dependency(), None);
-    assert_eq!(
-        SolveStage::MaterialResolve.gap_dependency(),
-        Some("frankensim-hp7tb")
-    );
+    assert_eq!(SolveStage::MaterialResolve.gap_dependency(), None);
     assert_eq!(
         SolveStage::FlowNetwork.gap_dependency(),
         Some("frankensim-frn2i")

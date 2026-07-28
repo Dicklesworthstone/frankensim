@@ -141,16 +141,34 @@ Stages execute in pinned order: `import-verify`, `assign`,
 `material-resolve`, `flow-network`, `conduction`, `qoi`. Each completed stage
 is one atomic ledger operation: frozen stage IR, the Five Explicits, the
 stage receipt artifact, lineage links, and the sealed driver state. The first
-stage additionally retains the exact canonical project source as input
-lineage. In slice 1 `import-verify` streams every retained import artifact
-through the ledger's content-hash verifier (row presence is not authority),
-checks the frozen import byte/count envelope against retained raw, canonical
-PLY, and canonical assignment-report bytes, and `assign` binds declared
-targets to that verified evidence; `material-resolve`
-(frankensim-hp7tb), `flow-network` (frankensim-frn2i), `conduction`
-(frankensim-s93ej), and `qoi` (frankensim-s2l9v) refuse with
-`cli-solve-stage-gap` (exit 5) naming their producer bead, and the refusal is
-itself retained as a terminal error operation.
+stage additionally retains the exact canonical project source and every
+admitted card pack as input lineage. `import-verify` streams every retained
+import artifact through the ledger's content-hash verifier (row presence is
+not authority), checks the frozen import byte/count envelope against retained
+raw, canonical PLY, and canonical assignment-report bytes; `assign` binds
+declared targets to that verified evidence; and `material-resolve` builds the
+complete card library from the admitted packs, resolves every declared
+material and interface binding through `fs_project::resolve_bindings` under
+`BindingRequirements::thermal_steady_v1()`, and retains each selected claim's
+replayable usage receipt as a `solve-material-usage-receipt` artifact.
+`flow-network` (frankensim-frn2i), `conduction` (frankensim-s93ej), and `qoi`
+(frankensim-s2l9v) refuse with `cli-solve-stage-gap` (exit 5) naming their
+producer bead, and the refusal is itself retained as a terminal error
+operation.
+
+Card packs reach the run through the repeatable `--materials <pack>` and
+`--interfaces <pack>` flags. Admission decodes each pack through its own
+canonical `fs-matdb` envelope, orders the set by pack root, collapses
+byte-identical duplicates, and refuses when two distinct packs reconstruct
+one card — the card library is keyed by card identity, so there is no
+last-one-wins path. Caller order and caller paths are not semantic: they
+never reach the run identity or any receipt. The canonical set root **is**
+bound into the run identity, so a different pack set is a different run
+rather than a second answer for one run. Because the packs are retained
+against the run's first operation, resume recovers them from the ledger
+whichever stage was interrupted, and re-deriving the run identity from the
+recovered set is what makes that recovery an attestation rather than a
+restatement.
 
 Stage checkpoints use the fs-exec **legacy v1** snapshot envelope
 deliberately: the v2 envelope's expectation token is in-process-only and its
@@ -256,7 +274,19 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-stage-gap`, `cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,
-`cli-solve-ledger-path`, `cli-solve-ledger-open`, `cli-solve-budget-exceeded`.
+`cli-solve-ledger-path`, `cli-solve-ledger-open`, `cli-solve-budget-exceeded`,
+`cli-solve-usage`, `cli-solve-card-pack-read`, `cli-solve-card-pack-size`,
+`cli-solve-card-pack-count`, `cli-solve-card-pack-source`,
+`cli-solve-card-pack-decode`, `cli-solve-card-pack-identity`,
+`cli-solve-card-pack-conflict`, `cli-solve-material-nonfinite`,
+`cli-solve-material-receipt-envelope`.
+
+The `material-resolve` stage additionally propagates `fs_project::bind`'s own
+violation codes verbatim (`project-material-card-unknown`,
+`project-material-state-mismatch`, `project-material-unbound-region`,
+`project-binding-domain-uncovered`, and the rest of that vocabulary). This is
+deliberate: flattening every binding cause into one CLI code would destroy
+the diagnostic identity the binding layer already defines.
 
 ## Invariants
 
@@ -502,10 +532,19 @@ publication.
 - The presence of report/package in help and parsing is not an implementation
   claim. Until their named authorities land, execution fails before side
   effects.
-- The solve verb executes only its slice-1 prefix. A run cannot currently
-  complete: `material-resolve`, `flow-network`, `conduction`, and `qoi` are
-  typed gaps owned by their named beads, and no end-to-end solve, physics
-  answer, QoI, or product-determinism claim is made. `import-verify` proves
+- The solve verb executes only its leading prefix. A run cannot currently
+  complete: `flow-network`, `conduction`, and `qoi` are typed gaps owned by
+  their named beads, and no end-to-end solve, physics answer, QoI, or
+  product-determinism claim is made.
+- `material-resolve` proves that every declared region and interface resolves
+  to an admitted card whose selected claim answers the required property at
+  both endpoints of the declared temperature range, and it retains that
+  claim's replayable usage receipt. It does **not** authenticate the pack
+  producer, validate a claim against any external corpus, narrow or replace a
+  claim's stated uncertainty, or turn an `Unstated` uncertainty into a bound.
+  A pack that decodes is admissible input, not validated data. Perfect
+  contact remains refused by the binding layer, so declaring it still fails
+  closed. `import-verify` proves
   canonical internal row/receipt/lineage structure, retained content hashes,
   and the documented resource-count consistency only. PLY/report parsing
   checks exact writer grammar, project source/unit/subject ordering, and

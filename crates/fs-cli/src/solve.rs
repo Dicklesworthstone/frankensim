@@ -12,10 +12,19 @@
 //! `cli-solve-stage-gap` naming the owning bead; a skeleton run is never
 //! presented as an integrated solve.
 //!
-//! Slice-1 boundary (stated, not implied): `import-verify` and `assign`
-//! execute against retained import evidence; `material-resolve`
-//! (frankensim-hp7tb), `flow-network` (frankensim-frn2i), `conduction`
-//! (frankensim-s93ej), and `qoi` (frankensim-s2l9v) are typed gaps.
+//! Executing boundary (stated, not implied): `import-verify` and `assign`
+//! execute against retained import evidence, and `material-resolve` executes
+//! against caller-supplied normalized card packs (bead frankensim-hp7tb);
+//! `flow-network` (frankensim-frn2i), `conduction` (frankensim-s93ej), and
+//! `qoi` (frankensim-s2l9v) remain typed gaps.
+//!
+//! Card packs are invocation inputs, so their canonical set root is bound
+//! into the run identity: a different pack set is a different run, never the
+//! same run with a different answer. The exact pack bytes are retained
+//! against the run's first operation alongside the project source, so resume
+//! recovers them from the ledger no matter which stage was interrupted, and
+//! re-deriving the run identity from the recovered set is what makes that
+//! recovery an attestation rather than a restatement.
 
 // Refusals are cold-path values carrying complete diagnostics; the crate's
 // refusal idiom (`GeometryImportRefusal`) is by-value for the same reason.
@@ -29,8 +38,8 @@ use std::hash::BuildHasherDefault;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use fs_blake3::hash_domain;
 use fs_blake3::identity::ContentId;
+use fs_blake3::{hash_bytes, hash_domain};
 use fs_exec::CancelGate;
 use fs_exec::solver::{
     LegacySnapshotExpectationV1, LegacySnapshotLimitsV1, LegacySnapshotV1Adapter,
@@ -43,20 +52,30 @@ use fs_ledger::{
     LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
-use fs_project::{DecodedProject, GeometryArtifact, ProjectSpec, geometry_source_identity};
+use fs_project::{
+    BindingRequirements, DecodedProject, GeometryArtifact, ProjectSpec, geometry_source_identity,
+    resolve_bindings,
+};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
 
+use crate::cards::{CardPackKind, CardPackSet, CardPackSetBuilder, RawCardPack};
 use crate::import::{explicits, json_string};
 
 /// Domain separating solve-run identity derivation from every other hash.
 pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1";
 /// Driver semantics version bound into run identity and driver state.
-pub const SOLVE_DRIVER_VERSION: u32 = 2;
+///
+/// Bumped to 3 when `material-resolve` stopped being a typed gap: the stage
+/// set a run identity stands for changed, and the run preimage gained the
+/// admitted card-pack-set root. A v2 checkpoint therefore cannot be mistaken
+/// for a v3 run.
+pub const SOLVE_DRIVER_VERSION: u32 = 3;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
 const IMPORT_VERIFY_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-import-verify-receipt.v1";
 const ASSIGN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-assignment-binding.v1";
+const MATERIAL_RESOLVE_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-material-resolve-receipt.v1";
 const IMPORT_IR_SCHEMA: &str = "frankensim.cli.geometry-import.v1";
 const IMPORT_SUMMARY_SCHEMA: &str = "frankensim.cli.geometry-import-receipt.v1";
 
@@ -64,6 +83,7 @@ const PROJECT_SOURCE_KIND: &str = "solve-project-source";
 const STAGE_STATE_KIND: &str = "solve-stage-state";
 const STAGE_RECEIPT_KIND: &str = "solve-stage-receipt";
 const RUN_RECEIPT_KIND: &str = "solve-run-receipt";
+const MATERIAL_USAGE_KIND: &str = "solve-material-usage-receipt";
 const IMPORT_SUMMARY_KIND: &str = "geometry-import-run-receipt";
 const IMPORT_RAW_KIND: &str = "geometry-source";
 const IMPORT_PROMOTION_KIND: &str = "geometry-import-receipt";
@@ -79,6 +99,12 @@ const IMPORT_SUMMARY_NO_CLAIM: &str = "the ledger binds exact raw bytes, fs-io r
 const IMPORT_VERIFY_AUTHORITY: &str = "re-hashed retained import evidence";
 const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
+const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
+const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
+    interface resolves to an admitted card whose selected claim covers the declared temperature \
+    range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
+    producer, validate the claim against any external corpus, narrow or replace a claim's stated \
+    uncertainty, or upgrade an Unstated uncertainty into a bound";
 const ASSIGNMENT_REPORT_AUTHORITY: &str = "finite-tessellation-selection";
 const ASSIGNMENT_REPORT_NO_CLAIM: &str = "selectors classify the supplied finite tessellation \
     only; caller-supplied source and subject identities are retained but not authenticated; no \
@@ -150,6 +176,14 @@ const EDGE_ITEM_WORK_BYTES: u64 = 33;
 const DERIVATION_ITEM_WORK_BYTES: u64 = 64;
 /// Edge scan cap per operation while locating retained evidence.
 const EDGE_SCAN_CAP: usize = 1024;
+/// Largest distinct claim-usage receipt set one `material-resolve` operation
+/// retains. Together with the card-pack ceiling this keeps the stage's typed
+/// edge set inside the ledger's bounded scan.
+const MAX_MATERIAL_USAGE_RECEIPTS: usize = 512;
+/// Read cap for one retained card pack recovered during resume. This mirrors
+/// the admission ceiling so a pack that was admissible on the fresh path
+/// cannot become unreadable on the resume path.
+const MAX_CARD_PACK_READ_BYTES: u64 = crate::cards::MAX_CARD_PACK_BYTES;
 /// Largest geometry set the solve evidence contract can attest completely.
 /// One import operation has at most `4 * sources + 1` typed edges, so 255
 /// sources fit under the ledger's 1024-edge bounded scan.
@@ -185,6 +219,15 @@ pub enum SolveEvidencePhase {
     EntityResolution,
     /// Derive assignment identities, rows, or the canonical assignment receipt.
     AssignmentDerivation,
+    /// Resolve declared bindings against the admitted card library, or build
+    /// the canonical material-resolve receipt.
+    MaterialBindingResolution,
+    /// Materialize one retained card pack during resume.
+    ///
+    /// The optional plan index is the pack's canonical position in the set.
+    ResumeCardPackRead,
+    /// Decode and re-admit one recovered card pack during resume.
+    ResumeCardPackDecode,
     /// Construct one canonical stage receipt from already verified evidence.
     ReceiptDerivation,
     /// Retrieve one bounded operation edge page.
@@ -488,7 +531,8 @@ pub enum SolveStage {
     ImportVerify,
     /// Bind verified assignment evidence into the run's lineage.
     Assign,
-    /// Resolve material/interface cards (gap: frankensim-hp7tb).
+    /// Resolve declared material/interface bindings against the admitted
+    /// card packs (built at frankensim-hp7tb).
     MaterialResolve,
     /// Solve the enclosure flow network (gap: frankensim-frn2i).
     FlowNetwork,
@@ -540,8 +584,7 @@ impl SolveStage {
     #[must_use]
     pub const fn gap_dependency(self) -> Option<&'static str> {
         match self {
-            SolveStage::ImportVerify | SolveStage::Assign => None,
-            SolveStage::MaterialResolve => Some("frankensim-hp7tb"),
+            SolveStage::ImportVerify | SolveStage::Assign | SolveStage::MaterialResolve => None,
             SolveStage::FlowNetwork => Some("frankensim-frn2i"),
             SolveStage::Conduction => Some("frankensim-s93ej"),
             SolveStage::Qoi => Some("frankensim-s2l9v"),
@@ -572,16 +615,26 @@ impl SolveStage {
 pub struct SolveRunId(ContentHash);
 
 impl SolveRunId {
-    /// Derive the run identity from the decoded project.
+    /// Derive the run identity from the decoded project and the admitted
+    /// card-pack set.
+    ///
+    /// The pack set is part of the run's answer, not an incidental
+    /// invocation detail: two runs that bind different cards must not share
+    /// one identity, because the driver would then see two competing
+    /// checkpoints for what it believes is one run.
     #[must_use]
-    pub fn derive(project: &DecodedProject) -> SolveRunId {
+    pub fn derive(project: &DecodedProject, cards: &CardPackSet) -> SolveRunId {
         let project_hash = project.hash();
-        Self::derive_with_project_hash(project, project_hash)
+        Self::derive_with_project_hash(project, project_hash, cards.root())
     }
 
-    fn derive_with_project_hash(project: &DecodedProject, project_hash: ContentHash) -> SolveRunId {
+    fn derive_with_project_hash(
+        project: &DecodedProject,
+        project_hash: ContentHash,
+        cards_root: ContentHash,
+    ) -> SolveRunId {
         let spec = &project.spec;
-        let mut preimage = Vec::with_capacity(128);
+        let mut preimage = Vec::with_capacity(160);
         preimage.extend_from_slice(project_hash.as_bytes());
         let (constellation, workspace) = spec.versions.as_ref().map_or(("", ""), |v| {
             (v.constellation.as_str(), v.workspace.as_str())
@@ -590,6 +643,7 @@ impl SolveRunId {
         push_framed(&mut preimage, workspace.as_bytes());
         let seed = spec.seeds.as_ref().map_or(0, |s| s.root);
         preimage.extend_from_slice(&seed.to_le_bytes());
+        push_framed(&mut preimage, cards_root.as_bytes());
         preimage.extend_from_slice(&SOLVE_DRIVER_VERSION.to_le_bytes());
         SolveRunId(hash_domain(SOLVE_RUN_IDENTITY_DOMAIN, &preimage))
     }
@@ -942,6 +996,10 @@ struct VerifiedResume {
     state_artifact: ContentHash,
     attestation: Rc<ResumeImportCache>,
     context: StageContext,
+    /// Card packs recovered from the run's retained inputs and re-admitted
+    /// through the same canonicalization the fresh path uses. The recovered
+    /// set root must reproduce the requested run identity.
+    cards: CardPackSet,
 }
 
 #[derive(Debug)]
@@ -975,6 +1033,10 @@ struct SolveEngine<'a> {
     clock: &'a mut dyn FnMut() -> f64,
     spec: &'a ProjectSpec,
     canonical_source: &'a str,
+    /// The admitted card packs backing this run. On a fresh run these are the
+    /// caller's inputs; on resume they are recovered from the ledger and
+    /// re-attested against the run identity before the engine opens.
+    cards: &'a CardPackSet,
     project_hash: ContentHash,
     run: SolveRunId,
     governor: Governor,
@@ -1002,9 +1064,10 @@ pub fn run_solve(
     gate: &CancelGate,
     clock: &mut dyn FnMut() -> f64,
     project: &DecodedProject,
+    cards: &CardPackSet,
     progress_sink: &mut Vec<String>,
 ) -> Result<SolveOutcome, SolveRefusal> {
-    run_solve_inner(ledger, gate, clock, project, progress_sink, None)
+    run_solve_inner(ledger, gate, clock, project, cards, progress_sink, None)
 }
 
 /// Deterministic conformance-test entry point for requesting cancellation at
@@ -1018,10 +1081,19 @@ pub fn run_solve_with_cancellation_plan(
     gate: &CancelGate,
     clock: &mut dyn FnMut() -> f64,
     project: &DecodedProject,
+    cards: &CardPackSet,
     progress_sink: &mut Vec<String>,
     plan: &SolveCancellationPlan,
 ) -> Result<SolveOutcome, SolveRefusal> {
-    run_solve_inner(ledger, gate, clock, project, progress_sink, Some(plan))
+    run_solve_inner(
+        ledger,
+        gate,
+        clock,
+        project,
+        cards,
+        progress_sink,
+        Some(plan),
+    )
 }
 
 fn run_solve_inner<'a>(
@@ -1029,6 +1101,7 @@ fn run_solve_inner<'a>(
     gate: &'a CancelGate,
     clock: &'a mut dyn FnMut() -> f64,
     project: &'a DecodedProject,
+    cards: &'a CardPackSet,
     progress_sink: &mut Vec<String>,
     plan: Option<&'a SolveCancellationPlan>,
 ) -> Result<SolveOutcome, SolveRefusal> {
@@ -1059,7 +1132,7 @@ fn run_solve_inner<'a>(
     work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 0)
         .map_err(|_| cancelled_before_run_refusal())?;
     let project_hash = project.hash();
-    let run = SolveRunId::derive_with_project_hash(project, project_hash);
+    let run = SolveRunId::derive_with_project_hash(project, project_hash, cards.root());
     work.charge(u64::try_from(project.canonical.len()).map_err(|_| {
         invocation_work_refusal(
             Some(run),
@@ -1072,7 +1145,8 @@ fn run_solve_inner<'a>(
     .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
     work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 1)
         .map_err(|_| cancelled_fresh_refusal(run, None))?;
-    let mut engine = SolveEngine::open(ledger, work, clock, project, project_hash, run, None)?;
+    let mut engine =
+        SolveEngine::open(ledger, work, clock, project, cards, project_hash, run, None)?;
     let state = SolveDriverState {
         run: *run.as_bytes(),
         project: *engine.project_hash.as_bytes(),
@@ -1140,6 +1214,7 @@ fn resume_solve_inner<'a>(
         state_artifact,
         attestation,
         context,
+        cards,
     } = verified;
     let attestation = Rc::try_unwrap(attestation).unwrap_or_else(|_| {
         unreachable!("latest-state selection releases every non-selected attestation reference")
@@ -1166,6 +1241,7 @@ fn resume_solve_inner<'a>(
         work,
         clock,
         &project,
+        &cards,
         project_hash,
         run,
         Some(rendered_explicits),
@@ -1210,6 +1286,7 @@ impl<'a> SolveEngine<'a> {
         work: EvidenceWork<'a>,
         clock: &'a mut dyn FnMut() -> f64,
         project: &'a DecodedProject,
+        cards: &'a CardPackSet,
         project_hash: ContentHash,
         run: SolveRunId,
         rendered_explicits: Option<(String, String, String, [u8; 8])>,
@@ -1274,6 +1351,7 @@ impl<'a> SolveEngine<'a> {
             clock,
             spec: &project.spec,
             canonical_source: &project.canonical,
+            cards,
             project_hash,
             run,
             governor,
@@ -1346,13 +1424,20 @@ impl<'a> SolveEngine<'a> {
                 );
                 return Err(self.record_refusal(&state, stage, refusal));
             }
+            // Stages that retain no side evidence yield an empty usage list;
+            // only `material-resolve` retains replayable claim-usage receipts.
             let body = match stage {
-                SolveStage::ImportVerify => self.stage_import_verify(&mut context),
-                SolveStage::Assign => self.stage_assign(&context),
+                SolveStage::ImportVerify => self
+                    .stage_import_verify(&mut context)
+                    .map(|receipt| (receipt, Vec::new())),
+                SolveStage::Assign => self
+                    .stage_assign(&context)
+                    .map(|receipt| (receipt, Vec::new())),
+                SolveStage::MaterialResolve => self.stage_material_resolve(),
                 _ => unreachable!("gap stages returned above"),
             };
-            let receipt_json = match body {
-                Ok(receipt) => receipt,
+            let (receipt_json, usages) = match body {
+                Ok(produced) => produced,
                 Err(refusal) if refusal.code == "cli-solve-cancelled" => {
                     return Err(self.cancelled_refusal(&state));
                 }
@@ -1408,7 +1493,14 @@ impl<'a> SolveEngine<'a> {
             state.consumed_core_s = consumed_core_s;
             state.consumed_wall_s = consumed_wall_s;
             let (op_id, receipt_hash, state_hash) = self
-                .persist_stage(&state, stage, &receipt_json, &context, predecessor_state)
+                .persist_stage(
+                    &state,
+                    stage,
+                    &receipt_json,
+                    &usages,
+                    &context,
+                    predecessor_state,
+                )
                 .map_err(|error| self.ledger_refusal(stage, &error))?;
             state.completed.push(CompletedStage {
                 ordinal: stage.ordinal(),
@@ -1640,6 +1732,12 @@ impl<'a> SolveEngine<'a> {
         assignment_receipt(self.spec, context, self.run, self.work, false)
     }
 
+    /// Resolve every declared material and interface binding against the
+    /// admitted card packs.
+    fn stage_material_resolve(&mut self) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+        material_resolve_receipt(self.spec, self.cards, self.run, self.work, false)
+    }
+
     /// Persist one completed stage as a ledgered op: stage receipt, sealed
     /// driver state (including this stage), and lineage links, atomically.
     fn persist_stage(
@@ -1647,6 +1745,7 @@ impl<'a> SolveEngine<'a> {
         state_before: &SolveDriverState,
         stage: SolveStage,
         receipt_json: &str,
+        usages: &[RetainedUsage],
         context: &StageContext,
         predecessor_state: Option<ContentHash>,
     ) -> Result<(i64, ContentHash, ContentHash), LedgerError> {
@@ -1694,6 +1793,31 @@ impl<'a> SolveEngine<'a> {
                     None,
                 )?;
                 self.ledger.link(op, &source.hash, EdgeRole::In)?;
+                // Card packs are run inputs, so they are retained against the
+                // run's first operation exactly as the project source is.
+                // Retaining them here rather than at `material-resolve` is
+                // what lets a run cancelled during an earlier stage resume at
+                // all: the recovered set is re-attested against the run
+                // identity, which binds its canonical root.
+                for pack in self.cards.iter() {
+                    let retained = self.ledger.put_artifact(
+                        pack.kind().artifact_kind(),
+                        pack.bytes(),
+                        None,
+                    )?;
+                    self.ledger.link(op, &retained.hash, EdgeRole::In)?;
+                }
+            }
+            if stage == SolveStage::MaterialResolve {
+                for pack in self.cards.iter() {
+                    self.ledger.link(op, &pack.artifact(), EdgeRole::In)?;
+                }
+                for usage in usages {
+                    let retained =
+                        self.ledger
+                            .put_artifact(MATERIAL_USAGE_KIND, &usage.bytes, None)?;
+                    self.ledger.link(op, &retained.hash, EdgeRole::Out)?;
+                }
             }
             if stage == SolveStage::ImportVerify {
                 let import_summary =
@@ -2027,6 +2151,355 @@ fn import_verify_receipt(
     work.checkpoint(phase, None, u64::MAX)
         .map_err(|_| EvidenceCompareError::Cancelled)?;
     Ok(receipt)
+}
+
+/// One replayable claim-usage receipt retained as its own ledger artifact.
+///
+/// `id` is the `fs-matdb` receipt identity (what `ClaimSet::verify_receipt`
+/// replays against); `artifact` is the ledger content address of the exact
+/// retained bytes. They are different hashes over different preimages and the
+/// stage receipt records both, so neither can stand in for the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetainedUsage {
+    id: String,
+    artifact: ContentHash,
+    bytes: Vec<u8>,
+}
+
+/// Canonical finite `f64` spelling, or `None` for a non-finite value.
+///
+/// The retained-receipt reader requires `value.to_string() == spelling`, so a
+/// non-finite value has no admissible canonical form and must refuse rather
+/// than reach a receipt.
+fn canonical_f64(value: f64) -> Option<String> {
+    value.is_finite().then(|| value.to_string())
+}
+
+fn material_nonfinite(stage: SolveStage, what: impl Into<String>) -> SolveRefusal {
+    SolveRefusal::staged(
+        "cli-solve-material-nonfinite",
+        stage,
+        what,
+        "repair the card claim so every resolved endpoint is a finite quantity",
+    )
+}
+
+fn dims_json(dims: [i8; 6]) -> String {
+    let mut out = String::from("[");
+    for (index, exponent) in dims.into_iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{exponent}");
+    }
+    out.push(']');
+    out
+}
+
+fn required_properties_json(properties: &[fs_project::RequiredProperty]) -> String {
+    let mut out = String::from("[");
+    for (index, required) in properties.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"property\":{},\"dims\":{}}}",
+            json_string(&required.property),
+            dims_json(required.dims.0)
+        );
+    }
+    out.push(']');
+    out
+}
+
+fn uncertainty_json(
+    stage: SolveStage,
+    context: &str,
+    uncertainty: &fs_matdb::UncertaintyModel,
+) -> Result<String, SolveRefusal> {
+    Ok(match *uncertainty {
+        fs_matdb::UncertaintyModel::Unstated => "{\"kind\":\"unstated\"}".to_string(),
+        fs_matdb::UncertaintyModel::HalfWidth {
+            half_width,
+            confidence,
+        } => {
+            let (half_width, confidence) = finite_pair(stage, context, half_width, confidence)?;
+            format!(
+                "{{\"kind\":\"half-width\",\"half_width\":{half_width},\"confidence\":{confidence}}}"
+            )
+        }
+        fs_matdb::UncertaintyModel::RelativeHalfWidth {
+            fraction,
+            confidence,
+        } => {
+            let (fraction, confidence) = finite_pair(stage, context, fraction, confidence)?;
+            format!(
+                "{{\"kind\":\"relative-half-width\",\"fraction\":{fraction},\
+                 \"confidence\":{confidence}}}"
+            )
+        }
+    })
+}
+
+fn finite_pair(
+    stage: SolveStage,
+    context: &str,
+    first: f64,
+    second: f64,
+) -> Result<(String, String), SolveRefusal> {
+    let first = canonical_f64(first).ok_or_else(|| {
+        material_nonfinite(stage, format!("{context} carries a non-finite value"))
+    })?;
+    let second = canonical_f64(second).ok_or_else(|| {
+        material_nonfinite(stage, format!("{context} carries a non-finite value"))
+    })?;
+    Ok((first, second))
+}
+
+/// Resolve the project's declared bindings against the admitted card packs
+/// and render the canonical `material-resolve` stage receipt.
+///
+/// Deliberately a free function so resume can rebuild the byte-identical
+/// receipt from re-attested evidence, exactly as [`assignment_receipt`] does.
+///
+/// The receipt names packs and cards by content root only. Caller paths never
+/// appear, so the same content admitted from a different path reproduces the
+/// same receipt — which is what lets resume, whose only inputs are the ledger
+/// and the run id, reproduce it at all.
+fn material_resolve_receipt(
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
+) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+    let stage = SolveStage::MaterialResolve;
+    let cancelled = || {
+        if resume {
+            cancelled_resume_refusal(run)
+        } else {
+            cancelled_fresh_refusal(run, Some(stage))
+        }
+    };
+    let phase = SolveEvidencePhase::MaterialBindingResolution;
+    let mut units = 0u64;
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    // Building the library never chooses a claim: every admitted card enters
+    // with its complete claim set, and selection happens inside
+    // `resolve_bindings`, which leaves a replayable receipt for what it used.
+    let library = cards.library();
+    for _ in 0..cards.len() {
+        work.charge(DERIVATION_ITEM_WORK_BYTES)
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        units = units.saturating_add(1);
+        work.checkpoint(phase, None, units)
+            .map_err(|_| cancelled())?;
+    }
+
+    let requirements = BindingRequirements::thermal_steady_v1();
+    let resolution = resolve_bindings(spec, &library, &requirements);
+    work.charge(DERIVATION_ITEM_WORK_BYTES)
+        .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    units = units.saturating_add(1);
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    if !resolution.admissible() {
+        // The binding layer owns this vocabulary. Propagating its own stable
+        // code keeps one diagnostic identity across the library boundary
+        // instead of flattening every cause into one CLI code.
+        let first = &resolution.violations[0];
+        let mut what = format!(
+            "{} declared material/interface binding violation(s) against the admitted card \
+             packs; first: {}",
+            resolution.violations.len(),
+            first.what
+        );
+        for violation in resolution.violations.iter().skip(1).take(7) {
+            let _ = write!(what, "; also [{}] {}", violation.code, violation.what);
+        }
+        if resolution.violations.len() > 8 {
+            let _ = write!(
+                what,
+                "; and {} further violation(s)",
+                resolution.violations.len() - 8
+            );
+        }
+        return Err(SolveRefusal::staged(
+            first.code,
+            stage,
+            what,
+            first.fix.clone(),
+        ));
+    }
+
+    let mut usages: Vec<RetainedUsage> = Vec::new();
+    let mut bindings = String::new();
+    for (index, binding) in resolution.bindings.iter().enumerate() {
+        if index > 0 {
+            bindings.push(',');
+        }
+        let (target_kind, target_name) = match &binding.target {
+            fs_project::BindingTarget::Region(name) => ("region", name),
+            fs_project::BindingTarget::Interface(name) => ("interface", name),
+        };
+        let context = format!("{target_kind} `{target_name}`");
+        let (range_lo, range_hi) = finite_pair(
+            stage,
+            &format!("{context} admitted range"),
+            binding.range_lo,
+            binding.range_hi,
+        )?;
+        let mut properties = String::new();
+        for (property_index, property) in binding.properties.iter().enumerate() {
+            if property_index > 0 {
+                properties.push(',');
+            }
+            let property_context = format!("{context} property `{}`", property.property);
+            let (value_lo, value_hi) = finite_pair(
+                stage,
+                &property_context,
+                property.value_lo,
+                property.value_hi,
+            )?;
+            let uncertainty = uncertainty_json(stage, &property_context, &property.uncertainty)?;
+            for retained in [&property.receipt_lo, &property.receipt_hi] {
+                let artifact = hash_bytes(&retained.bytes);
+                if !usages.iter().any(|usage| usage.artifact == artifact) {
+                    usages.push(RetainedUsage {
+                        id: retained.receipt_hash.clone(),
+                        artifact,
+                        bytes: retained.bytes.clone(),
+                    });
+                }
+            }
+            let _ = write!(
+                properties,
+                "{{\"property\":{},\"value_lo\":{value_lo},\"value_hi\":{value_hi},\
+                 \"dims\":{},\"uncertainty\":{uncertainty},\"unstated_uncertainty\":{},\
+                 \"selected_claim\":{},\"regime_card\":{{\"name\":{},\"version\":{}}},\
+                 \"provenance_source\":{},\"provenance_license\":{},\
+                 \"usage_receipt_lo\":{{\"id\":{},\"artifact\":{}}},\
+                 \"usage_receipt_hi\":{{\"id\":{},\"artifact\":{}}}}}",
+                json_string(&property.property),
+                dims_json(property.dims.0),
+                property.unstated_uncertainty,
+                json_string(&property.selected_claim),
+                json_string(&property.regime_card.name),
+                json_string(&property.regime_card.version),
+                json_string(&property.provenance_source),
+                json_string(&property.provenance_license),
+                json_string(&property.receipt_lo.receipt_hash),
+                json_string(&hash_bytes(&property.receipt_lo.bytes).to_hex()),
+                json_string(&property.receipt_hi.receipt_hash),
+                json_string(&hash_bytes(&property.receipt_hi.bytes).to_hex()),
+            );
+            work.charge(DERIVATION_ITEM_WORK_BYTES)
+                .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+            units = units.saturating_add(1);
+            work.checkpoint(phase, None, units)
+                .map_err(|_| cancelled())?;
+        }
+        let _ = write!(
+            bindings,
+            "{{\"target_kind\":{},\"target\":{},\"card\":{},\"card_identity\":{},\
+             \"declared_source\":{},\"declared_interface_state\":{},\
+             \"range_lo\":{range_lo},\"range_hi\":{range_hi},\"pinned_claim\":{},\
+             \"properties\":[{properties}]}}",
+            json_string(target_kind),
+            json_string(target_name),
+            json_string(&binding.card),
+            json_string(&binding.card_identity),
+            json_string(&binding.declared_source),
+            binding
+                .declared_interface_state
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |state| json_string(state)),
+            binding
+                .pinned_claim
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |claim| json_string(claim)),
+        );
+        work.charge(DERIVATION_ITEM_WORK_BYTES)
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        units = units.saturating_add(1);
+        work.checkpoint(phase, None, units)
+            .map_err(|_| cancelled())?;
+    }
+
+    if usages.len() > MAX_MATERIAL_USAGE_RECEIPTS {
+        return Err(SolveRefusal::staged(
+            "cli-solve-material-receipt-envelope",
+            stage,
+            format!(
+                "resolving this project retains {} distinct claim-usage receipts, above the \
+                 {MAX_MATERIAL_USAGE_RECEIPTS}-receipt stage envelope",
+                usages.len()
+            ),
+            "reduce the number of declared bindings, or raise the documented stage envelope \
+             deliberately",
+        ));
+    }
+
+    let mut packs = String::new();
+    for (index, pack) in cards.iter().enumerate() {
+        if index > 0 {
+            packs.push(',');
+        }
+        let _ = write!(
+            packs,
+            "{{\"kind\":{},\"root\":{},\"card\":{},\"identity\":{}}}",
+            json_string(pack.kind().label()),
+            json_string(&pack.root().to_hex()),
+            json_string(&pack.card().to_hex()),
+            json_string(pack.identity()),
+        );
+    }
+
+    let mut advisories = String::new();
+    for (index, advisory) in resolution.advisories.iter().enumerate() {
+        if index > 0 {
+            advisories.push(',');
+        }
+        let _ = write!(
+            advisories,
+            "{{\"code\":{},\"what\":{},\"note\":{}}}",
+            json_string(advisory.code),
+            json_string(&advisory.what),
+            json_string(&advisory.note),
+        );
+    }
+
+    let receipt = format!(
+        "{{\"schema\":{},\"run\":{},\"pack_set_root\":{},\"packs\":[{packs}],\
+         \"requirements\":{{\"temperature_axis\":{},\"material_properties\":{},\
+         \"interface_properties\":{}}},\"bindings\":[{bindings}],\
+         \"advisories\":[{advisories}],\"authority\":{},\"no_claim\":{}}}",
+        json_string(MATERIAL_RESOLVE_RECEIPT_SCHEMA),
+        json_string(&run.to_hex()),
+        json_string(&cards.root().to_hex()),
+        json_string(&requirements.temperature_axis),
+        required_properties_json(&requirements.material_properties),
+        required_properties_json(&requirements.interface_properties),
+        json_string(MATERIAL_RESOLVE_AUTHORITY),
+        json_string(MATERIAL_RESOLVE_NO_CLAIM),
+    );
+    work.charge(u64::try_from(receipt.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(stage),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    work.checkpoint(phase, None, u64::MAX)
+        .map_err(|_| cancelled())?;
+    Ok((receipt, usages))
 }
 
 fn assignment_receipt(
@@ -3310,6 +3783,7 @@ fn validate_resume_candidate(
     }
 
     let mut context = StageContext::default();
+    let mut recovered_cards: Option<CardPackSet> = None;
     let mut predecessor_state = None;
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
     for (index, completed) in state.completed.iter().enumerate() {
@@ -3434,6 +3908,28 @@ fn validate_resume_candidate(
         match stage {
             SolveStage::ImportVerify => {
                 expected_edges.push((EdgeRole::In, project_source));
+                // Card packs are retained against this first operation, so
+                // recovery happens here regardless of which later stage was
+                // interrupted.
+                let (packs, pack_artifacts) = recover_card_packs_resume(ledger, run, &edges, work)?;
+                // The complete run preimage is only available now. Deriving
+                // it here is what turns pack recovery into an attestation:
+                // any added, dropped, or substituted pack moves the identity
+                // and cannot present itself as this run.
+                let rederived =
+                    SolveRunId::derive_with_project_hash(project, project_hash, packs.root());
+                if rederived != run {
+                    return Err(resume_identity(format!(
+                        "the retained project and card packs re-derive run `{}` but resume \
+                         requested `{}`",
+                        rederived.to_hex(),
+                        run.to_hex()
+                    )));
+                }
+                for artifact in pack_artifacts {
+                    expected_edges.push((EdgeRole::In, artifact));
+                }
+                recovered_cards = Some(packs);
                 let summary_inputs = artifacts_with_kind_resume(
                     ledger,
                     run,
@@ -3604,6 +4100,76 @@ fn validate_resume_candidate(
                 })?;
                 expected_edges.push((EdgeRole::In, predecessor));
             }
+            SolveStage::MaterialResolve => {
+                let cards = recovered_cards.as_ref().ok_or_else(|| {
+                    resume_identity(
+                        "the retained material-resolve stage has no recovered card-pack set",
+                    )
+                })?;
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let rebuilt = material_resolve_receipt(&project.spec, cards, run, work, true);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let (expected_receipt, usages) = match rebuilt {
+                    Ok(rebuilt) => rebuilt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
+                            "the retained material bindings no longer resolve against the \
+                             recovered card packs: {}",
+                            error.what
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
+                    return Err(resume_identity(
+                        "the retained material-resolve receipt is not the canonical driver receipt",
+                    ));
+                }
+                for pack in cards.iter() {
+                    expected_edges.push((EdgeRole::In, pack.artifact()));
+                }
+                for usage in &usages {
+                    expected_edges.push((EdgeRole::Out, usage.artifact));
+                }
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained material-resolve stage has no verified assign-stage \
+                         predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
+            }
             _ => unreachable!("completed unavailable stages were refused above"),
         }
         require_exact_edges(
@@ -3640,11 +4206,18 @@ fn validate_resume_candidate(
         predecessor_checkpoint = Some(checkpoint);
     }
 
+    let cards = recovered_cards.ok_or_else(|| {
+        resume_identity(
+            "the candidate has no re-attested card-pack set; every run retains its inputs against \
+             its first operation",
+        )
+    })?;
     Ok(VerifiedResume {
         state,
         state_artifact,
         attestation,
         context,
+        cards,
     })
 }
 
@@ -3970,7 +4543,6 @@ fn attest_retained_project(
     work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 0)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let project_hash = project.hash();
-    let rederived = SolveRunId::derive_with_project_hash(&project, project_hash);
     work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 1)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let identity_bytes = u64::try_from(project.canonical.len()).map_err(|_| {
@@ -3985,13 +4557,11 @@ fn attest_retained_project(
     work.charge(identity_bytes).map_err(|error| {
         invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
     })?;
-    if rederived != run {
-        return Err(resume_identity(format!(
-            "retained project re-derives run `{}` but resume requested `{}`",
-            rederived.to_hex(),
-            run.to_hex()
-        )));
-    }
+    // Run identity now binds the admitted card-pack set as well as the
+    // project, so it cannot be re-derived here: the packs are recovered from
+    // the run's first operation, which the caller re-attests. The complete
+    // re-derivation lives in that stage's arm and always executes, because a
+    // checkpoint exists only after the first stage completes.
     work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 0)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let rendered_explicits = explicits(&project.spec);
@@ -4249,6 +4819,93 @@ fn require_artifact_kind_resume(
         )));
     }
     Ok(())
+}
+
+/// Recover the run's admitted card packs from the retained inputs of its
+/// first operation and re-admit them through the fresh path's canonicalizer.
+///
+/// This is recovery, not authority. What makes it an attestation is the
+/// caller's follow-up check that the recovered set root reproduces the
+/// requested run identity: adding, dropping, or substituting a pack moves
+/// that identity, so a tampered input set cannot present itself as this run.
+fn recover_card_packs_resume(
+    ledger: &Ledger,
+    run: SolveRunId,
+    edges: &[OpArtifactEdge],
+    work: EvidenceWork<'_>,
+) -> Result<(CardPackSet, Vec<ContentHash>), SolveRefusal> {
+    let mut builder = CardPackSetBuilder::new();
+    let mut artifacts = Vec::new();
+    for kind in [CardPackKind::Material, CardPackKind::Interface] {
+        let retained = artifacts_with_kind_resume(
+            ledger,
+            run,
+            edges,
+            EdgeRole::In,
+            kind.artifact_kind(),
+            work,
+        )?;
+        for (index, artifact) in retained.into_iter().enumerate() {
+            let bytes = materialize_evidence_artifact(
+                ledger,
+                work,
+                artifact,
+                MAX_CARD_PACK_READ_BYTES,
+                SolveEvidencePhase::ResumeCardPackRead,
+                Some(index),
+            )
+            .map_err(|error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(SolveStage::MaterialResolve), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading a retained card pack failed", error)
+                }
+            })?
+            .ok_or_else(|| {
+                resume_identity(format!(
+                    "the run's retained {} pack {} exceeds the {MAX_CARD_PACK_READ_BYTES}-byte \
+                     read envelope or is missing",
+                    kind.label(),
+                    artifact.to_hex()
+                ))
+            })?;
+            work.checkpoint(SolveEvidencePhase::ResumeCardPackDecode, Some(index), 0)
+                .map_err(|_| cancelled_resume_refusal(run))?;
+            builder
+                .push(RawCardPack {
+                    kind,
+                    source: format!("ledger artifact {}", artifact.to_hex()),
+                    bytes,
+                    expect: None,
+                })
+                .map_err(|refusal| {
+                    resume_identity(format!(
+                        "a retained card pack no longer re-admits: {}",
+                        refusal.what
+                    ))
+                })?;
+            work.checkpoint(SolveEvidencePhase::ResumeCardPackDecode, Some(index), 1)
+                .map_err(|_| cancelled_resume_refusal(run))?;
+            artifacts.push(artifact);
+        }
+    }
+    let set = builder.finish().map_err(|refusal| {
+        resume_identity(format!(
+            "the retained card-pack set no longer canonicalizes: {}",
+            refusal.what
+        ))
+    })?;
+    if set.len() != artifacts.len() {
+        return Err(resume_identity(format!(
+            "the run retains {} card-pack artifacts but only {} distinct packs; a retained \
+             input set cannot contain duplicates",
+            artifacts.len(),
+            set.len()
+        )));
+    }
+    Ok((set, artifacts))
 }
 
 fn artifacts_with_kind_resume(

@@ -7,6 +7,7 @@
 //! remain open fail before side effects with `cli-stage-unavailable`; a
 //! CLI-shaped mock is not substituted for an integrated workflow.
 
+mod cards;
 mod import;
 mod solve;
 
@@ -15,6 +16,11 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+pub use cards::{
+    AdmittedCardPack, CARD_PACK_SET_DOMAIN, CardPackKind, CardPackRefusal, CardPackSet,
+    CardPackSetBuilder, MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES, MAX_CARD_PACKS,
+    RawCardPack,
+};
 pub use import::{
     GeometryImportLimits, GeometryImportRefusal, GeometryImportRun, RawGeometryLibrary,
     RecordedImportRefusal, RetainedGeometryImport, import_project_geometry,
@@ -51,7 +57,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id>";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id>";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -76,8 +82,17 @@ enum Command {
     Help,
     Validate(PathBuf),
     Import(ImportCommand),
-    SolveProject { project: PathBuf, ledger: PathBuf },
-    Resume { run_id: String, ledger: PathBuf },
+    SolveProject {
+        project: PathBuf,
+        ledger: PathBuf,
+        /// Declared card packs in caller order. Admission canonicalizes the
+        /// set, so this order does not reach the run or the stage receipt.
+        cards: Vec<(CardPackKind, PathBuf)>,
+    },
+    Resume {
+        run_id: String,
+        ledger: PathBuf,
+    },
     Report(String),
     Package(String),
 }
@@ -146,7 +161,11 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
         Command::Help => help(mode),
         Command::Validate(path) => validate_path(&path, mode),
         Command::Import(command) => import_path(&command, mode),
-        Command::SolveProject { project, ledger } => solve_path(&project, &ledger, mode),
+        Command::SolveProject {
+            project,
+            ledger,
+            cards,
+        } => solve_path(&project, &ledger, &cards, mode),
         Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
         Command::Report(run_id) => unavailable(
             mode,
@@ -245,12 +264,6 @@ fn parse_args(
         [verb, rest @ ..] if verb == "import" => {
             Command::Import(parse_import_args(rest).map_err(|diagnostic| (mode, diagnostic))?)
         }
-        [verb, project, ledger] if verb == "solve" && is_operand(project) && is_operand(ledger) => {
-            Command::SolveProject {
-                project: PathBuf::from(project),
-                ledger: PathBuf::from(ledger),
-            }
-        }
         [verb, resume, run_id, ledger]
             if verb == "solve"
                 && resume == "--resume"
@@ -260,6 +273,15 @@ fn parse_args(
             Command::Resume {
                 run_id: run_id.clone(),
                 ledger: PathBuf::from(ledger),
+            }
+        }
+        [verb, project, ledger, rest @ ..]
+            if verb == "solve" && is_operand(project) && is_operand(ledger) =>
+        {
+            Command::SolveProject {
+                project: PathBuf::from(project),
+                ledger: PathBuf::from(ledger),
+                cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
             }
         }
         [verb, run_id] if verb == "report" && is_operand(run_id) => Command::Report(run_id.clone()),
@@ -279,6 +301,51 @@ fn parse_args(
         }
     };
     Ok((mode, command))
+}
+
+/// Parse the solve verb's repeatable card-pack flags.
+///
+/// Repetition is the point: a project binds one card per region and
+/// interface, and each card arrives in its own normalized pack. Caller order
+/// is not semantic — [`CardPackSet`] canonicalizes by content — so a repeated
+/// path is admitted here and collapses at admission rather than being
+/// rejected as a duplicate flag.
+fn parse_solve_card_args(args: &[String]) -> Result<Vec<(CardPackKind, PathBuf)>, Diagnostic> {
+    let mut cards = Vec::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        let kind = match args[index].as_str() {
+            "--materials" => CardPackKind::Material,
+            "--interfaces" => CardPackKind::Interface,
+            _ => return Err(solve_usage_diagnostic()),
+        };
+        let Some(value) = args.get(index + 1) else {
+            return Err(solve_usage_diagnostic());
+        };
+        if !is_operand(value) {
+            return Err(solve_usage_diagnostic());
+        }
+        if cards.len() >= MAX_CARD_PACKS {
+            return Err(Diagnostic::new(
+                "solve",
+                "cli-solve-card-pack-count",
+                format!("the invocation declares more than {MAX_CARD_PACKS} card packs"),
+                "reduce the pack set to the cards the project actually binds",
+            ));
+        }
+        cards.push((kind, PathBuf::from(value)));
+        index += 2;
+    }
+    Ok(cards)
+}
+
+fn solve_usage_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        "solve",
+        "cli-solve-usage",
+        "solve card-pack flags must be `--materials <pack>` or `--interfaces <pack>` pairs",
+        USAGE,
+    )
 }
 
 fn parse_import_args(args: &[String]) -> Result<ImportCommand, Diagnostic> {
@@ -626,10 +693,103 @@ fn read_project_for_import(
     Ok(decoded)
 }
 
-fn solve_path(project: &Path, ledger_path: &Path, mode: OutputMode) -> CommandOutput {
+/// Bounded read of one declared card pack.
+///
+/// The size gate runs against the file's metadata before any read, and the
+/// read itself takes one byte more than the ceiling so a file that grows
+/// between the two still refuses instead of being silently truncated.
+fn read_card_pack(
+    kind: CardPackKind,
+    path: &Path,
+    mode: OutputMode,
+) -> Result<Vec<u8>, CommandOutput> {
+    let label = path.to_string_lossy();
+    let refuse = |code: &str, message: String, fix: &str| {
+        let diagnostic = Diagnostic::new("solve", code.to_string(), message, fix.to_string())
+            .with_subject(label.to_string());
+        refusal(mode, exit::INPUT, &diagnostic, None)
+    };
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        refuse(
+            "cli-solve-card-pack-read",
+            format!("cannot read {} pack `{label}`: {error}", kind.label()),
+            "supply a readable normalized card pack",
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_CARD_PACK_BYTES {
+        return Err(refuse(
+            "cli-solve-card-pack-size",
+            format!(
+                "{} pack `{label}` is not a regular file within {MAX_CARD_PACK_BYTES} bytes",
+                kind.label()
+            ),
+            "supply a regular card-pack file inside the documented ceiling",
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|error| {
+        refuse(
+            "cli-solve-card-pack-read",
+            format!("cannot open {} pack `{label}`: {error}", kind.label()),
+            "supply a readable normalized card pack",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CARD_PACK_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            refuse(
+                "cli-solve-card-pack-read",
+                format!("cannot read {} pack `{label}`: {error}", kind.label()),
+                "supply a readable normalized card pack",
+            )
+        })?;
+    if bytes.len() as u64 > MAX_CARD_PACK_BYTES {
+        return Err(refuse(
+            "cli-solve-card-pack-size",
+            format!(
+                "{} pack `{label}` exceeds {MAX_CARD_PACK_BYTES} bytes",
+                kind.label()
+            ),
+            "supply a card pack inside the documented ceiling",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn admit_card_packs(
+    declared: &[(CardPackKind, PathBuf)],
+    mode: OutputMode,
+) -> Result<CardPackSet, CommandOutput> {
+    let mut raw = Vec::with_capacity(declared.len());
+    for (kind, path) in declared {
+        let bytes = read_card_pack(*kind, path, mode)?;
+        raw.push(RawCardPack {
+            kind: *kind,
+            source: path.to_string_lossy().into_owned(),
+            bytes,
+            expect: None,
+        });
+    }
+    CardPackSet::admit(raw).map_err(|refused| {
+        let diagnostic =
+            Diagnostic::new("solve", refused.code.to_string(), refused.what, refused.fix);
+        refusal(mode, exit::REFUSED, &diagnostic, None)
+    })
+}
+
+fn solve_path(
+    project: &Path,
+    ledger_path: &Path,
+    declared_cards: &[(CardPackKind, PathBuf)],
+    mode: OutputMode,
+) -> CommandOutput {
     let project_label = project.to_string_lossy();
     let decoded = match read_project_for_solve(project, mode) {
         Ok(decoded) => decoded,
+        Err(output) => return output,
+    };
+    let cards = match admit_card_packs(declared_cards, mode) {
+        Ok(cards) => cards,
         Err(output) => return output,
     };
     let findings = decoded.findings();
@@ -666,7 +826,7 @@ fn solve_path(project: &Path, ledger_path: &Path, mode: OutputMode) -> CommandOu
     let started = std::time::Instant::now();
     let mut clock = move || started.elapsed().as_secs_f64();
     let mut progress = Vec::new();
-    let result = run_solve(&ledger, &gate, &mut clock, &decoded, &mut progress);
+    let result = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress);
     render_solve_result(mode, &project_label, result, &progress)
 }
 

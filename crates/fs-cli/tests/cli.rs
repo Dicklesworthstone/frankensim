@@ -189,6 +189,11 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     assert_eq!(unknown_flag.exit_code, exit::USAGE);
     assert!(unknown_flag.stderr.contains("cli-usage"));
 
+    assert!(
+        help.stdout.contains("[--materials <pack>]"),
+        "the published usage names the card-pack grammar"
+    );
+
     let mixed_import_policy = run(args(&[
         "import",
         "project.fsim",
@@ -255,6 +260,62 @@ fn g0_solve_grammar_requires_a_ledger_operand() {
     let missing_project = run(args(&["solve", "no-such.fsim", "no-such.db", "--json"]));
     assert_eq!(missing_project.exit_code, exit::INPUT);
     assert!(missing_project.stderr.contains("cli-input-read"));
+}
+
+#[test]
+fn g0_solve_card_pack_flags_are_repeatable_and_pair_strictly() {
+    // A dangling flag with no value is a usage refusal, not a silent drop.
+    let dangling = run(args(&[
+        "solve",
+        "no-such.fsim",
+        "no-such.db",
+        "--materials",
+        "--json",
+    ]));
+    assert_eq!(dangling.exit_code, exit::USAGE);
+    assert!(dangling.stderr.contains("cli-solve-usage"));
+
+    let unknown = run(args(&[
+        "solve",
+        "no-such.fsim",
+        "no-such.db",
+        "--cards",
+        "p.fsmcdpk",
+        "--json",
+    ]));
+    assert_eq!(unknown.exit_code, exit::USAGE);
+    assert!(unknown.stderr.contains("cli-solve-usage"));
+
+    // Repetition is legal grammar: the project reads the missing-input
+    // refusal, which proves parsing accepted both pairs and got as far as
+    // bounded project I/O.
+    let repeated = run(args(&[
+        "solve",
+        "no-such.fsim",
+        "no-such.db",
+        "--materials",
+        "a.fsmcdpk",
+        "--materials",
+        "b.fsmcdpk",
+        "--interfaces",
+        "c.fsintpk",
+        "--json",
+    ]));
+    assert_eq!(repeated.exit_code, exit::INPUT);
+    assert!(repeated.stderr.contains("cli-input-read"));
+
+    // The resume spelling keeps its own exact arity and is not reinterpreted
+    // as a project/ledger pair with trailing flags.
+    let resume_with_cards = run(args(&[
+        "solve",
+        "--resume",
+        "run-1",
+        "run.db",
+        "--materials",
+        "a.fsmcdpk",
+    ]));
+    assert_eq!(resume_with_cards.exit_code, exit::USAGE);
+    assert!(resume_with_cards.stderr.contains("cli-usage"));
 }
 
 #[test]
