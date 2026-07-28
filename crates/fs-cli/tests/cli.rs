@@ -1,6 +1,8 @@
 //! G0 command-contract tests for the `frankensim` CLI membrane.
 
-use fs_cli::{exit, run, validate_source};
+use fs_cli::{
+    MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES, MAX_CARD_PACKS, exit, run, validate_source,
+};
 use fs_project::{
     Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, GeometryArtifact,
     GeometryAssignment, MeshSelector, Metadata, OutputRequest, PowerDissipation, ProjectSpec,
@@ -11,6 +13,38 @@ use fs_qty::QtyAny;
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
+}
+
+/// Per-test scratch directory under the platform temp root.
+///
+/// The card-pack resource ceilings are the only part of the CLI contract that
+/// has to reach real filesystem metadata — a size ceiling that never sees a
+/// real `stat` is not a ceiling — so this is the one place the membrane tests
+/// touch disk.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fs-cli-cards-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    dir
+}
+
+/// Write the admissible fixture project so a solve invocation gets past the
+/// project read and reaches card-pack admission.
+fn written_project(dir: &std::path::Path) -> std::path::PathBuf {
+    let source = print_sexpr(&valid_project()).expect("fixture renders canonically");
+    let path = dir.join("reference.fsim");
+    std::fs::write(&path, source).expect("project fixture writes");
+    path
+}
+
+fn solve_with_pack(project: &std::path::Path, ledger: &std::path::Path, pack: &str) -> Vec<String> {
+    vec![
+        "solve".to_string(),
+        project.to_string_lossy().into_owned(),
+        ledger.to_string_lossy().into_owned(),
+        "--materials".to_string(),
+        pack.to_string(),
+        "--json".to_string(),
+    ]
 }
 
 fn valid_project() -> ProjectSpec {
@@ -316,6 +350,117 @@ fn g0_solve_card_pack_flags_are_repeatable_and_pair_strictly() {
     ]));
     assert_eq!(resume_with_cards.exit_code, exit::USAGE);
     assert!(resume_with_cards.stderr.contains("cli-usage"));
+}
+
+#[test]
+fn g0_the_invocation_card_pack_ceiling_refuses_before_any_file_is_touched() {
+    // The grammar ceiling counts declared pairs, so it must fire during
+    // argument parsing — before the project path is even stat'd. The missing
+    // project is the positive control: at the ceiling the run gets far enough
+    // to fail on it, one pair past the ceiling it never does.
+    let invocation = |pairs: usize| {
+        let mut argv = vec![
+            "solve".to_string(),
+            "no-such.fsim".to_string(),
+            "no-such.db".to_string(),
+        ];
+        for index in 0..pairs {
+            argv.push("--materials".to_string());
+            argv.push(format!("pack-{index}.fsmcdpk"));
+        }
+        argv.push("--json".to_string());
+        run(argv)
+    };
+
+    let at_cap = invocation(MAX_CARD_PACKS);
+    assert_eq!(at_cap.exit_code, exit::INPUT);
+    assert!(
+        at_cap.stderr.contains("cli-input-read"),
+        "exactly the ceiling parses and proceeds to bounded project I/O"
+    );
+
+    let past_cap = invocation(MAX_CARD_PACKS + 1);
+    assert!(past_cap.stderr.contains("cli-solve-card-pack-count"));
+    assert!(
+        !past_cap.stderr.contains("cli-input-read"),
+        "the ceiling must refuse before the project is read, not after"
+    );
+    // Pinned, not endorsed: this is a resource cap reported in the USAGE exit
+    // class even though the invocation matches the documented grammar and
+    // `exit::INPUT` is the class documented for "admitted by the CLI resource
+    // cap". Tracked as its own bead; this assertion exists so the class cannot
+    // drift silently while that is decided.
+    assert_eq!(past_cap.exit_code, exit::USAGE);
+}
+
+#[test]
+fn g0_a_non_regular_card_pack_path_refuses_at_the_size_guard() {
+    let dir = scratch("nonregular");
+    let project = written_project(&dir);
+    // A directory resolves through `stat` but is not a regular file, so it
+    // can never carry a bounded pack read.
+    let output = run(solve_with_pack(
+        &project,
+        &dir.join("run.db"),
+        &dir.to_string_lossy(),
+    ));
+    assert_eq!(output.exit_code, exit::INPUT);
+    assert!(output.stderr.contains("cli-solve-card-pack-size"));
+}
+
+#[test]
+fn g0_the_card_pack_read_ceiling_is_exactly_max_card_pack_bytes_on_disk() {
+    let dir = scratch("oversized");
+    let project = written_project(&dir);
+    let ledger = dir.join("run.db");
+
+    // Both files are undecodable, so the code is what discriminates: one byte
+    // past the ceiling never reaches the decoder, exactly at the ceiling does.
+    let past_cap = dir.join("past-cap.fsmcdpk");
+    std::fs::write(&past_cap, vec![0u8; MAX_CARD_PACK_BYTES as usize + 1])
+        .expect("oversized fixture writes");
+    let output = run(solve_with_pack(
+        &project,
+        &ledger,
+        &past_cap.to_string_lossy(),
+    ));
+    assert_eq!(output.exit_code, exit::INPUT);
+    assert!(output.stderr.contains("cli-solve-card-pack-size"));
+
+    let at_cap = dir.join("at-cap.fsmcdpk");
+    std::fs::write(&at_cap, vec![0u8; MAX_CARD_PACK_BYTES as usize])
+        .expect("at-ceiling fixture writes");
+    let output = run(solve_with_pack(
+        &project,
+        &ledger,
+        &at_cap.to_string_lossy(),
+    ));
+    assert_eq!(output.exit_code, exit::REFUSED);
+    assert!(
+        output.stderr.contains("cli-solve-card-pack-decode"),
+        "bytes exactly at the ceiling are read in full and refused by the decoder"
+    );
+}
+
+#[test]
+fn g0_an_overlong_pack_path_refuses_as_unreadable_not_as_an_oversized_label() {
+    // `cli-solve-card-pack-source` guards the retained diagnostic label, but
+    // from the CLI the label IS the path, and no filesystem admits a
+    // component this long. The read guard therefore shadows it: the source
+    // ceiling is a library-boundary guard only, proven reachable in
+    // `fs_cli::cards`' own unit battery rather than pretended to be covered
+    // here. If the guard order ever changes, this pin is what says so.
+    let dir = scratch("longpath");
+    let project = written_project(&dir);
+    let overlong = dir.join("x".repeat(MAX_CARD_PACK_SOURCE_BYTES + 1));
+    let output = run(solve_with_pack(
+        &project,
+        &dir.join("run.db"),
+        &overlong.to_string_lossy(),
+    ));
+    assert_eq!(output.exit_code, exit::INPUT);
+    assert!(output.stderr.contains("cli-solve-card-pack-read"));
+    assert!(!output.stderr.contains("cli-solve-card-pack-source"));
 }
 
 #[test]

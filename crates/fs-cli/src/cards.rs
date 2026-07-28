@@ -716,6 +716,99 @@ mod tests {
     }
 
     #[test]
+    fn g0_the_source_label_ceiling_admits_the_cap_and_refuses_one_byte_past() {
+        // The label is retained only for diagnostics, so the ceiling exists to
+        // bound what a refusal message can echo back. Exactly at the cap is
+        // still a legal label; the refusal starts one byte later.
+        let bytes = material_bytes("AA6061", "pack-a");
+        let at_cap = "s".repeat(MAX_CARD_PACK_SOURCE_BYTES);
+        let set = CardPackSet::admit(vec![raw(CardPackKind::Material, &at_cap, bytes.clone())])
+            .expect("a label exactly at the ceiling is still admitted");
+        assert_eq!(set.len(), 1);
+
+        let past_cap = "s".repeat(MAX_CARD_PACK_SOURCE_BYTES + 1);
+        let refusal = CardPackSet::admit(vec![raw(CardPackKind::Material, &past_cap, bytes)])
+            .expect_err("one byte past the ceiling refuses");
+        assert_eq!(refusal.code, "cli-solve-card-pack-source");
+        assert!(
+            !refusal.what.contains(&past_cap),
+            "a refusal about an oversized label must not echo the whole label back"
+        );
+    }
+
+    #[test]
+    fn g0_the_pack_byte_ceiling_refuses_before_decode_is_attempted() {
+        // Both lengths are undecodable garbage, so the *code* is what
+        // discriminates: at the cap the bytes reach the decoder and fail on
+        // magic, one byte past the ceiling refuses first. That is the exact
+        // boundary and the guard ordering in a single comparison.
+        let at_cap = vec![0u8; MAX_CARD_PACK_BYTES as usize];
+        let refusal = CardPackSet::admit(vec![raw(CardPackKind::Material, "at-cap", at_cap)])
+            .expect_err("undecodable bytes never admit");
+        assert_eq!(
+            refusal.code, "cli-solve-card-pack-decode",
+            "bytes exactly at the ceiling are inside admission and reach the decoder"
+        );
+
+        let past_cap = vec![0u8; MAX_CARD_PACK_BYTES as usize + 1];
+        let refusal = CardPackSet::admit(vec![raw(CardPackKind::Material, "past-cap", past_cap)])
+            .expect_err("one byte past the ceiling refuses");
+        assert_eq!(
+            refusal.code, "cli-solve-card-pack-size",
+            "the size ceiling must fire before the decoder is handed the bytes"
+        );
+    }
+
+    #[test]
+    fn g0_the_pack_count_ceiling_admits_exactly_max_card_packs_and_refuses_the_next() {
+        // Distinct chemistries give distinct material states, so every fixture
+        // reconstructs a different card and none collapses as a duplicate or
+        // refuses as a conflict.
+        let mut packs = Vec::with_capacity(MAX_CARD_PACKS + 1);
+        for index in 0..=MAX_CARD_PACKS {
+            packs.push(raw(
+                CardPackKind::Material,
+                &format!("pack-{index}.fsmcdpk"),
+                material_bytes(&format!("Alloy{index:04}"), "pack-a"),
+            ));
+        }
+
+        let at_cap = CardPackSet::admit(packs[..MAX_CARD_PACKS].to_vec())
+            .expect("exactly the ceiling admits");
+        assert_eq!(at_cap.len(), MAX_CARD_PACKS);
+
+        let refusal = CardPackSet::admit(packs).expect_err("one pack past the ceiling refuses");
+        assert_eq!(refusal.code, "cli-solve-card-pack-count");
+    }
+
+    #[test]
+    fn g0_idempotent_repeats_do_not_consume_the_pack_count_budget() {
+        // The ceiling bounds the *admitted set*, not the number of times a
+        // caller names a pack: the idempotent-repeat path returns before the
+        // count check. This is the semantic difference between this ceiling
+        // and the invocation-level one the CLI grammar applies, and it is why
+        // the two carry different messages under the same code.
+        let mut packs = Vec::new();
+        for index in 0..MAX_CARD_PACKS {
+            packs.push(raw(
+                CardPackKind::Material,
+                &format!("pack-{index}.fsmcdpk"),
+                material_bytes(&format!("Alloy{index:04}"), "pack-a"),
+            ));
+        }
+        let distinct = CardPackSet::admit(packs.clone()).expect("the full set admits");
+
+        // Every pack named a second time: twice the declarations, the same
+        // admitted set and the same canonical root.
+        let mut repeated = packs.clone();
+        repeated.extend(packs);
+        let collapsed =
+            CardPackSet::admit(repeated).expect("repeats collapse instead of exhausting the count");
+        assert_eq!(collapsed.len(), MAX_CARD_PACKS);
+        assert_eq!(distinct.root().to_hex(), collapsed.root().to_hex());
+    }
+
+    #[test]
     fn g0_the_empty_set_has_a_stable_root() {
         assert_eq!(
             CardPackSet::empty().root().to_hex(),
