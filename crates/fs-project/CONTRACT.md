@@ -64,7 +64,13 @@ bindings; it runs no solves and admits no scenarios itself.
   rationale. Those strings are canonical recorded provenance, not
   authenticated evidence. `PowerDissipation`
   rows, `Cooling` (fans/vents/leakage; declared-empty lists are facts,
-  omission is a violation), `Envelope`, sourced `ThermalLimit` requirements
+  omission is a violation; a fan may carry an optional sourced
+  `FanCurveDecl` — at least two points, strictly increasing flow,
+  non-increasing pressure, declared tolerance with a `FanToleranceBasis`,
+  and a stall boundary — and the section may carry an optional
+  `AirflowLeakage` open area, distinct from the thermal watts sink; absence
+  of either is a declaration the flow-network stage must refuse, never
+  repair), `Envelope`, sourced `ThermalLimit` requirements
   with explicit QoI, direction, effective limit, guard margin, severity,
   versioned base authority, and an already-applied `SafetyFactorPolicy` with
   its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
@@ -132,9 +138,11 @@ bindings; it runs no solves and admits no scenarios itself.
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The only
   registered rule is the synthetic version-0 proof rule, named as such.
-- The ONE defaultable field is power-row `duty` (`1.0`, continuous
-  dissipation is the conservative assumption); everything else is mandatory,
-  and the default is always receipted.
+- The defaultable fields are exactly two, and every applied default is
+  receipted: power-row `duty` (`1.0`, continuous dissipation is the
+  conservative assumption) and a declared fan curve's `min-flow` (the
+  curve's first point: no stall margin is claimed beyond the declared
+  data); everything else is mandatory.
 - `bind::resolve_bindings(&ProjectSpec, &CardLibrary, &BindingRequirements)
   -> MaterialResolution` (bead f85xj.6.4): every declared region must bind
   exactly one `fs_matdb::MaterialCard` (manufactured state spelled exactly as
@@ -322,7 +330,12 @@ default with canonicalization receipt (and strict-mode refusal of the same
 bytes); noncanonical whitespace refusal/receipt; the synthetic v0 migration
 round trip with verifying receipt plus refusal of no-op and unknown-version
 migrations; entity identity pins accepting the recomputed token and refusing
-a stale one; and the broken-project corpus (14 rows) logging every violation
+a stale one; a declared fan curve plus airflow-leakage area round-tripping
+hash-stable through both spellings with the receipted `min-flow` default,
+`project-field-enum` refusal of an unknown tolerance basis, and an
+eleven-row broken-cooling corpus covering curve shape/tolerance/source/dims,
+airflow-leakage dims, and the fan/vent/thermal-leakage dims rows; and the
+broken-project corpus (14 rows) logging every violation
 with its fix as the error-message quality bar.
 The f85xj.17.6 battery additionally proves sourced requirement and factor
 lineage round-trip in both spellings, sourceless/invalid-factor refusal,
@@ -417,6 +430,12 @@ refuse atomically.
   freeze binds the tree and the `check-all` gate, not a published artifact.
 - Validation is structural and dimensional; it makes no physics claim (a
   well-formed project can still describe an unsolvable or nonsensical study).
+- A declared `FanCurveDecl` is a caller/manufacturer declaration with a
+  named source; admitting it proves nothing about the physical fan. Its
+  structural checks mirror, but do not replace, `fs-airflow`'s own curve
+  admission at lowering time. The `AirflowLeakage` area is a declared
+  effective opening, not a measured leakage model, and the schema does not
+  decide which discharge model consumes it.
 - The f85xj.17.3 finite-mesh audit finds bounded proximity candidates between
   resolved region tessellations; it does not certify continuum contact,
   physical-law completeness, or authenticated transforms. The explicit

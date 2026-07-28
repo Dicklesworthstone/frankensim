@@ -1,7 +1,7 @@
 //! Battery for the versioned `.fsim` project schema (bead f85xj.6.1): the
 //! reference cooling project parses and is admissible, canonical bytes are
 //! stable across both spellings, every mandatory-field omission is a named
-//! violation, unknown fields are refused, the only default is receipted, and
+//! violation, unknown fields are refused, every applied default is receipted, and
 //! the version-bump machinery is proven with the synthetic migration. The
 //! broken-project corpus doubles as documentation of the error-message
 //! quality bar: every row logs its violation and fix.
@@ -13,13 +13,14 @@ use fs_evidence::uncertainty::{
 };
 use fs_package::{EvidencePackage, Provenance, VerifiedPackage};
 use fs_project::{
-    Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan,
-    GeometryArtifact, GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, InterfaceState,
-    MaterialBinding, MeshSelector, Metadata, OutputRequest, PerfectContactBinding,
-    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
-    Vent, Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient,
-    print_json, print_sexpr, project_decision_authorities, project_decision_authority,
+    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope,
+    FSIM_VERSION, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
+    GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, InterfaceState, MaterialBinding,
+    MeshSelector, Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient, print_json,
+    print_sexpr, project_decision_authorities, project_decision_authority,
     requirement_source_reviews,
 };
 use fs_qty::QtyAny;
@@ -237,12 +238,14 @@ fn reference_project() -> ProjectSpec {
                 name: "intake-1".to_string(),
                 flow: QtyAny::new(0.012, fs_project::spec::dims::VOLUMETRIC_FLOW),
                 static_pressure: QtyAny::new(45.0, fs_project::spec::dims::PRESSURE),
+                curve: None,
             }],
             vents: vec![Vent {
                 region: "sink-base".to_string(),
                 area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
             }],
             leakage: watts(2.5),
+            airflow_leakage: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(273.15),
@@ -489,6 +492,7 @@ fn parse_render_parse_is_idempotent_across_project_variants() {
         };
     }
     variants.push(pinned);
+    variants.push(curved_cooling_project());
 
     for (index, spec) in variants.iter().enumerate() {
         let first = print_sexpr(spec).expect("renders");
@@ -1160,5 +1164,232 @@ fn deliberate_perfect_contact_round_trips_and_conflicts_fail_closed() {
             findings.iter().any(|finding| finding.code == code),
             "missing `{code}` in {findings:?}"
         );
+    }
+}
+
+// ---- Declared fan curve + airflow leakage accretion (frankensim-frn2i) ----
+
+fn flow_q(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::VOLUMETRIC_FLOW)
+}
+
+fn pascals(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::PRESSURE)
+}
+
+fn declared_fan_curve() -> FanCurveDecl {
+    FanCurveDecl {
+        points: vec![
+            FanCurvePoint {
+                flow: flow_q(0.0),
+                static_pressure: pascals(60.0),
+            },
+            FanCurvePoint {
+                flow: flow_q(0.008),
+                static_pressure: pascals(50.0),
+            },
+            FanCurvePoint {
+                flow: flow_q(0.02),
+                static_pressure: pascals(0.0),
+            },
+        ],
+        pressure_tolerance_rel: 0.08,
+        tolerance_basis: FanToleranceBasis::Manufacturer,
+        source: "Synthetic fixture curve; not manufacturer performance data".to_string(),
+        source_id: "fixture-fan-curve-v1".to_string(),
+        min_flow: flow_q(0.002),
+    }
+}
+
+fn curved_cooling_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let cooling = spec.cooling.as_mut().expect("reference has cooling");
+    cooling.fans[0].curve = Some(declared_fan_curve());
+    cooling.airflow_leakage = Some(AirflowLeakage {
+        area: QtyAny::new(0.0015, fs_project::spec::dims::AREA),
+    });
+    spec
+}
+
+fn with_broken_curve(mutate: impl FnOnce(&mut FanCurveDecl)) -> ProjectSpec {
+    let mut spec = curved_cooling_project();
+    let curve = spec.cooling.as_mut().expect("cooling present").fans[0]
+        .curve
+        .as_mut()
+        .expect("curve present");
+    mutate(curve);
+    spec
+}
+
+#[test]
+fn a_declared_fan_curve_and_airflow_leakage_round_trip_hash_stable() {
+    let spec = curved_cooling_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+
+    let rendered = print_sexpr(&spec).expect("renders");
+    let decoded = parse_sexpr(&rendered).expect("strict parse");
+    assert_eq!(
+        decoded.spec, spec,
+        "curve/leakage must survive the round trip"
+    );
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    assert!(
+        decoded.defaults.is_empty(),
+        "explicit min-flow needs no default"
+    );
+    assert_eq!(decoded.hash(), canonical_hash(decoded.canonical.as_bytes()));
+
+    let json = print_json(&spec).expect("renders json");
+    let from_json = parse_json(&json).expect("json parses");
+    assert_eq!(from_json.spec, spec, "both spellings reach one spec");
+    assert_eq!(from_json.hash(), decoded.hash(), "one canonical identity");
+}
+
+#[test]
+fn the_min_flow_default_is_receipted_never_silent() {
+    let rendered = print_sexpr(&curved_cooling_project()).expect("renders");
+    let start = rendered
+        .find(" :min-flow ")
+        .expect("fixture declares min-flow");
+    let end = start
+        + rendered[start..]
+            .find(" :points")
+            .expect("points follows min-flow in canonical order");
+    let without_min_flow = format!("{}{}", &rendered[..start], &rendered[end..]);
+    assert_ne!(rendered, without_min_flow, "fixture edit must apply");
+
+    let decoded = parse_sexpr_lenient(&without_min_flow).expect("lenient parse");
+    assert_eq!(decoded.defaults.len(), 1);
+    let receipt = &decoded.defaults[0];
+    assert_eq!(receipt.field, "cooling.fans[intake-1].curve.min-flow");
+    assert_eq!(
+        receipt.value, "0 m^3/s",
+        "defaults to the first point's flow"
+    );
+    assert!(!receipt.rationale.trim().is_empty());
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let canonicalization = decoded
+        .canonicalization
+        .expect("re-emission must be receipted");
+    assert!(canonicalization.verifies(without_min_flow.as_bytes(), decoded.canonical.as_bytes()));
+
+    let refusal = parse_sexpr(&without_min_flow).expect_err("strict parse must refuse");
+    assert!(
+        refusal.code == "fsim-non-canonical" || refusal.code == "fsim-default-in-strict-mode",
+        "unexpected refusal {refusal:?}"
+    );
+}
+
+#[test]
+fn a_bad_tolerance_basis_is_refused_by_enum() {
+    let rendered = print_sexpr(&curved_cooling_project()).expect("renders");
+    let bad = rendered.replacen("\"manufacturer\"", "\"vibes\"", 1);
+    assert_ne!(rendered, bad, "fixture edit must apply");
+    let decoded = parse_sexpr_lenient(&bad).expect("lenient parse");
+    assert!(
+        decoded
+            .findings()
+            .iter()
+            .any(|violation| violation.code == "project-field-enum"),
+        "{:?}",
+        decoded.findings()
+    );
+}
+
+fn broken_cooling_corpus() -> Vec<(&'static str, ProjectSpec, &'static str)> {
+    vec![
+        (
+            "single-point-fan-curve",
+            with_broken_curve(|curve| {
+                curve.points.truncate(1);
+                curve.min_flow = flow_q(0.0);
+            }),
+            "project-fan-curve-shape",
+        ),
+        (
+            "non-monotone-fan-curve-flow",
+            with_broken_curve(|curve| curve.points[1].flow = flow_q(0.03)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "rising-pressure-fan-curve",
+            with_broken_curve(|curve| curve.points[1].static_pressure = pascals(80.0)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "fan-curve-min-flow-outside-span",
+            with_broken_curve(|curve| curve.min_flow = flow_q(0.5)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "fan-curve-tolerance-out-of-range",
+            with_broken_curve(|curve| curve.pressure_tolerance_rel = 1.5),
+            "project-fan-curve-tolerance",
+        ),
+        (
+            "fan-curve-unsourced",
+            with_broken_curve(|curve| curve.source = "  ".to_string()),
+            "project-fan-curve-source",
+        ),
+        (
+            "fan-curve-wrong-dims",
+            with_broken_curve(|curve| curve.points[0].flow = pascals(0.0)),
+            "project-fan-curve-dims",
+        ),
+        (
+            "airflow-leakage-wrong-dims",
+            {
+                let mut s = curved_cooling_project();
+                s.cooling.as_mut().expect("cooling").airflow_leakage =
+                    Some(AirflowLeakage { area: watts(3.0) });
+                s
+            },
+            "project-airflow-leakage-dims",
+        ),
+        (
+            "wrong-fan-flow-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").fans[0].flow = kelvin(300.0);
+                s
+            },
+            "project-fan-dims",
+        ),
+        (
+            "wrong-vent-area-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").vents[0].area = watts(4.0);
+                s
+            },
+            "project-vent-dims",
+        ),
+        (
+            "wrong-thermal-leakage-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").leakage = kelvin(2.5);
+                s
+            },
+            "project-leakage-dims",
+        ),
+    ]
+}
+
+#[test]
+fn the_broken_cooling_corpus_logs_every_violation_with_its_fix() {
+    eprintln!("RESULT\tCASE\tCODE\tFIX");
+    for (label, spec, expected_code) in &broken_cooling_corpus() {
+        let findings = spec.validate();
+        if let Some(violation) = findings.iter().find(|v| v.code == *expected_code) {
+            eprintln!("PASS\t{label}\t{}\t{}", violation.code, violation.fix);
+            assert!(
+                !violation.fix.trim().is_empty() && !violation.what.trim().is_empty(),
+                "{label}: violation must carry what+fix"
+            );
+        } else {
+            eprintln!("FAIL\t{label}\t{expected_code}\t-");
+            panic!("{label}: expected `{expected_code}`, got {findings:?}");
+        }
     }
 }

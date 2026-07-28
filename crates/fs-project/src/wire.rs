@@ -21,11 +21,12 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
-    GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding,
-    Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
-    SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
+    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
+    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata,
+    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -464,36 +465,90 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
     Ok(())
 }
 
+fn tolerance_basis_str(basis: FanToleranceBasis) -> &'static str {
+    match basis {
+        FanToleranceBasis::Manufacturer => "manufacturer",
+        FanToleranceBasis::Engineering => "engineering",
+        FanToleranceBasis::Analytic => "analytic",
+    }
+}
+
+fn lower_fan_curve(curve: &FanCurveDecl) -> Result<Node, ProjectError> {
+    let mut points = vec![sym("points")];
+    for point in &curve.points {
+        points.push(list(vec![
+            sym("point"),
+            kw("flow"),
+            qty(point.flow)?,
+            kw("static-pressure"),
+            qty(point.static_pressure)?,
+        ]));
+    }
+    Ok(list(vec![
+        sym("curve"),
+        kw("pressure-tolerance-rel"),
+        float(curve.pressure_tolerance_rel),
+        kw("tolerance-basis"),
+        text(tolerance_basis_str(curve.tolerance_basis)),
+        kw("source"),
+        text(&curve.source),
+        kw("source-id"),
+        text(&curve.source_id),
+        kw("min-flow"),
+        qty(curve.min_flow)?,
+        kw("points"),
+        list(points),
+    ]))
+}
+
+fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), ProjectError> {
+    let mut fans = vec![sym("fans")];
+    for fan in &cooling.fans {
+        let mut row = vec![
+            sym("fan"),
+            kw("name"),
+            text(&fan.name),
+            kw("flow"),
+            qty(fan.flow)?,
+            kw("static-pressure"),
+            qty(fan.static_pressure)?,
+        ];
+        if let Some(curve) = &fan.curve {
+            row.push(kw("curve"));
+            row.push(lower_fan_curve(curve)?);
+        }
+        fans.push(list(row));
+    }
+    let mut vents = vec![sym("vents")];
+    for vent in &cooling.vents {
+        vents.push(list(vec![
+            sym("vent"),
+            kw("region"),
+            text(&vent.region),
+            kw("area"),
+            qty(vent.area)?,
+        ]));
+    }
+    let mut cooling_sections = vec![
+        sym("cooling"),
+        list(fans),
+        list(vents),
+        list(vec![sym("leakage"), kw("watts"), qty(cooling.leakage)?]),
+    ];
+    if let Some(airflow_leakage) = &cooling.airflow_leakage {
+        cooling_sections.push(list(vec![
+            sym("airflow-leakage"),
+            kw("area"),
+            qty(airflow_leakage.area)?,
+        ]));
+    }
+    sections.push(list(cooling_sections));
+    Ok(())
+}
+
 fn lower_operations(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), ProjectError> {
     if let Some(cooling) = &spec.cooling {
-        let mut fans = vec![sym("fans")];
-        for fan in &cooling.fans {
-            fans.push(list(vec![
-                sym("fan"),
-                kw("name"),
-                text(&fan.name),
-                kw("flow"),
-                qty(fan.flow)?,
-                kw("static-pressure"),
-                qty(fan.static_pressure)?,
-            ]));
-        }
-        let mut vents = vec![sym("vents")];
-        for vent in &cooling.vents {
-            vents.push(list(vec![
-                sym("vent"),
-                kw("region"),
-                text(&vent.region),
-                kw("area"),
-                qty(vent.area)?,
-            ]));
-        }
-        sections.push(list(vec![
-            sym("cooling"),
-            list(fans),
-            list(vents),
-            list(vec![sym("leakage"), kw("watts"), qty(cooling.leakage)?]),
-        ]));
+        lower_cooling(cooling, sections)?;
     }
     if let Some(envelope) = &spec.envelope {
         sections.push(list(vec![
@@ -1068,7 +1123,7 @@ pub fn recognize(node: &Node) -> Result<DecodedProject, ProjectError> {
                 spec.perfect_contacts = Some(read_perfect_contacts(body, &mut recognition));
             }
             "power" => spec.power = Some(read_power(body, &mut recognition, &mut defaults)),
-            "cooling" => spec.cooling = read_cooling(body, &mut recognition),
+            "cooling" => spec.cooling = read_cooling(body, &mut recognition, &mut defaults),
             "envelope" => spec.envelope = Some(read_envelope(body, &mut recognition)),
             "requirements" => spec.requirements = Some(read_requirements(body, &mut recognition)),
             "solver" => spec.solver = Some(read_solver(body, &mut recognition)),
@@ -1934,10 +1989,15 @@ fn read_power(
     rows
 }
 
-fn read_cooling(body: &[Node], out: &mut Vec<Violation>) -> Option<Cooling> {
+fn read_cooling(
+    body: &[Node],
+    out: &mut Vec<Violation>,
+    defaults: &mut Vec<DefaultReceipt>,
+) -> Option<Cooling> {
     let mut fans = Vec::new();
     let mut vents = Vec::new();
     let mut leakage = None;
+    let mut airflow_leakage = None;
     for node in body {
         match section_name(node) {
             Some(("fans", inner)) => {
@@ -1951,16 +2011,24 @@ fn read_cooling(body: &[Node], out: &mut Vec<Violation>) -> Option<Cooling> {
                         });
                         continue;
                     };
-                    let pairs =
-                        read_pairs(fan_body, "fan", &["name", "flow", "static-pressure"], out);
+                    let pairs = read_pairs(
+                        fan_body,
+                        "fan",
+                        &["name", "flow", "static-pressure", "curve"],
+                        out,
+                    );
+                    let name = expect_str(field(&pairs, "name"), "fan.name", out);
+                    let curve = field(&pairs, "curve")
+                        .and_then(|node| read_fan_curve(node, &name, out, defaults));
                     fans.push(Fan {
-                        name: expect_str(field(&pairs, "name"), "fan.name", out),
+                        name,
                         flow: expect_qty(field(&pairs, "flow"), "fan.flow", out),
                         static_pressure: expect_qty(
                             field(&pairs, "static-pressure"),
                             "fan.static-pressure",
                             out,
                         ),
+                        curve,
                     });
                 }
             }
@@ -1985,11 +2053,18 @@ fn read_cooling(body: &[Node], out: &mut Vec<Violation>) -> Option<Cooling> {
                 let pairs = read_pairs(inner, "leakage", &["watts"], out);
                 leakage = Some(expect_qty(field(&pairs, "watts"), "leakage.watts", out));
             }
+            Some(("airflow-leakage", inner)) => {
+                let pairs = read_pairs(inner, "airflow-leakage", &["area"], out);
+                airflow_leakage = Some(AirflowLeakage {
+                    area: expect_qty(field(&pairs, "area"), "airflow-leakage.area", out),
+                });
+            }
             _ => {
                 out.push(Violation {
                     code: "project-unknown-field",
                     what: "`cooling` carries an unknown subsection".to_string(),
-                    fix: "cooling contains exactly `(fans ...)`, `(vents ...)`, `(leakage ...)`"
+                    fix: "cooling contains exactly `(fans ...)`, `(vents ...)`, \
+                          `(leakage ...)`, and optionally `(airflow-leakage ...)`"
                         .to_string(),
                 });
             }
@@ -2007,6 +2082,124 @@ fn read_cooling(body: &[Node], out: &mut Vec<Violation>) -> Option<Cooling> {
         fans,
         vents,
         leakage,
+        airflow_leakage,
+    })
+}
+
+fn parse_tolerance_basis(value: &str, out: &mut Vec<Violation>) -> FanToleranceBasis {
+    match value {
+        "manufacturer" => FanToleranceBasis::Manufacturer,
+        "engineering" => FanToleranceBasis::Engineering,
+        "analytic" => FanToleranceBasis::Analytic,
+        _ => {
+            invalid_enum(
+                out,
+                "fan.curve.tolerance-basis",
+                value,
+                "`manufacturer`, `engineering`, `analytic`",
+            );
+            FanToleranceBasis::Engineering
+        }
+    }
+}
+
+fn read_fan_curve(
+    node: &Node,
+    fan: &str,
+    out: &mut Vec<Violation>,
+    defaults: &mut Vec<DefaultReceipt>,
+) -> Option<FanCurveDecl> {
+    let Some(("curve", inner)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("fan `{fan}` `:curve` value must be a `(curve ...)` section"),
+            fix: "declare `(curve :pressure-tolerance-rel ... :tolerance-basis ... \
+                  :source ... :source-id ... :min-flow ... :points (points (point ...) ...))`"
+                .to_string(),
+        });
+        return None;
+    };
+    let pairs = read_pairs(
+        inner,
+        "fan.curve",
+        &[
+            "pressure-tolerance-rel",
+            "tolerance-basis",
+            "source",
+            "source-id",
+            "min-flow",
+            "points",
+        ],
+        out,
+    );
+    let mut points = Vec::new();
+    match field(&pairs, "points").and_then(section_name) {
+        Some(("points", rows)) => {
+            for row in rows {
+                let Some(("point", point_body)) = section_name(row) else {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: format!("fan `{fan}` curve points must be `(point ...)` rows"),
+                        fix: "declare `(point :flow ... :static-pressure ...)`".to_string(),
+                    });
+                    continue;
+                };
+                let point_pairs = read_pairs(
+                    point_body,
+                    "fan.curve.point",
+                    &["flow", "static-pressure"],
+                    out,
+                );
+                points.push(FanCurvePoint {
+                    flow: expect_qty(field(&point_pairs, "flow"), "fan.curve.point.flow", out),
+                    static_pressure: expect_qty(
+                        field(&point_pairs, "static-pressure"),
+                        "fan.curve.point.static-pressure",
+                        out,
+                    ),
+                });
+            }
+        }
+        _ => {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: format!("fan `{fan}` curve lacks its `(points ...)` list"),
+                fix: "declare `:points (points (point :flow ... :static-pressure ...) ...)`"
+                    .to_string(),
+            });
+        }
+    }
+    let min_flow = if let Some(node) = field(&pairs, "min-flow") {
+        expect_qty(Some(node), "fan.curve.min-flow", out)
+    } else if let Some(first) = points.first() {
+        defaults.push(DefaultReceipt {
+            field: format!("cooling.fans[{fan}].curve.min-flow"),
+            value: format!("{} m^3/s", first.flow.value),
+            rationale: "an undeclared stall boundary defaults to the curve's first point: \
+                        no stall margin is claimed beyond the declared data",
+        });
+        first.flow
+    } else {
+        expect_qty(None, "fan.curve.min-flow", out)
+    };
+    Some(FanCurveDecl {
+        points,
+        pressure_tolerance_rel: expect_float(
+            field(&pairs, "pressure-tolerance-rel"),
+            "fan.curve.pressure-tolerance-rel",
+            out,
+        ),
+        tolerance_basis: parse_tolerance_basis(
+            &expect_str(
+                field(&pairs, "tolerance-basis"),
+                "fan.curve.tolerance-basis",
+                out,
+            ),
+            out,
+        ),
+        source: expect_str(field(&pairs, "source"), "fan.curve.source", out),
+        source_id: expect_str(field(&pairs, "source-id"), "fan.curve.source-id", out),
+        min_flow,
     })
 }
 

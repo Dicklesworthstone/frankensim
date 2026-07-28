@@ -168,6 +168,7 @@ fn project_for_receipt(format: &str, source_hash: u64, parser_version: &str) -> 
             fans: Vec::new(),
             vents: Vec::new(),
             leakage: watts(0.0),
+            airflow_leakage: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),

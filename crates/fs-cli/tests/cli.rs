@@ -87,6 +87,7 @@ fn valid_project() -> ProjectSpec {
             fans: Vec::new(),
             vents: Vec::new(),
             leakage: watts(0.0),
+            airflow_leakage: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),

@@ -450,7 +450,8 @@ pub struct PowerDissipation {
     /// Dissipated power (W).
     pub watts: QtyAny,
     /// Duty factor in `0.0..=1.0`. Omission in the lenient wire spelling is
-    /// the schema's ONE receipted power default (`1.0`).
+    /// a receipted power default (`1.0`); the only other receipted default
+    /// is a declared fan curve's omitted `min-flow`.
     pub duty: f64,
 }
 
@@ -463,6 +464,52 @@ pub struct Fan {
     pub flow: QtyAny,
     /// Static pressure at the operating point (Pa).
     pub static_pressure: QtyAny,
+    /// Optional declared pressure-flow curve. The single operating point
+    /// above serves the correlation rung; a network operating-point solve
+    /// needs a curve, and absence of one is a declaration the flow-network
+    /// stage must refuse rather than repair.
+    pub curve: Option<FanCurveDecl>,
+}
+
+/// Authority classification for a declared fan-curve pressure tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanToleranceBasis {
+    /// Published by the named manufacturer or retained dataset.
+    Manufacturer,
+    /// A caller-declared engineering allowance, not source-published data.
+    Engineering,
+    /// An analytic curve with no empirical tolerance contribution.
+    Analytic,
+}
+
+/// One declared fan-curve sample point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FanCurvePoint {
+    /// Volumetric flow (m^3/s).
+    pub flow: QtyAny,
+    /// Static pressure (Pa).
+    pub static_pressure: QtyAny,
+}
+
+/// A declared fan pressure-flow curve: the data a network operating-point
+/// solve needs that a single rated point cannot provide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FanCurveDecl {
+    /// Declared sample points: at least two, flow strictly increasing,
+    /// pressure non-increasing.
+    pub points: Vec<FanCurvePoint>,
+    /// Declared relative pressure tolerance in `0.0..1.0`.
+    pub pressure_tolerance_rel: f64,
+    /// Authority behind the declared tolerance.
+    pub tolerance_basis: FanToleranceBasis,
+    /// Human-readable source citation for the curve data.
+    pub source: String,
+    /// Stable source identifier.
+    pub source_id: String,
+    /// Lowest admissible flow (declared stall boundary). Omission in the
+    /// lenient wire spelling defaults, with a receipt, to the first point's
+    /// flow (no declared stall margin).
+    pub min_flow: QtyAny,
 }
 
 /// One vent declaration.
@@ -471,6 +518,15 @@ pub struct Vent {
     /// Surface/region declared name the vent occupies.
     pub region: String,
     /// Open area (m^2).
+    pub area: QtyAny,
+}
+
+/// The declared airflow leakage path. Distinct from the thermal `leakage`
+/// watts sink: this is the effective open seam area the flow network's
+/// mandatory leakage branch is lowered from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirflowLeakage {
+    /// Effective open leakage area (m^2).
     pub area: QtyAny,
 }
 
@@ -483,6 +539,10 @@ pub struct Cooling {
     pub vents: Vec<Vent>,
     /// Non-modeled leakage/background dissipation (W).
     pub leakage: QtyAny,
+    /// Optional declared airflow leakage area. Absence is a declaration:
+    /// the flow-network stage refuses rather than inventing a leakage
+    /// branch.
+    pub airflow_leakage: Option<AirflowLeakage>,
 }
 
 /// The operating envelope.
@@ -1309,6 +1369,9 @@ impl ProjectSpec {
                     fan.static_pressure,
                     dims::PRESSURE,
                 );
+                if let Some(curve) = &fan.curve {
+                    Self::check_fan_curve(out, &fan.name, curve);
+                }
             }
             for vent in &cooling.vents {
                 check_dims(
@@ -1326,8 +1389,105 @@ impl ProjectSpec {
                 cooling.leakage,
                 dims::POWER,
             );
+            if let Some(airflow_leakage) = &cooling.airflow_leakage {
+                check_dims(
+                    out,
+                    "project-airflow-leakage-dims",
+                    "cooling.airflow-leakage.area",
+                    airflow_leakage.area,
+                    dims::AREA,
+                );
+            }
         }
         self.check_range_quantities(out);
+    }
+
+    fn check_fan_curve(out: &mut Vec<Violation>, fan: &str, curve: &FanCurveDecl) {
+        for (index, point) in curve.points.iter().enumerate() {
+            check_dims(
+                out,
+                "project-fan-curve-dims",
+                &format!("fan `{fan}` curve point {index} flow"),
+                point.flow,
+                dims::VOLUMETRIC_FLOW,
+            );
+            check_dims(
+                out,
+                "project-fan-curve-dims",
+                &format!("fan `{fan}` curve point {index} static pressure"),
+                point.static_pressure,
+                dims::PRESSURE,
+            );
+        }
+        check_dims(
+            out,
+            "project-fan-curve-dims",
+            &format!("fan `{fan}` curve min-flow"),
+            curve.min_flow,
+            dims::VOLUMETRIC_FLOW,
+        );
+        if curve.points.len() < 2 {
+            out.push(violation(
+                "project-fan-curve-shape",
+                format!("fan `{fan}` curve has {} point(s)", curve.points.len()),
+                "a declared curve needs at least two points; a single rated point \
+                 belongs in the fan's own :flow/:static-pressure fields",
+            ));
+        }
+        for (index, pair) in curve.points.windows(2).enumerate() {
+            let flow_increases = pair[1].flow.value > pair[0].flow.value;
+            if !flow_increases {
+                out.push(violation(
+                    "project-fan-curve-shape",
+                    format!(
+                        "fan `{fan}` curve flow does not strictly increase at point {}",
+                        index + 1
+                    ),
+                    "declare curve points in strictly increasing flow order",
+                ));
+            }
+            if pair[1].static_pressure.value > pair[0].static_pressure.value {
+                out.push(violation(
+                    "project-fan-curve-shape",
+                    format!("fan `{fan}` curve pressure rises at point {}", index + 1),
+                    "a declared fan curve must be non-increasing in pressure; a rising \
+                     branch is the unstable stall region and cannot be declared as \
+                     admissible data",
+                ));
+            }
+        }
+        if let (Some(first), Some(last)) = (curve.points.first(), curve.points.last())
+            && curve.points.len() >= 2
+            && !(curve.min_flow.value >= first.flow.value && curve.min_flow.value < last.flow.value)
+        {
+            out.push(violation(
+                "project-fan-curve-shape",
+                format!(
+                    "fan `{fan}` curve min-flow {} is outside [first point, last point)",
+                    curve.min_flow.value
+                ),
+                "the stall boundary must lie inside the declared curve's flow span",
+            ));
+        }
+        if !(curve.pressure_tolerance_rel.is_finite()
+            && (0.0..1.0).contains(&curve.pressure_tolerance_rel))
+        {
+            out.push(violation(
+                "project-fan-curve-tolerance",
+                format!(
+                    "fan `{fan}` curve pressure tolerance is {}",
+                    curve.pressure_tolerance_rel
+                ),
+                "declare a finite relative tolerance in 0.0..1.0",
+            ));
+        }
+        if curve.source.trim().is_empty() || curve.source_id.trim().is_empty() {
+            out.push(violation(
+                "project-fan-curve-source",
+                format!("fan `{fan}` curve lacks a source citation or identifier"),
+                "a declared curve carries its authority: state both :source and :source-id",
+            ));
+        }
     }
 
     fn check_range_quantities(&self, out: &mut Vec<Violation>) {
