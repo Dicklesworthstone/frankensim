@@ -1346,11 +1346,20 @@ fn degrading_any_upstream_evidence_slice_refuses_or_demotes() {
     }
     // The margin reaches the correct reason only by inheriting it, which is
     // the propagation seam doing real work rather than being decorative.
+}
+
+/// The second half of the upstream-evidence sweep: a retained report that is
+/// self-contradictory or algebraically unconverged must refuse, not produce a
+/// QoI that reads like a supported one.
+#[test]
+fn a_contradictory_or_unconverged_conduction_report_refuses() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    let (junction, surface, power) = declarations(&mesh);
 
     // (2) A claim of retained receipts with zero receipts is self-contradictory.
     let mut contradictory = solution.clone();
     contradictory.report.material_receipts = 0;
-    let (junction, surface, power) = declarations(&mesh);
     let refusal = extract_thermal_qois(
         &mesh,
         &contradictory,

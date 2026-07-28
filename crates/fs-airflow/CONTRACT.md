@@ -111,6 +111,26 @@ CHT ladder's correlation-rung transfer.
   contributes no term of its own: it is exact by declaration, not measured.
   Propagation copies representations rather than composing them, so an
   `Unknown` source term can never be strengthened in transit.
+- Material authority is visible in the evidence, not only in the digest. Every
+  temperature QoI names its conductivity provenance as a model card
+  (`fs-conduction:material-matdb-receipts` or `fs-conduction:material-declared`)
+  and carries a provenance-specific `Parameters` gap reason. Both remain
+  `Unknown` — neither authority supplies a propagation theorem — but "receipts
+  are retained, propagation is not" and "the values are caller-declared with no
+  receipt at all" are different claims and now read differently. Before this,
+  `ProvenanceClass` reached only `solution_identity`, so two solves with
+  different material authority hashed differently but were byte-identical to a
+  reviewer.
+- `extract_thermal_qois` validates the retained report as well as the field.
+  `ConductionSolution` has public fields, and a resumed or deserialized
+  solution is assembled rather than solved, so the seam refuses (a) any
+  retained linear record with `converged_true == false`, naming the iteration,
+  method and true relative residual — a QoI taken from an algebraically
+  unconverged field is unsupported, not merely weaker — and (b) a report
+  claiming `MatdbReceipts` while reporting zero receipts, which is
+  self-contradictory. The production solver already fails closed on the first
+  case (`ConductionError::LinearSolveFailed`), so that guard defends the seam
+  rather than a live solver path.
 - Every emitted `ThermalQoi<T>` carries both the existing `Evidence<T>` view and
   an `EngineeringUncertaintyBudget` with exactly one term for roundoff,
   solver/algebraic, discretization, geometry, parameters, boundary conditions,
@@ -338,6 +358,14 @@ None.
 - G3 margin offset invariance: shifting the effective limit and every nodal
   temperature by a common offset leaves the margin and the surface spread
   invariant and shifts the mean by exactly that offset.
+- G4 upstream-evidence mutation sweep: degrading one upstream slice at a time
+  against an admissible baseline. Declared material provenance changes the
+  model cards and the `Parameters` reason on every temperature QoI (the margin
+  reaches the right reason only by inheriting it, which exercises the
+  propagation seam); a receipts-claimed/zero-receipts report refuses; a
+  non-converged linear record refuses naming the failing solve, while a
+  converged record of the same shape stays admissible, so the guard keys on
+  convergence rather than on the record count.
 - G1 conjugate air path: the single-segment march against the closed-form
   heated channel `T_w - (T_w - T_in)e^(-NTU)` evaluated through an independent
   `f64::exp` path; the defining identity `h A (T_w - T_ref,eff) == Q` across
