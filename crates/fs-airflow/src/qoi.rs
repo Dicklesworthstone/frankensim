@@ -780,52 +780,14 @@ pub fn extract_thermal_qois(
         vertex: maximum_vertex,
     };
 
-    let surface = surface_statistics(mesh, solution, surface_region)?;
-    let surface_region_id = region_identity(surface_region.name(), surface_region.boundary_faces());
-    let mean_identity = qoi_identity("surface-mean", &[solution_id], &surface_region_id);
-    let spread_identity = qoi_identity("surface-spread", &[solution_id], &surface_region_id);
-    let std_identity = qoi_identity("surface-face-mean-std", &[solution_id], &surface_region_id);
-    let uniformity = SurfaceUniformity {
-        mean_temperature: ThermalQoi {
-            evidence: no_claim_temperature(
-                Temperature::new(surface.mean),
-                temperature_model.clone(),
-                mean_identity,
-            ),
-            uncertainty: unknown_budget(
-                "thermal-surface-mean",
-                "kelvin",
-                mean_identity,
-                std::slice::from_ref(&parameter_term),
-            )?,
-        },
-        spread: ThermalQoi {
-            evidence: no_claim_temperature(
-                Temperature::new(surface.spread),
-                temperature_model.clone(),
-                spread_identity,
-            ),
-            uncertainty: unknown_budget(
-                "thermal-surface-spread",
-                "kelvin",
-                spread_identity,
-                std::slice::from_ref(&parameter_term),
-            )?,
-        },
-        face_mean_standard_deviation: ThermalQoi {
-            evidence: no_claim_temperature(
-                Temperature::new(surface.standard_deviation),
-                temperature_model.clone(),
-                std_identity,
-            ),
-            uncertainty: unknown_budget(
-                "thermal-surface-face-mean-std",
-                "kelvin",
-                std_identity,
-                std::slice::from_ref(&parameter_term),
-            )?,
-        },
-    };
+    let uniformity = surface_uniformity(
+        mesh,
+        solution,
+        surface_region,
+        solution_id,
+        &temperature_model,
+        &parameter_term,
+    )?;
 
     let pressure_value = operating_point.pressure.value.value();
     let pressure_half_width = interval_half_width(
@@ -895,6 +857,67 @@ pub fn extract_thermal_qois(
         fan_power: fan_power_qoi,
         uniformity,
         thermal_margin,
+    })
+}
+
+/// Build the three uniformity records over one declared reporting surface.
+///
+/// Split out of `extract_thermal_qois` so the entry point reads as the five
+/// families it emits rather than as one long straight line.
+fn surface_uniformity(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    surface_region: &SurfaceRegion,
+    solution_id: ContentHash,
+    temperature_model: &ModelEvidence,
+    parameter_term: &(
+        EngineeringUncertaintyKind,
+        TermValue,
+        &'static str,
+        ContentHash,
+    ),
+) -> Result<SurfaceUniformity, QoiError> {
+    let surface = surface_statistics(mesh, solution, surface_region)?;
+    let surface_region_id = region_identity(surface_region.name(), surface_region.boundary_faces());
+    let mean_identity = qoi_identity("surface-mean", &[solution_id], &surface_region_id);
+    let spread_identity = qoi_identity("surface-spread", &[solution_id], &surface_region_id);
+    let std_identity = qoi_identity("surface-face-mean-std", &[solution_id], &surface_region_id);
+    let known = std::slice::from_ref(parameter_term);
+    Ok(SurfaceUniformity {
+        mean_temperature: ThermalQoi {
+            evidence: no_claim_temperature(
+                Temperature::new(surface.mean),
+                temperature_model.clone(),
+                mean_identity,
+            ),
+            uncertainty: unknown_budget("thermal-surface-mean", "kelvin", mean_identity, known)?,
+        },
+        spread: ThermalQoi {
+            evidence: no_claim_temperature(
+                Temperature::new(surface.spread),
+                temperature_model.clone(),
+                spread_identity,
+            ),
+            uncertainty: unknown_budget(
+                "thermal-surface-spread",
+                "kelvin",
+                spread_identity,
+                known,
+            )?,
+        },
+        face_mean_standard_deviation: ThermalQoi {
+            evidence: no_claim_temperature(
+                Temperature::new(surface.standard_deviation),
+                temperature_model.clone(),
+                std_identity,
+            ),
+            uncertainty: unknown_budget(
+                "thermal-surface-face-mean-std",
+                "kelvin",
+                std_identity,
+                known,
+            )?,
+        },
     })
 }
 
