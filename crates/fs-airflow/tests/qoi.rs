@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, QoiError, SurfaceRegion, ThermalOutputAuditError,
-    ThermalQoiCardUse, ThermalRequirement, extract_thermal_qois,
+    DiscretizationReceipt, FanPowerSpec, JunctionRegion, QoiError, SafetyFactorAuthority,
+    SurfaceRegion, ThermalOutputAuditError, ThermalQoiCardUse, ThermalQoiDeclarations,
+    ThermalRequirement, extract_thermal_qois,
 };
 use fs_airflow::{
     AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
@@ -150,27 +151,74 @@ fn extract_fixture_run() -> (fs_airflow::qoi::ThermalQoiSet, fs_airflow::Operati
     (qois, operating)
 }
 
+/// A declared derating policy. The factor is retained authority only: the
+/// effective limit handed to [`ThermalRequirement`] is already post-factor.
+fn safety_factor(factor: f64) -> SafetyFactorAuthority {
+    SafetyFactorAuthority::try_new(factor, source("derating-policy-v1")).expect("safety factor")
+}
+
+fn requirement_at(effective_limit_k: f64, factor: f64) -> ThermalRequirement {
+    ThermalRequirement::try_new(
+        Temperature::new(effective_limit_k),
+        safety_factor(factor),
+        source("component-datasheet-limit-v1"),
+    )
+    .expect("requirement")
+}
+
 fn extract_fixture_qois(
     mesh: &ConductionMesh,
     solution: &ConductionSolution,
     operating: &fs_airflow::OperatingPoint,
 ) -> fs_airflow::qoi::ThermalQoiSet {
-    let (junction, surface, power) = declarations(mesh);
-    let requirement = ThermalRequirement::try_new(
-        Temperature::new(380.0),
-        source("component-datasheet-limit-v1"),
+    extract_fixture_qois_with(
+        mesh,
+        solution,
+        operating,
+        &requirement_at(380.0, 1.25),
+        None,
     )
-    .expect("requirement");
+}
+
+fn extract_fixture_qois_with(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    operating: &fs_airflow::OperatingPoint,
+    requirement: &ThermalRequirement,
+    discretization: Option<&DiscretizationReceipt>,
+) -> fs_airflow::qoi::ThermalQoiSet {
+    let (junction, surface, power) = declarations(mesh);
     extract_thermal_qois(
         mesh,
         solution,
         operating,
-        &junction,
-        &surface,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(requirement),
+            discretization,
+        },
     )
     .expect("QoI extraction")
+}
+
+/// Replace every nodal temperature with `a + b*z` from the mesh's own
+/// coordinates, so the expected surface mean and spread follow from calculus
+/// rather than from a mirror of the production loop.
+fn linear_in_z(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    a: f64,
+    b: f64,
+) -> ConductionSolution {
+    let mut linear = solution.clone();
+    linear.temperature = mesh
+        .positions()
+        .iter()
+        .map(|position| a + b * position[2])
+        .collect();
+    linear
 }
 
 fn fan_regime_card() -> ModelCard {
@@ -244,20 +292,19 @@ fn every_reference_qoi_emits_an_eight_term_budget_without_laundering_unknowns() 
     let (mesh, solution) = mesh_and_solution();
     let operating = operating_point();
     let (junction, surface, power) = declarations(&mesh);
-    let requirement = ThermalRequirement::try_new(
-        Temperature::new(380.0),
-        source("component-datasheet-limit-v1"),
-    )
-    .expect("requirement");
+    let requirement = requirement_at(380.0, 1.25);
 
     let qois = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &junction,
-        &surface,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("QoI extraction");
 
@@ -610,8 +657,12 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
 fn region_order_is_canonical_and_maximum_tie_break_is_stable() {
     let (mesh, solution) = mesh_and_solution();
     let operating = operating_point();
-    let requirement = ThermalRequirement::try_new(Temperature::new(380.0), source("limit-v1"))
-        .expect("requirement");
+    let requirement = ThermalRequirement::try_new(
+        Temperature::new(380.0),
+        safety_factor(1.25),
+        source("limit-v1"),
+    )
+    .expect("requirement");
     let power = FanPowerSpec::try_new(0.72, 0.04, source("efficiency-v1")).expect("efficiency");
     let ascending =
         SurfaceRegion::try_new("case", (0..mesh.boundary().len()).collect()).expect("ascending");
@@ -624,20 +675,26 @@ fn region_order_is_canonical_and_maximum_tie_break_is_stable() {
         &mesh,
         &solution,
         &operating,
-        &first,
-        &ascending,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &first,
+            surface_region: &ascending,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("first extraction");
     let b = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &second,
-        &descending,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &second,
+            surface_region: &descending,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("second extraction");
 
@@ -656,7 +713,16 @@ fn missing_requirement_and_malformed_regions_refuse() {
     let operating = operating_point();
     let (junction, surface, power) = declarations(&mesh);
     let missing = extract_thermal_qois(
-        &mesh, &solution, &operating, &junction, &surface, &power, None,
+        &mesh,
+        &solution,
+        &operating,
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: None,
+            discretization: None,
+        },
     )
     .expect_err("margin cannot invent a requirement");
     assert_eq!(missing, QoiError::MissingRequirement);
@@ -672,27 +738,37 @@ fn widening_an_upstream_operating_envelope_cannot_shrink_qoi_terms() {
     wider.flow.numerical.lo *= 0.9;
     wider.flow.numerical.hi *= 1.1;
     let (junction, surface, power) = declarations(&mesh);
-    let requirement = ThermalRequirement::try_new(Temperature::new(380.0), source("limit-v1"))
-        .expect("requirement");
+    let requirement = ThermalRequirement::try_new(
+        Temperature::new(380.0),
+        safety_factor(1.25),
+        source("limit-v1"),
+    )
+    .expect("requirement");
 
     let base = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &junction,
-        &surface,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("base");
     let enlarged = extract_thermal_qois(
         &mesh,
         &solution,
         &wider,
-        &junction,
-        &surface,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("wider");
 
@@ -739,29 +815,43 @@ fn source_changes_rebind_fan_power_and_margin_identities() {
     let (junction, surface, power_a) = declarations(&mesh);
     let power_b = FanPowerSpec::try_new(0.72, 0.04, source("efficiency-v2"))
         .expect("alternate efficiency source");
-    let requirement_a = ThermalRequirement::try_new(Temperature::new(380.0), source("limit-v1"))
-        .expect("first requirement");
-    let requirement_b = ThermalRequirement::try_new(Temperature::new(380.0), source("limit-v2"))
-        .expect("second requirement");
+    let requirement_a = ThermalRequirement::try_new(
+        Temperature::new(380.0),
+        safety_factor(1.25),
+        source("limit-v1"),
+    )
+    .expect("first requirement");
+    let requirement_b = ThermalRequirement::try_new(
+        Temperature::new(380.0),
+        safety_factor(1.25),
+        source("limit-v2"),
+    )
+    .expect("second requirement");
 
     let a = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &junction,
-        &surface,
-        &power_a,
-        Some(&requirement_a),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power_a,
+            requirement: Some(&requirement_a),
+            discretization: None,
+        },
     )
     .expect("first");
     let b = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &junction,
-        &surface,
-        &power_b,
-        Some(&requirement_b),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power_b,
+            requirement: Some(&requirement_b),
+            discretization: None,
+        },
     )
     .expect("second");
 
@@ -793,27 +883,37 @@ fn geometry_changes_rebind_temperature_qoi_identities() {
     let operating = operating_point();
     let (junction, surface, power) = declarations(&mesh);
     let (scaled_junction, scaled_surface, scaled_power) = declarations(&scaled_mesh);
-    let requirement = ThermalRequirement::try_new(Temperature::new(380.0), source("limit-v1"))
-        .expect("requirement");
+    let requirement = ThermalRequirement::try_new(
+        Temperature::new(380.0),
+        safety_factor(1.25),
+        source("limit-v1"),
+    )
+    .expect("requirement");
 
     let base = extract_thermal_qois(
         &mesh,
         &solution,
         &operating,
-        &junction,
-        &surface,
-        &power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("base geometry");
     let scaled = extract_thermal_qois(
         &scaled_mesh,
         &solution,
         &operating,
-        &scaled_junction,
-        &scaled_surface,
-        &scaled_power,
-        Some(&requirement),
+        &ThermalQoiDeclarations {
+            junction_region: &scaled_junction,
+            surface_region: &scaled_surface,
+            fan_power: &scaled_power,
+            requirement: Some(&requirement),
+            discretization: None,
+        },
     )
     .expect("scaled geometry");
 
@@ -826,5 +926,336 @@ fn geometry_changes_rebind_temperature_qoi_identities() {
         base.uniformity.mean_temperature.uncertainty.content_id(),
         scaled.uniformity.mean_temperature.uncertainty.content_id(),
         "the semantic identity must still bind the physical mesh"
+    );
+}
+
+/// Analytic oracle. For `T = a + b*z` the P1 face mean is exact, so the
+/// area-weighted surface mean over the closed unit cube is `a + b/2` by
+/// calculus (bottom `a`, top `a+b`, four sides `a+b/2`, equal areas), the
+/// surface-vertex spread is exactly `b`, and the junction maximum is
+/// `a + b*max(z)` over the declared region. None of these expectations is
+/// computed by re-running the production loop.
+#[test]
+fn a_linear_field_pins_the_surface_mean_spread_and_junction_maximum_analytically() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    let (a, b) = (300.0_f64, 60.0_f64);
+    let linear = linear_in_z(&mesh, &solution, a, b);
+    let qois = extract_fixture_qois(&mesh, &linear, &operating);
+
+    let mean = qois.uniformity.mean_temperature.evidence.value.value();
+    assert!(
+        (mean - (a + 0.5 * b)).abs() < 1.0e-9,
+        "closed-cube area-weighted mean of a+b*z must be a+b/2: got {mean}, want {}",
+        a + 0.5 * b
+    );
+
+    let spread = qois.uniformity.spread.evidence.value.value();
+    assert!(
+        (spread - b).abs() < 1.0e-9,
+        "surface-vertex spread of a+b*z over the unit cube must be b: got {spread}"
+    );
+
+    // The declared junction region is {0, 6, 7}; its maximum is a + b*max(z).
+    let junction_max_z = [0usize, 6, 7]
+        .into_iter()
+        .map(|vertex| mesh.positions()[vertex][2])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let maximum = qois.junction_maximum.qoi.evidence.value.value();
+    assert!(
+        (maximum - (a + b * junction_max_z)).abs() < 1.0e-9,
+        "junction maximum must be a+b*max(z) over the declared region: got {maximum}"
+    );
+
+    // A dispersion cannot exceed half the range it is drawn from.
+    let deviation = qois
+        .uniformity
+        .face_mean_standard_deviation
+        .evidence
+        .value
+        .value();
+    assert!(
+        deviation > 0.0 && deviation <= 0.5 * spread + 1.0e-12,
+        "face-mean dispersion {deviation} must be positive and within half the spread {spread}"
+    );
+}
+
+/// Degenerate analytic case: a constant field has zero spread and zero
+/// dispersion exactly, and the margin is the whole effective limit gap.
+#[test]
+fn a_constant_field_has_exactly_zero_spread_and_zero_dispersion() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    let constant = linear_in_z(&mesh, &solution, 330.0, 0.0);
+    let qois = extract_fixture_qois(&mesh, &constant, &operating);
+
+    // Bit equality, not an epsilon: exactness is the claim being made, and
+    // `to_bits` also distinguishes the -0.0 a sign-losing mutant would produce.
+    assert_eq!(
+        qois.uniformity
+            .mean_temperature
+            .evidence
+            .value
+            .value()
+            .to_bits(),
+        330.0_f64.to_bits(),
+        "the area-weighted mean of a constant field is that constant"
+    );
+    assert_eq!(
+        qois.uniformity.spread.evidence.value.value().to_bits(),
+        0.0_f64.to_bits(),
+        "a constant field has exactly zero spread"
+    );
+    assert_eq!(
+        qois.uniformity
+            .face_mean_standard_deviation
+            .evidence
+            .value
+            .value()
+            .to_bits(),
+        0.0_f64.to_bits(),
+        "a constant field has exactly zero face-mean dispersion"
+    );
+    assert_eq!(
+        qois.thermal_margin.evidence.value.value().to_bits(),
+        (380.0_f64 - 330.0_f64).to_bits(),
+        "margin is the effective limit minus the junction maximum"
+    );
+}
+
+/// The margin must be a functional of the junction maximum, not an
+/// independently fabricated budget. A declared refinement-ladder receipt is the
+/// only route by which the maximum acquires a known Discretization term; the
+/// margin must inherit exactly that term value.
+///
+/// The `None` arm is the non-vacuity guard: it proves the assertion below is
+/// sensitive, because without a receipt both budgets really are Unknown and an
+/// equality check alone would pass even for a fabricated budget.
+#[test]
+fn the_margin_budget_inherits_every_junction_maximum_term() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+
+    let without = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(380.0, 1.25),
+        None,
+    );
+    assert!(
+        matches!(
+            without
+                .junction_maximum
+                .qoi
+                .uncertainty
+                .term(EngineeringUncertaintyKind::Discretization)
+                .value(),
+            TermValue::Unknown { .. }
+        ),
+        "absent a receipt the maximum's discretization term must stay a named Unknown"
+    );
+
+    let receipt = DiscretizationReceipt::try_new(2.5, source("refinement-ladder-v1"))
+        .expect("declared ladder half-width");
+    let with = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(380.0, 1.25),
+        Some(&receipt),
+    );
+
+    let maximum_term = with
+        .junction_maximum
+        .qoi
+        .uncertainty
+        .term(EngineeringUncertaintyKind::Discretization)
+        .value()
+        .clone();
+    assert_eq!(
+        maximum_term,
+        TermValue::interval(0.0, 2.5).expect("declared interval"),
+        "a declared receipt must populate the maximum's discretization term"
+    );
+
+    // Every term transfers 1:1 because margin = limit - maximum in kelvin.
+    for kind in EngineeringUncertaintyKind::ALL {
+        assert_eq!(
+            with.thermal_margin.uncertainty.term(kind).value(),
+            with.junction_maximum.qoi.uncertainty.term(kind).value(),
+            "the margin must inherit the junction maximum's {} term",
+            kind.name()
+        );
+    }
+
+    // ...and admitting a ladder observation must not upgrade the certificate.
+    assert_eq!(
+        with.junction_maximum.qoi.evidence.numerical.kind,
+        NumericalKind::NoClaim,
+        "a declared ladder observation is not a numerical certificate"
+    );
+}
+
+/// "Safety-factor single application": the factor was applied once, upstream,
+/// by the declaring authority. Holding the effective limit fixed and changing
+/// only the factor must rebind identity while leaving the margin value
+/// bit-identical. A mutant that re-applies the factor here dies on the value
+/// assertion; a mutant that drops the factor from identity dies on the
+/// identity assertion.
+#[test]
+fn a_safety_factor_rebinds_identity_without_moving_the_margin() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+
+    let lenient = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(380.0, 1.0),
+        None,
+    );
+    let strict = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(380.0, 2.0),
+        None,
+    );
+
+    assert_eq!(
+        lenient.thermal_margin.evidence.value.value().to_bits(),
+        strict.thermal_margin.evidence.value.value().to_bits(),
+        "the effective limit is already post-factor; the factor must never be re-applied"
+    );
+    assert_ne!(
+        lenient.thermal_margin.uncertainty.content_id(),
+        strict.thermal_margin.uncertainty.content_id(),
+        "the declared factor and its policy must still bind requirement identity"
+    );
+
+    // A factor below one, or non-finite, is not an admissible derating.
+    assert!(SafetyFactorAuthority::try_new(0.99, source("bad-policy")).is_err());
+    assert!(SafetyFactorAuthority::try_new(f64::NAN, source("bad-policy")).is_err());
+    assert!(SafetyFactorAuthority::try_new(f64::INFINITY, source("bad-policy")).is_err());
+}
+
+/// DONE-WHEN clause: the validity intersection must demonstrably NARROW when an
+/// upstream card narrows. The existing battery moves the operating POINT out of
+/// a fixed card; this holds the point fixed and shrinks the CARD around it,
+/// which is the direction the clause actually names.
+#[test]
+fn narrowing_one_upstream_card_narrows_the_intersection_and_demotes() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+    let qois = extract_fixture_qois(&mesh, &solution, &operating);
+
+    // One fixed point, comfortably inside the published fan-card flow bound.
+    let point = thermal_regime_point("nominal", 0.10, 20_000.0);
+
+    let published = fan_regime_card();
+    let uses = card_uses(&qois, std::slice::from_ref(&published));
+    let wide = qois
+        .clone()
+        .audit_operating_envelope(
+            std::slice::from_ref(&published),
+            std::slice::from_ref(&point),
+            &uses,
+        )
+        .expect("published card admits the point");
+    assert_eq!(
+        wide.audit.receipts[0].coverage,
+        EnvelopeCoverage::FullyInDomain,
+        "non-vacuity: the point must start inside the published domain"
+    );
+    assert!(
+        wide.audit.receipts.iter().all(|receipt| !receipt.demoted()),
+        "nothing may demote while the point is in domain"
+    );
+
+    // Narrow ONLY the flow bound, around the same unchanged point.
+    let mut narrowed = published.clone();
+    narrowed.validity = narrowed.validity.with("flow_m3_s", 0.0, 0.05);
+    let tight = qois
+        .clone()
+        .audit_operating_envelope(std::slice::from_ref(&narrowed), &[point], &uses)
+        .expect("narrowed card still audits");
+
+    assert_eq!(
+        tight.audit.receipts[0].coverage,
+        EnvelopeCoverage::FullyOutOfDomain,
+        "narrowing the card must push the unchanged point out of the intersection"
+    );
+    assert!(
+        tight
+            .audit
+            .receipts
+            .iter()
+            .all(fs_regime::OutputClaimReceipt::demoted),
+        "every QoI must demote once its consumed card no longer covers the point"
+    );
+    for budget in tight.qois.budgets() {
+        assert!(
+            matches!(
+                budget.term(EngineeringUncertaintyKind::ModelForm).value(),
+                TermValue::Unknown { .. }
+            ),
+            "{} must lose its model-form authority when the domain narrows past the point",
+            budget.qoi()
+        );
+    }
+}
+
+/// Metamorphic law: shifting the requirement and every nodal temperature by the
+/// same offset leaves the margin invariant, because margin is a difference of
+/// two temperatures. This kills any mutant that scales rather than subtracts,
+/// or that applies a factor to one side only.
+#[test]
+fn a_common_temperature_offset_leaves_the_margin_invariant() {
+    let (mesh, solution) = mesh_and_solution();
+    let operating = operating_point();
+
+    let base = extract_fixture_qois_with(
+        &mesh,
+        &solution,
+        &operating,
+        &requirement_at(380.0, 1.25),
+        None,
+    );
+
+    let offset = 17.5_f64;
+    let mut shifted_solution = solution.clone();
+    for value in &mut shifted_solution.temperature {
+        *value += offset;
+    }
+    let shifted = extract_fixture_qois_with(
+        &mesh,
+        &shifted_solution,
+        &operating,
+        &requirement_at(380.0 + offset, 1.25),
+        None,
+    );
+
+    assert!(
+        (base.thermal_margin.evidence.value.value()
+            - shifted.thermal_margin.evidence.value.value())
+        .abs()
+            < 1.0e-9,
+        "a common offset on limit and field must leave the margin invariant"
+    );
+    assert!(
+        (base.uniformity.spread.evidence.value.value()
+            - shifted.uniformity.spread.evidence.value.value())
+        .abs()
+            < 1.0e-9,
+        "a common offset must leave the surface spread invariant"
+    );
+    assert!(
+        (shifted.uniformity.mean_temperature.evidence.value.value()
+            - base.uniformity.mean_temperature.evidence.value.value()
+            - offset)
+            .abs()
+            < 1.0e-9,
+        "a common offset must shift the mean by exactly that offset"
     );
 }

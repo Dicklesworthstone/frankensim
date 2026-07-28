@@ -159,19 +159,81 @@ impl FanPowerSpec {
     }
 }
 
+/// Safety-factor authority already reflected in an effective requirement.
+///
+/// No universal multiply/divide rule is inferred here. The declaring source
+/// owns how the finite factor was applied, and
+/// [`ThermalRequirement::maximum_temperature`] stores the effective value
+/// consumed by margin evaluation. This record exists so the factor and its
+/// authority bind into requirement identity; nothing in this crate re-applies
+/// it. Applying it a second time here would be a double derating.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafetyFactorAuthority {
+    /// Applied factor, finite and at least one.
+    factor: f64,
+    /// Versioned policy defining the application rule.
+    source: SourceProvenance,
+}
+
+impl SafetyFactorAuthority {
+    /// Admit a finite factor of at least one with a cited application policy.
+    ///
+    /// # Errors
+    /// Refuses a non-finite factor, a factor below one, or a blank citation
+    /// or identifier.
+    pub fn try_new(factor: f64, source: SourceProvenance) -> Result<Self, QoiError> {
+        if !(factor.is_finite() && factor >= 1.0) {
+            return Err(QoiError::invalid(
+                "safety factor",
+                "factor must be finite and at least one",
+            ));
+        }
+        if source.citation.trim().is_empty() || source.identifier.trim().is_empty() {
+            return Err(QoiError::invalid(
+                "safety factor source",
+                "citation and stable identifier must both be non-empty",
+            ));
+        }
+        Ok(Self { factor, source })
+    }
+
+    /// Applied factor, retained for identity only.
+    #[must_use]
+    pub const fn factor(&self) -> f64 {
+        self.factor
+    }
+
+    /// Authority defining how the factor was applied upstream.
+    #[must_use]
+    pub const fn source(&self) -> &SourceProvenance {
+        &self.source
+    }
+}
+
 /// Maximum admissible component temperature from a cited requirement.
+///
+/// The temperature is the *effective* limit: any safety factor was already
+/// applied by the declaring authority. The retained
+/// [`SafetyFactorAuthority`] records which factor produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalRequirement {
-    /// Maximum permitted temperature in kelvin.
+    /// Effective maximum permitted temperature in kelvin, post-factor.
     maximum_temperature: Temperature,
+    /// Safety-factor authority already reflected in the value above.
+    safety_factor: SafetyFactorAuthority,
     /// Requirement/standard authority.
     source: SourceProvenance,
 }
 
 impl ThermalRequirement {
-    /// Admit a finite positive absolute-temperature requirement.
+    /// Admit a finite positive effective absolute-temperature requirement.
+    ///
+    /// # Errors
+    /// Refuses a non-finite or non-positive kelvin limit, or a blank
+    /// requirement citation or identifier.
     pub fn try_new(
         maximum_temperature: Temperature,
+        safety_factor: SafetyFactorAuthority,
         source: SourceProvenance,
     ) -> Result<Self, QoiError> {
         if !(maximum_temperature.value().is_finite() && maximum_temperature.value() > 0.0) {
@@ -188,14 +250,21 @@ impl ThermalRequirement {
         }
         Ok(Self {
             maximum_temperature,
+            safety_factor,
             source,
         })
     }
 
-    /// Maximum permitted temperature.
+    /// Effective maximum permitted temperature, with the factor already applied.
     #[must_use]
     pub const fn maximum_temperature(&self) -> Temperature {
         self.maximum_temperature
+    }
+
+    /// Safety-factor authority behind the effective limit.
+    #[must_use]
+    pub const fn safety_factor(&self) -> &SafetyFactorAuthority {
+        &self.safety_factor
     }
 
     /// Requirement/standard authority.
@@ -203,6 +272,84 @@ impl ThermalRequirement {
     pub const fn source(&self) -> &SourceProvenance {
         &self.source
     }
+}
+
+/// A caller-declared refinement-ladder half-width for the junction maximum.
+///
+/// This is an *observation the caller retains*, in kelvin, from an actual
+/// mesh-refinement ladder or goal-oriented estimate produced elsewhere. This
+/// crate neither computes it nor derives it from a solver residual: a
+/// conduction residual measured in watts is not converted into kelvin here.
+///
+/// A declared ladder observation is not a certificate, so admitting one leaves
+/// [`Evidence::numerical`](fs_evidence::Evidence) at
+/// [`NumericalKind::NoClaim`](fs_evidence::NumericalKind); it populates only
+/// the `Discretization` term of the engineering budget, exactly as a declared
+/// fan-efficiency band populates `Parameters`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscretizationReceipt {
+    /// Conservative half-width in kelvin, finite and non-negative.
+    half_width: f64,
+    /// Authority for the retained ladder or estimator run.
+    source: SourceProvenance,
+}
+
+impl DiscretizationReceipt {
+    /// Admit a finite non-negative kelvin half-width with a cited source.
+    ///
+    /// # Errors
+    /// Refuses a non-finite or negative half-width, negative zero, or a blank
+    /// citation or identifier.
+    pub fn try_new(half_width: f64, source: SourceProvenance) -> Result<Self, QoiError> {
+        if !(half_width.is_finite() && half_width >= 0.0)
+            || (half_width == 0.0 && half_width.is_sign_negative())
+        {
+            return Err(QoiError::invalid(
+                "discretization receipt",
+                "half-width must be finite, non-negative, and not negative zero",
+            ));
+        }
+        if source.citation.trim().is_empty() || source.identifier.trim().is_empty() {
+            return Err(QoiError::invalid(
+                "discretization receipt source",
+                "citation and stable identifier must both be non-empty",
+            ));
+        }
+        Ok(Self { half_width, source })
+    }
+
+    /// Conservative kelvin half-width.
+    #[must_use]
+    pub const fn half_width(&self) -> f64 {
+        self.half_width
+    }
+
+    /// Authority for the retained ladder or estimator run.
+    #[must_use]
+    pub const fn source(&self) -> &SourceProvenance {
+        &self.source
+    }
+}
+
+/// Everything the caller declares for one thermal QoI extraction.
+///
+/// Grouping these keeps the extraction entry point narrow as QoI families grow,
+/// and keeps "what the caller declared" separable from "what the solvers
+/// produced" (the mesh, field, and operating point passed alongside it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermalQoiDeclarations<'a> {
+    /// Component region the junction maximum is taken over.
+    pub junction_region: &'a JunctionRegion,
+    /// Reporting surface the uniformity family is taken over.
+    pub surface_region: &'a SurfaceRegion,
+    /// Cited fan total-efficiency interval.
+    pub fan_power: &'a FanPowerSpec,
+    /// Cited effective temperature requirement. Absence refuses; there is no
+    /// default limit.
+    pub requirement: Option<&'a ThermalRequirement>,
+    /// Optional declared refinement-ladder half-width for the junction
+    /// maximum. Absence leaves the discretization term a named `Unknown`.
+    pub discretization: Option<&'a DiscretizationReceipt>,
 }
 
 /// One typed QoI with its legacy evidence carrier and rich engineering budget.
@@ -552,18 +699,33 @@ impl From<UncertaintyError> for QoiError {
 /// estimate bands. Every budget separately retains an unknown model-form term,
 /// so conditional parameter/BC envelopes cannot become product authority.
 ///
+/// An optional [`DiscretizationReceipt`] is the only route by which the
+/// junction maximum acquires a known `Discretization` term; the thermal margin
+/// then inherits it, because `margin = limit - maximum` has unit sensitivity to
+/// the maximum in the same kelvin. Admitting a receipt does not upgrade
+/// `NumericalKind::NoClaim`: a declared ladder observation is not a certificate.
+///
+/// The requirement's [`SafetyFactorAuthority`] is retained for identity only.
+/// The supplied limit is already the effective post-factor value, so this
+/// function never re-applies the factor.
+///
 /// # Errors
 /// Refuses malformed regions, mismatched/non-finite fields, invalid operating
-/// evidence, invalid fan efficiency, or an absent requirement.
+/// evidence, invalid fan efficiency, a non-finite margin, or an absent
+/// requirement.
 pub fn extract_thermal_qois(
     mesh: &ConductionMesh,
     solution: &ConductionSolution,
     operating_point: &OperatingPoint,
-    junction_region: &JunctionRegion,
-    surface_region: &SurfaceRegion,
-    fan_power: &FanPowerSpec,
-    requirement: Option<&ThermalRequirement>,
+    declarations: &ThermalQoiDeclarations<'_>,
 ) -> Result<ThermalQoiSet, QoiError> {
+    let &ThermalQoiDeclarations {
+        junction_region,
+        surface_region,
+        fan_power,
+        requirement,
+        discretization,
+    } = declarations;
     let requirement = requirement.ok_or(QoiError::MissingRequirement)?;
     validate_solution(mesh, solution)?;
     validate_operating_point(operating_point)?;
@@ -573,16 +735,37 @@ pub fn extract_thermal_qois(
     let operating_id = operating_identity(operating_point);
     let fan_id = fan_power_identity(fan_power);
     let requirement_id = requirement_identity(requirement);
+    let discretization_id = discretization.map(discretization_identity);
 
     let (maximum, maximum_vertex) = junction_maximum(solution, junction_region);
     let temperature_model = conduction_model(solution);
+    let mut maximum_parents = vec![solution_id];
+    if let Some(identity) = discretization_id {
+        maximum_parents.push(identity);
+    }
     let maximum_identity = qoi_identity(
         "junction-maximum",
-        &[solution_id],
+        &maximum_parents,
         &region_identity(junction_region.name(), junction_region.vertices()),
     );
-    let maximum_budget =
-        unknown_budget("thermal-junction-maximum", "kelvin", maximum_identity, &[])?;
+    // A declared refinement-ladder half-width is the ONLY route by which the
+    // junction maximum acquires a known Discretization term. Absent a receipt
+    // the term stays a named Unknown; nothing here manufactures one.
+    let mut maximum_known = Vec::new();
+    if let (Some(receipt), Some(identity)) = (discretization, discretization_id) {
+        maximum_known.push((
+            EngineeringUncertaintyKind::Discretization,
+            TermValue::interval(0.0, receipt.half_width())?,
+            "thermal-qoi-discretization-receipt",
+            identity,
+        ));
+    }
+    let maximum_budget = unknown_budget(
+        "thermal-junction-maximum",
+        "kelvin",
+        maximum_identity,
+        &maximum_known,
+    )?;
     let maximum_evidence =
         no_claim_temperature(maximum, temperature_model.clone(), maximum_identity);
     let junction_maximum = JunctionMaximum {
@@ -655,6 +838,10 @@ pub fn extract_thermal_qois(
 
     let fan_power_qoi = fan_power_qoi(operating_point, fan_power, operating_id, fan_id)?;
 
+    // The effective limit already reflects the declared safety factor; this
+    // subtraction is the ONLY place the factor could be applied a second time,
+    // and it deliberately is not. `safety_factor` reaches `requirement_id`
+    // only, so changing the factor rebinds identity without moving the value.
     let margin = requirement.maximum_temperature.value() - maximum.value();
     if !margin.is_finite() {
         return Err(QoiError::invalid(
@@ -667,13 +854,25 @@ pub fn extract_thermal_qois(
         &[maximum_identity, requirement_id],
         requirement.source.identifier.as_bytes(),
     );
+    // margin = L_eff - T_max has unit sensitivity to the junction maximum and
+    // is expressed in the same kelvin, so every junction-maximum term
+    // transfers 1:1. Propagating the term VALUES (rather than re-deriving
+    // independent Unknowns) is what makes the margin a functional of its input
+    // instead of a scalar wearing a budget. The declared limit contributes no
+    // term of its own: it is exact by declaration, not a measured quantity.
     let thermal_margin = ThermalQoi {
         evidence: no_claim_temperature(
             Temperature::new(margin),
             temperature_model,
             margin_identity,
         ),
-        uncertainty: unknown_budget("thermal-margin", "kelvin", margin_identity, &[])?,
+        uncertainty: propagate_budget(
+            &junction_maximum.qoi.uncertainty,
+            "thermal-margin",
+            "kelvin",
+            margin_identity,
+            "thermal-qoi-margin-from-junction-maximum",
+        )?,
     };
 
     Ok(ThermalQoiSet {
@@ -838,6 +1037,36 @@ fn unknown_budget(
     EngineeringUncertaintyBudget::try_new(qoi, unit, terms).map_err(Into::into)
 }
 
+/// Re-express a source budget as a downstream QoI with unit sensitivity.
+///
+/// Every term VALUE transfers unchanged, which is exact when the downstream
+/// QoI is `constant ± source` in the same unit. Provenance is rebound to the
+/// downstream identity under `role` so that a change anywhere in the
+/// downstream identity chain (for a margin: the requirement and its safety
+/// factor) still rebinds the budget, while lineage back to the source stays
+/// carried by `identity`'s parent hashes.
+///
+/// This deliberately cannot strengthen a term: it copies representations
+/// rather than composing them, so an `Unknown` source term stays `Unknown`.
+fn propagate_budget(
+    source: &EngineeringUncertaintyBudget,
+    qoi: &str,
+    unit: &str,
+    identity: ContentHash,
+    role: &'static str,
+) -> Result<EngineeringUncertaintyBudget, QoiError> {
+    let mut terms = Vec::with_capacity(EngineeringUncertaintyKind::ALL.len());
+    for kind in EngineeringUncertaintyKind::ALL {
+        let provenance = UncertaintyArtifactRef::new(role, term_identity(identity, kind))?;
+        terms.push(EngineeringUncertaintyTerm::try_new(
+            kind,
+            source.term(kind).value().clone(),
+            provenance,
+        )?);
+    }
+    EngineeringUncertaintyBudget::try_new(qoi, unit, terms).map_err(Into::into)
+}
+
 fn unknown_reason(kind: EngineeringUncertaintyKind) -> &'static str {
     match kind {
         EngineeringUncertaintyKind::Roundoff => {
@@ -962,11 +1191,18 @@ fn junction_maximum(
     solution: &ConductionSolution,
     region: &JunctionRegion,
 ) -> (Temperature, usize) {
+    // `JunctionRegion` admission sorts vertices ascending and rejects
+    // duplicates, so every candidate is strictly greater than the incumbent.
+    // The strict `>` is therefore the whole tie-break: an equal value never
+    // displaces the incumbent, so the lowest canonical index wins. A
+    // `candidate < vertex` guard would be unreachable here, not a safeguard.
+    // `validate_solution` has already rejected non-finite nodal values, so no
+    // NaN can reach this comparison.
     let mut vertex = region.vertices()[0];
     let mut maximum = solution.temperature[vertex];
     for &candidate in &region.vertices()[1..] {
         let value = solution.temperature[candidate];
-        if value > maximum || (value.to_bits() == maximum.to_bits() && candidate < vertex) {
+        if value > maximum {
             maximum = value;
             vertex = candidate;
         }
@@ -1143,6 +1379,20 @@ fn requirement_identity(requirement: &ThermalRequirement) -> ContentHash {
     );
     push_string(&mut bytes, &requirement.source.citation);
     push_string(&mut bytes, &requirement.source.identifier);
+    // The already-applied factor and its policy bind into identity so two runs
+    // that share an effective limit but derated it under different authority
+    // are distinguishable. The factor never reaches the margin arithmetic.
+    bytes.extend_from_slice(&requirement.safety_factor.factor.to_bits().to_le_bytes());
+    push_string(&mut bytes, &requirement.safety_factor.source.citation);
+    push_string(&mut bytes, &requirement.safety_factor.source.identifier);
+    hash_domain(QOI_IDENTITY_DOMAIN, &bytes)
+}
+
+fn discretization_identity(receipt: &DiscretizationReceipt) -> ContentHash {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&receipt.half_width.to_bits().to_le_bytes());
+    push_string(&mut bytes, &receipt.source.citation);
+    push_string(&mut bytes, &receipt.source.identifier);
     hash_domain(QOI_IDENTITY_DOMAIN, &bytes)
 }
 

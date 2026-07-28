@@ -79,11 +79,38 @@ CHT ladder's correlation-rung transfer.
   hydraulic diameter, aspect ratio, and length ratio all derive from the same
   mesh constants.
 - `qoi::extract_thermal_qois` consumes a `ConductionSolution`, its exact
-  `ConductionMesh`, an `OperatingPoint`, declared junction/surface regions, a
-  cited fan-efficiency interval, and a cited maximum-temperature requirement.
+  `ConductionMesh`, an `OperatingPoint`, and one `ThermalQoiDeclarations`.
   It emits the five E05.10 families: deterministic maximum junction
   temperature, pressure drop, fan input power, surface mean/uniformity, and
   thermal margin. An absent requirement refuses; there is no default limit.
+- `ThermalQoiDeclarations` groups everything the caller declares: the junction
+  and surface regions, the cited fan-efficiency interval, the cited
+  requirement, and the optional cited `DiscretizationReceipt`. Keeping the
+  declarations in one borrow separates what the caller asserted from what the
+  solvers produced, and keeps the entry point narrow as families are added.
+- `ThermalRequirement` carries the *effective* limit together with a mandatory
+  `SafetyFactorAuthority`. Following the project-layer doctrine, no universal
+  multiply/divide rule is inferred: the declaring source owns how the finite
+  factor (finite, at least one) was applied, and the supplied temperature is
+  already post-factor. The factor and its policy bind into requirement
+  identity and never enter the margin arithmetic, so this crate cannot derate
+  a second time. Holding the effective limit fixed while changing the factor
+  rebinds identity and leaves the margin value bit-identical; that equality is
+  the executable meaning of single application.
+- `DiscretizationReceipt` is the only route by which the junction maximum
+  acquires a known `Discretization` term. It is a caller-declared
+  refinement-ladder or goal-oriented half-width **in kelvin**; this crate
+  neither computes it nor derives it from a solver residual. Admitting one
+  populates the budget term only and leaves `NumericalKind::NoClaim` in place,
+  because a declared ladder observation is not a certificate.
+- The thermal margin is a functional of the junction maximum, not an
+  independently constructed budget. Because `margin = limit - maximum` has unit
+  sensitivity in the same kelvin, every junction-maximum term value transfers
+  1:1 into the margin budget; provenance is rebound to the margin identity so
+  the requirement and its factor still rebind it. The declared limit
+  contributes no term of its own: it is exact by declaration, not measured.
+  Propagation copies representations rather than composing them, so an
+  `Unknown` source term can never be strengthened in transit.
 - Every emitted `ThermalQoi<T>` carries both the existing `Evidence<T>` view and
   an `EngineeringUncertaintyBudget` with exactly one term for roundoff,
   solver/algebraic, discretization, geometry, parameters, boundary conditions,
@@ -151,6 +178,10 @@ CHT ladder's correlation-rung transfer.
    as an admitted result and a demoted one while hashing identically.
 8. Junction and surface declarations canonicalize index order and reject
    duplicates. Equal junction maxima choose the lowest canonical vertex index.
+   That tie-break is delivered by the canonical ascending order plus a strict
+   `>` comparison, not by an index guard inside the scan: because every
+   candidate is strictly greater than the already-visited incumbent, such a
+   guard would be unreachable rather than protective.
 9. Every thermal QoI budget has exactly eight terms. Widening a valid upstream
    pressure/flow or efficiency interval cannot shrink the corresponding
    conditional term; changing a requirement or efficiency authority rebinds
@@ -160,12 +191,22 @@ CHT ladder's correlation-rung transfer.
 10. Raw temperature extrema, surface summaries, and margin remain
     `NumericalKind::NoClaim` until an admitted DWR/refinement-to-QoI map exists.
     A conduction residual measured in watts is not converted into kelvin by
-    dimensional wishful thinking.
-11. Pressure uncertainty endpoints come from the independently solved
+    dimensional wishful thinking. Admitting a `DiscretizationReceipt` does not
+    relax this: a caller-declared kelvin ladder observation populates the
+    budget's discretization term and leaves the numerical certificate alone.
+11. As emitted by `extract_thermal_qois`, the margin budget equals the
+    junction-maximum budget term-for-term. This is checked with a declared
+    discretization receipt present, so the equality is sensitive rather than an
+    artefact of both budgets being entirely Unknown. The property is stated at
+    extraction, not after `audit_operating_envelope`: the audit issues one
+    receipt per declared QoI, so a caller that declares different consumed
+    cards for the maximum and the margin can legitimately demote them
+    differently.
+12. Pressure uncertainty endpoints come from the independently solved
     low-fan/low-resistance and high-fan/high-resistance corners. A flow root is
     never recombined with the opposite resistance bound to manufacture a wider
     but physically unreachable band.
-12. Every successfully admitted `AirPath` and every published march or solve
+13. Every successfully admitted `AirPath` and every published march or solve
     result keeps its represented conjugate reductions inside the finite `f64`
     domain. Path admission checks the derived positive capacity rate, segment
     conductance, NTU, effectiveness terms, and total wetted area. The march
@@ -273,6 +314,30 @@ None.
 - deterministic region-order/tie-break equivalence, missing-requirement and
   malformed-region refusals, G3 upstream-envelope widening monotonicity, and
   source-only identity rebinding for fan power and margin.
+- G1 analytic surface oracle: for `T = a + b*z` the closed unit cube's
+  area-weighted mean is `a + b/2` and the surface-vertex spread is exactly `b`
+  by calculus, and the junction maximum is `a + b*max(z)` over the declared
+  region. The expectations come from integration, not from re-running the
+  production loop. The constant-field companion pins spread and face-mean
+  dispersion at exactly zero, and the dispersion is bounded by half the spread.
+- G0 margin propagation: with a declared `DiscretizationReceipt` the junction
+  maximum's discretization term becomes the declared interval and the margin
+  inherits every term. The receipt-absent arm asserting a named `Unknown` is
+  the non-vacuity guard: without it the equality would also hold for a
+  fabricated budget, because both budgets are otherwise entirely Unknown.
+- G0 safety-factor single application: holding the effective limit fixed while
+  changing only the declared factor leaves the margin value bit-identical and
+  still rebinds the budget identity. A mutant that re-applies the factor fails
+  the value assertion; one that drops it from identity fails the identity
+  assertion. Factors below one and non-finite factors refuse.
+- G3 validity narrowing: holding one operating point fixed and shrinking a
+  consumed card's `flow_m3_s` bound around it moves coverage from
+  `FullyInDomain` to `FullyOutOfDomain` and demotes every record's model-form
+  term. The in-domain arm is the non-vacuity guard. This is the card-narrowing
+  direction, distinct from the existing point-moving demotion tests.
+- G3 margin offset invariance: shifting the effective limit and every nodal
+  temperature by a common offset leaves the margin and the surface spread
+  invariant and shifts the mean by exactly that offset.
 - G1 conjugate air path: the single-segment march against the closed-form
   heated channel `T_w - (T_w - T_in)e^(-NTU)` evaluated through an independent
   `f64::exp` path; the defining identity `h A (T_w - T_ref,eff) == Q` across
