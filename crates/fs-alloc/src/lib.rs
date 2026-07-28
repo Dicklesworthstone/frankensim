@@ -50,7 +50,15 @@ pub use arena::{
     ReclaimPoison, ReclaimPoisonMutation, Site, SiteReport, SiteStats,
 };
 pub use hugepage::{HUGEPAGE_BYTES, HugepageDecision, HugepageOutcome, HugepagePolicy};
-pub use lease::{LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};
+pub use lease::{
+    DelegatedLeaseCharge, DelegatedLeaseCloseReceipt, DelegatedLeaseCloseRefusal,
+    DelegatedLeaseRefusal, DelegatedMemoryLease, LeaseCharge, LeaseConfigurationRefusal,
+    LeaseDelegationRefusal, LeaseIdentity, LeaseIdentityPathError, LeaseReceipt,
+    LeaseReceiptVerificationError, LeaseRefusal, LeaseSealRefusal, OperationMemoryLease,
+    PreparedPublishedTransfer, PublishedTransfer, PublishedTransferBinding,
+    PublishedTransferCloseReceipt, PublishedTransferReceipt, PublishedTransferRefusal,
+    PublishedTransferRollbackReceipt, SealedLeaseReceipt,
+};
 pub use lease_vec::LeasedVec;
 pub use pool::{PoolItem, ShardStats, ShardedPool, ShardedPoolStats};
 
