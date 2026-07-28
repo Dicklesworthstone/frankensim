@@ -59,18 +59,24 @@ pub use cx::{
 };
 pub use fault::{FaultPlanError, TILE_FAULT_PLAN_VERSION, TileFaultPlan};
 pub use invocation::{
-    ChildBudget, ChildReceipt, CostUnits, EvaluationUnits, INVOCATION_RECEIPT_VERSION,
-    InvocationAdmission, InvocationAdmitter, InvocationBudget, InvocationDisposition,
-    InvocationError, InvocationLimits, InvocationMemoryRefusal, InvocationMemoryReservation,
-    InvocationPoll, InvocationReceipt, InvocationResources, MemoryBytes, OutputBytes, PollUnits,
-    ReceiptSemanticError, Time, TimeSource, VirtualClock, WallClock, WorkUnits,
+    ChildBudget, ChildFinalizationEvidence, ChildFinalizer, ChildReceipt, CostUnits,
+    EvaluationUnits, FINALIZATION_REPORT_VERSION, FinalizableChildBudget, FinalizationObservation,
+    FinalizationPublication, FinalizationReport, FinalizationResources, FinalizedChildReceipt,
+    INVOCATION_RECEIPT_MAX_CHILDREN, INVOCATION_RECEIPT_VERSION, InvocationAdmission,
+    InvocationAdmitter, InvocationBudget, InvocationDisposition, InvocationError, InvocationLimits,
+    InvocationMemoryRefusal, InvocationMemoryReservation, InvocationPlanBinding, InvocationPoll,
+    InvocationPublicationScope, InvocationReceipt, InvocationResources, MemoryBytes, OutputBytes,
+    PollUnits, PreparedPublication, PublicationCommitError, ReceiptSemanticError, Time, TimeSource,
+    UnfinishedChild, UnfinishedChildAuthority, VirtualClock, WallClock, WorkUnits,
 };
 pub use kernel::{KernelRunner, Reduce, TileKernel, TilePlan};
 pub use kill::{CandidateId, KillRegistry, UnregisteredKill};
 pub use latency::{LaneError, LatencyLane};
 pub use pool::{
-    CrewScopeError, ParkedTilePool, PoolConfig, RunError, RunReport, TilePool, victim_order,
-    weighted_ranges,
+    CompletionKernelRunner, CrewScopeError, ParkedTilePool, PoolConfig, RunError, RunReport,
+    TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS, TILEPOOL_COMPLETION_WITNESS_VERSION, TilePool,
+    TilePoolCompletionDisposition, TilePoolCompletionWitness, TilePoolCompletionWitnessError,
+    TilePoolInvocationPermit, TilePoolRequestPhase, WitnessedRun, victim_order, weighted_ranges,
 };
 pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
 pub use tune::{

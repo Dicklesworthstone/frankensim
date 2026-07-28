@@ -23,7 +23,7 @@ use core::ops::ControlFlow;
 use fs_alloc::CachePadded;
 use fs_substrate::affinity::CcdTopology;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Semantic version of the tile-pool placement/tuning identity.
 ///
@@ -35,6 +35,47 @@ pub const TILEPOOL_PLACEMENT_IDENTITY_VERSION: u32 = 2;
 pub const TILEPOOL_PLACEMENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.tilepool-placement.v2";
 
 const TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM: &str = "fs-exec-tilepool-v";
+
+/// Schema version of executor-minted TilePool completion evidence.
+///
+/// Version 2 binds the exact normalized placement identity, pool seed,
+/// call-local replay root, request phase, full parked-crew callback set, and
+/// lossless `u128` cumulative lease counters.
+pub const TILEPOOL_COMPLETION_WITNESS_VERSION: u32 = 2;
+
+const TILEPOOL_COMPLETION_WITNESS_DOMAIN: &str =
+    "org.frankensim.fs-exec.tilepool-completion-witness.v2";
+const TILEPOOL_COMPLETION_PLAN_DOMAIN: &str = "org.frankensim.fs-exec.tilepool-completion-plan.v2";
+const TILEPOOL_COMPLETION_CALL_REPLAY_DOMAIN: &str =
+    "org.frankensim.fs-exec.tilepool-call-replay.v1";
+
+/// Claims deliberately excluded from every TilePool completion witness.
+///
+/// The witness covers only the run-local executor lifecycle that mints it.
+/// In particular, it cannot discover work that was never admitted to this
+/// pool run and it says nothing about publication outside the executor.
+const TILEPOOL_COMPLETION_WITNESS_BASE_NO_CLAIMS: &[&str] = &[
+    "external-or-unregistered-threads",
+    "cancel-gate-instance-identity",
+    "wall-clock-or-cancellation-latency",
+    "scheduler-trace-or-steal-replay",
+    "application-state-publication",
+    "scientific-output-correctness",
+    "durable-invocation-admission",
+];
+
+/// No-claim set for standalone witnessed calls that do not consume an affine
+/// invocation permit.
+pub const TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS: &[&str] = &[
+    "external-or-unregistered-threads",
+    "cancel-gate-instance-identity",
+    "wall-clock-or-cancellation-latency",
+    "scheduler-trace-or-steal-replay",
+    "application-state-publication",
+    "scientific-output-correctness",
+    "durable-invocation-admission",
+    "cross-call-uniqueness-without-affine-invocation-permit",
+];
 
 /// Owner-local declaration consumed by `xtask check-identities`.
 #[allow(dead_code)]
@@ -297,6 +338,13 @@ pub enum RunError {
         /// Operating-system diagnostic.
         message: String,
     },
+    /// A parked crew already has an admitted dispatch. Concurrent or
+    /// recursive dispatch is refused before root allocation or worker wakeup,
+    /// leaving the active run and crew reusable.
+    ParkedCrewBusy {
+        /// Kernel whose attempted dispatch was refused.
+        kernel: &'static str,
+    },
     /// The operation memory lease refused the pool's root metadata BEFORE
     /// worker launch (bead wf9.16); nothing ran and no root metadata was
     /// allocated.
@@ -390,6 +438,10 @@ impl fmt::Display for RunError {
                 f,
                 "kernel `{kernel}` worker {worker} could not be created: {message}; started workers were cancelled and drained"
             ),
+            RunError::ParkedCrewBusy { kernel } => write!(
+                f,
+                "kernel `{kernel}` was not dispatched: this parked crew already has an active run"
+            ),
             RunError::ReductionPanicked { kernel, message } => write!(
                 f,
                 "kernel `{kernel}` deterministic reduction panicked: {message}; the unwind was contained and the pool remains usable"
@@ -437,6 +489,2360 @@ impl core::error::Error for RunError {
             _ => None,
         }
     }
+}
+
+/// Terminal class bound into an executor-minted completion witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TilePoolCompletionDisposition {
+    /// Every admitted tile completed and reduction returned normally.
+    Completed,
+    /// The run's cancellation gate was requested and the worker set drained.
+    Cancelled,
+    /// At least one tile returned a typed refusal.
+    TileFailed,
+    /// At least one tile panic was contained.
+    TilePanicked,
+    /// A scoped worker could not be created; already-launched workers joined.
+    WorkerSpawnRefused,
+    /// An overlapping or recursive parked-crew dispatch was refused.
+    ParkedCrewBusy,
+    /// The operation lease refused root metadata before worker launch.
+    MemoryRefused,
+    /// Checked root planning refused an unrepresentable run.
+    MemoryPlanOverflow,
+    /// Fallible root backing allocation was refused.
+    MemoryAllocationRefused,
+    /// Every tile completed, but the deterministic reduction panicked.
+    ReductionPanicked,
+    /// The executor found a missing output slot after worker join.
+    Incomplete,
+}
+
+impl TilePoolCompletionDisposition {
+    /// Stable canonical spelling used by completion logs.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::TileFailed => "tile-failed",
+            Self::TilePanicked => "tile-panicked",
+            Self::WorkerSpawnRefused => "worker-spawn-refused",
+            Self::ParkedCrewBusy => "parked-crew-busy",
+            Self::MemoryRefused => "memory-refused",
+            Self::MemoryPlanOverflow => "memory-plan-overflow",
+            Self::MemoryAllocationRefused => "memory-allocation-refused",
+            Self::ReductionPanicked => "reduction-panicked",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    #[must_use]
+    const fn tag(self) -> u64 {
+        match self {
+            Self::Completed => 0,
+            Self::Cancelled => 1,
+            Self::TileFailed => 2,
+            Self::TilePanicked => 3,
+            Self::WorkerSpawnRefused => 4,
+            Self::ParkedCrewBusy => 5,
+            Self::MemoryRefused => 6,
+            Self::MemoryPlanOverflow => 7,
+            Self::MemoryAllocationRefused => 8,
+            Self::ReductionPanicked => 9,
+            Self::Incomplete => 10,
+        }
+    }
+}
+
+/// Stable reason a retained completion witness failed verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TilePoolCompletionWitnessError {
+    /// The producer schema is not understood by this verifier.
+    UnsupportedVersion {
+        /// Encountered schema version.
+        found: u32,
+    },
+    /// The retained plan root does not bind the declared run and tile plan.
+    PlanRootMismatch,
+    /// The retained witness root does not bind the retained fields.
+    RootMismatch,
+    /// One lifecycle/count/quiescence invariant was violated.
+    Invariant {
+        /// Stable invariant label.
+        name: &'static str,
+    },
+    /// The result/report/witness bundle disagrees internally.
+    BundleInvariant {
+        /// Stable bundle-invariant label.
+        name: &'static str,
+    },
+}
+
+impl fmt::Display for TilePoolCompletionWitnessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedVersion { found } => {
+                write!(
+                    formatter,
+                    "unsupported TilePool completion witness version {found}"
+                )
+            }
+            Self::PlanRootMismatch => {
+                formatter.write_str("TilePool completion witness plan root mismatch")
+            }
+            Self::RootMismatch => formatter.write_str("TilePool completion witness root mismatch"),
+            Self::Invariant { name } => {
+                write!(formatter, "TilePool completion witness violated `{name}`")
+            }
+            Self::BundleInvariant { name } => {
+                write!(formatter, "TilePool witnessed run violated `{name}`")
+            }
+        }
+    }
+}
+
+impl core::error::Error for TilePoolCompletionWitnessError {}
+
+/// First request phase retained by a completion witness.
+///
+/// This is a logical ordering relative to executor checkpoints, not a
+/// wall-clock timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TilePoolRequestPhase {
+    /// No request existed when the terminal bundle was sealed.
+    NotRequested,
+    /// The gate was already requested when the run entered the executor.
+    BeforeEntry,
+    /// The request appeared after entry but before terminal outcome selection.
+    BeforeTerminalDecision,
+    /// The request appeared only after terminal outcome selection but before
+    /// the immutable witness was sealed.
+    AfterTerminalDecision,
+}
+
+impl TilePoolRequestPhase {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not-requested",
+            Self::BeforeEntry => "before-entry",
+            Self::BeforeTerminalDecision => "before-terminal-decision",
+            Self::AfterTerminalDecision => "after-terminal-decision",
+        }
+    }
+
+    #[must_use]
+    const fn tag(self) -> u64 {
+        match self {
+            Self::NotRequested => 0,
+            Self::BeforeEntry => 1,
+            Self::BeforeTerminalDecision => 2,
+            Self::AfterTerminalDecision => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionArenaSnapshot {
+    live: u64,
+    reserved_bytes: u64,
+    free_bytes: u64,
+    quiescent: bool,
+}
+
+impl CompletionArenaSnapshot {
+    fn capture(pool: &fs_alloc::ArenaPool) -> Self {
+        let stats = pool.stats();
+        Self {
+            live: u64::try_from(stats.arenas_live).unwrap_or(u64::MAX),
+            reserved_bytes: u64::try_from(stats.reserved_bytes).unwrap_or(u64::MAX),
+            free_bytes: u64::try_from(stats.free_bytes).unwrap_or(u64::MAX),
+            quiescent: stats.quiescent(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionLeaseSnapshot {
+    limit_bytes: Option<u64>,
+    requested_bytes: u128,
+    peak_bytes: u64,
+    used_bytes: u64,
+    refusals: u128,
+    release_invariant_violations: u128,
+}
+
+impl CompletionLeaseSnapshot {
+    fn capture(lease: &fs_alloc::OperationMemoryLease) -> Self {
+        let receipt = lease.receipt();
+        Self {
+            limit_bytes: receipt.limit_bytes,
+            requested_bytes: receipt.requested_bytes,
+            peak_bytes: receipt.peak_bytes,
+            used_bytes: receipt.used_bytes,
+            refusals: receipt.refusals,
+            release_invariant_violations: receipt.release_invariant_violations,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionScopeIdentity {
+    kind: &'static str,
+    parent_region_id: Option<u64>,
+    parent_task_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionBefore {
+    scope: CompletionScopeIdentity,
+    pool_placement_identity: String,
+    arena: CompletionArenaSnapshot,
+    lease: CompletionLeaseSnapshot,
+    cancellation_requested_at_entry: bool,
+    planned_crew_callbacks: u64,
+}
+
+impl CompletionScopeIdentity {
+    const STD_SCOPED: Self = Self {
+        kind: "std-thread-scope",
+        parent_region_id: None,
+        parent_task_id: None,
+    };
+
+    const STD_PARKED: Self = Self {
+        kind: "std-thread-parked-crew",
+        parent_region_id: None,
+        parent_task_id: None,
+    };
+
+    fn task_scoped<Caps>(cx: &asupersync::Cx<Caps>) -> Self {
+        Self {
+            kind: "asupersync-task-scope",
+            parent_region_id: Some(cx.region_id().as_u64()),
+            parent_task_id: Some(cx.task_id().as_u64()),
+        }
+    }
+
+    fn task_parked<Caps>(cx: &asupersync::Cx<Caps>) -> Self {
+        Self {
+            kind: "asupersync-task-parked-crew",
+            parent_region_id: Some(cx.region_id().as_u64()),
+            parent_task_id: Some(cx.task_id().as_u64()),
+        }
+    }
+}
+
+/// Immutable, versioned evidence minted by the executor only after the real
+/// TilePool launch/join path has closed.
+///
+/// Private fields and the absence of a public constructor prevent callers
+/// from manufacturing a `drained=true` token. The witness binds the declared
+/// run and plan, actual worker entry/exit counts, exact claimed tile outcomes,
+/// run-local arena-scope closure, root-charge release, before/after allocator
+/// observations, the selected terminal error, and an explicit no-claim set.
+///
+/// `failed_tiles()` counts panic outcomes plus the one typed refusal retained
+/// with exact provenance by the existing lowest-tile `RunError` contract.
+/// Additional simultaneous `ControlFlow::Break` values are retained exactly
+/// in `break_tiles()` but are not relabelled as independently proven faults.
+/// Consequently `cancelled_tiles()` is the conservative remainder without
+/// retained failure provenance, not a claim that every such tile personally
+/// observed the cancellation gate.
+///
+/// Global arena/lease before-after values are observations, not a claim that
+/// no concurrent caller exists. Run-local authority comes from zero live
+/// worker guards and tile scopes plus explicit release of the executor's root
+/// charge. The witness never attests external threads, wall-clock latency,
+/// scheduler replay, application publication, or scientific correctness.
+///
+/// The type is intentionally non-forgeable and immutable outside this module:
+///
+/// ```compile_fail
+/// use fs_exec::TilePoolCompletionWitness;
+///
+/// fn forge_or_mutate(witness: &mut TilePoolCompletionWitness) {
+///     witness.version = 99;
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct TilePoolCompletionWitness {
+    version: u32,
+    producer_version: &'static str,
+    pool_placement_identity_version: u32,
+    pool_placement_identity: String,
+    pool_seed: u64,
+    kernel: &'static str,
+    kernel_id: u64,
+    declared_run: RunId,
+    mode: &'static str,
+    scope: CompletionScopeIdentity,
+    planned_tiles: u64,
+    plan_root: [u8; 32],
+    call_replay_root: [u8; 32],
+    affine_invocation_permit_root: Option<[u8; 32]>,
+    admission_completed: bool,
+    admitted_tiles: u64,
+    unadmitted_tiles: u64,
+    claimed_tiles: u64,
+    completed_tiles: u64,
+    break_tiles: u64,
+    panicked_tiles: u64,
+    planned_workers: u64,
+    launched_workers: u64,
+    joined_workers: u64,
+    worker_admission_closed: bool,
+    live_worker_guards_at_seal: u64,
+    planned_crew_callbacks: u64,
+    entered_crew_callbacks: u64,
+    exited_crew_callbacks: u64,
+    tile_scopes_opened: u64,
+    live_tile_scopes_at_seal: u64,
+    cancellation_requested_at_entry: bool,
+    cancellation_requested_at_terminal: bool,
+    cancellation_requested: bool,
+    request_phase: TilePoolRequestPhase,
+    cancellation_observed_workers: u64,
+    root_metadata_bytes: u64,
+    root_charge_admitted: bool,
+    root_charge_released: bool,
+    arena_before: CompletionArenaSnapshot,
+    arena_after: CompletionArenaSnapshot,
+    lease_before: CompletionLeaseSnapshot,
+    lease_after: CompletionLeaseSnapshot,
+    disposition: TilePoolCompletionDisposition,
+    first_failure_kind: Option<&'static str>,
+    first_failure_tile: Option<u64>,
+    terminal_error: Option<RunError>,
+    root: [u8; 32],
+}
+
+/// Affine authority to execute one permit-bound witnessed TilePool call.
+///
+/// The root invocation layer constructs this token only after atomically
+/// reserving its one execution attempt. The token is deliberately neither
+/// [`Clone`] nor [`Copy`], and every permit-bound run method consumes it.
+/// Its per-run permit root is bound into both the call-replay root and
+/// terminal witness. The root invocation layer derives that permit root from
+/// the invocation occurrence plus the declared run ordinal; it is not the
+/// bare invocation root.
+///
+/// Standalone `*_witnessed` compatibility methods do not need a permit and
+/// explicitly retain the cross-call-uniqueness no-claim.
+///
+/// ```compile_fail
+/// use fs_exec::TilePoolInvocationPermit;
+///
+/// fn consume(_: TilePoolInvocationPermit) {}
+///
+/// fn cannot_reuse(permit: TilePoolInvocationPermit) {
+///     consume(permit);
+///     consume(permit);
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub struct TilePoolInvocationPermit {
+    permit_root: [u8; 32],
+}
+
+impl TilePoolInvocationPermit {
+    /// Mint one permit from a per-run root derived by invocation authority.
+    ///
+    /// This constructor stays crate-private so ordinary callers cannot mint
+    /// one-shot authority. `InvocationBudget` is responsible for deriving the
+    /// root from its invocation occurrence plus run ordinal and refusing a
+    /// second mint for that ordinal.
+    #[must_use]
+    pub(crate) const fn from_permit_root(permit_root: [u8; 32]) -> Self {
+        Self { permit_root }
+    }
+
+    /// Per-run permit root bound into the witnessed call.
+    #[must_use]
+    pub const fn permit_root(&self) -> [u8; 32] {
+        self.permit_root
+    }
+
+    const fn into_root(self) -> [u8; 32] {
+        self.permit_root
+    }
+}
+
+/// One coherent executor result, measured report, and completion witness.
+///
+/// Private fields prevent callers from pairing a valid witness with a report
+/// or outcome from another run. Use [`Self::into_parts`] to consume the
+/// executor-minted bundle.
+#[derive(Debug)]
+#[must_use]
+pub struct WitnessedRun<Out> {
+    outcome: Result<Out, RunError>,
+    report: RunReport,
+    witness: TilePoolCompletionWitness,
+}
+
+impl<Out> WitnessedRun<Out> {
+    /// Borrow the terminal kernel outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> &Result<Out, RunError> {
+        &self.outcome
+    }
+
+    /// Borrow the measured, non-semantic scheduling report.
+    #[must_use]
+    pub const fn report(&self) -> &RunReport {
+        &self.report
+    }
+
+    /// Borrow the immutable semantic completion witness.
+    #[must_use]
+    pub const fn witness(&self) -> &TilePoolCompletionWitness {
+        &self.witness
+    }
+
+    /// Consume the bundle without weakening its prior verification.
+    #[must_use]
+    pub fn into_parts(self) -> (Result<Out, RunError>, RunReport, TilePoolCompletionWitness) {
+        (self.outcome, self.report, self.witness)
+    }
+
+    /// Recheck the witness plus exact report/outcome coupling.
+    pub fn verify_bundle(&self) -> Result<(), TilePoolCompletionWitnessError> {
+        self.witness.verify()?;
+        if self.report.kernel != self.witness.kernel {
+            return Err(completion_bundle_invariant("report-kernel"));
+        }
+        if self.report.mode != self.witness.mode {
+            return Err(completion_bundle_invariant("report-mode"));
+        }
+        if self.report.declared_run != self.witness.declared_run {
+            return Err(completion_bundle_invariant("report-declared-run"));
+        }
+        if self.report.completed != self.witness.completed_tiles {
+            return Err(completion_bundle_invariant("report-completed"));
+        }
+        if self.report.total != self.witness.planned_tiles {
+            return Err(completion_bundle_invariant("report-total"));
+        }
+        let reported_completed = self
+            .report
+            .tiles_by_worker
+            .iter()
+            .try_fold(0_u64, |total, count| total.checked_add(*count))
+            .ok_or_else(|| completion_bundle_invariant("report-worker-count-overflow"))?;
+        if self.witness.admission_completed {
+            if u64::try_from(self.report.tiles_by_worker.len()).ok()
+                != Some(self.witness.planned_workers)
+            {
+                return Err(completion_bundle_invariant("report-worker-cardinality"));
+            }
+            if reported_completed != self.witness.completed_tiles {
+                return Err(completion_bundle_invariant("report-worker-conservation"));
+            }
+        } else if !self.report.tiles_by_worker.is_empty() || reported_completed != 0 {
+            return Err(completion_bundle_invariant("prelaunch-report-workers"));
+        }
+        match (&self.outcome, self.witness.terminal_error()) {
+            (Ok(_), None) => {}
+            (Err(outcome), Some(retained)) if outcome == retained => {}
+            _ => return Err(completion_bundle_invariant("terminal-outcome")),
+        }
+        Ok(())
+    }
+}
+
+/// Runner surface for consumers that require executor-minted completion
+/// evidence rather than the legacy outcome/report pair.
+pub trait CompletionKernelRunner {
+    /// Normalized worker count used for preflight sizing.
+    fn workers(&self) -> usize;
+
+    /// Execute under an explicit gate and return one verified bundle.
+    fn run_with_gate_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>;
+
+    /// Consume one affine invocation permit and execute the exact call once.
+    fn run_with_gate_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>;
+}
+
+impl TilePoolCompletionWitness {
+    /// Current witness schema version.
+    pub const VERSION: u32 = TILEPOOL_COMPLETION_WITNESS_VERSION;
+
+    /// Fixed explicit no-claim set.
+    ///
+    /// This is the compatibility set used by standalone calls. Permit-bound
+    /// witnesses expose the narrower run-specific set through
+    /// [`Self::no_claims`].
+    pub const NO_CLAIMS: &'static [&'static str] = TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS;
+
+    /// Explicit no-claim set applicable to this exact witnessed call.
+    #[must_use]
+    pub fn no_claims(&self) -> &'static [&'static str] {
+        if self.affine_invocation_permit_root.is_some() {
+            TILEPOOL_COMPLETION_WITNESS_BASE_NO_CLAIMS
+        } else {
+            TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS
+        }
+    }
+
+    /// Retained producer schema version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// fs-exec crate version that minted this witness.
+    #[must_use]
+    pub const fn producer_version(&self) -> &'static str {
+        self.producer_version
+    }
+
+    /// Placement-identity schema used by the exact normalized pool.
+    #[must_use]
+    pub const fn pool_placement_identity_version(&self) -> u32 {
+        self.pool_placement_identity_version
+    }
+
+    /// Exact normalized placement identity of the pool that executed this
+    /// call.
+    #[must_use]
+    pub fn pool_placement_identity(&self) -> &str {
+        &self.pool_placement_identity
+    }
+
+    /// Declared stream seed from the executing pool configuration.
+    #[must_use]
+    pub const fn pool_seed(&self) -> u64 {
+        self.pool_seed
+    }
+
+    /// Kernel name from the actual `TilePlan`.
+    #[must_use]
+    pub const fn kernel(&self) -> &'static str {
+        self.kernel
+    }
+
+    /// Stable kernel identity from the actual `TilePlan`.
+    #[must_use]
+    pub const fn kernel_id(&self) -> u64 {
+        self.kernel_id
+    }
+
+    /// Caller-declared logical run identity.
+    #[must_use]
+    pub const fn declared_run(&self) -> RunId {
+        self.declared_run
+    }
+
+    /// Execution-mode name bound into the witness.
+    #[must_use]
+    pub const fn mode(&self) -> &'static str {
+        self.mode
+    }
+
+    /// Worker-lifetime/scope strategy used by this exact launch.
+    #[must_use]
+    pub const fn scope_kind(&self) -> &'static str {
+        self.scope.kind
+    }
+
+    /// Owning asupersync region when this run was launched inside one.
+    #[must_use]
+    pub const fn parent_region_id(&self) -> Option<u64> {
+        self.scope.parent_region_id
+    }
+
+    /// Owning asupersync task when this run was launched inside one.
+    #[must_use]
+    pub const fn parent_task_id(&self) -> Option<u64> {
+        self.scope.parent_task_id
+    }
+
+    /// Tiles declared by the actual plan.
+    #[must_use]
+    pub const fn planned_tiles(&self) -> u64 {
+        self.planned_tiles
+    }
+
+    /// Whether checked root allocation/admission completed before launch.
+    #[must_use]
+    pub const fn admission_completed(&self) -> bool {
+        self.admission_completed
+    }
+
+    /// Plan tiles admitted to the worker protocol.
+    #[must_use]
+    pub const fn admitted_tiles(&self) -> u64 {
+        self.admitted_tiles
+    }
+
+    /// Plan tiles refused before worker-protocol admission.
+    #[must_use]
+    pub const fn unadmitted_tiles(&self) -> u64 {
+        self.unadmitted_tiles
+    }
+
+    /// Tiles actually removed from an owned/stolen run.
+    #[must_use]
+    pub const fn claimed_tiles(&self) -> u64 {
+        self.claimed_tiles
+    }
+
+    /// Tiles that returned `ControlFlow::Continue` and populated a slot.
+    #[must_use]
+    pub const fn completed_tiles(&self) -> u64 {
+        self.completed_tiles
+    }
+
+    /// Tiles that returned `ControlFlow::Break`.
+    #[must_use]
+    pub const fn break_tiles(&self) -> u64 {
+        self.break_tiles
+    }
+
+    /// Tiles whose panic was contained by the worker loop.
+    #[must_use]
+    pub const fn panicked_tiles(&self) -> u64 {
+        self.panicked_tiles
+    }
+
+    /// Typed-refusal tiles retained with exact provenance (zero or one).
+    #[must_use]
+    pub fn retained_refusal_tiles(&self) -> u64 {
+        if matches!(
+            self.terminal_error.as_ref(),
+            Some(RunError::TileFailed { .. })
+        ) {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Failures with exact executor-retained provenance.
+    #[must_use]
+    pub fn failed_tiles(&self) -> u64 {
+        self.panicked_tiles + self.retained_refusal_tiles()
+    }
+
+    /// Conservative non-success remainder without retained failure provenance.
+    #[must_use]
+    pub fn cancelled_tiles(&self) -> u64 {
+        let unclaimed = self.admitted_tiles.saturating_sub(self.claimed_tiles);
+        let nonfailure_breaks = self
+            .break_tiles
+            .saturating_sub(self.retained_refusal_tiles());
+        unclaimed.saturating_add(nonfailure_breaks)
+    }
+
+    /// Workers selected after tile-count normalization.
+    #[must_use]
+    pub const fn planned_workers(&self) -> u64 {
+        self.planned_workers
+    }
+
+    /// Workers that actually entered the shared worker loop.
+    #[must_use]
+    pub const fn launched_workers(&self) -> u64 {
+        self.launched_workers
+    }
+
+    /// Entered workers that exited before the launch harness returned.
+    #[must_use]
+    pub const fn joined_workers(&self) -> u64 {
+        self.joined_workers
+    }
+
+    /// Whether run-local worker admission was permanently closed before seal.
+    #[must_use]
+    pub const fn worker_admission_closed(&self) -> bool {
+        self.worker_admission_closed
+    }
+
+    /// Worker guards still live when the evidence was sealed.
+    #[must_use]
+    pub const fn live_worker_guards_at_seal(&self) -> u64 {
+        self.live_worker_guards_at_seal
+    }
+
+    /// Number of parked-crew callbacks required for this dispatch.
+    ///
+    /// This is the complete parked crew, which may be larger than
+    /// [`Self::planned_workers`] for a short tile plan.
+    #[must_use]
+    pub const fn planned_crew_callbacks(&self) -> u64 {
+        self.planned_crew_callbacks
+    }
+
+    /// Parked-crew callbacks that entered this exact dispatch.
+    #[must_use]
+    pub const fn entered_crew_callbacks(&self) -> u64 {
+        self.entered_crew_callbacks
+    }
+
+    /// Entered parked-crew callbacks that exited before sealing.
+    #[must_use]
+    pub const fn exited_crew_callbacks(&self) -> u64 {
+        self.exited_crew_callbacks
+    }
+
+    /// Tile-arena scopes opened by claimed work.
+    #[must_use]
+    pub const fn tile_scopes_opened(&self) -> u64 {
+        self.tile_scopes_opened
+    }
+
+    /// Run-local tile-arena scopes still live when sealed.
+    #[must_use]
+    pub const fn live_tile_scopes_at_seal(&self) -> u64 {
+        self.live_tile_scopes_at_seal
+    }
+
+    /// Whether the run's actual gate was requested by seal time.
+    #[must_use]
+    pub const fn cancellation_requested(&self) -> bool {
+        self.cancellation_requested
+    }
+
+    /// Whether the gate was already requested at executor entry.
+    #[must_use]
+    pub const fn cancellation_requested_at_entry(&self) -> bool {
+        self.cancellation_requested_at_entry
+    }
+
+    /// Whether the gate was requested at the terminal-decision checkpoint.
+    #[must_use]
+    pub const fn cancellation_requested_at_terminal(&self) -> bool {
+        self.cancellation_requested_at_terminal
+    }
+
+    /// First logical request phase observed by the executor.
+    #[must_use]
+    pub const fn request_phase(&self) -> TilePoolRequestPhase {
+        self.request_phase
+    }
+
+    /// Workers that actually reached a tile boundary and observed the
+    /// requested gate before exiting.
+    ///
+    /// This is distinct from [`Self::cancellation_requested`]: a refusal can
+    /// close launch before any worker exists, and a late external request can
+    /// race after workers have already exhausted their deques.
+    #[must_use]
+    pub const fn cancellation_observed_workers(&self) -> u64 {
+        self.cancellation_observed_workers
+    }
+
+    /// Checked logical root-metadata charge for this plan.
+    #[must_use]
+    pub const fn root_metadata_bytes(&self) -> u64 {
+        self.root_metadata_bytes
+    }
+
+    /// Whether the executor admitted its root lease charge.
+    #[must_use]
+    pub const fn root_charge_admitted(&self) -> bool {
+        self.root_charge_admitted
+    }
+
+    /// Whether an admitted executor root charge was explicitly released.
+    #[must_use]
+    pub const fn root_charge_released(&self) -> bool {
+        self.root_charge_released
+    }
+
+    /// Run-local transient quiescence (workers/scopes/root charge only).
+    #[must_use]
+    pub const fn executor_transients_quiescent(&self) -> bool {
+        self.worker_admission_closed
+            && self.live_worker_guards_at_seal == 0
+            && self.live_tile_scopes_at_seal == 0
+            && (!self.root_charge_admitted || self.root_charge_released)
+    }
+
+    /// Global ArenaPool live-arena observation before the run.
+    #[must_use]
+    pub const fn arena_live_before(&self) -> u64 {
+        self.arena_before.live
+    }
+
+    /// Global ArenaPool live-arena observation after run-local drain.
+    #[must_use]
+    pub const fn arena_live_after(&self) -> u64 {
+        self.arena_after.live
+    }
+
+    /// Whether the global ArenaPool happened to be quiescent before the run.
+    #[must_use]
+    pub const fn arena_pool_quiescent_before(&self) -> bool {
+        self.arena_before.quiescent
+    }
+
+    /// Whether the global ArenaPool happened to be quiescent after this run.
+    #[must_use]
+    pub const fn arena_pool_quiescent_after(&self) -> bool {
+        self.arena_after.quiescent
+    }
+
+    /// Shared operation-lease bytes live before this run.
+    #[must_use]
+    pub const fn lease_used_before(&self) -> u64 {
+        self.lease_before.used_bytes
+    }
+
+    /// Shared operation-lease bytes live after executor-transient release.
+    #[must_use]
+    pub const fn lease_used_after(&self) -> u64 {
+        self.lease_after.used_bytes
+    }
+
+    /// Shared operation-lease refusal count before this run.
+    #[must_use]
+    pub const fn lease_refusals_before(&self) -> u128 {
+        self.lease_before.refusals
+    }
+
+    /// Shared operation-lease refusal count after this run.
+    #[must_use]
+    pub const fn lease_refusals_after(&self) -> u128 {
+        self.lease_after.refusals
+    }
+
+    /// Cumulative granted lease bytes before this call.
+    #[must_use]
+    pub const fn lease_requested_before(&self) -> u128 {
+        self.lease_before.requested_bytes
+    }
+
+    /// Cumulative granted lease bytes after this call.
+    #[must_use]
+    pub const fn lease_requested_after(&self) -> u128 {
+        self.lease_after.requested_bytes
+    }
+
+    /// Cumulative lease release-invariant violations before this call.
+    #[must_use]
+    pub const fn lease_release_invariant_violations_before(&self) -> u128 {
+        self.lease_before.release_invariant_violations
+    }
+
+    /// Cumulative lease release-invariant violations after this call.
+    #[must_use]
+    pub const fn lease_release_invariant_violations_after(&self) -> u128 {
+        self.lease_after.release_invariant_violations
+    }
+
+    /// Terminal disposition bound to the selected `RunError`, if any.
+    #[must_use]
+    pub const fn disposition(&self) -> TilePoolCompletionDisposition {
+        self.disposition
+    }
+
+    /// Stable disposition spelling.
+    #[must_use]
+    pub const fn disposition_name(&self) -> &'static str {
+        self.disposition.name()
+    }
+
+    /// Selected terminal tile-failure class, when the terminal error is a
+    /// typed refusal or contained tile panic.
+    #[must_use]
+    pub const fn first_failure_kind(&self) -> Option<&'static str> {
+        self.first_failure_kind
+    }
+
+    /// Lowest logical tile retained under the selected terminal failure
+    /// class, independently cross-checked against `terminal_error`.
+    #[must_use]
+    pub const fn first_failure_tile(&self) -> Option<u64> {
+        self.first_failure_tile
+    }
+
+    /// Exact selected terminal error under existing `RunError` precedence.
+    #[must_use]
+    pub const fn terminal_error(&self) -> Option<&RunError> {
+        self.terminal_error.as_ref()
+    }
+
+    /// Exact plan-root bytes.
+    #[must_use]
+    pub const fn plan_root_bytes(&self) -> [u8; 32] {
+        self.plan_root
+    }
+
+    /// Lowercase plan-root hex.
+    #[must_use]
+    pub fn plan_root_hex(&self) -> String {
+        completion_hex(&self.plan_root)
+    }
+
+    /// Exact replay root for the declared call identity.
+    ///
+    /// This root is intentionally reproducible. It is not a uniqueness token
+    /// for standalone calls: identical declared calls have the same root.
+    /// Permit-consuming calls also bind their one-shot invocation root.
+    #[must_use]
+    pub const fn call_replay_root_bytes(&self) -> [u8; 32] {
+        self.call_replay_root
+    }
+
+    /// Lowercase call-replay-root hex.
+    #[must_use]
+    pub fn call_replay_root_hex(&self) -> String {
+        completion_hex(&self.call_replay_root)
+    }
+
+    /// Affine invocation-permit root for a permit-consuming call.
+    ///
+    /// Standalone compatibility entry points retain `None` and therefore
+    /// make no cross-call uniqueness claim.
+    #[must_use]
+    pub const fn affine_invocation_permit_root(&self) -> Option<[u8; 32]> {
+        self.affine_invocation_permit_root
+    }
+
+    /// Whether this call was bound to an affine invocation permit.
+    #[must_use]
+    pub const fn has_affine_invocation_permit(&self) -> bool {
+        self.affine_invocation_permit_root.is_some()
+    }
+
+    /// Exact witness-root bytes.
+    #[must_use]
+    pub const fn root_bytes(&self) -> [u8; 32] {
+        self.root
+    }
+
+    /// Lowercase witness-root hex.
+    #[must_use]
+    pub fn root_hex(&self) -> String {
+        completion_hex(&self.root)
+    }
+
+    /// Recompute both roots and verify count, join, admission, quiescence,
+    /// terminal-error, and disposition semantics.
+    ///
+    /// # Errors
+    /// Returns the first stable violated invariant.
+    pub fn verify(&self) -> Result<(), TilePoolCompletionWitnessError> {
+        verify_completion_witness(self)
+    }
+
+    /// Convenience integrity verdict.
+    #[must_use]
+    pub fn verifies_integrity(&self) -> bool {
+        self.verify().is_ok()
+    }
+
+    /// Canonical semantic JSON with deterministic field order.
+    ///
+    /// Timing samples, steal counts, stdout/stderr, and caller publication
+    /// state are deliberately absent.
+    #[must_use]
+    pub fn to_canonical_json(&self) -> String {
+        use core::fmt::Write as _;
+
+        let mut out = String::with_capacity(2304);
+        out.push_str("{\"schema\":\"fs-exec-tilepool-completion-witness-v2\"");
+        let _ = write!(out, ",\"version\":{}", self.version);
+        out.push_str(",\"producer_version\":");
+        push_json_string(&mut out, self.producer_version);
+        let _ = write!(
+            out,
+            ",\"pool_placement_identity_version\":{}",
+            self.pool_placement_identity_version
+        );
+        out.push_str(",\"pool_placement_identity\":");
+        push_json_string(&mut out, &self.pool_placement_identity);
+        let _ = write!(out, ",\"pool_seed\":{}", self.pool_seed);
+        out.push_str(",\"kernel\":");
+        push_json_string(&mut out, self.kernel);
+        let _ = write!(
+            out,
+            ",\"kernel_id\":{},\"declared_run\":{},\"mode\":",
+            self.kernel_id, self.declared_run.0
+        );
+        push_json_string(&mut out, self.mode);
+        out.push_str(",\"scope\":{\"kind\":");
+        push_json_string(&mut out, self.scope.kind);
+        out.push_str(",\"parent_region_id\":");
+        completion_push_optional_u64_json(&mut out, self.scope.parent_region_id);
+        out.push_str(",\"parent_task_id\":");
+        completion_push_optional_u64_json(&mut out, self.scope.parent_task_id);
+        out.push('}');
+        let _ = write!(
+            out,
+            ",\"planned_tiles\":{},\"plan_root\":\"{}\",\"call_replay_root\":\"{}\",\
+             \"admission_completed\":{},\"admitted_tiles\":{},\"unadmitted_tiles\":{},\
+             \"claimed_tiles\":{},\"completed_tiles\":{},\"break_tiles\":{},\
+             \"panicked_tiles\":{},\"retained_refusal_tiles\":{},\"failed_tiles\":{},\
+             \"cancelled_tiles\":{},\"planned_workers\":{},\"launched_workers\":{},\
+             \"joined_workers\":{},\"worker_admission_closed\":{},\
+             \"live_worker_guards_at_seal\":{},\"planned_crew_callbacks\":{},\
+             \"entered_crew_callbacks\":{},\"exited_crew_callbacks\":{},\
+             \"tile_scopes_opened\":{},\"live_tile_scopes_at_seal\":{},\
+             \"cancellation_requested_at_entry\":{},\
+             \"cancellation_requested_at_terminal\":{},\"cancellation_requested\":{},\
+             \"request_phase\":\"{}\",\
+             \"cancellation_observed_workers\":{},\
+             \"root_metadata_bytes\":{},\"root_charge_admitted\":{},\
+             \"root_charge_released\":{},\"executor_transients_quiescent\":{}",
+            self.planned_tiles,
+            self.plan_root_hex(),
+            self.call_replay_root_hex(),
+            self.admission_completed,
+            self.admitted_tiles,
+            self.unadmitted_tiles,
+            self.claimed_tiles,
+            self.completed_tiles,
+            self.break_tiles,
+            self.panicked_tiles,
+            self.retained_refusal_tiles(),
+            self.failed_tiles(),
+            self.cancelled_tiles(),
+            self.planned_workers,
+            self.launched_workers,
+            self.joined_workers,
+            self.worker_admission_closed,
+            self.live_worker_guards_at_seal,
+            self.planned_crew_callbacks,
+            self.entered_crew_callbacks,
+            self.exited_crew_callbacks,
+            self.tile_scopes_opened,
+            self.live_tile_scopes_at_seal,
+            self.cancellation_requested_at_entry,
+            self.cancellation_requested_at_terminal,
+            self.cancellation_requested,
+            self.request_phase.name(),
+            self.cancellation_observed_workers,
+            self.root_metadata_bytes,
+            self.root_charge_admitted,
+            self.root_charge_released,
+            self.executor_transients_quiescent(),
+        );
+        out.push_str(",\"affine_invocation_permit_root\":");
+        match self.affine_invocation_permit_root {
+            Some(root) => push_json_string(&mut out, &completion_hex(&root)),
+            None => out.push_str("null"),
+        }
+        let _ = write!(
+            out,
+            ",\"arena_before\":{{\"live\":{},\"reserved_bytes\":{},\"free_bytes\":{},\
+             \"quiescent\":{}}},\"arena_after\":{{\"live\":{},\"reserved_bytes\":{},\
+             \"free_bytes\":{},\"quiescent\":{}}}",
+            self.arena_before.live,
+            self.arena_before.reserved_bytes,
+            self.arena_before.free_bytes,
+            self.arena_before.quiescent,
+            self.arena_after.live,
+            self.arena_after.reserved_bytes,
+            self.arena_after.free_bytes,
+            self.arena_after.quiescent,
+        );
+        completion_push_lease_json(&mut out, "lease_before", self.lease_before);
+        completion_push_lease_json(&mut out, "lease_after", self.lease_after);
+        out.push_str(",\"disposition\":");
+        push_json_string(&mut out, self.disposition.name());
+        out.push_str(",\"first_failure\":{\"kind\":");
+        match self.first_failure_kind {
+            Some(kind) => push_json_string(&mut out, kind),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"tile\":");
+        completion_push_optional_u64_json(&mut out, self.first_failure_tile);
+        out.push('}');
+        out.push_str(",\"terminal_error\":");
+        match &self.terminal_error {
+            Some(error) => {
+                out.push_str("{\"kind\":");
+                push_json_string(&mut out, completion_error_kind(error));
+                out.push_str(",\"detail\":");
+                push_json_string(&mut out, &error.to_string());
+                out.push('}');
+            }
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"no_claims\":[");
+        for (index, no_claim) in self.no_claims().iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            push_json_string(&mut out, no_claim);
+        }
+        let _ = write!(out, "],\"witness_root\":\"{}\"}}", self.root_hex());
+        out
+    }
+
+    /// Deterministic JSONL envelope for focused/e2e evidence logging.
+    ///
+    /// `case`, `sequence`, and `source_build_identity` are logging-envelope
+    /// metadata and therefore do not alter the immutable semantic witness.
+    /// stdout/stderr remains outside semantic identity.
+    #[must_use]
+    pub fn to_jsonl(&self, case: &str, sequence: u64, source_build_identity: &str) -> String {
+        self.to_jsonl_with_reuse(case, sequence, source_build_identity, None)
+    }
+
+    /// Deterministic JSONL envelope with an optional post-run pool-reuse
+    /// verdict.
+    ///
+    /// Reuse is necessarily observed after this immutable witness was minted,
+    /// so it is explicit envelope metadata rather than executor-attested
+    /// semantic identity. This method never changes [`Self::root_bytes`].
+    #[must_use]
+    pub fn to_jsonl_with_reuse(
+        &self,
+        case: &str,
+        sequence: u64,
+        source_build_identity: &str,
+        reuse_verdict: Option<bool>,
+    ) -> String {
+        use core::fmt::Write as _;
+
+        let mut out = String::with_capacity(2560);
+        out.push_str("{\"schema\":\"fs-exec-tilepool-completion-e2e-v2\",\"case\":");
+        push_json_string(&mut out, case);
+        let _ = write!(out, ",\"sequence\":{sequence},\"source_build_identity\":");
+        push_json_string(&mut out, source_build_identity);
+        out.push_str(",\"reuse_verdict\":");
+        match reuse_verdict {
+            Some(true) => out.push_str("true"),
+            Some(false) => out.push_str("false"),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"witness\":");
+        out.push_str(&self.to_canonical_json());
+        out.push('}');
+        out
+    }
+}
+
+fn completion_invariant(name: &'static str) -> TilePoolCompletionWitnessError {
+    TilePoolCompletionWitnessError::Invariant { name }
+}
+
+fn completion_bundle_invariant(name: &'static str) -> TilePoolCompletionWitnessError {
+    TilePoolCompletionWitnessError::BundleInvariant { name }
+}
+
+fn completion_disposition(error: Option<&RunError>) -> TilePoolCompletionDisposition {
+    match error {
+        None => TilePoolCompletionDisposition::Completed,
+        Some(RunError::Cancelled { .. }) => TilePoolCompletionDisposition::Cancelled,
+        Some(RunError::TileFailed { .. }) => TilePoolCompletionDisposition::TileFailed,
+        Some(RunError::TilePanicked { .. }) => TilePoolCompletionDisposition::TilePanicked,
+        Some(RunError::WorkerSpawn { .. }) => TilePoolCompletionDisposition::WorkerSpawnRefused,
+        Some(RunError::ParkedCrewBusy { .. }) => TilePoolCompletionDisposition::ParkedCrewBusy,
+        Some(RunError::MemoryRefused { .. }) => TilePoolCompletionDisposition::MemoryRefused,
+        Some(RunError::MemoryPlanOverflow { .. }) => {
+            TilePoolCompletionDisposition::MemoryPlanOverflow
+        }
+        Some(RunError::MemoryAllocationRefused { .. }) => {
+            TilePoolCompletionDisposition::MemoryAllocationRefused
+        }
+        Some(RunError::ReductionPanicked { .. }) => {
+            TilePoolCompletionDisposition::ReductionPanicked
+        }
+        Some(RunError::Incomplete { .. }) => TilePoolCompletionDisposition::Incomplete,
+    }
+}
+
+fn completion_first_failure(error: Option<&RunError>) -> (Option<&'static str>, Option<u64>) {
+    match error {
+        Some(RunError::TileFailed { tile, .. }) => (Some("tile-failed"), Some(*tile)),
+        Some(RunError::TilePanicked { tile, .. }) => (Some("tile-panicked"), Some(*tile)),
+        _ => (None, None),
+    }
+}
+
+fn verify_completion_witness(
+    witness: &TilePoolCompletionWitness,
+) -> Result<(), TilePoolCompletionWitnessError> {
+    if witness.version != TILEPOOL_COMPLETION_WITNESS_VERSION {
+        return Err(TilePoolCompletionWitnessError::UnsupportedVersion {
+            found: witness.version,
+        });
+    }
+    if witness.pool_placement_identity_version != TILEPOOL_PLACEMENT_IDENTITY_VERSION {
+        return Err(completion_invariant("pool-placement-identity-version"));
+    }
+    if !completion_placement_identity_is_well_formed(&witness.pool_placement_identity) {
+        return Err(completion_invariant("pool-placement-identity-shape"));
+    }
+    if completion_plan_root(
+        witness.pool_placement_identity_version,
+        &witness.pool_placement_identity,
+        witness.pool_seed,
+        witness.kernel,
+        witness.kernel_id,
+        witness.declared_run,
+        witness.mode,
+        witness.planned_tiles,
+    ) != witness.plan_root
+    {
+        return Err(TilePoolCompletionWitnessError::PlanRootMismatch);
+    }
+    if completion_call_replay_root(
+        witness.plan_root,
+        witness.scope,
+        witness.affine_invocation_permit_root,
+    ) != witness.call_replay_root
+    {
+        return Err(completion_invariant("call-replay-root"));
+    }
+    if completion_witness_root(witness) != witness.root {
+        return Err(TilePoolCompletionWitnessError::RootMismatch);
+    }
+    if witness.cancellation_requested_at_entry && !witness.cancellation_requested_at_terminal {
+        return Err(completion_invariant("request-entry-monotonic"));
+    }
+    if witness.cancellation_requested_at_terminal && !witness.cancellation_requested {
+        return Err(completion_invariant("request-terminal-monotonic"));
+    }
+    let request_phase = completion_request_phase(
+        witness.cancellation_requested_at_entry,
+        witness.cancellation_requested_at_terminal,
+        witness.cancellation_requested,
+    )
+    .ok_or_else(|| completion_invariant("request-phase-observations"))?;
+    if witness.request_phase != request_phase {
+        return Err(completion_invariant("derived-request-phase"));
+    }
+    completion_verify_arena_snapshot(witness.arena_before, "arena-before-internal")?;
+    completion_verify_arena_snapshot(witness.arena_after, "arena-after-internal")?;
+    completion_verify_lease_snapshot(witness.lease_before, "lease-before-internal")?;
+    completion_verify_lease_snapshot(witness.lease_after, "lease-after-internal")?;
+    if witness.lease_before.limit_bytes != witness.lease_after.limit_bytes {
+        return Err(completion_invariant("lease-limit-stable"));
+    }
+    if witness.lease_after.requested_bytes < witness.lease_before.requested_bytes {
+        return Err(completion_invariant("lease-requested-monotonic"));
+    }
+    if witness.lease_after.peak_bytes < witness.lease_before.peak_bytes {
+        return Err(completion_invariant("lease-peak-monotonic"));
+    }
+    if witness.lease_after.refusals < witness.lease_before.refusals {
+        return Err(completion_invariant("lease-refusals-monotonic"));
+    }
+    if witness.lease_after.release_invariant_violations
+        != witness.lease_before.release_invariant_violations
+    {
+        return Err(completion_invariant(
+            "no-run-observed-lease-release-violation",
+        ));
+    }
+    let lease_requested_delta = witness
+        .lease_after
+        .requested_bytes
+        .checked_sub(witness.lease_before.requested_bytes)
+        .ok_or_else(|| completion_invariant("lease-requested-delta"))?;
+    let lease_refusal_delta = witness
+        .lease_after
+        .refusals
+        .checked_sub(witness.lease_before.refusals)
+        .ok_or_else(|| completion_invariant("lease-refusal-delta"))?;
+    if witness.root_charge_admitted
+        && lease_requested_delta < u128::from(witness.root_metadata_bytes)
+    {
+        return Err(completion_invariant("root-charge-request-observed"));
+    }
+    if witness.root_charge_admitted != witness.root_charge_released {
+        return Err(completion_invariant("root-charge-release"));
+    }
+    let parked_scope = match (
+        witness.scope.kind,
+        witness.scope.parent_region_id,
+        witness.scope.parent_task_id,
+    ) {
+        ("std-thread-scope", None, None) => false,
+        ("asupersync-task-scope", Some(_), Some(_)) => false,
+        ("std-thread-parked-crew", None, None) => true,
+        ("asupersync-task-parked-crew", Some(_), Some(_)) => true,
+        _ => return Err(completion_invariant("scope-identity")),
+    };
+    if witness.admitted_tiles.checked_add(witness.unadmitted_tiles) != Some(witness.planned_tiles) {
+        return Err(completion_invariant("plan-admission-conservation"));
+    }
+    if witness.admission_completed {
+        if witness.admitted_tiles != witness.planned_tiles || witness.unadmitted_tiles != 0 {
+            return Err(completion_invariant("admitted-plan"));
+        }
+        if !witness.root_charge_admitted {
+            return Err(completion_invariant("root-charge-admitted"));
+        }
+    } else if witness.admitted_tiles != 0
+        || witness.claimed_tiles != 0
+        || witness.completed_tiles != 0
+        || witness.break_tiles != 0
+        || witness.panicked_tiles != 0
+        || witness.launched_workers != 0
+        || witness.joined_workers != 0
+        || witness.entered_crew_callbacks != 0
+        || witness.exited_crew_callbacks != 0
+        || witness.tile_scopes_opened != 0
+        || witness.cancellation_observed_workers != 0
+    {
+        return Err(completion_invariant("prelaunch-zero-work"));
+    }
+    if parked_scope {
+        if witness.planned_crew_callbacks == 0
+            || witness.planned_workers > witness.planned_crew_callbacks
+        {
+            return Err(completion_invariant("parked-crew-plan"));
+        }
+        if witness.admission_completed
+            && (witness.entered_crew_callbacks != witness.planned_crew_callbacks
+                || witness.exited_crew_callbacks != witness.entered_crew_callbacks)
+        {
+            return Err(completion_invariant("parked-crew-callback-drain"));
+        }
+    } else if witness.planned_crew_callbacks != 0
+        || witness.entered_crew_callbacks != 0
+        || witness.exited_crew_callbacks != 0
+    {
+        return Err(completion_invariant("nonparked-crew-callbacks"));
+    }
+    if witness.claimed_tiles > witness.admitted_tiles {
+        return Err(completion_invariant("claimed-within-admitted"));
+    }
+    if witness
+        .completed_tiles
+        .checked_add(witness.break_tiles)
+        .and_then(|count| count.checked_add(witness.panicked_tiles))
+        != Some(witness.claimed_tiles)
+    {
+        return Err(completion_invariant("claimed-terminal-conservation"));
+    }
+    if witness.tile_scopes_opened != witness.claimed_tiles {
+        return Err(completion_invariant("one-scope-per-claimed-tile"));
+    }
+    if witness.retained_refusal_tiles() > witness.break_tiles {
+        return Err(completion_invariant("retained-refusal-is-break"));
+    }
+    if witness.launched_workers > witness.planned_workers {
+        return Err(completion_invariant("launched-within-plan"));
+    }
+    if witness.claimed_tiles != 0 && witness.launched_workers == 0 {
+        return Err(completion_invariant("claimed-work-needs-worker"));
+    }
+    if witness.admission_completed {
+        match witness.terminal_error.as_ref() {
+            Some(RunError::WorkerSpawn { .. }) => {}
+            Some(RunError::Cancelled { .. }) => {
+                if witness.launched_workers != 0
+                    && witness.launched_workers != witness.planned_workers
+                {
+                    return Err(completion_invariant("cancelled-launch-set"));
+                }
+            }
+            _ if witness.launched_workers != witness.planned_workers => {
+                return Err(completion_invariant("all-planned-workers-entered"));
+            }
+            _ => {}
+        }
+    }
+    if witness.joined_workers != witness.launched_workers {
+        return Err(completion_invariant("all-launched-workers-joined"));
+    }
+    if !witness.worker_admission_closed {
+        return Err(completion_invariant("worker-admission-closed"));
+    }
+    if witness.live_worker_guards_at_seal != 0 {
+        return Err(completion_invariant("no-live-worker-guards"));
+    }
+    if witness.live_tile_scopes_at_seal != 0 {
+        return Err(completion_invariant("no-live-tile-scopes"));
+    }
+    if witness.cancellation_observed_workers > witness.launched_workers {
+        return Err(completion_invariant("request-observation-within-launch"));
+    }
+    if witness.cancellation_observed_workers != 0 && !witness.cancellation_requested_at_terminal {
+        return Err(completion_invariant("observed-request-before-terminal"));
+    }
+    if witness.disposition != completion_disposition(witness.terminal_error.as_ref()) {
+        return Err(completion_invariant("derived-disposition"));
+    }
+    if (witness.first_failure_kind, witness.first_failure_tile)
+        != completion_first_failure(witness.terminal_error.as_ref())
+    {
+        return Err(completion_invariant("retained-first-failure"));
+    }
+    if witness
+        .first_failure_tile
+        .is_some_and(|tile| tile >= witness.planned_tiles)
+    {
+        return Err(completion_invariant("first-failure-within-plan"));
+    }
+    match &witness.terminal_error {
+        None => {
+            if !witness.admission_completed
+                || witness.completed_tiles != witness.planned_tiles
+                || witness.claimed_tiles != witness.planned_tiles
+                || witness.break_tiles != 0
+                || witness.panicked_tiles != 0
+                || witness.cancellation_requested_at_terminal
+            {
+                return Err(completion_invariant("completed-run"));
+            }
+        }
+        Some(RunError::Cancelled {
+            kernel,
+            completed,
+            total,
+        }) => {
+            if *kernel != witness.kernel
+                || *completed != witness.completed_tiles
+                || *total != witness.planned_tiles
+                || !witness.cancellation_requested_at_terminal
+            {
+                return Err(completion_invariant("cancelled-error"));
+            }
+        }
+        Some(RunError::TilePanicked {
+            kernel, completed, ..
+        })
+        | Some(RunError::TileFailed {
+            kernel, completed, ..
+        }) => {
+            if *kernel != witness.kernel
+                || *completed != witness.completed_tiles
+                || !witness.cancellation_requested_at_terminal
+                || witness.failed_tiles() == 0
+            {
+                return Err(completion_invariant("tile-failure-error"));
+            }
+        }
+        Some(RunError::WorkerSpawn { kernel, worker, .. }) => {
+            if *kernel != witness.kernel
+                || !witness.admission_completed
+                || !witness.cancellation_requested_at_terminal
+                || u64::try_from(*worker).ok() != Some(witness.launched_workers)
+            {
+                return Err(completion_invariant("worker-spawn-error"));
+            }
+        }
+        Some(RunError::ParkedCrewBusy { kernel }) => {
+            if *kernel != witness.kernel
+                || witness.admission_completed
+                || !parked_scope
+                || witness.root_metadata_bytes != 0
+                || witness.root_charge_admitted
+            {
+                return Err(completion_invariant("parked-crew-busy-error"));
+            }
+        }
+        Some(RunError::MemoryRefused { kernel, .. }) => {
+            if *kernel != witness.kernel
+                || witness.admission_completed
+                || witness.root_charge_admitted
+                || lease_refusal_delta == 0
+            {
+                return Err(completion_invariant("memory-refused-error"));
+            }
+        }
+        Some(RunError::MemoryPlanOverflow { kernel, .. }) => {
+            if *kernel != witness.kernel || witness.admission_completed {
+                return Err(completion_invariant("memory-plan-overflow-error"));
+            }
+        }
+        Some(RunError::MemoryAllocationRefused { kernel, .. }) => {
+            if *kernel != witness.kernel
+                || witness.admission_completed
+                || !witness.root_charge_admitted
+            {
+                return Err(completion_invariant("memory-allocation-refused-error"));
+            }
+        }
+        Some(RunError::ReductionPanicked { kernel, .. }) => {
+            if *kernel != witness.kernel
+                || !witness.admission_completed
+                || witness.completed_tiles != witness.planned_tiles
+                || witness.cancellation_requested_at_terminal
+            {
+                return Err(completion_invariant("reduction-error"));
+            }
+        }
+        Some(RunError::Incomplete { kernel, tile }) => {
+            if *kernel != witness.kernel
+                || !witness.admission_completed
+                || *tile >= witness.planned_tiles
+                || witness.cancellation_requested_at_terminal
+            {
+                return Err(completion_invariant("incomplete-error"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn completion_placement_identity_is_well_formed(identity: &str) -> bool {
+    const PREFIX: &str = "fs-exec-tilepool-v2-";
+    let Some(digest) = identity.strip_prefix(PREFIX) else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn completion_request_phase(
+    requested_at_entry: bool,
+    requested_at_terminal: bool,
+    requested_at_seal: bool,
+) -> Option<TilePoolRequestPhase> {
+    match (requested_at_entry, requested_at_terminal, requested_at_seal) {
+        (false, false, false) => Some(TilePoolRequestPhase::NotRequested),
+        (true, true, true) => Some(TilePoolRequestPhase::BeforeEntry),
+        (false, true, true) => Some(TilePoolRequestPhase::BeforeTerminalDecision),
+        (false, false, true) => Some(TilePoolRequestPhase::AfterTerminalDecision),
+        _ => None,
+    }
+}
+
+fn completion_verify_arena_snapshot(
+    snapshot: CompletionArenaSnapshot,
+    invariant: &'static str,
+) -> Result<(), TilePoolCompletionWitnessError> {
+    if snapshot.free_bytes > snapshot.reserved_bytes
+        || snapshot.quiescent
+            != (snapshot.live == 0 && snapshot.reserved_bytes == snapshot.free_bytes)
+    {
+        return Err(completion_invariant(invariant));
+    }
+    Ok(())
+}
+
+fn completion_verify_lease_snapshot(
+    snapshot: CompletionLeaseSnapshot,
+    invariant: &'static str,
+) -> Result<(), TilePoolCompletionWitnessError> {
+    if snapshot.used_bytes > snapshot.peak_bytes
+        || snapshot
+            .limit_bytes
+            .is_some_and(|limit| snapshot.used_bytes > limit || snapshot.peak_bytes > limit)
+    {
+        return Err(completion_invariant(invariant));
+    }
+    Ok(())
+}
+
+fn completion_hex(bytes: &[u8; 32]) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn completion_push_optional_u64_json(out: &mut String, value: Option<u64>) {
+    use core::fmt::Write as _;
+
+    match value {
+        Some(value) => {
+            let _ = write!(out, "{value}");
+        }
+        None => out.push_str("null"),
+    }
+}
+
+fn completion_push_lease_json(out: &mut String, name: &str, snapshot: CompletionLeaseSnapshot) {
+    use core::fmt::Write as _;
+
+    out.push_str(",\"");
+    out.push_str(name);
+    out.push_str("\":{\"limit_bytes\":");
+    match snapshot.limit_bytes {
+        Some(limit) => {
+            let _ = write!(out, "{limit}");
+        }
+        None => out.push_str("null"),
+    }
+    let _ = write!(
+        out,
+        ",\"requested_bytes\":{},\"peak_bytes\":{},\"used_bytes\":{},\
+         \"refusals\":{},\"release_invariant_violations\":{}}}",
+        snapshot.requested_bytes,
+        snapshot.peak_bytes,
+        snapshot.used_bytes,
+        snapshot.refusals,
+        snapshot.release_invariant_violations,
+    );
+}
+
+fn completion_error_kind(error: &RunError) -> &'static str {
+    match error {
+        RunError::Cancelled { .. } => "cancelled",
+        RunError::TilePanicked { .. } => "tile-panicked",
+        RunError::TileFailed { .. } => "tile-failed",
+        RunError::WorkerSpawn { .. } => "worker-spawn-refused",
+        RunError::ParkedCrewBusy { .. } => "parked-crew-busy",
+        RunError::MemoryRefused { .. } => "memory-refused",
+        RunError::MemoryPlanOverflow { .. } => "memory-plan-overflow",
+        RunError::MemoryAllocationRefused { .. } => "memory-allocation-refused",
+        RunError::ReductionPanicked { .. } => "reduction-panicked",
+        RunError::Incomplete { .. } => "incomplete",
+    }
+}
+
+fn completion_hash_field(hasher: &mut fs_blake3::DomainHasher, name: &'static str, value: &[u8]) {
+    let name_len = u64::try_from(name.len()).unwrap_or(u64::MAX);
+    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(&name_len.to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(&value_len.to_le_bytes());
+    hasher.update(value);
+}
+
+fn completion_hash_bool(hasher: &mut fs_blake3::DomainHasher, name: &'static str, value: bool) {
+    completion_hash_field(hasher, name, &[u8::from(value)]);
+}
+
+fn completion_hash_u64(hasher: &mut fs_blake3::DomainHasher, name: &'static str, value: u64) {
+    completion_hash_field(hasher, name, &value.to_le_bytes());
+}
+
+fn completion_hash_u128(hasher: &mut fs_blake3::DomainHasher, name: &'static str, value: u128) {
+    completion_hash_field(hasher, name, &value.to_le_bytes());
+}
+
+fn completion_hash_usize(hasher: &mut fs_blake3::DomainHasher, name: &'static str, value: usize) {
+    completion_hash_u64(hasher, name, u64::try_from(value).unwrap_or(u64::MAX));
+}
+
+fn completion_hash_optional_u64(
+    hasher: &mut fs_blake3::DomainHasher,
+    presence_name: &'static str,
+    value_name: &'static str,
+    value: Option<u64>,
+) {
+    completion_hash_bool(hasher, presence_name, value.is_some());
+    if let Some(value) = value {
+        completion_hash_u64(hasher, value_name, value);
+    }
+}
+
+fn completion_hash_optional_root(
+    hasher: &mut fs_blake3::DomainHasher,
+    presence_name: &'static str,
+    value_name: &'static str,
+    value: Option<[u8; 32]>,
+) {
+    completion_hash_bool(hasher, presence_name, value.is_some());
+    if let Some(value) = value {
+        completion_hash_field(hasher, value_name, &value);
+    }
+}
+
+fn completion_run_error_tag(error: &RunError) -> u64 {
+    match error {
+        RunError::Cancelled { .. } => 0,
+        RunError::TilePanicked { .. } => 1,
+        RunError::TileFailed { .. } => 2,
+        RunError::WorkerSpawn { .. } => 3,
+        RunError::ParkedCrewBusy { .. } => 4,
+        RunError::MemoryRefused { .. } => 5,
+        RunError::MemoryPlanOverflow { .. } => 6,
+        RunError::MemoryAllocationRefused { .. } => 7,
+        RunError::ReductionPanicked { .. } => 8,
+        RunError::Incomplete { .. } => 9,
+    }
+}
+
+fn completion_hash_run_error(hasher: &mut fs_blake3::DomainHasher, error: &RunError) {
+    completion_hash_u64(
+        hasher,
+        "terminal-error.tag",
+        completion_run_error_tag(error),
+    );
+    match error {
+        RunError::Cancelled {
+            kernel,
+            completed,
+            total,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.completed", *completed);
+            completion_hash_u64(hasher, "terminal-error.total", *total);
+        }
+        RunError::TilePanicked {
+            kernel,
+            tile,
+            message,
+            completed,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.tile", *tile);
+            completion_hash_field(hasher, "terminal-error.message", message.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.completed", *completed);
+        }
+        RunError::TileFailed {
+            kernel,
+            tile,
+            failure,
+            completed,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.tile", *tile);
+            completion_hash_tile_failure(hasher, failure);
+            completion_hash_u64(hasher, "terminal-error.completed", *completed);
+        }
+        RunError::WorkerSpawn {
+            kernel,
+            worker,
+            message,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_u64(
+                hasher,
+                "terminal-error.worker",
+                u64::try_from(*worker).unwrap_or(u64::MAX),
+            );
+            completion_hash_field(hasher, "terminal-error.message", message.as_bytes());
+        }
+        RunError::ParkedCrewBusy { kernel } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+        }
+        RunError::MemoryRefused {
+            kernel,
+            what,
+            requested_bytes,
+            used_bytes,
+            limit_bytes,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_field(hasher, "terminal-error.what", what.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.requested-bytes", *requested_bytes);
+            completion_hash_u64(hasher, "terminal-error.used-bytes", *used_bytes);
+            completion_hash_u64(hasher, "terminal-error.limit-bytes", *limit_bytes);
+        }
+        RunError::MemoryPlanOverflow { kernel, what } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_field(hasher, "terminal-error.what", what.as_bytes());
+        }
+        RunError::MemoryAllocationRefused {
+            kernel,
+            what,
+            requested_bytes,
+        } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_field(hasher, "terminal-error.what", what.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.requested-bytes", *requested_bytes);
+        }
+        RunError::ReductionPanicked { kernel, message } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_field(hasher, "terminal-error.message", message.as_bytes());
+        }
+        RunError::Incomplete { kernel, tile } => {
+            completion_hash_field(hasher, "terminal-error.kernel", kernel.as_bytes());
+            completion_hash_u64(hasher, "terminal-error.tile", *tile);
+        }
+    }
+}
+
+fn completion_hash_tile_failure(hasher: &mut fs_blake3::DomainHasher, failure: &TileFailure) {
+    match failure {
+        TileFailure::Allocation(error) => {
+            completion_hash_u64(hasher, "terminal-error.failure.tag", 0);
+            completion_hash_alloc_error(hasher, error);
+        }
+        TileFailure::InjectedFault {
+            plan_version,
+            plan_seed,
+            tiles,
+            touches_per_tile,
+            touch,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.tag", 1);
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.plan-version",
+                u64::from(*plan_version),
+            );
+            completion_hash_u64(hasher, "terminal-error.failure.plan-seed", *plan_seed);
+            completion_hash_u64(hasher, "terminal-error.failure.tiles", *tiles);
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.touches-per-tile",
+                u64::from(*touches_per_tile),
+            );
+            completion_hash_u64(hasher, "terminal-error.failure.touch", u64::from(*touch));
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn completion_hash_alloc_error(hasher: &mut fs_blake3::DomainHasher, error: &fs_alloc::AllocError) {
+    match error {
+        fs_alloc::AllocError::Exhausted {
+            site,
+            requested_bytes,
+            reserved_bytes,
+            limit_bytes,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 0);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.requested-bytes",
+                *requested_bytes,
+            );
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.reserved-bytes",
+                *reserved_bytes,
+            );
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.limit-bytes",
+                *limit_bytes,
+            );
+        }
+        fs_alloc::AllocError::OutOfMemory {
+            site,
+            requested_bytes,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 1);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.requested-bytes",
+                *requested_bytes,
+            );
+        }
+        fs_alloc::AllocError::LeaseExhausted {
+            site,
+            requested_bytes,
+            used_bytes,
+            limit_bytes,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 2);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.requested-bytes",
+                *requested_bytes,
+            );
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.used-bytes",
+                *used_bytes,
+            );
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.limit-bytes",
+                *limit_bytes,
+            );
+        }
+        fs_alloc::AllocError::LayoutOverflow {
+            site,
+            len,
+            elem_bytes,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 3);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_usize(hasher, "terminal-error.failure.alloc.len", *len);
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.elem-bytes",
+                *elem_bytes,
+            );
+        }
+        fs_alloc::AllocError::ReservationOverflow {
+            site,
+            base_bytes,
+            additional_bytes,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 4);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.base-bytes",
+                *base_bytes,
+            );
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.additional-bytes",
+                *additional_bytes,
+            );
+        }
+        fs_alloc::AllocError::ReclaimedChunkCorrupted {
+            site,
+            poison_version,
+            poison_seed,
+            chunk_bytes,
+            offset,
+            expected,
+            actual,
+        } => {
+            completion_hash_u64(hasher, "terminal-error.failure.alloc.tag", 5);
+            completion_hash_field(hasher, "terminal-error.failure.alloc.site", site.as_bytes());
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.poison-version",
+                u64::from(*poison_version),
+            );
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.poison-seed",
+                *poison_seed,
+            );
+            completion_hash_usize(
+                hasher,
+                "terminal-error.failure.alloc.chunk-bytes",
+                *chunk_bytes,
+            );
+            completion_hash_usize(hasher, "terminal-error.failure.alloc.offset", *offset);
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.expected",
+                u64::from(*expected),
+            );
+            completion_hash_u64(
+                hasher,
+                "terminal-error.failure.alloc.actual",
+                u64::from(*actual),
+            );
+        }
+    }
+}
+
+fn completion_plan_root(
+    pool_placement_identity_version: u32,
+    pool_placement_identity: &str,
+    pool_seed: u64,
+    kernel: &'static str,
+    kernel_id: u64,
+    run: RunId,
+    mode: &'static str,
+    planned_tiles: u64,
+) -> [u8; 32] {
+    let mut hasher = fs_blake3::DomainHasher::new(TILEPOOL_COMPLETION_PLAN_DOMAIN);
+    completion_hash_u64(
+        &mut hasher,
+        "pool-placement-identity-version",
+        u64::from(pool_placement_identity_version),
+    );
+    completion_hash_field(
+        &mut hasher,
+        "pool-placement-identity",
+        pool_placement_identity.as_bytes(),
+    );
+    completion_hash_u64(&mut hasher, "pool-seed", pool_seed);
+    completion_hash_field(&mut hasher, "kernel", kernel.as_bytes());
+    completion_hash_u64(&mut hasher, "kernel-id", kernel_id);
+    completion_hash_u64(&mut hasher, "declared-run", run.0);
+    completion_hash_field(&mut hasher, "mode", mode.as_bytes());
+    completion_hash_u64(&mut hasher, "planned-tiles", planned_tiles);
+    *hasher.finalize().as_bytes()
+}
+
+fn completion_call_replay_root(
+    plan_root: [u8; 32],
+    scope: CompletionScopeIdentity,
+    affine_invocation_permit_root: Option<[u8; 32]>,
+) -> [u8; 32] {
+    let mut hasher = fs_blake3::DomainHasher::new(TILEPOOL_COMPLETION_CALL_REPLAY_DOMAIN);
+    completion_hash_field(&mut hasher, "plan-root", &plan_root);
+    completion_hash_field(&mut hasher, "scope.kind", scope.kind.as_bytes());
+    completion_hash_optional_u64(
+        &mut hasher,
+        "scope.parent-region-id.present",
+        "scope.parent-region-id",
+        scope.parent_region_id,
+    );
+    completion_hash_optional_u64(
+        &mut hasher,
+        "scope.parent-task-id.present",
+        "scope.parent-task-id",
+        scope.parent_task_id,
+    );
+    completion_hash_optional_root(
+        &mut hasher,
+        "affine-invocation-permit-root.present",
+        "affine-invocation-permit-root",
+        affine_invocation_permit_root,
+    );
+    *hasher.finalize().as_bytes()
+}
+
+fn completion_witness_root(witness: &TilePoolCompletionWitness) -> [u8; 32] {
+    let mut hasher = fs_blake3::DomainHasher::new(TILEPOOL_COMPLETION_WITNESS_DOMAIN);
+    completion_hash_u64(&mut hasher, "version", u64::from(witness.version));
+    completion_hash_field(
+        &mut hasher,
+        "producer-version",
+        witness.producer_version.as_bytes(),
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "pool-placement-identity-version",
+        u64::from(witness.pool_placement_identity_version),
+    );
+    completion_hash_field(
+        &mut hasher,
+        "pool-placement-identity",
+        witness.pool_placement_identity.as_bytes(),
+    );
+    completion_hash_u64(&mut hasher, "pool-seed", witness.pool_seed);
+    completion_hash_field(&mut hasher, "kernel", witness.kernel.as_bytes());
+    completion_hash_u64(&mut hasher, "kernel-id", witness.kernel_id);
+    completion_hash_u64(&mut hasher, "declared-run", witness.declared_run.0);
+    completion_hash_field(&mut hasher, "mode", witness.mode.as_bytes());
+    completion_hash_field(&mut hasher, "scope.kind", witness.scope.kind.as_bytes());
+    completion_hash_optional_u64(
+        &mut hasher,
+        "scope.parent-region-id.present",
+        "scope.parent-region-id",
+        witness.scope.parent_region_id,
+    );
+    completion_hash_optional_u64(
+        &mut hasher,
+        "scope.parent-task-id.present",
+        "scope.parent-task-id",
+        witness.scope.parent_task_id,
+    );
+    completion_hash_u64(&mut hasher, "planned-tiles", witness.planned_tiles);
+    completion_hash_field(&mut hasher, "plan-root", &witness.plan_root);
+    completion_hash_field(&mut hasher, "call-replay-root", &witness.call_replay_root);
+    completion_hash_optional_root(
+        &mut hasher,
+        "affine-invocation-permit-root.present",
+        "affine-invocation-permit-root",
+        witness.affine_invocation_permit_root,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "admission-completed",
+        witness.admission_completed,
+    );
+    completion_hash_u64(&mut hasher, "admitted-tiles", witness.admitted_tiles);
+    completion_hash_u64(&mut hasher, "unadmitted-tiles", witness.unadmitted_tiles);
+    completion_hash_u64(&mut hasher, "claimed-tiles", witness.claimed_tiles);
+    completion_hash_u64(&mut hasher, "completed-tiles", witness.completed_tiles);
+    completion_hash_u64(&mut hasher, "break-tiles", witness.break_tiles);
+    completion_hash_u64(&mut hasher, "panicked-tiles", witness.panicked_tiles);
+    completion_hash_u64(&mut hasher, "planned-workers", witness.planned_workers);
+    completion_hash_u64(&mut hasher, "launched-workers", witness.launched_workers);
+    completion_hash_u64(&mut hasher, "joined-workers", witness.joined_workers);
+    completion_hash_bool(
+        &mut hasher,
+        "worker-admission-closed",
+        witness.worker_admission_closed,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "live-worker-guards-at-seal",
+        witness.live_worker_guards_at_seal,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "planned-crew-callbacks",
+        witness.planned_crew_callbacks,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "entered-crew-callbacks",
+        witness.entered_crew_callbacks,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "exited-crew-callbacks",
+        witness.exited_crew_callbacks,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "tile-scopes-opened",
+        witness.tile_scopes_opened,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "live-tile-scopes-at-seal",
+        witness.live_tile_scopes_at_seal,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "cancellation-requested-at-entry",
+        witness.cancellation_requested_at_entry,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "cancellation-requested-at-terminal",
+        witness.cancellation_requested_at_terminal,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "cancellation-requested",
+        witness.cancellation_requested,
+    );
+    completion_hash_u64(&mut hasher, "request-phase", witness.request_phase.tag());
+    completion_hash_u64(
+        &mut hasher,
+        "cancellation-observed-workers",
+        witness.cancellation_observed_workers,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "root-metadata-bytes",
+        witness.root_metadata_bytes,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "root-charge-admitted",
+        witness.root_charge_admitted,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "root-charge-released",
+        witness.root_charge_released,
+    );
+    completion_hash_u64(&mut hasher, "arena-before.live", witness.arena_before.live);
+    completion_hash_u64(
+        &mut hasher,
+        "arena-before.reserved-bytes",
+        witness.arena_before.reserved_bytes,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "arena-before.free-bytes",
+        witness.arena_before.free_bytes,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "arena-before.quiescent",
+        witness.arena_before.quiescent,
+    );
+    completion_hash_u64(&mut hasher, "arena-after.live", witness.arena_after.live);
+    completion_hash_u64(
+        &mut hasher,
+        "arena-after.reserved-bytes",
+        witness.arena_after.reserved_bytes,
+    );
+    completion_hash_u64(
+        &mut hasher,
+        "arena-after.free-bytes",
+        witness.arena_after.free_bytes,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "arena-after.quiescent",
+        witness.arena_after.quiescent,
+    );
+    completion_hash_lease_before(&mut hasher, witness.lease_before);
+    completion_hash_lease_after(&mut hasher, witness.lease_after);
+    completion_hash_u64(&mut hasher, "disposition", witness.disposition.tag());
+    completion_hash_bool(
+        &mut hasher,
+        "first-failure-kind-present",
+        witness.first_failure_kind.is_some(),
+    );
+    if let Some(kind) = witness.first_failure_kind {
+        completion_hash_field(&mut hasher, "first-failure-kind", kind.as_bytes());
+    }
+    completion_hash_optional_u64(
+        &mut hasher,
+        "first-failure-tile-present",
+        "first-failure-tile",
+        witness.first_failure_tile,
+    );
+    completion_hash_bool(
+        &mut hasher,
+        "terminal-error-present",
+        witness.terminal_error.is_some(),
+    );
+    if let Some(error) = &witness.terminal_error {
+        completion_hash_run_error(&mut hasher, error);
+    }
+    completion_hash_u64(
+        &mut hasher,
+        "no-claim-count",
+        u64::try_from(witness.no_claims().len()).unwrap_or(u64::MAX),
+    );
+    for no_claim in witness.no_claims() {
+        completion_hash_field(&mut hasher, "no-claim", no_claim.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn completion_hash_lease_before(
+    hasher: &mut fs_blake3::DomainHasher,
+    lease: CompletionLeaseSnapshot,
+) {
+    completion_hash_optional_u64(
+        hasher,
+        "lease-before.limit-bytes.present",
+        "lease-before.limit-bytes",
+        lease.limit_bytes,
+    );
+    completion_hash_u128(
+        hasher,
+        "lease-before.requested-bytes",
+        lease.requested_bytes,
+    );
+    completion_hash_u64(hasher, "lease-before.peak-bytes", lease.peak_bytes);
+    completion_hash_u64(hasher, "lease-before.used-bytes", lease.used_bytes);
+    completion_hash_u128(hasher, "lease-before.refusals", lease.refusals);
+    completion_hash_u128(
+        hasher,
+        "lease-before.release-invariant-violations",
+        lease.release_invariant_violations,
+    );
+}
+
+fn completion_hash_lease_after(
+    hasher: &mut fs_blake3::DomainHasher,
+    lease: CompletionLeaseSnapshot,
+) {
+    completion_hash_optional_u64(
+        hasher,
+        "lease-after.limit-bytes.present",
+        "lease-after.limit-bytes",
+        lease.limit_bytes,
+    );
+    completion_hash_u128(hasher, "lease-after.requested-bytes", lease.requested_bytes);
+    completion_hash_u64(hasher, "lease-after.peak-bytes", lease.peak_bytes);
+    completion_hash_u64(hasher, "lease-after.used-bytes", lease.used_bytes);
+    completion_hash_u128(hasher, "lease-after.refusals", lease.refusals);
+    completion_hash_u128(
+        hasher,
+        "lease-after.release-invariant-violations",
+        lease.release_invariant_violations,
+    );
+}
+
+struct CompletionWitnessFields {
+    pool_placement_identity: String,
+    pool_seed: u64,
+    affine_invocation_permit_root: Option<[u8; 32]>,
+    kernel: &'static str,
+    kernel_id: u64,
+    declared_run: RunId,
+    mode: &'static str,
+    scope: CompletionScopeIdentity,
+    planned_tiles: u64,
+    admission_completed: bool,
+    admitted_tiles: u64,
+    claimed_tiles: u64,
+    completed_tiles: u64,
+    break_tiles: u64,
+    panicked_tiles: u64,
+    planned_workers: u64,
+    launched_workers: u64,
+    joined_workers: u64,
+    planned_crew_callbacks: u64,
+    entered_crew_callbacks: u64,
+    exited_crew_callbacks: u64,
+    tile_scopes_opened: u64,
+    live_tile_scopes_at_seal: u64,
+    cancellation_requested_at_entry: bool,
+    cancellation_requested_at_terminal: bool,
+    cancellation_requested: bool,
+    cancellation_observed_workers: u64,
+    root_metadata_bytes: u64,
+    root_charge_admitted: bool,
+    root_charge_released: bool,
+    arena_before: CompletionArenaSnapshot,
+    arena_after: CompletionArenaSnapshot,
+    lease_before: CompletionLeaseSnapshot,
+    lease_after: CompletionLeaseSnapshot,
+    terminal_error: Option<RunError>,
+}
+
+fn mint_completion_witness(
+    fields: CompletionWitnessFields,
+) -> Result<TilePoolCompletionWitness, TilePoolCompletionWitnessError> {
+    let plan_root = completion_plan_root(
+        TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+        &fields.pool_placement_identity,
+        fields.pool_seed,
+        fields.kernel,
+        fields.kernel_id,
+        fields.declared_run,
+        fields.mode,
+        fields.planned_tiles,
+    );
+    let affine_invocation_permit_root = fields.affine_invocation_permit_root;
+    let call_replay_root =
+        completion_call_replay_root(plan_root, fields.scope, affine_invocation_permit_root);
+    let request_phase = completion_request_phase(
+        fields.cancellation_requested_at_entry,
+        fields.cancellation_requested_at_terminal,
+        fields.cancellation_requested,
+    )
+    .ok_or_else(|| completion_invariant("mint-request-phase-observations"))?;
+    let admission_completed = fields.admission_completed;
+    let admitted_tiles = fields.admitted_tiles;
+    let launched_workers = fields.launched_workers;
+    let joined_workers = fields.joined_workers;
+    let (first_failure_kind, first_failure_tile) =
+        completion_first_failure(fields.terminal_error.as_ref());
+    let mut witness = TilePoolCompletionWitness {
+        version: TILEPOOL_COMPLETION_WITNESS_VERSION,
+        producer_version: env!("CARGO_PKG_VERSION"),
+        pool_placement_identity_version: TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+        pool_placement_identity: fields.pool_placement_identity,
+        pool_seed: fields.pool_seed,
+        kernel: fields.kernel,
+        kernel_id: fields.kernel_id,
+        declared_run: fields.declared_run,
+        mode: fields.mode,
+        scope: fields.scope,
+        planned_tiles: fields.planned_tiles,
+        plan_root,
+        call_replay_root,
+        affine_invocation_permit_root,
+        admission_completed,
+        admitted_tiles,
+        unadmitted_tiles: fields.planned_tiles.saturating_sub(admitted_tiles),
+        claimed_tiles: fields.claimed_tiles,
+        completed_tiles: fields.completed_tiles,
+        break_tiles: fields.break_tiles,
+        panicked_tiles: fields.panicked_tiles,
+        planned_workers: fields.planned_workers,
+        launched_workers,
+        joined_workers,
+        worker_admission_closed: true,
+        live_worker_guards_at_seal: launched_workers.saturating_sub(joined_workers),
+        planned_crew_callbacks: fields.planned_crew_callbacks,
+        entered_crew_callbacks: fields.entered_crew_callbacks,
+        exited_crew_callbacks: fields.exited_crew_callbacks,
+        tile_scopes_opened: fields.tile_scopes_opened,
+        live_tile_scopes_at_seal: fields.live_tile_scopes_at_seal,
+        cancellation_requested_at_entry: fields.cancellation_requested_at_entry,
+        cancellation_requested_at_terminal: fields.cancellation_requested_at_terminal,
+        cancellation_requested: fields.cancellation_requested,
+        request_phase,
+        cancellation_observed_workers: fields.cancellation_observed_workers,
+        root_metadata_bytes: fields.root_metadata_bytes,
+        root_charge_admitted: fields.root_charge_admitted,
+        root_charge_released: fields.root_charge_released,
+        arena_before: fields.arena_before,
+        arena_after: fields.arena_after,
+        lease_before: fields.lease_before,
+        lease_after: fields.lease_after,
+        disposition: completion_disposition(fields.terminal_error.as_ref()),
+        first_failure_kind,
+        first_failure_tile,
+        terminal_error: fields.terminal_error,
+        root: [0; 32],
+    };
+    witness.root = completion_witness_root(&witness);
+    witness.verify()?;
+    Ok(witness)
 }
 
 fn push_json_string(out: &mut String, value: &str) {
@@ -657,12 +3063,76 @@ fn allocation_bytes<T>(capacity: usize) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// One-shot, thread-local backing-allocation refusal used only to prove
+    /// prelaunch sealing and lease-charge rollback. Root allocation happens
+    /// on the calling thread, so parallel tests cannot consume each other's
+    /// injected refusal.
+    static TEST_ROOT_ALLOCATION_REFUSAL: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+
+    /// One-shot scoped-thread spawn refusal. The hook is consumed on the
+    /// caller's launch thread before attempting the selected worker, while
+    /// every earlier real worker still traverses the normal join/drain path.
+    static TEST_WORKER_SPAWN_REFUSAL: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn refuse_next_root_allocation(what: &'static str) {
+    TEST_ROOT_ALLOCATION_REFUSAL.with(|refusal| {
+        assert!(
+            refusal.replace(Some(what)).is_none(),
+            "root allocation refusal already armed on this test thread"
+        );
+    });
+}
+
+#[cfg(test)]
+fn refuse_next_worker_spawn(worker: usize) {
+    TEST_WORKER_SPAWN_REFUSAL.with(|refusal| {
+        assert!(
+            refusal.replace(Some(worker)).is_none(),
+            "worker spawn refusal already armed on this test thread"
+        );
+    });
+}
+
+#[cfg(test)]
+fn take_worker_spawn_refusal(worker: usize) -> bool {
+    TEST_WORKER_SPAWN_REFUSAL.with(|refusal| {
+        if refusal.get() == Some(worker) {
+            refusal.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 fn try_reserve_root_vec<T>(
     values: &mut Vec<T>,
     capacity: usize,
     kernel: &'static str,
     what: &'static str,
 ) -> Result<(), RunError> {
+    #[cfg(test)]
+    if TEST_ROOT_ALLOCATION_REFUSAL.with(|refusal| {
+        if refusal.get() == Some(what) {
+            refusal.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(RunError::MemoryAllocationRefused {
+            kernel,
+            what,
+            requested_bytes: allocation_bytes::<T>(capacity),
+        });
+    }
+
     values
         .try_reserve_exact(capacity)
         .map_err(|_| RunError::MemoryAllocationRefused {
@@ -921,7 +3391,37 @@ fn mul_ratio_floor(value: u64, numerator: u128, denominator: u128) -> u64 {
 enum Launch<'a, Caps: 'static> {
     OwnScope,
     TaskScope(&'a asupersync::Cx<Caps>),
-    Crew(&'a crate::crew::Crew<Caps>),
+    Crew {
+        crew: &'a crate::crew::Crew<Caps>,
+        scope: CompletionScopeIdentity,
+        dispatch_admission: &'a AtomicBool,
+    },
+}
+
+impl<'a, Caps: 'static> Launch<'a, Caps> {
+    fn completion_scope(self) -> CompletionScopeIdentity {
+        match self {
+            Self::OwnScope => CompletionScopeIdentity::STD_SCOPED,
+            Self::TaskScope(cx) => CompletionScopeIdentity::task_scoped(cx),
+            Self::Crew { scope, .. } => scope,
+        }
+    }
+
+    fn planned_crew_callbacks(self) -> u64 {
+        match self {
+            Self::OwnScope | Self::TaskScope(_) => 0,
+            Self::Crew { crew, .. } => u64::try_from(crew.workers()).unwrap_or(u64::MAX),
+        }
+    }
+
+    fn dispatch_admission(self) -> Option<&'a AtomicBool> {
+        match self {
+            Self::OwnScope | Self::TaskScope(_) => None,
+            Self::Crew {
+                dispatch_admission, ..
+            } => Some(dispatch_admission),
+        }
+    }
 }
 
 // Manual impls: every variant is a reference (or unit), so Launch is Copy
@@ -934,6 +3434,24 @@ impl<Caps: 'static> Clone for Launch<'_, Caps> {
 }
 
 impl<Caps: 'static> Copy for Launch<'_, Caps> {}
+
+struct ParkedDispatchAdmission<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> ParkedDispatchAdmission<'a> {
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { flag })
+    }
+}
+
+impl Drop for ParkedDispatchAdmission<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
 
 /// Caps stand-in for launches that carry no task context.
 type NoTask = asupersync::cx::cap::All;
@@ -958,10 +3476,54 @@ struct WorkerCtx<'a, K: TileKernel> {
     victims: &'a [Vec<usize>],
     observed: &'a [CachePadded<AtomicU64>],
     done_by: &'a [CachePadded<AtomicU64>],
+    claimed: &'a AtomicU64,
+    breaks: &'a AtomicU64,
+    panics: &'a AtomicU64,
+    workers_entered: &'a AtomicU64,
+    workers_exited: &'a AtomicU64,
+    tile_scopes_opened: &'a AtomicU64,
+    tile_scopes_live: &'a AtomicU64,
+    cancellation_observed_workers: &'a AtomicU64,
     steals: &'a AtomicU64,
     cross_steals: &'a AtomicU64,
     panic_box: &'a Mutex<Option<(u64, String)>>,
     refusal_sink: &'a RefusalSink,
+}
+
+struct WorkerCompletionGuard<'a> {
+    exited: Option<&'a AtomicU64>,
+}
+
+struct CrewCallbackCompletionGuard<'a> {
+    exited: Option<&'a AtomicU64>,
+}
+
+impl Drop for CrewCallbackCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(exited) = self.exited {
+            exited.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for WorkerCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(exited) = self.exited {
+            exited.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
+struct TileScopeCompletionGuard<'a> {
+    live: Option<&'a AtomicU64>,
+}
+
+impl Drop for TileScopeCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(live) = self.live {
+            live.fetch_sub(1, Ordering::Release);
+        }
+    }
 }
 
 /// The worker protocol, shared verbatim by both launch harnesses. When
@@ -970,11 +3532,17 @@ struct WorkerCtx<'a, K: TileKernel> {
 /// the task context, and a failed checkpoint converts into a gate request
 /// so the pool's normal drain protocol — including its cancel-latency
 /// histogram — applies unchanged (P7: one drain semantics, two signals).
-fn worker_loop<Caps, K: TileKernel>(
+fn worker_loop<const COMPLETION: bool, Caps, K: TileKernel>(
     ctx: &WorkerCtx<'_, K>,
     w: usize,
     task_cx: Option<&CpuCx<Caps>>,
 ) {
+    if COMPLETION {
+        ctx.workers_entered.fetch_add(1, Ordering::Release);
+    }
+    let _worker_completion = WorkerCompletionGuard {
+        exited: COMPLETION.then_some(ctx.workers_exited),
+    };
     if !ctx.config.pin_groups.is_empty() {
         let g = ccd_of_worker(w, ctx.workers, ctx.config.topo) % ctx.config.pin_groups.len();
         // Advisory (see PoolConfig::pin_groups docs).
@@ -991,6 +3559,10 @@ fn worker_loop<Caps, K: TileKernel>(
             ctx.gate.request();
         }
         if ctx.gate.is_requested() {
+            if COMPLETION {
+                ctx.cancellation_observed_workers
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(observed_at_ns) = ctx.gate.latency_now_ns() {
                 let _ = ctx.observed[w].get().compare_exchange(
                     0,
@@ -1027,6 +3599,9 @@ fn worker_loop<Caps, K: TileKernel>(
         let Some(tile) = tile else {
             break; // every deque empty: run complete
         };
+        if COMPLETION {
+            ctx.claimed.fetch_add(1, Ordering::Relaxed);
+        }
         let key = StreamKey {
             seed: ctx.config.seed,
             kernel_id: ctx.kernel_id,
@@ -1035,6 +3610,13 @@ fn worker_loop<Caps, K: TileKernel>(
         };
         // Every tile arena charges the shared operation
         // lease while its chunks are held (bead wf9.16).
+        if COMPLETION {
+            ctx.tile_scopes_opened.fetch_add(1, Ordering::Relaxed);
+            ctx.tile_scopes_live.fetch_add(1, Ordering::Release);
+        }
+        let tile_scope_completion = TileScopeCompletionGuard {
+            live: COMPLETION.then_some(ctx.tile_scopes_live),
+        };
         let outcome = ctx.arenas.scope_leased(ctx.lease, |arena| {
             let cx = Cx::new_with_refusal_sink(
                 ctx.gate,
@@ -1047,17 +3629,24 @@ fn worker_loop<Caps, K: TileKernel>(
             );
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.kernel.run(tile, &cx)))
         });
+        drop(tile_scope_completion);
         match outcome {
             Ok(ControlFlow::Continue(out)) => {
                 *ctx.slots[tile as usize].lock().expect("slot") = Some(out);
                 ctx.done_by[w].get().fetch_add(1, Ordering::Relaxed);
             }
             Ok(ControlFlow::Break(_cancelled)) => {
+                if COMPLETION {
+                    ctx.breaks.fetch_add(1, Ordering::Relaxed);
+                }
                 // Kernel observed the gate (or self-cancelled):
                 // make it global and drain.
                 ctx.gate.request();
             }
             Err(payload) => {
+                if COMPLETION {
+                    ctx.panics.fetch_add(1, Ordering::Relaxed);
+                }
                 let message = payload
                     .downcast_ref::<&str>()
                     .map(ToString::to_string)
@@ -1194,6 +3783,15 @@ impl TilePool {
         self.run_with_gate(kernel, &CancelGate::new()).0
     }
 
+    /// [`Self::run`] plus executor-minted completion evidence from the same
+    /// actual launch/join path.
+    pub fn run_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_with_gate_witnessed(kernel, &CancelGate::new())
+    }
+
     /// Run a kernel under an explicit, caller-ledgered [`RunId`] (bead
     /// wf9.7.1): re-running the SAME kernel with a DIFFERENT logical
     /// run (a new generation, trial, or restart) diverges its streams
@@ -1216,6 +3814,23 @@ impl TilePool {
         )
     }
 
+    /// [`Self::run_declared`] plus executor-minted completion evidence.
+    pub fn run_declared_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_inner_witnessed(
+            kernel,
+            gate,
+            run,
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::<NoTask>::OwnScope,
+        )
+    }
+
     /// Run a kernel under explicit logical identity and asupersync budget.
     /// Every tile receives the exact same budget slice in its [`Cx`]; kernels
     /// remain responsible for consuming or interpreting its quota dimensions.
@@ -1227,6 +3842,25 @@ impl TilePool {
         budget: Budget,
     ) -> (Result<K::Out, RunError>, RunReport) {
         self.run_inner(
+            kernel,
+            gate,
+            run,
+            budget,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::<NoTask>::OwnScope,
+        )
+    }
+
+    /// [`Self::run_declared_budgeted`] plus executor-minted completion
+    /// evidence.
+    pub fn run_declared_budgeted_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_inner_witnessed(
             kernel,
             gate,
             run,
@@ -1260,6 +3894,49 @@ impl TilePool {
         K::Out: crate::LeaseAdmittedOut,
     {
         self.run_inner(kernel, gate, run, budget, lease, Launch::<NoTask>::OwnScope)
+    }
+
+    /// [`Self::run_declared_leased_budgeted`] plus executor-minted completion
+    /// evidence. The witness records the shared lease before and after
+    /// executor-transient release; caller-owned retained output may
+    /// legitimately keep the shared lease nonzero.
+    pub fn run_declared_leased_budgeted_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_inner_witnessed(kernel, gate, run, budget, lease, Launch::<NoTask>::OwnScope)
+    }
+
+    /// Permit-consuming form of
+    /// [`Self::run_declared_leased_budgeted_witnessed`].
+    pub fn run_declared_leased_budgeted_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_inner_witnessed_with_permit(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            Some(permit.into_root()),
+            Launch::<NoTask>::OwnScope,
+        )
     }
 
     /// Run a kernel under a LIVE asupersync task context (bead lx0e): the
@@ -1304,6 +3981,49 @@ impl TilePool {
         self.run_inner(kernel, gate, run, budget, lease, Launch::TaskScope(task_cx))
     }
 
+    /// [`Self::run_scoped`] plus executor-minted completion evidence.
+    pub fn run_scoped_witnessed<Caps, K: TileKernel>(
+        &self,
+        task_cx: &asupersync::Cx<Caps>,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        Caps: Send + Sync + 'static,
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_inner_witnessed(kernel, gate, run, budget, lease, Launch::TaskScope(task_cx))
+    }
+
+    /// Permit-consuming form of [`Self::run_scoped_witnessed`].
+    pub fn run_scoped_witnessed_once<Caps, K: TileKernel>(
+        &self,
+        task_cx: &asupersync::Cx<Caps>,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        Caps: Send + Sync + 'static,
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_inner_witnessed_with_permit(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            Some(permit.into_root()),
+            Launch::TaskScope(task_cx),
+        )
+    }
+
     /// Park a crew of exactly [`TilePool::workers`] workers as scoped CPU
     /// children of the CALLING task (bead tkr7) and run `f` with a
     /// [`ParkedTilePool`] whose runs dispatch to those parked workers
@@ -1338,6 +4058,7 @@ impl TilePool {
         F: FnOnce(&ParkedTilePool<'_, Caps>) -> R,
     {
         let crew = crate::crew::Crew::new(self.config.workers);
+        let dispatch_admission = AtomicBool::new(false);
         match task_cx.scoped_cpu(self.config.workers, |scope| {
             let _shutdown = crate::crew::CrewShutdown(&crew);
             for w in 0..crew.workers() {
@@ -1349,6 +4070,8 @@ impl TilePool {
             f(&ParkedTilePool {
                 pool: self,
                 crew: &crew,
+                scope: CompletionScopeIdentity::task_parked(task_cx),
+                dispatch_admission: &dispatch_admission,
             })
         }) {
             Ok(out) => Ok(out),
@@ -1374,6 +4097,7 @@ impl TilePool {
         F: FnOnce(&ParkedTilePool<'_, NoTask>) -> R,
     {
         let crew: crate::crew::Crew<NoTask> = crate::crew::Crew::new(self.config.workers);
+        let dispatch_admission = AtomicBool::new(false);
         std::thread::scope(|s| {
             let _shutdown = crate::crew::CrewShutdown(&crew);
             for w in 0..crew.workers() {
@@ -1383,6 +4107,8 @@ impl TilePool {
             f(&ParkedTilePool {
                 pool: self,
                 crew: &crew,
+                scope: CompletionScopeIdentity::STD_PARKED,
+                dispatch_admission: &dispatch_admission,
             })
         })
     }
@@ -1408,6 +4134,44 @@ impl TilePool {
         )
     }
 
+    /// [`Self::run_with_gate`] plus executor-minted completion evidence.
+    pub fn run_with_gate_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_inner_witnessed(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::<NoTask>::OwnScope,
+        )
+    }
+
+    /// Consume one affine invocation permit and run under an external gate.
+    ///
+    /// Unlike the standalone compatibility method, the returned witness
+    /// binds the permit root and therefore can participate in a one-shot
+    /// invocation proof.
+    pub fn run_with_gate_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_inner_witnessed_with_permit(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Some(permit.into_root()),
+            Launch::<NoTask>::OwnScope,
+        )
+    }
+
     // One coherent protocol (seed deques -> worker loops -> fold + report);
     // splitting it would scatter the drain/containment invariants the
     // storm suite audits as a unit.
@@ -1424,23 +4188,181 @@ impl TilePool {
     where
         Caps: Send + Sync + 'static,
     {
+        let (result, report, witness) =
+            self.run_inner_core::<false, Caps, K>(kernel, gate, run, budget, lease, None, launch);
+        debug_assert!(witness.is_none());
+        (result, report)
+    }
+
+    // This is deliberately one lifecycle: plan/admit -> launch -> join ->
+    // consume/drop staging -> release root charge -> seal. Moving witness
+    // construction into a caller wrapper would lose the authority boundary.
+    fn run_inner_witnessed<Caps, K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        launch: Launch<'_, Caps>,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        Caps: Send + Sync + 'static,
+    {
+        self.run_inner_witnessed_with_permit(kernel, gate, run, budget, lease, None, launch)
+    }
+
+    fn run_inner_witnessed_with_permit<Caps, K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        affine_invocation_permit_root: Option<[u8; 32]>,
+        launch: Launch<'_, Caps>,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        Caps: Send + Sync + 'static,
+    {
+        let (result, report, witness) = self.run_inner_core::<true, Caps, K>(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            affine_invocation_permit_root,
+            launch,
+        );
+        let witness =
+            witness.ok_or_else(|| completion_bundle_invariant("completion-witness-missing"))??;
+        let bundle = WitnessedRun {
+            outcome: result,
+            report,
+            witness,
+        };
+        bundle.verify_bundle()?;
+        Ok(bundle)
+    }
+
+    // `COMPLETION=false` is the legacy zero-evidence lane. Const propagation
+    // removes witness counters, allocator snapshots, and hashing so the
+    // additive evidence API does not tax existing hot-kernel callers.
+    #[allow(clippy::too_many_lines)]
+    fn run_inner_core<const COMPLETION: bool, Caps, K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        affine_invocation_permit_root: Option<[u8; 32]>,
+        launch: Launch<'_, Caps>,
+    ) -> (
+        Result<K::Out, RunError>,
+        RunReport,
+        Option<Result<TilePoolCompletionWitness, TilePoolCompletionWitnessError>>,
+    )
+    where
+        Caps: Send + Sync + 'static,
+    {
         let plan = kernel.tiles();
         let kernel_id = plan.kernel_id();
         let n = plan.tiles;
+        let mode = self.config.mode.name();
+        let completion_before = COMPLETION.then(|| CompletionBefore {
+            scope: launch.completion_scope(),
+            pool_placement_identity: self.placement_identity(),
+            arena: CompletionArenaSnapshot::capture(&self.arenas),
+            lease: CompletionLeaseSnapshot::capture(lease),
+            cancellation_requested_at_entry: gate.is_requested(),
+            planned_crew_callbacks: launch.planned_crew_callbacks(),
+        });
+        let prelaunch = |error: RunError,
+                         planned_workers: u64,
+                         root_metadata_bytes: u64,
+                         root_charge_admitted: bool,
+                         root_charge_released: bool| {
+            let report = prelaunch_report(plan.kernel, mode, run, n);
+            let cancellation_requested_at_terminal = gate.is_requested();
+            let cancellation_requested = gate.is_requested();
+            let witness = completion_before.as_ref().map(|before| {
+                mint_completion_witness(CompletionWitnessFields {
+                    pool_placement_identity: before.pool_placement_identity.clone(),
+                    pool_seed: self.config.seed,
+                    affine_invocation_permit_root,
+                    kernel: plan.kernel,
+                    kernel_id,
+                    declared_run: run,
+                    mode,
+                    scope: before.scope,
+                    planned_tiles: n,
+                    admission_completed: false,
+                    admitted_tiles: 0,
+                    claimed_tiles: 0,
+                    completed_tiles: 0,
+                    break_tiles: 0,
+                    panicked_tiles: 0,
+                    planned_workers,
+                    launched_workers: 0,
+                    joined_workers: 0,
+                    planned_crew_callbacks: before.planned_crew_callbacks,
+                    entered_crew_callbacks: 0,
+                    exited_crew_callbacks: 0,
+                    tile_scopes_opened: 0,
+                    live_tile_scopes_at_seal: 0,
+                    cancellation_requested_at_entry: before.cancellation_requested_at_entry,
+                    cancellation_requested_at_terminal,
+                    cancellation_requested,
+                    cancellation_observed_workers: 0,
+                    root_metadata_bytes,
+                    root_charge_admitted,
+                    root_charge_released,
+                    arena_before: before.arena,
+                    arena_after: CompletionArenaSnapshot::capture(&self.arenas),
+                    lease_before: before.lease,
+                    lease_after: CompletionLeaseSnapshot::capture(lease),
+                    terminal_error: Some(error.clone()),
+                })
+            });
+            (Err(error), report, witness)
+        };
+
         // Stream identity is DECLARED, never scheduled (wf9.7.1): the
         // former pool-global counter made keys depend on unrelated
         // prior runs and on concurrent invocation order.
         let iteration = run.0;
         let Ok(n_usize) = usize::try_from(n) else {
-            return (
-                Err(RunError::MemoryPlanOverflow {
+            return prelaunch(
+                RunError::MemoryPlanOverflow {
                     kernel: plan.kernel,
                     what: "tile-count",
-                }),
-                prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+                },
+                0,
+                0,
+                false,
+                false,
             );
         };
         let workers = self.config.workers.min(n_usize.max(1)).max(1);
+        let planned_workers = u64::try_from(workers).unwrap_or(u64::MAX);
+        let _parked_dispatch_admission = match launch.dispatch_admission() {
+            Some(admission) => match ParkedDispatchAdmission::try_acquire(admission) {
+                Some(guard) => Some(guard),
+                None => {
+                    return prelaunch(
+                        RunError::ParkedCrewBusy {
+                            kernel: plan.kernel,
+                        },
+                        planned_workers,
+                        0,
+                        false,
+                        false,
+                    );
+                }
+            },
+            None => None,
+        };
 
         // Root metadata is reserved fallibly BEFORE any of it is allocated
         // and BEFORE worker launch (bead wf9.16). The charge covers slots,
@@ -1452,42 +4374,38 @@ impl TilePool {
         let root_bytes = match root_metadata_bytes::<K>(n, workers) {
             Ok(bytes) => bytes,
             Err(what) => {
-                return (
-                    Err(RunError::MemoryPlanOverflow {
+                return prelaunch(
+                    RunError::MemoryPlanOverflow {
                         kernel: plan.kernel,
                         what,
-                    }),
-                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+                    },
+                    planned_workers,
+                    0,
+                    false,
+                    false,
                 );
             }
         };
-        let _root_charge = match lease.reserve("tilepool-root-metadata", root_bytes) {
+        let root_charge = match lease.reserve("tilepool-root-metadata", root_bytes) {
             Ok(charge) => charge,
             Err(refusal) => {
-                return (
-                    Err(RunError::MemoryRefused {
+                return prelaunch(
+                    RunError::MemoryRefused {
                         kernel: plan.kernel,
                         what: refusal.what,
                         requested_bytes: refusal.requested_bytes,
                         used_bytes: refusal.used_bytes,
                         limit_bytes: refusal.limit_bytes,
-                    }),
-                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+                    },
+                    planned_workers,
+                    root_bytes,
+                    false,
+                    false,
                 );
             }
         };
 
-        let RunRoot {
-            slots,
-            _ranges,
-            deques,
-            victims,
-            observed,
-            done_by,
-            mut cancel_latencies_ns,
-            mut tiles_by_worker,
-            mut outs,
-        } = match allocate_run_root::<K>(
+        let root = match allocate_run_root::<K>(
             n,
             n_usize,
             workers,
@@ -1497,235 +4415,398 @@ impl TilePool {
         ) {
             Ok(root) => root,
             Err(error) => {
-                return (
-                    Err(error),
-                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
-                );
+                drop(root_charge);
+                return prelaunch(error, planned_workers, root_bytes, true, true);
             }
         };
 
-        let steals = AtomicU64::new(0);
-        let cross_steals = AtomicU64::new(0);
-        let panic_box: Mutex<Option<(u64, String)>> = Mutex::new(None);
-        let refusal_sink = RefusalSink::default();
+        let (
+            result,
+            report,
+            terminal_error,
+            claimed_tiles,
+            break_tiles,
+            panicked_tiles,
+            launched_workers,
+            joined_workers,
+            entered_crew_callbacks,
+            exited_crew_callbacks,
+            tile_scopes_opened,
+            live_tile_scopes_at_seal,
+            cancellation_requested_at_terminal,
+            cancellation_observed_workers,
+        ) = {
+            let RunRoot {
+                slots,
+                _ranges,
+                deques,
+                victims,
+                observed,
+                done_by,
+                mut cancel_latencies_ns,
+                mut tiles_by_worker,
+                mut outs,
+            } = root;
 
-        let ctx = WorkerCtx {
-            kernel,
-            kernel_id,
-            iteration,
-            workers,
-            budget,
-            gate,
-            lease,
-            arenas: &self.arenas,
-            config: &self.config,
-            deques: &deques,
-            slots: &slots,
-            victims: &victims,
-            observed: &observed,
-            done_by: &done_by,
-            steals: &steals,
-            cross_steals: &cross_steals,
-            panic_box: &panic_box,
-            refusal_sink: &refusal_sink,
-        };
-        let mut spawn_failure = None;
-        let mut scope_refusal = None;
-        match launch {
-            Launch::OwnScope => {
-                std::thread::scope(|s| {
-                    for w in 0..workers {
-                        let ctx = &ctx;
-                        let spawned = std::thread::Builder::new()
-                            .spawn_scoped(s, move || worker_loop::<Caps, K>(ctx, w, None));
-                        if let Err(error) = spawned {
-                            spawn_failure = Some((w, error.to_string()));
-                            gate.request();
-                            break;
+            let claimed = AtomicU64::new(0);
+            let breaks = AtomicU64::new(0);
+            let panics = AtomicU64::new(0);
+            let workers_entered = AtomicU64::new(0);
+            let workers_exited = AtomicU64::new(0);
+            let crew_callbacks_entered = AtomicU64::new(0);
+            let crew_callbacks_exited = AtomicU64::new(0);
+            let tile_scopes_opened_counter = AtomicU64::new(0);
+            let tile_scopes_live = AtomicU64::new(0);
+            let cancellation_observed_workers = AtomicU64::new(0);
+            let steals = AtomicU64::new(0);
+            let cross_steals = AtomicU64::new(0);
+            let panic_box: Mutex<Option<(u64, String)>> = Mutex::new(None);
+            let refusal_sink = RefusalSink::default();
+
+            let ctx = WorkerCtx {
+                kernel,
+                kernel_id,
+                iteration,
+                workers,
+                budget,
+                gate,
+                lease,
+                arenas: &self.arenas,
+                config: &self.config,
+                deques: &deques,
+                slots: &slots,
+                victims: &victims,
+                observed: &observed,
+                done_by: &done_by,
+                claimed: &claimed,
+                breaks: &breaks,
+                panics: &panics,
+                workers_entered: &workers_entered,
+                workers_exited: &workers_exited,
+                tile_scopes_opened: &tile_scopes_opened_counter,
+                tile_scopes_live: &tile_scopes_live,
+                cancellation_observed_workers: &cancellation_observed_workers,
+                steals: &steals,
+                cross_steals: &cross_steals,
+                panic_box: &panic_box,
+                refusal_sink: &refusal_sink,
+            };
+            let mut spawn_failure = None;
+            let mut scope_refusal = None;
+            match launch {
+                Launch::OwnScope => {
+                    std::thread::scope(|s| {
+                        for w in 0..workers {
+                            let ctx = &ctx;
+                            #[cfg(test)]
+                            if take_worker_spawn_refusal(w) {
+                                spawn_failure =
+                                    Some((w, "test-injected worker spawn refusal".to_string()));
+                                gate.request();
+                                break;
+                            }
+                            let spawned = std::thread::Builder::new().spawn_scoped(s, move || {
+                                worker_loop::<COMPLETION, Caps, K>(ctx, w, None)
+                            });
+                            if let Err(error) = spawned {
+                                spawn_failure = Some((w, error.to_string()));
+                                gate.request();
+                                break;
+                            }
+                        }
+                    });
+                }
+                Launch::Crew { crew, .. } => {
+                    // Every parked worker enters the callback, even when the
+                    // active tile plan uses a smaller worker subset. Dispatch
+                    // returns only after this complete callback set exits.
+                    let job = |w: usize, cpu: Option<&CpuCx<Caps>>| {
+                        if COMPLETION {
+                            crew_callbacks_entered.fetch_add(1, Ordering::Release);
+                        }
+                        let _callback_completion = CrewCallbackCompletionGuard {
+                            exited: COMPLETION.then_some(&crew_callbacks_exited),
+                        };
+                        if w < ctx.workers {
+                            worker_loop::<COMPLETION, Caps, K>(&ctx, w, cpu);
+                        }
+                    };
+                    if let Some((worker, message)) = crew.dispatch(&job) {
+                        std::panic::panic_any(format!(
+                            "tile-pool worker {worker} panicked outside tile containment: {message}"
+                        ));
+                    }
+                }
+                Launch::TaskScope(cx) => {
+                    match cx.scoped_cpu(workers, |scope| {
+                        for w in 0..workers {
+                            let ctx = &ctx;
+                            if let Err(error) = scope.spawn(move |cpu| {
+                                worker_loop::<COMPLETION, Caps, K>(ctx, w, Some(cpu))
+                            }) {
+                                spawn_failure = Some((w, error.to_string()));
+                                gate.request();
+                                break;
+                            }
+                        }
+                    }) {
+                        Ok(()) => {}
+                        Err(refusal) => scope_refusal = Some(refusal),
+                    }
+                }
+            }
+            if let Some(refusal) = scope_refusal {
+                match refusal {
+                    ScopedCpuError::Cancelled(_) => gate.request(),
+                    ScopedCpuError::ChildPanicked { child, message } => {
+                        std::panic::panic_any(format!(
+                            "tile-pool worker {child} panicked outside tile containment: {message}"
+                        ));
+                    }
+                    ScopedCpuError::WorkerCapExceeded { cap } => {
+                        std::panic::panic_any(format!(
+                            "tile-pool scoped launch exceeded its own worker cap {cap}"
+                        ));
+                    }
+                }
+            }
+
+            // Every launch harness above is a blocking join boundary. These
+            // counters come from the actual worker-loop entry/exit guards,
+            // rather than from a caller-authored tracker.
+            let launched_workers = if COMPLETION {
+                workers_entered.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let joined_workers = if COMPLETION {
+                workers_exited.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let entered_crew_callbacks = if COMPLETION {
+                crew_callbacks_entered.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let exited_crew_callbacks = if COMPLETION {
+                crew_callbacks_exited.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let claimed_tiles = if COMPLETION {
+                claimed.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let break_tiles = if COMPLETION {
+                breaks.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let panicked_tiles = if COMPLETION {
+                panics.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let tile_scopes_opened = if COMPLETION {
+                tile_scopes_opened_counter.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let live_tile_scopes_at_seal = if COMPLETION {
+                tile_scopes_live.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            let cancellation_observed_workers = if COMPLETION {
+                cancellation_observed_workers.load(Ordering::Acquire)
+            } else {
+                0
+            };
+
+            let completed = slots
+                .iter()
+                .filter(|slot| slot.lock().expect("slot").is_some())
+                .count() as u64;
+            if let Some(requested_at) = gate.requested_at_ns() {
+                for observed_at in &observed {
+                    match observed_at.get().load(Ordering::Acquire) {
+                        0 => {}
+                        observed_at => {
+                            cancel_latencies_ns.push(observed_at.saturating_sub(requested_at));
                         }
                     }
-                });
-            }
-            Launch::Crew(crew) => {
-                // The parked lane (bead tkr7): no spawns at all — the job
-                // is dispatched to workers already parked inside their
-                // owner's scope, and dispatch blocks until every one of
-                // them reports done, so run-local borrows in `ctx` outlive
-                // every use (the crew capsule's latch argument). Task
-                // cancellation/budget bridging rides each worker's own
-                // park-time CpuCx, exactly like the scoped lane. Crew
-                // workers beyond this run's normalized count no-op: the
-                // run-local tables are sized to `ctx.workers`.
-                let job = |w: usize, cpu: Option<&CpuCx<Caps>>| {
-                    if w < ctx.workers {
-                        worker_loop(&ctx, w, cpu);
-                    }
-                };
-                if let Some((worker, message)) = crew.dispatch(&job) {
-                    // Parity with the spawned lanes: a panic escaping a
-                    // worker (kernel panics are contained per tile) is a
-                    // pool invariant failure — propagate.
-                    std::panic::panic_any(format!(
-                        "tile-pool worker {worker} panicked outside tile containment: {message}"
-                    ));
                 }
             }
-            Launch::TaskScope(cx) => {
-                // The asupersync lane (bead lx0e): workers are scoped CPU
-                // children of the CALLING task via `Cx::scoped_cpu`, which
-                // blocks here until every child joins — the scope tree is
-                // honest by construction (the region cannot close under the
-                // workers because its task is inside this call).
-                match cx.scoped_cpu(workers, |scope| {
-                    for w in 0..workers {
-                        let ctx = &ctx;
-                        if let Err(error) = scope.spawn(move |cpu| worker_loop(ctx, w, Some(cpu))) {
-                            // Structurally unreachable (exactly `workers`
-                            // spawns under a cap of `workers`); kept as the
-                            // same failure class as an OS spawn refusal.
-                            spawn_failure = Some((w, error.to_string()));
-                            gate.request();
-                            break;
-                        }
-                    }
-                }) {
-                    Ok(()) => {}
-                    Err(refusal) => scope_refusal = Some(refusal),
-                }
+            for completed_by_worker in &done_by {
+                tiles_by_worker.push(completed_by_worker.get().load(Ordering::Relaxed));
             }
-        }
-        if let Some(refusal) = scope_refusal {
-            match refusal {
-                // Entry refusal (nothing ran) or exit checkpoint (the
-                // calling task was cancelled or exhausted its budget, even
-                // if every tile completed first): fail closed as a
-                // cancellation — the drain is already complete because the
-                // scope joins all workers before returning.
-                ScopedCpuError::Cancelled(_) => gate.request(),
-                // Parity with the std lane: kernel panics are contained per
-                // tile INSIDE the worker loop, so a panic escaping a worker
-                // is a pool invariant failure — propagate, exactly as
-                // `std::thread::scope` would have.
-                ScopedCpuError::ChildPanicked { child, message } => std::panic::panic_any(format!(
-                    "tile-pool worker {child} panicked outside tile containment: {message}"
-                )),
-                // Unreachable by construction; refuse loudly rather than
-                // misreport.
-                ScopedCpuError::WorkerCapExceeded { cap } => std::panic::panic_any(format!(
-                    "tile-pool scoped launch exceeded its own worker cap {cap}"
-                )),
-            }
-        }
+            let report = RunReport {
+                kernel: plan.kernel,
+                mode,
+                declared_run: run,
+                completed,
+                total: n,
+                steals: steals.load(Ordering::Relaxed),
+                cross_ccd_steals: cross_steals.load(Ordering::Relaxed),
+                cancel_latencies_ns,
+                tiles_by_worker,
+            };
 
-        let completed = slots
-            .iter()
-            .filter(|s| s.lock().expect("slot").is_some())
-            .count() as u64;
-        let requested_at = gate.requested_at_ns();
-        if let Some(requested_at) = requested_at {
-            for observed_at in &observed {
-                match observed_at.get().load(Ordering::Acquire) {
-                    0 => {}
-                    observed_at => {
-                        cancel_latencies_ns.push(observed_at.saturating_sub(requested_at));
-                    }
-                }
-            }
-        }
-        for completed_by_worker in &done_by {
-            tiles_by_worker.push(completed_by_worker.get().load(Ordering::Relaxed));
-        }
-        let report = RunReport {
-            kernel: plan.kernel,
-            mode: self.config.mode.name(),
-            declared_run: run,
-            completed,
-            total: n,
-            steals: steals.load(Ordering::Relaxed),
-            cross_ccd_steals: cross_steals.load(Ordering::Relaxed),
-            cancel_latencies_ns,
-            tiles_by_worker,
-        };
-
-        // Stable failure-class precedence preserves legacy panic containment
-        // while keeping typed refusals distinct from ordinary cancellation.
-        if let Some((worker, message)) = spawn_failure {
-            return (
+            let panic_failure = panic_box.into_inner().expect("panic box");
+            let typed_failure = refusal_sink.take();
+            let cancellation_requested_at_terminal = gate.is_requested();
+            // Stable failure-class precedence preserves the existing public
+            // RunError semantics; the exact selected value is cloned into the
+            // immutable witness and rechecked by its verifier.
+            let result = if let Some((worker, message)) = spawn_failure {
                 Err(RunError::WorkerSpawn {
                     kernel: plan.kernel,
                     worker,
                     message,
-                }),
-                report,
-            );
-        }
-        if let Some((tile, message)) = panic_box.into_inner().expect("panic box") {
-            return (
+                })
+            } else if let Some((tile, message)) = panic_failure {
                 Err(RunError::TilePanicked {
                     kernel: plan.kernel,
                     tile,
                     message,
                     completed,
-                }),
-                report,
-            );
-        }
-        if let Some((tile, failure)) = refusal_sink.take() {
-            return (
+                })
+            } else if let Some((tile, failure)) = typed_failure {
                 Err(RunError::TileFailed {
                     kernel: plan.kernel,
                     tile,
                     failure,
                     completed,
-                }),
-                report,
-            );
-        }
-        if gate.is_requested() {
-            return (
+                })
+            } else if cancellation_requested_at_terminal {
                 Err(RunError::Cancelled {
                     kernel: plan.kernel,
                     completed,
                     total: n,
-                }),
-                report,
-            );
-        }
-        // Fixed-shape fold: the pairwise tree over ascending tile order
-        // (shape a pure function of the tile count — plan §5.4).
-        for (i, slot) in slots.into_iter().enumerate() {
-            match slot.into_inner().expect("slot") {
-                Some(out) => outs.push(out),
-                None => {
-                    return (
-                        Err(RunError::Incomplete {
-                            kernel: plan.kernel,
-                            tile: i as u64,
-                        }),
-                        report,
-                    );
+                })
+            } else {
+                let mut missing = None;
+                for (index, slot) in slots.into_iter().enumerate() {
+                    match slot.into_inner().expect("slot") {
+                        Some(out) => outs.push(out),
+                        None => {
+                            missing = Some(index as u64);
+                            break;
+                        }
+                    }
                 }
-            }
-        }
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::reduce::pairwise_fold(outs)
-        })) {
-            Ok(out) => (Ok(out), report),
-            Err(payload) => {
-                let message = payload
-                    .downcast_ref::<&str>()
-                    .map(ToString::to_string)
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "non-string panic payload".to_string());
-                (
-                    Err(RunError::ReductionPanicked {
+                match missing {
+                    Some(tile) => Err(RunError::Incomplete {
                         kernel: plan.kernel,
-                        message,
+                        tile,
                     }),
-                    report,
-                )
-            }
-        }
+                    None => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::reduce::pairwise_fold(outs)
+                    })) {
+                        Ok(out) => Ok(out),
+                        Err(payload) => {
+                            let message = payload
+                                .downcast_ref::<&str>()
+                                .map(ToString::to_string)
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "non-string panic payload".to_string());
+                            Err(RunError::ReductionPanicked {
+                                kernel: plan.kernel,
+                                message,
+                            })
+                        }
+                    },
+                }
+            };
+            let terminal_error = result.as_ref().err().cloned();
+            (
+                result,
+                report,
+                terminal_error,
+                claimed_tiles,
+                break_tiles,
+                panicked_tiles,
+                launched_workers,
+                joined_workers,
+                entered_crew_callbacks,
+                exited_crew_callbacks,
+                tile_scopes_opened,
+                live_tile_scopes_at_seal,
+                cancellation_requested_at_terminal,
+                cancellation_observed_workers,
+            )
+        };
+
+        // The output/result and report have left staging. All other root
+        // vectors dropped at the block boundary above; now release the
+        // executor's own root lease charge before observing/sealing evidence.
+        drop(root_charge);
+        let cancellation_requested = gate.is_requested();
+        let witness = completion_before.map(|before| {
+            mint_completion_witness(CompletionWitnessFields {
+                pool_placement_identity: before.pool_placement_identity,
+                pool_seed: self.config.seed,
+                affine_invocation_permit_root,
+                kernel: plan.kernel,
+                kernel_id,
+                declared_run: run,
+                mode,
+                scope: before.scope,
+                planned_tiles: n,
+                admission_completed: true,
+                admitted_tiles: n,
+                claimed_tiles,
+                completed_tiles: report.completed,
+                break_tiles,
+                panicked_tiles,
+                planned_workers,
+                launched_workers,
+                joined_workers,
+                planned_crew_callbacks: before.planned_crew_callbacks,
+                entered_crew_callbacks,
+                exited_crew_callbacks,
+                tile_scopes_opened,
+                live_tile_scopes_at_seal,
+                cancellation_requested_at_entry: before.cancellation_requested_at_entry,
+                cancellation_requested_at_terminal,
+                cancellation_requested,
+                cancellation_observed_workers,
+                root_metadata_bytes: root_bytes,
+                root_charge_admitted: true,
+                root_charge_released: true,
+                arena_before: before.arena,
+                arena_after: CompletionArenaSnapshot::capture(&self.arenas),
+                lease_before: before.lease,
+                lease_after: CompletionLeaseSnapshot::capture(lease),
+                terminal_error,
+            })
+        });
+        (result, report, witness)
+    }
+}
+
+impl CompletionKernelRunner for TilePool {
+    fn workers(&self) -> usize {
+        TilePool::workers(self)
+    }
+
+    fn run_with_gate_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        TilePool::run_with_gate_witnessed(self, kernel, gate)
+    }
+
+    fn run_with_gate_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        TilePool::run_with_gate_witnessed_once(self, kernel, gate, permit)
     }
 }
 
@@ -1762,6 +4843,8 @@ impl core::error::Error for CrewScopeError {}
 pub struct ParkedTilePool<'a, Caps: 'static> {
     pool: &'a TilePool,
     crew: &'a crate::crew::Crew<Caps>,
+    scope: CompletionScopeIdentity,
+    dispatch_admission: &'a AtomicBool,
 }
 
 impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
@@ -1786,6 +4869,14 @@ impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
         self.run_with_gate(kernel, &CancelGate::new()).0
     }
 
+    /// [`TilePool::run_witnessed`] on the parked crew.
+    pub fn run_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.run_with_gate_witnessed(kernel, &CancelGate::new())
+    }
+
     /// [`TilePool::run_with_gate`] on the parked crew.
     pub fn run_with_gate<K: TileKernel>(
         &self,
@@ -1798,7 +4889,53 @@ impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
             RunId::default(),
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
-            Launch::Crew(self.crew),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
+    }
+
+    /// [`TilePool::run_with_gate_witnessed`] on the parked crew.
+    pub fn run_with_gate_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.pool.run_inner_witnessed(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
+    }
+
+    /// Permit-consuming [`Self::run_with_gate_witnessed`] on the parked crew.
+    pub fn run_with_gate_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.pool.run_inner_witnessed_with_permit(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Some(permit.into_root()),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
         )
     }
 
@@ -1815,7 +4952,32 @@ impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
             run,
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
-            Launch::Crew(self.crew),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
+    }
+
+    /// [`TilePool::run_declared_witnessed`] on the parked crew.
+    pub fn run_declared_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        self.pool.run_inner_witnessed(
+            kernel,
+            gate,
+            run,
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
         )
     }
 
@@ -1828,8 +4990,74 @@ impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
         budget: Budget,
         lease: &fs_alloc::OperationMemoryLease,
     ) -> (Result<K::Out, RunError>, RunReport) {
-        self.pool
-            .run_inner(kernel, gate, run, budget, lease, Launch::Crew(self.crew))
+        self.pool.run_inner(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
+    }
+
+    /// [`TilePool::run_declared_leased_budgeted_witnessed`] on the parked
+    /// crew.
+    pub fn run_declared_leased_budgeted_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.pool.run_inner_witnessed(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
+    }
+
+    /// Permit-consuming
+    /// [`Self::run_declared_leased_budgeted_witnessed`] on the parked crew.
+    pub fn run_declared_leased_budgeted_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError>
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.pool.run_inner_witnessed_with_permit(
+            kernel,
+            gate,
+            run,
+            budget,
+            lease,
+            Some(permit.into_root()),
+            Launch::Crew {
+                crew: self.crew,
+                scope: self.scope,
+                dispatch_admission: self.dispatch_admission,
+            },
+        )
     }
 }
 
@@ -1844,6 +5072,29 @@ impl<Caps: Send + Sync + 'static> crate::kernel::KernelRunner for ParkedTilePool
         gate: &CancelGate,
     ) -> (Result<K::Out, RunError>, RunReport) {
         ParkedTilePool::run_with_gate(self, kernel, gate)
+    }
+}
+
+impl<Caps: Send + Sync + 'static> CompletionKernelRunner for ParkedTilePool<'_, Caps> {
+    fn workers(&self) -> usize {
+        ParkedTilePool::workers(self)
+    }
+
+    fn run_with_gate_witnessed<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        ParkedTilePool::run_with_gate_witnessed(self, kernel, gate)
+    }
+
+    fn run_with_gate_witnessed_once<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        permit: TilePoolInvocationPermit,
+    ) -> Result<WitnessedRun<K::Out>, TilePoolCompletionWitnessError> {
+        ParkedTilePool::run_with_gate_witnessed_once(self, kernel, gate, permit)
     }
 }
 
@@ -2000,6 +5251,16 @@ mod tests {
     use super::*;
     use crate::kernel::{Reduce, TilePlan};
 
+    macro_rules! witnessed_parts {
+        ($run:expr) => {{
+            let bundle = $run.expect("executor must seal a valid witnessed-run bundle");
+            bundle
+                .verify_bundle()
+                .expect("fresh executor bundle must verify");
+            bundle.into_parts()
+        }};
+    }
+
     struct SumKernel {
         tiles: u64,
     }
@@ -2147,6 +5408,57 @@ mod tests {
             } else {
                 ControlFlow::Continue(1)
             }
+        }
+    }
+
+    struct BlockingParkedKernel {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    impl TileKernel for BlockingParkedKernel {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/blocking-parked-dispatch", 1)
+        }
+
+        fn run(&self, _tile: u64, cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            self.entered.wait();
+            self.release.wait();
+            if cx.checkpoint().is_err() {
+                ControlFlow::Break(crate::Cancelled)
+            } else {
+                ControlFlow::Continue(1)
+            }
+        }
+    }
+
+    struct RecursiveParkedKernel<'pool, 'crew> {
+        parked: &'pool ParkedTilePool<'crew, NoTask>,
+        nested: Mutex<Option<WitnessedRun<u64>>>,
+    }
+
+    impl TileKernel for RecursiveParkedKernel<'_, '_> {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/recursive-parked-dispatch", 1)
+        }
+
+        fn run(&self, _tile: u64, cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            if cx.checkpoint().is_err() {
+                return ControlFlow::Break(crate::Cancelled);
+            }
+            let nested = self
+                .parked
+                .run_witnessed(&NoAllocation)
+                .expect("recursive dispatch refusal must itself seal a valid witness");
+            self.nested
+                .lock()
+                .expect("recursive result")
+                .replace(nested);
+            ControlFlow::Continue(1)
         }
     }
 
@@ -2453,13 +5765,14 @@ mod tests {
     fn unrepresentable_root_plan_is_refused_before_lease_or_launch() {
         let pool = pool(2);
         let lease = fs_alloc::OperationMemoryLease::unbounded();
-        let (result, report) = pool.run_declared_leased_budgeted(
-            &UnrepresentablePlan,
-            &CancelGate::new(),
-            RunId(29),
-            Budget::INFINITE,
-            &lease,
-        );
+        let (result, report, witness) =
+            witnessed_parts!(pool.run_declared_leased_budgeted_witnessed(
+                &UnrepresentablePlan,
+                &CancelGate::new(),
+                RunId(29),
+                Budget::INFINITE,
+                &lease,
+            ));
         assert!(
             matches!(
                 result,
@@ -2471,6 +5784,18 @@ mod tests {
             "got {result:?}"
         );
         assert_eq!(report.completed, 0);
+        assert_eq!(witness.verify(), Ok(()));
+        assert_eq!(
+            witness.disposition(),
+            TilePoolCompletionDisposition::MemoryPlanOverflow
+        );
+        assert!(!witness.admission_completed());
+        assert_eq!(witness.admitted_tiles(), 0);
+        assert_eq!(witness.claimed_tiles(), 0);
+        assert_eq!(witness.launched_workers(), 0);
+        assert_eq!(witness.joined_workers(), 0);
+        assert!(!witness.root_charge_admitted());
+        assert!(!witness.root_charge_released());
         let receipt = lease.receipt();
         assert_eq!(receipt.requested_bytes, 0);
         assert_eq!(receipt.used_bytes, 0);
@@ -2488,12 +5813,12 @@ mod tests {
                 tiles: workers as u64,
                 barrier: std::sync::Barrier::new(workers),
             };
-            let (result, report) = pool.run_declared_budgeted(
+            let (result, report, witness) = witnessed_parts!(pool.run_declared_budgeted_witnessed(
                 &kernel,
                 &gate,
                 RunId(23),
                 Budget::new().with_cost_quota(1 << 20),
-            );
+            ));
             match result {
                 Err(RunError::TileFailed {
                     tile: 0,
@@ -2509,6 +5834,19 @@ mod tests {
             assert!(gate.is_requested());
             assert_eq!(report.completed, 0);
             assert_eq!(report.total, workers as u64);
+            assert_eq!(witness.verify(), Ok(()));
+            assert_eq!(
+                witness.disposition(),
+                TilePoolCompletionDisposition::TileFailed
+            );
+            assert_eq!(witness.first_failure_kind(), Some("tile-failed"));
+            assert_eq!(witness.first_failure_tile(), Some(0));
+            assert_eq!(witness.claimed_tiles(), workers as u64);
+            assert_eq!(witness.break_tiles(), workers as u64);
+            assert_eq!(witness.failed_tiles(), 1);
+            assert_eq!(witness.cancelled_tiles(), workers.saturating_sub(1) as u64);
+            assert_eq!(witness.launched_workers(), workers as u64);
+            assert_eq!(witness.joined_workers(), workers as u64);
             assert!(pool.arena_pool().stats().quiescent());
             assert_eq!(pool.run(&NoAllocation).expect("pool remains reusable"), 1);
         }
@@ -2551,9 +5889,9 @@ mod tests {
                     tiles: workers as u64,
                     barrier: std::sync::Barrier::new(workers),
                 };
-                let error = pool(workers)
-                    .run(&kernel)
-                    .expect_err("every in-flight tile panics");
+                let p = pool(workers);
+                let (result, _, witness) = witnessed_parts!(p.run_witnessed(&kernel));
+                let error = result.expect_err("every in-flight tile panics");
                 match error {
                     RunError::TilePanicked { tile, message, .. } => {
                         assert_eq!(tile, 0, "panic provenance must not depend on arrival order");
@@ -2561,6 +5899,19 @@ mod tests {
                     }
                     other => panic!("expected TilePanicked, got {other:?}"),
                 }
+                assert_eq!(witness.verify(), Ok(()));
+                assert_eq!(
+                    witness.disposition(),
+                    TilePoolCompletionDisposition::TilePanicked
+                );
+                assert_eq!(witness.first_failure_kind(), Some("tile-panicked"));
+                assert_eq!(witness.first_failure_tile(), Some(0));
+                assert_eq!(witness.claimed_tiles(), workers as u64);
+                assert_eq!(witness.panicked_tiles(), workers as u64);
+                assert_eq!(witness.failed_tiles(), workers as u64);
+                assert_eq!(witness.cancelled_tiles(), 0);
+                assert_eq!(witness.launched_workers(), workers as u64);
+                assert_eq!(witness.joined_workers(), workers as u64);
             }
         }
     }
@@ -3269,5 +6620,630 @@ mod tests {
             assert_eq!(refused, Err(CrewScopeError::Cancelled));
             cx.set_cancel_requested(false);
         });
+    }
+
+    fn assert_completion_invariant(witness: &TilePoolCompletionWitness, expected: &'static str) {
+        assert_eq!(
+            witness.verify(),
+            Err(TilePoolCompletionWitnessError::Invariant { name: expected }),
+            "mutated witness should fail `{expected}`: {}",
+            witness.to_canonical_json()
+        );
+    }
+
+    #[test]
+    fn completion_witness_binds_the_real_asupersync_parent_scope() {
+        in_task(|cx| {
+            let expected_region = cx.region_id().as_u64();
+            let expected_task = cx.task_id().as_u64();
+            let p = pool(2);
+            let (result, _, witness) = witnessed_parts!(p.run_scoped_witnessed(
+                &cx,
+                &SumKernel { tiles: 8 },
+                &CancelGate::new_clock_free(),
+                RunId(301),
+                Budget::INFINITE,
+                &fs_alloc::OperationMemoryLease::unbounded(),
+            ));
+            assert_eq!(result, Ok((1..=8).sum::<u64>()));
+            assert_eq!(witness.verify(), Ok(()));
+            assert_eq!(witness.scope_kind(), "asupersync-task-scope");
+            assert_eq!(witness.parent_region_id(), Some(expected_region));
+            assert_eq!(witness.parent_task_id(), Some(expected_task));
+            println!(
+                "{}",
+                witness.to_jsonl("asupersync-parent-scope", 0, "inline-real-task")
+            );
+        });
+    }
+
+    #[test]
+    fn affine_invocation_permit_is_consumed_and_binds_call_identity() {
+        const CROSS_CALL_NO_CLAIM: &str = "cross-call-uniqueness-without-affine-invocation-permit";
+
+        let p = pool(2);
+        let gate = CancelGate::new_clock_free();
+        let ordinal_zero_permit_root = [0xA5; 32];
+        let permit = TilePoolInvocationPermit::from_permit_root(ordinal_zero_permit_root);
+        assert_eq!(permit.permit_root(), ordinal_zero_permit_root);
+
+        let bound = p
+            .run_with_gate_witnessed_once(&NoAllocation, &gate, permit)
+            .expect("permit-bound run");
+        bound.verify_bundle().expect("permit-bound bundle");
+        assert_eq!(bound.outcome(), &Ok(1));
+        assert!(bound.witness().has_affine_invocation_permit());
+        assert_eq!(
+            bound.witness().affine_invocation_permit_root(),
+            Some(ordinal_zero_permit_root)
+        );
+        assert!(
+            !bound.witness().no_claims().contains(&CROSS_CALL_NO_CLAIM),
+            "a consumed affine permit discharges the standalone uniqueness no-claim"
+        );
+
+        let standalone = p
+            .run_with_gate_witnessed(&NoAllocation, &CancelGate::new_clock_free())
+            .expect("standalone witnessed run");
+        assert!(!standalone.witness().has_affine_invocation_permit());
+        assert!(
+            standalone
+                .witness()
+                .no_claims()
+                .contains(&CROSS_CALL_NO_CLAIM)
+        );
+        assert_eq!(
+            bound.witness().plan_root_bytes(),
+            standalone.witness().plan_root_bytes(),
+            "the declared plan is unchanged by invocation authority"
+        );
+        assert_ne!(
+            bound.witness().call_replay_root_bytes(),
+            standalone.witness().call_replay_root_bytes(),
+            "the permit root must distinguish the authority-bearing call"
+        );
+
+        let ordinal_one_permit_root = [0x5A; 32];
+        let second = p
+            .run_with_gate_witnessed_once(
+                &NoAllocation,
+                &CancelGate::new_clock_free(),
+                TilePoolInvocationPermit::from_permit_root(ordinal_one_permit_root),
+            )
+            .expect("second independent permit-bound run");
+        assert_eq!(
+            second.witness().affine_invocation_permit_root(),
+            Some(ordinal_one_permit_root)
+        );
+        assert_eq!(
+            bound.witness().plan_root_bytes(),
+            second.witness().plan_root_bytes(),
+            "run ordinal authority changes the permit root, not the declared executor plan"
+        );
+        assert_ne!(
+            bound.witness().call_replay_root_bytes(),
+            second.witness().call_replay_root_bytes()
+        );
+        assert_ne!(bound.witness().root_bytes(), second.witness().root_bytes());
+
+        let mut permit_corruption = bound.witness().clone();
+        permit_corruption.affine_invocation_permit_root = Some(ordinal_one_permit_root);
+        permit_corruption.root = completion_witness_root(&permit_corruption);
+        assert_completion_invariant(&permit_corruption, "call-replay-root");
+    }
+
+    #[test]
+    fn witnessed_run_bundle_rejects_cross_run_report_and_outcome_tampering() {
+        let p = pool(2);
+
+        let mut report_kernel = p
+            .run_witnessed(&NoAllocation)
+            .expect("fresh witnessed bundle");
+        report_kernel.report.kernel = "test/not-the-executed-kernel";
+        assert_eq!(
+            report_kernel.verify_bundle(),
+            Err(TilePoolCompletionWitnessError::BundleInvariant {
+                name: "report-kernel"
+            })
+        );
+
+        let mut report_completed = p
+            .run_witnessed(&NoAllocation)
+            .expect("fresh witnessed bundle");
+        report_completed.report.completed = 0;
+        assert_eq!(
+            report_completed.verify_bundle(),
+            Err(TilePoolCompletionWitnessError::BundleInvariant {
+                name: "report-completed"
+            })
+        );
+
+        let mut worker_conservation = p
+            .run_witnessed(&NoAllocation)
+            .expect("fresh witnessed bundle");
+        worker_conservation.report.tiles_by_worker[0] =
+            worker_conservation.report.tiles_by_worker[0].saturating_add(1);
+        assert_eq!(
+            worker_conservation.verify_bundle(),
+            Err(TilePoolCompletionWitnessError::BundleInvariant {
+                name: "report-worker-conservation"
+            })
+        );
+
+        let mut terminal_outcome = p
+            .run_witnessed(&NoAllocation)
+            .expect("fresh witnessed bundle");
+        terminal_outcome.outcome = Err(RunError::Incomplete {
+            kernel: "test/no-allocation",
+            tile: 0,
+        });
+        assert_eq!(
+            terminal_outcome.verify_bundle(),
+            Err(TilePoolCompletionWitnessError::BundleInvariant {
+                name: "terminal-outcome"
+            })
+        );
+    }
+
+    /// G5: both retained roots are checked before lifecycle semantics, then a
+    /// self-consistent rehash still cannot turn impossible join/quiescence
+    /// states into executor-minted evidence.
+    #[test]
+    fn completion_witness_verifier_rejects_mutated_lifecycle_states() {
+        let p = pool(2);
+        let (result, _, base) = witnessed_parts!(p.run_witnessed(&NoAllocation));
+        assert_eq!(result, Ok(1));
+        assert_eq!(base.verify(), Ok(()));
+
+        let mut plan_corruption = base.clone();
+        plan_corruption.plan_root[0] ^= 0x80;
+        assert_eq!(
+            plan_corruption.verify(),
+            Err(TilePoolCompletionWitnessError::PlanRootMismatch)
+        );
+
+        let mut root_corruption = base.clone();
+        root_corruption.joined_workers = root_corruption.joined_workers.saturating_sub(1);
+        assert_eq!(
+            root_corruption.verify(),
+            Err(TilePoolCompletionWitnessError::RootMismatch)
+        );
+
+        let mutations: &[(fn(&mut TilePoolCompletionWitness), &'static str)] = &[
+            (
+                |witness| {
+                    witness.joined_workers = witness.joined_workers.saturating_sub(1);
+                },
+                "all-launched-workers-joined",
+            ),
+            (
+                |witness| {
+                    witness.launched_workers = witness.launched_workers.saturating_sub(1);
+                    witness.joined_workers = witness.joined_workers.saturating_sub(1);
+                },
+                "claimed-work-needs-worker",
+            ),
+            (
+                |witness| witness.worker_admission_closed = false,
+                "worker-admission-closed",
+            ),
+            (
+                |witness| witness.live_worker_guards_at_seal = 1,
+                "no-live-worker-guards",
+            ),
+            (
+                |witness| witness.live_tile_scopes_at_seal = 1,
+                "no-live-tile-scopes",
+            ),
+            (
+                |witness| witness.root_charge_released = false,
+                "root-charge-release",
+            ),
+            (
+                |witness| {
+                    witness.completed_tiles = witness.completed_tiles.saturating_sub(1);
+                },
+                "claimed-terminal-conservation",
+            ),
+            (
+                |witness| witness.disposition = TilePoolCompletionDisposition::Cancelled,
+                "derived-disposition",
+            ),
+            (
+                |witness| witness.scope.parent_region_id = Some(1),
+                "scope-identity",
+            ),
+            (
+                |witness| {
+                    witness.cancellation_observed_workers =
+                        witness.launched_workers.saturating_add(1);
+                },
+                "request-observation-within-launch",
+            ),
+            (
+                |witness| witness.cancellation_requested_at_entry = true,
+                "request-entry-monotonic",
+            ),
+            (
+                |witness| witness.cancellation_requested_at_terminal = true,
+                "request-terminal-monotonic",
+            ),
+            (
+                |witness| witness.request_phase = TilePoolRequestPhase::BeforeEntry,
+                "derived-request-phase",
+            ),
+            (
+                |witness| {
+                    witness.arena_before.quiescent = !witness.arena_before.quiescent;
+                },
+                "arena-before-internal",
+            ),
+            (
+                |witness| {
+                    witness.arena_after.free_bytes =
+                        witness.arena_after.reserved_bytes.saturating_add(1);
+                },
+                "arena-after-internal",
+            ),
+            (
+                |witness| {
+                    witness.lease_after.limit_bytes = Some(
+                        witness
+                            .lease_after
+                            .peak_bytes
+                            .max(witness.lease_after.used_bytes),
+                    );
+                },
+                "lease-limit-stable",
+            ),
+            (
+                |witness| {
+                    witness.lease_before.requested_bytes =
+                        witness.lease_after.requested_bytes.saturating_add(1);
+                },
+                "lease-requested-monotonic",
+            ),
+            (
+                |witness| {
+                    witness.lease_before.peak_bytes =
+                        witness.lease_after.peak_bytes.saturating_add(1);
+                },
+                "lease-peak-monotonic",
+            ),
+            (
+                |witness| {
+                    witness.lease_before.refusals = witness.lease_after.refusals.saturating_add(1);
+                },
+                "lease-refusals-monotonic",
+            ),
+            (
+                |witness| {
+                    witness.lease_after.release_invariant_violations = witness
+                        .lease_before
+                        .release_invariant_violations
+                        .saturating_add(1);
+                },
+                "no-run-observed-lease-release-violation",
+            ),
+            (
+                |witness| {
+                    witness.lease_after.requested_bytes = witness.lease_before.requested_bytes;
+                },
+                "root-charge-request-observed",
+            ),
+        ];
+        for (mutate, expected) in mutations {
+            let mut witness = base.clone();
+            mutate(&mut witness);
+            witness.root = completion_witness_root(&witness);
+            assert_completion_invariant(&witness, expected);
+        }
+
+        let cancelled_gate = CancelGate::new_clock_free();
+        cancelled_gate.request();
+        let (_, _, mut cancelled) =
+            witnessed_parts!(p.run_with_gate_witnessed(&NoAllocation, &cancelled_gate));
+        assert!(cancelled.cancellation_observed_workers() > 0);
+        cancelled.cancellation_requested = false;
+        cancelled.root = completion_witness_root(&cancelled);
+        assert_completion_invariant(&cancelled, "request-terminal-monotonic");
+
+        let mut config = PoolConfig::new(1, CcdTopology::APPLE_M_CLASS, 0xFA13);
+        config.arena.limit_bytes = Some(0);
+        let fault_pool = TilePool::new(config);
+        let (_, _, mut first_failure) =
+            witnessed_parts!(fault_pool.run_declared_budgeted_witnessed(
+                &SimultaneousAllocationRefusal {
+                    tiles: 1,
+                    barrier: std::sync::Barrier::new(1),
+                },
+                &CancelGate::new_clock_free(),
+                RunId(302),
+                Budget::INFINITE,
+            ));
+        match first_failure.terminal_error.as_mut() {
+            Some(RunError::TileFailed { tile, .. }) => *tile = 7,
+            other => panic!("expected retained typed refusal, got {other:?}"),
+        }
+        first_failure.root = completion_witness_root(&first_failure);
+        assert_completion_invariant(&first_failure, "retained-first-failure");
+    }
+
+    #[test]
+    fn completion_request_phase_model_and_wide_lease_counters_are_lossless() {
+        let p = pool(1);
+        let (_, _, base) = witnessed_parts!(p.run_witnessed(&NoAllocation));
+        assert_eq!(base.request_phase(), TilePoolRequestPhase::NotRequested);
+
+        let mut after_terminal = base.clone();
+        after_terminal.cancellation_requested = true;
+        after_terminal.request_phase = TilePoolRequestPhase::AfterTerminalDecision;
+        after_terminal.root = completion_witness_root(&after_terminal);
+        assert_eq!(
+            after_terminal.verify(),
+            Ok(()),
+            "a request first observed after terminal selection is distinct from run cancellation"
+        );
+
+        let mut wide = base;
+        wide.lease_before.requested_bytes = u128::from(u64::MAX) + 41;
+        wide.lease_after.requested_bytes = wide
+            .lease_before
+            .requested_bytes
+            .saturating_add(u128::from(wide.root_metadata_bytes));
+        wide.root = completion_witness_root(&wide);
+        assert_eq!(wide.verify(), Ok(()));
+        let json = wide.to_canonical_json();
+        assert!(
+            json.contains(&wide.lease_before.requested_bytes.to_string()),
+            "canonical evidence must retain the full u128 counter"
+        );
+        assert!(
+            json.contains(&wide.lease_after.requested_bytes.to_string()),
+            "canonical evidence must retain the full u128 delta"
+        );
+    }
+
+    /// Bounded lifecycle model: across every join/admission/live-guard state
+    /// reachable in this two-worker fixture, the verifier accepts exactly the
+    /// closed state where every entered worker has exited and no guard remains.
+    #[test]
+    fn completion_witness_bounded_join_model_accepts_only_closed_drained_states() {
+        let p = pool(2);
+        let (_, _, base) = witnessed_parts!(p.run_witnessed(&SumKernel { tiles: 2 }));
+        assert_eq!(base.launched_workers, 2);
+
+        let mut cases = 0_u64;
+        for joined in 0..=base.launched_workers {
+            for live in 0..=base.launched_workers {
+                for admission_closed in [false, true] {
+                    cases += 1;
+                    let mut witness = base.clone();
+                    witness.joined_workers = joined;
+                    witness.live_worker_guards_at_seal = live;
+                    witness.worker_admission_closed = admission_closed;
+                    witness.root = completion_witness_root(&witness);
+
+                    let should_verify =
+                        joined == base.launched_workers && live == 0 && admission_closed;
+                    assert_eq!(
+                        witness.verify().is_ok(),
+                        should_verify,
+                        "bounded model case joined={joined}, live={live}, \
+                         admission_closed={admission_closed}: {}",
+                        witness.to_canonical_json()
+                    );
+                }
+            }
+        }
+        assert_eq!(cases, 18);
+    }
+
+    /// G4: a real fallible root-backing refusal seals before launch, records
+    /// explicit charge rollback, and leaves the same pool reusable.
+    #[test]
+    fn completion_witness_root_allocation_refusal_seals_and_pool_reuses() {
+        let p = pool(2);
+        refuse_next_root_allocation("slot-table");
+        let (result, report, witness) = witnessed_parts!(p.run_witnessed(&SumKernel { tiles: 8 }));
+
+        assert!(matches!(
+            result,
+            Err(RunError::MemoryAllocationRefused {
+                what: "slot-table",
+                ..
+            })
+        ));
+        assert_eq!(report.completed, 0);
+        assert_eq!(report.total, 8);
+        assert_eq!(witness.verify(), Ok(()));
+        assert_eq!(
+            witness.disposition(),
+            TilePoolCompletionDisposition::MemoryAllocationRefused
+        );
+        assert!(!witness.admission_completed());
+        assert_eq!(witness.admitted_tiles(), 0);
+        assert_eq!(witness.unadmitted_tiles(), 8);
+        assert_eq!(witness.claimed_tiles(), 0);
+        assert_eq!(witness.launched_workers(), 0);
+        assert_eq!(witness.joined_workers(), 0);
+        assert!(witness.root_charge_admitted());
+        assert!(witness.root_charge_released());
+        assert_eq!(witness.lease_used_after(), witness.lease_used_before());
+        assert!(witness.executor_transients_quiescent());
+        println!(
+            "{}",
+            witness.to_jsonl("root-backing-allocation-refusal", 0, "inline-private-hook")
+        );
+
+        assert_eq!(
+            p.run(&SumKernel { tiles: 8 })
+                .expect("pool remains reusable"),
+            (1..=8).sum::<u64>()
+        );
+        assert!(p.arena_pool().stats().quiescent());
+    }
+
+    /// G4: a refusal after one real worker was admitted closes admission,
+    /// requests drain, joins that worker, and seals the structured launch
+    /// failure without fabricating an entry for the refused worker.
+    #[test]
+    fn completion_witness_worker_spawn_refusal_joins_started_workers() {
+        let p = pool(2);
+        refuse_next_worker_spawn(1);
+        let (result, report, witness) =
+            witnessed_parts!(p.run_witnessed(&SumKernel { tiles: 16_384 }));
+
+        assert!(matches!(
+            result,
+            Err(RunError::WorkerSpawn {
+                worker: 1,
+                ref message,
+                ..
+            }) if message == "test-injected worker spawn refusal"
+        ));
+        assert_eq!(witness.verify(), Ok(()));
+        assert_eq!(
+            witness.disposition(),
+            TilePoolCompletionDisposition::WorkerSpawnRefused
+        );
+        assert!(witness.admission_completed());
+        assert_eq!(witness.planned_workers(), 2);
+        assert_eq!(witness.launched_workers(), 1);
+        assert_eq!(witness.joined_workers(), 1);
+        assert!(witness.worker_admission_closed());
+        assert!(witness.cancellation_requested());
+        assert_eq!(
+            witness.claimed_tiles(),
+            witness.completed_tiles() + witness.break_tiles() + witness.panicked_tiles()
+        );
+        assert_eq!(report.completed, witness.completed_tiles());
+        assert!(witness.executor_transients_quiescent());
+        assert_eq!(
+            p.run(&SumKernel { tiles: 8 })
+                .expect("pool remains reusable after spawn refusal"),
+            (1..=8).sum::<u64>()
+        );
+        assert!(p.arena_pool().stats().quiescent());
+        println!(
+            "{}",
+            witness.to_jsonl_with_reuse(
+                "worker-spawn-refusal",
+                0,
+                "inline-private-hook",
+                Some(true),
+            )
+        );
+    }
+
+    #[test]
+    fn parked_crew_overlap_is_refused_before_dispatch_and_then_reuses() {
+        let p = pool(4);
+        p.with_parked_crew_local(|parked| {
+            let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            std::thread::scope(|scope| {
+                let active_kernel = BlockingParkedKernel {
+                    entered: std::sync::Arc::clone(&entered),
+                    release: std::sync::Arc::clone(&release),
+                };
+                let active = scope.spawn(move || {
+                    parked
+                        .run_witnessed(&active_kernel)
+                        .expect("active parked run must seal")
+                });
+
+                entered.wait();
+                let busy = parked
+                    .run_witnessed(&NoAllocation)
+                    .expect("overlap refusal must seal a valid bundle");
+                busy.verify_bundle().expect("busy refusal bundle");
+                assert!(matches!(
+                    busy.outcome(),
+                    Err(RunError::ParkedCrewBusy {
+                        kernel: "test/no-allocation"
+                    })
+                ));
+                assert_eq!(
+                    busy.witness().disposition(),
+                    TilePoolCompletionDisposition::ParkedCrewBusy
+                );
+                assert!(!busy.witness().admission_completed());
+                assert_eq!(busy.witness().root_metadata_bytes(), 0);
+                assert!(!busy.witness().root_charge_admitted());
+                assert_eq!(busy.witness().planned_crew_callbacks(), 4);
+                assert_eq!(busy.witness().entered_crew_callbacks(), 0);
+                assert_eq!(busy.witness().exited_crew_callbacks(), 0);
+
+                release.wait();
+                let active = active.join().expect("active parked caller");
+                active.verify_bundle().expect("active parked bundle");
+                assert_eq!(active.outcome(), &Ok(1));
+                assert_eq!(active.witness().planned_workers(), 1);
+                assert_eq!(active.witness().launched_workers(), 1);
+                assert_eq!(active.witness().joined_workers(), 1);
+                assert_eq!(active.witness().planned_crew_callbacks(), 4);
+                assert_eq!(active.witness().entered_crew_callbacks(), 4);
+                assert_eq!(active.witness().exited_crew_callbacks(), 4);
+
+                let mut missing_callback = active.witness().clone();
+                missing_callback.entered_crew_callbacks = 3;
+                missing_callback.root = completion_witness_root(&missing_callback);
+                assert_completion_invariant(&missing_callback, "parked-crew-callback-drain");
+            });
+
+            let reused = parked
+                .run_witnessed(&NoAllocation)
+                .expect("crew must remain reusable after overlap refusal");
+            assert_eq!(reused.outcome(), &Ok(1));
+            assert_eq!(reused.witness().entered_crew_callbacks(), 4);
+            assert_eq!(reused.witness().exited_crew_callbacks(), 4);
+        });
+        assert!(p.arena_pool().stats().quiescent());
+    }
+
+    #[test]
+    fn parked_crew_recursive_dispatch_is_refused_without_poisoning_outer_run() {
+        let p = pool(3);
+        p.with_parked_crew_local(|parked| {
+            let kernel = RecursiveParkedKernel {
+                parked,
+                nested: Mutex::new(None),
+            };
+            let outer = parked
+                .run_witnessed(&kernel)
+                .expect("outer recursive-dispatch fixture must seal");
+            outer.verify_bundle().expect("outer bundle");
+            assert_eq!(outer.outcome(), &Ok(1));
+            assert_eq!(outer.witness().planned_crew_callbacks(), 3);
+            assert_eq!(outer.witness().entered_crew_callbacks(), 3);
+            assert_eq!(outer.witness().exited_crew_callbacks(), 3);
+
+            let nested = kernel
+                .nested
+                .lock()
+                .expect("recursive result")
+                .take()
+                .expect("kernel must retain its nested refusal");
+            nested.verify_bundle().expect("nested busy bundle");
+            assert!(matches!(
+                nested.outcome(),
+                Err(RunError::ParkedCrewBusy {
+                    kernel: "test/no-allocation"
+                })
+            ));
+            assert_eq!(nested.witness().planned_crew_callbacks(), 3);
+            assert_eq!(nested.witness().entered_crew_callbacks(), 0);
+            assert_eq!(nested.witness().exited_crew_callbacks(), 0);
+
+            assert_eq!(
+                parked
+                    .run(&NoAllocation)
+                    .expect("crew must remain reusable after recursive refusal"),
+                1
+            );
+        });
+        assert!(p.arena_pool().stats().quiescent());
     }
 }

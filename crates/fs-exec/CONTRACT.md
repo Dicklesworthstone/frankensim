@@ -259,14 +259,71 @@ fs-blake3, fs-substrate, fs-obs.
   roots. `verify_semantics` replays affine conservation and identity derivation,
   validates deadline evidence, possible resource/refusal evidence, a single
   ancestor-chain first-fault origin, and direct-versus-descendant memory-peak
-  bounds. Resource overruns are limited to the six typed dimension labels with
-  requested strictly greater than available, and arithmetic-overflow labels
-  are limited to the producer's accounting vocabulary. Control/release errors
-  whose producer paths cannot seal a receipt are rejected as terminal evidence,
-  as are self-consistently rehashed semantic forgeries. `Completed` means the
-  authority closed without a latched error;
+  bounds. Resource overruns use the six scientific dimension labels or the two
+  finalizer-only labels (`finalization-work`, `finalization-polls`), always
+  with requested strictly greater than available; arithmetic-overflow labels
+  are limited to the producer's accounting vocabulary. Refusal, memory, and
+  finalizer-only failures require an explicit child origin; a finalizer-only
+  failure additionally requires a child carrying finalization evidence.
+  Control/release errors whose producer paths cannot seal a receipt are
+  rejected as terminal evidence, as are self-consistently rehashed semantic
+  forgeries. The producer runs this same semantic verifier before releasing
+  root authority or caching a receipt, so verifier drift fails closed instead
+  of returning known-unverifiable evidence. `Completed` means the authority
+  closed without a latched error;
   exact-plan consumers must additionally check the dimensions their policy
   requires to be spent exactly.
+- Invocation receipts are schema version 2. The v2 child identity domain binds
+  the optional checked-plan binding, ordinary and finalizer grants; the v2
+  child receipt records the exact ordinary/finalizer grant,
+  direct-consumption, and return partition plus the terminal publication and
+  finalization-report root. `InvocationAdmitter::admit_bound` records a
+  three-axis `InvocationPlanBinding` (schema root, schema version, concrete
+  plan root) in every child identity, finalization report, and invocation root.
+  `InvocationAdmitter::admit` remains an explicitly unbound compatibility
+  path and cannot satisfy an invocation-atomic publication claim. Finalization
+  reports are schema version 2 because plan binding is now part of their
+  canonical grammar. A report refuses a receipt carrying a different or
+  absent binding before child lookup. Version-1 roots are historical evidence
+  under their v1 domains; this producer/verifier does not silently rotate or
+  reinterpret them.
+- `FinalizationResources` isolates cleanup work/polls from ordinary scientific
+  capacity. `split_finalizable_child` returns a `FinalizableChildBudget`, which
+  has neither legacy `finish` nor direct output publication: it must be
+  consumed into `ChildFinalizer`. The finalizer remains usable after the first
+  cancellation/refusal solely to charge its pre-admitted cleanup reserve,
+  abort or prepare-and-commit child-local publication once, and close the
+  child. `commit_child_local_publication` performs an infallible
+  `mem::replace` between two terminal checks; a request winning the post-swap
+  check triggers an infallible restore, returns the staged value, and leaves
+  the destination unchanged. `commit_publication` is a compatibility spelling
+  with the same explicitly child-local scope. A child-local success may
+  coexist with later root cancellation/refusal and cannot satisfy an
+  invocation-atomic sparse claim. Publication scope is committed into the
+  report and child receipt. The declared output-byte count is caller-supplied
+  logical capacity only: this generic layer does not attest `T`'s allocation
+  size, encoding length, or content identity. Arbitrary fallible publication
+  callbacks are not accepted. It cannot
+  allocate memory, mint children, restart scientific work, or overwrite the
+  first terminal cause. Premature `finish` is non-consuming, and repeated
+  finish/replay returns the identical immutable report without returning
+  capacity again. After a caught unwind, `recover_child_finalizer` can remint
+  authority only because mutable root access proves the old borrow is gone; it
+  fails closed with the supplied typed refusal unless publication had already
+  committed. `FinalizationReport::join` accepts only the matching
+  semantically verified immutable `ChildReceipt`; the joined root binds the
+  parent invocation root, child root, and finalization root.
+- Invocation receipt production and replay reserve child-vector capacity
+  fallibly before root authority is released. Allocation refusal is a
+  structured retryable producer-control error and cannot be sealed as
+  scientific evidence. The returned receipt copy is prebuilt before the
+  cached receipt becomes terminal.
+- The v2 semantic verifier accepts at most
+  `INVOCATION_RECEIPT_MAX_CHILDREN` rows. It builds one fallibly allocated
+  content-ID/parent index and computes direct-child/subtree aggregates in a
+  bottom-up pass instead of repeatedly scanning untrusted ancestry. Oversized
+  receipts and verifier scratch-allocation failures are distinct structured
+  semantic errors.
 
 ## Invariants
 1. Completeness: a non-cancelled, non-panicked run executes every tile in
@@ -348,10 +405,31 @@ fs-blake3, fs-substrate, fs-obs.
     caller-selected. No child or root receipt exists while a child authority or
     direct memory reservation remains live. A backing-memory refusal is unique,
     exceeds the enforced root limit, and matches the receipt's first-refusal
-    tuple exactly; failed child receipts form one ancestor chain, never sibling
-    failure origins.
+    tuple exactly. The v2 root records one explicit failure-origin child (or a
+    root-origin marker); ancestors and fail-closed recovered siblings may carry
+    identical inherited copies, but can never claim a second origin or a
+    different first failure.
     Empty child-phase labels are rejected before identity/ordinal mutation and
     therefore can never make an unverifiable producer receipt.
+17. A finalizable child transfers ordinary and finalizer capacity together but
+    exposes only the ordinary portion to scientific work. Cancellation or
+    refusal does not disable the finalizer reserve. Child-local success
+    publication
+    requires a cleanup poll and a one-use prepared token; deadline/cancellation
+    observed between prepare and the infallible destination swap seals
+    `Aborted`, returns the staged value, and leaves the destination unchanged.
+    Cleanup is refused without mutation once publication is prepared or sealed.
+    Every failed child must seal `Aborted`; no finalization report exists while
+    publication is pending/prepared, nested children or memory remain live, or
+    the child is unclosed. Before storing or replaying its commitment, the
+    producer verifies the finalization report's version, root, exact resource
+    conservation, terminal publication, derived disposition, and reachable
+    failure evidence. Finalizer and joined receipt fields, including
+    `ChildLocal` publication scope, are canonical and verifier-checked. This
+    invariant attests child authority and resource closure only: it neither
+    seals the enclosing invocation nor supplies a real executor/pool
+    completion witness. Invocation-atomic prepared-root publication remains a
+    successor integration gate and must not be inferred from this surface.
 
 ## Tile-pool placement identity (v2)
 
@@ -685,7 +763,8 @@ and limit bytes), or `MemoryAllocationRefused` (fallible root backing-store
 reservation after lease admission, with the lease charge rolled back).
 Invocation accounting returns `InvocationError`: dimensioned exhaustion,
 checked overflow, absolute-deadline expiry, cancellation, backing-memory
-refusal, explicit scientific refusal, or a terminal ownership invariant.
+refusal, explicit scientific refusal, finalizer/publication misuse, receipt
+binding mismatch, or a terminal ownership invariant.
 Post-admission callers can finalize a `Refused`/`Cancelled` receipt; admission
 failures occur before root authority exists and therefore have no receipt.
 
@@ -714,6 +793,16 @@ cancellation observation. Deadline expiry requests the bound `CancelGate` and
 is retained as the first terminal failure. Publication and child/root
 finalization recheck the terminal state; a successful receipt therefore cannot
 cross an observed absolute deadline.
+Finalizer cleanup polls use the isolated reserve and report a terminal
+observation without disabling later cleanup. The pre-publication poll plus
+post-swap deadline/cancellation recheck is the child-output linearization
+boundary; a request winning that check restores the destination before return.
+post-commit requests do not retroactively relabel already committed child
+output. Root finalization still performs its own terminal observation, so a
+later request can cancel the enclosing invocation without rewriting the
+already sealed child publication.
+`FinalizationReport` does not itself prove scheduler drain, external-thread
+enrollment, application durability, or wall-clock cancellation latency.
 See no-claims for the 200 µs target's status.
 
 ## Unsafe boundary
@@ -883,6 +972,12 @@ confidence claim.
   and explicitly call `finish`. Logical memory bytes are a declared live-set
   capacity and do not claim allocator metadata, hidden third-party allocation,
   or resident-set size.
+- `FinalizationReport` proves only the affine cleanup/publication transition
+  performed by `ChildFinalizer` and its exact binding to one generic child
+  receipt. It is not a worker-drain witness. Code using `TilePool`, another
+  scheduler, or externally owned workers must join the executor-minted
+  completion evidence required by that runtime before making a
+  request-drain-finalize claim.
 - `run_declared_leased_budgeted` / `run_scoped` enforce one shared lease over
   the checked, tracked root-metadata formula, all chunks acquired by their
   leased arenas, AND output payload storage (bead wf9.16.1): both leased
