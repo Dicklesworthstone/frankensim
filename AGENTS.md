@@ -534,6 +534,31 @@ expected and actual heads it prints. Never move a shared sibling checkout back
 to its pin to make this preflight green. Pin movement must instead follow the
 constellation governance and compatibility-train process.
 
+The preflight tells you a sibling is off-pin. It does **not** tell you whether
+that is a fast-forward or a divergence, and only the second is an incident.
+Before proposing any remedy, classify: if `git merge-base --is-ancestor <pin>
+HEAD` succeeds in the sibling, the checkout is strictly newer and the *lock* is
+stale, so the safe direction is forward. Measured 2026-07-29: all seven
+siblings were clean strict fast-forwards, 25 to 611 commits ahead. Treating
+that as drift and "restoring" the pins would have discarded every one of those
+commits.
+
+### Regenerating Derived Artifacts On A Shared Tree
+
+`cargo run -p xtask -- generate-source-manifest` with **no arguments** is safe
+while other agents have uncommitted work. It is a pure function of `HEAD`:
+every tracked path that is dirty and not named on the command line is read
+from `HEAD` via `git show`, so another lane's edits cannot leak into an
+artifact that claims to describe a commit
+(`xtask/src/source_manifest.rs::capture_source_files_scoped`). Pass paths as
+arguments only for the files you are about to commit yourself.
+
+There is therefore **no "quiet tree" precondition**. Do not decline to
+regenerate on the belief that it will absorb someone else's WIP; that belief
+appeared in several commit messages, was copied forward as precedent, and is
+false. If a derived artifact is stale, it is stale at `HEAD` and that is always
+a real violation.
+
 ---
 
 ## Testing Policy
