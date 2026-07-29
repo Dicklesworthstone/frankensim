@@ -4,7 +4,10 @@ use crate::budget::AdmittedRunnerBudgetsV2;
 use crate::catalog::{
     ArtifactDispositionV2, DiagnosticCodeV2, ProofExitV2, RunProfileV2, RunnerCommandV2,
 };
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionFixedObservationV2, ConstructionObservedV2,
+};
 use crate::identity::{CaseManifestRootV2, SourceIdentityRootV2};
 use crate::publication::PublicationSelectionV2;
 use crate::value::StableTokenV2;
@@ -296,6 +299,12 @@ pub enum CommandSelectionProvenanceV2 {
     SealedReplay(SourceIdentityRootV2),
 }
 
+impl ConstructionClosedSemanticV2 for CommandSelectionProvenanceV2 {
+    fn construction_stable_name(&self) -> &'static str {
+        provenance_name(self)
+    }
+}
+
 /// Family/mode/profile selected through an exact provenance route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSelectionV2 {
@@ -429,7 +438,7 @@ impl CommandSelectionV2 {
 ///
 /// Validated fields cannot be mutated after construction:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::CommandIntentV2;
 ///
 /// fn forge_command(intent: &mut CommandIntentV2) {
@@ -439,7 +448,7 @@ impl CommandSelectionV2 {
 ///
 /// A validated command intent cannot be converted into an authority scope:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use fs_evidence_runner::CommandIntentV2;
 /// use fs_evidence_runner::identity::AuthorityScopeRootV2;
 ///
@@ -482,7 +491,7 @@ impl CommandIntentV2 {
                 ConstructionErrorKindV2::Unexpected,
                 "command.selection",
                 "typed absence for List; use CommandIntentV2::list",
-                "present",
+                ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Present),
             ));
         }
         let provenance_matches = matches!(
@@ -509,11 +518,7 @@ impl CommandIntentV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "command.selection_provenance",
                 "the frozen command-specific source",
-                format_args!(
-                    "{}/{}",
-                    command.name(),
-                    provenance_name(selection.provenance())
-                ),
+                ConstructionObservedV2::closed_pair(&command, selection.provenance()),
             ));
         }
 
@@ -522,7 +527,7 @@ impl CommandIntentV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "command.profile",
                 "the same profile in selection and admitted budgets",
-                format_args!("{}/{}", selection.profile.name(), budgets.profile().name()),
+                ConstructionObservedV2::closed_pair(&selection.profile, &budgets.profile()),
             ));
         }
         let disposition = match command {
@@ -539,7 +544,7 @@ impl CommandIntentV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "command.disposition",
                 "the command's fixed disposition",
-                budgets.disposition().name(),
+                ConstructionObservedV2::closed(&budgets.disposition()),
             ));
         }
         match (disposition, publication_selection.is_some()) {
@@ -550,7 +555,7 @@ impl CommandIntentV2 {
                     ConstructionErrorKindV2::Unexpected,
                     "command.publication_selection",
                     "absence for a lifecycle-only command",
-                    "present",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Present),
                 ));
             }
             (ArtifactDispositionV2::DurableBundleRequired, false) => {
@@ -558,7 +563,7 @@ impl CommandIntentV2 {
                     ConstructionErrorKindV2::Missing,
                     "command.publication_selection",
                     "one selection for a durable command",
-                    "absent",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
                 ));
             }
         }

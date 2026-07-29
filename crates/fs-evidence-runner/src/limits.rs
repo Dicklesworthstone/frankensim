@@ -388,7 +388,7 @@ macro_rules! define_runner_limits {
         /// The admitted vector itself has no post-mutation or cap-widening
         /// surface:
         ///
-        /// ```compile_fail
+        /// ```compile_fail,E0616
         /// use fs_evidence_runner::{RunProfileV2, RunnerLimitsV2};
         ///
         /// let mut limits = RunnerLimitsV2::base(RunProfileV2::Smoke);
@@ -2150,77 +2150,77 @@ mod tests {
     ];
 
     const EXPECTED_WIDTHS: [RunnerLimitWidthV2; RUNNER_LIMIT_FIELD_COUNT_V2] = [
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U32,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
-        RunnerLimitWidthV2::U64,
+        RunnerLimitWidthV2::U32, // 1 argv_tokens
+        RunnerLimitWidthV2::U64, // 2 argv_token_bytes
+        RunnerLimitWidthV2::U64, // 3 argv_aggregate_bytes
+        RunnerLimitWidthV2::U64, // 4 lifecycle_record_encoded_bytes
+        RunnerLimitWidthV2::U32, // 5 case_lifecycle_records
+        RunnerLimitWidthV2::U64, // 6 case_lifecycle_encoded_bytes
+        RunnerLimitWidthV2::U32, // 7 family_rows_per_case
+        RunnerLimitWidthV2::U32, // 8 invocation_cases
+        RunnerLimitWidthV2::U32, // 9 lifecycle_document_records
+        RunnerLimitWidthV2::U64, // 10 lifecycle_document_encoded_bytes
+        RunnerLimitWidthV2::U64, // 11 command_result_stdout_bytes
+        RunnerLimitWidthV2::U64, // 12 child_stdout_bytes
+        RunnerLimitWidthV2::U64, // 13 combined_child_stdout_bytes
+        RunnerLimitWidthV2::U64, // 14 child_stderr_bytes
+        RunnerLimitWidthV2::U64, // 15 combined_child_stderr_bytes
+        RunnerLimitWidthV2::U64, // 16 manifest_encoded_bytes
+        RunnerLimitWidthV2::U32, // 17 nesting_depth
+        RunnerLimitWidthV2::U32, // 18 comparison_nodes
+        RunnerLimitWidthV2::U32, // 19 effect_nodes
+        RunnerLimitWidthV2::U64, // 20 text_bytes
+        RunnerLimitWidthV2::U64, // 21 stable_token_bytes
+        RunnerLimitWidthV2::U64, // 22 bundle_relative_path_bytes
+        RunnerLimitWidthV2::U32, // 23 diagnostics_per_case
+        RunnerLimitWidthV2::U32, // 24 diagnostics_per_run
+        RunnerLimitWidthV2::U32, // 25 prerequisites_per_diagnostic
+        RunnerLimitWidthV2::U32, // 26 repairs_per_diagnostic
+        RunnerLimitWidthV2::U32, // 27 artifacts
+        RunnerLimitWidthV2::U64, // 28 artifact_encoded_bytes
+        RunnerLimitWidthV2::U64, // 29 artifact_expanded_bytes
+        RunnerLimitWidthV2::U64, // 30 artifact_stored_bytes
+        RunnerLimitWidthV2::U64, // 31 bundle_encoded_bytes
+        RunnerLimitWidthV2::U64, // 32 bundle_expanded_bytes
+        RunnerLimitWidthV2::U64, // 33 artifact_stored_aggregate_bytes
+        RunnerLimitWidthV2::U64, // 34 system_publication_stored_bytes
+        RunnerLimitWidthV2::U64, // 35 publication_stored_bytes
+        RunnerLimitWidthV2::U64, // 36 child_stream_discard_bytes
+        RunnerLimitWidthV2::U32, // 37 modes_per_family
+        RunnerLimitWidthV2::U32, // 38 extension_diagnostics_per_family
+        RunnerLimitWidthV2::U32, // 39 artifact_roles_per_family
+        RunnerLimitWidthV2::U32, // 40 root_policies_per_family
+        RunnerLimitWidthV2::U32, // 41 registered_units_per_family
+        RunnerLimitWidthV2::U32, // 42 digest_domains_per_family
+        RunnerLimitWidthV2::U32, // 43 extension_schemas_per_family
+        RunnerLimitWidthV2::U32, // 44 executable_descriptors_per_family
+        RunnerLimitWidthV2::U32, // 45 map_entries
+        RunnerLimitWidthV2::U32, // 46 generic_array_items
+        RunnerLimitWidthV2::U32, // 47 path_segments
+        RunnerLimitWidthV2::U32, // 48 integer_digits
+        RunnerLimitWidthV2::U64, // 49 rational_component_bytes
+        RunnerLimitWidthV2::U64, // 50 decimal_coefficient_bytes
+        RunnerLimitWidthV2::U32, // 51 decimal_absolute_scale
+        RunnerLimitWidthV2::U32, // 52 logical_extents_per_artifact
+        RunnerLimitWidthV2::U32, // 53 observation_keys_per_case
+        RunnerLimitWidthV2::U32, // 54 decision_detail_namespaces
+        RunnerLimitWidthV2::U32, // 55 output_classes
+        RunnerLimitWidthV2::U64, // 56 opaque_value_bytes
+        RunnerLimitWidthV2::U64, // 57 retained_unknown_extension_bytes
+        RunnerLimitWidthV2::U32, // 58 expression_edges
+        RunnerLimitWidthV2::U32, // 59 memoized_evaluation_visits
+        RunnerLimitWidthV2::U64, // 60 repair_action_encoded_bytes
+        RunnerLimitWidthV2::U64, // 61 actionable_diagnostic_encoded_bytes
+        RunnerLimitWidthV2::U64, // 62 failure_stderr_encoded_bytes
+        RunnerLimitWidthV2::U64, // 63 runner_catalog_encoded_bytes
+        RunnerLimitWidthV2::U64, // 64 published_bundle_receipt_encoded_bytes
+        RunnerLimitWidthV2::U64, // 65 content_store_envelope_non_payload_bytes
+        RunnerLimitWidthV2::U32, // 66 registered_extent_axes_per_family
+        RunnerLimitWidthV2::U32, // 67 registered_observation_keys_per_family
+        RunnerLimitWidthV2::U32, // 68 registered_authority_scopes_per_family
+        RunnerLimitWidthV2::U32, // 69 registered_external_root_classes_per_family
+        RunnerLimitWidthV2::U32, // 70 registered_evaluation_units_per_family
+        RunnerLimitWidthV2::U32, // 71 registered_resource_identities_per_family
     ];
 
     const EXPECTED_UNITS: [RunnerLimitUnitV2; RUNNER_LIMIT_FIELD_COUNT_V2] = [
@@ -2311,77 +2311,77 @@ mod tests {
         expected_tightenability();
 
     const EXPECTED_MINIMUM_RULES: [RunnerLimitMinimumRuleV2; RUNNER_LIMIT_FIELD_COUNT_V2] = [
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ExecutableCaseAtLeastTwoRecords,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::CheckedLifecycleEquation,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::Fixed,
-        RunnerLimitMinimumRuleV2::Fixed,
-        RunnerLimitMinimumRuleV2::Fixed,
-        RunnerLimitMinimumRuleV2::Fixed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
-        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::AtLeastOne,
-        RunnerLimitMinimumRuleV2::ZeroAllowed,
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 1 argv_tokens
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 2 argv_token_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 3 argv_aggregate_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 4 lifecycle_record_encoded_bytes
+        RunnerLimitMinimumRuleV2::ExecutableCaseAtLeastTwoRecords, // 5 case_lifecycle_records
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 6 case_lifecycle_encoded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 7 family_rows_per_case
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 8 invocation_cases
+        RunnerLimitMinimumRuleV2::CheckedLifecycleEquation, // 9 lifecycle_document_records
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 10 lifecycle_document_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 11 command_result_stdout_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 12 child_stdout_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 13 combined_child_stdout_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 14 child_stderr_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 15 combined_child_stderr_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 16 manifest_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 17 nesting_depth
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 18 comparison_nodes
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 19 effect_nodes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 20 text_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 21 stable_token_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 22 bundle_relative_path_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 23 diagnostics_per_case
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 24 diagnostics_per_run
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 25 prerequisites_per_diagnostic
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 26 repairs_per_diagnostic
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 27 artifacts
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 28 artifact_encoded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 29 artifact_expanded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 30 artifact_stored_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 31 bundle_encoded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 32 bundle_expanded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 33 artifact_stored_aggregate_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 34 system_publication_stored_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 35 publication_stored_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 36 child_stream_discard_bytes
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 37 modes_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 38 extension_diagnostics_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 39 artifact_roles_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 40 root_policies_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 41 registered_units_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 42 digest_domains_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 43 extension_schemas_per_family
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 44 executable_descriptors_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 45 map_entries
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 46 generic_array_items
+        RunnerLimitMinimumRuleV2::AtLeastOne,                 // 47 path_segments
+        RunnerLimitMinimumRuleV2::Fixed,                      // 48 integer_digits
+        RunnerLimitMinimumRuleV2::Fixed,                      // 49 rational_component_bytes
+        RunnerLimitMinimumRuleV2::Fixed,                      // 50 decimal_coefficient_bytes
+        RunnerLimitMinimumRuleV2::Fixed,                      // 51 decimal_absolute_scale
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 52 logical_extents_per_artifact
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 53 observation_keys_per_case
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 54 decision_detail_namespaces
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 55 output_classes
+        RunnerLimitMinimumRuleV2::AtLeastOne,                 // 56 opaque_value_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 57 retained_unknown_extension_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed,                // 58 expression_edges
+        RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne, // 59 memoized_evaluation_visits
+        RunnerLimitMinimumRuleV2::AtLeastOne,                 // 60 repair_action_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 61 actionable_diagnostic_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 62 failure_stderr_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 63 runner_catalog_encoded_bytes
+        RunnerLimitMinimumRuleV2::AtLeastOne, // 64 published_bundle_receipt_encoded_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 65 content_store_envelope_non_payload_bytes
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 66 registered_extent_axes_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 67 registered_observation_keys_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 68 registered_authority_scopes_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 69 registered_external_root_classes_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 70 registered_evaluation_units_per_family
+        RunnerLimitMinimumRuleV2::ZeroAllowed, // 71 registered_resource_identities_per_family
     ];
 
     const EXPECTED_SMOKE_VALUES: [RunnerLimitValueV2; RUNNER_LIMIT_FIELD_COUNT_V2] = [
@@ -2480,23 +2480,146 @@ mod tests {
         for index in 0..RUNNER_LIMIT_FIELD_COUNT_V2 {
             let field = RunnerLimitFieldV2::ALL[index];
             let descriptor = RUNNER_LIMIT_DESCRIPTORS_V2[index];
-            assert_eq!(field.ordinal(), u16::try_from(index + 1).unwrap());
+            let context = format!("code {} {}", index + 1, EXPECTED_NAMES[index]);
+            assert_eq!(
+                EXPECTED_SMOKE_VALUES[index].width(),
+                EXPECTED_WIDTHS[index],
+                "Smoke fixture width: {context}"
+            );
+            assert_eq!(
+                EXPECTED_FULL_VALUES[index].width(),
+                EXPECTED_WIDTHS[index],
+                "Full fixture width: {context}"
+            );
+            assert_eq!(
+                field.ordinal(),
+                u16::try_from(index + 1).unwrap(),
+                "ordinal: {context}"
+            );
             assert_eq!(
                 RunnerLimitFieldV2::from_ordinal(field.ordinal()),
-                Some(field)
+                Some(field),
+                "ordinal lookup: {context}"
             );
-            assert_eq!(descriptor.field, field);
-            assert_eq!(descriptor.name, EXPECTED_NAMES[index]);
-            assert_eq!(descriptor.width, EXPECTED_WIDTHS[index]);
-            assert_eq!(descriptor.unit, EXPECTED_UNITS[index]);
-            assert_eq!(descriptor.tightenability, EXPECTED_TIGHTENABILITY[index]);
-            assert_eq!(descriptor.minimum_rule, EXPECTED_MINIMUM_RULES[index]);
-            assert_eq!(smoke.value(field), EXPECTED_SMOKE_VALUES[index]);
-            assert_eq!(full.value(field), EXPECTED_FULL_VALUES[index]);
-            assert_eq!(smoke.value(field).width(), EXPECTED_WIDTHS[index]);
+            assert_eq!(descriptor.field, field, "descriptor field: {context}");
+            assert_eq!(
+                descriptor.name, EXPECTED_NAMES[index],
+                "descriptor name: {context}"
+            );
+            assert_eq!(
+                descriptor.width, EXPECTED_WIDTHS[index],
+                "descriptor width: {context}"
+            );
+            assert_eq!(
+                descriptor.unit, EXPECTED_UNITS[index],
+                "descriptor unit: {context}"
+            );
+            assert_eq!(
+                descriptor.tightenability, EXPECTED_TIGHTENABILITY[index],
+                "descriptor tightenability: {context}"
+            );
+            assert_eq!(
+                descriptor.minimum_rule, EXPECTED_MINIMUM_RULES[index],
+                "descriptor minimum: {context}"
+            );
+            assert_eq!(
+                smoke.value(field),
+                EXPECTED_SMOKE_VALUES[index],
+                "Smoke value: {context}"
+            );
+            assert_eq!(
+                full.value(field),
+                EXPECTED_FULL_VALUES[index],
+                "Full value: {context}"
+            );
+            assert_eq!(
+                smoke.value(field).width(),
+                EXPECTED_WIDTHS[index],
+                "production width: {context}"
+            );
         }
         assert_eq!(RunnerLimitFieldV2::from_ordinal(0), None);
         assert_eq!(RunnerLimitFieldV2::from_ordinal(72), None);
+    }
+
+    #[test]
+    fn canonical_projection_encodes_all_71_width_tags_and_payloads_exactly() {
+        const PREFIX: &[u8] = b"FSRUNNER-LIMITS\x01";
+        const EXPECTED_PROJECTION_BYTES: usize = 716;
+
+        for (profile, expected_values) in [
+            (RunProfileV2::Smoke, EXPECTED_SMOKE_VALUES),
+            (RunProfileV2::Full, EXPECTED_FULL_VALUES),
+        ] {
+            let projection = RunnerLimitsV2::base(profile).canonical_projection();
+            assert_eq!(
+                projection.len(),
+                EXPECTED_PROJECTION_BYTES,
+                "{profile:?} projection length"
+            );
+            assert_eq!(&projection[..PREFIX.len()], PREFIX, "{profile:?} prefix");
+
+            let mut cursor = PREFIX.len();
+            for index in 0..RUNNER_LIMIT_FIELD_COUNT_V2 {
+                let ordinal = u16::from_be_bytes(
+                    projection[cursor..cursor + 2]
+                        .try_into()
+                        .expect("exact ordinal width"),
+                );
+                cursor += 2;
+                let width_tag = u16::from_be_bytes(
+                    projection[cursor..cursor + 2]
+                        .try_into()
+                        .expect("exact width-tag width"),
+                );
+                cursor += 2;
+                assert_eq!(
+                    ordinal,
+                    u16::try_from(index + 1).expect("71 rows fit u16"),
+                    "{profile:?} ordinal for {}",
+                    EXPECTED_NAMES[index]
+                );
+                match (EXPECTED_WIDTHS[index], expected_values[index]) {
+                    (RunnerLimitWidthV2::U32, RunnerLimitValueV2::U32(expected)) => {
+                        assert_eq!(
+                            width_tag, 1,
+                            "{profile:?} U32 tag for {}",
+                            EXPECTED_NAMES[index]
+                        );
+                        assert_eq!(
+                            &projection[cursor..cursor + 4],
+                            &expected.to_be_bytes(),
+                            "{profile:?} U32 payload for {}",
+                            EXPECTED_NAMES[index]
+                        );
+                        cursor += 4;
+                    }
+                    (RunnerLimitWidthV2::U64, RunnerLimitValueV2::U64(expected)) => {
+                        assert_eq!(
+                            width_tag, 2,
+                            "{profile:?} U64 tag for {}",
+                            EXPECTED_NAMES[index]
+                        );
+                        assert_eq!(
+                            &projection[cursor..cursor + 8],
+                            &expected.to_be_bytes(),
+                            "{profile:?} U64 payload for {}",
+                            EXPECTED_NAMES[index]
+                        );
+                        cursor += 8;
+                    }
+                    (expected_width, observed) => panic!(
+                        "{profile:?} fixture mismatch for {}: {expected_width:?} vs {observed:?}",
+                        EXPECTED_NAMES[index]
+                    ),
+                }
+            }
+            assert_eq!(
+                cursor,
+                projection.len(),
+                "{profile:?} projection has no trailing bytes"
+            );
+        }
     }
 
     #[test]
@@ -2736,10 +2859,16 @@ mod tests {
         let base = RunnerLimitsCandidateV2::base(RunProfileV2::Smoke);
         for field in RunnerLimitFieldV2::ALL {
             let descriptor = field.descriptor();
+            let expected_width = EXPECTED_WIDTHS[(field.ordinal() - 1) as usize];
+            assert_eq!(
+                descriptor.width, expected_width,
+                "independent width for {}",
+                descriptor.name
+            );
             validate_individual_limit_field(&base, &base, field, true)
                 .expect("base ceiling is individually valid");
 
-            let wrong_width = match descriptor.width {
+            let wrong_width = match expected_width {
                 RunnerLimitWidthV2::U32 => RunnerLimitValueV2::U64(0),
                 RunnerLimitWidthV2::U64 => RunnerLimitValueV2::U32(0),
             };
@@ -2751,15 +2880,15 @@ mod tests {
             assert_eq!(error.field(), field);
             assert_eq!(
                 error.expected(),
-                RunnerLimitExpectationV2::Width(descriptor.width)
+                RunnerLimitExpectationV2::Width(expected_width)
             );
             assert_eq!(error.observed(), wrong_width);
 
             let (minimum, below) = match descriptor.minimum_rule {
                 RunnerLimitMinimumRuleV2::AtLeastOne
                 | RunnerLimitMinimumRuleV2::ExecutableFamilyAtLeastOne => (
-                    Some(boundary_value(descriptor.width, 1)),
-                    Some(boundary_value(descriptor.width, 0)),
+                    Some(boundary_value(expected_width, 1)),
+                    Some(boundary_value(expected_width, 0)),
                 ),
                 RunnerLimitMinimumRuleV2::ExecutableCaseAtLeastTwoRecords => (
                     Some(RunnerLimitValueV2::U32(2)),
@@ -2767,7 +2896,7 @@ mod tests {
                 ),
                 RunnerLimitMinimumRuleV2::ZeroAllowed
                 | RunnerLimitMinimumRuleV2::CheckedLifecycleEquation => {
-                    (Some(boundary_value(descriptor.width, 0)), None)
+                    (Some(boundary_value(expected_width, 0)), None)
                 }
                 RunnerLimitMinimumRuleV2::Fixed => (None, None),
             };
@@ -2795,7 +2924,7 @@ mod tests {
             }
 
             let mut maximum_candidate = base;
-            let maximum = primitive_max(descriptor.width);
+            let maximum = primitive_max(expected_width);
             maximum_candidate
                 .set_value(field, maximum)
                 .expect("matching width");

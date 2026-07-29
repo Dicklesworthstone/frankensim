@@ -6,7 +6,10 @@
 //! mint scientific, lifecycle, durability, admission, or authority claims.
 
 use crate::catalog::{ArtifactRoleV2, LogicalExtentAxisV2, LogicalUnitV2};
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionFixedObservationV2, ConstructionObservedDataClassV2, ConstructionObservedV2,
+};
 use crate::identity::{NoClaimScopeRootV1, RunnerLimitsRootV2};
 use crate::limits::RunnerLimitsV2;
 use crate::value::{RationalV2, StableTokenV2, UnitV2};
@@ -26,13 +29,26 @@ pub const LOGICAL_EXTENT_PROJECTION_DOMAIN_V1: &str =
 /// Absolute pre-allocation cap for one registered axis's allowed-unit rows.
 pub const LOGICAL_AXIS_ALLOWED_UNITS_MAX_V2: usize = 4_096;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionConstructionObservationV2 {
+    DimensionMismatch,
+}
+
+impl ConstructionClosedSemanticV2 for ExtensionConstructionObservationV2 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::DimensionMismatch => "dimension mismatch",
+        }
+    }
+}
+
 /// Fixed Runner V2 artifact codecs.
 ///
 /// The catalog is declaration-only. In particular, this type provides no
 /// encoder, decoder, frame validator, checksum, or artifact-inventory
 /// behavior.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use fs_evidence_runner::ArtifactCodecIdV2;
 ///
 /// let _encoded = ArtifactCodecIdV2::Identity.encode(b"payload");
@@ -86,12 +102,12 @@ impl ArtifactCodecIdV2 {
 /// claiming semantic membership without lookup in a checked
 /// [`BaseExtensionRegistryProjectionV2`].
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::extension::RegisteredArtifactRoleDescriptorV2;
 ///
-/// let _forged = RegisteredArtifactRoleDescriptorV2 {
-///     id: core::num::NonZeroU16::new(7).unwrap(),
-/// };
+/// fn expose_unchecked_id(descriptor: &RegisteredArtifactRoleDescriptorV2) {
+///     let _ = descriptor.id;
+/// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegisteredArtifactRoleDescriptorV2 {
@@ -159,7 +175,7 @@ impl RegisteredArtifactRoleDescriptorV2 {
 ///
 /// Typed namespaces cannot be cross-substituted:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::{
 ///     ArtifactRoleV2, RegisteredLogicalUnitDescriptorV2,
 /// };
@@ -254,12 +270,12 @@ impl LogicalUnitScaleToCanonicalV2 {
         denominator: u128,
     ) -> Result<Self, ConstructionErrorV2> {
         let scale_to_canonical =
-            RationalV2::from_canonical_parts(numerator, denominator).map_err(|error| {
-                refusal(
+            RationalV2::from_canonical_parts(numerator, denominator).map_err(|_| {
+                ConstructionErrorV2::new(
                     ConstructionErrorKindV2::Incompatible,
                     "extension.axis.allowed_unit.scale_to_canonical",
                     "a positive exact rational already in lowest terms",
-                    format_args!("{error:?}"),
+                    ConstructionObservedV2::signed_unsigned_pair(numerator, denominator),
                 )
             })?;
         Self::new(unit, scale_to_canonical)
@@ -275,10 +291,9 @@ impl LogicalUnitScaleToCanonicalV2 {
                 ConstructionErrorKindV2::OutOfRange,
                 "extension.axis.allowed_unit.scale_to_canonical",
                 "a positive exact reduced rational",
-                format_args!(
-                    "{}/{}",
+                ConstructionObservedV2::signed_unsigned_pair(
                     scale_to_canonical.numerator(),
-                    scale_to_canonical.denominator()
+                    scale_to_canonical.denominator(),
                 ),
             ));
         }
@@ -355,7 +370,10 @@ impl RegisteredLogicalExtentAxisDescriptorV2 {
                     ConstructionErrorKindV2::Duplicate,
                     "extension.logical_axis.allowed_units.unit",
                     "one row per typed logical unit",
-                    format_logical_unit(row.unit()),
+                    ConstructionObservedV2::tag_and_optional_id(
+                        row.unit().tag(),
+                        row.unit().registered_id(),
+                    ),
                 ));
             }
         }
@@ -377,14 +395,14 @@ impl RegisteredLogicalExtentAxisDescriptorV2 {
             ));
         }
         if canonical_rows[0].scale_to_canonical() != rational_one() {
+            let canonical_scale = canonical_rows[0].scale_to_canonical();
             return Err(refusal(
                 ConstructionErrorKindV2::Incompatible,
                 "extension.logical_axis.canonical_scale",
                 "the exact rational 1/1",
-                format_args!(
-                    "{}/{}",
-                    canonical_rows[0].scale_to_canonical().numerator(),
-                    canonical_rows[0].scale_to_canonical().denominator()
+                ConstructionObservedV2::signed_unsigned_pair(
+                    canonical_scale.numerator(),
+                    canonical_scale.denominator(),
                 ),
             ));
         }
@@ -456,15 +474,12 @@ impl RegisteredLogicalExtentAxisDescriptorV2 {
 /// Raw fields are private so a registered ID cannot bypass semantic registry
 /// lookup.
 ///
-/// ```compile_fail
-/// use fs_evidence_runner::{LogicalExtentAxisV2, LogicalUnitV2};
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::extension::LogicalExtentV2;
 ///
-/// let _forged = LogicalExtentV2 {
-///     axis: LogicalExtentAxisV2::Payload,
-///     value: 1,
-///     unit: LogicalUnitV2::Rows,
-/// };
+/// fn expose_unchecked_axis(extent: &LogicalExtentV2) {
+///     let _ = extent.axis;
+/// }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LogicalExtentV2 {
@@ -521,7 +536,7 @@ impl LogicalExtentV2 {
                 ConstructionErrorKindV2::UnknownCode,
                 "logical_extent.axis",
                 "a base axis or a registered axis resolved by a checked registry",
-                format_logical_axis(axis),
+                ConstructionObservedV2::tag_and_optional_id(axis.tag(), axis.registered_id()),
             ));
         }
         if unit.registered_id().is_some() {
@@ -529,7 +544,7 @@ impl LogicalExtentV2 {
                 ConstructionErrorKindV2::UnknownCode,
                 "logical_extent.unit",
                 "a base unit on the registry-free path",
-                format_logical_unit(unit),
+                ConstructionObservedV2::tag_and_optional_id(unit.tag(), unit.registered_id()),
             ));
         }
         if base_axis_scale(axis, unit).is_none() {
@@ -537,11 +552,7 @@ impl LogicalExtentV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "logical_extent.axis_unit",
                 "a unit admitted by the selected base axis",
-                format_args!(
-                    "{}:{}",
-                    format_logical_axis(axis),
-                    format_logical_unit(unit)
-                ),
+                logical_axis_unit_observation(axis, unit),
             ));
         }
         Ok(Self {
@@ -583,6 +594,41 @@ impl LogicalExtentV2 {
 /// Population and family sealing remain downstream. The projection proves only
 /// that the presented descriptor data is internally canonical and within its
 /// explicitly named caps.
+///
+/// Base and registered-extension close-capability IDs are nominally distinct:
+///
+/// ```compile_fail,E0308
+/// use fs_evidence_runner::coverage::{
+///     BaseCoverageCloseCapabilityIdV1,
+///     BaseCoverageCloseRegisteredExtensionCapabilityIdV1,
+/// };
+///
+/// fn extension_capability_id_rejects_base_capability_id(
+///     _id: BaseCoverageCloseRegisteredExtensionCapabilityIdV1,
+/// ) {
+/// }
+///
+/// let base_id = BaseCoverageCloseCapabilityIdV1::new(1).unwrap();
+/// extension_capability_id_rejects_base_capability_id(base_id);
+/// ```
+///
+/// The reverse substitution is rejected independently:
+///
+/// ```compile_fail,E0308
+/// use fs_evidence_runner::coverage::{
+///     BaseCoverageCloseCapabilityIdV1,
+///     BaseCoverageCloseRegisteredExtensionCapabilityIdV1,
+/// };
+///
+/// fn base_capability_id_rejects_extension_capability_id(
+///     _id: BaseCoverageCloseCapabilityIdV1,
+/// ) {
+/// }
+///
+/// let extension_id =
+///     BaseCoverageCloseRegisteredExtensionCapabilityIdV1::new(1).unwrap();
+/// base_capability_id_rejects_extension_capability_id(extension_id);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseExtensionRegistryProjectionV2 {
     limits_root: RunnerLimitsRootV2,
@@ -640,18 +686,26 @@ impl BaseExtensionRegistryProjectionV2 {
         )?;
 
         let mut global_names = BTreeSet::new();
-        for (category, name) in artifact_roles
+        for name in artifact_roles
             .iter()
-            .map(|row| ("artifact-role", row.name()))
-            .chain(logical_units.iter().map(|row| ("logical-unit", row.name())))
-            .chain(logical_axes.iter().map(|row| ("logical-axis", row.name())))
+            .map(RegisteredArtifactRoleDescriptorV2::name)
+            .chain(
+                logical_units
+                    .iter()
+                    .map(RegisteredLogicalUnitDescriptorV2::name),
+            )
+            .chain(
+                logical_axes
+                    .iter()
+                    .map(RegisteredLogicalExtentAxisDescriptorV2::name),
+            )
         {
             if !global_names.insert(name.as_str()) {
-                return Err(refusal(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Duplicate,
                     "extension.global_name",
                     "one globally unambiguous namespaced name across all categories",
-                    format_args!("{category}:{}", name.as_str()),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -709,15 +763,40 @@ impl BaseExtensionRegistryProjectionV2 {
         logical_units: &[RegisteredLogicalUnitDescriptorV2],
         logical_axes: &[RegisteredLogicalExtentAxisDescriptorV2],
     ) -> Result<Self, ConstructionErrorV2> {
-        let reconstructed = Self::try_new(limits, artifact_roles, logical_units, logical_axes)?;
-        if reconstructed.limits_root != self.limits_root {
-            return Err(refusal(
+        let limits_root = limits.semantic_root();
+        if limits_root != self.limits_root {
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "extension.registry.limits_root",
                 "the exact admitted Runner-limit semantic root",
-                "a different limits root",
+                ConstructionObservedDataClassV2::CapabilityOrResource,
             ));
         }
+        // Exact-set reconstruction owns missing/extra classification. Perform
+        // the complete permutation-insensitive category checks before
+        // cross-category referential validation so, for example, an axis that
+        // still names an omitted or substituted registered unit cannot turn a
+        // precise Missing or Incompatible result into the lower-level
+        // UnknownCode used by first-time construction.
+        require_exact_category(
+            "extension.registry.artifact_roles",
+            self.artifact_roles.len(),
+            artifact_roles.len(),
+            exact_permutation(self.artifact_roles.as_ref(), artifact_roles),
+        )?;
+        require_exact_category(
+            "extension.registry.logical_units",
+            self.logical_units.len(),
+            logical_units.len(),
+            exact_permutation(self.logical_units.as_ref(), logical_units),
+        )?;
+        require_exact_category(
+            "extension.registry.logical_axes",
+            self.logical_axes.len(),
+            logical_axes.len(),
+            exact_permutation(self.logical_axes.as_ref(), logical_axes),
+        )?;
+        let reconstructed = Self::try_new(limits, artifact_roles, logical_units, logical_axes)?;
         require_exact_category(
             "extension.registry.artifact_roles",
             self.artifact_roles.len(),
@@ -737,11 +816,11 @@ impl BaseExtensionRegistryProjectionV2 {
             self.logical_axes.as_ref() == reconstructed.logical_axes.as_ref(),
         )?;
         if reconstructed != *self {
-            return Err(refusal(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "extension.registry.exact_set",
                 "the exact canonical descriptor set and semantic root",
-                reconstructed.root.to_hex(),
+                ConstructionObservedDataClassV2::CapabilityOrResource,
             ));
         }
         Ok(reconstructed)
@@ -868,11 +947,7 @@ impl BaseExtensionRegistryProjectionV2 {
                     ConstructionErrorKindV2::Incompatible,
                     "logical_extent.axis_unit",
                     "a unit explicitly admitted by the registered axis",
-                    format_args!(
-                        "{}:{}",
-                        format_logical_axis(axis),
-                        format_logical_unit(unit)
-                    ),
+                    logical_axis_unit_observation(axis, unit),
                 )
             })
         } else {
@@ -889,11 +964,7 @@ impl BaseExtensionRegistryProjectionV2 {
                     ConstructionErrorKindV2::Incompatible,
                     "logical_extent.axis_unit",
                     "a unit admitted by the selected base axis",
-                    format_args!(
-                        "{}:{}",
-                        format_logical_axis(axis),
-                        format_logical_unit(unit)
-                    ),
+                    logical_axis_unit_observation(axis, unit),
                 )
             })
         }
@@ -911,7 +982,7 @@ fn require_exact_category(
             ConstructionErrorKindV2::Missing,
             field,
             "the exact category row set",
-            format_args!("{observed_count} of {expected_count}"),
+            count_pair_observation(observed_count, expected_count),
         ));
     }
     if observed_count > expected_count {
@@ -919,7 +990,7 @@ fn require_exact_category(
             ConstructionErrorKindV2::Unexpected,
             field,
             "no row beyond the exact category row set",
-            format_args!("{observed_count} for {expected_count}"),
+            count_pair_observation(observed_count, expected_count),
         ));
     }
     if !exact_rows_match {
@@ -931,6 +1002,10 @@ fn require_exact_category(
         ));
     }
     Ok(())
+}
+
+fn exact_permutation<T: PartialEq>(expected: &[T], observed: &[T]) -> bool {
+    expected.len() == observed.len() && expected.iter().all(|row| observed.contains(row))
 }
 
 /// Return the exact normalized scale ratio between dimension-compatible
@@ -947,7 +1022,7 @@ pub fn normalized_unit_scale_ratio_v2(
             ConstructionErrorKindV2::Incompatible,
             "unit_conversion.dimensions",
             "identical seven-axis SI exponents",
-            "dimension mismatch",
+            ConstructionObservedV2::closed(&ExtensionConstructionObservationV2::DimensionMismatch),
         ));
     }
     checked_positive_ratio(source.scale(), target.scale())
@@ -1032,7 +1107,7 @@ fn checked_scale_u128(
             ConstructionErrorKindV2::Incompatible,
             "logical_extent.conversion",
             "an exact integral u128 target extent",
-            format_args!("remaining denominator {denominator}"),
+            denominator,
         ));
     }
     checked_product(&numerators, "logical_extent.conversion.value")
@@ -1057,12 +1132,12 @@ fn checked_positive_ratio(
             numerator,
         )
     })?;
-    RationalV2::from_canonical_parts(numerator, denominator).map_err(|error| {
-        refusal(
+    RationalV2::from_canonical_parts(numerator, denominator).map_err(|_| {
+        ConstructionErrorV2::new(
             ConstructionErrorKindV2::Incompatible,
             "unit_conversion.ratio",
             "one canonical exact rational",
-            format_args!("{error:?}"),
+            ConstructionObservedV2::signed_unsigned_pair(numerator, denominator),
         )
     })
 }
@@ -1081,12 +1156,12 @@ fn checked_rational_product(
     let magnitude = checked_product(&numerators, "unit_conversion.value_numerator")?;
     let denominator = checked_product(&denominators, "unit_conversion.value_denominator")?;
     let signed = signed_from_magnitude_checked(negative, magnitude)?;
-    RationalV2::from_canonical_parts(signed, denominator).map_err(|error| {
-        refusal(
+    RationalV2::from_canonical_parts(signed, denominator).map_err(|_| {
+        ConstructionErrorV2::new(
             ConstructionErrorKindV2::Incompatible,
             "unit_conversion.value",
             "one canonical exact rational",
-            format_args!("{error:?}"),
+            ConstructionObservedV2::signed_unsigned_pair(signed, denominator),
         )
     })
 }
@@ -1123,7 +1198,7 @@ fn checked_product(factors: &[u128], field: &'static str) -> Result<u128, Constr
                 ConstructionErrorKindV2::ArithmeticOverflow,
                 field,
                 "a product representable as u128",
-                "u128 multiplication overflow",
+                ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Overflow),
             )
         })
     })
@@ -1231,7 +1306,7 @@ fn require_registered_variant(
             ConstructionErrorKindV2::Incompatible,
             field,
             expected_variant,
-            "fixed base variant",
+            ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
         ));
     };
     NonZeroU16::new(id).ok_or_else(|| {
@@ -1249,11 +1324,11 @@ fn require_globally_namespaced(
     field: &'static str,
 ) -> Result<StableTokenV2, ConstructionErrorV2> {
     if name.as_str().split('.').count() < 3 {
-        return Err(refusal(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             field,
             "a globally namespaced stable token with at least three dot-separated segments",
-            name.as_str(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     Ok(name)
@@ -1264,12 +1339,17 @@ fn require_count_cap(
     maximum: u32,
     field: &'static str,
 ) -> Result<(), ConstructionErrorV2> {
-    if u64::try_from(observed).unwrap_or(u64::MAX) > u64::from(maximum) {
+    let Ok(maximum) = usize::try_from(maximum) else {
+        // If the u32 cap does not fit usize, no collection representable on
+        // this target can exceed it.
+        return Ok(());
+    };
+    if observed > maximum {
         return Err(refusal(
             ConstructionErrorKindV2::TooLarge,
             field,
             "a collection within its semantically named RunnerLimitsV2 cap",
-            format_args!("{observed}>{maximum}"),
+            count_pair_observation(observed, maximum),
         ));
     }
     Ok(())
@@ -1319,20 +1399,6 @@ fn lookup_by_id<'a, T>(
         })
 }
 
-fn format_logical_unit(value: LogicalUnitV2) -> String {
-    match value.registered_id() {
-        Some(id) => format!("registered-unit:{id}"),
-        None => value.name().to_owned(),
-    }
-}
-
-fn format_logical_axis(value: LogicalExtentAxisV2) -> String {
-    match value.registered_id() {
-        Some(id) => format!("registered-axis:{id}"),
-        None => value.name().to_owned(),
-    }
-}
-
 fn rational_one() -> RationalV2 {
     RationalV2::from_canonical_parts(1, 1).expect("1/1 is canonical")
 }
@@ -1346,11 +1412,30 @@ fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
     left
 }
 
+fn logical_axis_unit_observation(
+    axis: LogicalExtentAxisV2,
+    unit: LogicalUnitV2,
+) -> ConstructionObservedV2 {
+    ConstructionObservedV2::unsigned_quad(
+        u64::from(axis.tag()),
+        u64::from(axis.registered_id().unwrap_or(0)),
+        u64::from(unit.tag()),
+        u64::from(unit.registered_id().unwrap_or(0)),
+    )
+}
+
+fn count_pair_observation(observed: usize, expected_or_maximum: usize) -> ConstructionObservedV2 {
+    ConstructionObservedV2::unsigned_pair(
+        u64::try_from(observed).expect("Runner collection counts fit u64"),
+        u64::try_from(expected_or_maximum).expect("Runner collection limits fit u64"),
+    )
+}
+
 fn refusal(
     kind: ConstructionErrorKindV2,
     field: &'static str,
     expected: &'static str,
-    observed: impl core::fmt::Display,
+    observed: impl Into<ConstructionObservedV2>,
 ) -> ConstructionErrorV2 {
     ConstructionErrorV2::new(kind, field, expected, observed)
 }
@@ -1816,6 +1901,48 @@ mod tests {
             assert_eq!(error.kind(), expected_kind);
             assert_eq!(error.field(), expected_field);
         }
+
+        let mutated_roles = [roles[0].clone(), role(8, "eight", 10)];
+        let error = first
+            .reconstruct_exact(&limits, &mutated_roles, &units, &axes)
+            .expect_err("same-count registered-role substitution");
+        assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+        assert_eq!(error.field(), "extension.registry.artifact_roles");
+
+        let mutated_units = [units[0].clone(), unit(8, "eight", 10)];
+        let error = first
+            .reconstruct_exact(&limits, &roles, &mutated_units, &axes)
+            .expect_err("same-count registered-unit substitution");
+        assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+        assert_eq!(error.field(), "extension.registry.logical_units");
+
+        let substituted_unit_value = LogicalUnitV2::from_tag(16, Some(8)).unwrap();
+        let mutated_axes = [
+            axes[0].clone(),
+            axis(
+                7,
+                "seven",
+                6,
+                substituted_unit_value,
+                &[scale(substituted_unit_value, 1, 1)],
+            ),
+        ];
+        let error = first
+            .reconstruct_exact(&limits, &roles, &units, &mutated_axes)
+            .expect_err("same-count unresolved axis-unit substitution");
+        assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+        assert_eq!(error.field(), "extension.registry.logical_axes");
+
+        let error = first
+            .reconstruct_exact(
+                &RunnerLimitsV2::base(RunProfileV2::Full),
+                &roles,
+                &units,
+                &axes,
+            )
+            .expect_err("different limits root");
+        assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+        assert_eq!(error.field(), "extension.registry.limits_root");
     }
 
     #[test]

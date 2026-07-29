@@ -5,7 +5,10 @@
 //! admission. Unknown tags are refused rather than preserved or guessed.
 
 use crate::canonical::CanonicalFrameV1;
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionObservedDataClassV2, ConstructionObservedV2,
+};
 use core::fmt;
 use core::num::NonZeroU16;
 use fs_blake3::ContentHash;
@@ -597,6 +600,12 @@ impl DecisionDetailNamespaceDescriptorV1 {
     }
 }
 
+impl ConstructionClosedSemanticV2 for DecisionDetailNamespaceDescriptorV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.stable_name
+    }
+}
+
 /// Reserved base-vocabulary namespace descriptor.
 pub const BASE_DECISION_DETAIL_NAMESPACE_V2: DecisionDetailNamespaceDescriptorV1 =
     DecisionDetailNamespaceDescriptorV1::new(
@@ -771,7 +780,7 @@ impl DecisionDetailNamespaceRegistryV2 {
                     ConstructionErrorKindV2::Duplicate,
                     "decision_detail_namespace_registry.stable_name",
                     "unique stable namespace names",
-                    entry.stable_name,
+                    ConstructionObservedV2::closed(entry),
                 ));
             }
             validate_registry_token(
@@ -830,7 +839,9 @@ fn validate_registry_token(field: &'static str, value: &str) -> Result<(), Const
                 ConstructionErrorKindV2::Incompatible,
                 field,
                 "lowercase alphanumeric segments separated by dot, underscore, or hyphen",
-                value,
+                ConstructionObservedV2::redacted(
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                ),
             ));
         }
     }
@@ -839,7 +850,7 @@ fn validate_registry_token(field: &'static str, value: &str) -> Result<(), Const
             ConstructionErrorKindV2::Incompatible,
             field,
             "a token ending in an alphanumeric byte",
-            value,
+            ConstructionObservedV2::redacted(ConstructionObservedDataClassV2::CallerControlledText),
         ));
     }
     Ok(())
@@ -1162,6 +1173,30 @@ registered_payload_catalog! {
         @ RegisteredAxis = 10 => "registered-axis",
     }
 }
+
+macro_rules! impl_construction_closed_catalog_name {
+    ($($catalog:ty),+ $(,)?) => {
+        $(
+            impl ConstructionClosedSemanticV2 for $catalog {
+                fn construction_stable_name(&self) -> &'static str {
+                    self.name()
+                }
+            }
+        )+
+    };
+}
+
+impl_construction_closed_catalog_name!(
+    RunnerCommandV2,
+    RunProfileV2,
+    ArtifactDispositionV2,
+    PlatformPathProfileV2,
+    PublicationProtocolV2,
+    DestinationAdmissionModeV2,
+    RootCapabilityAccessV2,
+    RootCapabilityRightV2,
+    RootClassV2,
+);
 
 #[cfg(test)]
 mod tests {

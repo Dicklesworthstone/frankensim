@@ -5,7 +5,10 @@ use crate::catalog::{
     DestinationAdmissionModeV2, DigestRoleV2, OverlapPolicyRelationV2, PlatformPathProfileV2,
     RootCapabilityAccessV2, RootCapabilityRightV2, RootClassV2, RunnerCommandV2,
 };
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionErrorKindV2, ConstructionErrorV2, ConstructionFixedObservationV2,
+    ConstructionObservedV2,
+};
 use crate::identity::{DigestValueV2, NoClaimScopeRootV1, RootCapabilityPolicyRootV2};
 use crate::publication::PublicationSelectionV2;
 use std::collections::BTreeSet;
@@ -86,7 +89,7 @@ impl RootPolicyRegistryProjectionV2 {
                     ConstructionErrorKindV2::ArithmeticOverflow,
                     "root_policy_registry.registrations",
                     "an aggregate registration count representable as usize",
-                    "count overflow",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::CountOverflow),
                 )
             })?;
         if aggregate_count > ROOT_POLICY_REGISTRATIONS_MAX_V2 {
@@ -197,7 +200,7 @@ impl RootPolicyRegistryProjectionV2 {
 /// credentials, prefixes, generations, and acquisition attempts without
 /// depending on any downstream backend type:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::capability::RootCapabilityPolicyV2;
 /// use fs_evidence_runner::catalog::{
 ///     DigestRoleV2, PlatformPathProfileV2, RootCapabilityAccessV2, RootClassV2,
@@ -236,7 +239,7 @@ impl RootPolicyRegistryProjectionV2 {
 ///
 /// Fields and the semantic-root constructor remain private:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::capability::RootCapabilityPolicyV2;
 ///
 /// fn try_to_replace_root(policy: &mut RootCapabilityPolicyV2) {
@@ -279,7 +282,7 @@ impl RootCapabilityPolicyV2 {
                     ConstructionErrorKindV2::Incompatible,
                     "root_capability_policy.root_class_access",
                     "input/read-only, output/durable, or registered Other",
-                    format_args!("{}/{}", root_class.name(), access.name()),
+                    ConstructionObservedV2::closed_pair(&root_class, &access),
                 ));
             }
         }
@@ -298,7 +301,7 @@ impl RootCapabilityPolicyV2 {
                     ConstructionErrorKindV2::Duplicate,
                     "root_capability_policy.rights",
                     "unique rights before canonical sorting",
-                    right.name(),
+                    ConstructionObservedV2::closed(right),
                 ));
             }
         }
@@ -327,7 +330,7 @@ impl RootCapabilityPolicyV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "root_capability_policy.rights",
                 "the exact rights of at least one legal profile/access/mode cell",
-                render_rights(&rights),
+                ConstructionObservedV2::closed_sequence(rights.iter()),
             ));
         }
 
@@ -451,7 +454,7 @@ pub fn validate_policy_against_selection_v2(
             ConstructionErrorKindV2::Incompatible,
             "root_capability_policy.access",
             "DurableOutput for a publication selection",
-            policy.access.name(),
+            ConstructionObservedV2::closed(&policy.access),
         ));
     }
     if policy.path_profile != selection.path_profile() {
@@ -459,7 +462,7 @@ pub fn validate_policy_against_selection_v2(
             ConstructionErrorKindV2::Incompatible,
             "root_capability_policy.path_profile",
             "the publication selection path profile",
-            policy.path_profile.name(),
+            ConstructionObservedV2::closed(&policy.path_profile),
         ));
     }
     let expected = expected_rights(
@@ -472,7 +475,7 @@ pub fn validate_policy_against_selection_v2(
             ConstructionErrorKindV2::Incompatible,
             "root_capability_policy.rights",
             "the exact least-privilege output cell",
-            render_rights(&policy.rights),
+            ConstructionObservedV2::closed_sequence(policy.rights.iter()),
         ));
     }
     Ok(())
@@ -511,7 +514,7 @@ impl NarrowedPolicyViewV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "root_capability_policy.access",
                 "ReadOnlyInput",
-                policy.access.name(),
+                ConstructionObservedV2::closed(&policy.access),
             ));
         }
         let expected = expected_rights(
@@ -524,7 +527,7 @@ impl NarrowedPolicyViewV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "root_capability_policy.rights",
                 "the exact least-privilege input cell",
-                render_rights(&policy.rights),
+                ConstructionObservedV2::closed_sequence(policy.rights.iter()),
             ));
         }
         Ok(Self {
@@ -602,7 +605,7 @@ impl RootCapabilityPolicySetV2 {
                     ConstructionErrorKindV2::Duplicate,
                     "root_capability_policy_set.root_class",
                     "one policy per exact root class",
-                    format_args!("{}:{:?}", key.0, key.1),
+                    ConstructionObservedV2::tag_and_optional_id(key.0, Some(key.1)),
                 ));
             }
         }
@@ -632,7 +635,9 @@ impl RootCapabilityPolicySetV2 {
                         ConstructionErrorKindV2::Incompatible,
                         "root_capability_policy_set.replay_access",
                         "one ReadOnlyInput and one DurableOutput",
-                        render_accesses(&policies),
+                        ConstructionObservedV2::closed_sequence(
+                            policies.iter().map(|policy| &policy.access),
+                        ),
                     ));
                 };
                 if input.overlap_policy_id != output.overlap_policy_id {
@@ -640,7 +645,10 @@ impl RootCapabilityPolicySetV2 {
                         ConstructionErrorKindV2::Incompatible,
                         "root_capability_policy_set.overlap_policy_id",
                         "one shared registered overlap-policy ID",
-                        format_args!("{}/{}", input.overlap_policy_id, output.overlap_policy_id),
+                        ConstructionObservedV2::unsigned_pair(
+                            u64::from(input.overlap_policy_id),
+                            u64::from(output.overlap_policy_id),
+                        ),
                     ));
                 }
                 if registry.overlap_relation(input.overlap_policy_id)
@@ -859,22 +867,6 @@ fn require_nonzero(field: &'static str, value: u16) -> Result<(), ConstructionEr
     Ok(())
 }
 
-fn render_rights(rights: &[RootCapabilityRightV2]) -> String {
-    rights
-        .iter()
-        .map(|right| right.name())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn render_accesses(policies: &[RootCapabilityPolicyV2]) -> String {
-    policies
-        .iter()
-        .map(|policy| policy.access.name())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 fn cardinality_error(
     command: RunnerCommandV2,
     expected: usize,
@@ -889,7 +881,7 @@ fn cardinality_error(
             2 => "exactly one ReadOnlyInput and one DurableOutput policy",
             _ => "the frozen command cardinality",
         },
-        format_args!("{}/{}", command.name(), observed),
+        ConstructionObservedV2::closed_and_usize(&command, observed),
     )
 }
 

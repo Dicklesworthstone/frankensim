@@ -3,6 +3,79 @@
 use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
 use fs_blake3::{ContentHash, hash_domain};
 
+/// Canonical field sink shared by the count-only preflight and byte encoder.
+///
+/// Callers that need a complete-size preflight should express their field
+/// sequence once and pass it to [`CanonicalFrameV1::preflighted`]. The closure
+/// must be a pure description of the frame: it is invoked first against a
+/// nonallocating [`CanonicalFrameSizeV1`] and then against the byte encoder.
+pub(crate) trait CanonicalFrameSinkV1 {
+    fn push_u8(&mut self, field: &'static str, value: u8) -> Result<(), ConstructionErrorV2>;
+
+    fn push_u16(&mut self, field: &'static str, value: u16) -> Result<(), ConstructionErrorV2>;
+
+    fn push_u32(&mut self, field: &'static str, value: u32) -> Result<(), ConstructionErrorV2>;
+
+    fn push_bytes(&mut self, field: &'static str, value: &[u8]) -> Result<(), ConstructionErrorV2>;
+
+    fn push_fixed_bytes_32(
+        &mut self,
+        field: &'static str,
+        value: &[u8],
+    ) -> Result<(), ConstructionErrorV2>;
+
+    fn push_str(&mut self, field: &'static str, value: &str) -> Result<(), ConstructionErrorV2>;
+
+    fn push_presence(
+        &mut self,
+        field: &'static str,
+        present: bool,
+    ) -> Result<(), ConstructionErrorV2>;
+}
+
+/// Count-only canonical frame sink.
+///
+/// This type retains only the checked encoded length and the inclusive frame
+/// bound. It does not retain field values or allocate a caller-sized buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CanonicalFrameSizeV1 {
+    encoded_len: usize,
+    max_bytes: usize,
+}
+
+impl CanonicalFrameSizeV1 {
+    pub(crate) fn new(magic: &'static [u8], max_bytes: usize) -> Result<Self, ConstructionErrorV2> {
+        if magic.len() > max_bytes {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::TooLarge,
+                "canonical.magic",
+                "magic fits the frame bound",
+                magic.len(),
+            ));
+        }
+        Ok(Self {
+            encoded_len: magic.len(),
+            max_bytes,
+        })
+    }
+
+    /// Exact encoded length accumulated so far, including the magic.
+    #[must_use]
+    pub(crate) const fn exact_len(self) -> usize {
+        self.encoded_len
+    }
+
+    fn extend(
+        &mut self,
+        field: &'static str,
+        additional: usize,
+    ) -> Result<(), ConstructionErrorV2> {
+        self.encoded_len =
+            checked_canonical_frame_length_v1(field, self.encoded_len, additional, self.max_bytes)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CanonicalFrameV1 {
     bytes: Vec<u8>,
@@ -23,6 +96,61 @@ impl CanonicalFrameV1 {
             bytes: magic.to_vec(),
             max_bytes,
         })
+    }
+
+    /// Preflight and encode one canonical frame from a single field sequence.
+    ///
+    /// The first closure invocation uses a count-only sink. Only after that
+    /// pass succeeds is an exact-capacity byte buffer allocated. The second
+    /// invocation is bounded by the preflighted length, and the final equality
+    /// check refuses a shorter second pass.
+    pub(crate) fn preflighted<F>(
+        magic: &'static [u8],
+        max_bytes: usize,
+        encode_fields: F,
+    ) -> Result<Self, ConstructionErrorV2>
+    where
+        F: Fn(&mut dyn CanonicalFrameSinkV1) -> Result<(), ConstructionErrorV2>,
+    {
+        let exact_len = Self::preflight_length(magic, max_bytes, &encode_fields)?;
+
+        let mut bytes = Vec::with_capacity(exact_len);
+        bytes.extend_from_slice(magic);
+        let mut frame = Self {
+            bytes,
+            // A divergent larger second pass must refuse before Vec can grow
+            // beyond the complete size established by the first pass.
+            max_bytes: exact_len,
+        };
+        encode_fields(&mut frame)?;
+        if frame.bytes.len() != exact_len {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "canonical.preflight",
+                "encoded length exactly matches the size preflight",
+                frame.bytes.len(),
+            ));
+        }
+        Ok(frame)
+    }
+
+    /// Count one complete canonical frame without allocating its byte buffer.
+    ///
+    /// Composite constructors use this before any caller-cardinality-sized
+    /// validation index. The later [`Self::preflighted`] call repeats the
+    /// count from the same field encoder immediately before materialization,
+    /// so semantic validation cannot make a stale length authoritative.
+    pub(crate) fn preflight_length<F>(
+        magic: &'static [u8],
+        max_bytes: usize,
+        encode_fields: &F,
+    ) -> Result<usize, ConstructionErrorV2>
+    where
+        F: Fn(&mut dyn CanonicalFrameSinkV1) -> Result<(), ConstructionErrorV2> + ?Sized,
+    {
+        let mut size = CanonicalFrameSizeV1::new(magic, max_bytes)?;
+        encode_fields(&mut size)?;
+        Ok(size.exact_len())
     }
 
     pub(crate) fn push_u8(
@@ -121,13 +249,29 @@ impl CanonicalFrameV1 {
                     value.len(),
                 )
             })?;
-        checked_frame_length(field, self.bytes.len(), additional, self.max_bytes)?;
+        checked_canonical_frame_length_v1(field, self.bytes.len(), additional, self.max_bytes)?;
 
         // Capacity was checked for the complete field before either component
         // is appended, so a refusal cannot leave a partial length prefix.
         self.bytes.extend_from_slice(&length.to_be_bytes());
         self.bytes.extend_from_slice(value);
         Ok(())
+    }
+
+    pub(crate) fn push_fixed_bytes_32(
+        &mut self,
+        field: &'static str,
+        value: &[u8],
+    ) -> Result<(), ConstructionErrorV2> {
+        if value.len() != 32 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                field,
+                "exactly 32 unprefixed bytes",
+                value.len(),
+            ));
+        }
+        self.extend(field, value)
     }
 
     pub(crate) fn push_str(
@@ -150,14 +294,118 @@ impl CanonicalFrameV1 {
         &self.bytes
     }
 
+    /// Transfer the exactly preflighted canonical bytes without copying them.
+    ///
+    /// Component constructors call [`Self::root`] before this transfer when
+    /// they also retain a content identity. Consuming the frame here preserves
+    /// the one-allocation materialization contract of [`Self::preflighted`].
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     pub(crate) fn root(&self, domain: &'static str) -> ContentHash {
         hash_domain(domain, &self.bytes)
     }
 
     fn extend(&mut self, field: &'static str, value: &[u8]) -> Result<(), ConstructionErrorV2> {
-        checked_frame_length(field, self.bytes.len(), value.len(), self.max_bytes)?;
+        checked_canonical_frame_length_v1(field, self.bytes.len(), value.len(), self.max_bytes)?;
         self.bytes.extend_from_slice(value);
         Ok(())
+    }
+}
+
+impl CanonicalFrameSinkV1 for CanonicalFrameV1 {
+    fn push_u8(&mut self, field: &'static str, value: u8) -> Result<(), ConstructionErrorV2> {
+        Self::push_u8(self, field, value)
+    }
+
+    fn push_u16(&mut self, field: &'static str, value: u16) -> Result<(), ConstructionErrorV2> {
+        Self::push_u16(self, field, value)
+    }
+
+    fn push_u32(&mut self, field: &'static str, value: u32) -> Result<(), ConstructionErrorV2> {
+        Self::push_u32(self, field, value)
+    }
+
+    fn push_bytes(&mut self, field: &'static str, value: &[u8]) -> Result<(), ConstructionErrorV2> {
+        Self::push_bytes(self, field, value)
+    }
+
+    fn push_fixed_bytes_32(
+        &mut self,
+        field: &'static str,
+        value: &[u8],
+    ) -> Result<(), ConstructionErrorV2> {
+        Self::push_fixed_bytes_32(self, field, value)
+    }
+
+    fn push_str(&mut self, field: &'static str, value: &str) -> Result<(), ConstructionErrorV2> {
+        Self::push_str(self, field, value)
+    }
+
+    fn push_presence(
+        &mut self,
+        field: &'static str,
+        present: bool,
+    ) -> Result<(), ConstructionErrorV2> {
+        Self::push_presence(self, field, present)
+    }
+}
+
+impl CanonicalFrameSinkV1 for CanonicalFrameSizeV1 {
+    fn push_u8(&mut self, field: &'static str, _value: u8) -> Result<(), ConstructionErrorV2> {
+        self.extend(field, core::mem::size_of::<u8>())
+    }
+
+    fn push_u16(&mut self, field: &'static str, _value: u16) -> Result<(), ConstructionErrorV2> {
+        self.extend(field, core::mem::size_of::<u16>())
+    }
+
+    fn push_u32(&mut self, field: &'static str, _value: u32) -> Result<(), ConstructionErrorV2> {
+        self.extend(field, core::mem::size_of::<u32>())
+    }
+
+    fn push_bytes(&mut self, field: &'static str, value: &[u8]) -> Result<(), ConstructionErrorV2> {
+        let _length = checked_u32_length(field, value.len())?;
+        let additional = core::mem::size_of::<u32>()
+            .checked_add(value.len())
+            .ok_or_else(|| {
+                ConstructionErrorV2::new(
+                    ConstructionErrorKindV2::ArithmeticOverflow,
+                    field,
+                    "checked length prefix plus payload length",
+                    value.len(),
+                )
+            })?;
+        self.extend(field, additional)
+    }
+
+    fn push_fixed_bytes_32(
+        &mut self,
+        field: &'static str,
+        value: &[u8],
+    ) -> Result<(), ConstructionErrorV2> {
+        if value.len() != 32 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                field,
+                "exactly 32 unprefixed bytes",
+                value.len(),
+            ));
+        }
+        self.extend(field, 32)
+    }
+
+    fn push_str(&mut self, field: &'static str, value: &str) -> Result<(), ConstructionErrorV2> {
+        self.push_bytes(field, value.as_bytes())
+    }
+
+    fn push_presence(
+        &mut self,
+        field: &'static str,
+        _present: bool,
+    ) -> Result<(), ConstructionErrorV2> {
+        self.extend(field, core::mem::size_of::<u8>())
     }
 }
 
@@ -172,7 +420,11 @@ fn checked_u32_length(field: &'static str, length: usize) -> Result<u32, Constru
     })
 }
 
-fn checked_frame_length(
+/// Checked encoded-length seam used by count-only and byte-emitting frames.
+///
+/// Keeping this callable within the crate lets bounded declaration tests
+/// exercise arithmetic overflow without constructing an impossible allocation.
+pub(crate) fn checked_canonical_frame_length_v1(
     field: &'static str,
     current: usize,
     additional: usize,
@@ -199,7 +451,12 @@ fn checked_frame_length(
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonicalFrameV1, checked_frame_length, checked_u32_length};
+    use std::cell::Cell;
+
+    use super::{
+        CanonicalFrameSinkV1, CanonicalFrameSizeV1, CanonicalFrameV1,
+        checked_canonical_frame_length_v1, checked_u32_length,
+    };
     use crate::construction::ConstructionErrorKindV2;
 
     #[test]
@@ -281,11 +538,93 @@ mod tests {
             assert_eq!(error.expected(), "length representable as u32");
         }
 
-        let error =
-            checked_frame_length("frame", usize::MAX, 1, usize::MAX).expect_err("usize overflow");
+        let error = checked_canonical_frame_length_v1("frame", usize::MAX, 1, usize::MAX)
+            .expect_err("usize overflow");
         assert_eq!(error.kind(), ConstructionErrorKindV2::ArithmeticOverflow);
         assert_eq!(error.field(), "frame");
         assert_eq!(error.expected(), "checked frame length");
+    }
+
+    #[test]
+    fn count_only_preflight_matches_the_exact_encoded_length() {
+        let mut size = CanonicalFrameSizeV1::new(b"FRAME", 128).expect("size preflight");
+        size.push_u16("code", 7).expect("u16");
+        size.push_u32("count", 3).expect("u32");
+        size.push_str("name", "alpha").expect("string");
+        size.push_presence("optional", true).expect("presence");
+        size.push_fixed_bytes_32("root", &[0xA5; 32])
+            .expect("fixed root");
+
+        let frame = CanonicalFrameV1::preflighted(b"FRAME", 128, |sink| {
+            sink.push_u16("code", 7)?;
+            sink.push_u32("count", 3)?;
+            sink.push_str("name", "alpha")?;
+            sink.push_presence("optional", true)?;
+            sink.push_fixed_bytes_32("root", &[0xA5; 32])
+        })
+        .expect("preflighted frame");
+
+        assert_eq!(size.exact_len(), frame.as_bytes().len());
+        assert_eq!(size.exact_len(), 5 + 2 + 4 + 4 + 5 + 1 + 32);
+    }
+
+    #[test]
+    fn preflight_refusal_happens_before_the_encoding_pass() {
+        let invocations = Cell::new(0_u8);
+        let error = CanonicalFrameV1::preflighted(b"M", 7, |sink| {
+            invocations.set(invocations.get() + 1);
+            sink.push_bytes("payload", &[1, 2, 3])
+        })
+        .expect_err("complete size exceeds the inclusive bound");
+
+        assert_eq!(error.kind(), ConstructionErrorKindV2::TooLarge);
+        assert_eq!(error.field(), "payload");
+        assert_eq!(invocations.get(), 1);
+    }
+
+    #[test]
+    fn preflighted_frame_refuses_a_divergent_second_pass() {
+        let invocations = Cell::new(0_u8);
+        let error = CanonicalFrameV1::preflighted(b"M", 32, |sink| {
+            let invocation = invocations.get();
+            invocations.set(invocation + 1);
+            if invocation == 0 {
+                sink.push_u16("value", 7)
+            } else {
+                sink.push_u8("value", 7)
+            }
+        })
+        .expect_err("second pass must have the preflighted exact length");
+
+        assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+        assert_eq!(error.field(), "canonical.preflight");
+        assert_eq!(
+            error.expected(),
+            "encoded length exactly matches the size preflight"
+        );
+        assert_eq!(error.observed(), "2");
+        assert_eq!(invocations.get(), 2);
+    }
+
+    #[test]
+    fn preflighted_frame_refuses_growth_beyond_the_exact_capacity() {
+        let invocations = Cell::new(0_u8);
+        let error = CanonicalFrameV1::preflighted(b"M", 32, |sink| {
+            let invocation = invocations.get();
+            invocations.set(invocation + 1);
+            if invocation == 0 {
+                sink.push_u8("value", 7)
+            } else {
+                sink.push_u16("value", 7)
+            }
+        })
+        .expect_err("second pass cannot grow beyond its preflighted capacity");
+
+        assert_eq!(error.kind(), ConstructionErrorKindV2::TooLarge);
+        assert_eq!(error.field(), "value");
+        assert_eq!(error.expected(), "value fits the canonical frame bound");
+        assert_eq!(error.observed(), "3");
+        assert_eq!(invocations.get(), 2);
     }
 
     #[test]

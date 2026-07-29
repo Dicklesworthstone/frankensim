@@ -14,7 +14,8 @@
 //! - [`limits`] and [`budget`] for bounded profile limits and registry-aware
 //!   budget admission;
 //! - [`coverage`] for source-authoritative coverage and leaf-close manifests;
-//! - [`projection`] for independent E2E/source-closure projections; and
+//! - [`projection`] for independent E2E/source-closure projections;
+//! - [`schema_impact`] for source-frozen canonical-frame evolution graphs; and
 //! - [`logging`] for deterministic base-E2E and leaf-close evidence logs.
 //!
 //! These modules expose declaration and pure-validation contracts only. A
@@ -41,6 +42,7 @@ pub mod logging;
 pub mod path;
 pub mod projection;
 pub mod publication;
+pub mod schema_impact;
 pub mod state;
 pub mod value;
 
@@ -66,7 +68,9 @@ pub use command::{
     CommandSelectorExpectationV2, CommandSelectorFieldV2, CommandSelectorPresenceV2,
     CommandSelectorUsageKindV2, CommandSelectorUsageV2, validate_command_selector_presence_v2,
 };
-pub use construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+pub use construction::{
+    ConstructionErrorKindV2, ConstructionErrorV2, ConstructionObservedDataClassV2,
+};
 pub use coverage::{
     BaseCoverageCaseDeclarationV1, BaseCoverageCheckedReportV1, BaseCoverageExecutableSubsetV1,
     BaseCoverageManifestCaseV1, BaseCoverageManifestClassV1, BaseCoverageManifestV1,
@@ -126,10 +130,35 @@ pub use projection::{
     run_base_e2e_projection_v1,
 };
 pub use publication::{PublicationSelectionV2, PublicationTargetV2, SymbolicCommandResultPlanV2};
+pub use schema_impact::{
+    CanonicalFieldCodeV1, CanonicalFieldLayoutV1, CanonicalFieldNameV1, CanonicalFieldWireKindV1,
+    CanonicalFrameVersionV1, CanonicalNominalRootRoleIdV1, CanonicalRustSchemaNameV1,
+    CanonicalSchemaAuthorityStateV1, CanonicalSchemaAuthoritySurfaceV1, CanonicalSchemaDomainV1,
+    CanonicalSchemaFieldDescriptorV1, CanonicalSchemaFrameBindingV1,
+    CanonicalSchemaFrameDescriptorV1, CanonicalSchemaIdV1, CanonicalSchemaMagicV1,
+    CanonicalSchemaSlotUseV1, CanonicalSchemaVersionSlotDescriptorV1, CanonicalSemanticTypeIdV1,
+    CanonicalSlotIdV1, CanonicalVersionSlotCodeV1, CompatibleSourceSnapshotV1,
+    FrozenBaseNominalRootRegistryFragmentV1, LeafExtensionNominalRootRegistryFragmentV1,
+    LegacyNestedContainerRefV1, NominalRootRegistryIdV1, NominalRootRegistryKindV1,
+    NominalRootRoleRefV1, RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1,
+    RUNNER_V2_BASE_SCHEMA_IMPACT_OWNER_LEAF_ID_V1, RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1,
+    SchemaImpactLeafIdV1, SchemaImpactManifestEntryV1, SchemaImpactManifestRelationV1,
+    SchemaImpactManifestV1, SchemaImpactNoClaimV1, SchemaImpactRowV1,
+    runner_v2_base_schema_impact_manifest_v1,
+};
 pub use state::{
     NotRunBasisErrorV2, NotRunBasisV2, NotRunCauseV2, StateValidationInputV2, validate_state_v2,
 };
 pub use value::{
-    DecimalV2, NumericValueV2, RationalV2, StableTokenV2, TextV2, TypedOptionV1, TypedValueV2,
-    UnitV2,
+    CASE_SEED_DERIVATION_DOMAIN_MAX_ROWS_V1, CASE_SEED_DERIVATION_NO_CLAIM_V1,
+    CaseSeedDerivationDomainRegistryRootV1, CaseSeedDerivationDomainRegistryV1,
+    CaseSeedDerivationDomainRootV1, CaseSeedPolicyRootV2, CaseSeedPolicyV2,
+    CaseSeedProvenanceRootV2, CaseSeedResolutionRootV2, CaseSeedResolutionV2, DecimalV2,
+    FixedManifestSeedBindingV2, InvocationDerivedSeedBindingV2, InvocationSeedSelectionRootV2,
+    InvocationSeedSelectionV2, NoRandomnessSeedBindingV2, NumericValueV2, RationalV2,
+    RegisteredCaseSeedDerivationDomainV1, SEED_CLI_FLAG_V2, SEED_CLI_PREFIX_V2,
+    SEED_MATERIAL_BYTES_V2, SEED_MATERIAL_LOWER_HEX_BYTES_V2, STABLE_CASE_ID_MAX_BYTES_V2,
+    SeedErrorV2, SeedGeneratorVersionV1, SeedInapplicableCodeV1, SeedMaterialRootV2,
+    SeedMaterialV2, SeedMinimizerVersionV1, SeedSchemaDescriptorV1, StableCaseIdentityRootV2,
+    StableCaseIdentityV2, StableTokenV2, TextV2, TypedOptionV1, TypedValueV2, UnitV2,
 };

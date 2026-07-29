@@ -6,7 +6,10 @@
 
 use crate::canonical::CanonicalFrameV1;
 use crate::catalog::DigestRoleV2;
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionFixedObservationV2, ConstructionObservedDataClassV2, ConstructionObservedV2,
+};
 use fs_blake3::ContentHash;
 
 #[allow(
@@ -86,7 +89,7 @@ pub enum IdentityError {
 /// );
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0423
 /// use fs_evidence_runner::identity::DigestDomainV1;
 ///
 /// let forged = DigestDomainV1("org.frankensim.fs-evidence-runner.forged.v1");
@@ -143,7 +146,7 @@ impl DigestDomainV1 {
 /// Even a role- and domain-matching generic digest cannot coerce into a
 /// nominal wrapper:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::catalog::DigestRoleV2;
 /// use fs_evidence_runner::identity::{DigestValueV2, SourceIdentityRootV2};
 ///
@@ -360,6 +363,12 @@ impl PresentedIdentityDescriptorV1 {
     }
 }
 
+impl ConstructionClosedSemanticV2 for PresentedIdentityDescriptorV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.schema_name()
+    }
+}
+
 macro_rules! define_presented_root {
     (
         $(#[$meta:meta])*
@@ -473,7 +482,7 @@ define_presented_root!(
     ///
     /// The generic-digest semantic constructor is not public:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0624
     /// use fs_evidence_runner::catalog::DigestRoleV2;
     /// use fs_evidence_runner::identity::{DigestValueV2, SourceIdentityRootV2};
     ///
@@ -558,7 +567,7 @@ define_presented_root!(
     ///
     /// Lifecycle construction remains with the lifecycle owner:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0624
     /// use fs_evidence_runner::catalog::DigestRoleV2;
     /// use fs_evidence_runner::identity::{DigestValueV2, LifecycleLogRootV2};
     ///
@@ -622,7 +631,7 @@ define_presented_root!(
     ///
     /// Presented bytes cannot invoke the private durability constructor:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0624
     /// use fs_evidence_runner::catalog::DigestRoleV2;
     /// use fs_evidence_runner::identity::{
     ///     DigestValueV2, DurablePublicationIdentityV2,
@@ -674,7 +683,7 @@ define_presented_root!(
     ///
     /// Authority construction remains private to its owning phase:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0624
     /// use fs_evidence_runner::catalog::DigestRoleV2;
     /// use fs_evidence_runner::identity::{AuthorityScopeRootV2, DigestValueV2};
     ///
@@ -1040,6 +1049,12 @@ impl ConstructorOwnerV1 {
     }
 }
 
+impl ConstructionClosedSemanticV2 for ConstructorOwnerV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.name()
+    }
+}
+
 /// One source-defined nominal-wrapper to semantic-constructor-owner handoff.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ConstructorOwnerHandoffEntryV1 {
@@ -1363,7 +1378,7 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Duplicate,
                     "constructor_owner_handoff.descriptor",
                     "one row per nominal schema name",
-                    entry.descriptor.schema_name(),
+                    ConstructionObservedV2::closed(&entry.descriptor),
                 ));
             }
         }
@@ -1378,7 +1393,7 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Missing,
                     "constructor_owner_handoff.descriptor",
                     "the exact frozen schema/domain/role descriptor",
-                    expected.descriptor.schema_name(),
+                    ConstructionObservedV2::closed(&expected.descriptor),
                 ));
             };
             if observed.owner != expected.owner {
@@ -1386,7 +1401,7 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "constructor_owner_handoff.owner",
                     "the exact current or sole downstream constructor owner",
-                    observed.owner.owner_id(),
+                    ConstructionObservedV2::closed(&observed.owner),
                 ));
             }
             canonical.push(expected);
@@ -1414,7 +1429,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                 ConstructionErrorKindV2::OutOfOrder,
                 "constructor_owner_handoff.entries",
                 "the exact frozen 43-row closeout sequence",
-                "the same exact set in a different order",
+                ConstructionObservedV2::fixed(
+                    ConstructionFixedObservationV2::ExactSetDifferentOrder,
+                ),
             ));
         }
         Ok(projection)
@@ -1458,7 +1475,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Duplicate,
                     "constructor_owner_handoff.presented.schema_name",
                     "one row per exact nominal schema name",
-                    "a repeated presented schema name",
+                    ConstructionObservedV2::fixed(
+                        ConstructionFixedObservationV2::RepeatedPresentedSchemaName,
+                    ),
                 ));
             }
         }
@@ -1480,7 +1499,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     },
                     "constructor_owner_handoff.presented.schema_name",
                     expected_descriptor.schema_name(),
-                    "a different or out-of-order schema name",
+                    ConstructionObservedV2::fixed(
+                        ConstructionFixedObservationV2::DifferentOrOutOfOrderSchemaName,
+                    ),
                 ));
             }
             if observed.domain() != expected_descriptor.domain() {
@@ -1488,7 +1509,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "constructor_owner_handoff.presented.domain",
                     expected_descriptor.domain(),
-                    "a different nominal domain",
+                    ConstructionObservedV2::fixed(
+                        ConstructionFixedObservationV2::DifferentNominalDomain,
+                    ),
                 ));
             }
             let observed_role = DigestRoleV2::from_code(observed.role_code()).map_err(|_| {
@@ -1521,7 +1544,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "constructor_owner_handoff.presented.owner_name",
                     expected.owner().name(),
-                    "a stale or substituted owner name",
+                    ConstructionObservedV2::fixed(
+                        ConstructionFixedObservationV2::StaleOrSubstitutedOwnerName,
+                    ),
                 ));
             }
             if observed.owner_id() != expected.owner().owner_id() {
@@ -1529,7 +1554,9 @@ impl ConstructorOwnerHandoffProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "constructor_owner_handoff.presented.owner_id",
                     expected.owner().owner_id(),
-                    "a stale or substituted owner identifier",
+                    ConstructionObservedV2::fixed(
+                        ConstructionFixedObservationV2::StaleOrSubstitutedOwnerIdentifier,
+                    ),
                 ));
             }
         }
@@ -1565,11 +1592,11 @@ impl ConstructorOwnerHandoffProjectionV1 {
             .find(|entry| entry.descriptor.schema_name() == schema_name)
             .map(|entry| entry.owner)
             .ok_or_else(|| {
-                ConstructionErrorV2::new(
+                ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::UnknownCode,
                     "constructor_owner_handoff.schema_name",
                     "one exact frozen nominal schema name",
-                    schema_name,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 )
             })
     }
@@ -1625,7 +1652,7 @@ pub const ROOT_FREE_EVALUATOR_MEMBER_GUARD_DOMAIN_V1: &str =
 ///
 /// Attempting to import the forbidden planning wrappers fails:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0432
 /// use fs_evidence_runner::identity::{
 ///     CaseEvaluationKeyRootV2,
 ///     EvaluationPrecontextRootV2,
@@ -1670,6 +1697,12 @@ impl RootFreeEvaluatorMemberV1 {
             Self::ExpectedMismatchFrame => "ExpectedMismatchFrameV2",
             Self::ExpectedEvaluationErrorFrame => "ExpectedEvaluationErrorFrameV2",
         }
+    }
+}
+
+impl ConstructionClosedSemanticV2 for RootFreeEvaluatorMemberV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.schema_name()
     }
 }
 
@@ -1932,7 +1965,7 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                     ConstructionErrorKindV2::Duplicate,
                     "root_free_guard.member",
                     "one row per exact root-free member",
-                    row.member.schema_name(),
+                    ConstructionObservedV2::closed(&row.member),
                 ));
             }
         }
@@ -1955,15 +1988,15 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "root_free_guard.owner",
                     "EvaluatorAndCaseConformance",
-                    row.owner.owner_id(),
+                    ConstructionObservedV2::closed(&row.owner),
                 ));
             }
             if row.forbidden_root_schema != expected.forbidden_root_schema {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Incompatible,
                     "root_free_guard.forbidden_root_schema",
                     expected.forbidden_root_schema,
-                    &row.forbidden_root_schema,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
             if row.dependency_rank != expected.dependency_rank {
@@ -1980,7 +2013,7 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                         ConstructionErrorKindV2::Incompatible,
                         "root_free_guard.predecessors",
                         "strictly earlier root-free predecessors only",
-                        predecessor.schema_name(),
+                        ConstructionObservedV2::closed(predecessor),
                     ));
                 }
             }
@@ -2000,16 +2033,11 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                     .map(String::as_str)
                     .ne(expected_inputs.iter().copied())
             {
-                let forbidden = row
-                    .allowed_nominal_inputs
-                    .iter()
-                    .find(|input| FORBIDDEN_ROOT_FREE_ACTUAL_INPUTS_V1.contains(&input.as_str()))
-                    .map_or("input-set mutation", String::as_str);
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Incompatible,
                     "root_free_guard.allowed_nominal_inputs",
                     "the exact forward-only nominal input-root sequence",
-                    forbidden,
+                    ConstructionObservedDataClassV2::BulkPayload,
                 ));
             }
             if row.standalone_root_schema.is_some()
@@ -2021,7 +2049,7 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                     ConstructionErrorKindV2::Unexpected,
                     "root_free_guard.standalone_identity_surface",
                     "no root, role, domain, or presented parser",
-                    row.member.schema_name(),
+                    ConstructionObservedV2::closed(&row.member),
                 ));
             }
             if row.generic_digest_allowed || row.wildcard_members_allowed {
@@ -2029,7 +2057,7 @@ impl RootFreeEvaluatorMemberGuardProjectionV1 {
                     ConstructionErrorKindV2::Unexpected,
                     "root_free_guard.widening_surface",
                     "no generic digest conversion or wildcard member",
-                    row.member.schema_name(),
+                    ConstructionObservedV2::closed(&row.member),
                 ));
             }
         }

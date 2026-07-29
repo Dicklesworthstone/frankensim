@@ -32,10 +32,25 @@ use crate::command::{
     CommandIntentV2, CommandSelectionV2, CommandSelectorCardinalityV2, CommandSelectorFieldV2,
     CommandSelectorPresenceV2, validate_command_selector_presence_v2,
 };
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionFixedObservationV2, ConstructionObservedDataClassV2, ConstructionObservedV2,
+};
 use crate::coverage::{
-    BaseCoverageCaseDeclarationV1, BaseCoverageCheckedReportV1, BaseCoverageManifestClassV1,
-    BaseCoverageManifestV1, BaseCoveragePresentedOutcomeV1, BaseCoveragePresentedResultV1,
+    BaseCoverageCaseDeclarationV1, BaseCoverageCheckedReportV1,
+    BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseDeferredEvidenceEnvelopeV1,
+    BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
+    BaseCoverageCloseManifestV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
+    BaseCoverageManifestClassV1, BaseCoverageManifestV1, BaseCoveragePresentedOutcomeV1,
+    BaseCoveragePresentedResultV1, CanonicalSchemaImpactDispositionV1,
+    CompatibleSourceSnapshotRootV1, DeferredReasonV1,
+    RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1, RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1,
+    RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1, RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1,
+    RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1, RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+    RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1, RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+    RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1, RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1,
+    compatible_source_snapshot_root_from_exact_frame_v1,
+    frozen_downstream_close_contribution_budgets_v1,
 };
 use crate::dependency::{
     CURRENT_DIRECT_DEPENDENCY_DECLARATION_DOMAIN_V1, current_direct_dependency_declaration_root_v1,
@@ -69,6 +84,11 @@ use crate::path::{
 use crate::publication::{
     PublicationSelectionV2, PublicationTargetV2, SymbolicCommandResultPlanV2,
 };
+use crate::schema_impact::{
+    RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1, RUNNER_V2_BASE_SCHEMA_IMPACT_OWNER_LEAF_ID_V1,
+    RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1, SchemaImpactManifestRelationV1,
+    SchemaImpactManifestV1, runner_v2_base_schema_impact_manifest_v1,
+};
 use crate::state::{
     NotRunBasisErrorV2, NotRunBasisV2, NotRunCauseV2, PresentedDrainRootKindV2,
     StateValidationErrorV2, StateValidationInputV2, validate_state_v2,
@@ -76,6 +96,47 @@ use crate::state::{
 use crate::value::{OpaqueBytesV2, RationalV2, StableTokenV2, TypedValueV2, ValueError};
 use core::fmt::Write as _;
 use fs_blake3::{ContentHash, hash_domain};
+
+/// Typed witness of the exact existing compiled source-snapshot root.
+///
+/// Only this source-closure module can mint the production witness. Consumers
+/// receive it from [`RunnerV2BaseSourceClosureV1::compatible_snapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompatibleSourceSnapshotV1 {
+    root: CompatibleSourceSnapshotRootV1,
+}
+
+impl CompatibleSourceSnapshotV1 {
+    fn from_exact_frame(frame: &CanonicalFrameV1) -> Result<Self, ConstructionErrorV2> {
+        Ok(Self {
+            root: compatible_source_snapshot_root_from_exact_frame_v1(frame)?,
+        })
+    }
+
+    /// Exact nominal snapshot root.
+    #[must_use]
+    pub const fn root(self) -> CompatibleSourceSnapshotRootV1 {
+        self.root
+    }
+}
+
+/// Crate-private proof that one logical source path is an exact member of the
+/// compatible compiled source closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompatibleSourceMemberV1 {
+    path: LogicalBundlePathV1,
+    snapshot: CompatibleSourceSnapshotV1,
+}
+
+impl CompatibleSourceMemberV1 {
+    pub(crate) const fn path(&self) -> &LogicalBundlePathV1 {
+        &self.path
+    }
+
+    pub(crate) const fn snapshot(&self) -> CompatibleSourceSnapshotV1 {
+        self.snapshot
+    }
+}
 
 /// Overall non-wire projection root domain.
 pub const BASE_E2E_PROJECTION_DOMAIN_V1: &str =
@@ -176,6 +237,62 @@ pub const BASE_SOURCE_CLOSURE_DOMAIN_V1: &str =
 pub const BASE_COVERAGE_INVENTORY_DOMAIN_V1: &str =
     "org.frankensim.fs-evidence-runner.base-coverage-inventory.v1";
 
+/// Domain for one V2 row projected from the source-frozen schema-impact DAG.
+pub const BASE_SCHEMA_IMPACT_PROJECTION_ROW_DOMAIN_V2: &str =
+    "org.frankensim.fs-evidence-runner.base-schema-impact-projection-row.v2";
+/// Domain for the exact V2 projection of the base schema-impact manifest.
+pub const BASE_SCHEMA_IMPACT_PROJECTION_DOMAIN_V2: &str =
+    "org.frankensim.fs-evidence-runner.base-schema-impact-projection.v2";
+/// Domain for the immutable Phase-1 contract payload declaration.
+pub const RUNNER_V2_PHASE_ONE_CONTRACT_PAYLOAD_DOMAIN_V2: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-contract-payload.v2";
+/// Domain for the downstream-owned Phase-1 case-manifest declaration.
+pub const RUNNER_V2_PHASE_ONE_CASE_MANIFEST_CONTRACT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-case-manifest-contract.v1";
+/// Domain for the exact Phase-1 expected-partition declaration.
+pub const RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-expected-partitions.v1";
+/// Domain for the Phase-1 portable target-route declaration.
+pub const RUNNER_V2_PHASE_ONE_TARGET_CONTRACT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-target-contract.v1";
+/// Domain for the Phase-1 feature-set declaration.
+pub const RUNNER_V2_PHASE_ONE_FEATURE_CONTRACT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-feature-contract.v1";
+/// Domain for the Phase-1 build-input declaration.
+pub const RUNNER_V2_PHASE_ONE_BUILD_CONTRACT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-build-contract.v1";
+/// Domain for the Phase-1 toolchain-input declaration.
+pub const RUNNER_V2_PHASE_ONE_TOOLCHAIN_CONTRACT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-toolchain-contract.v1";
+/// Domain for the complete contribution plus separate Deferred envelope join.
+pub const RUNNER_V2_PHASE_ONE_CONTRIBUTION_PROJECTION_DOMAIN_V2: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-contribution-projection.v2";
+
+/// Exact base schema-impact projection row count.
+pub const RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2: usize = 3;
+/// Exact number of source paths represented by the base schema-impact rows.
+pub const RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SOURCE_PATH_COUNT_V2: usize = 1;
+/// Exact number of owned rows in the base schema-impact projection.
+pub const RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_OWNED_ROW_COUNT_V2: usize = 3;
+/// Exact number of consumed rows in the base schema-impact projection.
+pub const RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_CONSUMED_ROW_COUNT_V2: usize = 0;
+
+const RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SCHEMA_IDS_V2: [&str;
+    RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2] = [
+    "canonical-schema-field-descriptor",
+    "canonical-schema-frame-descriptor",
+    "canonical-schema-version-slot-descriptor",
+];
+
+const RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1: [&str; 6] = [
+    "positive",
+    "expected-refusal",
+    "expected-failure",
+    "mutation",
+    "unsupported",
+    "inapplicable",
+];
+
 /// Sole declaration owner of one compiled base source input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -267,7 +384,7 @@ struct EmbeddedSourceFileV1 {
 // This is the exact bytewise-lexicographic source set owned or consumed by the
 // base leaf. `include_bytes!` makes the compiled projection move whenever any
 // source, contract, manifest, or lock input changes.
-const EMBEDDED_SOURCE_FILES_V1: [EmbeddedSourceFileV1; 26] = [
+const EMBEDDED_SOURCE_FILES_V1: [EmbeddedSourceFileV1; 27] = [
     EmbeddedSourceFileV1 {
         path: ".cargo/config.toml",
         bytes: include_bytes!("../../../.cargo/config.toml"),
@@ -453,6 +570,14 @@ const EMBEDDED_SOURCE_FILES_V1: [EmbeddedSourceFileV1; 26] = [
         snapshot_policy: BaseSourceSnapshotPolicyV1::ExactCommonCompiledSnapshot,
     },
     EmbeddedSourceFileV1 {
+        path: "crates/fs-evidence-runner/src/schema_impact.rs",
+        bytes: include_bytes!("schema_impact.rs"),
+        owner: BaseSourceOwnerV1::RunnerV2BaseSchema,
+        source_route: BaseSourceRouteV1::CrateModule,
+        expected_source_identity: "frankensim.fs-evidence-runner.src.schema-impact.v1",
+        snapshot_policy: BaseSourceSnapshotPolicyV1::ExactCommonCompiledSnapshot,
+    },
+    EmbeddedSourceFileV1 {
         path: "crates/fs-evidence-runner/src/state.rs",
         bytes: include_bytes!("state.rs"),
         owner: BaseSourceOwnerV1::RunnerV2BaseSchema,
@@ -542,11 +667,11 @@ impl BaseSourceClosureInputV1 {
     ) -> Result<Self, ConstructionErrorV2> {
         let path = path.into();
         let declaration = source_declaration(&path).ok_or_else(|| {
-            ConstructionErrorV2::new(
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Unexpected,
                 "base_source_closure.path",
                 "a member of the exact embedded source set",
-                &path,
+                ConstructionObservedDataClassV2::CallerControlledText,
             )
         })?;
         let snapshot_root = compiled_source_snapshot_root()?;
@@ -755,7 +880,7 @@ impl BaseSourceClosureEntryV1 {
 /// # Ok::<(), fs_evidence_runner::ConstructionErrorV2>(())
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::projection::RunnerV2BaseSourceClosureV1;
 ///
 /// let mut closure = RunnerV2BaseSourceClosureV1::frozen().unwrap();
@@ -764,7 +889,7 @@ impl BaseSourceClosureEntryV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerV2BaseSourceClosureV1 {
     entries: Box<[BaseSourceClosureEntryV1]>,
-    snapshot_root: ContentHash,
+    compatible_snapshot: CompatibleSourceSnapshotV1,
     dependency_declaration_root: ContentHash,
     root: ContentHash,
 }
@@ -809,11 +934,11 @@ impl RunnerV2BaseSourceClosureV1 {
     ) -> Result<Self, ConstructionErrorV2> {
         let expected_dependency_root = current_direct_dependency_declaration_root_v1();
         if dependency_declaration_root != expected_dependency_root {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_source_closure.dependency_declaration_root",
                 "the exact current declaration-time direct-dependency root",
-                dependency_declaration_root.to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         validate_source_input_set(inputs)?;
@@ -821,7 +946,8 @@ impl RunnerV2BaseSourceClosureV1 {
             .iter()
             .map(|file| file.path)
             .collect::<std::collections::BTreeSet<_>>();
-        let snapshot_root = compiled_source_snapshot_root()?;
+        let compatible_snapshot = compiled_source_snapshot()?;
+        let snapshot_root = compatible_snapshot.root().content_hash();
         for (ordinal, (input, expected)) in inputs
             .iter()
             .zip(EMBEDDED_SOURCE_FILES_V1.iter())
@@ -836,7 +962,7 @@ impl RunnerV2BaseSourceClosureV1 {
         let root = source_closure_root(&entries, snapshot_root)?;
         Ok(Self {
             entries: entries.into_boxed_slice(),
-            snapshot_root,
+            compatible_snapshot,
             dependency_declaration_root,
             root,
         })
@@ -857,7 +983,44 @@ impl RunnerV2BaseSourceClosureV1 {
     /// Common content-derived compile-time snapshot identity.
     #[must_use]
     pub const fn snapshot_root(&self) -> ContentHash {
-        self.snapshot_root
+        self.compatible_snapshot.root().content_hash()
+    }
+
+    /// Nominally typed witness of the exact existing snapshot frame.
+    ///
+    /// This is the same content hash returned by [`Self::snapshot_root`].
+    /// No wrapper frame or digest-of-digest transformation is applied.
+    #[must_use]
+    pub const fn compatible_snapshot(&self) -> CompatibleSourceSnapshotV1 {
+        self.compatible_snapshot
+    }
+
+    /// Resolve one exact embedded source member for crate-owned declaration
+    /// admission.
+    pub(crate) fn compatible_source_member(
+        &self,
+        path: &'static str,
+    ) -> Result<CompatibleSourceMemberV1, ConstructionErrorV2> {
+        if !self.entries.iter().any(|entry| entry.path() == path) {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Missing,
+                "source_closure.compatible_member",
+                "one exact path in the compiled source closure",
+                ConstructionObservedDataClassV2::PhysicalLocator,
+            ));
+        }
+        let path = LogicalBundlePathV1::new(path).map_err(|_| {
+            ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "source_closure.compatible_member",
+                "one valid logical path in the compiled source closure",
+                ConstructionObservedDataClassV2::PhysicalLocator,
+            )
+        })?;
+        Ok(CompatibleSourceMemberV1 {
+            path,
+            snapshot: self.compatible_snapshot,
+        })
     }
 
     /// Exact declaration-time direct-dependency policy root.
@@ -868,6 +1031,1040 @@ impl RunnerV2BaseSourceClosureV1 {
     pub const fn dependency_declaration_root(&self) -> ContentHash {
         self.dependency_declaration_root
     }
+}
+
+/// One exact row in the additive V2 projection of the schema-impact manifest.
+///
+/// The row is a projection identity only. It does not parse schema bytes,
+/// perform a migration, validate an execution, or mint schema authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerV2BaseSchemaImpactProjectionRowV2 {
+    local_ordinal: u32,
+    relation: SchemaImpactManifestRelationV1,
+    schema_id: StableTokenV2,
+    source_path: LogicalBundlePathV1,
+    disposition: CanonicalSchemaImpactDispositionV1,
+    schema_impact_row_root: ContentHash,
+    compatible_source_snapshot_root: CompatibleSourceSnapshotRootV1,
+    root: ContentHash,
+}
+
+impl RunnerV2BaseSchemaImpactProjectionRowV2 {
+    /// Derived one-based manifest-local ordinal.
+    #[must_use]
+    pub const fn local_ordinal(&self) -> u32 {
+        self.local_ordinal
+    }
+
+    /// Exact Owned/Consumed relationship to the base leaf.
+    #[must_use]
+    pub const fn relation(&self) -> SchemaImpactManifestRelationV1 {
+        self.relation
+    }
+
+    /// Exact stable schema ID.
+    #[must_use]
+    pub const fn schema_id(&self) -> &StableTokenV2 {
+        &self.schema_id
+    }
+
+    /// Exact source-closed declaration path.
+    #[must_use]
+    pub const fn source_path(&self) -> &LogicalBundlePathV1 {
+        &self.source_path
+    }
+
+    /// Exact source-frozen schema-impact disposition.
+    #[must_use]
+    pub const fn disposition(&self) -> CanonicalSchemaImpactDispositionV1 {
+        self.disposition
+    }
+
+    /// Exact admitted schema-impact row root.
+    #[must_use]
+    pub const fn schema_impact_row_root(&self) -> ContentHash {
+        self.schema_impact_row_root
+    }
+
+    /// Exact compatible source-snapshot root.
+    #[must_use]
+    pub const fn compatible_source_snapshot_root(&self) -> CompatibleSourceSnapshotRootV1 {
+        self.compatible_source_snapshot_root
+    }
+
+    /// Domain-separated V2 projection-row root.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+}
+
+/// Exact V2 projection wrapper over the base source-frozen schema-impact DAG.
+///
+/// This is intentionally a small declaration-only bridge. It does not imply
+/// that the larger V2 semantic-row, journey, result, execution, report, or log
+/// schema family has been implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerV2BaseSchemaImpactProjectionV2 {
+    manifest: SchemaImpactManifestV1,
+    rows: Box<[RunnerV2BaseSchemaImpactProjectionRowV2]>,
+    source_path_count: u32,
+    owned_row_count: u32,
+    consumed_row_count: u32,
+    root: ContentHash,
+}
+
+impl RunnerV2BaseSchemaImpactProjectionV2 {
+    /// Reconstruct the exact source-frozen base projection.
+    pub fn frozen() -> Result<Self, ConstructionErrorV2> {
+        static FROZEN_SCHEMA_IMPACT_PROJECTION_V2: std::sync::OnceLock<
+            Result<RunnerV2BaseSchemaImpactProjectionV2, ConstructionErrorV2>,
+        > = std::sync::OnceLock::new();
+        FROZEN_SCHEMA_IMPACT_PROJECTION_V2
+            .get_or_init(|| {
+                let manifest = runner_v2_base_schema_impact_manifest_v1()?;
+                Self::build_exact(manifest)
+            })
+            .clone()
+    }
+
+    /// Reconstruct only when the presented manifest is byte-for-byte the
+    /// source-owned base manifest.
+    pub fn reconstruct_exact(
+        manifest: &SchemaImpactManifestV1,
+    ) -> Result<Self, ConstructionErrorV2> {
+        let expected = runner_v2_base_schema_impact_manifest_v1()?;
+        if manifest != &expected {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.schema_impact.manifest",
+                "the exact source-frozen base schema-impact manifest",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
+        Self::build_exact(manifest.clone())
+    }
+
+    fn build_exact(manifest: SchemaImpactManifestV1) -> Result<Self, ConstructionErrorV2> {
+        validate_schema_impact_projection_manifest_v2(&manifest)?;
+        let rows = manifest
+            .entries()
+            .iter()
+            .map(|entry| {
+                let schema_id = StableTokenV2::new(entry.row().schema_id().as_str().to_owned())
+                    .map_err(|_| {
+                        ConstructionErrorV2::new_redacted(
+                            ConstructionErrorKindV2::Incompatible,
+                            "projection.schema_impact.schema_id",
+                            "one exact bounded stable schema ID",
+                            ConstructionObservedDataClassV2::CallerControlledText,
+                        )
+                    })?;
+                let source_path = entry.row().source_path().clone();
+                let schema_impact_row_root = entry.row().root().content_hash();
+                let compatible_source_snapshot_root = entry.row().compatible_source_snapshot_root();
+                let root = schema_impact_projection_row_root_v2(
+                    entry.local_ordinal(),
+                    entry.relation(),
+                    &schema_id,
+                    &source_path,
+                    entry.row().disposition(),
+                    schema_impact_row_root,
+                    compatible_source_snapshot_root,
+                )?;
+                Ok(RunnerV2BaseSchemaImpactProjectionRowV2 {
+                    local_ordinal: entry.local_ordinal(),
+                    relation: entry.relation(),
+                    schema_id,
+                    source_path,
+                    disposition: entry.row().disposition(),
+                    schema_impact_row_root,
+                    compatible_source_snapshot_root,
+                    root,
+                })
+            })
+            .collect::<Result<Vec<_>, ConstructionErrorV2>>()?;
+        let source_path_count = checked_u32(
+            rows.iter()
+                .map(|row| row.source_path.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "projection.schema_impact.source_path_count",
+        )?;
+        let owned_row_count = checked_u32(
+            rows.iter()
+                .filter(|row| row.relation == SchemaImpactManifestRelationV1::Owned)
+                .count(),
+            "projection.schema_impact.owned_row_count",
+        )?;
+        let consumed_row_count = checked_u32(
+            rows.iter()
+                .filter(|row| row.relation == SchemaImpactManifestRelationV1::Consumed)
+                .count(),
+            "projection.schema_impact.consumed_row_count",
+        )?;
+        let root = schema_impact_projection_root_v2(
+            &manifest,
+            &rows,
+            source_path_count,
+            owned_row_count,
+            consumed_row_count,
+        )?;
+        Ok(Self {
+            manifest,
+            rows: rows.into_boxed_slice(),
+            source_path_count,
+            owned_row_count,
+            consumed_row_count,
+            root,
+        })
+    }
+
+    /// Exact source-frozen schema-impact manifest.
+    #[must_use]
+    pub const fn manifest(&self) -> &SchemaImpactManifestV1 {
+        &self.manifest
+    }
+
+    /// Complete rows in exact manifest-local topological order.
+    #[must_use]
+    pub fn rows(&self) -> &[RunnerV2BaseSchemaImpactProjectionRowV2] {
+        &self.rows
+    }
+
+    /// Number of distinct exact source paths across the projected rows.
+    #[must_use]
+    pub const fn source_path_count(&self) -> u32 {
+        self.source_path_count
+    }
+
+    /// Exact number of base-leaf-owned rows.
+    #[must_use]
+    pub const fn owned_row_count(&self) -> u32 {
+        self.owned_row_count
+    }
+
+    /// Exact number of externally owned rows consumed by this base wrapper.
+    #[must_use]
+    pub const fn consumed_row_count(&self) -> u32 {
+        self.consumed_row_count
+    }
+
+    /// Domain-separated V2 schema-impact projection root.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+
+    /// This declaration-only projection contains no runtime observation.
+    #[must_use]
+    pub const fn execution_observation_count(&self) -> u32 {
+        0
+    }
+}
+
+/// Immutable Phase-1 contribution plus its distinct Deferred envelope.
+///
+/// This wrapper provides upstream declaration evidence only. It does not read
+/// or execute either downstream wrapper, does not read the downstream-owned
+/// case-manifest file, and cannot report that the designated route passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerV2PhaseOneContractContributionV2 {
+    schema_impact_projection: RunnerV2BaseSchemaImpactProjectionV2,
+    source_closure_root: ContentHash,
+    base_coverage_manifest_root: ContentHash,
+    case_manifest_contract_root: ContentHash,
+    expected_partitions_root: ContentHash,
+    payload_root: ContentHash,
+    contribution: BaseCoverageCloseDownstreamContributionV2,
+    deferred_envelope: BaseCoverageCloseDeferredEvidenceEnvelopeV1,
+    root: ContentHash,
+}
+
+impl RunnerV2PhaseOneContractContributionV2 {
+    /// Reconstruct the one exact source-owned Phase-1 contribution.
+    pub fn frozen() -> Result<Self, ConstructionErrorV2> {
+        static FROZEN_PHASE_ONE_CONTRIBUTION_V2: std::sync::OnceLock<
+            Result<RunnerV2PhaseOneContractContributionV2, ConstructionErrorV2>,
+        > = std::sync::OnceLock::new();
+        FROZEN_PHASE_ONE_CONTRIBUTION_V2
+            .get_or_init(Self::build_frozen)
+            .clone()
+    }
+
+    fn build_frozen() -> Result<Self, ConstructionErrorV2> {
+        let source_closure = RunnerV2BaseSourceClosureV1::frozen()?;
+        let base_coverage_manifest = BaseCoverageManifestV1::frozen()?;
+        let schema_impact_projection = RunnerV2BaseSchemaImpactProjectionV2::frozen()?;
+        if schema_impact_projection
+            .manifest()
+            .compatible_source_snapshot_root()
+            != source_closure.compatible_snapshot().root()
+        {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.phase_one.compatible_source_snapshot",
+                "one exact compatible source snapshot across contribution inputs",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
+
+        let case_manifest_contract_root = phase_one_case_manifest_contract_root_v1()?;
+        let expected_partitions_root = phase_one_expected_partitions_root_v1()?;
+        let target_root = phase_one_target_contract_root_v1()?;
+        let feature_set_root = phase_one_feature_contract_root_v1()?;
+        let build_contract_root =
+            phase_one_build_contract_root_v1(&source_closure, &schema_impact_projection)?;
+        let toolchain_contract_root = phase_one_toolchain_contract_root_v1(&source_closure)?;
+        let source_root = parse_phase_one_source_identity(source_closure.root())?;
+        let build_root = parse_phase_one_build_identity(build_contract_root)?;
+        let toolchain_root = parse_phase_one_toolchain_identity(toolchain_contract_root)?;
+        let schema_impact_log_schema_root = crate::logging::schema_impact_log_schema_root_v1()?;
+        let payload_root = phase_one_payload_root_v2(
+            &source_closure,
+            base_coverage_manifest.root(),
+            &schema_impact_projection,
+            expected_partitions_root,
+            target_root,
+            feature_set_root,
+            schema_impact_log_schema_root,
+        )?;
+        let observer_contract = BaseCoverageCloseDeferredObservationContractV1::new(
+            RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+            BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+            token(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1)?,
+            RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+            RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+            case_manifest_contract_root,
+            DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+            token(RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1)?,
+        )?;
+        validate_exact_phase_one_observer_contract_v1(&observer_contract)?;
+        let contribution = BaseCoverageCloseDownstreamContributionV2::new(
+            RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1,
+            payload_root,
+            expected_partitions_root,
+            frozen_downstream_close_contribution_budgets_v1(1, 1)?,
+            frozen_downstream_close_contribution_budgets_v1(4, 2)?,
+            schema_impact_projection.root(),
+            schema_impact_log_schema_root,
+            source_root,
+            build_root,
+            toolchain_root,
+            target_root,
+            feature_set_root,
+            BaseCoverageCloseRetainedRelativeArtifactPolicyV1::OwnerEnvelopeRelativePathsOnly,
+            observer_contract,
+            token(RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1)?,
+        )?;
+        let deferred_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
+            &contribution,
+            token(RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1)?,
+        )?;
+        let root = phase_one_contribution_projection_root_v2(
+            &schema_impact_projection,
+            source_closure.root(),
+            base_coverage_manifest.root(),
+            case_manifest_contract_root,
+            expected_partitions_root,
+            payload_root,
+            &contribution,
+            &deferred_envelope,
+        )?;
+        Ok(Self {
+            schema_impact_projection,
+            source_closure_root: source_closure.root(),
+            base_coverage_manifest_root: base_coverage_manifest.root(),
+            case_manifest_contract_root,
+            expected_partitions_root,
+            payload_root,
+            contribution,
+            deferred_envelope,
+            root,
+        })
+    }
+
+    /// Exact declaration-only schema-impact projection.
+    #[must_use]
+    pub const fn schema_impact_projection(&self) -> &RunnerV2BaseSchemaImpactProjectionV2 {
+        &self.schema_impact_projection
+    }
+
+    /// Exact compiled source-closure root.
+    #[must_use]
+    pub const fn source_closure_root(&self) -> ContentHash {
+        self.source_closure_root
+    }
+
+    /// Exact base source-coverage manifest root.
+    #[must_use]
+    pub const fn base_coverage_manifest_root(&self) -> ContentHash {
+        self.base_coverage_manifest_root
+    }
+
+    /// Declaration root for the downstream-owned case manifest.
+    #[must_use]
+    pub const fn case_manifest_contract_root(&self) -> ContentHash {
+        self.case_manifest_contract_root
+    }
+
+    /// Exact declaration-side expected partition root.
+    #[must_use]
+    pub const fn expected_partitions_root(&self) -> ContentHash {
+        self.expected_partitions_root
+    }
+
+    /// Exact immutable Phase-1 payload root.
+    #[must_use]
+    pub const fn payload_root(&self) -> ContentHash {
+        self.payload_root
+    }
+
+    /// Exact result-free V2 contribution.
+    #[must_use]
+    pub const fn contribution(&self) -> &BaseCoverageCloseDownstreamContributionV2 {
+        &self.contribution
+    }
+
+    /// Separate exact Deferred evidence envelope.
+    #[must_use]
+    pub const fn deferred_envelope(&self) -> &BaseCoverageCloseDeferredEvidenceEnvelopeV1 {
+        &self.deferred_envelope
+    }
+
+    /// Domain-separated contribution/envelope join root.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+
+    /// This upstream declaration performs no downstream execution.
+    #[must_use]
+    pub const fn downstream_execution_count(&self) -> u32 {
+        0
+    }
+}
+
+fn validate_schema_impact_projection_manifest_v2(
+    manifest: &SchemaImpactManifestV1,
+) -> Result<(), ConstructionErrorV2> {
+    if manifest.issuer_leaf_id().as_str() != RUNNER_V2_BASE_SCHEMA_IMPACT_OWNER_LEAF_ID_V1 {
+        return Err(ConstructionErrorV2::new_redacted(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.schema_impact.issuer",
+            "the exact base schema-impact owner leaf",
+            ConstructionObservedDataClassV2::CallerControlledText,
+        ));
+    }
+    if manifest.entries().len() != RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2 {
+        return Err(ConstructionErrorV2::new(
+            if manifest.entries().len() < RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2 {
+                ConstructionErrorKindV2::Missing
+            } else {
+                ConstructionErrorKindV2::Unexpected
+            },
+            "projection.schema_impact.row_count",
+            "the exact three-row base schema-impact manifest",
+            manifest.entries().len(),
+        ));
+    }
+    if manifest.graph_edge_count() != 0
+        || !manifest.leaf_extension_registries().is_empty()
+        || manifest.base_partition_nominal_role_count() != 44
+        || manifest.frozen_base_nominal_role_count() != 47
+    {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.schema_impact.manifest_shape",
+            "zero edges, zero extensions, 44 base roles, and 47 frozen roles",
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(manifest.graph_edge_count()),
+                manifest.leaf_extension_registries().len() as u64,
+            ),
+        ));
+    }
+    for (index, (entry, expected_schema_id)) in manifest
+        .entries()
+        .iter()
+        .zip(RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SCHEMA_IDS_V2)
+        .enumerate()
+    {
+        let expected_ordinal = checked_u32(index + 1, "projection.schema_impact.local_ordinal")?;
+        if entry.local_ordinal() != expected_ordinal
+            || entry.relation() != SchemaImpactManifestRelationV1::Owned
+            || entry.row().schema_id().as_str() != expected_schema_id
+            || entry.row().source_path().as_str() != RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1
+            || entry.row().disposition() != CanonicalSchemaImpactDispositionV1::NewV1NoPredecessor
+            || entry.row().no_claim().as_str() != RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1
+            || entry.row().compatible_source_snapshot_root()
+                != manifest.compatible_source_snapshot_root()
+        {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.schema_impact.row",
+                "the exact ordered owned row ID, path, disposition, snapshot, and no-claim",
+                ConstructionObservedV2::indexed_redacted(
+                    index,
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the row projection root visibly binds every exact schema-impact coordinate"
+)]
+fn schema_impact_projection_row_root_v2(
+    local_ordinal: u32,
+    relation: SchemaImpactManifestRelationV1,
+    schema_id: &StableTokenV2,
+    source_path: &LogicalBundlePathV1,
+    disposition: CanonicalSchemaImpactDispositionV1,
+    schema_impact_row_root: ContentHash,
+    compatible_source_snapshot_root: CompatibleSourceSnapshotRootV1,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    if local_ordinal == 0 {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Zero,
+            "projection.schema_impact.local_ordinal",
+            "a nonzero one-based manifest-local ordinal",
+            local_ordinal,
+        ));
+    }
+    let mut frame = CanonicalFrameV1::new(b"FSBASESCHEMAIMPACTPROJECTIONROW\x02", 4 * 1024)?;
+    frame.push_u16("projection.api_generation", 2)?;
+    frame.push_u16("projection.wire_version", 1)?;
+    frame.push_u16("projection.wire_predecessor_policy", 1)?;
+    frame.push_u32("projection.local_ordinal", local_ordinal)?;
+    frame.push_u16("projection.relation", relation.code())?;
+    frame.push_str("projection.schema_id", schema_id.as_str())?;
+    frame.push_str("projection.source_path", source_path.as_str())?;
+    frame.push_u16("projection.disposition", disposition.code())?;
+    frame.push_bytes(
+        "projection.schema_impact_row_root",
+        schema_impact_row_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.compatible_source_snapshot_root",
+        compatible_source_snapshot_root.content_hash().as_bytes(),
+    )?;
+    frame.push_str(
+        "projection.no_claim",
+        "schema-impact-projection-row-proves-declaration-binding-not-migration-execution-or-authority",
+    )?;
+    Ok(frame.root(BASE_SCHEMA_IMPACT_PROJECTION_ROW_DOMAIN_V2))
+}
+
+fn schema_impact_projection_root_v2(
+    manifest: &SchemaImpactManifestV1,
+    rows: &[RunnerV2BaseSchemaImpactProjectionRowV2],
+    source_path_count: u32,
+    owned_row_count: u32,
+    consumed_row_count: u32,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let exact_row_count = checked_u32(
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2,
+        "projection.schema_impact.row_count",
+    )?;
+    let observed_row_count = checked_u32(rows.len(), "projection.schema_impact.row_count")?;
+    if observed_row_count != exact_row_count {
+        return Err(ConstructionErrorV2::new(
+            if observed_row_count < exact_row_count {
+                ConstructionErrorKindV2::Missing
+            } else {
+                ConstructionErrorKindV2::Unexpected
+            },
+            "projection.schema_impact.row_count",
+            "the exact three projected rows",
+            observed_row_count,
+        ));
+    }
+    if source_path_count != RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SOURCE_PATH_COUNT_V2 as u32
+        || owned_row_count != RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_OWNED_ROW_COUNT_V2 as u32
+        || consumed_row_count
+            != RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_CONSUMED_ROW_COUNT_V2 as u32
+        || owned_row_count
+            .checked_add(consumed_row_count)
+            .ok_or_else(sequence_overflow)?
+            != observed_row_count
+    {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.schema_impact.counts",
+            "one source path, three owned rows, zero consumed rows, and an exact partition sum",
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(owned_row_count),
+                u64::from(consumed_row_count),
+            ),
+        ));
+    }
+    for (index, (row, manifest_entry)) in rows.iter().zip(manifest.entries()).enumerate() {
+        let expected_ordinal = checked_u32(index + 1, "projection.schema_impact.local_ordinal")?;
+        let expected_row_root = schema_impact_projection_row_root_v2(
+            row.local_ordinal,
+            row.relation,
+            &row.schema_id,
+            &row.source_path,
+            row.disposition,
+            row.schema_impact_row_root,
+            row.compatible_source_snapshot_root,
+        )?;
+        if row.local_ordinal != expected_ordinal
+            || row.relation != SchemaImpactManifestRelationV1::Owned
+            || row.schema_id.as_str()
+                != RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SCHEMA_IDS_V2[index]
+            || row.source_path.as_str() != RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1
+            || row.disposition != CanonicalSchemaImpactDispositionV1::NewV1NoPredecessor
+            || row.schema_impact_row_root != manifest_entry.row().root().content_hash()
+            || row.compatible_source_snapshot_root != manifest.compatible_source_snapshot_root()
+            || row.root != expected_row_root
+        {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::OutOfOrder,
+                "projection.schema_impact.rows",
+                "the exact three-row source-frozen order and common snapshot",
+                index,
+            ));
+        }
+    }
+    let mut frame = CanonicalFrameV1::new(b"FSBASESCHEMAIMPACTPROJECTION\x02", 16 * 1024)?;
+    frame.push_u16("projection.api_generation", 2)?;
+    frame.push_u16("projection.wire_version", 1)?;
+    frame.push_u16("projection.wire_predecessor_policy", 1)?;
+    frame.push_str(
+        "projection.issuer_leaf_id",
+        manifest.issuer_leaf_id().as_str(),
+    )?;
+    frame.push_bytes(
+        "projection.compatible_source_snapshot_root",
+        manifest
+            .compatible_source_snapshot_root()
+            .content_hash()
+            .as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.schema_impact_manifest_root",
+        manifest.root().content_hash().as_bytes(),
+    )?;
+    frame.push_u32(
+        "projection.base_partition_nominal_role_count",
+        manifest.base_partition_nominal_role_count(),
+    )?;
+    frame.push_u32(
+        "projection.frozen_base_nominal_role_count",
+        manifest.frozen_base_nominal_role_count(),
+    )?;
+    frame.push_u32(
+        "projection.extension_fragment_count",
+        checked_u32(
+            manifest.leaf_extension_registries().len(),
+            "projection.schema_impact.extension_fragment_count",
+        )?,
+    )?;
+    frame.push_u32("projection.graph_edge_count", manifest.graph_edge_count())?;
+    frame.push_u32("projection.source_path_count", source_path_count)?;
+    frame.push_u32("projection.owned_row_count", owned_row_count)?;
+    frame.push_u32("projection.consumed_row_count", consumed_row_count)?;
+    frame.push_u32("projection.row_count", observed_row_count)?;
+    for row in rows {
+        frame.push_u32("projection.row_local_ordinal", row.local_ordinal)?;
+        frame.push_u16("projection.row_relation", row.relation.code())?;
+        frame.push_str("projection.row_schema_id", row.schema_id.as_str())?;
+        frame.push_str("projection.row_source_path", row.source_path.as_str())?;
+        frame.push_bytes(
+            "projection.row_schema_impact_root",
+            row.schema_impact_row_root.as_bytes(),
+        )?;
+        frame.push_bytes("projection.row_projection_root", row.root.as_bytes())?;
+    }
+    frame.push_str(
+        "projection.no_claim",
+        "schema-impact-v2-projection-proves-exact-declaration-rows-not-parser-migration-execution-or-authority",
+    )?;
+    Ok(frame.root(BASE_SCHEMA_IMPACT_PROJECTION_DOMAIN_V2))
+}
+
+fn validate_exact_phase_one_observer_contract_v1(
+    observer: &BaseCoverageCloseDeferredObservationContractV1,
+) -> Result<(), ConstructionErrorV2> {
+    let exact_owner = RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1;
+    if observer.route_id().as_str() != RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1
+        || observer.semantic_consumer() != exact_owner
+        || observer.execution_owner() != exact_owner
+        || observer.driver_owner() != exact_owner
+        || observer.posix_wrapper_owner() != exact_owner
+        || observer.windows_wrapper_owner() != exact_owner
+        || observer.capability_profile() != BaseCoverageCloseCapabilityProfileV1::ReleaseControl
+        || observer.driver().as_str() != RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1
+        || observer.posix_route() != RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1
+        || observer.windows_route() != RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1
+        || observer.case_manifest_path() != RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1
+        || observer.deferred_reason()
+            != DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner
+        || observer.no_claim().as_str() != RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1
+    {
+        return Err(ConstructionErrorV2::new_redacted(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.phase_one.observer_contract",
+            "the exact owner, capability, driver, POSIX, Windows, manifest, and Deferred route",
+            ConstructionObservedDataClassV2::CallerControlledText,
+        ));
+    }
+    Ok(())
+}
+
+fn phase_one_case_manifest_contract_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1CASEMANIFEST\x01", 4 * 1024)?;
+    frame.push_str(
+        "manifest.route_id",
+        RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+    )?;
+    frame.push_str(
+        "manifest.execution_owner",
+        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+    )?;
+    frame.push_str("manifest.driver", RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1)?;
+    frame.push_str(
+        "manifest.posix_route",
+        RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+    )?;
+    frame.push_str(
+        "manifest.windows_route",
+        RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+    )?;
+    frame.push_str(
+        "manifest.path",
+        RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+    )?;
+    frame.push_u16("manifest.declaration_only", 1)?;
+    frame.push_str(
+        "manifest.no_claim",
+        "downstream-owned-case-manifest-contract-is-not-file-content-or-execution-proof",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_CASE_MANIFEST_CONTRACT_DOMAIN_V1))
+}
+
+fn phase_one_expected_partitions_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 4 * 1024)?;
+    frame.push_u32(
+        "partitions.count",
+        checked_u32(
+            RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1.len(),
+            "projection.phase_one.partition_count",
+        )?,
+    )?;
+    for (index, name) in RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1
+        .iter()
+        .enumerate()
+    {
+        frame.push_u16(
+            "partitions.code",
+            u16::try_from(index + 1).map_err(|_| sequence_overflow())?,
+        )?;
+        frame.push_str("partitions.name", name)?;
+        frame.push_u16("partitions.eventual_owner_requires_exact_match", 1)?;
+    }
+    frame.push_u32("partitions.required_unexpected_mismatches", 0)?;
+    frame.push_u32("partitions.required_execution_failures", 0)?;
+    frame.push_u32("partitions.required_unexplained_skips", 0)?;
+    frame.push_str(
+        "partitions.no_claim",
+        "expected-partitions-do-not-prove-owner-execution-or-matched-results",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1))
+}
+
+fn phase_one_target_contract_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1TARGET\x01", 2 * 1024)?;
+    frame.push_str(
+        "target.posix_route",
+        RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+    )?;
+    frame.push_str(
+        "target.windows_route",
+        RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+    )?;
+    frame.push_str(
+        "target.no_claim",
+        "portable-route-declaration-does-not-prove-platform-execution",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_TARGET_CONTRACT_DOMAIN_V1))
+}
+
+fn phase_one_feature_contract_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1FEATURES\x01", 1_024)?;
+    frame.push_u32("features.required_count", 0)?;
+    frame.push_str(
+        "features.no_claim",
+        "empty-required-feature-declaration-does-not-prove-owner-build-configuration",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_FEATURE_CONTRACT_DOMAIN_V1))
+}
+
+fn phase_one_build_contract_root_v1(
+    source_closure: &RunnerV2BaseSourceClosureV1,
+    schema_impact_projection: &RunnerV2BaseSchemaImpactProjectionV2,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1BUILD\x01", 2 * 1024)?;
+    frame.push_bytes(
+        "build.source_closure_root",
+        source_closure.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "build.compatible_source_snapshot_root",
+        source_closure.snapshot_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "build.schema_impact_projection_root",
+        schema_impact_projection.root().as_bytes(),
+    )?;
+    frame.push_str(
+        "build.no_claim",
+        "build-input-declaration-does-not-prove-a-build-or-release-artifact",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_BUILD_CONTRACT_DOMAIN_V1))
+}
+
+fn phase_one_toolchain_contract_root_v1(
+    source_closure: &RunnerV2BaseSourceClosureV1,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let toolchain_entry = source_closure
+        .entries()
+        .iter()
+        .find(|entry| entry.path() == "rust-toolchain.toml")
+        .ok_or_else(|| {
+            ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Missing,
+                "projection.phase_one.toolchain_source",
+                "the exact rust-toolchain.toml source-closure entry",
+                source_closure.entries().len(),
+            )
+        })?;
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1TOOLCHAIN\x01", 2 * 1024)?;
+    frame.push_str("toolchain.source_path", toolchain_entry.path())?;
+    frame.push_bytes(
+        "toolchain.source_entry_root",
+        toolchain_entry.entry_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "toolchain.compatible_source_snapshot_root",
+        source_closure.snapshot_root().as_bytes(),
+    )?;
+    frame.push_str(
+        "toolchain.no_claim",
+        "toolchain-input-declaration-does-not-prove-owner-toolchain-execution",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_TOOLCHAIN_CONTRACT_DOMAIN_V1))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the immutable payload explicitly binds every currently implemented Phase-1 declaration input"
+)]
+fn phase_one_payload_root_v2(
+    source_closure: &RunnerV2BaseSourceClosureV1,
+    base_coverage_manifest_root: ContentHash,
+    schema_impact_projection: &RunnerV2BaseSchemaImpactProjectionV2,
+    expected_partitions_root: ContentHash,
+    target_root: ContentHash,
+    feature_set_root: ContentHash,
+    schema_impact_log_schema_root: ContentHash,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1PAYLOAD\x02", 4 * 1024)?;
+    frame.push_u16("payload.api_generation", 2)?;
+    frame.push_u16("payload.wire_version", 1)?;
+    frame.push_str("payload.route_id", RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1)?;
+    frame.push_str(
+        "payload.source_owner",
+        RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1,
+    )?;
+    frame.push_bytes(
+        "payload.source_closure_root",
+        source_closure.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "payload.compatible_source_snapshot_root",
+        source_closure.snapshot_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "payload.dependency_declaration_root",
+        source_closure.dependency_declaration_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "payload.base_coverage_manifest_root",
+        base_coverage_manifest_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "payload.schema_impact_projection_root",
+        schema_impact_projection.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "payload.expected_partitions_root",
+        expected_partitions_root.as_bytes(),
+    )?;
+    frame.push_bytes("payload.target_root", target_root.as_bytes())?;
+    frame.push_bytes("payload.feature_set_root", feature_set_root.as_bytes())?;
+    frame.push_bytes(
+        "payload.schema_impact_log_schema_root",
+        schema_impact_log_schema_root.as_bytes(),
+    )?;
+    frame.push_str(
+        "payload.no_claim",
+        "phase1-payload-is-result-free-and-does-not-complete-the-v2-execution-result-or-log-family",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_CONTRACT_PAYLOAD_DOMAIN_V2))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the aggregate root binds the contribution and separate envelope without introducing a reverse edge"
+)]
+fn phase_one_contribution_projection_root_v2(
+    schema_impact_projection: &RunnerV2BaseSchemaImpactProjectionV2,
+    source_closure_root: ContentHash,
+    base_coverage_manifest_root: ContentHash,
+    case_manifest_contract_root: ContentHash,
+    expected_partitions_root: ContentHash,
+    payload_root: ContentHash,
+    contribution: &BaseCoverageCloseDownstreamContributionV2,
+    deferred_envelope: &BaseCoverageCloseDeferredEvidenceEnvelopeV1,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    validate_exact_phase_one_observer_contract_v1(contribution.observer_contract())?;
+    if contribution.source_owner() != RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1
+        || contribution.payload_root() != payload_root
+        || contribution.expected_partitions_root() != expected_partitions_root
+        || contribution.schema_root() != schema_impact_projection.root()
+        || contribution.log_schema_root() != crate::logging::schema_impact_log_schema_root_v1()?
+        || contribution.observer_contract().case_manifest_root() != case_manifest_contract_root
+        || contribution.retained_artifact_policy()
+            != BaseCoverageCloseRetainedRelativeArtifactPolicyV1::OwnerEnvelopeRelativePathsOnly
+        || contribution.no_claim().as_str() != RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1
+        || deferred_envelope.contribution_root() != contribution.root()
+        || deferred_envelope.observer_contract_root() != contribution.observer_contract().root()
+        || deferred_envelope.evidence_kind()
+            != crate::coverage::BaseCoverageCloseEvidenceKindV1::ImmutableDownstreamContribution
+        || deferred_envelope.disposition()
+            != crate::coverage::RuntimeObservationDispositionV1::Deferred
+        || deferred_envelope.deferred_reason()
+            != DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner
+        || deferred_envelope.retained_artifact_policy()
+            != BaseCoverageCloseRetainedRelativeArtifactPolicyV1::OwnerEnvelopeRelativePathsOnly
+        || deferred_envelope.no_claim().as_str()
+            != RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1
+        || contribution.execution_actual_field_count() != 0
+        || deferred_envelope.execution_actual_field_count() != 0
+    {
+        return Err(ConstructionErrorV2::new_redacted(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.phase_one.contribution_envelope_join",
+            "the exact cycle-free contribution, observer, payload, manifest, and Deferred envelope join",
+            ConstructionObservedDataClassV2::CallerControlledText,
+        ));
+    }
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1CONTRIBUTIONPROJECTION\x02", 4 * 1024)?;
+    frame.push_u16("projection.api_generation", 2)?;
+    frame.push_u16("projection.wire_version", 1)?;
+    frame.push_str(
+        "projection.route_id",
+        RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+    )?;
+    frame.push_bytes(
+        "projection.schema_impact_projection_root",
+        schema_impact_projection.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.source_closure_root",
+        source_closure_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.base_coverage_manifest_root",
+        base_coverage_manifest_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.case_manifest_contract_root",
+        case_manifest_contract_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.expected_partitions_root",
+        expected_partitions_root.as_bytes(),
+    )?;
+    frame.push_bytes("projection.payload_root", payload_root.as_bytes())?;
+    frame.push_bytes(
+        "projection.contribution_root",
+        contribution.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.deferred_envelope_root",
+        deferred_envelope.root().content_hash().as_bytes(),
+    )?;
+    frame.push_u32("projection.downstream_execution_count", 0)?;
+    frame.push_str(
+        "projection.no_claim",
+        "immutable-phase1-contribution-projection-does-not-prove-downstream-execution-or-success",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_CONTRIBUTION_PROJECTION_DOMAIN_V2))
+}
+
+fn parse_phase_one_source_identity(
+    root: ContentHash,
+) -> Result<SourceIdentityRootV2, ConstructionErrorV2> {
+    SourceIdentityRootV2::parse_presented(
+        SourceIdentityRootV2::DESCRIPTOR.role(),
+        SourceIdentityRootV2::DESCRIPTOR.domain(),
+        &root.to_hex(),
+    )
+    .map_err(|_| phase_one_identity_error("projection.phase_one.source_root"))
+}
+
+fn parse_phase_one_build_identity(
+    root: ContentHash,
+) -> Result<BuildIdentityRootV2, ConstructionErrorV2> {
+    BuildIdentityRootV2::parse_presented(
+        BuildIdentityRootV2::DESCRIPTOR.role(),
+        BuildIdentityRootV2::DESCRIPTOR.domain(),
+        &root.to_hex(),
+    )
+    .map_err(|_| phase_one_identity_error("projection.phase_one.build_root"))
+}
+
+fn parse_phase_one_toolchain_identity(
+    root: ContentHash,
+) -> Result<ToolchainIdentityRootV2, ConstructionErrorV2> {
+    ToolchainIdentityRootV2::parse_presented(
+        ToolchainIdentityRootV2::DESCRIPTOR.role(),
+        ToolchainIdentityRootV2::DESCRIPTOR.domain(),
+        &root.to_hex(),
+    )
+    .map_err(|_| phase_one_identity_error("projection.phase_one.toolchain_root"))
+}
+
+fn phase_one_identity_error(field: &'static str) -> ConstructionErrorV2 {
+    ConstructionErrorV2::new_redacted(
+        ConstructionErrorKindV2::Incompatible,
+        field,
+        "one exact role- and domain-checked declaration identity",
+        ConstructionObservedDataClassV2::CallerControlledText,
+    )
+}
+
+fn checked_u32(value: usize, field: &'static str) -> Result<u32, ConstructionErrorV2> {
+    u32::try_from(value).map_err(|_| {
+        ConstructionErrorV2::new(
+            ConstructionErrorKindV2::TooLarge,
+            field,
+            "a bounded u32 count",
+            value,
+        )
+    })
 }
 
 /// Result-free source-coverage classes retained by the immutable manifest.
@@ -916,6 +2113,24 @@ impl BaseCoverageClassV1 {
 
     const fn code(self) -> u16 {
         self as u16
+    }
+}
+
+#[allow(deprecated)]
+impl ConstructionClosedSemanticV2 for BaseCoverageClassV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Boundary => "boundary",
+            Self::PropertyMetamorphic => "property-metamorphic",
+            Self::CompileFailDoctest => "compile-fail-doctest",
+            Self::SchemaDescriptor => "schema-descriptor",
+            Self::Mutation => "mutation",
+            Self::Integration => "integration",
+            Self::ProjectionE2e => "projection-e2e",
+            Self::Logging => "logging",
+            Self::SourceClosure => "source-closure",
+        }
     }
 }
 
@@ -1235,7 +2450,7 @@ pub enum BaseE2eJourneyV1 {
     /// Cross-backend publication journey.
     PublicationV2 = 2,
     /// Independent verifier journey.
-    VerifierV1 = 3,
+    VerifierV2 = 3,
     /// Canonical controller/process journey.
     CanonicalRunnerV2 = 4,
     /// Independent Runner-to-rjoq handoff journey.
@@ -1247,7 +2462,7 @@ impl BaseE2eJourneyV1 {
     pub const ALL: [Self; 5] = [
         Self::PublicationState,
         Self::PublicationV2,
-        Self::VerifierV1,
+        Self::VerifierV2,
         Self::CanonicalRunnerV2,
         Self::RjoqHandoffV1,
     ];
@@ -1264,7 +2479,7 @@ impl BaseE2eJourneyV1 {
         match self {
             Self::PublicationState => "publication-state-v2",
             Self::PublicationV2 => "publication-v2",
-            Self::VerifierV1 => "verifier-v1",
+            Self::VerifierV2 => "verifier-v2",
             Self::CanonicalRunnerV2 => "canonical-runner-v2",
             Self::RjoqHandoffV1 => "rjoq-handoff-v1",
         }
@@ -1276,9 +2491,41 @@ impl BaseE2eJourneyV1 {
         match self {
             Self::PublicationState => "scripts/ci/e2e_evidence_runner_publication_state_v2.sh",
             Self::PublicationV2 => "scripts/ci/e2e_evidence_runner_publication_v2.sh",
-            Self::VerifierV1 => "scripts/ci/e2e_evidence_verifier_v1.sh",
+            Self::VerifierV2 => "scripts/ci/e2e_evidence_verifier_v2.sh",
             Self::CanonicalRunnerV2 => "scripts/ci/canonical_evidence_runner_v2.sh",
             Self::RjoqHandoffV1 => "scripts/ci/verify_runner_rjoq_handoff_v1.sh",
+        }
+    }
+
+    /// Exact downstream-owned release-driver name.
+    #[must_use]
+    pub const fn driver_name(self) -> &'static str {
+        match self {
+            Self::PublicationState => "e2e-evidence-runner-publication-state-v2-driver",
+            Self::PublicationV2 => "e2e-evidence-runner-publication-v2-driver",
+            Self::VerifierV2 => "e2e-evidence-verifier-v2-driver",
+            Self::CanonicalRunnerV2 => "canonical-evidence-runner-v2-e2e-driver",
+            Self::RjoqHandoffV1 => "verify-runner-rjoq-handoff-v1-driver",
+        }
+    }
+
+    /// Exact downstream-owned immutable suite-manifest path.
+    #[must_use]
+    pub const fn manifest_path(self) -> &'static str {
+        match self {
+            Self::PublicationState => {
+                "scripts/ci/manifests/evidence_runner_publication_state_v2_cases.v1.json"
+            }
+            Self::PublicationV2 => {
+                "scripts/ci/manifests/evidence_runner_publication_v2_cases.v1.json"
+            }
+            Self::VerifierV2 => "scripts/ci/manifests/evidence_verifier_v2_cases.v1.json",
+            Self::CanonicalRunnerV2 => {
+                "scripts/ci/manifests/canonical_evidence_runner_v2_cases.v1.json"
+            }
+            Self::RjoqHandoffV1 => {
+                "scripts/ci/manifests/runner_rjoq_handoff_verifier_v1_cases.v1.json"
+            }
         }
     }
 
@@ -1287,9 +2534,9 @@ impl BaseE2eJourneyV1 {
     pub const fn downstream_owner(self) -> &'static str {
         match self {
             Self::PublicationState => "frankensim-epic-foundations-huq.24.2.2.2",
-            Self::PublicationV2 => "frankensim-epic-foundations-huq.24.2.2.3",
-            Self::VerifierV1 => "frankensim-epic-foundations-huq.24.3.3.3",
-            Self::CanonicalRunnerV2 => "frankensim-epic-foundations-huq.24.4.1.3",
+            Self::PublicationV2 => "frankensim-epic-foundations-huq.24.2.2.3.3",
+            Self::VerifierV2 => "frankensim-epic-foundations-huq.24.3.3.3.3",
+            Self::CanonicalRunnerV2 => "frankensim-epic-foundations-huq.24.4.1.4",
             Self::RjoqHandoffV1 => "frankensim-epic-foundations-huq.24.5.3.1",
         }
     }
@@ -1300,10 +2547,16 @@ impl BaseE2eJourneyV1 {
         match self {
             Self::PublicationState => "publication-state-contract-input",
             Self::PublicationV2 => "cross-backend-publication-contract-input",
-            Self::VerifierV1 => "independent-verifier-contract-input",
+            Self::VerifierV2 => "independent-verifier-contract-input",
             Self::CanonicalRunnerV2 => "canonical-controller-contract-input",
             Self::RjoqHandoffV1 => "runner-rjoq-handoff-contract-input",
         }
+    }
+}
+
+impl ConstructionClosedSemanticV2 for BaseE2eJourneyV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.key()
     }
 }
 
@@ -1330,6 +2583,12 @@ impl BaseE2eExpectedDecisionV1 {
             Self::Refuse => "refuse",
             Self::Unsupported => "unsupported",
         }
+    }
+}
+
+impl ConstructionClosedSemanticV2 for BaseE2eExpectedDecisionV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.name()
     }
 }
 
@@ -1618,6 +2877,12 @@ impl BaseE2eCaseKindV1 {
     }
 }
 
+impl ConstructionClosedSemanticV2 for BaseE2eCaseKindV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.name()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BaseCaseTemplateV1 {
     id: &'static str,
@@ -1793,7 +3058,7 @@ const PUBLICATION_V2_CASES_V1: &[BaseE2eCaseKindV1] = &[
     BaseE2eCaseKindV1::CommandList,
 ];
 
-const VERIFIER_V1_CASES_V1: &[BaseE2eCaseKindV1] = &[
+const VERIFIER_V2_CASES_V1: &[BaseE2eCaseKindV1] = &[
     BaseE2eCaseKindV1::CatalogLiterals,
     BaseE2eCaseKindV1::UnknownCatalogCode,
     BaseE2eCaseKindV1::CanonicalRational,
@@ -1884,7 +3149,7 @@ const PUBLICATION_V2_ROW_IDS_V1: &[&str] = &[
     "command-list",
 ];
 
-const VERIFIER_V1_ROW_IDS_V1: &[&str] = &[
+const VERIFIER_V2_ROW_IDS_V1: &[&str] = &[
     "catalog-literals",
     "unknown-catalog-code",
     "canonical-rational",
@@ -1956,7 +3221,7 @@ const fn journey_case_kinds(journey: BaseE2eJourneyV1) -> &'static [BaseE2eCaseK
     match journey {
         BaseE2eJourneyV1::PublicationState => PUBLICATION_STATE_CASES_V1,
         BaseE2eJourneyV1::PublicationV2 => PUBLICATION_V2_CASES_V1,
-        BaseE2eJourneyV1::VerifierV1 => VERIFIER_V1_CASES_V1,
+        BaseE2eJourneyV1::VerifierV2 => VERIFIER_V2_CASES_V1,
         BaseE2eJourneyV1::CanonicalRunnerV2 => CANONICAL_RUNNER_V2_CASES_V1,
         BaseE2eJourneyV1::RjoqHandoffV1 => RJOQ_HANDOFF_V1_CASES_V1,
     }
@@ -1966,7 +3231,7 @@ const fn journey_row_id_oracle(journey: BaseE2eJourneyV1) -> &'static [&'static 
     match journey {
         BaseE2eJourneyV1::PublicationState => PUBLICATION_STATE_ROW_IDS_V1,
         BaseE2eJourneyV1::PublicationV2 => PUBLICATION_V2_ROW_IDS_V1,
-        BaseE2eJourneyV1::VerifierV1 => VERIFIER_V1_ROW_IDS_V1,
+        BaseE2eJourneyV1::VerifierV2 => VERIFIER_V2_ROW_IDS_V1,
         BaseE2eJourneyV1::CanonicalRunnerV2 => CANONICAL_RUNNER_V2_ROW_IDS_V1,
         BaseE2eJourneyV1::RjoqHandoffV1 => RJOQ_HANDOFF_V1_ROW_IDS_V1,
     }
@@ -1983,7 +3248,9 @@ pub struct BaseE2eProjectionRowV1 {
     kind: BaseE2eCaseKindV1,
     journey: BaseE2eJourneyV1,
     downstream_owner: StableTokenV2,
+    downstream_driver: StableTokenV2,
     downstream_script: LogicalBundlePathV1,
+    downstream_manifest: LogicalBundlePathV1,
     consumption_rationale: StableTokenV2,
     fixture_reference: StableTokenV2,
     expected: BaseE2eExpectedDecisionV1,
@@ -2035,10 +3302,22 @@ impl BaseE2eProjectionRowV1 {
         &self.downstream_owner
     }
 
+    /// Exact downstream release-driver name.
+    #[must_use]
+    pub const fn downstream_driver(&self) -> &StableTokenV2 {
+        &self.downstream_driver
+    }
+
     /// Sole downstream script mapping.
     #[must_use]
     pub const fn downstream_script(&self) -> &LogicalBundlePathV1 {
         &self.downstream_script
+    }
+
+    /// Exact immutable downstream suite-manifest mapping.
+    #[must_use]
+    pub const fn downstream_manifest(&self) -> &LogicalBundlePathV1 {
+        &self.downstream_manifest
     }
 
     /// Explicit journey-specific consumption rationale.
@@ -2171,7 +3450,9 @@ impl BaseE2eProjectionRowV1 {
 fn projection_row(
     journey: BaseE2eJourneyV1,
     downstream_owner: &StableTokenV2,
+    downstream_driver: &StableTokenV2,
     downstream_script: &LogicalBundlePathV1,
+    downstream_manifest: &LogicalBundlePathV1,
     source_closure_root: ContentHash,
     log_schema_root: ContentHash,
     kind: BaseE2eCaseKindV1,
@@ -2182,7 +3463,7 @@ fn projection_row(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_projection.case_template",
             "the exact independently tagged case name and kind",
-            kind.code(),
+            ConstructionObservedV2::closed(&kind),
         ));
     }
     let id = token(template.id)?;
@@ -2205,9 +3486,9 @@ fn projection_row(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_projection.expected_detail_manifest",
             "one exact detail for every expected-refusal or unsupported cell",
-            format_args!(
-                "{} != {expected_detail_cell_count}",
-                expected_detail_manifest.cell_count
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(expected_detail_manifest.cell_count),
+                u64::from(expected_detail_cell_count),
             ),
         ));
     }
@@ -2220,7 +3501,10 @@ fn projection_row(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_projection.semantic_partition",
             "positive + expected-refusal + unsupported equals semantic cell count",
-            format_args!("{partition_count} != {semantic_cell_count}"),
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(partition_count),
+                u64::from(semantic_cell_count),
+            ),
         ));
     }
     let unit = kind.unit();
@@ -2242,7 +3526,9 @@ fn projection_row(
     let mapping_root = journey_row_root(
         journey,
         downstream_owner,
+        downstream_driver,
         downstream_script,
+        downstream_manifest,
         &consumption_rationale,
         &fixture_reference,
         source_closure_root,
@@ -2254,7 +3540,9 @@ fn projection_row(
         kind,
         journey,
         downstream_owner: downstream_owner.clone(),
+        downstream_driver: downstream_driver.clone(),
         downstream_script: downstream_script.clone(),
+        downstream_manifest: downstream_manifest.clone(),
         consumption_rationale,
         fixture_reference,
         expected: template.expected,
@@ -2383,7 +3671,7 @@ fn registered_decision_detail_for_case(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_projection.registered_decision_detail",
             "namespace 7 case-conformance-detail owned by 24.1.1.3.1",
-            format_args!("{}:{}", descriptor.stable_name(), descriptor.owner()),
+            ConstructionObservedV2::closed(&descriptor),
         ));
     }
     let encoded_length = u32::try_from(OPAQUE_FIXTURE.len()).map_err(|_| {
@@ -2448,7 +3736,9 @@ fn case_oracle_manifest_root(kind: BaseE2eCaseKindV1) -> ContentHash {
 fn journey_row_root(
     journey: BaseE2eJourneyV1,
     downstream_owner: &StableTokenV2,
+    downstream_driver: &StableTokenV2,
     downstream_script: &LogicalBundlePathV1,
+    downstream_manifest: &LogicalBundlePathV1,
     consumption_rationale: &StableTokenV2,
     fixture_reference: &StableTokenV2,
     source_closure_root: ContentHash,
@@ -2458,7 +3748,9 @@ fn journey_row_root(
     let mut frame = CanonicalFrameV1::new(b"FSBASEJOURNEYROW\x01", 4096)?;
     frame.push_u16("mapping.journey", journey.code())?;
     frame.push_str("mapping.downstream_owner", downstream_owner.as_str())?;
+    frame.push_str("mapping.downstream_driver", downstream_driver.as_str())?;
     frame.push_str("mapping.downstream_script", downstream_script.as_str())?;
+    frame.push_str("mapping.downstream_manifest", downstream_manifest.as_str())?;
     frame.push_str(
         "mapping.consumption_rationale",
         consumption_rationale.as_str(),
@@ -2481,7 +3773,9 @@ fn journey_row_root(
 pub struct BaseE2eJourneyProjectionV1 {
     journey: BaseE2eJourneyV1,
     downstream_owner: StableTokenV2,
+    driver_name: StableTokenV2,
     script_path: LogicalBundlePathV1,
+    manifest_path: LogicalBundlePathV1,
     rows: Box<[BaseE2eProjectionRowV1]>,
     source_closure_root: ContentHash,
     log_schema_root: ContentHash,
@@ -2505,6 +3799,18 @@ impl BaseE2eJourneyProjectionV1 {
     #[must_use]
     pub const fn downstream_owner(&self) -> &StableTokenV2 {
         &self.downstream_owner
+    }
+
+    /// Exact downstream-owned release-driver name.
+    #[must_use]
+    pub const fn driver_name(&self) -> &StableTokenV2 {
+        &self.driver_name
+    }
+
+    /// Exact downstream-owned immutable suite-manifest path.
+    #[must_use]
+    pub const fn manifest_path(&self) -> &LogicalBundlePathV1 {
+        &self.manifest_path
     }
 
     /// Exact row set.
@@ -2546,6 +3852,7 @@ pub struct RunnerV2BaseE2eProjectionV1 {
     source_closure: RunnerV2BaseSourceClosureV1,
     coverage_inventory: BaseCoverageInventoryV1,
     coverage_manifest: BaseCoverageManifestV1,
+    close_manifest: BaseCoverageCloseManifestV1,
     log_schema_root: ContentHash,
     root: ContentHash,
 }
@@ -2558,14 +3865,25 @@ impl RunnerV2BaseE2eProjectionV1 {
         let mut journeys = Vec::with_capacity(BaseE2eJourneyV1::ALL.len());
         for journey in BaseE2eJourneyV1::ALL {
             let downstream_owner = token(journey.downstream_owner())?;
-            let script_path = LogicalBundlePathV1::new(journey.script_path()).map_err(|error| {
-                ConstructionErrorV2::new(
-                    ConstructionErrorKindV2::Incompatible,
-                    "base_e2e_projection.script_path",
-                    "the frozen logical relative script path",
-                    format_args!("{error:?}"),
-                )
-            })?;
+            let driver_name = token(journey.driver_name())?;
+            let script_path =
+                LogicalBundlePathV1::new(journey.script_path()).map_err(|_error| {
+                    ConstructionErrorV2::new_redacted(
+                        ConstructionErrorKindV2::Incompatible,
+                        "base_e2e_projection.script_path",
+                        "the frozen logical relative script path",
+                        ConstructionObservedDataClassV2::CallerControlledText,
+                    )
+                })?;
+            let manifest_path =
+                LogicalBundlePathV1::new(journey.manifest_path()).map_err(|_error| {
+                    ConstructionErrorV2::new_redacted(
+                        ConstructionErrorKindV2::Incompatible,
+                        "base_e2e_projection.manifest_path",
+                        "the frozen logical relative immutable suite-manifest path",
+                        ConstructionObservedDataClassV2::CallerControlledText,
+                    )
+                })?;
             let rows = journey_case_kinds(journey)
                 .iter()
                 .copied()
@@ -2573,7 +3891,9 @@ impl RunnerV2BaseE2eProjectionV1 {
                     projection_row(
                         journey,
                         &downstream_owner,
+                        &driver_name,
                         &script_path,
+                        &manifest_path,
                         source_closure.root(),
                         log_schema_root,
                         kind,
@@ -2591,13 +3911,15 @@ impl RunnerV2BaseE2eProjectionV1 {
                     ConstructionErrorKindV2::Incompatible,
                     "base_e2e_projection.journey_row_oracle",
                     "the exact independent literal row-ID sequence",
-                    journey.key(),
+                    ConstructionObservedV2::closed(&journey),
                 ));
             }
             let root = journey_root(
                 journey,
                 &downstream_owner,
+                &driver_name,
                 &script_path,
+                &manifest_path,
                 &rows,
                 source_closure.root(),
                 log_schema_root,
@@ -2605,7 +3927,9 @@ impl RunnerV2BaseE2eProjectionV1 {
             journeys.push(BaseE2eJourneyProjectionV1 {
                 journey,
                 downstream_owner,
+                driver_name,
                 script_path,
+                manifest_path,
                 rows: rows.into_boxed_slice(),
                 source_closure_root: source_closure.root(),
                 log_schema_root,
@@ -2614,11 +3938,21 @@ impl RunnerV2BaseE2eProjectionV1 {
         }
         let coverage_inventory = coverage_inventory(&journeys)?;
         let coverage_manifest = exact_coverage_manifest(&journeys)?;
+        let close_manifest = BaseCoverageCloseManifestV1::frozen()?;
+        if close_manifest.source_manifest_root() != coverage_manifest.root() {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "base_e2e_projection.close_source_manifest_root",
+                "the exact source-authoritative full coverage manifest root",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
         let root = projection_root(
             &journeys,
             source_closure.root(),
             coverage_inventory.root(),
             coverage_manifest.root(),
+            close_manifest.root(),
             log_schema_root,
         )?;
         Ok(Self {
@@ -2626,6 +3960,7 @@ impl RunnerV2BaseE2eProjectionV1 {
             source_closure,
             coverage_inventory,
             coverage_manifest,
+            close_manifest,
             log_schema_root,
             root,
         })
@@ -2657,6 +3992,16 @@ impl RunnerV2BaseE2eProjectionV1 {
     #[must_use]
     pub const fn coverage_manifest(&self) -> &BaseCoverageManifestV1 {
         &self.coverage_manifest
+    }
+
+    /// Source-authoritative, result-free, full-set-only AC53 close manifest.
+    ///
+    /// This projection binds the manifest but does not synthesize a close
+    /// report: unit, compile-fail, and downstream-owned execution remain
+    /// separately presented proof obligations.
+    #[must_use]
+    pub const fn close_manifest(&self) -> &BaseCoverageCloseManifestV1 {
+        &self.close_manifest
     }
 
     /// Closed deterministic logging-schema root bound by every journey.
@@ -2706,11 +4051,11 @@ impl BaseE2eHarnessIdentityV1 {
         let mut seen = std::collections::BTreeSet::new();
         for feature in &features {
             if !seen.insert(feature.as_str()) {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Duplicate,
                     "base_e2e_harness.features",
                     "unique stable feature tokens",
-                    feature.as_str(),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -2857,6 +4202,14 @@ impl BaseE2eRetainedArtifactClaimV1 {
     #[must_use]
     pub const fn is_absent(self) -> bool {
         matches!(self, Self::Absent)
+    }
+}
+
+impl ConstructionClosedSemanticV2 for BaseE2eRetainedArtifactClaimV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+        }
     }
 }
 
@@ -3285,7 +4638,7 @@ impl BaseE2eMatchedPartitionV1 {
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_result.partition",
                 "matched cells no greater than eligible cells",
-                format_args!("{matched} > {eligible}"),
+                ConstructionObservedV2::unsigned_pair(u64::from(matched), u64::from(eligible)),
             ));
         }
         Ok(Self { eligible, matched })
@@ -3338,7 +4691,10 @@ impl BaseE2eObservedCountsV1 {
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_result.unexpected_mismatches",
                 "the exact positive and expected-refusal partition gaps",
-                format_args!("{unexpected_mismatches} != {expected_mismatches}"),
+                ConstructionObservedV2::unsigned_pair(
+                    u64::from(unexpected_mismatches),
+                    u64::from(expected_mismatches),
+                ),
             ));
         }
         let checked_cells = positive
@@ -3493,7 +4849,10 @@ impl BaseE2ePresentedRowResultV1 {
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_result.detail_cells",
                 "matched detail cells no greater than observed detail cells",
-                format_args!("{detail_cells_matched} > {observed_detail_cell_count}"),
+                ConstructionObservedV2::unsigned_pair(
+                    u64::from(detail_cells_matched),
+                    u64::from(observed_detail_cell_count),
+                ),
             ));
         }
         if first_unexpected_cell.is_some() != (counts.unexpected_mismatches() > 0) {
@@ -3614,9 +4973,9 @@ impl BaseE2ePresentedRowResultV1 {
                 ConstructionErrorKindV2::Missing,
                 "base_e2e_result.observed_detail_cells",
                 "every cell declared by the observed detail manifest",
-                format_args!(
-                    "{observed_count} of {}",
-                    observed_detail_manifest.cell_count()
+                ConstructionObservedV2::unsigned_pair(
+                    u64::from(observed_count),
+                    u64::from(observed_detail_manifest.cell_count()),
                 ),
             ));
         }
@@ -3625,20 +4984,20 @@ impl BaseE2ePresentedRowResultV1 {
                 ConstructionErrorKindV2::Unexpected,
                 "base_e2e_result.observed_detail_cells",
                 "no cell beyond the observed detail manifest count",
-                format_args!(
-                    "{observed_count} for {}",
-                    observed_detail_manifest.cell_count()
+                ConstructionObservedV2::unsigned_pair(
+                    u64::from(observed_count),
+                    u64::from(observed_detail_manifest.cell_count()),
                 ),
             ));
         }
         let reconstructed =
             BaseE2eDecisionDetailManifestV1::from_cells(row.kind(), observed_detail_cells)?;
         if reconstructed.root() != observed_detail_manifest.root() {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_result.observed_detail_manifest_root",
                 "the exact root reconstructed from the ordered observed detail cells",
-                observed_detail_manifest.root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
 
@@ -3664,15 +5023,15 @@ impl BaseE2ePresentedRowResultV1 {
                     ConstructionErrorKindV2::Missing,
                     "base_e2e_result.first_unexpected_cell",
                     "the exact first typed detail-divergence cell ID",
-                    required_id,
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
                 ));
             };
             if presented_id.as_str() != required_id {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Incompatible,
                     "base_e2e_result.first_unexpected_cell",
                     "the exact first typed detail-divergence cell ID",
-                    presented_id.as_str(),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         } else if counts.unexpected_mismatches() > 0 {
@@ -3681,15 +5040,15 @@ impl BaseE2ePresentedRowResultV1 {
                     ConstructionErrorKindV2::Missing,
                     "base_e2e_result.first_unexpected_cell",
                     "the closed row.contract divergence ID when typed detail cells are exact",
-                    "absent",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
                 ));
             };
             if presented_id.as_str() != BASE_E2E_ROW_CONTRACT_DIVERGENCE_ID_V1 {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Incompatible,
                     "base_e2e_result.first_unexpected_cell",
                     "the closed row.contract divergence ID when typed detail cells are exact",
-                    presented_id.as_str(),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -4301,17 +5660,17 @@ fn observation_from_execution(
             ConstructionErrorKindV2::Missing,
             "base_e2e_execution.expected_detail_cells",
             "the complete in-process expected detail-cell slice",
-            "absent",
+            ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
         )
     })?;
     if expected_cells != row.expected_detail_cells()
         || execution.detail.expected != row.expected_detail_manifest()
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution.expected_detail_manifest",
             "the exact independent row detail oracle",
-            execution.detail.expected.root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -4320,17 +5679,17 @@ fn observation_from_execution(
             ConstructionErrorKindV2::Missing,
             "base_e2e_execution.observed_detail_cells",
             "the complete in-process observed detail-cell slice",
-            "absent",
+            ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
         )
     })?;
     let observed_detail_manifest =
         BaseE2eDecisionDetailManifestV1::from_cells(row.kind(), observed_cells)?;
     if observed_detail_manifest != execution.detail.observed {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution.observed_detail_manifest",
             "the exact descriptor reconstructed from in-process observed cells",
-            execution.detail.observed.root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -4355,19 +5714,11 @@ fn observation_from_execution(
     if execution.detail.matched_cells != detail_cells_matched
         || execution.detail.first_divergent_cell != first_divergent_cell
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution.detail_reconciliation",
             "the exact matched count and first divergence derived from in-process cells",
-            format_args!(
-                "{}/{}",
-                execution.detail.matched_cells,
-                execution
-                    .detail
-                    .first_divergent_cell
-                    .as_deref()
-                    .unwrap_or("none")
-            ),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -4385,7 +5736,10 @@ fn observation_from_execution(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution.checked_cells",
             "the exact sum of the in-process observed partitions",
-            format_args!("{} != {}", execution.checked_cells, counts.checked_cells()),
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(execution.checked_cells),
+                u64::from(counts.checked_cells()),
+            ),
         ));
     }
     if execution.first_failed_cell.is_some() != (counts.unexpected_mismatches() > 0) {
@@ -4399,11 +5753,11 @@ fn observation_from_execution(
     if let Some(detail_divergence) = first_divergent_cell.as_deref()
         && execution.first_failed_cell.as_deref() != Some(detail_divergence)
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution.first_failed_cell",
             "the exact first typed detail divergence",
-            execution.first_failed_cell.as_deref().unwrap_or("absent"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let first_observed_detail_cell = first_divergent_index
@@ -4548,11 +5902,11 @@ fn in_process_row_execution_witness_root(
     comparison: &BaseE2eRowResultV1,
 ) -> Result<ContentHash, ConstructionErrorV2> {
     if comparison.execution_witness_root().is_some() {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution_witness.comparison_row",
             "a comparison row with explicit witness absence",
-            comparison.root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let counts = observation.counts;
@@ -4655,11 +6009,11 @@ fn finalize_executed_row(
             )
         })?;
     if expected_row != row {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_execution_witness.row_binding",
             "the exact row at the presented journey ordinal",
-            row.id().as_str(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -4701,11 +6055,11 @@ fn validate_executed_row(
     }
     let comparison = checked_row_result(row, &executed.observation, None)?;
     if comparison.root() != executed.comparison_root {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_journey_execution.comparison_root",
             "the independently reconstructed comparison row root",
-            executed.comparison_root.to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let witness_root = in_process_row_execution_witness_root(
@@ -4717,20 +6071,20 @@ fn validate_executed_row(
         &comparison,
     )?;
     if witness_root != executed.witness_root {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_journey_execution.witness_root",
             "the independently reconstructed in-process row witness",
-            executed.witness_root.to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let result = checked_row_result(row, &executed.observation, Some(witness_root))?;
     if result != executed.result {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_journey_execution.row_result",
             "the exact witness-bound checked row result",
-            executed.result.root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     Ok(())
@@ -4771,11 +6125,11 @@ fn finalize_journey_execution(
         let row_ordinal = u32::try_from(index + 1).map_err(|_| sequence_overflow())?;
         validate_executed_row(manifest, row_ordinal, row, harness, &executed)?;
         if !witness_roots.insert(executed.witness_root) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_e2e_journey_execution.witness_root",
                 "one distinct in-process witness per ordered journey row",
-                executed.witness_root.to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         let result = executed.result;
@@ -4846,11 +6200,11 @@ pub fn run_base_e2e_journey_v1(
 ) -> Result<BaseE2eJourneyExecutionReportV1, ConstructionErrorV2> {
     let expected = RunnerV2BaseE2eProjectionV1::frozen()?;
     if projection != &expected {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_journey.projection",
             "the exact frozen projection",
-            projection.manifest_root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     run_base_e2e_journey_rows_v1(projection, journey, harness)
@@ -4870,7 +6224,7 @@ fn run_base_e2e_journey_rows_v1(
                 ConstructionErrorKindV2::Missing,
                 "base_e2e_journey.manifest",
                 "one exact journey manifest",
-                journey.code(),
+                ConstructionObservedV2::closed(&journey),
             )
         })?;
 
@@ -4909,11 +6263,11 @@ pub fn compare_base_e2e_journey_results_v1(
 ) -> Result<BaseE2eJourneyComparisonReportV1, ConstructionErrorV2> {
     let expected_projection = RunnerV2BaseE2eProjectionV1::frozen()?;
     if projection != &expected_projection {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_join.projection",
             "the exact frozen projection",
-            projection.manifest_root().to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let manifest = projection
@@ -4925,7 +6279,7 @@ pub fn compare_base_e2e_journey_results_v1(
                 ConstructionErrorKindV2::Missing,
                 "base_e2e_join.manifest",
                 "one exact journey manifest",
-                journey.code(),
+                ConstructionObservedV2::closed(&journey),
             )
         })?;
 
@@ -4933,19 +6287,19 @@ pub fn compare_base_e2e_journey_results_v1(
     let mut seen_roots = std::collections::BTreeSet::new();
     for result in presented {
         if !seen_ids.insert(result.row_id().as_str()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_e2e_join.row_id",
                 "one result per exact journey row",
-                result.row_id().as_str(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         if !seen_roots.insert(result.root()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_e2e_join.presented_root",
                 "one distinct result root per exact journey row",
-                result.root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -4954,7 +6308,10 @@ pub fn compare_base_e2e_journey_results_v1(
             ConstructionErrorKindV2::Missing,
             "base_e2e_join.results",
             "one ordered result for every exact manifest row",
-            format_args!("{} of {}", presented.len(), manifest.rows().len()),
+            ConstructionObservedV2::unsigned_pair(
+                presented.len() as u64,
+                manifest.rows().len() as u64,
+            ),
         ));
     }
     if presented.len() > manifest.rows().len() {
@@ -4962,7 +6319,10 @@ pub fn compare_base_e2e_journey_results_v1(
             ConstructionErrorKindV2::Unexpected,
             "base_e2e_join.results",
             "no result beyond the exact manifest row set",
-            format_args!("{} for {}", presented.len(), manifest.rows().len()),
+            ConstructionObservedV2::unsigned_pair(
+                presented.len() as u64,
+                manifest.rows().len() as u64,
+            ),
         ));
     }
 
@@ -4977,7 +6337,7 @@ pub fn compare_base_e2e_journey_results_v1(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_join.journey",
                 "the selected journey on every result",
-                result.journey().key(),
+                ConstructionObservedV2::closed(&result.journey()),
             ));
         }
         if !target_ids.contains(result.row_id().as_str()) {
@@ -4988,7 +6348,7 @@ pub fn compare_base_e2e_journey_results_v1(
                         .iter()
                         .any(|row| row.id() == result.row_id())
             });
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 if mapped_elsewhere {
                     ConstructionErrorKindV2::Incompatible
                 } else {
@@ -4996,7 +6356,7 @@ pub fn compare_base_e2e_journey_results_v1(
                 },
                 "base_e2e_join.row_id",
                 "an exact row mapped to the selected journey",
-                result.row_id().as_str(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -5011,7 +6371,7 @@ pub fn compare_base_e2e_journey_results_v1(
             ConstructionErrorKindV2::OutOfOrder,
             "base_e2e_join.results",
             "exact manifest row order",
-            "the same row set in a different order",
+            ConstructionObservedV2::fixed(ConstructionFixedObservationV2::ExactSetDifferentOrder),
         ));
     }
 
@@ -5026,11 +6386,11 @@ pub fn compare_base_e2e_journey_results_v1(
 
     for (row, presented_result) in manifest.rows().iter().zip(presented) {
         if presented_result.semantic_manifest_root() != row.semantic_manifest_root() {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_join.semantic_manifest_root",
                 "the exact source-closed row manifest root",
-                presented_result.semantic_manifest_root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         let observation = observation_from_presented(presented_result);
@@ -5436,11 +6796,11 @@ fn journey_comparison_root(
             ));
         }
         if result.execution_witness_root().is_some() {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_journey_comparison.execution_witness",
                 "explicit witness absence on every comparison row",
-                result.root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         frame.push_bytes("comparison.result_root", result.root().as_bytes())?;
@@ -5529,11 +6889,11 @@ fn journey_execution_root(
             ));
         }
         let witness_root = result.execution_witness_root().ok_or_else(|| {
-            ConstructionErrorV2::new(
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Missing,
                 "base_e2e_journey_execution.witness_root",
                 "one private in-process witness for every result",
-                row.id().as_str(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             )
         })?;
         frame.push_u32(
@@ -5599,18 +6959,18 @@ fn projection_execution_root(
                 ConstructionErrorKindV2::OutOfOrder,
                 "base_e2e_projection_execution.journey",
                 "the exact frozen journey order",
-                format_args!("{index}:{}", execution.journey().key()),
+                ConstructionObservedV2::closed_and_usize(&execution.journey(), index),
             ));
         }
         if execution.manifest_root() != manifest.manifest_root()
             || execution.harness_context_root() != harness.context_root()
             || execution.log_schema_root() != manifest.log_schema_root()
         {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_projection_execution.binding",
                 "the exact journey manifest, harness context, and log schema roots",
-                execution.execution_root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         let reconstructed_execution_root = journey_execution_root(
@@ -5630,7 +6990,10 @@ fn projection_execution_root(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_projection_execution.journey_execution_root",
                 "the independently reconstructed context-bound journey execution root",
-                format_args!("{index}:{}", execution.execution_root().to_hex()),
+                ConstructionObservedV2::indexed_redacted(
+                    index,
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                ),
             ));
         }
         frame.push_u16("aggregate.journey", execution.journey().code())?;
@@ -5658,11 +7021,11 @@ pub fn run_base_e2e_projection_v1(
 ) -> Result<BaseE2eProjectionReportV1, ConstructionErrorV2> {
     let expected = RunnerV2BaseE2eProjectionV1::frozen()?;
     if projection != &expected {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_e2e_projection.root",
             "the exact immutable frozen projection",
-            projection.root.to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -5757,11 +7120,11 @@ pub fn run_base_e2e_projection_v1(
                 .insert(coverage_id.clone(), (coverage_outcome, result.root()))
                 .is_some()
             {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Duplicate,
                     "coverage.runtime_result",
                     "one result per exact coverage ID",
-                    coverage_id,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
             match outcome {
@@ -5976,12 +7339,12 @@ pub fn run_base_e2e_projection_v1(
         .entries()
         .iter()
         .map(|entry| {
-            LogicalBundlePathV1::new(entry.path()).map_err(|error| {
-                ConstructionErrorV2::new(
+            LogicalBundlePathV1::new(entry.path()).map_err(|_error| {
+                ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Incompatible,
                     "base_e2e_projection.source_closure_path",
                     "a source-closure-relative path",
-                    format_args!("{error:?}"),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 )
             })
         })
@@ -6039,6 +7402,15 @@ impl BaseE2eCapabilityRefusalStageV1 {
     #[must_use]
     pub const fn code(self) -> u16 {
         self as u16
+    }
+}
+
+impl ConstructionClosedSemanticV2 for BaseE2eCapabilityRefusalStageV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::IntrinsicPolicy => "intrinsic-policy",
+            Self::ContextualNarrowing => "contextual-narrowing",
+        }
     }
 }
 
@@ -6165,6 +7537,12 @@ impl BaseE2eDetailPayloadV1 {
     }
 }
 
+impl ConstructionClosedSemanticV2 for BaseE2eDetailPayloadV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        self.kind_name()
+    }
+}
+
 /// One publicly inspectable expected or observed decision-detail cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseE2eDetailCellV1 {
@@ -6224,7 +7602,7 @@ impl BaseE2eDetailCellV1 {
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_detail_cell.payload",
                 "Accept with AcceptedInstead, Unsupported with the non-ASCII Windows adjudication, or Refuse with another typed refusal payload",
-                format_args!("{}:{}", decision.name(), payload.kind_name()),
+                ConstructionObservedV2::closed_pair(&decision, &payload),
             ));
         }
         match &payload {
@@ -6233,7 +7611,7 @@ impl BaseE2eDetailCellV1 {
                     ConstructionErrorKindV2::Missing,
                     "base_e2e_detail_cell.catalog",
                     "a nonempty stable catalog name",
-                    "empty",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Absent),
                 ));
             }
             BaseE2eDetailPayloadV1::Limit {
@@ -6253,19 +7631,19 @@ impl BaseE2eDetailCellV1 {
                         ConstructionErrorKindV2::OutOfRange,
                         "base_e2e_detail_cell.repair_rank",
                         "an inclusive repair rank from 1 through 16",
-                        repair_rank,
+                        *repair_rank,
                     ));
                 }
                 for (field, value) in [
                     ("base_e2e_detail_cell.owner", *owner),
                     ("base_e2e_detail_cell.repair_target", *repair_target),
                 ] {
-                    StableTokenV2::new(value).map_err(|error| {
-                        ConstructionErrorV2::new(
+                    StableTokenV2::new(value).map_err(|_error| {
+                        ConstructionErrorV2::new_redacted(
                             ConstructionErrorKindV2::Incompatible,
                             field,
                             "a bounded lowercase stable token",
-                            format_args!("{error:?}"),
+                            ConstructionObservedDataClassV2::CallerControlledText,
                         )
                     })?;
                 }
@@ -6553,7 +7931,10 @@ fn validate_detail_cell_sequence(
             ConstructionErrorKindV2::TooLarge,
             "base_e2e_detail_manifest.cells",
             "no more cells than the containing semantic matrix",
-            format_args!("{cell_count} > {}", kind.semantic_cell_count()),
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(cell_count),
+                u64::from(kind.semantic_cell_count()),
+            ),
         ));
     }
     let mut stable_ids = std::collections::BTreeSet::new();
@@ -6565,7 +7946,7 @@ fn validate_detail_cell_sequence(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_detail_manifest.cell_kind",
                 "the containing detail-manifest case kind",
-                cell.kind().name(),
+                ConstructionObservedV2::closed(&cell.kind()),
             ));
         }
         if cell.semantic_ordinal() == 0 || cell.semantic_ordinal() > kind.semantic_cell_count() {
@@ -6590,25 +7971,28 @@ fn validate_detail_cell_sequence(
                     ConstructionErrorKindV2::OutOfOrder,
                     "base_e2e_detail_manifest.semantic_ordinal",
                     "strictly increasing semantic ordinals",
-                    format_args!("{} after {previous}", cell.semantic_ordinal()),
+                    ConstructionObservedV2::unsigned_pair(
+                        u64::from(cell.semantic_ordinal()),
+                        u64::from(previous),
+                    ),
                 ));
             }
         }
         previous_ordinal = Some(cell.semantic_ordinal());
         if !stable_ids.insert(cell.stable_id()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_e2e_detail_manifest.stable_id",
                 "one unique stable ID per detail cell",
-                cell.stable_id(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         if !roots.insert(cell.root()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_e2e_detail_manifest.cell_root",
                 "one unique canonical root per detail cell",
-                cell.root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         let recomputed = checked_detail_cell_root(
@@ -6619,11 +8003,11 @@ fn validate_detail_cell_sequence(
             cell.payload(),
         )?;
         if recomputed != cell.root() {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "base_e2e_detail_manifest.cell_root",
                 "the exact root reconstructed from the typed detail cell",
-                cell.root().to_hex(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -7955,11 +9339,10 @@ fn publication_cross_error() -> ConstructionErrorV2 {
         ConstructionErrorKindV2::Incompatible,
         "publication.profile_protocol_target",
         "the exact frozen profile/protocol/target cell",
-        format_args!(
-            "{}/{}/{}",
-            PlatformPathProfileV2::WindowsHandleRelativeV1.name(),
-            PublicationProtocolV2::PosixDescriptorRenameAndDirectorySyncV1.name(),
-            PlatformPathProfileV2::WindowsHandleRelativeV1.name()
+        ConstructionObservedV2::closed_triple(
+            &PlatformPathProfileV2::WindowsHandleRelativeV1,
+            &PublicationProtocolV2::PosixDescriptorRenameAndDirectorySyncV1,
+            &PlatformPathProfileV2::WindowsHandleRelativeV1,
         ),
     )
 }
@@ -8059,14 +9442,6 @@ fn capability_oracle_rights(
     }
 }
 
-fn render_capability_rights(rights: &[RootCapabilityRightV2]) -> String {
-    rights
-        .iter()
-        .map(|right| right.name())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 fn expected_capability_refusal(
     profile: PlatformPathProfileV2,
     access: RootCapabilityAccessV2,
@@ -8095,7 +9470,7 @@ fn expected_capability_refusal(
             ConstructionErrorKindV2::Incompatible,
             "root_capability_policy.rights",
             expected,
-            render_capability_rights(rights),
+            ConstructionObservedV2::closed_sequence(rights.iter()),
         ),
     )
 }
@@ -9053,6 +10428,16 @@ enum BaseE2eMixedPartitionV1 {
     Unsupported,
 }
 
+impl ConstructionClosedSemanticV2 for BaseE2eMixedPartitionV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::ExpectedRefusal => "expected-refusal",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BaseE2eMixedProgressV1 {
     checked_cells: u32,
@@ -9421,11 +10806,11 @@ fn run_source_closure_checks(
     duplicate[1] = duplicate[0].clone();
     matched_cases[3] = source_closure_refusal_matches(
         &RunnerV2BaseSourceClosureV1::reconstruct(&duplicate),
-        ConstructionErrorV2::new(
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Duplicate,
             "base_source_closure.path",
             "one unique path per exact source entry",
-            duplicate[1].path(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ),
     );
 
@@ -9437,7 +10822,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::OutOfOrder,
             "base_source_closure.path",
             "the exact bytewise-lexicographic source order",
-            format_args!("0:{}", reordered[0].path()),
+            ConstructionObservedV2::indexed_redacted(
+                0,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ),
     );
 
@@ -9446,11 +10834,11 @@ fn run_source_closure_checks(
     stale[0].content_root = hash_domain(BASE_SOURCE_FILE_CONTENT_DOMAIN_V1, &stale[0].bytes);
     matched_cases[5] = source_closure_refusal_matches(
         &RunnerV2BaseSourceClosureV1::reconstruct(&stale),
-        ConstructionErrorV2::new(
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.bytes",
             "the exact compile-time included source bytes",
-            EMBEDDED_SOURCE_FILES_V1[0].path,
+            ConstructionObservedDataClassV2::BulkPayload,
         ),
     );
 
@@ -9462,7 +10850,7 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.owner",
             "the exact sole declaration owner",
-            format_args!("0:{}", owner[0].owner_code()),
+            ConstructionObservedV2::unsigned_pair(0, u64::from(owner[0].owner_code())),
         ),
     );
 
@@ -9474,7 +10862,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.source_route",
             "the exact closed compile-time source route",
-            format_args!("0:{}", source_route[0].source_route_code()),
+            ConstructionObservedV2::unsigned_pair(
+                0,
+                u64::from(source_route[0].source_route_code()),
+            ),
         ),
     );
 
@@ -9489,7 +10880,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.expected_source_identity_root",
             "the exact declarative expected-source-identity root",
-            format_args!("0:{}", source_identity[0].path()),
+            ConstructionObservedV2::indexed_redacted(
+                0,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ),
     );
 
@@ -9501,7 +10895,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.snapshot_policy",
             "the exact common compiled-snapshot policy",
-            format_args!("0:{}", snapshot_policy[0].snapshot_policy_code()),
+            ConstructionObservedV2::unsigned_pair(
+                0,
+                u64::from(snapshot_policy[0].snapshot_policy_code()),
+            ),
         ),
     );
 
@@ -9513,7 +10910,7 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.encoded_bytes",
             "the exact presented source byte length",
-            format_args!("0:{}", encoded_length[0].encoded_bytes()),
+            ConstructionObservedV2::unsigned_pair(0, encoded_length[0].encoded_bytes()),
         ),
     );
 
@@ -9528,7 +10925,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.content_root",
             "the root of the exact presented source bytes",
-            format_args!("0:{}", content_root[0].path()),
+            ConstructionObservedV2::indexed_redacted(
+                0,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ),
     );
 
@@ -9544,7 +10944,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.snapshot_root",
             "the one exact common compiled-snapshot root",
-            format_args!("0:{}", mixed_snapshot[0].path()),
+            ConstructionObservedV2::indexed_redacted(
+                0,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ),
     );
 
@@ -9558,7 +10961,10 @@ fn run_source_closure_checks(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.snapshot_root",
             "the one exact common compiled-snapshot root",
-            format_args!("0:{}", wrong_common_snapshot[0].path()),
+            ConstructionObservedV2::indexed_redacted(
+                0,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ),
     );
 
@@ -9571,11 +10977,11 @@ fn run_source_closure_checks(
             &exact_inputs(),
             wrong_dependency_root,
         ),
-        ConstructionErrorV2::new(
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.dependency_declaration_root",
             "the exact current declaration-time direct-dependency root",
-            wrong_dependency_root.to_hex(),
+            ConstructionObservedDataClassV2::CallerControlledText,
         ),
     );
 
@@ -10188,7 +11594,7 @@ fn command_selection(
             ConstructionErrorKindV2::Unexpected,
             "command.selection",
             "typed absence for List",
-            "present",
+            ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Present),
         )),
     }
 }
@@ -10213,23 +11619,23 @@ fn command_budgets(
 }
 
 fn presented_identity_error(field: &'static str) -> ConstructionErrorV2 {
-    ConstructionErrorV2::new(
+    ConstructionErrorV2::new_redacted(
         ConstructionErrorKindV2::Incompatible,
         field,
         "an exact nominal presented identity fixture",
-        "identity parse refused",
+        ConstructionObservedDataClassV2::CallerControlledText,
     )
 }
 
 fn opaque_root(root: ContentHash) -> Result<TypedValueV2, ConstructionErrorV2> {
     OpaqueBytesV2::new(root.as_bytes().to_vec())
         .map(TypedValueV2::OpaqueBytes)
-        .map_err(|error| {
-            ConstructionErrorV2::new(
+        .map_err(|_error| {
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "projection.opaque_root",
                 "an exact 32-byte domain-separated root",
-                format_args!("{error:?}"),
+                ConstructionObservedDataClassV2::BulkPayload,
             )
         })
 }
@@ -12288,12 +13694,12 @@ fn budget_oracle_table_root() -> ContentHash {
 
 fn budget_registered_unit_registry()
 -> Result<BaseExtensionRegistryProjectionV2, ConstructionErrorV2> {
-    let registered_unit = LogicalUnitV2::from_tag(16, Some(7)).map_err(|error| {
-        ConstructionErrorV2::new(
+    let registered_unit = LogicalUnitV2::from_tag(16, Some(7)).map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "budget.registry.logical_unit",
             "the exact registered-unit fixture ID 7",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })?;
     let no_claim_scope = NoClaimScopeRootV1::parse_presented(
@@ -12301,30 +13707,30 @@ fn budget_registered_unit_registry()
         NoClaimScopeRootV1::DESCRIPTOR.domain(),
         &"00".repeat(32),
     )
-    .map_err(|error| {
-        ConstructionErrorV2::new(
+    .map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "budget.registry.no_claim_scope",
             "the exact all-zero-present nominal no-claim fixture",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })?;
     let descriptor = RegisteredLogicalUnitDescriptorV2::new(
         registered_unit,
-        StableTokenV2::new("org.frankensim.fixture.logical-work-unit").map_err(|error| {
-            ConstructionErrorV2::new(
+        StableTokenV2::new("org.frankensim.fixture.logical-work-unit").map_err(|_error| {
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "budget.registry.logical_unit.name",
                 "the exact namespaced registered-unit fixture name",
-                format_args!("{error:?}"),
+                ConstructionObservedDataClassV2::CallerControlledText,
             )
         })?,
-        StableTokenV2::new("org.frankensim.fixture.owner").map_err(|error| {
-            ConstructionErrorV2::new(
+        StableTokenV2::new("org.frankensim.fixture.owner").map_err(|_error| {
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "budget.registry.logical_unit.owner",
                 "the exact registered-unit fixture owner",
-                format_args!("{error:?}"),
+                ConstructionObservedDataClassV2::CallerControlledText,
             )
         })?,
         no_claim_scope,
@@ -12578,12 +13984,12 @@ fn selection_for_profile(
     profile: PlatformPathProfileV2,
     mode: DestinationAdmissionModeV2,
 ) -> Result<PublicationSelectionV2, ConstructionErrorV2> {
-    let logical = LogicalBundlePathV1::new("runner/seal").map_err(|error| {
-        ConstructionErrorV2::new(
+    let logical = LogicalBundlePathV1::new("runner/seal").map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "projection.publication_path",
             "a valid logical path",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })?;
     let (protocol, target) = match profile {
@@ -12598,12 +14004,12 @@ fn selection_for_profile(
         PlatformPathProfileV2::ContentStoreObjectKeyV1 => (
             PublicationProtocolV2::ContentStoreAtomicCommitV1,
             PublicationTargetV2::ContentStoreLogicalKey(
-                ContentStoreObjectKeyV1::new("objects/seal").map_err(|error| {
-                    ConstructionErrorV2::new(
+                ContentStoreObjectKeyV1::new("objects/seal").map_err(|_error| {
+                    ConstructionErrorV2::new_redacted(
                         ConstructionErrorKindV2::Incompatible,
                         "projection.content_store_key",
                         "a valid logical object key",
-                        format_args!("{error:?}"),
+                        ConstructionObservedDataClassV2::CallerControlledText,
                     )
                 })?,
             ),
@@ -12613,12 +14019,12 @@ fn selection_for_profile(
 }
 
 fn publication_selection(path: &str) -> Result<PublicationSelectionV2, ConstructionErrorV2> {
-    let path = LogicalBundlePathV1::new(path).map_err(|error| {
-        ConstructionErrorV2::new(
+    let path = LogicalBundlePathV1::new(path).map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "projection.publication_path",
             "a valid logical path",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })?;
     PublicationSelectionV2::new(
@@ -12955,11 +14361,11 @@ fn presented_stop_fixture_roots() -> Result<
     ConstructionErrorV2,
 > {
     let parse_error = |field: &'static str| {
-        ConstructionErrorV2::new(
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             field,
             "a nominal presented stop fixture root",
-            "fixture construction failed",
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     };
     let cancelled_hex = hash_domain(
@@ -13372,12 +14778,12 @@ fn publication_storage() -> Result<BaseE2ePublicationStorageTotalsV1, Constructi
             system_publication_stored_bytes,
             publication_stored_bytes,
         })
-        .map_err(|error| {
-            ConstructionErrorV2::new(
+        .map_err(|_error| {
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "publication.storage",
                 "the independently reconstructed base publication-storage projection",
-                format_args!("{error:?}"),
+                ConstructionObservedDataClassV2::BulkPayload,
             )
         })?;
     Ok(BaseE2ePublicationStorageTotalsV1 {
@@ -13393,11 +14799,11 @@ fn validate_source_input_set(
     let mut paths = std::collections::BTreeSet::new();
     for input in inputs {
         if !paths.insert(input.path()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "base_source_closure.path",
                 "one unique path per exact source entry",
-                input.path(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -13456,7 +14862,10 @@ fn validate_source_input_position(
         kind,
         "base_source_closure.path",
         expectation,
-        format_args!("{ordinal}:{}", input.path()),
+        ConstructionObservedV2::indexed_redacted(
+            ordinal,
+            ConstructionObservedDataClassV2::CallerControlledText,
+        ),
     ))
 }
 
@@ -13470,7 +14879,7 @@ fn validate_source_input_metadata(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.owner",
             "the exact sole declaration owner",
-            format_args!("{ordinal}:{}", input.owner_code()),
+            ConstructionObservedV2::unsigned_pair(ordinal as u64, u64::from(input.owner_code())),
         ));
     }
     if input.source_route_code() != expected.source_route as u16 {
@@ -13478,7 +14887,10 @@ fn validate_source_input_metadata(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.source_route",
             "the exact closed compile-time source route",
-            format_args!("{ordinal}:{}", input.source_route_code()),
+            ConstructionObservedV2::unsigned_pair(
+                ordinal as u64,
+                u64::from(input.source_route_code()),
+            ),
         ));
     }
     if input.expected_source_identity_root() != expected_source_identity_root(expected) {
@@ -13486,7 +14898,10 @@ fn validate_source_input_metadata(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.expected_source_identity_root",
             "the exact declarative expected-source-identity root",
-            format_args!("{ordinal}:{}", input.path()),
+            ConstructionObservedV2::indexed_redacted(
+                ordinal,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ));
     }
     if input.snapshot_policy_code() != expected.snapshot_policy as u16 {
@@ -13494,7 +14909,10 @@ fn validate_source_input_metadata(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.snapshot_policy",
             "the exact common compiled-snapshot policy",
-            format_args!("{ordinal}:{}", input.snapshot_policy_code()),
+            ConstructionObservedV2::unsigned_pair(
+                ordinal as u64,
+                u64::from(input.snapshot_policy_code()),
+            ),
         ));
     }
     Ok(())
@@ -13519,7 +14937,7 @@ fn validate_source_input_content(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.encoded_bytes",
             "the exact presented source byte length",
-            format_args!("{ordinal}:{}", input.encoded_bytes()),
+            ConstructionObservedV2::unsigned_pair(ordinal as u64, input.encoded_bytes()),
         ));
     }
     let content_root = hash_domain(BASE_SOURCE_FILE_CONTENT_DOMAIN_V1, input.bytes());
@@ -13528,15 +14946,18 @@ fn validate_source_input_content(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.content_root",
             "the root of the exact presented source bytes",
-            format_args!("{ordinal}:{}", input.path()),
+            ConstructionObservedV2::indexed_redacted(
+                ordinal,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ));
     }
     if input.bytes() != expected.bytes {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.bytes",
             "the exact compile-time included source bytes",
-            expected.path,
+            ConstructionObservedDataClassV2::BulkPayload,
         ));
     }
     if input.snapshot_root() != snapshot_root {
@@ -13544,7 +14965,10 @@ fn validate_source_input_content(
             ConstructionErrorKindV2::Incompatible,
             "base_source_closure.snapshot_root",
             "the one exact common compiled-snapshot root",
-            format_args!("{ordinal}:{}", input.path()),
+            ConstructionObservedV2::indexed_redacted(
+                ordinal,
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ),
         ));
     }
     Ok(())
@@ -13619,18 +15043,45 @@ fn expected_source_identity_root(declaration: &EmbeddedSourceFileV1) -> ContentH
     hash_domain(BASE_EXPECTED_SOURCE_IDENTITY_DOMAIN_V1, &bytes)
 }
 
-fn compiled_source_snapshot_root() -> Result<ContentHash, ConstructionErrorV2> {
-    static COMPILED_SOURCE_SNAPSHOT_ROOT_V1: std::sync::OnceLock<
-        Result<ContentHash, ConstructionErrorV2>,
+fn compiled_source_snapshot() -> Result<CompatibleSourceSnapshotV1, ConstructionErrorV2> {
+    static COMPILED_SOURCE_SNAPSHOT_V1: std::sync::OnceLock<
+        Result<CompatibleSourceSnapshotV1, ConstructionErrorV2>,
     > = std::sync::OnceLock::new();
-    COMPILED_SOURCE_SNAPSHOT_ROOT_V1
-        .get_or_init(|| source_snapshot_root(&EMBEDDED_SOURCE_FILES_V1))
+    COMPILED_SOURCE_SNAPSHOT_V1
+        .get_or_init(|| {
+            let frame = source_snapshot_frame(&EMBEDDED_SOURCE_FILES_V1)?;
+            CompatibleSourceSnapshotV1::from_exact_frame(&frame)
+        })
         .clone()
 }
 
-fn source_snapshot_root(
+#[cfg(test)]
+pub(crate) fn compatible_source_test_fixture_v1(
+    discriminator: u8,
+) -> Result<(CompatibleSourceSnapshotV1, CompatibleSourceMemberV1), ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSBASESOURCESNAPSHOT\x01", 1_024)?;
+    frame.push_u8("snapshot.test_fixture_discriminator", discriminator)?;
+    let snapshot = CompatibleSourceSnapshotV1::from_exact_frame(&frame)?;
+    let path = LogicalBundlePathV1::new("crates/fs-evidence-runner/src/schema_impact.rs").map_err(
+        |_| {
+            ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "source_closure.test_fixture_member",
+                "the exact schema-impact source path",
+                ConstructionObservedDataClassV2::PhysicalLocator,
+            )
+        },
+    )?;
+    Ok((snapshot, CompatibleSourceMemberV1 { path, snapshot }))
+}
+
+fn compiled_source_snapshot_root() -> Result<ContentHash, ConstructionErrorV2> {
+    Ok(compiled_source_snapshot()?.root().content_hash())
+}
+
+fn source_snapshot_frame(
     files: &[EmbeddedSourceFileV1],
-) -> Result<ContentHash, ConstructionErrorV2> {
+) -> Result<CanonicalFrameV1, ConstructionErrorV2> {
     let mut frame = CanonicalFrameV1::new(b"FSBASESOURCESNAPSHOT\x01", 64 * 1024)?;
     frame.push_bytes(
         "snapshot.current_direct_dependency_declaration_root",
@@ -13676,7 +15127,7 @@ fn source_snapshot_root(
             hash_domain(BASE_SOURCE_FILE_CONTENT_DOMAIN_V1, file.bytes).as_bytes(),
         )?;
     }
-    Ok(frame.root(BASE_SOURCE_SNAPSHOT_DOMAIN_V1))
+    Ok(frame)
 }
 
 fn source_closure_root(
@@ -13766,26 +15217,26 @@ fn reconstruct_exact_local_coverage_report(
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    if let Some(extra) = observations
+    if observations
         .keys()
-        .find(|id| !selected_id_set.contains(id.as_str()))
+        .any(|id| !selected_id_set.contains(id.as_str()))
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Unexpected,
             "coverage.runtime_result.source_case_id",
             "only independently declared locally executed coverage IDs",
-            extra,
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
-    if let Some(missing) = selected_ids
+    if selected_ids
         .iter()
-        .find(|id| !observations.contains_key(**id))
+        .any(|id| !observations.contains_key(*id))
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Missing,
             "coverage.runtime_result.source_case_id",
             "one observation for every independently declared locally executed coverage ID",
-            missing,
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
 
@@ -13794,11 +15245,11 @@ fn reconstruct_exact_local_coverage_report(
         .iter()
         .map(|id| {
             let (outcome, evidence_root) = observations.get(*id).ok_or_else(|| {
-                ConstructionErrorV2::new(
+                ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Missing,
                     "coverage.runtime_result.source_case_id",
                     "one observation for every independently declared locally executed coverage ID",
-                    *id,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 )
             })?;
             BaseCoveragePresentedResultV1::new(manifest.root(), *id, *outcome, *evidence_root)
@@ -13820,7 +15271,7 @@ fn exact_coverage_manifest(
         BaseE2eJourneyV1::PublicationState,
         BaseE2eJourneyV1::PublicationV2,
         BaseE2eJourneyV1::RjoqHandoffV1,
-        BaseE2eJourneyV1::VerifierV1,
+        BaseE2eJourneyV1::VerifierV2,
     ] {
         for row_id in journey_row_id_oracle(journey) {
             extensions.push(BaseCoverageCaseDeclarationV1::new(
@@ -13860,8 +15311,8 @@ fn exact_coverage_manifest(
             "scripts/ci/verify_runner_rjoq_handoff_v1.sh",
         ),
         (
-            "external-e2e:verifier-v1",
-            "scripts/ci/e2e_evidence_verifier_v1.sh",
+            "external-e2e:verifier-v2",
+            "scripts/ci/e2e_evidence_verifier_v2.sh",
         ),
     ] {
         extensions.push(BaseCoverageCaseDeclarationV1::new(
@@ -13909,17 +15360,17 @@ fn exact_coverage_manifest(
                 ConstructionErrorKindV2::Incompatible,
                 "coverage.journey_row_count",
                 "the exact independent literal row-ID count",
-                journey.journey().key(),
+                ConstructionObservedV2::closed(&journey.journey()),
             ));
         }
         for (literal_id, row) in literal_ids.iter().zip(journey.rows()) {
             let coverage_id = format!("projection-e2e:{}:{literal_id}", journey.journey().key());
             if row.id().as_str() != *literal_id || manifest.case(&coverage_id).is_none() {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Missing,
                     "coverage.projection_e2e",
                     "one independently declared coverage case per journey row",
-                    coverage_id,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -13964,7 +15415,7 @@ fn coverage_inventory(
                 ConstructionErrorKindV2::Missing,
                 "coverage.source_cases",
                 "at least one immutable source case per coverage class",
-                class.code(),
+                ConstructionObservedV2::closed(&class),
             ));
         }
     }
@@ -13992,11 +15443,11 @@ fn coverage_inventory(
     let mut seen = std::collections::BTreeSet::new();
     for source_case in &cases {
         if !seen.insert((source_case.class.code(), source_case.id.as_str())) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "coverage.source_case_id",
                 "unique IDs within every coverage class",
-                source_case.id.as_str(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -14017,20 +15468,20 @@ fn coverage_source_case(
         .iter()
         .any(|source| source.path == source_path)
     {
-        return Err(ConstructionErrorV2::new(
+        return Err(ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Unexpected,
             "coverage.source_path",
             "a member of the exact embedded source closure",
-            source_path,
+            ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
     let id = token(id)?;
-    let source_path = LogicalBundlePathV1::new(source_path).map_err(|error| {
-        ConstructionErrorV2::new(
+    let source_path = LogicalBundlePathV1::new(source_path).map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "coverage.source_path",
             "a validated relative source path",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })?;
     Ok(BaseCoverageSourceCaseV1 {
@@ -14068,7 +15519,9 @@ fn coverage_inventory_root(
 fn journey_root(
     journey: BaseE2eJourneyV1,
     downstream_owner: &StableTokenV2,
+    driver_name: &StableTokenV2,
     script_path: &LogicalBundlePathV1,
+    manifest_path: &LogicalBundlePathV1,
     rows: &[BaseE2eProjectionRowV1],
     source_closure_root: ContentHash,
     log_schema_root: ContentHash,
@@ -14078,7 +15531,9 @@ fn journey_root(
     frame.push_u16("projection.wire_version", 1)?;
     frame.push_u16("projection.journey", journey.code())?;
     frame.push_str("projection.downstream_owner", downstream_owner.as_str())?;
+    frame.push_str("projection.driver_name", driver_name.as_str())?;
     frame.push_str("projection.script_path", script_path.as_str())?;
+    frame.push_str("projection.manifest_path", manifest_path.as_str())?;
     frame.push_bytes(
         "projection.source_closure_root",
         source_closure_root.as_bytes(),
@@ -14098,15 +15553,17 @@ fn journey_root(
     for row in rows {
         if row.journey() != journey
             || row.downstream_owner() != downstream_owner
+            || row.downstream_driver() != driver_name
             || row.downstream_script() != script_path
+            || row.downstream_manifest() != manifest_path
             || row.source_closure_root() != source_closure_root
             || row.log_schema_root() != log_schema_root
         {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "projection.journey_row_context",
-                "the exact journey, owner, script, and source closure",
-                row.id().as_str(),
+                "the exact journey, owner, driver, script, manifest, and source closure",
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
         frame.push_str("projection.row_id", row.id.as_str())?;
@@ -14152,6 +15609,7 @@ fn projection_root(
     source_closure_root: ContentHash,
     coverage_inventory_root: ContentHash,
     coverage_manifest_root: ContentHash,
+    close_manifest_root: ContentHash,
     log_schema_root: ContentHash,
 ) -> Result<ContentHash, ConstructionErrorV2> {
     let mut frame = CanonicalFrameV1::new(b"FSBASEPROJECTION\x01", 4096)?;
@@ -14176,6 +15634,10 @@ fn projection_root(
     frame.push_bytes(
         "projection.coverage_manifest_root",
         coverage_manifest_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "projection.close_manifest_root",
+        close_manifest_root.as_bytes(),
     )?;
     frame.push_bytes("projection.log_schema_root", log_schema_root.as_bytes())?;
     Ok(frame.root(BASE_E2E_PROJECTION_DOMAIN_V1))
@@ -14259,11 +15721,11 @@ fn case_terminal_log_event(
         case_fields.push(field(
             "first-detail-divergence-root",
             opaque_root(result.first_divergence_root().ok_or_else(|| {
-                ConstructionErrorV2::new(
+                ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Missing,
                     "base_e2e_projection.first_divergence_root",
                     "one typed bounded detail-or-row-contract divergence root for every failed terminal",
-                    first_failed_cell,
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 )
             })?)?,
         )?);
@@ -14426,12 +15888,12 @@ fn field(
 }
 
 fn token(value: &str) -> Result<StableTokenV2, ConstructionErrorV2> {
-    StableTokenV2::new(value).map_err(|error| {
-        ConstructionErrorV2::new(
+    StableTokenV2::new(value).map_err(|_error| {
+        ConstructionErrorV2::new_redacted(
             ConstructionErrorKindV2::Incompatible,
             "projection.stable_token",
             "a valid stable token",
-            format_args!("{error:?}"),
+            ConstructionObservedDataClassV2::CallerControlledText,
         )
     })
 }
@@ -14441,7 +15903,7 @@ fn sequence_overflow() -> ConstructionErrorV2 {
         ConstructionErrorKindV2::ArithmeticOverflow,
         "projection.logical_sequence",
         "a checked u32 sequence",
-        "overflow",
+        ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Overflow),
     )
 }
 
@@ -14452,25 +15914,54 @@ mod tests {
         BaseE2eJourneyV1, BaseE2eMatchedPartitionV1, BaseE2eObservedCountsV1,
         BaseE2ePresentedRowResultV1, BaseSourceClosureInputV1, BaseSourceOwnerV1,
         BaseSourceRouteV1, BaseSourceSnapshotPolicyV1, EMBEDDED_SOURCE_FILES_V1,
-        RunnerV2BaseE2eProjectionV1, RunnerV2BaseSourceClosureV1,
-        compare_base_e2e_journey_results_v1, execute_case, expected_source_identity_root,
-        journey_row_id_oracle, journey_row_root, reconstruct_exact_local_coverage_report,
-        run_base_e2e_journey_v1, run_base_e2e_projection_v1, source_closure_entry,
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_CONSUMED_ROW_COUNT_V2,
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_OWNED_ROW_COUNT_V2,
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2,
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SCHEMA_IDS_V2,
+        RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SOURCE_PATH_COUNT_V2,
+        RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1, RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1,
+        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1, RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1,
+        RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1, RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+        RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1,
+        RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+        RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1,
+        RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1, RunnerV2BaseE2eProjectionV1,
+        RunnerV2BaseSchemaImpactProjectionV2, RunnerV2BaseSourceClosureV1,
+        RunnerV2PhaseOneContractContributionV2, compare_base_e2e_journey_results_v1,
+        encode_construction_error, execute_case, expected_source_identity_root, journey_root,
+        journey_row_id_oracle, journey_row_root, phase_one_contribution_projection_root_v2,
+        phase_one_payload_root_v2, reconstruct_exact_local_coverage_report,
+        run_base_e2e_journey_v1, run_base_e2e_projection_v1, schema_impact_projection_root_v2,
+        schema_impact_projection_row_root_v2, source_closure_entry,
+        validate_exact_phase_one_observer_contract_v1,
     };
     use crate::budget::RunnerBudgetViolationKindV2;
     use crate::catalog::{DigestRoleV2, RepairActionKindV2};
     use crate::construction::ConstructionErrorKindV2;
-    use crate::coverage::BaseCoverageManifestClassV1;
+    use crate::coverage::{
+        BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseContributionBudgetsV1,
+        BaseCoverageCloseDeferredEvidenceEnvelopeV1,
+        BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
+        BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
+        BaseCoverageManifestClassV1, CanonicalSchemaImpactDispositionV1, DeferredReasonV1,
+        RuntimeObservationDispositionV1, compatible_source_snapshot_root_from_exact_frame_v1,
+        frozen_downstream_close_contribution_budgets_v1,
+    };
     use crate::dependency::current_direct_dependency_declaration_root_v1;
     use crate::identity::{
         BuildIdentityRootV2, NoClaimScopeRootV1, SourceIdentityRootV2, ToolchainIdentityRootV2,
     };
     use crate::limits::RunnerLimitValueV2;
     use crate::path::LogicalBundlePathV1;
+    use crate::schema_impact::{
+        RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1, RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1,
+        SchemaImpactManifestRelationV1, SchemaImpactManifestRowSourceV1, SchemaImpactNoClaimV1,
+        source_frozen_schema_impact_manifest_v1,
+    };
     use crate::value::StableTokenV2;
     use fs_blake3::hash_domain;
 
-    const EXPECTED_SOURCE_PATHS_V1: [&str; 26] = [
+    const EXPECTED_SOURCE_PATHS_V1: [&str; 27] = [
         ".cargo/config.toml",
         "Cargo.lock",
         "Cargo.toml",
@@ -14494,6 +15985,7 @@ mod tests {
         "crates/fs-evidence-runner/src/path.rs",
         "crates/fs-evidence-runner/src/projection.rs",
         "crates/fs-evidence-runner/src/publication.rs",
+        "crates/fs-evidence-runner/src/schema_impact.rs",
         "crates/fs-evidence-runner/src/state.rs",
         "crates/fs-evidence-runner/src/value.rs",
         "rust-toolchain.toml",
@@ -14594,6 +16086,852 @@ mod tests {
             .collect()
     }
 
+    #[derive(Clone)]
+    struct PhaseOneContributionFixture {
+        source_owner: String,
+        payload_root: fs_blake3::ContentHash,
+        expected_partitions_root: fs_blake3::ContentHash,
+        per_cell_budgets: BaseCoverageCloseContributionBudgetsV1,
+        shard_budgets: BaseCoverageCloseContributionBudgetsV1,
+        schema_root: fs_blake3::ContentHash,
+        log_schema_root: fs_blake3::ContentHash,
+        source_root: SourceIdentityRootV2,
+        build_root: BuildIdentityRootV2,
+        toolchain_root: ToolchainIdentityRootV2,
+        target_root: fs_blake3::ContentHash,
+        feature_set_root: fs_blake3::ContentHash,
+        retained_artifact_policy: BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
+        observer_contract: BaseCoverageCloseDeferredObservationContractV1,
+        no_claim: StableTokenV2,
+    }
+
+    impl PhaseOneContributionFixture {
+        fn from_contribution(contribution: &BaseCoverageCloseDownstreamContributionV2) -> Self {
+            Self {
+                source_owner: contribution.source_owner().to_owned(),
+                payload_root: contribution.payload_root(),
+                expected_partitions_root: contribution.expected_partitions_root(),
+                per_cell_budgets: contribution.per_cell_budgets(),
+                shard_budgets: contribution.shard_budgets(),
+                schema_root: contribution.schema_root(),
+                log_schema_root: contribution.log_schema_root(),
+                source_root: contribution.source_root().clone(),
+                build_root: contribution.build_root().clone(),
+                toolchain_root: contribution.toolchain_root().clone(),
+                target_root: contribution.target_root(),
+                feature_set_root: contribution.feature_set_root(),
+                retained_artifact_policy: contribution.retained_artifact_policy(),
+                observer_contract: contribution.observer_contract().clone(),
+                no_claim: contribution.no_claim().clone(),
+            }
+        }
+
+        fn build(
+            &self,
+        ) -> Result<BaseCoverageCloseDownstreamContributionV2, crate::ConstructionErrorV2> {
+            BaseCoverageCloseDownstreamContributionV2::new(
+                self.source_owner.clone(),
+                self.payload_root,
+                self.expected_partitions_root,
+                self.per_cell_budgets,
+                self.shard_budgets,
+                self.schema_root,
+                self.log_schema_root,
+                self.source_root.clone(),
+                self.build_root.clone(),
+                self.toolchain_root.clone(),
+                self.target_root,
+                self.feature_set_root,
+                self.retained_artifact_policy,
+                self.observer_contract.clone(),
+                self.no_claim.clone(),
+            )
+        }
+    }
+
+    #[test]
+    fn schema_impact_v2_projection_has_exact_rows_paths_counts_and_canonical_roots() {
+        let projection =
+            RunnerV2BaseSchemaImpactProjectionV2::frozen().expect("exact V2 projection");
+        let reconstructed =
+            RunnerV2BaseSchemaImpactProjectionV2::reconstruct_exact(projection.manifest())
+                .expect("exact manifest reconstructs");
+
+        assert_eq!(reconstructed, projection);
+        assert_eq!(
+            projection.rows().len(),
+            RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_ROW_COUNT_V2
+        );
+        assert_eq!(
+            projection.source_path_count(),
+            RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SOURCE_PATH_COUNT_V2 as u32
+        );
+        assert_eq!(
+            projection.owned_row_count(),
+            RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_OWNED_ROW_COUNT_V2 as u32
+        );
+        assert_eq!(
+            projection.consumed_row_count(),
+            RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_CONSUMED_ROW_COUNT_V2 as u32
+        );
+        assert_eq!(projection.execution_observation_count(), 0);
+        assert_eq!(
+            projection.manifest().no_claim().as_str(),
+            RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1
+        );
+
+        let mut projection_roots = std::collections::BTreeSet::new();
+        for (index, (row, manifest_entry)) in projection
+            .rows()
+            .iter()
+            .zip(projection.manifest().entries())
+            .enumerate()
+        {
+            assert_eq!(
+                row.local_ordinal(),
+                u32::try_from(index + 1).expect("bounded")
+            );
+            assert_eq!(row.relation(), SchemaImpactManifestRelationV1::Owned);
+            assert_eq!(
+                row.schema_id().as_str(),
+                RUNNER_V2_BASE_SCHEMA_IMPACT_PROJECTION_SCHEMA_IDS_V2[index]
+            );
+            assert_eq!(
+                row.source_path().as_str(),
+                RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1
+            );
+            assert_eq!(
+                row.disposition(),
+                CanonicalSchemaImpactDispositionV1::NewV1NoPredecessor
+            );
+            assert_eq!(
+                row.schema_impact_row_root(),
+                manifest_entry.row().root().content_hash()
+            );
+            assert_eq!(
+                row.compatible_source_snapshot_root(),
+                projection.manifest().compatible_source_snapshot_root()
+            );
+            assert_eq!(
+                row.root(),
+                schema_impact_projection_row_root_v2(
+                    row.local_ordinal(),
+                    row.relation(),
+                    row.schema_id(),
+                    row.source_path(),
+                    row.disposition(),
+                    row.schema_impact_row_root(),
+                    row.compatible_source_snapshot_root(),
+                )
+                .expect("exact row root reconstructs")
+            );
+            assert!(projection_roots.insert(row.root()));
+        }
+        assert_eq!(projection_roots.len(), projection.rows().len());
+        assert_eq!(
+            projection.root(),
+            schema_impact_projection_root_v2(
+                projection.manifest(),
+                projection.rows(),
+                projection.source_path_count(),
+                projection.owned_row_count(),
+                projection.consumed_row_count(),
+            )
+            .expect("exact aggregate root reconstructs")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one adversarial matrix checks every schema-impact projection coordinate and exact aggregate boundary"
+    )]
+    fn schema_impact_v2_projection_rejects_missing_extra_reordered_path_count_and_root_mutants() {
+        let projection =
+            RunnerV2BaseSchemaImpactProjectionV2::frozen().expect("exact V2 projection");
+        let manifest = projection.manifest();
+        let source_closure = RunnerV2BaseSourceClosureV1::frozen().expect("source closure");
+        let alternate_manifest = source_frozen_schema_impact_manifest_v1(
+            manifest.issuer_leaf_id().clone(),
+            source_closure.compatible_snapshot(),
+            manifest.frozen_base_registry(),
+            Vec::new(),
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| SchemaImpactManifestRowSourceV1 {
+                    relation: entry.relation(),
+                    row: entry.row().clone(),
+                })
+                .collect(),
+            SchemaImpactNoClaimV1::new("alternate-valid-no-claim-boundary")
+                .expect("alternate no-claim"),
+        )
+        .expect("alternate manifest remains internally valid");
+        assert_eq!(
+            RunnerV2BaseSchemaImpactProjectionV2::reconstruct_exact(&alternate_manifest)
+                .expect_err("any non-exact manifest must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &projection.rows()[..2], 1, 2, 0)
+                .expect_err("missing row must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Missing
+        );
+        let mut extra = projection.rows().to_vec();
+        extra.push(projection.rows()[2].clone());
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &extra, 1, 4, 0)
+                .expect_err("extra row must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Unexpected
+        );
+        let mut reordered = projection.rows().to_vec();
+        reordered.swap(0, 1);
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &reordered, 1, 3, 0)
+                .expect_err("reordered rows must refuse")
+                .kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
+        let mut wrong_path = projection.rows().to_vec();
+        wrong_path[0].source_path =
+            LogicalBundlePathV1::new("crates/fs-evidence-runner/src/projection.rs")
+                .expect("mutated path");
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &wrong_path, 2, 3, 0)
+                .expect_err("path substitution must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut wrong_schema_row_root = projection.rows().to_vec();
+        wrong_schema_row_root[0].schema_impact_row_root =
+            hash_domain("projection-test-schema-impact-row-mutant.v1", b"row");
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &wrong_schema_row_root, 1, 3, 0)
+                .expect_err("schema row-root substitution must refuse")
+                .kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
+        let mut wrong_projection_row_root = projection.rows().to_vec();
+        wrong_projection_row_root[0].root =
+            hash_domain("projection-test-schema-projection-row-mutant.v1", b"row");
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, &wrong_projection_row_root, 1, 3, 0)
+                .expect_err("projection row-root substitution must refuse")
+                .kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, projection.rows(), 2, 3, 0)
+                .expect_err("source-path count inflation must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        assert_eq!(
+            schema_impact_projection_root_v2(manifest, projection.rows(), 1, 2, 1)
+                .expect_err("owned/consumed count substitution must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let row = &projection.rows()[0];
+        assert_eq!(
+            schema_impact_projection_row_root_v2(
+                0,
+                row.relation(),
+                row.schema_id(),
+                row.source_path(),
+                row.disposition(),
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect_err("zero ordinal must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Zero
+        );
+        let mut alternate_snapshot_frame =
+            crate::canonical::CanonicalFrameV1::new(b"FSBASESOURCESNAPSHOT\x01", 256)
+                .expect("alternate snapshot frame");
+        alternate_snapshot_frame
+            .push_str("snapshot.mutant", "one")
+            .expect("alternate snapshot field");
+        let alternate_snapshot =
+            compatible_source_snapshot_root_from_exact_frame_v1(&alternate_snapshot_frame)
+                .expect("alternate nominal snapshot");
+        let alternate_schema_id = StableTokenV2::new("canonical-schema-field-descriptor-mutant")
+            .expect("alternate schema ID");
+        let alternate_source_path =
+            LogicalBundlePathV1::new("crates/fs-evidence-runner/src/projection.rs")
+                .expect("alternate source path");
+        let variants = [
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal() + 1,
+                row.relation(),
+                row.schema_id(),
+                row.source_path(),
+                row.disposition(),
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("ordinal variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                SchemaImpactManifestRelationV1::Consumed,
+                row.schema_id(),
+                row.source_path(),
+                row.disposition(),
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("relation variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                row.relation(),
+                &alternate_schema_id,
+                row.source_path(),
+                row.disposition(),
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("schema-ID variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                row.relation(),
+                row.schema_id(),
+                &alternate_source_path,
+                row.disposition(),
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("source-path variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                row.relation(),
+                row.schema_id(),
+                row.source_path(),
+                CanonicalSchemaImpactDispositionV1::UnchangedV1,
+                row.schema_impact_row_root(),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("disposition variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                row.relation(),
+                row.schema_id(),
+                row.source_path(),
+                row.disposition(),
+                hash_domain("projection-test-schema-impact-root-axis.v1", b"mutant"),
+                row.compatible_source_snapshot_root(),
+            )
+            .expect("schema-root variant"),
+            schema_impact_projection_row_root_v2(
+                row.local_ordinal(),
+                row.relation(),
+                row.schema_id(),
+                row.source_path(),
+                row.disposition(),
+                row.schema_impact_row_root(),
+                alternate_snapshot,
+            )
+            .expect("snapshot variant"),
+        ];
+        assert!(variants.iter().all(|root| *root != row.root()));
+        assert_eq!(
+            variants
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            variants.len()
+        );
+    }
+
+    #[test]
+    fn phase_one_contribution_is_exact_result_free_deferred_and_no_execution() {
+        let projection =
+            RunnerV2PhaseOneContractContributionV2::frozen().expect("phase-one contribution");
+        let contribution = projection.contribution();
+        let observer = contribution.observer_contract();
+        let envelope = projection.deferred_envelope();
+
+        assert_eq!(
+            RunnerV2PhaseOneContractContributionV2::frozen().expect("deterministic reconstruction"),
+            projection
+        );
+        assert_eq!(
+            contribution.source_owner(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1
+        );
+        assert_eq!(
+            observer.route_id().as_str(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1
+        );
+        assert_eq!(
+            observer.semantic_consumer(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+        );
+        assert_eq!(
+            observer.execution_owner(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+        );
+        assert_eq!(
+            observer.driver_owner(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+        );
+        assert_eq!(
+            observer.posix_wrapper_owner(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+        );
+        assert_eq!(
+            observer.windows_wrapper_owner(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+        );
+        assert_eq!(
+            observer.capability_profile(),
+            BaseCoverageCloseCapabilityProfileV1::ReleaseControl
+        );
+        assert_eq!(
+            observer.capability_profile().stable_id(),
+            "fs-evidence-runner.close-capability.release-control.v1"
+        );
+        assert_eq!(
+            observer.driver().as_str(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1
+        );
+        assert_eq!(
+            observer.posix_route(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1
+        );
+        assert_eq!(
+            observer.windows_route(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1
+        );
+        assert_eq!(
+            observer.case_manifest_path(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1
+        );
+        assert_eq!(
+            observer.case_manifest_root(),
+            projection.case_manifest_contract_root()
+        );
+        assert_eq!(
+            observer.deferred_reason(),
+            DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner
+        );
+        assert_eq!(
+            observer.deferred_reason().descriptor().name(),
+            "immutable-contribution-awaits-designated-release-owner"
+        );
+        assert_eq!(
+            observer.no_claim().as_str(),
+            RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1
+        );
+        assert_eq!(contribution.payload_root(), projection.payload_root());
+        assert_eq!(
+            contribution.expected_partitions_root(),
+            projection.expected_partitions_root()
+        );
+        assert_eq!(
+            contribution.schema_root(),
+            projection.schema_impact_projection().root()
+        );
+        let schema_impact_log_schema_root =
+            crate::logging::schema_impact_log_schema_root_v1().expect("schema-impact log schema");
+        assert_eq!(
+            contribution.log_schema_root(),
+            schema_impact_log_schema_root
+        );
+        let source_closure = RunnerV2BaseSourceClosureV1::frozen().expect("exact source closure");
+        assert_eq!(
+            projection.payload_root(),
+            phase_one_payload_root_v2(
+                &source_closure,
+                projection.base_coverage_manifest_root(),
+                projection.schema_impact_projection(),
+                projection.expected_partitions_root(),
+                contribution.target_root(),
+                contribution.feature_set_root(),
+                schema_impact_log_schema_root,
+            )
+            .expect("independent exact Phase-1 payload oracle")
+        );
+        assert_ne!(
+            projection.payload_root(),
+            phase_one_payload_root_v2(
+                &source_closure,
+                projection.base_coverage_manifest_root(),
+                projection.schema_impact_projection(),
+                projection.expected_partitions_root(),
+                contribution.target_root(),
+                contribution.feature_set_root(),
+                crate::logging::base_e2e_log_schema_root_v1()
+                    .expect("compatibility base-E2E log schema"),
+            )
+            .expect("compatibility-root mutant payload")
+        );
+        assert_eq!(contribution.per_cell_budgets().max_child_processes(), 1);
+        assert_eq!(contribution.per_cell_budgets().max_parallel_children(), 1);
+        assert_eq!(contribution.shard_budgets().max_child_processes(), 4);
+        assert_eq!(contribution.shard_budgets().max_parallel_children(), 2);
+        assert_eq!(
+            contribution.retained_artifact_policy(),
+            BaseCoverageCloseRetainedRelativeArtifactPolicyV1::OwnerEnvelopeRelativePathsOnly
+        );
+        assert_eq!(
+            contribution.no_claim().as_str(),
+            RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1
+        );
+        assert_eq!(
+            envelope.evidence_kind(),
+            BaseCoverageCloseEvidenceKindV1::ImmutableDownstreamContribution
+        );
+        assert_eq!(
+            envelope.disposition(),
+            RuntimeObservationDispositionV1::Deferred
+        );
+        assert_eq!(envelope.contribution_root(), contribution.root());
+        assert_eq!(envelope.observer_contract_root(), observer.root());
+        assert_eq!(
+            envelope.deferred_reason_registry_root(),
+            observer.deferred_reason_registry_root()
+        );
+        assert_eq!(envelope.deferred_reason(), observer.deferred_reason());
+        assert_eq!(
+            envelope.retained_artifact_policy(),
+            contribution.retained_artifact_policy()
+        );
+        assert_eq!(
+            envelope.no_claim().as_str(),
+            RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1
+        );
+        assert_eq!(contribution.execution_actual_field_count(), 0);
+        assert_eq!(envelope.execution_actual_field_count(), 0);
+        assert_eq!(projection.downstream_execution_count(), 0);
+        assert_ne!(contribution.root(), envelope.root().content_hash());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive mutation matrix proves every contribution identity axis and boundary is bound or refused"
+    )]
+    fn phase_one_contribution_roots_move_and_budget_owner_cycle_boundaries_fail_closed() {
+        let projection =
+            RunnerV2PhaseOneContractContributionV2::frozen().expect("phase-one contribution");
+        let base = PhaseOneContributionFixture::from_contribution(projection.contribution());
+        let original_root = projection.contribution().root();
+        let mut variants = Vec::new();
+
+        for axis in 0_u8..14 {
+            let mut fixture = base.clone();
+            match axis {
+                0 => fixture.source_owner = "frankensim-test-mutated-source-owner".to_owned(),
+                1 => {
+                    fixture.payload_root =
+                        hash_domain("projection-test-phase-one-payload-axis.v1", b"mutant")
+                }
+                2 => {
+                    fixture.expected_partitions_root =
+                        hash_domain("projection-test-phase-one-partitions-axis.v1", b"mutant")
+                }
+                3 => {
+                    fixture.per_cell_budgets = frozen_downstream_close_contribution_budgets_v1(2, 1)
+                        .expect("mutated per-cell budget")
+                }
+                4 => {
+                    fixture.shard_budgets = frozen_downstream_close_contribution_budgets_v1(5, 2)
+                        .expect("mutated shard budget")
+                }
+                5 => {
+                    fixture.schema_root =
+                        hash_domain("projection-test-phase-one-schema-axis.v1", b"mutant")
+                }
+                6 => {
+                    fixture.log_schema_root =
+                        hash_domain("projection-test-phase-one-log-axis.v1", b"mutant")
+                }
+                7 => {
+                    fixture.source_root = super::parse_phase_one_source_identity(hash_domain(
+                        "projection-test-phase-one-source-axis.v1",
+                        b"mutant",
+                    ))
+                    .expect("mutated source identity")
+                }
+                8 => {
+                    fixture.build_root = super::parse_phase_one_build_identity(hash_domain(
+                        "projection-test-phase-one-build-axis.v1",
+                        b"mutant",
+                    ))
+                    .expect("mutated build identity")
+                }
+                9 => {
+                    fixture.toolchain_root = super::parse_phase_one_toolchain_identity(hash_domain(
+                        "projection-test-phase-one-toolchain-axis.v1",
+                        b"mutant",
+                    ))
+                    .expect("mutated toolchain identity")
+                }
+                10 => {
+                    fixture.target_root =
+                        hash_domain("projection-test-phase-one-target-axis.v1", b"mutant")
+                }
+                11 => {
+                    fixture.feature_set_root =
+                        hash_domain("projection-test-phase-one-feature-axis.v1", b"mutant")
+                }
+                12 => {
+                    fixture.observer_contract = BaseCoverageCloseDeferredObservationContractV1::new(
+                        RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                        BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+                        StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1).expect("driver"),
+                        RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+                        RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+                        projection.case_manifest_contract_root(),
+                        DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+                        StableTokenV2::new("mutated-phase1-observer-no-claim")
+                            .expect("mutated observer no-claim"),
+                    )
+                    .expect("structurally valid mutated observer")
+                }
+                13 => {
+                    fixture.no_claim = StableTokenV2::new("mutated-phase1-contribution-no-claim")
+                        .expect("mutated contribution no-claim")
+                }
+                _ => unreachable!("closed mutation axis"),
+            }
+            let variant = fixture.build().expect("individually valid mutation");
+            assert_ne!(
+                variant.root(),
+                original_root,
+                "axis {axis} must move the root"
+            );
+            variants.push(variant.root());
+        }
+        assert_eq!(
+            variants
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            variants.len()
+        );
+
+        assert_eq!(
+            frozen_downstream_close_contribution_budgets_v1(0, 1)
+                .expect_err("zero child budget must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Zero
+        );
+        assert_eq!(
+            frozen_downstream_close_contribution_budgets_v1(1, 2)
+                .expect_err("parallel greater than total must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        assert_eq!(
+            frozen_downstream_close_contribution_budgets_v1(257, 1)
+                .expect_err("child budget above ceiling must refuse")
+                .kind(),
+            ConstructionErrorKindV2::TooLarge
+        );
+
+        let mut inverted_budget_scope = base.clone();
+        inverted_budget_scope.per_cell_budgets =
+            frozen_downstream_close_contribution_budgets_v1(5, 3)
+                .expect("valid standalone per-cell budget");
+        assert_eq!(
+            inverted_budget_scope
+                .build()
+                .expect_err("per-cell scope wider than shard must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut colliding_roots = base.clone();
+        colliding_roots.feature_set_root = colliding_roots.target_root;
+        assert_eq!(
+            colliding_roots
+                .build()
+                .expect_err("semantic-root collision must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut owner_alias = base.clone();
+        owner_alias.source_owner = RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1.to_owned();
+        assert_eq!(
+            owner_alias
+                .build()
+                .expect_err("source/execution owner alias must refuse")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        assert_eq!(
+            BaseCoverageCloseDeferredObservationContractV1::new(
+                RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+                StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1).expect("driver"),
+                RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+                projection.case_manifest_contract_root(),
+                DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+                StableTokenV2::new(RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1)
+                    .expect("observer no-claim"),
+            )
+            .expect_err("upstream semantic consumer must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        assert_eq!(
+            BaseCoverageCloseDeferredObservationContractV1::new(
+                RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+                StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1).expect("driver"),
+                RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+                projection.case_manifest_contract_root(),
+                DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+                StableTokenV2::new(RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1)
+                    .expect("observer no-claim"),
+            )
+            .expect_err("duplicate platform routes must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let alternate_observer_contribution = {
+            let mut fixture = base.clone();
+            fixture.observer_contract = BaseCoverageCloseDeferredObservationContractV1::new(
+                RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+                StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1).expect("driver"),
+                RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+                RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+                projection.case_manifest_contract_root(),
+                DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+                StableTokenV2::new("mutated-phase1-observer-no-claim")
+                    .expect("mutated observer no-claim"),
+            )
+            .expect("structurally valid alternate observer");
+            fixture.build().expect("alternate observer contribution")
+        };
+        assert_eq!(
+            validate_exact_phase_one_observer_contract_v1(
+                alternate_observer_contribution.observer_contract()
+            )
+            .expect_err("exact Phase-1 validator must reject observer substitution")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let alternate_observer_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
+            &alternate_observer_contribution,
+            StableTokenV2::new(RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1)
+                .expect("envelope no-claim"),
+        )
+        .expect("structurally valid alternate-observer envelope");
+        assert_eq!(
+            phase_one_contribution_projection_root_v2(
+                projection.schema_impact_projection(),
+                projection.source_closure_root(),
+                projection.base_coverage_manifest_root(),
+                projection.case_manifest_contract_root(),
+                projection.expected_partitions_root(),
+                projection.payload_root(),
+                &alternate_observer_contribution,
+                &alternate_observer_envelope,
+            )
+            .expect_err("aggregate must reject observer substitution")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        assert_eq!(
+            phase_one_contribution_projection_root_v2(
+                projection.schema_impact_projection(),
+                projection.source_closure_root(),
+                projection.base_coverage_manifest_root(),
+                projection.case_manifest_contract_root(),
+                projection.expected_partitions_root(),
+                hash_domain("projection-test-phase-one-join-mutant.v1", b"payload"),
+                projection.contribution(),
+                projection.deferred_envelope(),
+            )
+            .expect_err("aggregate must reject a payload/contribution mismatch")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let wrong_log_contribution = {
+            let mut fixture = base.clone();
+            fixture.log_schema_root = crate::logging::base_e2e_log_schema_root_v1()
+                .expect("compatibility base-E2E log schema");
+            fixture
+                .build()
+                .expect("structurally valid wrong-log contribution")
+        };
+        let wrong_log_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
+            &wrong_log_contribution,
+            StableTokenV2::new(RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1)
+                .expect("envelope no-claim"),
+        )
+        .expect("wrong-log Deferred envelope");
+        assert_eq!(
+            phase_one_contribution_projection_root_v2(
+                projection.schema_impact_projection(),
+                projection.source_closure_root(),
+                projection.base_coverage_manifest_root(),
+                projection.case_manifest_contract_root(),
+                projection.expected_partitions_root(),
+                projection.payload_root(),
+                &wrong_log_contribution,
+                &wrong_log_envelope,
+            )
+            .expect_err("aggregate must reject the compatibility log schema root")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let alternate_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
+            projection.contribution(),
+            StableTokenV2::new("alternate-deferred-envelope-no-claim")
+                .expect("alternate envelope no-claim"),
+        )
+        .expect("alternate declaration-only envelope");
+        assert_eq!(projection.contribution().root(), original_root);
+        assert_ne!(
+            alternate_envelope.root(),
+            projection.deferred_envelope().root()
+        );
+        assert_eq!(
+            alternate_envelope.contribution_root(),
+            projection.contribution().root()
+        );
+    }
+
     fn presented_results(
         projection: &RunnerV2BaseE2eProjectionV1,
         journey: BaseE2eJourneyV1,
@@ -14672,14 +17010,59 @@ mod tests {
         let projection = RunnerV2BaseE2eProjectionV1::frozen().expect("frozen projection");
         assert_eq!(projection.journeys().len(), BaseE2eJourneyV1::ALL.len());
         let expected_row_counts = [21_usize, 18, 19, 24, 16];
+        let expected_routes = [
+            (
+                BaseE2eJourneyV1::PublicationState,
+                "publication-state-v2",
+                "frankensim-epic-foundations-huq.24.2.2.2",
+                "e2e-evidence-runner-publication-state-v2-driver",
+                "scripts/ci/e2e_evidence_runner_publication_state_v2.sh",
+                "scripts/ci/manifests/evidence_runner_publication_state_v2_cases.v1.json",
+            ),
+            (
+                BaseE2eJourneyV1::PublicationV2,
+                "publication-v2",
+                "frankensim-epic-foundations-huq.24.2.2.3.3",
+                "e2e-evidence-runner-publication-v2-driver",
+                "scripts/ci/e2e_evidence_runner_publication_v2.sh",
+                "scripts/ci/manifests/evidence_runner_publication_v2_cases.v1.json",
+            ),
+            (
+                BaseE2eJourneyV1::VerifierV2,
+                "verifier-v2",
+                "frankensim-epic-foundations-huq.24.3.3.3.3",
+                "e2e-evidence-verifier-v2-driver",
+                "scripts/ci/e2e_evidence_verifier_v2.sh",
+                "scripts/ci/manifests/evidence_verifier_v2_cases.v1.json",
+            ),
+            (
+                BaseE2eJourneyV1::CanonicalRunnerV2,
+                "canonical-runner-v2",
+                "frankensim-epic-foundations-huq.24.4.1.4",
+                "canonical-evidence-runner-v2-e2e-driver",
+                "scripts/ci/canonical_evidence_runner_v2.sh",
+                "scripts/ci/manifests/canonical_evidence_runner_v2_cases.v1.json",
+            ),
+            (
+                BaseE2eJourneyV1::RjoqHandoffV1,
+                "rjoq-handoff-v1",
+                "frankensim-epic-foundations-huq.24.5.3.1",
+                "verify-runner-rjoq-handoff-v1-driver",
+                "scripts/ci/verify_runner_rjoq_handoff_v1.sh",
+                "scripts/ci/manifests/runner_rjoq_handoff_verifier_v1_cases.v1.json",
+            ),
+        ];
         let mut row_count = 0_usize;
         let mut detail_manifests = std::collections::BTreeMap::new();
         for (index, journey) in projection.journeys().iter().enumerate() {
+            let (expected_journey, key, owner, driver, script, manifest) = expected_routes[index];
+            assert_eq!(journey.journey(), expected_journey);
             assert_eq!(journey.journey(), BaseE2eJourneyV1::ALL[index]);
-            assert_eq!(
-                journey.script_path().as_str(),
-                BaseE2eJourneyV1::ALL[index].script_path()
-            );
+            assert_eq!(journey.journey().key(), key);
+            assert_eq!(journey.downstream_owner().as_str(), owner);
+            assert_eq!(journey.driver_name().as_str(), driver);
+            assert_eq!(journey.script_path().as_str(), script);
+            assert_eq!(journey.manifest_path().as_str(), manifest);
             assert_eq!(journey.rows().len(), expected_row_counts[index]);
             assert_eq!(
                 journey
@@ -14692,7 +17075,9 @@ mod tests {
             assert!(journey.rows().iter().all(|row| {
                 row.journey() == journey.journey()
                     && row.downstream_owner() == journey.downstream_owner()
+                    && row.downstream_driver() == journey.driver_name()
                     && row.downstream_script() == journey.script_path()
+                    && row.downstream_manifest() == journey.manifest_path()
                     && row.source_closure_root() == projection.source_closure().root()
                     && row.log_schema_root() == projection.log_schema_root()
                     && !row.consumption_rationale().as_str().is_empty()
@@ -15420,6 +17805,91 @@ mod tests {
     }
 
     #[test]
+    fn journey_routes_reject_wrong_owner_driver_script_or_manifest() {
+        let projection = RunnerV2BaseE2eProjectionV1::frozen().expect("frozen projection");
+        let wrong_owner = StableTokenV2::new("wrong-owner").expect("wrong owner");
+        let wrong_driver = StableTokenV2::new("wrong-driver").expect("wrong driver");
+        let wrong_script =
+            LogicalBundlePathV1::new("scripts/ci/wrong_route.sh").expect("wrong script");
+        let wrong_manifest = LogicalBundlePathV1::new("scripts/ci/manifests/wrong_route.v1.json")
+            .expect("wrong manifest");
+
+        for journey in projection.journeys() {
+            let exact = journey_root(
+                journey.journey(),
+                journey.downstream_owner(),
+                journey.driver_name(),
+                journey.script_path(),
+                journey.manifest_path(),
+                journey.rows(),
+                journey.source_closure_root(),
+                journey.log_schema_root(),
+            )
+            .expect("exact route");
+            assert_eq!(exact, journey.manifest_root());
+
+            for (mutation, result) in [
+                (
+                    "owner",
+                    journey_root(
+                        journey.journey(),
+                        &wrong_owner,
+                        journey.driver_name(),
+                        journey.script_path(),
+                        journey.manifest_path(),
+                        journey.rows(),
+                        journey.source_closure_root(),
+                        journey.log_schema_root(),
+                    ),
+                ),
+                (
+                    "driver",
+                    journey_root(
+                        journey.journey(),
+                        journey.downstream_owner(),
+                        &wrong_driver,
+                        journey.script_path(),
+                        journey.manifest_path(),
+                        journey.rows(),
+                        journey.source_closure_root(),
+                        journey.log_schema_root(),
+                    ),
+                ),
+                (
+                    "script",
+                    journey_root(
+                        journey.journey(),
+                        journey.downstream_owner(),
+                        journey.driver_name(),
+                        &wrong_script,
+                        journey.manifest_path(),
+                        journey.rows(),
+                        journey.source_closure_root(),
+                        journey.log_schema_root(),
+                    ),
+                ),
+                (
+                    "manifest",
+                    journey_root(
+                        journey.journey(),
+                        journey.downstream_owner(),
+                        journey.driver_name(),
+                        journey.script_path(),
+                        &wrong_manifest,
+                        journey.rows(),
+                        journey.source_closure_root(),
+                        journey.log_schema_root(),
+                    ),
+                ),
+            ] {
+                let error = result.expect_err(mutation);
+                assert_eq!(error.kind(), ConstructionErrorKindV2::Incompatible);
+                assert_eq!(error.field(), "projection.journey_row_context");
+            }
+        }
+    }
+
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "this end-to-end test validates every aggregate counter, root binding, and deterministic logging invariant together"
@@ -15824,7 +18294,9 @@ mod tests {
         let exact = journey_row_root(
             row.journey(),
             row.downstream_owner(),
+            row.downstream_driver(),
             row.downstream_script(),
+            row.downstream_manifest(),
             row.consumption_rationale(),
             row.fixture_reference(),
             row.source_closure_root(),
@@ -15835,7 +18307,10 @@ mod tests {
         assert_eq!(exact, row.mapping_root());
 
         let other_owner = StableTokenV2::new("other-owner").expect("owner");
+        let other_driver = StableTokenV2::new("other-driver").expect("driver");
         let other_script = LogicalBundlePathV1::new("scripts/ci/other.sh").expect("script");
+        let other_manifest =
+            LogicalBundlePathV1::new("scripts/ci/manifests/other.v1.json").expect("manifest");
         let other_rationale = StableTokenV2::new("other-rationale").expect("rationale");
         let other_fixture = StableTokenV2::new("other-fixture").expect("fixture");
         let other_root = hash_domain("projection-test-field-mutation.v1", b"other");
@@ -15843,7 +18318,9 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 &other_owner,
+                row.downstream_driver(),
                 row.downstream_script(),
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 row.fixture_reference(),
                 row.source_closure_root(),
@@ -15854,7 +18331,22 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                &other_driver,
+                row.downstream_script(),
+                row.downstream_manifest(),
+                row.consumption_rationale(),
+                row.fixture_reference(),
+                row.source_closure_root(),
+                row.log_schema_root(),
+                row.semantic_manifest_root(),
+            )
+            .expect("driver mutation"),
+            journey_row_root(
+                row.journey(),
+                row.downstream_owner(),
+                row.downstream_driver(),
                 &other_script,
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 row.fixture_reference(),
                 row.source_closure_root(),
@@ -15865,7 +18357,22 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                row.downstream_driver(),
                 row.downstream_script(),
+                &other_manifest,
+                row.consumption_rationale(),
+                row.fixture_reference(),
+                row.source_closure_root(),
+                row.log_schema_root(),
+                row.semantic_manifest_root(),
+            )
+            .expect("manifest mutation"),
+            journey_row_root(
+                row.journey(),
+                row.downstream_owner(),
+                row.downstream_driver(),
+                row.downstream_script(),
+                row.downstream_manifest(),
                 &other_rationale,
                 row.fixture_reference(),
                 row.source_closure_root(),
@@ -15876,7 +18383,9 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                row.downstream_driver(),
                 row.downstream_script(),
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 &other_fixture,
                 row.source_closure_root(),
@@ -15887,7 +18396,9 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                row.downstream_driver(),
                 row.downstream_script(),
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 row.fixture_reference(),
                 other_root,
@@ -15898,7 +18409,9 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                row.downstream_driver(),
                 row.downstream_script(),
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 row.fixture_reference(),
                 row.source_closure_root(),
@@ -15909,7 +18422,9 @@ mod tests {
             journey_row_root(
                 row.journey(),
                 row.downstream_owner(),
+                row.downstream_driver(),
                 row.downstream_script(),
+                row.downstream_manifest(),
                 row.consumption_rationale(),
                 row.fixture_reference(),
                 row.source_closure_root(),
@@ -15950,6 +18465,11 @@ mod tests {
         assert_eq!(
             closure.dependency_declaration_root(),
             current_direct_dependency_declaration_root_v1()
+        );
+        assert_eq!(
+            closure.compatible_snapshot().root().content_hash(),
+            closure.snapshot_root(),
+            "the typed compatibility witness must be the existing snapshot hash, not a wrapper hash"
         );
         let mut identities = std::collections::BTreeSet::new();
         let mut entry_roots = std::collections::BTreeSet::new();
@@ -16003,7 +18523,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.owner() == BaseSourceOwnerV1::RunnerV2BaseSchema)
                 .count(),
-            20
+            22
         );
         assert_eq!(
             closure
@@ -16011,7 +18531,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.source_route() == BaseSourceRouteV1::CrateModule)
                 .count(),
-            18
+            20
         );
         for route in [
             BaseSourceRouteV1::WorkspaceCargoConfig,
@@ -16035,6 +18555,24 @@ mod tests {
             EXPECTED_SOURCE_PATHS_V1
                 .windows(2)
                 .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+        );
+
+        let sentinel = "caller-controlled-no-echo-sentinel";
+        let error = BaseSourceClosureInputV1::exact_presented(sentinel, b"rejected".to_vec())
+            .expect_err("an unregistered caller-presented source path must refuse");
+        assert_eq!(error.observed(), "<redacted:caller-controlled-text>");
+        let mut encoded_error = Vec::new();
+        encode_construction_error(&mut encoded_error, &error);
+        assert!(
+            !encoded_error
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes()),
+            "canonical error detail must not retain rejected sentinel bytes"
+        );
+        assert!(
+            encoded_error
+                .windows(b"<redacted:caller-controlled-text>".len())
+                .any(|window| window == b"<redacted:caller-controlled-text>")
         );
     }
 
@@ -16252,23 +18790,23 @@ mod tests {
     fn ac38_coverage_manifest_source_of_truth_and_checked_report_are_exact() {
         let projection = RunnerV2BaseE2eProjectionV1::frozen().expect("frozen projection");
         let expected_counts = [
-            (BaseCoverageManifestClassV1::Unit, 10),
-            (BaseCoverageManifestClassV1::CompileFailDoctest, 47),
-            (BaseCoverageManifestClassV1::ManifestContract, 10),
+            (BaseCoverageManifestClassV1::Unit, 12),
+            (BaseCoverageManifestClassV1::CompileFailDoctest, 68),
+            (BaseCoverageManifestClassV1::ManifestContract, 29),
             (BaseCoverageManifestClassV1::ProjectionE2e, 98),
             (BaseCoverageManifestClassV1::RuntimeLogging, 1),
             (BaseCoverageManifestClassV1::SourceClosure, 15),
             (BaseCoverageManifestClassV1::ExternalE2eScript, 5),
             (BaseCoverageManifestClassV1::ExternalMutation, 1),
             (BaseCoverageManifestClassV1::ExternalGovernance, 1),
-            (BaseCoverageManifestClassV1::Boundary, 39),
-            (BaseCoverageManifestClassV1::PropertyMetamorphic, 17),
-            (BaseCoverageManifestClassV1::SchemaDescriptor, 39),
-            (BaseCoverageManifestClassV1::Mutation, 41),
-            (BaseCoverageManifestClassV1::NoMockIntegration, 14),
+            (BaseCoverageManifestClassV1::Boundary, 53),
+            (BaseCoverageManifestClassV1::PropertyMetamorphic, 24),
+            (BaseCoverageManifestClassV1::SchemaDescriptor, 48),
+            (BaseCoverageManifestClassV1::Mutation, 61),
+            (BaseCoverageManifestClassV1::NoMockIntegration, 17),
         ];
         let manifest = projection.coverage_manifest();
-        assert_eq!(manifest.cases().len(), 338);
+        assert_eq!(manifest.cases().len(), 433);
         for (class, expected_count) in expected_counts {
             assert_eq!(manifest.case_count(class), expected_count);
             assert!(manifest.case_count(class) > 0);
@@ -16279,6 +18817,24 @@ mod tests {
                 .map(crate::coverage::BaseCoverageManifestCaseV1::ordinal)
                 .collect::<Vec<_>>();
             assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        let close_manifest = projection.close_manifest();
+        assert_eq!(close_manifest.source_manifest_root(), manifest.root());
+        assert_eq!(close_manifest.cells().len(), manifest.cases().len());
+        assert_eq!(close_manifest.cells().len(), 433);
+        for group in crate::coverage::BaseCoverageCloseGroupV1::ALL {
+            assert!(
+                close_manifest.group_count(group) > 0,
+                "group {} must have an exact source cell",
+                group.stable_name()
+            );
+        }
+        for facet in crate::coverage::BaseCoverageCloseFacetV1::ALL {
+            assert!(
+                close_manifest.facet_count(facet) > 0,
+                "facet {} must be applicable or exactly reasoned",
+                facet.stable_name()
+            );
         }
 
         let report =
@@ -17148,7 +19704,7 @@ mod tests {
         let mut cross_journey = complete.clone();
         cross_journey[0] = reconstruct_result(
             &complete[0],
-            BaseE2eJourneyV1::VerifierV1,
+            BaseE2eJourneyV1::VerifierV2,
             complete[0].row_id().clone(),
             complete[0].semantic_manifest_root(),
         );

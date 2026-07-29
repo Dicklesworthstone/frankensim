@@ -66,7 +66,7 @@ impl PresentedDrainRootKindV2 {
 ///
 /// Swapping nominal roots does not type-check:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::identity::TimedOutStopRootV2;
 /// use fs_evidence_runner::state::{NotRunCauseV2, NotRunCauseV2::PriorCancelled};
 ///
@@ -77,7 +77,7 @@ impl PresentedDrainRootKindV2 {
 ///
 /// A generic digest cannot replace the nominal causal root:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::identity::DigestValueV2;
 /// use fs_evidence_runner::state::NotRunCauseV2;
 ///
@@ -88,7 +88,7 @@ impl PresentedDrainRootKindV2 {
 ///
 /// Every variant requires its causal root:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::state::NotRunCauseV2;
 ///
 /// let _: NotRunCauseV2 = NotRunCauseV2::PriorCancelled;
@@ -96,7 +96,7 @@ impl PresentedDrainRootKindV2 {
 ///
 /// No profile-filter or generic suppression variant exists:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use fs_evidence_runner::state::NotRunCauseV2;
 ///
 /// let _ = NotRunCauseV2::PriorProfileFilter;
@@ -191,7 +191,7 @@ impl NotRunCauseV2 {
 /// assert_eq!(basis.remaining_case_count(5).unwrap(), 3);
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0451
 /// use fs_evidence_runner::state::{NotRunBasisV2, NotRunCauseV2};
 ///
 /// fn forge(cause: NotRunCauseV2) -> NotRunBasisV2 {
@@ -366,7 +366,7 @@ const fn validate_not_run_ordinal_v2(
 /// An unvalidated candidate cannot convert directly into a validated terminal
 /// cell:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use fs_evidence_runner::catalog::{ProofExitV2, StateBearingRecordRoleV2};
 /// use fs_evidence_runner::state::{StateValidationInputV2, ValidatedStateCellV2};
 ///

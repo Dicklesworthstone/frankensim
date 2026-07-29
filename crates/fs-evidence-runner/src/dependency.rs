@@ -4,7 +4,10 @@
 //! metadata, fetch a registry, move a constellation pin, or add a dependency
 //! to the package manifest.
 
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionClosedSemanticV2, ConstructionErrorKindV2, ConstructionErrorV2,
+    ConstructionObservedDataClassV2, ConstructionObservedV2,
+};
 use crate::value::StableTokenV2;
 use fs_blake3::{ContentHash, hash_domain};
 use std::collections::BTreeSet;
@@ -24,6 +27,16 @@ pub enum DependencySourceRouteV1 {
     /// An ambient package registry; represented only so validation can refuse
     /// it deterministically.
     AmbientRegistry = 3,
+}
+
+impl ConstructionClosedSemanticV2 for DependencySourceRouteV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::WorkspacePath => "workspace-path",
+            Self::PinnedConstellationSibling => "pinned-constellation-sibling",
+            Self::AmbientRegistry => "ambient-registry",
+        }
+    }
 }
 
 /// Exact declaration-time identity of one dependency source.
@@ -91,6 +104,17 @@ pub enum DependencyOwnerPhaseV1 {
     CapabilityCancellationProcessPersistence = 2,
 }
 
+impl ConstructionClosedSemanticV2 for DependencyOwnerPhaseV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::BaseSchema => "base-schema",
+            Self::CapabilityCancellationProcessPersistence => {
+                "capability-cancellation-process-persistence"
+            }
+        }
+    }
+}
+
 /// Cargo-route qualifiers forbidden from the direct normal dependency set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -105,6 +129,18 @@ pub enum DependencyRouteQualifierV1 {
     ProcMacro = 4,
     /// A target-specific dependency route.
     TargetSpecific = 5,
+}
+
+impl ConstructionClosedSemanticV2 for DependencyRouteQualifierV1 {
+    fn construction_stable_name(&self) -> &'static str {
+        match self {
+            Self::Optional => "optional",
+            Self::Renamed => "renamed",
+            Self::BuildDependency => "build-dependency",
+            Self::ProcMacro => "proc-macro",
+            Self::TargetSpecific => "target-specific",
+        }
+    }
 }
 
 /// One immutable package-policy row.
@@ -296,23 +332,23 @@ impl PresentedDependencyRouteV1 {
         owner: DependencyOwnerPhaseV1,
         mut qualifiers: Vec<DependencyRouteQualifierV1>,
     ) -> Result<Self, ConstructionErrorV2> {
-        let package = StableTokenV2::new(package.into()).map_err(|error| {
-            ConstructionErrorV2::new(
+        let package = StableTokenV2::new(package.into()).map_err(|_| {
+            ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "dependency.package",
                 "one validated stable package token",
-                format_args!("{error:?}"),
+                ConstructionObservedDataClassV2::CallerControlledText,
             )
         })?;
         let mut features = features
             .into_iter()
             .map(|feature| {
-                StableTokenV2::new(feature).map_err(|error| {
-                    ConstructionErrorV2::new(
+                StableTokenV2::new(feature).map_err(|_| {
+                    ConstructionErrorV2::new_redacted(
                         ConstructionErrorKindV2::Incompatible,
                         "dependency.feature",
                         "one validated stable feature token",
-                        format_args!("{error:?}"),
+                        ConstructionObservedDataClassV2::CallerControlledText,
                     )
                 })
             })
@@ -320,11 +356,11 @@ impl PresentedDependencyRouteV1 {
         let mut seen = BTreeSet::new();
         for feature in &features {
             if !seen.insert(feature.as_str()) {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Duplicate,
                     "dependency.features",
                     "one duplicate-free feature set",
-                    feature.as_str(),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -336,7 +372,7 @@ impl PresentedDependencyRouteV1 {
                     ConstructionErrorKindV2::Duplicate,
                     "dependency.qualifiers",
                     "one duplicate-free route-qualifier set",
-                    *qualifier as u16,
+                    ConstructionObservedV2::closed(qualifier),
                 ));
             }
         }
@@ -397,11 +433,11 @@ fn validate_exact_dependency_set(
     let mut seen = BTreeSet::new();
     for route in presented {
         if !seen.insert(route.package.as_str()) {
-            return Err(ConstructionErrorV2::new(
+            return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Duplicate,
                 "dependency.package",
                 "one exact route per package",
-                route.package.as_str(),
+                ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
     }
@@ -428,18 +464,67 @@ fn validate_exact_dependency_set(
             .iter()
             .map(StableTokenV2::as_str)
             .collect::<Vec<_>>();
-        let exact = route.package.as_str() == policy.package
-            && route.source_identity == policy.source_identity
-            && actual_features == policy.required_features
-            && route.owner == policy.owner
-            && route.qualifiers.is_empty()
-            && route.source_identity.route() != DependencySourceRouteV1::AmbientRegistry;
-        if !exact {
+        if route.package.as_str() != policy.package {
             return Err(ConstructionErrorV2::new(
                 ConstructionErrorKindV2::Incompatible,
                 "dependency.route",
                 "the exact ordered package/source/features/owner normal route",
-                format_args!("{ordinal}:{}", route.package.as_str()),
+                ConstructionObservedV2::indexed_redacted(
+                    ordinal,
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                ),
+            ));
+        }
+        if route.source_identity.route() == DependencySourceRouteV1::AmbientRegistry {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "dependency.route",
+                "the exact ordered package/source/features/owner normal route",
+                ConstructionObservedV2::closed_and_usize(&route.source_identity.route(), ordinal),
+            ));
+        }
+        if route.source_identity != policy.source_identity {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "dependency.route",
+                "the exact ordered package/source/features/owner normal route",
+                ConstructionObservedV2::indexed_redacted(
+                    ordinal,
+                    ConstructionObservedDataClassV2::PhysicalLocator,
+                ),
+            ));
+        }
+        if actual_features != policy.required_features {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "dependency.route",
+                "the exact ordered package/source/features/owner normal route",
+                ConstructionObservedV2::indexed_redacted(
+                    ordinal,
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                ),
+            ));
+        }
+        if route.owner != policy.owner {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "dependency.route",
+                "the exact ordered package/source/features/owner normal route",
+                ConstructionObservedV2::closed_and_usize(&route.owner, ordinal),
+            ));
+        }
+        if !route.qualifiers.is_empty() {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "dependency.route",
+                "the exact ordered package/source/features/owner normal route",
+                ConstructionObservedV2::closed_and_usize(
+                    route
+                        .qualifiers
+                        .first()
+                        .expect("the qualifier branch requires one qualifier"),
+                    ordinal,
+                ),
             ));
         }
     }
@@ -777,6 +862,7 @@ mod tests {
                 "logging",
                 "projection",
                 "publication",
+                "value",
             ]
             .into_iter()
             .collect(),

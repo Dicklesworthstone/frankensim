@@ -5,7 +5,10 @@ use crate::catalog::{
     DecisionDetailNamespaceRegistryV2, DecisionDetailNamespaceV2, DiagnosticCodeV2,
     RepairActionKindV2, RetryabilityV2,
 };
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionErrorKindV2, ConstructionErrorV2, ConstructionObservedDataClassV2,
+    ConstructionObservedV2,
+};
 use crate::identity::{ArtifactContentRootV2, DigestValueV2, NoClaimScopeRootV1};
 use crate::value::{NumericValueV2, QuantityV2, StableTokenV2, TypedValueV2};
 use fs_blake3::ContentHash;
@@ -128,7 +131,7 @@ impl DiagnosticCodeRefV2 {
 /// The comparison/effect owner defines structured mismatch semantics,
 /// including the first-divergent lane; this base type does not.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0609
 /// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
 /// use fs_evidence_runner::ProofExitV2;
 ///
@@ -137,7 +140,7 @@ impl DiagnosticCodeRefV2 {
 /// }
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0609
 /// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
 /// use fs_evidence_runner::RefusedReasonV2;
 ///
@@ -146,7 +149,7 @@ impl DiagnosticCodeRefV2 {
 /// }
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
 ///
 /// fn mint_authority(detail: &RegisteredDecisionDetailProjectionV2) {
@@ -333,7 +336,7 @@ impl DiagnosticValueV2 {
 ///
 /// No executable command, callback, script, or URI-launch field exists:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0609
 /// use fs_evidence_runner::RepairActionV2;
 ///
 /// fn execute(repair: &RepairActionV2) {
@@ -379,10 +382,9 @@ impl RepairActionV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "repair.replacement",
                 "the same typed-value shape as expected",
-                format_args!(
-                    "{:?}/{:?}",
-                    expected.compatibility_tag(),
-                    replacement.compatibility_tag()
+                ConstructionObservedV2::unsigned_pair(
+                    diagnostic_value_shape_code(expected.compatibility_tag()),
+                    diagnostic_value_shape_code(replacement.compatibility_tag()),
                 ),
             ));
         }
@@ -550,11 +552,11 @@ impl ActionableDiagnosticV2 {
         let mut seen = BTreeSet::new();
         for prerequisite in &prerequisites {
             if !seen.insert(prerequisite.as_str()) {
-                return Err(ConstructionErrorV2::new(
+                return Err(ConstructionErrorV2::new_redacted(
                     ConstructionErrorKindV2::Duplicate,
                     "diagnostic.prerequisites",
                     "unique ordered prerequisite tokens",
-                    prerequisite.as_str(),
+                    ConstructionObservedDataClassV2::CallerControlledText,
                 ));
             }
         }
@@ -698,10 +700,17 @@ fn validate_display_hint(value: String) -> Result<String, ConstructionErrorV2> {
             ConstructionErrorKindV2::Incompatible,
             "repair.display_hint",
             "single-line text without NUL or control characters",
-            format_args!("{index}:U+{:04X}", u32::from(character)),
+            ConstructionObservedV2::unsigned_pair(
+                u64::try_from(index).expect("the display-hint byte bound fits u64"),
+                u64::from(u32::from(character)),
+            ),
         ));
     }
     Ok(value)
+}
+
+fn diagnostic_value_shape_code((wire_tag, retained): (u16, bool)) -> u64 {
+    (u64::from(wire_tag) << 1) | u64::from(u8::from(retained))
 }
 
 fn encode_repair(

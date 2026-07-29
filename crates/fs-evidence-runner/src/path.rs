@@ -84,7 +84,7 @@ pub enum PathError {
 ///
 /// A raw string cannot be passed where validation is required:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::LogicalBundlePathV1;
 ///
 /// fn consume_validated(_: LogicalBundlePathV1) {}
@@ -94,7 +94,7 @@ pub enum PathError {
 ///
 /// The tuple field is private, so callers cannot mint the nominal wrapper:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0423
 /// use fs_evidence_runner::LogicalBundlePathV1;
 ///
 /// let _unchecked = LogicalBundlePathV1("../unvalidated".to_owned());
@@ -102,7 +102,7 @@ pub enum PathError {
 ///
 /// The checked path cannot be mutated after validation:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::LogicalBundlePathV1;
 ///
 /// let mut path = LogicalBundlePathV1::new("artifact/result.bin").unwrap();
@@ -170,7 +170,7 @@ impl PartialOrd for LogicalBundlePathV1 {
 ///
 /// A validated bundle path is not silently promoted to a ContentStore key:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fs_evidence_runner::{ContentStoreObjectKeyV1, LogicalBundlePathV1};
 ///
 /// let path = LogicalBundlePathV1::new("artifact/object").unwrap();
@@ -180,7 +180,7 @@ impl PartialOrd for LogicalBundlePathV1 {
 /// A checked object key cannot be widened into a reserved namespace after
 /// construction:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::ContentStoreObjectKeyV1;
 ///
 /// let mut key = ContentStoreObjectKeyV1::new("objects/result").unwrap();

@@ -961,6 +961,152 @@ modules own their private semantic root constructors. The three stop wrappers
 are presented-only here; lifecycle phase 24.1.2 remains their sole semantic
 stop/drain constructor owner.
 
+## Runner V2 base schema-impact declaration
+
+`schema_impact` owns the result-free, declaration-only schema-impact contract
+for the Runner V2 base leaf. It does not decode untrusted wire data, inspect
+retained artifacts, execute a migration, observe a downstream runtime, or mint
+compatibility merely because two schemas have similar shapes. Hostile bounded
+decoding remains owned by
+`frankensim-epic-foundations-huq.24.2.1.1`; this leaf presents only values
+constructed through its closed Rust API.
+
+The contract has independently typed, closed catalogs for frame version,
+authority state, slot use, manifest relation, registry kind, authority surface,
+field wire kind, field layout, impact disposition, and migration policy. A
+field descriptor binds its one-based ordinal, nonzero field code, stable field
+name and semantic-type ID, wire kind, structural layout, optional reciprocal
+field code, and optional version-slot code. A frame descriptor binds its Rust
+schema name, frame version, domain, raw terminal-version magic, exact ordered
+field descriptors, separately typed API generation and Runner wire version,
+predecessor policy, and optional nominal-root role. Version slots, registry
+fragments, impact rows, and the complete manifest each have distinct canonical
+domains and nominal roots. There is no raw-digest constructor, cross-role root
+conversion, positional substitution between frozen-base and leaf-extension
+values, or caller-selected manifest ordinal.
+
+The production declaration is exactly
+`runner_v2_base_schema_impact_manifest_v1()`. Its three canonically ordered
+rows describe `CanonicalSchemaFieldDescriptorV1`,
+`CanonicalSchemaFrameDescriptorV1`, and
+`CanonicalSchemaVersionSlotDescriptorV1`. They use the immutable FrozenBase
+registry and no leaf-extension fragment. Separately, the common manifest API
+admits a leaf extension only from a crate-owned static declaration that binds
+its owner, stable fragment ID, exact FrozenBase root, exact compatible source
+member, and complete descriptor sequence. Being listed by a caller is not
+source closure. Mixed snapshots; unknown, missing, extra, duplicate, reordered,
+substituted, or conflicting members; and an extension contributing no used
+role refuse before a manifest is constructed.
+
+Each impact row makes one of six dispositions explicit:
+`NewV1NoPredecessor`, `UnchangedV1`, `MigratedV1ToV2`,
+`DecodeOnlyLegacyV1`, `RetiredV1`, or
+`InapplicableNoCanonicalFrame`. Its migration policy, historical/current frame
+bindings, optional legacy container, predecessor relation, and authority
+surfaces must satisfy the complete closed matrix. Decode-only, retired, and
+inapplicable rows—and every other row without an authoritative current
+frame—expose an exactly empty authority surface. No disposition or policy
+silently inherits authority. The manifest derives canonical row ordinals,
+validates exact row-role coverage and unique roots, resolves reciprocal
+parent/child slots and legacy containers, and checks the bounded acyclic
+dependency graph. A compatibility-evidence edge is rejected whenever its
+fixed-point reachability includes a row with a nonempty authority surface.
+
+All AC60 cardinality maxima and canonical-size constants are inclusive. The
+canonical-size constants are defensive safety guards, not a claim that the
+current nested V1 grammar can construct an admitted component whose encoding
+reaches the guard:
+
+| Surface | Inclusive maximum |
+| --- | ---: |
+| stable token or registered text | 128 bytes |
+| source path | 240 bytes |
+| fields per frame | 256 |
+| authority surfaces per row | 6 |
+| predecessor, parent, or child slots | 256 |
+| impact rows per manifest | 256 |
+| dependency edges per manifest | 512 |
+| registered roles | 64 |
+| extension registry fragments | 256 |
+| canonical field descriptor | 1,024 bytes |
+| canonical version slot | 2,048 bytes |
+| canonical frame descriptor | 262,144 bytes |
+| canonical registry fragment | 65,536 bytes |
+| canonical impact row | 1,048,576 bytes |
+| canonical schema-impact manifest | 1,048,576 bytes |
+
+The independently derived tight reachability bounds for the present V1 grammar
+are:
+
+| V1 component | Tight grammar bound |
+| --- | ---: |
+| field descriptor | 298 bytes |
+| version-slot descriptor | 558 bytes |
+| frame descriptor | 77,631 bytes |
+| LeafExtension registry fragment | 27,417 bytes |
+| impact row | 477,318 bytes plus source-path length, therefore at most 477,558 bytes |
+| schema-impact manifest | 119,685 bytes |
+
+These grammar bounds do not replace or relax the inclusive safety guards. The
+immutable FrozenBase registry retains its exact frozen sequence and independent
+oracle; the variable LeafExtension bound above follows its one-through-64 role
+grammar. Every proportional count, edge aggregate, and canonical length uses
+checked arithmetic. Production-valid boundary proof constructs the largest
+semantically valid source-frozen value and every exact cardinality maximum.
+When a jointly maximal combination cannot satisfy an earlier invariant, the
+test proves the exact named refusal instead of padding, weakening, or mutating
+the component to manufacture a guard-length value.
+
+Guard reachability is proved separately at the shared canonical-frame seam. A
+nonallocating count-only preflight accepts an exactly guard-length synthetic
+frame and refuses guard plus one and checked arithmetic overflow before output
+allocation. That seam proof is not evidence that a production component can
+reach its guard. Private-field mutation, corrupted nested canonical bytes,
+one-blob framing under a component magic, and reserved or padding fields are
+not production-valid boundary fixtures.
+
+For admitted values, canonical materialization performs the count-only pass
+first, then makes exactly one output `Vec` allocation at the preflighted
+capacity. The second pass must produce exactly the preflighted length without
+growing beyond it. The component computes its root while borrowing that
+buffer, then consumes the frame and transfers the private `Vec` by ownership.
+There is no full-buffer clone, shrink-box conversion, second materialization
+allocation, mutable or public byte exposure, or authority widening. The
+complete composite-size preflight occurs before any
+caller-cardinality-sized validation index; a divergent second pass cannot
+produce a frame.
+
+The schema-impact test log uses six distinct semantic partitions: positive,
+expected refusal, expected failure, mutation, unsupported, and inapplicable.
+Expected counts are result-free declarations; observed matched and mismatched
+counts remain separate. A complete report must reconcile every expected case
+exactly once, retain matched counts for each partition, reject missing, extra,
+duplicate, reordered, skipped, or unlogged cases, and retain only bounded
+typed diagnostics plus the first divergence. Logs and reports bind the
+compatible-source snapshot root, schema-impact manifest root, close-repair
+manifest root, and closed log-schema root.
+
+The schema-owned production getter
+`runner_v2_base_schema_impact_log_case_manifest_v1()` first reconstructs the
+admitted production schema-impact manifest, then uses the crate-private
+`source_frozen_schema_impact_log_case_manifest_v1` translator. The translator
+exact-joins each declared case to one admitted manifest entry, the compiled
+source-member root, the kind-checked FrozenBase or LeafExtension registry
+identity, row owner and no-claim, row root, relation, derived local ordinal,
+and exact predecessor and parent/child-slot counts. LeafExtension log context
+retains its source-frozen owner and fragment ID; FrozenBase context admits
+neither. Context, expected-case, and case-manifest construction remain
+crate-private, so a public event cannot invent different source or registry
+context.
+
+This getter and translator declare expected partitions and expected-result
+roots only. They execute no case, observe no runtime, produce no matched or
+terminal count, inspect no retained artifact, perform no migration or hostile
+decode, and mint no compatibility, scientific, admission, close-decision, or
+other authority. Logging cannot create source-frozen authority merely by
+repeating a root; its result-free case manifest is derived only from a
+successfully validated schema-impact manifest.
+
 ## Invariants
 
 - Every closed catalog has one exact code-to-variant mapping. Unknown codes
@@ -1153,11 +1299,13 @@ bounded typed metadata or downstream retained relative artifact references.
 The pure logging envelope admits at most 64 closed fields per event, 4,096
 events per log, 1 MiB of canonical bytes per event, and 64 MiB for the complete
 canonical log. These are inclusive size guards, not permission to violate the
-closed event matrix or exact three-argument reproduction tuple. The largest
-legal publication terminal has exactly 63 fields and a valid 4,096-event state
-machine is admitted; 65 fields, 4,097 events, any structurally invalid value
-below a guard, and every checked arithmetic overflow refuse before
-canonicalization, reconciliation, or any further retained allocation.
+closed event matrix or the base-E2E log's exact three-argument reproduction
+tuple. The leaf-close writer separately uses the structured component-root
+descriptor defined below. The largest legal publication terminal has exactly
+63 fields and a valid 4,096-event state machine is admitted; 65 fields, 4,097
+events, any structurally invalid value below a guard, and every checked
+arithmetic overflow refuse before canonicalization, reconciliation, or any
+further retained allocation.
 This pure in-process leaf does not fabricate a retained-artifact claim by
 pointing at one of its source files. Its report carries an explicit typed
 absent-retained-artifact claim, and every log event emitted by
@@ -1165,6 +1313,39 @@ absent-retained-artifact claim, and every log event emitted by
 constructor can separately represent a validated relative retained-artifact
 path for downstream producers; that capability does not turn a source or
 script mapping into retained evidence.
+
+The leaf-close bounded writer is a separate complete-document state machine.
+Before it admits any detail it reserves exactly the declared terminal-reserve
+bytes for one canonical terminal event. Detail classes are closed and typed:
+cell, stage, diagnostic, and first divergence. Their exact ordered manifest
+binds every class and digest before admission. The writer preserves every
+admitted prefix and seals permanently on the first detail that cannot fit
+inside the remaining detail budget.
+
+A normal stream ends in one complete `Complete` terminal. The first
+over-budget detail instead emits one complete `LogBudgetExceeded` terminal
+containing all of:
+
+- rejected detail class and zero-based ordinal;
+- rejected detail digest and exact omitted-suffix count;
+- total byte budget and reserved terminal bytes;
+- first-divergence stage;
+- exact resource-return and drain outcomes;
+- diagnostic owner and exact repair-manifest root;
+- no-claim scope; and
+- the structured minimized-reproduction descriptor.
+
+The terminal itself must fit the bytes reserved before detail admission. A
+missing, extra, duplicate, reordered, digest-substituted, or truncated detail;
+post-terminal write; checked arithmetic overflow; absent terminal; incomplete
+terminal; partial canonical document; overwritten prefix; silent truncation;
+or overflow reported as success refuses. Canonical bytes and roots are
+materialized only after `finish` has admitted the exact complete stream.
+Normal and overflow documents replay byte-for-byte and root-for-root.
+Mutating any terminal field moves both terminal and document identities.
+Rejected caller-controlled data are represented only by stable class, ordinal,
+digest, bounded counts, and registered redaction metadata; no error, Debug
+surface, terminal, log, or reproduction string echoes the rejected value.
 
 Coverage and execution reports use one exact, non-contradictory vocabulary:
 eligible positive cells, matched positive cells, expected-refusal or mutation
@@ -1191,6 +1372,94 @@ inconsistent logs still refuse construction. Logging validates the divergence
 root's closed shape and placement; the projection producer must additionally
 prove that its emitted value equals the exact retained divergence descriptor
 root.
+
+## Semantic seed and Five Explicits
+
+`value::SeedMaterialV2` is the sole semantic workload-seed payload owned by
+this leaf. It is exactly 32 bytes. Its canonical command-line grammar is
+exactly `--seed none` or `--seed seed-256:` followed by 64 lowercase
+hexadecimal digits. Omission, duplication, uppercase, alternate prefixes,
+signs, separators, whitespace, Unicode, malformed lengths, and implicit or
+ambient seed sources refuse. Seed data are reproducibility inputs only; they
+mint no scientific, verification, admission, or publication authority.
+Every `SeedErrorV2` variant has a unique stable code and name, the exact
+`fs-evidence-runner/value` owner, typed retryability, one declarative
+non-executable repair kind and target, and the same closed no-claim boundary.
+Display, Debug, diagnostics, canonical refusal data, logs, and reproduction
+text retain only bounded lengths, offsets, codes, and redacted classes; they
+never echo rejected operands or seed material.
+
+The three source-declared case policies remain distinct:
+
+- `NoRandomness` carries no material and requires the registered
+  no-randomness inapplicability record.
+- `FixedManifest` obtains exact material only from the sealed case manifest
+  and binds that manifest identity.
+- `InvocationDerived` requires an explicitly provided, nonzero invocation
+  seed and binds the exact stable case identity plus one registered derivation
+  domain. Generator and minimizer versions are separate exact inputs.
+
+No property, metamorphic, mutation, or fuzz label implies randomness. The
+current base corpus is deterministic; any future randomized cell must be added
+to the exact source oracle together with its complete provenance. An
+applicable cell with absent source-backed material or provenance refuses
+instead of deriving material from its case ID, facet, clock, process, worker,
+thread, map order, or operating system.
+
+Every stable close cell exact-joins one independent Five Explicits oracle row.
+That row names separately rooted profiles for semantic numeric inputs,
+semantic numeric grants, expected numeric observations, seed policy and
+provenance, all seven hard/soft budget axes, declared version requirements,
+the capability contract, and the no-claim scope. Shared component profiles are
+permitted only when every cell names them explicitly, their resolved values
+are bound into that cell root, and missing, extra, duplicate, reordered,
+unknown, or unused rows or profiles refuse. Facet, source path, ordinal, and
+execution scope are classification data and cannot synthesize semantic
+explicit values.
+
+The semantic numeric surface includes only named values crossing the case or
+evidence contract boundary. Incidental implementation counters and source
+ordinals are not semantic inputs. Numeric values use the complete closed
+`NumericValueV2` union and bind either a canonical physical `UnitV2` or a
+logical `LogicalUnitV2`; registered logical units additionally bind their
+registry identity. A genuinely empty semantic surface is represented by an
+explicit exact-empty declaration, never by an omitted profile.
+
+Budgets retain seven axis codes and source-declared hard and soft values:
+u64 nanoseconds for time, u64 logical bytes for memory, u128 plus an exact
+logical unit for work, u32 for processes, and u64 encoded bytes for artifact,
+output, and log limits. Soft values are never inferred from hard values.
+Total-child and parallel-child constraints are separate process-shape fields;
+neither is a soft process budget. Construction validates widths, units,
+`soft <= hard`, governing Runner ceilings, checked aggregate feasibility, and
+canonical-frame feasibility.
+
+Version declarations preserve API generation, wire version and predecessor
+policy, schema identity, source-closure identity, any source-known build and
+toolchain identities, exact target or platform-matrix identity, exact
+profile/configuration identity, and canonical feature-set identity. A hash of
+the cell ID, class, path, facet, or scope is not a source, build, toolchain,
+target, profile, or feature identity. Execution evidence supplies the actual
+runtime-owned version fields and exact-joins them to the declaration.
+
+Capability contracts use registered nominal capability IDs and bind the
+capability registry/policy identity. A Bead owner, driver, or script token is
+never a capability. Declarations retain exact required and permitted sets.
+Execution evidence separately retains actual required, granted, observed,
+returned, and revoked sets and validates membership, canonical ordering,
+uniqueness, required/granted and observed/granted containment, and terminal
+return/revocation reconciliation. A contribution-only row carries a typed
+deferred-observation contract; it cannot represent unobserved capabilities as
+an observed empty set.
+
+Source-known explicits move the close-cell and close-manifest roots.
+Runtime-resolved explicits move the presented-evidence, detailed-log,
+minimized-reproduction, aggregate-execution, and report roots. Logs expose the
+Five Explicits root and each component root directly so the first divergent
+component is inspectable without reverse engineering an enclosing hash.
+Reproduction data retain applicable identities and safe resolved values but
+never raw forbidden values. Result-free declarations and immutable downstream
+contributions remain distinct from execution proof.
 
 `coverage::BaseCoverageManifestV1` is the sole source-authoritative,
 result-free AC38 coverage inventory. The older projection-local coverage
@@ -1256,16 +1525,27 @@ It contains exact journey-keyed projections for:
 
 - `scripts/ci/e2e_evidence_runner_publication_state_v2.sh`
 - `scripts/ci/e2e_evidence_runner_publication_v2.sh`
-- `scripts/ci/e2e_evidence_verifier_v1.sh`
+- `scripts/ci/e2e_evidence_verifier_v2.sh`
 - `scripts/ci/canonical_evidence_runner_v2.sh`
 - `scripts/ci/verify_runner_rjoq_handoff_v1.sh`
 
+The exact routes are:
+
+| Journey | Downstream owner | Driver | Script or native route | Immutable case manifest |
+| --- | --- | --- | --- | --- |
+| publication-state-v2 | `frankensim-epic-foundations-huq.24.2.2.2` | `e2e-evidence-runner-publication-state-v2-driver` | `scripts/ci/e2e_evidence_runner_publication_state_v2.sh` | `scripts/ci/manifests/evidence_runner_publication_state_v2_cases.v1.json` |
+| publication-v2 | `frankensim-epic-foundations-huq.24.2.2.3.3` | `e2e-evidence-runner-publication-v2-driver` | `scripts/ci/e2e_evidence_runner_publication_v2.sh` | `scripts/ci/manifests/evidence_runner_publication_v2_cases.v1.json` |
+| verifier-v2 | `frankensim-epic-foundations-huq.24.3.3.3.3` | `e2e-evidence-verifier-v2-driver` | `scripts/ci/e2e_evidence_verifier_v2.sh` | `scripts/ci/manifests/evidence_verifier_v2_cases.v1.json` |
+| canonical-runner-v2 | `frankensim-epic-foundations-huq.24.4.1.4` | `canonical-evidence-runner-v2-e2e-driver` | `scripts/ci/canonical_evidence_runner_v2.sh` | `scripts/ci/manifests/canonical_evidence_runner_v2_cases.v1.json` |
+| rjoq-handoff-v1 | `frankensim-epic-foundations-huq.24.5.3.1` | `verify-runner-rjoq-handoff-v1-driver` | `scripts/ci/verify_runner_rjoq_handoff_v1.sh` | `scripts/ci/manifests/runner_rjoq_handoff_verifier_v1_cases.v1.json` |
+
 The five row lists are handwritten and journey-specific. Every row binds its
-journey, downstream owner and script, consumption rationale, bounded fixture or
+journey, exact downstream owner, driver, script or native route, immutable
+manifest path and manifest root, consumption rationale, bounded fixture or
 closed subcase-manifest reference, exact expected decision and detail,
 semantic-cell partition, unit, no-claim scope, compiled source-closure root,
-and closed log-schema root. The immutable context-free journey-manifest root is
-distinct from the caller-context-bound journey-execution root.
+and closed log-schema root. The immutable context-free journey-manifest root
+is distinct from the caller-context-bound journey-execution root.
 
 Each row exposes an exact ordered, bounded, public detail-cell manifest.
 Callers can inspect every stable cell ID, semantic ordinal, expected decision,
@@ -1426,9 +1706,9 @@ The following responsibilities are explicitly outside this base slice:
 
 The sole downstream owners of the five release-built scripts are respectively
 `frankensim-epic-foundations-huq.24.2.2.2`,
-`frankensim-epic-foundations-huq.24.2.2.3`,
-`frankensim-epic-foundations-huq.24.3.3.3`,
-`frankensim-epic-foundations-huq.24.4.1.3`, and
+`frankensim-epic-foundations-huq.24.2.2.3.3`,
+`frankensim-epic-foundations-huq.24.3.3.3.3`,
+`frankensim-epic-foundations-huq.24.4.1.4`, and
 `frankensim-epic-foundations-huq.24.5.3.1`. This crate provides immutable
 projection inputs to those owners; it does not duplicate their script
 ownership.

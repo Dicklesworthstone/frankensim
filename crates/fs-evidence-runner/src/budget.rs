@@ -367,7 +367,7 @@ pub struct RunnerBudgetsCandidateV2 {
 ///
 /// A caller cannot post-mutate or widen an intrinsically validated grant:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::RunnerBudgetsV2;
 ///
 /// fn widen_wall_time(budgets: &mut RunnerBudgetsV2) {
@@ -425,7 +425,7 @@ pub struct RegistryBoundRunnerBudgetsV2 {
 ///
 /// Contextual admission does not expose a cap-widening mutation path:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use fs_evidence_runner::AdmittedRunnerBudgetsV2;
 ///
 /// fn widen_admitted_wall_time(admitted: &mut AdmittedRunnerBudgetsV2) {

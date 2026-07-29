@@ -4,7 +4,10 @@ use crate::canonical::CanonicalFrameV1;
 use crate::catalog::{
     DestinationAdmissionModeV2, PlatformPathProfileV2, PublicationProtocolV2, RunnerCommandV2,
 };
-use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
+use crate::construction::{
+    ConstructionErrorKindV2, ConstructionErrorV2, ConstructionFixedObservationV2,
+    ConstructionObservedV2,
+};
 use crate::limits::{
     PublicationStorageProjectionV2, SYSTEM_PUBLICATION_OBJECT_COUNT_V2,
     SystemPublicationObjectRoleV2,
@@ -104,11 +107,10 @@ impl PublicationSelectionV2 {
                 ConstructionErrorKindV2::Incompatible,
                 "publication.profile_protocol_target",
                 "the exact frozen profile/protocol/target cell",
-                format_args!(
-                    "{}/{}/{}",
-                    path_profile.name(),
-                    protocol.name(),
-                    target.path_profile().name()
+                ConstructionObservedV2::closed_triple(
+                    &path_profile,
+                    &protocol,
+                    &target.path_profile(),
                 ),
             ));
         }
@@ -501,7 +503,7 @@ impl SymbolicCommandResultPlanV2 {
                     ConstructionErrorKindV2::ArithmeticOverflow,
                     "result.complete_stdout_bytes",
                     "checked u64 sum",
-                    "overflow",
+                    ConstructionObservedV2::fixed(ConstructionFixedObservationV2::Overflow),
                 )
             })?;
         let admitted_stdout = stdout_grant_bytes.min(COMMAND_RESULT_STDOUT_MAX_BYTES_V2);
