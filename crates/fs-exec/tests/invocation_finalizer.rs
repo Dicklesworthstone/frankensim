@@ -194,12 +194,7 @@ fn successful_child_can_publish_only_after_finalizer_poll() {
             .expect("final poll permits preparation");
         let mut destination = 7_u64;
         let replaced = finalizer
-            .commit_child_local_publication(
-                prepared,
-                OutputBytes::new(8),
-                &mut destination,
-                11_u64,
-            )
+            .commit_child_local_publication(prepared, OutputBytes::new(8), &mut destination, 11_u64)
             .expect("prepared output commits once");
         assert_eq!(replaced, 7);
         assert_eq!(destination, 11);
@@ -652,12 +647,7 @@ fn child_local_publication_explicitly_survives_later_root_cancellation() {
         let prepared = finalizer.prepare_publication().unwrap();
         let mut destination = 1_u64;
         finalizer
-            .commit_child_local_publication(
-                prepared,
-                OutputBytes::new(8),
-                &mut destination,
-                2_u64,
-            )
+            .commit_child_local_publication(prepared, OutputBytes::new(8), &mut destination, 2_u64)
             .unwrap();
         assert_eq!(destination, 2);
         let report = finalizer.finish().unwrap();

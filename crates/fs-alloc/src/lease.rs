@@ -554,10 +554,8 @@ impl PublishedTransferEnvelope {
             self.payload_bytes,
             self.layout_bytes,
             self.overhead_bytes,
-            self.total_bytes().map_or_else(
-                || String::from("null"),
-                |total| total.to_string()
-            )
+            self.total_bytes()
+                .map_or_else(|| String::from("null"), |total| total.to_string())
         )
     }
 }
@@ -3195,13 +3193,8 @@ impl<'owner> DelegatedLeaseCharge<'owner> {
         binding: PublishedTransferBinding,
         envelope: PublishedTransferEnvelope,
     ) -> Result<PreparedPublishedTransfer<'owner>, PublishedTransferRefusal> {
-        let prepared_sequence = prepare_published_transfer(
-            &self.root,
-            self.identity,
-            self.bytes,
-            binding,
-            envelope,
-        )?;
+        let prepared_sequence =
+            prepare_published_transfer(&self.root, self.identity, self.bytes, binding, envelope)?;
         self.active = false;
         Ok(PreparedPublishedTransfer {
             root: self.root.clone(),
