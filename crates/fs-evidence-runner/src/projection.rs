@@ -40,10 +40,12 @@ use crate::coverage::{
     BaseCoverageCaseDeclarationV1, BaseCoverageCheckedReportV1,
     BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseDeferredEvidenceEnvelopeV1,
     BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
-    BaseCoverageCloseManifestV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
-    BaseCoverageManifestClassV1, BaseCoverageManifestV1, BaseCoveragePresentedOutcomeV1,
-    BaseCoveragePresentedResultV1, CanonicalSchemaImpactDispositionV1,
-    CompatibleSourceSnapshotRootV1, DeferredReasonV1,
+    BaseCoverageCloseDecisionV1, BaseCoverageCloseExecutionScopeV1, BaseCoverageCloseFacetV1,
+    BaseCoverageCloseGroupV1, BaseCoverageCloseManifestCellV1, BaseCoverageCloseManifestV1,
+    BaseCoverageClosePartitionV1, BaseCoverageCloseReasonCodeV1,
+    BaseCoverageCloseRetainedRelativeArtifactPolicyV1, BaseCoverageManifestClassV1,
+    BaseCoverageManifestV1, BaseCoveragePresentedOutcomeV1, BaseCoveragePresentedResultV1,
+    CanonicalSchemaImpactDispositionV1, CompatibleSourceSnapshotRootV1, DeferredReasonV1,
     RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1, RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1,
     RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1, RUNNER_V2_PHASE_ONE_CONTRACT_NO_CLAIM_V1,
     RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1, RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
@@ -1295,6 +1297,7 @@ impl RunnerV2PhaseOneContractContributionV2 {
     fn build_frozen() -> Result<Self, ConstructionErrorV2> {
         let source_closure = RunnerV2BaseSourceClosureV1::frozen()?;
         let base_coverage_manifest = BaseCoverageManifestV1::frozen()?;
+        let base_coverage_close_manifest = BaseCoverageCloseManifestV1::frozen()?;
         let schema_impact_projection = RunnerV2BaseSchemaImpactProjectionV2::frozen()?;
         if schema_impact_projection
             .manifest()
@@ -1309,8 +1312,10 @@ impl RunnerV2PhaseOneContractContributionV2 {
             ));
         }
 
-        let case_manifest_contract_root = phase_one_case_manifest_contract_root_v1()?;
-        let expected_partitions_root = phase_one_expected_partitions_root_v1()?;
+        let case_manifest_contract_root =
+            phase_one_case_manifest_contract_root_v1(&base_coverage_close_manifest)?;
+        let expected_partitions_root =
+            phase_one_expected_partitions_root_v1(&base_coverage_close_manifest)?;
         let target_root = phase_one_target_contract_root_v1()?;
         let feature_set_root = phase_one_feature_contract_root_v1()?;
         let build_contract_root =
@@ -1722,7 +1727,73 @@ fn validate_exact_phase_one_observer_contract_v1(
     Ok(())
 }
 
-fn phase_one_case_manifest_contract_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PhaseOneCloseLedgerCellV1 {
+    source_ordinal: u32,
+    source_case_id: Box<str>,
+    source_class: BaseCoverageManifestClassV1,
+    source_path: Box<str>,
+    group: BaseCoverageCloseGroupV1,
+    facet: BaseCoverageCloseFacetV1,
+    execution_scope: BaseCoverageCloseExecutionScopeV1,
+    partition: BaseCoverageClosePartitionV1,
+    expected_decision: BaseCoverageCloseDecisionV1,
+    expected_reason: Option<BaseCoverageCloseReasonCodeV1>,
+    downstream_contribution_root: Option<ContentHash>,
+    five_explicits_root: ContentHash,
+    cell_root: ContentHash,
+}
+
+impl PhaseOneCloseLedgerCellV1 {
+    fn from_close_cell(cell: &BaseCoverageCloseManifestCellV1) -> Self {
+        Self {
+            source_ordinal: cell.source_ordinal(),
+            source_case_id: cell.source_case_id().into(),
+            source_class: cell.source_class(),
+            source_path: cell.source_path().into(),
+            group: cell.group(),
+            facet: cell.facet(),
+            execution_scope: cell.execution_scope(),
+            partition: cell.partition(),
+            expected_decision: cell.expected_decision(),
+            expected_reason: cell.expected_reason(),
+            downstream_contribution_root: cell
+                .downstream_contribution()
+                .map(crate::coverage::BaseCoverageCloseDownstreamContributionV1::root),
+            five_explicits_root: cell.five_explicits().root(),
+            cell_root: cell.root(),
+        }
+    }
+}
+
+fn phase_one_case_manifest_contract_root_v1(
+    close_manifest: &BaseCoverageCloseManifestV1,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    phase_one_case_manifest_contract_root_from_components_v1(
+        close_manifest.source_manifest_root(),
+        close_manifest.reason_registry_root(),
+        close_manifest.root(),
+        checked_u32(
+            close_manifest.cells().len(),
+            "projection.phase_one.close_manifest_cell_count",
+        )?,
+    )
+}
+
+fn phase_one_case_manifest_contract_root_from_components_v1(
+    source_manifest_root: ContentHash,
+    reason_registry_root: ContentHash,
+    close_manifest_root: ContentHash,
+    close_manifest_cell_count: u32,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    if close_manifest_cell_count == 0 {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Zero,
+            "projection.phase_one.close_manifest_cell_count",
+            "the nonzero exact full-set close-manifest cell count",
+            close_manifest_cell_count,
+        ));
+    }
     let mut frame = CanonicalFrameV1::new(b"FSPHASE1CASEMANIFEST\x01", 4 * 1024)?;
     frame.push_str(
         "manifest.route_id",
@@ -1745,16 +1816,143 @@ fn phase_one_case_manifest_contract_root_v1() -> Result<ContentHash, Constructio
         "manifest.path",
         RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
     )?;
+    frame.push_bytes(
+        "manifest.source_manifest_root",
+        source_manifest_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "manifest.reason_registry_root",
+        reason_registry_root.as_bytes(),
+    )?;
+    frame.push_bytes("manifest.close_manifest_root", close_manifest_root.as_bytes())?;
+    frame.push_u32(
+        "manifest.close_manifest_cell_count",
+        close_manifest_cell_count,
+    )?;
     frame.push_u16("manifest.declaration_only", 1)?;
     frame.push_str(
         "manifest.no_claim",
-        "downstream-owned-case-manifest-contract-is-not-file-content-or-execution-proof",
+        "source-exact-full-set-ledger-and-downstream-path-contract-are-not-file-content-or-execution-proof",
     )?;
     Ok(frame.root(RUNNER_V2_PHASE_ONE_CASE_MANIFEST_CONTRACT_DOMAIN_V1))
 }
 
-fn phase_one_expected_partitions_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
-    let mut frame = CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 4 * 1024)?;
+fn phase_one_close_ledger_cells_v1(
+    close_manifest: &BaseCoverageCloseManifestV1,
+) -> Vec<PhaseOneCloseLedgerCellV1> {
+    close_manifest
+        .cells()
+        .iter()
+        .map(PhaseOneCloseLedgerCellV1::from_close_cell)
+        .collect()
+}
+
+fn phase_one_expected_partitions_root_v1(
+    close_manifest: &BaseCoverageCloseManifestV1,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let cells = phase_one_close_ledger_cells_v1(close_manifest);
+    phase_one_expected_partitions_root_from_ledger_v1(close_manifest, &cells)
+}
+
+fn phase_one_expected_partitions_root_from_ledger_v1(
+    close_manifest: &BaseCoverageCloseManifestV1,
+    cells: &[PhaseOneCloseLedgerCellV1],
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let expected_cells = close_manifest.cells();
+    if cells.len() != expected_cells.len() {
+        return Err(ConstructionErrorV2::new(
+            if cells.len() < expected_cells.len() {
+                ConstructionErrorKindV2::Missing
+            } else {
+                ConstructionErrorKindV2::Unexpected
+            },
+            "projection.phase_one.close_ledger_cell_count",
+            "one ledger row for every exact full-set close-manifest cell",
+            cells.len(),
+        ));
+    }
+    for (index, (presented, expected)) in cells.iter().zip(expected_cells).enumerate() {
+        let expected_ordinal =
+            checked_u32(index + 1, "projection.phase_one.close_ledger_ordinal")?;
+        if presented.source_ordinal != expected_ordinal
+            || presented.source_ordinal != expected.source_ordinal()
+        {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::OutOfOrder,
+                "projection.phase_one.close_ledger_ordinal",
+                "the exact contiguous source-manifest ordinal in canonical order",
+                presented.source_ordinal,
+            ));
+        }
+        if presented != &PhaseOneCloseLedgerCellV1::from_close_cell(expected) {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.phase_one.close_ledger_cell",
+                "the exact stable ID, source, classification, reason, contribution, Five Explicits, and cell root",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
+    }
+
+    let mut presented_partition_counts = [0_u32; 6];
+    for cell in cells {
+        let index = usize::from(cell.partition.code() - 1);
+        presented_partition_counts[index] = presented_partition_counts[index]
+            .checked_add(1)
+            .ok_or_else(sequence_overflow)?;
+    }
+    let mut independent_manifest_partition_counts = [0_u32; 6];
+    for cell in expected_cells {
+        let index = usize::from(cell.partition().code() - 1);
+        independent_manifest_partition_counts[index] = independent_manifest_partition_counts[index]
+            .checked_add(1)
+            .ok_or_else(sequence_overflow)?;
+    }
+    if presented_partition_counts != independent_manifest_partition_counts {
+        return Err(ConstructionErrorV2::new_redacted(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.phase_one.close_ledger_partition_counts",
+            "the independently recomputed exact per-partition cardinalities",
+            ConstructionObservedDataClassV2::CallerControlledText,
+        ));
+    }
+    let counted_total = presented_partition_counts
+        .iter()
+        .try_fold(0_u32, |total, count| {
+            total.checked_add(*count).ok_or_else(sequence_overflow)
+        })?;
+    let exact_total = checked_u32(
+        expected_cells.len(),
+        "projection.phase_one.close_ledger_cell_count",
+    )?;
+    if counted_total != exact_total {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Incompatible,
+            "projection.phase_one.close_ledger_partition_sum",
+            "an exact partition sum equal to the full close-manifest cell count",
+            ConstructionObservedV2::unsigned_pair(
+                u64::from(counted_total),
+                u64::from(exact_total),
+            ),
+        ));
+    }
+
+    let mut frame = CanonicalFrameV1::new(
+        b"FSPHASE1PARTITIONS\x01",
+        2 * 1024 * 1024,
+    )?;
+    frame.push_bytes(
+        "partitions.source_manifest_root",
+        close_manifest.source_manifest_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "partitions.reason_registry_root",
+        close_manifest.reason_registry_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "partitions.close_manifest_root",
+        close_manifest.root().as_bytes(),
+    )?;
     frame.push_u32(
         "partitions.count",
         checked_u32(
@@ -1766,12 +1964,65 @@ fn phase_one_expected_partitions_root_v1() -> Result<ContentHash, ConstructionEr
         .iter()
         .enumerate()
     {
+        let partition = BaseCoverageClosePartitionV1::ALL[index];
+        if partition.stable_name() != *name {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.phase_one.partition_vocabulary",
+                "the exact six-name closed partition vocabulary in code order",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
         frame.push_u16(
             "partitions.code",
-            u16::try_from(index + 1).map_err(|_| sequence_overflow())?,
+            partition.code(),
         )?;
         frame.push_str("partitions.name", name)?;
+        frame.push_u32(
+            "partitions.expected_cell_count",
+            presented_partition_counts[index],
+        )?;
         frame.push_u16("partitions.eventual_owner_requires_exact_match", 1)?;
+    }
+    frame.push_u32("partitions.cell_count", exact_total)?;
+    for cell in cells {
+        frame.push_u32("partitions.cell.ordinal", cell.source_ordinal)?;
+        frame.push_str("partitions.cell.stable_id", &cell.source_case_id)?;
+        frame.push_u16("partitions.cell.source_class", cell.source_class as u16)?;
+        frame.push_str("partitions.cell.source_path", &cell.source_path)?;
+        frame.push_u16("partitions.cell.group", cell.group.code())?;
+        frame.push_u16("partitions.cell.facet", cell.facet.code())?;
+        frame.push_u16(
+            "partitions.cell.execution_scope",
+            cell.execution_scope.code(),
+        )?;
+        frame.push_u16("partitions.cell.partition", cell.partition.code())?;
+        frame.push_u16(
+            "partitions.cell.expected_decision",
+            cell.expected_decision.code(),
+        )?;
+        frame.push_presence(
+            "partitions.cell.expected_reason_present",
+            cell.expected_reason.is_some(),
+        )?;
+        if let Some(reason) = cell.expected_reason {
+            frame.push_u16("partitions.cell.expected_reason", reason.code())?;
+        }
+        frame.push_presence(
+            "partitions.cell.downstream_contribution_present",
+            cell.downstream_contribution_root.is_some(),
+        )?;
+        if let Some(root) = cell.downstream_contribution_root {
+            frame.push_bytes(
+                "partitions.cell.downstream_contribution_root",
+                root.as_bytes(),
+            )?;
+        }
+        frame.push_bytes(
+            "partitions.cell.five_explicits_root",
+            cell.five_explicits_root.as_bytes(),
+        )?;
+        frame.push_bytes("partitions.cell.root", cell.cell_root.as_bytes())?;
     }
     frame.push_u32("partitions.required_unexpected_mismatches", 0)?;
     frame.push_u32("partitions.required_execution_failures", 0)?;
@@ -15925,13 +16176,17 @@ mod tests {
         RUNNER_V2_PHASE_ONE_CONTRACT_SOURCE_OWNER_V1,
         RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
         RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1,
+        RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1,
         RUNNER_V2_PHASE_ONE_OBSERVER_NO_CLAIM_V1, RunnerV2BaseE2eProjectionV1,
         RunnerV2BaseSchemaImpactProjectionV2, RunnerV2BaseSourceClosureV1,
         RunnerV2PhaseOneContractContributionV2, compare_base_e2e_journey_results_v1,
         encode_construction_error, execute_case, expected_source_identity_root, journey_root,
-        journey_row_id_oracle, journey_row_root, phase_one_contribution_projection_root_v2,
-        phase_one_payload_root_v2, reconstruct_exact_local_coverage_report,
-        run_base_e2e_journey_v1, run_base_e2e_projection_v1, schema_impact_projection_root_v2,
+        journey_row_id_oracle, journey_row_root, phase_one_build_contract_root_v1,
+        phase_one_case_manifest_contract_root_from_components_v1,
+        phase_one_close_ledger_cells_v1, phase_one_contribution_projection_root_v2,
+        phase_one_expected_partitions_root_from_ledger_v1, phase_one_payload_root_v2,
+        reconstruct_exact_local_coverage_report, run_base_e2e_journey_v1,
+        run_base_e2e_projection_v1, schema_impact_projection_root_v2,
         schema_impact_projection_row_root_v2, source_closure_entry,
         validate_exact_phase_one_observer_contract_v1,
     };
@@ -15942,7 +16197,8 @@ mod tests {
         BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseContributionBudgetsV1,
         BaseCoverageCloseDeferredEvidenceEnvelopeV1,
         BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
-        BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
+        BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseManifestV1,
+        BaseCoverageClosePartitionV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
         BaseCoverageManifestClassV1, CanonicalSchemaImpactDispositionV1, DeferredReasonV1,
         RuntimeObservationDispositionV1, compatible_source_snapshot_root_from_exact_frame_v1,
         frozen_downstream_close_contribution_budgets_v1,
@@ -15956,6 +16212,7 @@ mod tests {
     use crate::schema_impact::{
         RUNNER_V2_BASE_SCHEMA_IMPACT_NO_CLAIM_V1, RUNNER_V2_BASE_SCHEMA_IMPACT_SOURCE_PATH_V1,
         SchemaImpactManifestRelationV1, SchemaImpactManifestRowSourceV1, SchemaImpactNoClaimV1,
+        runner_v2_base_schema_impact_field_name_mutant_manifest_v1,
         source_frozen_schema_impact_manifest_v1,
     };
     use crate::value::StableTokenV2;
@@ -16147,6 +16404,126 @@ mod tests {
                 self.no_claim.clone(),
             )
         }
+    }
+
+    fn vocabulary_only_phase_one_partition_root_v1() -> fs_blake3::ContentHash {
+        let names = [
+            "positive",
+            "expected-refusal",
+            "expected-failure",
+            "mutation",
+            "unsupported",
+            "inapplicable",
+        ];
+        let mut frame =
+            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 4 * 1024)
+                .expect("legacy vocabulary-only frame");
+        frame
+            .push_u32("partitions.count", 6)
+            .expect("partition count");
+        for (index, name) in names.iter().enumerate() {
+            frame
+                .push_u16(
+                    "partitions.code",
+                    u16::try_from(index + 1).expect("six bounded partition codes"),
+                )
+                .expect("partition code");
+            frame
+                .push_str("partitions.name", name)
+                .expect("partition name");
+            frame
+                .push_u16("partitions.eventual_owner_requires_exact_match", 1)
+                .expect("partition exact-match flag");
+        }
+        frame
+            .push_u32("partitions.required_unexpected_mismatches", 0)
+            .expect("zero mismatches");
+        frame
+            .push_u32("partitions.required_execution_failures", 0)
+            .expect("zero failures");
+        frame
+            .push_u32("partitions.required_unexplained_skips", 0)
+            .expect("zero skips");
+        frame
+            .push_str(
+                "partitions.no_claim",
+                "expected-partitions-do-not-prove-owner-execution-or-matched-results",
+            )
+            .expect("partition no-claim");
+        frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1)
+    }
+
+    fn count_only_phase_one_partition_root_v1(
+        close_manifest: &BaseCoverageCloseManifestV1,
+    ) -> fs_blake3::ContentHash {
+        let mut frame =
+            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 64 * 1024)
+                .expect("count-only frame");
+        frame
+            .push_bytes(
+                "partitions.source_manifest_root",
+                close_manifest.source_manifest_root().as_bytes(),
+            )
+            .expect("source-manifest root");
+        frame
+            .push_bytes(
+                "partitions.reason_registry_root",
+                close_manifest.reason_registry_root().as_bytes(),
+            )
+            .expect("reason-registry root");
+        frame
+            .push_bytes(
+                "partitions.close_manifest_root",
+                close_manifest.root().as_bytes(),
+            )
+            .expect("close-manifest root");
+        frame
+            .push_u32("partitions.count", 6)
+            .expect("partition count");
+        for partition in BaseCoverageClosePartitionV1::ALL {
+            let count = u32::try_from(
+                close_manifest
+                    .cells()
+                    .iter()
+                    .filter(|cell| cell.partition() == partition)
+                    .count(),
+            )
+            .expect("bounded partition cardinality");
+            frame
+                .push_u16("partitions.code", partition.code())
+                .expect("partition code");
+            frame
+                .push_str("partitions.name", partition.stable_name())
+                .expect("partition name");
+            frame
+                .push_u32("partitions.expected_cell_count", count)
+                .expect("partition count");
+            frame
+                .push_u16("partitions.eventual_owner_requires_exact_match", 1)
+                .expect("partition exact-match flag");
+        }
+        frame
+            .push_u32(
+                "partitions.cell_count",
+                u32::try_from(close_manifest.cells().len()).expect("bounded close cell count"),
+            )
+            .expect("close cell count");
+        frame
+            .push_u32("partitions.required_unexpected_mismatches", 0)
+            .expect("zero mismatches");
+        frame
+            .push_u32("partitions.required_execution_failures", 0)
+            .expect("zero failures");
+        frame
+            .push_u32("partitions.required_unexplained_skips", 0)
+            .expect("zero skips");
+        frame
+            .push_str(
+                "partitions.no_claim",
+                "expected-partitions-do-not-prove-owner-execution-or-matched-results",
+            )
+            .expect("partition no-claim");
+        frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1)
     }
 
     #[test]
