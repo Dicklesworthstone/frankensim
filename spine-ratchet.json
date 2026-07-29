@@ -1,0 +1,10 @@
+{
+  "schema": "frankensim-spine-ratchet-v1",
+  "bead": "frankensim-o5et9",
+  "high_water_stages_executing": 3,
+  "stages_total": 6,
+  "executing_prefix": ["import-verify", "assign", "material-resolve"],
+  "first_gap": "flow-network",
+  "first_gap_owner": "frankensim-frn2i",
+  "no_claim": "counts the executing stage PREFIX declared in fs-cli source; it does not prove those stages are correct, only that the product still admits them"
+}

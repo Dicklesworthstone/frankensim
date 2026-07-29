@@ -65,6 +65,7 @@ mod moonshot_policy;
 mod program_metrics;
 mod schemas;
 mod source_manifest;
+mod spine_ratchet;
 mod vv_scorecard;
 
 use bootstrap_provenance::{
@@ -8342,6 +8343,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-spine-ratchet" => {
+            return match spine_ratchet::generate(&root) {
+                Ok(()) => {
+                    println!("spine ratchet regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "generate-source-manifest" => {
             let scope: std::collections::BTreeSet<String> = std::env::args().skip(2).collect();
             return match source_manifest::generate(&root, &scope) {
@@ -8531,6 +8544,7 @@ fn main() -> ExitCode {
         "check-program-metrics" => (program_metrics::check(&root), vec![program_metrics::CHECK]),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
+        "check-spine-ratchet" => (spine_ratchet::check(&root), vec![spine_ratchet::CHECK]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
         "check-all" => {
             let mut v = check_layers(&manifests);
@@ -8576,6 +8590,7 @@ fn main() -> ExitCode {
             v.extend(program_metrics::check(&root));
             v.extend(claims::check_claim_language(&root));
             v.extend(closures::check_closures(&root));
+            v.extend(spine_ratchet::check(&root));
             v.extend(check_citable_producers(&root));
             (
                 v,
