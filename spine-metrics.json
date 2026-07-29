@@ -1,0 +1,14 @@
+{
+  "schema": "frankensim-spine-metrics-v1",
+  "bead": "frankensim-o5et9",
+  "beads": {
+    "issues_fnv1a64": "018b7fb1365a44b5",
+    "open": 1744,
+    "blocked": 1456,
+    "actionable": 288
+  },
+  "e2e": {
+    "status": "no-retained-receipt"
+  },
+  "no_claim": "counts a deliberately regenerated tracker snapshot; the live tracker moves on every br op, so this trails it by design. e2e is no-retained-receipt: the lane runs green out-of-band (frankensim-ustax) but retains no tracked checked receipt (frankensim-iakds owns one)"
+}

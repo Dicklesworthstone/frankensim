@@ -536,7 +536,12 @@ constellation governance and compatibility-train process.
 
 The preflight tells you a sibling is off-pin. It does **not** tell you whether
 that is a fast-forward or a divergence, and only the second is an incident.
-Before proposing any remedy, classify: if `git merge-base --is-ancestor <pin>
+The standing gate `cargo run -p xtask -- check-constellation-drift` (a
+check-all member since bead frankensim-es6pt) now makes that classification
+continuously: per sibling it reports `on-pin`, `stale-lock` (fast-forward;
+visible but not red), `drift` (dirty, retreated, or diverged; red, naming the
+sibling with expected and actual heads), or NO-DATA. Before proposing any
+remedy, classify: if `git merge-base --is-ancestor <pin>
 HEAD` succeeds in the sibling, the checkout is strictly newer and the *lock* is
 stale, so the safe direction is forward. Measured 2026-07-29: all seven
 siblings were clean strict fast-forwards, 25 to 611 commits ahead. Treating

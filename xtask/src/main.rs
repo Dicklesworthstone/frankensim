@@ -21,6 +21,7 @@
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-constellation-assessment` — keep the measured seven-sibling trust cone current.
+//! - `check-constellation-drift` — classify each sibling against its pin; red only on wandered checkouts (bead es6pt).
 //! - `check-source-manifest` — keep the structural trust-cone source inventory and SPDX rendering current.
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
@@ -55,6 +56,7 @@ mod consolidation;
 pub mod constellation_admission;
 mod constellation_assessment;
 mod constellation_cleanliness;
+mod constellation_drift;
 mod critical_path;
 mod depgraph;
 mod identities;
@@ -65,6 +67,7 @@ mod moonshot_policy;
 mod program_metrics;
 mod schemas;
 mod source_manifest;
+mod spine_metrics;
 mod spine_ratchet;
 mod vv_scorecard;
 
@@ -8409,6 +8412,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-spine-metrics" => {
+            return match spine_metrics::generate(&root) {
+                Ok(()) => {
+                    eprintln!("spine metrics snapshot regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "compatibility-report" => {
             // `--candidate <lock>` adjudicates a PROPOSED pin set; without it the
             // comparison is against the live checkouts.
@@ -8502,6 +8517,11 @@ fn main() -> ExitCode {
             vec![source_manifest::CHECK, source_manifest::SPDX_CHECK],
         ),
         "check-vv-scorecard" => (vv_scorecard::check(&root), vec![vv_scorecard::CHECK]),
+        "check-constellation-drift" => {
+            let report = constellation_drift::check(&root);
+            policy_notes = report.notes;
+            (report.violations, vec![constellation_drift::CHECK])
+        }
         "check-claim-integrity" => {
             let report = claim_integrity_gate::check_claim_integrity_gate(&root);
             policy_notes = report.decisions;
@@ -8544,6 +8564,11 @@ fn main() -> ExitCode {
         "check-program-metrics" => (program_metrics::check(&root), vec![program_metrics::CHECK]),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
+        "check-spine-metrics" => {
+            let (violations, notes) = spine_metrics::check(&root);
+            policy_notes = notes;
+            (violations, vec![spine_metrics::CHECK])
+        }
         "check-spine-ratchet" => (spine_ratchet::check(&root), vec![spine_ratchet::CHECK]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
         "check-all" => {
@@ -8561,6 +8586,9 @@ fn main() -> ExitCode {
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
             v.extend(constellation_assessment::check(&root));
+            let drift_report = constellation_drift::check(&root);
+            v.extend(drift_report.violations);
+            policy_notes.extend(drift_report.notes);
             v.extend(source_manifest::check(&root));
             v.extend(vv_scorecard::check(&root));
             let manifest_report = manifest_fixture::check_manifest_fixture(&root);
@@ -8591,6 +8619,9 @@ fn main() -> ExitCode {
             v.extend(claims::check_claim_language(&root));
             v.extend(closures::check_closures(&root));
             v.extend(spine_ratchet::check(&root));
+            let spine_metrics_report = spine_metrics::check(&root);
+            v.extend(spine_metrics_report.0);
+            policy_notes.extend(spine_metrics_report.1);
             v.extend(check_citable_producers(&root));
             (
                 v,
@@ -8609,6 +8640,7 @@ fn main() -> ExitCode {
                     "golden-couplings",
                     "semantic-identities",
                     constellation_assessment::CHECK,
+                    constellation_drift::CHECK,
                     source_manifest::CHECK,
                     source_manifest::SPDX_CHECK,
                     vv_scorecard::CHECK,
@@ -8625,6 +8657,7 @@ fn main() -> ExitCode {
                     "claim-state",
                     "closure-evidence",
                     spine_ratchet::CHECK,
+                    spine_metrics::CHECK,
                     CITABLE_PRODUCER_CHECK,
                 ],
             )
@@ -8634,9 +8667,9 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
-                 check-identities|check-manifest-fixture|check-constellation-assessment|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|record-program-metrics|compatibility-report|lock-constellation|\
-                 check-constellation|depgraph-receipt|matdb-pack"
+                 check-identities|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|record-program-metrics|compatibility-report|lock-constellation|\
+                 check-constellation|check-spine-metrics|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;
         }

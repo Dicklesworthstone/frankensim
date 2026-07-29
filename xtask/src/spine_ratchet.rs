@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::Violation;
 
 pub(crate) const CHECK: &str = "spine-ratchet";
-const SOLVE_SOURCE: &str = "crates/fs-cli/src/solve.rs";
+pub(crate) const SOLVE_SOURCE: &str = "crates/fs-cli/src/solve.rs";
 const RATCHET_PATH: &str = "spine-ratchet.json";
 const SCHEMA: &str = "frankensim-spine-ratchet-v1";
 

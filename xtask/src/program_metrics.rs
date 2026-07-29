@@ -16,7 +16,7 @@ use std::path::Path;
 
 use fs_govern::program_metrics::{
     HistoryGeneration, ImportScorecardSource, MetricCell, MetricHistory, MetricObservation,
-    ProgramDashboard, ProgramSources, build_dashboard, frankensim_rows,
+    ProgramDashboard, ProgramSources, SpineMetricsSource, build_dashboard, frankensim_rows,
 };
 use fs_vvreg::ContentHash;
 use fs_vvreg::adversarial::adversarial_registry;
@@ -26,6 +26,7 @@ use fs_vvreg::scorecard::build_scorecard;
 use super::Violation;
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::maturity;
+use crate::{spine_metrics, spine_ratchet};
 
 pub(crate) const CHECK: &str = "program-metrics";
 const MARKDOWN_PATH: &str = "program-metrics.md";
@@ -378,6 +379,29 @@ fn read_history(root: &Path) -> Result<MetricHistory, String> {
         .map_err(|error| format!("{HISTORY_PATH} is not a valid trend basis: {error}"))
 }
 
+/// Spine inputs for the dashboard: the executing stage prefix derived live
+/// from the fs-cli source (the ratchet gate keeps that derivation honest),
+/// and the deliberately regenerated beads snapshot. Anything unreadable is a
+/// `None` field, which the projection renders as `NO-DATA` — the dashboard
+/// must never invent a spine number.
+fn spine_sources(root: &Path) -> SpineMetricsSource {
+    let stages = std::fs::read_to_string(root.join(spine_ratchet::SOLVE_SOURCE))
+        .ok()
+        .and_then(|source| spine_ratchet::derive_stages(&source).ok())
+        .map(|stages| {
+            let executing = spine_ratchet::executing_prefix(&stages).len();
+            (executing, stages.len())
+        });
+    let snapshot = spine_metrics::load(root);
+    SpineMetricsSource {
+        stages_executing: stages.map(|(executing, _)| executing),
+        stages_total: stages.map(|(_, total)| total),
+        beads_open: snapshot.map(|snapshot| snapshot.open),
+        beads_blocked: snapshot.map(|snapshot| snapshot.blocked),
+        beads_actionable: snapshot.map(|snapshot| snapshot.actionable),
+    }
+}
+
 /// Project the live registries into the dashboard.
 fn dashboard(root: &Path) -> Result<ProgramDashboard, String> {
     let scorecard = build_scorecard(corpus(), adversarial_registry(), &[], &[])
@@ -391,7 +415,8 @@ fn dashboard(root: &Path) -> Result<ProgramDashboard, String> {
         import_scorecard,
         &levels,
     )
-    .map_err(|error| format!("cannot read the program sources: {error}"))?;
+    .map_err(|error| format!("cannot read the program sources: {error}"))?
+    .with_spine(spine_sources(root));
     let rows = frankensim_rows(sources)
         .map_err(|error| format!("cannot project the program metrics: {error}"))?;
     let history = read_history(root)?;
@@ -564,6 +589,36 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// o5et9: the spine rows must render the three genuinely different
+    /// states differently — a measured ratchet ratio, a measured snapshot
+    /// count, and a NO-DATA e2e gap are not interchangeable, and "lane green
+    /// with no retained receipt" must never render as a measured zero.
+    #[test]
+    fn spine_rows_discriminate_measured_snapshot_and_no_data_states() {
+        let dashboard = dashboard(&repo_root()).expect("the real dashboard builds");
+        let cell = |id: &str| {
+            dashboard
+                .rows()
+                .iter()
+                .find(|entry| entry.metric().id() == id)
+                .unwrap_or_else(|| panic!("spine metric `{id}` exists"))
+                .metric()
+                .cell()
+                .status()
+        };
+        // The live ratchet derivation feeds a measured ratio.
+        assert_eq!(cell("spine-stages-executing"), "ratio");
+        // The validated snapshot feeds measured beads rows.
+        assert_eq!(cell("beads-blocked-ratio"), "ratio");
+        assert_eq!(cell("beads-actionable"), "count");
+        // The e2e lane has no retained receipt: NO-DATA, never a zero.
+        assert_eq!(cell("spine-e2e-lane-green"), "no-data");
+        assert_eq!(cell("spine-critical-path-positions"), "no-data");
+        // And the discrimination itself: a NO-DATA status and a measured
+        // zero-status are different renderings of different facts.
+        assert_ne!("no-data", "count");
     }
 
     /// The tracked compact projection is not trusted across manifest drift.

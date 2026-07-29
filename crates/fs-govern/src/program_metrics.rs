@@ -64,7 +64,14 @@ const SOURCE_IDENTITY_DOMAIN: &str = "org.frankensim.fs-govern.program-metrics-s
 /// are legitimate signals but they are diagnostics: they move without the
 /// program getting better at predicting reality, and each already has its own
 /// lane. Listing them in the artifact explains an absence instead of hiding it.
-pub const DEMOTED_DIAGNOSTICS: [(&str, &str); 4] = [
+///
+/// ("open issue counts" was excluded here until bead frankensim-o5et9: the
+/// live beads store churns on every unrelated edit, which would make this
+/// byte-checked artifact stale for every agent. The spine-metrics snapshot
+/// resolved that by feeding deliberately regenerated counts instead of the
+/// live store, so the blocked ratio and actionable count are measured rows
+/// now and the exclusion rationale survives in their honesty statements.)
+pub const DEMOTED_DIAGNOSTICS: [(&str, &str); 3] = [
     (
         "kernel throughput",
         "a performance diagnostic owned by the roofline lane; a faster kernel is not a better \
@@ -77,11 +84,6 @@ pub const DEMOTED_DIAGNOSTICS: [(&str, &str); 4] = [
     (
         "integration-test file count",
         "inventory, not proof; check-docs already pins it and a test file is not an outcome",
-    ),
-    (
-        "open issue counts",
-        "the beads store churns on every unrelated issue edit, which would make this checked \
-         artifact stale for every agent in the repository",
     ),
 ];
 
@@ -1442,6 +1444,26 @@ impl ImportScorecardSource {
     }
 }
 
+/// Spine (product-delivery) metric inputs, validated by the caller.
+///
+/// Every field is optional on purpose: a missing checked input renders
+/// `NO-DATA`, never an invented zero. The dashboard must be able to say
+/// "the spine ratchet is unreadable" and "the beads snapshot is absent" as
+/// facts distinct from any measured value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpineMetricsSource {
+    /// Solve stages executing, from the checked spine ratchet derivation.
+    pub stages_executing: Option<usize>,
+    /// Solve stages declared in total.
+    pub stages_total: Option<usize>,
+    /// Non-closed beads in the deliberately regenerated tracker snapshot.
+    pub beads_open: Option<usize>,
+    /// Snapshot beads with at least one non-closed blocker.
+    pub beads_blocked: Option<usize>,
+    /// Snapshot beads with no non-closed blocker.
+    pub beads_actionable: Option<usize>,
+}
+
 /// Registry values the FrankenSim projection reads.
 ///
 /// Deliberately a typed struct rather than paths: the projection cannot reach
@@ -1486,6 +1508,8 @@ pub struct ProgramSources {
     pub import_refused: usize,
     /// Observations disagreeing with a human-locked expected outcome.
     pub import_annotation_mismatches: usize,
+    /// Product-spine inputs: ratchet stages and the beads tracker snapshot.
+    pub spine: SpineMetricsSource,
 }
 
 impl ProgramSources {
@@ -1582,7 +1606,17 @@ impl ProgramSources {
             import_repaired: import_scorecard.repaired(),
             import_refused: import_scorecard.refused(),
             import_annotation_mismatches: import_scorecard.annotation_mismatches(),
+            spine: SpineMetricsSource::default(),
         })
+    }
+
+    /// Attach validated spine inputs. Kept as a builder so the registry
+    /// projection stays the single place registry shapes become numbers,
+    /// and the spine's checked artifacts arrive already parsed.
+    #[must_use]
+    pub fn with_spine(mut self, spine: SpineMetricsSource) -> Self {
+        self.spine = spine;
+        self
     }
 }
 
@@ -1590,6 +1624,9 @@ const CORPUS_SOURCE: &str = "fs_vvreg::corpus seeded validation registry";
 const SCORECARD_SOURCE: &str = "vv-scorecard.json (fs_vvreg::scorecard)";
 const ADVERSARIAL_SOURCE: &str = "fs_vvreg::adversarial registry";
 const MATURITY_SOURCE: &str = "capability-maturity.json";
+const SPINE_RATCHET_SOURCE: &str =
+    "spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet)";
+const SPINE_METRICS_SOURCE: &str = "spine-metrics.json (xtask spine-metrics beads snapshot)";
 const IMPORT_SOURCE: &str =
     "fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json}";
 
@@ -1943,6 +1980,99 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
             &[MATURITY_SOURCE],
             "L3 requires an admitted end-to-end integration claim; the current value is a real \
              zero, and no crate count or test count can move it",
+        )?,
+        MetricRow::try_new(
+            "spine-stages-executing",
+            "Solve pipeline stages executing in the checked spine ratchet",
+            MetricFamily::Governance,
+            MetricDirection::HigherIsBetter,
+            match (sources.spine.stages_executing, sources.spine.stages_total) {
+                (Some(executing), Some(total)) => ratio_or_no_data(
+                    executing,
+                    total,
+                    "no solve stage is declared",
+                    None,
+                ),
+                _ => no_data(
+                    "the spine ratchet cannot be derived from the live fs-cli source, so the \
+                     executing prefix is unknown rather than zero",
+                    Some("frankensim-o5et9"),
+                ),
+            },
+            &[SPINE_RATCHET_SOURCE],
+            "counts the executing stage PREFIX the product admits and the ratchet pins; it \
+             proves the stages execute, not that their answers are correct",
+        )?,
+        MetricRow::try_new(
+            "spine-e2e-lane-green",
+            "Staged-producer e2e lane stages proven green by a retained checked receipt",
+            MetricFamily::Governance,
+            MetricDirection::HigherIsBetter,
+            no_data(
+                "the staged-producer e2e lane runs green out-of-band (34/34 full profile, \
+                 2026-07-29, RCH) but retains no tracked checked receipt for this dashboard \
+                 to read; 'lane not built', 'lane run with zero passing stages', and 'lane \
+                 green with no retained receipt' are three different facts and only the \
+                 last is true",
+                Some("frankensim-iakds"),
+            ),
+            &[],
+            "an out-of-band green run is not a measurement this artifact can cite: the \
+             dashboard reads checked inputs, so the honest row today is the gap itself",
+        )?,
+        MetricRow::try_new(
+            "beads-blocked-ratio",
+            "Open beads with at least one open blocker, from the tracker snapshot",
+            MetricFamily::Governance,
+            MetricDirection::LowerIsBetter,
+            match (sources.spine.beads_blocked, sources.spine.beads_open) {
+                (Some(blocked), Some(open)) => ratio_or_no_data(
+                    blocked,
+                    open,
+                    "no open bead exists in the snapshot",
+                    None,
+                ),
+                _ => no_data(
+                    "the beads tracker snapshot artifact is absent or unreadable; the \
+                     dashboard does not invent a ratio from a live tracker",
+                    Some("frankensim-o5et9"),
+                ),
+            },
+            &[SPINE_METRICS_SOURCE],
+            "a deliberately regenerated snapshot ratio; the live tracker moves on every br \
+             op and is not a checked input, so this row trails the tracker by design",
+        )?,
+        MetricRow::try_new(
+            "beads-actionable",
+            "Open beads with no open blocker, from the tracker snapshot",
+            MetricFamily::Governance,
+            MetricDirection::Neutral,
+            match sources.spine.beads_actionable {
+                Some(actionable) => MetricCell::Measured(MetricObservation::count(
+                    u64::try_from(actionable).unwrap_or(u64::MAX),
+                )),
+                None => no_data(
+                    "the beads tracker snapshot artifact is absent or unreadable",
+                    Some("frankensim-o5et9"),
+                ),
+            },
+            &[SPINE_METRICS_SOURCE],
+            "directionless on purpose: actionable count falls when work completes AND when \
+             new blocked work is filed, so neither rise nor fall is inherently good",
+        )?,
+        MetricRow::try_new(
+            "spine-critical-path-positions",
+            "Spine beads on the certified tropical critical path, with slack",
+            MetricFamily::Governance,
+            MetricDirection::Neutral,
+            no_data(
+                "the certified tropical critical path over the bead graph has not landed, \
+                 so spine-bead path positions and per-bead slack are not computable",
+                Some("frankensim-kx95s"),
+            ),
+            &[],
+            "when the path lands this row measures WHERE the spine sits on it; until then \
+             any position number would be invented",
         )?,
     ];
     Ok(rows)

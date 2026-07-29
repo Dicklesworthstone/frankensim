@@ -1,11 +1,11 @@
 # FrankenSim program metrics dashboard
 
 schema: 1
-metrics: 22
-measured: 9
-no_data: 13
+metrics: 27
+measured: 12
+no_data: 15
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 5b84556213c3ce7c7504ea333c71ef453a6a9912e16322d1253ee98f91854f40
+source_identity: 969f8ce38bc0f3189d7df7b9abdaac334285ccc910e6d381febbb1f3dc774085
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -43,8 +43,13 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 
 | metric | value | trend | direction | sources |
 | --- | --- | --- | --- | --- |
+| Open beads with no open blocker, from the tracker snapshot | 288 | no prior generation | neutral | spine-metrics.json (xtask spine-metrics beads snapshot) |
+| Open beads with at least one open blocker, from the tracker snapshot | 1456 of 1744 (83.48%) | no prior generation | lower-is-better | spine-metrics.json (xtask spine-metrics beads snapshot) |
 | Registered capabilities at L2 (numerically verified) or above | 11 of 15 (73.33%) | no prior generation | higher-is-better | capability-maturity.json |
 | Registered capabilities at L3 (integrated workflow) or above | 0 of 15 (0.00%) | no prior generation | higher-is-better | capability-maturity.json |
+| Spine beads on the certified tropical critical path, with slack | NO-DATA (needs frankensim-kx95s) | no prior generation | neutral | - |
+| Staged-producer e2e lane stages proven green by a retained checked receipt | NO-DATA (needs frankensim-iakds) | no prior generation | higher-is-better | - |
+| Solve pipeline stages executing in the checked spine ratchet | 3 of 6 (50.00%) | no prior generation | higher-is-better | spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet) |
 
 ## What each metric does not capture
 
@@ -68,8 +73,13 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 - `external-reference-datasets` — external means cross-code, controlled-experimental, blind-predictive, or field monitoring; our own numerical verification is deliberately excluded from the numerator because agreeing with ourselves is not external evidence
 - `externally-anchored-claim-cells` — anchoring counts REFERENCES attached to a cell, not agreement with them; a cell can be anchored and still predict the reference badly
 - `unanchored-claim-cells` — an absolute count, so it grows when the program declares new claim cells; a rising number can mean expanding scope rather than decaying evidence
+- `beads-actionable` — directionless on purpose: actionable count falls when work completes AND when new blocked work is filed, so neither rise nor fall is inherently good
+- `beads-blocked-ratio` — a deliberately regenerated snapshot ratio; the live tracker moves on every br op and is not a checked input, so this row trails the tracker by design
 - `capabilities-at-l2-plus` — registry levels are declarations backed by cited evidence, not independent audits; the registry's own maturity is L1
 - `capabilities-at-l3-plus` — L3 requires an admitted end-to-end integration claim; the current value is a real zero, and no crate count or test count can move it
+- `spine-critical-path-positions` — when the path lands this row measures WHERE the spine sits on it; until then any position number would be invented
+- `spine-e2e-lane-green` — an out-of-band green run is not a measurement this artifact can cite: the dashboard reads checked inputs, so the honest row today is the gap itself
+- `spine-stages-executing` — counts the executing stage PREFIX the product admits and the ratchet pins; it proves the stages execute, not that their answers are correct
 
 ## Why metrics are missing
 
@@ -86,6 +96,8 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 - `surrogate-escalation-correctness` — no decisive-metrics instrumentation exists for learned components (tracked: f85xj.14.2)
 - `time-to-explain` — the ledger exposes no explain-query session instrumentation, so no timing surface exists to read
 - `user-study-measurements` — no user-study measurement exists; the nearest current proxies are quickstart timings and the external-reproduction friction log, neither of which is a user study (tracked: f85xj.7.6)
+- `spine-critical-path-positions` — the certified tropical critical path over the bead graph has not landed, so spine-bead path positions and per-bead slack are not computable (tracked: frankensim-kx95s)
+- `spine-e2e-lane-green` — the staged-producer e2e lane runs green out-of-band (34/34 full profile, 2026-07-29, RCH) but retains no tracked checked receipt for this dashboard to read; 'lane not built', 'lane run with zero passing stages', and 'lane green with no retained receipt' are three different facts and only the last is true (tracked: frankensim-iakds)
 
 ## Deliberately excluded
 
@@ -94,6 +106,5 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - kernel throughput — a performance diagnostic owned by the roofline lane; a faster kernel is not a better prediction
 - crate count — inventory, not capability; the capability maturity registry is the outcome measure
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
-- open issue counts — the beads store churns on every unrelated issue edit, which would make this checked artifact stale for every agent in the repository
 
-identity: 9b6b65486822c4ea7c214305ed9872e58928579adc7731202f7e67f3187b077c
+identity: 3102f25cca9be0ab3d4f2975b3be169c81359c6375f7173677913ad1f72ec84b
