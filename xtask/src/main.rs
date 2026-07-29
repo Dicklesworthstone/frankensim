@@ -8624,6 +8624,7 @@ fn main() -> ExitCode {
                     program_metrics::CHECK,
                     "claim-state",
                     "closure-evidence",
+                    spine_ratchet::CHECK,
                     CITABLE_PRODUCER_CHECK,
                 ],
             )
