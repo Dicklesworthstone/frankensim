@@ -511,3 +511,18 @@ fn g0_import_command_routes_valid_policy_to_bounded_project_io() {
         assert!(output.stderr.contains("cli-input-read"));
     }
 }
+
+#[test]
+fn g0_the_tracked_reference_project_validates_through_the_real_cli_verb() {
+    // Every other project in this battery is built in-process. This one is
+    // read off disk through the actual product verb, which is the only way
+    // to prove the documented user story ("write a .fsim, validate it")
+    // has a starting point that works (bead frankensim-58fbi).
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/reference-project/cooling-reference.fsim");
+    let output = run(args(&["--json", "validate", &path.to_string_lossy()]));
+    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"ok\""));
+    assert!(output.stdout.contains("\"finding_count\":0"));
+    assert_eq!(output.stdout.lines().count(), 1, "one JSON result record");
+}

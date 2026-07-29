@@ -2731,3 +2731,101 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
     );
     assert_eq!(SolveStage::Qoi.gap_dependency(), Some("frankensim-s2l9v"));
 }
+
+/// One-shot generator for the tracked reference project fixture
+/// (bead frankensim-58fbi). Run explicitly:
+///
+/// ```text
+/// cargo test -p fs-cli --test solve -- --ignored dump_reference_project_fixture
+/// ```
+///
+/// It writes the canonical `.fsim` source and the material-card pack that
+/// its binding references, so the two cannot be generated from divergent
+/// inputs. The permanent drift guard is a separate, non-ignored test.
+#[test]
+#[ignore = "generator: writes the tracked reference fixture under data/reference-project"]
+fn dump_reference_project_fixture() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/reference-project")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data/reference-project");
+            std::fs::create_dir_all(&path).expect("fixture directory");
+            path
+        });
+    let source = print_sexpr(&fixture_project(7, &tetra_stl())).expect("fixture renders");
+    std::fs::write(dir.join("cooling-reference.fsim"), &source).expect("project writes");
+    std::fs::write(dir.join("aa6061.fsmcdpk"), fixture_pack_bytes()).expect("pack writes");
+    std::fs::write(dir.join("plate.stl"), tetra_stl()).expect("geometry writes");
+    println!("wrote reference fixture to {}", dir.display());
+}
+
+/// Repo-relative path of the tracked reference project (bead
+/// frankensim-58fbi).
+fn reference_project_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/reference-project")
+}
+
+#[test]
+fn g0_the_tracked_reference_project_is_exactly_what_its_generator_produces() {
+    // The file and the programmatic fixture are two spellings of one
+    // project. If they can drift, the tracked file stops describing what
+    // the solve battery actually exercises, which is the whole reason the
+    // fixture is tracked rather than rebuilt per test.
+    let dir = reference_project_dir();
+    let tracked = std::fs::read_to_string(dir.join("cooling-reference.fsim"))
+        .expect("the tracked reference project exists");
+    let generated = print_sexpr(&fixture_project(7, &tetra_stl())).expect("fixture renders");
+    assert_eq!(
+        tracked, generated,
+        "tracked .fsim drifted from its generator; re-run the ignored \
+         dump_reference_project_fixture test"
+    );
+
+    let tracked_pack =
+        std::fs::read(dir.join("aa6061.fsmcdpk")).expect("the tracked card pack exists");
+    assert_eq!(
+        tracked_pack,
+        fixture_pack_bytes(),
+        "the tracked pack must reconstruct the exact card the project binds"
+    );
+}
+
+#[test]
+fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings() {
+    let source = std::fs::read_to_string(reference_project_dir().join("cooling-reference.fsim"))
+        .expect("the tracked reference project exists");
+
+    // parse_sexpr enforces canonical form (wire.rs:811 require_canonical),
+    // so a successful parse IS the round-trip proof -- a non-canonical
+    // tracked file could not get here.
+    let decoded = fs_project::parse_sexpr(&source).expect("the tracked project parses canonically");
+    assert!(
+        decoded.findings().is_empty(),
+        "the reference project must admit clean: {:?}",
+        decoded.findings()
+    );
+
+    // Negative control 1: canonicality is enforced on THIS file, not just
+    // in principle. One extra space must refuse.
+    let mut slack = source.clone();
+    slack.insert(slack.len() - 1, ' ');
+    assert!(
+        fs_project::parse_sexpr(&slack).is_err(),
+        "a non-canonical spelling of the reference project must refuse"
+    );
+
+    // Negative control 2: validation is live on this fixture, not vacuous.
+    // Dropping the requirements section must produce findings, proving the
+    // zero-findings result above is a real result.
+    let mut stripped = fixture_project(7, &tetra_stl());
+    stripped.requirements = Some(Vec::new());
+    let stripped_source = print_sexpr(&stripped).expect("renders");
+    let stripped_decoded =
+        fs_project::parse_sexpr(&stripped_source).expect("still structurally parseable");
+    assert!(
+        !stripped_decoded.findings().is_empty(),
+        "a project with no thermal requirement must not admit silently"
+    );
+}
