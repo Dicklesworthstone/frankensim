@@ -522,6 +522,12 @@ impl DocFacts {
         }
 
         let mut standalone_crates = Vec::new();
+        // TOOL is a declared layer like any other ("TOOL may depend on
+        // anything but nothing may depend on TOOL"), and fs-evidence-runner
+        // is the first `fs-*` crate to use it. The row inventories
+        // DECLARATIONS, and a tracked `fs-*` crate that declares TOOL is
+        // still a tracked `fs-*` crate, so excluding it would make the
+        // directory count stop meaning what it says.
         let mut layers = BTreeMap::from([
             ("UTIL", 0usize),
             ("L0", 0),
@@ -531,6 +537,7 @@ impl DocFacts {
             ("L4", 0),
             ("L5", 0),
             ("L6", 0),
+            ("TOOL", 0),
         ]);
         for path in &manifest_paths {
             let source = std::fs::read_to_string(path)
@@ -624,8 +631,14 @@ impl DocFacts {
         )
     }
 
+    /// Render order for the layer row.
+    ///
+    /// TOOL is last because it is not a product layer, but it MUST be
+    /// rendered: the row has to sum to the tracked crate-directory count
+    /// above it, and a layer row that quietly sums to one less than the
+    /// total it sits beside is worse than no row at all.
     fn layers_ordered(&self) -> impl Iterator<Item = (&'static str, usize)> + '_ {
-        ["UTIL", "L0", "L1", "L2", "L3", "L4", "L5", "L6"]
+        ["UTIL", "L0", "L1", "L2", "L3", "L4", "L5", "L6", "TOOL"]
             .into_iter()
             .map(|layer| (layer, self.layers.get(layer).copied().unwrap_or(0)))
     }
