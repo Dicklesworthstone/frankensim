@@ -24,7 +24,7 @@ pub enum PathError {
     Empty,
     /// The complete path began with `/`.
     Absolute,
-    /// The first segment began with an ASCII drive designator such as `C:`.
+    /// A segment began with an ASCII drive designator such as `C:`.
     DriveDesignator,
     /// A backslash appeared anywhere in the exact input.
     Backslash {
@@ -73,6 +73,41 @@ pub enum PathError {
 }
 
 /// A validated, exact UTF-8, slash-separated bundle-relative logical path.
+///
+/// ```
+/// use fs_evidence_runner::LogicalBundlePathV1;
+///
+/// let path = LogicalBundlePathV1::new("artifact/result.bin").unwrap();
+/// assert_eq!(path.as_str(), "artifact/result.bin");
+/// assert_eq!(path.segment_count(), 2);
+/// ```
+///
+/// A raw string cannot be passed where validation is required:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::LogicalBundlePathV1;
+///
+/// fn consume_validated(_: LogicalBundlePathV1) {}
+///
+/// consume_validated("../unvalidated".to_owned());
+/// ```
+///
+/// The tuple field is private, so callers cannot mint the nominal wrapper:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::LogicalBundlePathV1;
+///
+/// let _unchecked = LogicalBundlePathV1("../unvalidated".to_owned());
+/// ```
+///
+/// The checked path cannot be mutated after validation:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::LogicalBundlePathV1;
+///
+/// let mut path = LogicalBundlePathV1::new("artifact/result.bin").unwrap();
+/// path.0.push_str("/../escape");
+/// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LogicalBundlePathV1(String);
 
@@ -96,7 +131,8 @@ impl LogicalBundlePathV1 {
     }
 
     /// Iterates segments in their exact order without allocating.
-    pub fn segments(&self) -> impl Iterator<Item = &str> + DoubleEndedIterator {
+    #[must_use]
+    pub fn segments(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.0.split('/')
     }
 
@@ -123,6 +159,33 @@ impl PartialOrd for LogicalBundlePathV1 {
 ///
 /// This is nominally distinct from [`LogicalBundlePathV1`] and additionally
 /// rejects both reserved first-segment prefixes.
+///
+/// ```
+/// use fs_evidence_runner::ContentStoreObjectKeyV1;
+///
+/// let key = ContentStoreObjectKeyV1::new("objects/result").unwrap();
+/// assert_eq!(key.as_str(), "objects/result");
+/// assert_eq!(key.segment_count(), 2);
+/// ```
+///
+/// A validated bundle path is not silently promoted to a ContentStore key:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::{ContentStoreObjectKeyV1, LogicalBundlePathV1};
+///
+/// let path = LogicalBundlePathV1::new("artifact/object").unwrap();
+/// let _key: ContentStoreObjectKeyV1 = path;
+/// ```
+///
+/// A checked object key cannot be widened into a reserved namespace after
+/// construction:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::ContentStoreObjectKeyV1;
+///
+/// let mut key = ContentStoreObjectKeyV1::new("objects/result").unwrap();
+/// key.0.insert_str(0, "__runner_");
+/// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ContentStoreObjectKeyV1(String);
 
@@ -131,9 +194,7 @@ impl ContentStoreObjectKeyV1 {
     /// rules.
     pub fn new(value: &str) -> Result<Self, PathError> {
         validate_logical_path(value)?;
-        let Some(first) = value.split('/').next() else {
-            return Err(PathError::Empty);
-        };
+        let first = value.split('/').next().ok_or(PathError::Empty)?;
         if first.starts_with(CONTENT_STORE_FRANKENSIM_RESERVED_PREFIX) {
             return Err(PathError::ReservedContentStorePrefix {
                 prefix: CONTENT_STORE_FRANKENSIM_RESERVED_PREFIX,
@@ -160,7 +221,8 @@ impl ContentStoreObjectKeyV1 {
     }
 
     /// Iterates segments in their exact order without allocating.
-    pub fn segments(&self) -> impl Iterator<Item = &str> + DoubleEndedIterator {
+    #[must_use]
+    pub fn segments(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.0.split('/')
     }
 
@@ -203,7 +265,10 @@ fn validate_logical_path(value: &str) -> Result<(), PathError> {
         return Err(PathError::Nul { index });
     }
 
-    let segment_count = value.split('/').count();
+    // The count is deliberately capped at one past the admitted maximum. That
+    // keeps work and arithmetic bounded even if the byte ceiling changes in a
+    // later schema generation.
+    let segment_count = value.split('/').take(LOGICAL_PATH_MAX_SEGMENTS + 1).count();
     if segment_count > LOGICAL_PATH_MAX_SEGMENTS {
         return Err(PathError::TooManySegments {
             observed: segment_count,
@@ -256,9 +321,8 @@ fn is_strict_segment_prefix(prefix: &str, descendant: &str) -> bool {
             (Some(left), Some(right)) if left.as_bytes() == right.as_bytes() => {
                 matched += 1;
             }
-            (Some(_), Some(_)) | (Some(_), None) => return false,
+            (Some(_), Some(_) | None) | (None, None) => return false,
             (None, Some(_)) => return matched > 0,
-            (None, None) => return false,
         }
     }
 }
@@ -345,34 +409,33 @@ impl PathSetAdjudicationV1<'_> {
 /// rejects locally decidable ASCII aliases and reports non-ASCII alias
 /// adjudication as unsupported.
 #[must_use]
-pub fn adjudicate_logical_bundle_path_set<'a>(
+pub fn adjudicate_logical_bundle_path_set(
     profile: PlatformPathProfileV2,
-    paths: &'a [LogicalBundlePathV1],
-) -> PathSetAdjudicationV1<'a> {
-    adjudicate_strings(profile, paths.iter().map(LogicalBundlePathV1::as_str))
+    paths: &[LogicalBundlePathV1],
+) -> PathSetAdjudicationV1<'_> {
+    let strings = paths.iter().map(LogicalBundlePathV1::as_str);
+    adjudicate_strings(profile, &strings)
 }
 
 /// Adjudicates ContentStore keys under its exact-byte collision cell.
 #[must_use]
-pub fn adjudicate_content_store_object_key_set<'a>(
-    keys: &'a [ContentStoreObjectKeyV1],
-) -> PathSetAdjudicationV1<'a> {
-    adjudicate_strings(
-        PlatformPathProfileV2::ContentStoreObjectKeyV1,
-        keys.iter().map(ContentStoreObjectKeyV1::as_str),
-    )
+pub fn adjudicate_content_store_object_key_set(
+    keys: &[ContentStoreObjectKeyV1],
+) -> PathSetAdjudicationV1<'_> {
+    let strings = keys.iter().map(ContentStoreObjectKeyV1::as_str);
+    adjudicate_strings(PlatformPathProfileV2::ContentStoreObjectKeyV1, &strings)
 }
 
-fn adjudicate_strings<'a>(
-    profile: PlatformPathProfileV2,
-    paths: impl Clone + Iterator<Item = &'a str>,
-) -> PathSetAdjudicationV1<'a> {
+fn adjudicate_strings<'a, I>(profile: PlatformPathProfileV2, paths: &I) -> PathSetAdjudicationV1<'a>
+where
+    I: Clone + Iterator<Item = &'a str>,
+{
     let mut duplicate: Option<&'a str> = None;
     let mut prefix_pair: Option<(&'a str, &'a str)> = None;
     let mut windows_alias_pair: Option<(&'a str, &'a str)> = None;
     let mut windows_non_ascii: Option<&'a str> = None;
 
-    for (left_index, left) in paths.clone().enumerate() {
+    for (left_index, left) in (*paths).clone().enumerate() {
         if matches!(profile, PlatformPathProfileV2::WindowsHandleRelativeV1)
             && !left.is_ascii()
             && windows_non_ascii
@@ -381,7 +444,7 @@ fn adjudicate_strings<'a>(
             windows_non_ascii = Some(left);
         }
 
-        for right in paths.clone().skip(left_index + 1) {
+        for right in (*paths).clone().skip(left_index + 1) {
             let (first, second) = if compare_segment_sequences(left, right) == Ordering::Greater {
                 (right, left)
             } else {

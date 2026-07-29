@@ -43,6 +43,13 @@ The schema name table is closed and contains no aliases. A later wire-shape
 change must rotate its version and domain; an API-generation change alone does
 not silently move wire bytes.
 
+Non-wire semantic projections also carry an explicit, independently versioned
+domain. Their first frozen form uses `.v1`, but that suffix describes the
+projection schema rather than claiming that the projection itself is a wire
+frame. In particular, the initial extension registry, logical extent,
+constructor-owner handoff, and root-free evaluator-member guard projections
+all use distinct `.v1` domains.
+
 ## Public types and semantics
 
 This crate owns the following base-schema families and their pure validators.
@@ -134,6 +141,14 @@ Command applicability is table-driven:
 - `Run`, `Negative`, and `Replay` require `DurableBundleRequired`.
 
 Omitted, ambiguous, duplicated, or command-inapplicable selectors are `Usage`.
+`CommandSelectorPresenceV2` represents all five caller-selectable dimensions
+with exact `Absent`, `Singular`, `Duplicate`, or `Ambiguous` cardinality.
+`validate_command_selector_presence_v2` checks the frozen order family, mode,
+profile, negative case, then replay source and returns the first exact
+`CommandSelectorUsageV2`: `RunnerUsage`, selector field, command-specific
+`Absent` or `Singular` expectation, observed cardinality, and stable owner. It
+does not parse tokens, infer defaults, or treat a sealed manifest-derived value
+as a caller selector.
 
 ### Lifecycle record vocabulary and state-bearing roles
 
@@ -410,6 +425,86 @@ Registered family domains, root policies, diagnostics, roles, units, schemas,
 and executable descriptors are bounded sealed data. They are not callbacks or
 runtime schema implementations.
 
+### Fixed artifact codecs and logical extents
+
+`ArtifactCodecIdV2` is a closed declaration-only catalog:
+
+| Code | Variant |
+| ---: | --- |
+| 0 | `Identity` |
+| 1 | `ZstdFrameV1` |
+
+The fixed codec rows consume no family registry slot and expose no encoder,
+decoder, frame parser, checksum verifier, migration, or artifact-inventory
+behavior. Unknown codec codes refuse.
+
+`LogicalExtentV2` has private fields and the exact semantic order:
+
+1. `axis`, including its tag and optional registered ID;
+2. `value: u128`;
+3. `unit`, including its tag and optional registered ID.
+
+Its first non-wire semantic domain is
+`org.frankensim.fs-evidence-runner.logical-extent-projection.v1`.
+`LogicalExtentFieldV1` freezes the same three-row order. The semantic root
+binds every field and distinguishes zero, one, and `u128::MAX`. A bare
+syntactic registered axis or unit cannot enter the registry-free constructor.
+
+The exact base axis/unit cells are:
+
+| Axis | Admitted unit |
+| --- | --- |
+| `Payload` | `LogicalBytes` |
+| `Records` | `Records` |
+| `Rows` | `Rows` |
+| `Elements` | `Elements` |
+| `Samples` | `Samples` |
+| `Iterations` | `Iterations` |
+| `Operations` | `Operations` |
+| `Cycles` | `Cycles` |
+| `Duration` | `Nanoseconds` |
+| `Duration` | `Seconds` |
+
+`Nanoseconds` is the canonical Duration unit. One second scales to exactly
+`1_000_000_000/1` nanoseconds. Cross-axis units refuse.
+
+### Base extension registry and exact conversions
+
+`BaseExtensionRegistryProjectionV2` contains exactly three independent typed
+categories:
+
+1. registered artifact-role descriptors;
+2. registered logical-unit descriptors;
+3. registered logical-extent-axis descriptors.
+
+Its first non-wire domain is
+`org.frankensim.fs-evidence-runner.base-extension-registry-projection.v1`.
+Every projection binds the exact `RunnerLimitsV2` semantic root. IDs are
+nonzero and namespace-local, so the same numeric ID may appear once in each
+different category. Duplicate IDs within one category refuse. Names are
+globally namespaced and unique across all three categories. Every descriptor
+binds its name, owner, no-claim scope, and category-specific fields.
+
+Registered axes have a nonempty canonical allowed-unit set. The canonical unit
+occurs exactly once with scale `1/1`; every scale is positive, reduced, and
+exact. Registered unit references must resolve in the same exact registry.
+The axis constructor enforces an absolute 4,096-row pre-allocation ceiling,
+while the enclosing projection additionally enforces its admitted generic
+array ceiling. Registry categories independently admit zero, one, and their
+exact 64-row base ceilings and refuse 65. Exact reconstruction reports
+category-specific missing, extra, or mutated data and is permutation-invariant
+within each category.
+
+Registry-aware extent construction proves only membership in the supplied
+projection. Conversion uses exact rational arithmetic and succeeds only when
+the final extent value is an integral `u128`. Unavailable units, cross-axis
+substitution, fractional results, and arithmetic overflow refuse.
+`normalized_unit_scale_ratio_v2` and `convert_rational_quantity_v2` separately
+convert dimension-compatible `UnitV2` values through exact normalized rational
+scales; dimension mismatch, noncanonical input, and checked-product overflow
+refuse. None of these declarations proves execution, measurement, physical
+units, scientific validity, or authority.
+
 ### Wire widths
 
 Unless a field explicitly says otherwise:
@@ -430,6 +525,91 @@ width-changing or sign-changing reinterpretation is not compatible wire V1.
 `RunnerLimitsV2` is the sole owner of the base ceilings below. Families may
 tighten a base ceiling down to its documented structural minimum, but never
 widen it.
+
+The canonical schema contains exactly 71 fields in this order. `S/F` denotes
+the sole Smoke/Full profile difference; every other value is profile-equal.
+`RunnerLimitDescriptorV2` additionally freezes each row's semantic unit,
+tightenability, and structural-minimum rule.
+
+| Code | Field | Width | Base value |
+| ---: | --- | --- | ---: |
+| 1 | `argv_tokens` | `u32` | 64 |
+| 2 | `argv_token_bytes` | `u64` | 8 KiB |
+| 3 | `argv_aggregate_bytes` | `u64` | 64 KiB |
+| 4 | `lifecycle_record_encoded_bytes` | `u64` | 16 KiB |
+| 5 | `case_lifecycle_records` | `u32` | 256 |
+| 6 | `case_lifecycle_encoded_bytes` | `u64` | 256 KiB |
+| 7 | `family_rows_per_case` | `u32` | 254 |
+| 8 | `invocation_cases` | `u32` | 256 |
+| 9 | `lifecycle_document_records` | `u32` | 4096 |
+| 10 | `lifecycle_document_encoded_bytes` | `u64` | 4 MiB |
+| 11 | `command_result_stdout_bytes` | `u64` | 5 MiB |
+| 12 | `child_stdout_bytes` | `u64` | 4 MiB |
+| 13 | `combined_child_stdout_bytes` | `u64` | 16/128 MiB S/F |
+| 14 | `child_stderr_bytes` | `u64` | 64 KiB |
+| 15 | `combined_child_stderr_bytes` | `u64` | 256 KiB |
+| 16 | `manifest_encoded_bytes` | `u64` | 1 MiB |
+| 17 | `nesting_depth` | `u32` | 32 |
+| 18 | `comparison_nodes` | `u32` | 256 |
+| 19 | `effect_nodes` | `u32` | 256 |
+| 20 | `text_bytes` | `u64` | 8 KiB |
+| 21 | `stable_token_bytes` | `u64` | 128 |
+| 22 | `bundle_relative_path_bytes` | `u64` | 240 |
+| 23 | `diagnostics_per_case` | `u32` | 32 |
+| 24 | `diagnostics_per_run` | `u32` | 256 |
+| 25 | `prerequisites_per_diagnostic` | `u32` | 16 |
+| 26 | `repairs_per_diagnostic` | `u32` | 16 |
+| 27 | `artifacts` | `u32` | 256 |
+| 28 | `artifact_encoded_bytes` | `u64` | 64 MiB |
+| 29 | `artifact_expanded_bytes` | `u64` | 64 MiB |
+| 30 | `artifact_stored_bytes` | `u64` | 64 MiB + 4 KiB |
+| 31 | `bundle_encoded_bytes` | `u64` | 64/512 MiB S/F |
+| 32 | `bundle_expanded_bytes` | `u64` | 64/512 MiB S/F |
+| 33 | `artifact_stored_aggregate_bytes` | `u64` | 65/513 MiB S/F |
+| 34 | `system_publication_stored_bytes` | `u64` | 8 MiB |
+| 35 | `publication_stored_bytes` | `u64` | 73/521 MiB S/F |
+| 36 | `child_stream_discard_bytes` | `u64` | 1 MiB |
+| 37 | `modes_per_family` | `u32` | 64 |
+| 38 | `extension_diagnostics_per_family` | `u32` | 256 |
+| 39 | `artifact_roles_per_family` | `u32` | 64 |
+| 40 | `root_policies_per_family` | `u32` | 64 |
+| 41 | `registered_units_per_family` | `u32` | 64 |
+| 42 | `digest_domains_per_family` | `u32` | 64 |
+| 43 | `extension_schemas_per_family` | `u32` | 64 |
+| 44 | `executable_descriptors_per_family` | `u32` | 64 |
+| 45 | `map_entries` | `u32` | 256 |
+| 46 | `generic_array_items` | `u32` | 4096 |
+| 47 | `path_segments` | `u32` | 32 |
+| 48 | `integer_digits` | `u32` | 39 |
+| 49 | `rational_component_bytes` | `u64` | 16 |
+| 50 | `decimal_coefficient_bytes` | `u64` | 16 |
+| 51 | `decimal_absolute_scale` | `u32` | 6144 |
+| 52 | `logical_extents_per_artifact` | `u32` | 16 |
+| 53 | `observation_keys_per_case` | `u32` | 256 |
+| 54 | `decision_detail_namespaces` | `u32` | 64 |
+| 55 | `output_classes` | `u32` | 64 |
+| 56 | `opaque_value_bytes` | `u64` | 8192 |
+| 57 | `retained_unknown_extension_bytes` | `u64` | 65,536 |
+| 58 | `expression_edges` | `u32` | 512 |
+| 59 | `memoized_evaluation_visits` | `u32` | 4096 |
+| 60 | `repair_action_encoded_bytes` | `u64` | 1024 |
+| 61 | `actionable_diagnostic_encoded_bytes` | `u64` | 8192 |
+| 62 | `failure_stderr_encoded_bytes` | `u64` | 16,384 |
+| 63 | `runner_catalog_encoded_bytes` | `u64` | 1 MiB |
+| 64 | `published_bundle_receipt_encoded_bytes` | `u64` | 1 MiB |
+| 65 | `content_store_envelope_non_payload_bytes` | `u64` | 4096 |
+| 66 | `registered_extent_axes_per_family` | `u32` | 64 |
+| 67 | `registered_observation_keys_per_family` | `u32` | 4096 |
+| 68 | `registered_authority_scopes_per_family` | `u32` | 64 |
+| 69 | `registered_external_root_classes_per_family` | `u32` | 64 |
+| 70 | `registered_evaluation_units_per_family` | `u32` | 64 |
+| 71 | `registered_resource_identities_per_family` | `u32` | 256 |
+
+Codes 66 through 71 are independent profile-equal categories, may each be
+tightened to zero, and cannot borrow unused capacity from another category.
+Code 53 remains the per-case observation-key cap; code 67 bounds a family's
+registered observation-key union. Code 55 remains output classes. Fixed codec
+rows consume no registry slot.
 
 ### Invocation, lifecycle, and child output
 
@@ -533,6 +713,18 @@ ceilings are not blindly multiplied. Zero is legal only for genuinely optional
 extension, artifact, unknown-data, or family-row capacity. A jointly
 infeasible limit vector refuses before proportional allocation.
 
+`RunnerLimitsV2::admit_family` remains the compatibility fail-first boundary.
+`validate_family_complete` and `admit_family_complete` additionally expose one
+fixed-size report with at most one refusal per limit field. Its public iterator
+is always in ascending field order, while
+`compatibility_first_violation` identifies the exact refusal the fail-first
+boundary would return. Same-field precedence is individual fixed/base/minimum,
+then declared-minimum order/width/value in presented order, then frozen joint
+nested/artifact/case feasibility order, then executable-family shape order.
+The report checks every independently rejected field across those phases,
+retains no caller-sized diagnostic collection, and never allocates in
+proportion to the declared-minimum or per-case-row slices.
+
 Every cap carries its exact encoded, stored, expanded, logical, node, item, or
 byte unit. No downstream parser may invent or silently derive another bound.
 
@@ -565,6 +757,14 @@ nonzero. Total children may be zero only for
 `LifecycleOnlyNoBundle`; parallel children never exceed total children.
 The checked sum of stop-observation, drain, and finalize allowances never
 exceeds wall time.
+
+Relational overflow diagnostics retain the exact mathematical sum as `U128`
+rather than substituting `u64::MAX` or dropping an operand. Timeout-sum
+refusals target the stop-observation, drain, or finalize inputs; a
+whole-publication sum overflow targets either the artifact-stored or
+system-publication-stored summand. An equation mismatch may instead target the
+presented `publication_stored_bytes` total. Every repair target is bounded
+non-executable data.
 
 Every output grant is at or below `RunnerLimitsV2`. Logical work is an exact
 `u128` paired with one `LogicalUnitV2`.
@@ -894,38 +1094,120 @@ identity must unify with the pinned constellation.
 The crate imports, reexports, and constructs no promotion,
 verification-admission, scientific-authority, or rjoq type.
 
-Source-closure evidence exact-set binds every file and generated input owned or
-consumed by a leaf: implementation modules, this contract and rustdoc,
-schema/domain/descriptor and constructor tables, independent oracles, unit and
-property fixtures, mutation fixtures, in-process E2E projection rows, log
-schemas, direct dependency/source/feature identities, and build configuration.
-Missing, extra, stale, reordered, ambient, unpinned, duplicate-owner, or
-mixed-snapshot inputs move the closure or refuse. A retained binary or root
+The pure compiled source closure exact-set binds every file and generated input
+owned or consumed by this leaf: implementation modules, this contract and
+rustdoc, schema/domain/descriptor and constructor tables, independent oracles,
+unit and property fixtures, mutation fixtures, in-process E2E projection rows,
+log schemas, the current direct-dependency declaration, and build
+configuration. Every entry carries one exact workspace-relative path, typed
+owner, typed source route, declarative expected-source identity, common
+snapshot policy and identity, encoded length, and content root. Missing, extra,
+stale, reordered, ambient, duplicate-owner, wrong-route, wrong-identity,
+wrong-length, or mixed-snapshot presented inputs move the closure or refuse.
+The in-process closure corpus is exactly one positive reconstruction plus
+fourteen deliberate refusal cases. Every refusal compares the complete
+presented `ConstructionErrorV2` kind, field, expected text, and observed text;
+an arbitrary error is never counted as a match.
+The declarative identity and compile-time content root are not live revision or
+supply-chain proof. Ambient live-tree discovery, lock/constellation pin
+verification, generated-input discovery, and retained live evidence belong
+solely to `frankensim-epic-foundations-huq.24.1.3.1`. A retained binary or root
 cannot substitute for absent source.
 
 ## Retention and logging
 
 The production base library prints nothing and performs no ambient logging.
-Its deterministic test harness and retained conformance evidence record:
+Its deterministic test harness returns canonical conformance log data that
+records:
 
 - API, wire, source, build, toolchain, target, and feature roots;
 - exact catalog and cap counts;
 - state/reason/role/diagnostic matrix cells;
 - typed expected and observed values;
 - causal roots and manifest ordinals;
-- owner, prerequisites, no-claim scope, and repairs;
-- minimized relative case names and relative artifact paths;
-- separately typed encoded, stored, expanded, logical, cycle, duration, and
-  performance quantities where those are semantic inputs.
+- diagnostic owner, prerequisite and repair counts, and no-claim scope; exact
+  ordered diagnostic/repair values remain in the corresponding typed row or
+  detail manifest instead of being flattened into open log fields;
+- immutable manifest roots separately from caller-context execution roots;
+- expected and observed detail-manifest roots, exact detail-cell counts, and a
+  bounded typed first divergence;
+- artifact-stored, system-publication-stored, and whole-publication-stored
+  values as three distinct fields with exact stored-byte units and checked-sum
+  reconciliation;
+- minimized relative journey/case names and the exact typed downstream-script
+  mapping;
+- the closed logical-unit token and the exact count/stored-byte quantities
+  admitted by the field catalog. Richer encoded, expanded, logical-work,
+  cycle, duration, or performance inputs remain in their typed row/detail
+  manifests rather than appearing as undeclared log fields.
+
+Every logged source, build, toolchain, no-claim, cancelled, timed-out, and
+controlled-internal-error digest validates both its closed role and its exact
+registered nominal domain. Sharing `RunTerminal` or another broad digest role
+does not permit cross-field substitution.
 
 Logs do not retain absolute paths, PIDs, wall-clock timestamps, scheduler
 latency, environment secrets, credentials, physical capability locators, raw
 bulk payloads, or undeclared timing. Raw rejected payloads are represented by
-bounded typed metadata or retained relative artifact references.
+bounded typed metadata or downstream retained relative artifact references.
+The pure logging envelope admits at most 64 closed fields per event, 4,096
+events per log, 1 MiB of canonical bytes per event, and 64 MiB for the complete
+canonical log. These are inclusive size guards, not permission to violate the
+closed event matrix or exact three-argument reproduction tuple. The largest
+legal publication terminal has exactly 63 fields and a valid 4,096-event state
+machine is admitted; 65 fields, 4,097 events, any structurally invalid value
+below a guard, and every checked arithmetic overflow refuse before
+canonicalization, reconciliation, or any further retained allocation.
+This pure in-process leaf does not fabricate a retained-artifact claim by
+pointing at one of its source files. Its report carries an explicit typed
+absent-retained-artifact claim, and every log event emitted by
+`run_base_e2e_projection_v1` has no retained-artifact path. The public event
+constructor can separately represent a validated relative retained-artifact
+path for downstream producers; that capability does not turn a source or
+script mapping into retained evidence.
 
-Coverage manifests expose nonzero eligible, passed, failed, and unsupported
-counts as applicable and keep focused Phase-1 proof distinct from repository
-policy, DSR, release-built E2E, and downstream authority proof.
+Coverage and execution reports use one exact, non-contradictory vocabulary:
+eligible positive cells, matched positive cells, expected-refusal or mutation
+cells, matched expected refusals, explicitly unsupported cells with typed
+reasons, and unexpected mismatches. Green requires the two matched counts to
+equal their eligible counts, exactly one result for every selected ID, and zero
+unexpected mismatches. A nonzero expected-refusal corpus is required evidence;
+it is not a request for a green run to contain a failure. Focused Phase-1 proof
+stays distinct from repository policy, DSR, release-built E2E, and downstream
+authority proof.
+
+A structurally complete red log is still a valid, inspectable log document:
+its summaries must exactly reconcile every failed partition. A row-red log has
+at least one failed case terminal, and each such terminal carries the bounded
+first-divergence identity/root. That root names either the exact typed
+expected/observed detail divergence or, when the row contract itself fails
+before a detail comparison exists, the exact typed row-contract divergence. A
+source-closure-only red log may have no failed case terminal; its final
+projection summary instead reports a nonzero exact source-closure failure
+partition. `is_green` is the explicit conjunction of row and source-closure
+success. Red evidence is never discarded merely because it does not satisfy
+that predicate; malformed, incomplete, duplicated, or arithmetically
+inconsistent logs still refuse construction. Logging validates the divergence
+root's closed shape and placement; the projection producer must additionally
+prove that its emitted value equals the exact retained divergence descriptor
+root.
+
+`coverage::BaseCoverageManifestV1` is the sole source-authoritative,
+result-free AC38 coverage inventory. The older projection-local coverage
+inventory (`projection::BaseCoverageInventoryV1` and its local class/case
+types) is compatibility-only auxiliary data and cannot replace, widen, or
+prove the AC38 manifest. Likewise, compatibility accessors named only
+`eligible`, `passed`, `failed`, or `root` cannot replace the exact partition
+accessors or the explicitly named `manifest_root` and `execution_root`.
+Each coverage `source_path` is a result-free mapping to the workspace-relative
+source owner or designated external harness. A downstream harness path may be
+declared before that downstream-owned script exists; the path is neither
+retained evidence nor a claim that the harness ran. The in-process coverage
+selection is derived only from the manifest's exact `ProjectionE2e`,
+`RuntimeLogging`, and `SourceClosure` declarations. Runtime observation keys
+are exact-set compared with that independent selection, so a missing, extra,
+or non-local observation refuses instead of silently narrowing or widening
+the checked scope.
 
 ## Conformance tests
 
@@ -946,8 +1228,17 @@ The base slice requires all of the following independent evidence classes:
    code tests;
 7. no-mock integration tests using real public constructors and validators;
 8. deterministic structured-logging tests;
-9. exact source-closure and coverage-manifest tests;
+9. exact source-closure and coverage-manifest tests, with unit, boundary,
+   property/metamorphic, schema/descriptor, mutation, compile-fail/doctest,
+   no-mock integration, projection, logging, and source-closure classes
+   reported separately;
 10. in-process, source-closed Runner V2 base E2E projection tests.
+
+Command-applicability evidence enumerates all `4^5` selector-cardinality
+vectors for each of the six commands, accepts exactly one vector per command,
+and compares the complete Usage refusal. Profile-bound evidence separately
+checks both `Smoke` and `Full` exact ceilings and one-over refusals; passing one
+profile cannot stand in for the other.
 
 Compile-fail cases have a corresponding safe positive constructor or
 read-only-accessor example. The no-mock fixture emits no lifecycle, bundle,
@@ -969,19 +1260,136 @@ It contains exact journey-keyed projections for:
 - `scripts/ci/canonical_evidence_runner_v2.sh`
 - `scripts/ci/verify_runner_rjoq_handoff_v1.sh`
 
+The five row lists are handwritten and journey-specific. Every row binds its
+journey, downstream owner and script, consumption rationale, bounded fixture or
+closed subcase-manifest reference, exact expected decision and detail,
+semantic-cell partition, unit, no-claim scope, compiled source-closure root,
+and closed log-schema root. The immutable context-free journey-manifest root is
+distinct from the caller-context-bound journey-execution root.
+
+Each row exposes an exact ordered, bounded, public detail-cell manifest.
+Callers can inspect every stable cell ID, semantic ordinal, expected decision,
+and closed typed expected/refusal/unsupported payload without reverse
+engineering an opaque hash. Detail manifests reject missing, extra, duplicate,
+reordered, stale, or substituted cells. A containing row may bind the existing
+bounded `RegisteredDecisionDetailProjectionV2`; that reference includes its
+registered namespace, local code, content root, encoded length, registry root,
+and projection root, but neither extends `ActionableDiagnosticV2` nor mints
+comparison, verification, scientific, or admission authority.
+
+The public handoff includes the typed row, detail-cell, detail-manifest,
+presented-result, checked-result, comparison-report, execution-report,
+aggregate-report, harness-context, and explicit retained-artifact-absence
+vocabularies. Expected and observed detail-manifest roots remain distinct, as
+do immutable `manifest_root`, comparison-only `comparison_root`, private
+row-witness roots, and caller-context-bound `execution_root`; a generic `root`
+compatibility accessor does not erase those distinctions.
+External observers construct cells through the bounded checked
+`BaseE2eDetailCellV1::new` path and close complete ordered slices through
+`BaseE2eDecisionDetailManifestV1::from_cells`. The row-based
+`BaseE2ePresentedRowResultV1::new_with_observed_detail_cells` constructor
+recomputes and checks kind, ordinal range, order, unique IDs and roots, manifest
+count and root, matched-cell count, and the exact first divergent stable ID.
+That public constructor is comparison-only. Exact caller-presented cells and
+aggregate counts, including a positive-only row with an empty detail manifest,
+may produce a green equality result only inside
+`BaseE2eJourneyComparisonReportV1`. The report has its own comparison domain
+and `comparison_root`; it has no execution witness, no `execution_root` API,
+and no conversion into `BaseE2eJourneyExecutionReportV1`. The deprecated
+`join_base_e2e_journey_results_v1` name is only a source-migration alias for
+the comparison API; its retained harness argument cannot change that type or
+mint execution evidence.
+When the typed cells are exact but another semantic row partition is red, the
+only admitted failure ID is the closed `row.contract` sentinel, and the
+row-contract divergence root binds that exact value. The constructor retains
+only the first typed observed divergence after validation. The older
+descriptor-only constructors are deprecated compatibility paths because an
+opaque root/count cannot establish typed cell membership or order. Their
+root-bound observation mode remains explicitly unverified: they may be
+compared and inspected as mismatches, but they can never satisfy a green
+typed-detail comparison or expose cached cells as caller-observed cells.
+
+Only `run_base_e2e_journey_v1` and the five-journey aggregate can construct
+`BaseE2eJourneyExecutionReportV1`. Their private executed-row finalizer consumes
+`BaseE2eCaseExecutionV1` directly, reconstructs and reconciles every decision,
+semantic partition, detail manifest, matched-detail count, and first
+divergence from the retained in-process cells, and never binds caller-shaped
+`BaseE2ePresentedRowResultV1` data. It then mints one private witness per row
+under the distinct source-closed in-process execution class and domain. The
+witness binds the journey manifest root and code, one-based ordered row
+ordinal, row ID and kind, semantic manifest root, journey mapping root,
+harness-context root, all actual observed partitions, detail
+root/count/matched values, first divergence, and the witness-absent comparison
+row root. The checked execution-row root retains the exact witness root, and
+the journey-execution root retains every ordered row-result and witness root.
+Journey finalization rejects missing, extra, duplicate, reordered,
+reconstructed-mismatch, or substituted witnesses. Comparison rows retain
+explicit witness absence and cannot enter this finalizer.
+`Accept`, `Refuse`, and `Unsupported` cells have disjoint payload rules;
+limit/budget repair ranks are bounded to 1 through 16 and their owner/target
+labels must be canonical `StableTokenV2` values.
+The log validator rejects duplicate journey manifest roots, duplicate journey
+execution roots, any manifest/execution cross-substitution, and either
+aggregate root reusing a journey execution root. The projection layer additionally
+proves exact equality between every logged scoped execution root and its
+journey report, and between the logged aggregate execution root and the
+aggregate report.
+
 The rows cover every base literal, limit, budget, unit, capability-policy,
 one-field identity mutation, exact diagnostic, and no-claim boundary consumed
 by each journey. This leaf runs every eligible projection row **in process**
-through real public constructors and validators with no mocks. It emits
-deterministic detailed logs and reports eligible, passed, failed, unsupported,
-projection-E2E, and logging counts.
+through real constructors and validators with no mocks. Observations
+are not cached across rows or journeys: each reported row count therefore
+binds a distinct execution, while repeated semantic cases in different
+journeys are deliberately rerun. Refusal and
+unsupported observations compare exact typed error kind or code, field, owner,
+expected and observed values, unit, repair data, and unsupported reason.
+Aggregated matrices bind every ordered stable subcase ID and detail into a
+closed manifest with an exact count. Caller-presented row results are
+exact-compared by journey, row ID, semantic root, detail root, and order but
+never enter execution aggregation. In-process executions instead pass through
+the private witness finalizer before aggregation.
+Catalog-size log fields are frozen expected-inventory metadata, not claims
+about how far one observed execution progressed. `checked_cells` is the exact
+nonzero observed execution prefix: it equals the inventory only for a complete
+matrix run and remains shorter when a red run stops early. Failures while
+constructing command applicability/setup, the base budget, or the capability
+registry are explicitly assigned semantic ordinal 1. Matrix and aggregation
+helpers reject zero progress instead of padding it to one, so no unobserved
+cell can be fabricated merely to make a red result structurally nonzero.
+Expected catalog, limit, budget, diagnostic, and command rows come from
+handwritten source-closed oracle tables independent of the production lookup
+tables under test, and every oracle-table root is bound into its semantic
+manifest. Literal-table encoders accept their explicit handwritten row slices,
+bind independently matched nominal identities without calling production
+catalog accessors, and are mutation-tested through both the table root and the
+containing semantic row root. Mixed positive/refusal matrices retain typed
+per-subcase progress, so an early refusal-cell failure cannot be mislabeled as
+a positive-cell failure. The aggregate accepts only the execution-report type,
+retains the five ordered scoped execution roots, and binds them into one
+caller-context aggregate execution root; a comparison report is structurally
+ineligible. It does not discard execution roots after computing counts or
+substitute the context-free projection manifest root.
+Deterministic detailed logs reconcile the positive, expected-refusal,
+unsupported, and unexpected-mismatch partitions plus separately nonzero
+projection-E2E and logging counts. Publication-storage log events expose the
+three independently projected accounting cells—artifact-stored,
+system-publication-stored, and whole-publication-stored—without claiming that
+any bytes were physically retained; the closed log schema requires exact
+stored-byte typing and checked `artifact + system = publication`
+reconciliation.
 
 This leaf does not create, edit, invoke, or claim release-built execution of
 those scripts. Each sole downstream script owner must exact-set consume its
-corresponding immutable projection root, reject missing, extra, duplicate,
-stale, or unmapped rows, and execute every eligible row. Final program closure
-requires all five release-built projections; their execution is not a
-prerequisite for closing this pure base-schema leaf.
+corresponding immutable journey-manifest root, separately record and verify its
+caller-context journey-execution root, reject missing, extra, duplicate,
+reordered, stale, unmapped, cross-journey, context-substituted, or
+manifest/execution-root-substituted inputs, and execute every eligible row.
+Final program closure requires all five release-built projections; their
+execution is not a prerequisite for closing this pure base-schema leaf.
+None of these public descriptors, roots, reports, or in-process results claims
+live source provenance, retained runtime evidence, downstream script
+execution, durable publication, scientific verification, or admission.
 
 ## Downstream ownership exclusions
 
@@ -1011,8 +1419,10 @@ The following responsibilities are explicitly outside this base slice:
 - TOOL dependency policy, specialized contract checks, source/claim scans,
   documentation facts, count gates, generated retained inventories, and CI/DSR
   wiring: `frankensim-epic-foundations-huq.24.1.3.1`.
-- Root-free ownership registries, generated grammar, coverage joins, and exact
-  registry inventory: `frankensim-epic-foundations-huq.24.1.3.2`.
+- Root-free ownership registries, generated grammar, cross-leaf and external
+  coverage joins, and exact registry inventory:
+  `frankensim-epic-foundations-huq.24.1.3.2`. This leaf retains ownership of
+  its own in-process manifest/subcase/result/log joins.
 
 The sole downstream owners of the five release-built scripts are respectively
 `frankensim-epic-foundations-huq.24.2.2.2`,
@@ -1031,11 +1441,13 @@ consistent with the closed pure-validation matrices.
 
 It does **not** claim:
 
-- that a source, build, toolchain, case, artifact, object, log, manifest,
-  publication, receipt, policy, or resource exists;
+- that any nominal source, build, toolchain, case, artifact, object,
+  externally retained log or manifest, publication, receipt, acquired policy,
+  or resource exists outside the bounded in-memory data constructed here;
 - that presented bytes have the asserted meaning or match retained content;
-- that a case ran, a lifecycle completed, cancellation drained, or a process
-  terminated;
+- that any downstream or release-built case ran; the pure in-process
+  projection-row validation performed here does not imply that a lifecycle
+  completed, cancellation drained, or a process terminated;
 - that a path or logical key maps to a safe physical destination;
 - that a capability was acquired, remained fresh, was unrevoked, or enforced
   a policy;
@@ -1048,8 +1460,9 @@ It does **not** claim:
 - that any performance, resource-use, platform, or timing target was met;
 - that repository-wide policy, DSR, or release-built E2E proof passed.
 
-Presented roots, logical publication choices, policy roots, diagnostics,
-coverage manifests, and in-process E2E projection results remain
-non-authoritative data. Scientific, durability, verification, admission,
-promotion, release, and rjoq authority can arise only from their separately
-owned, explicitly capability-bearing protocols and retained evidence.
+Presented roots, compiled source identities, logical publication choices,
+policy roots, diagnostics, coverage manifests, and in-process E2E projection
+results remain non-authoritative data. Scientific, live-source, durability,
+verification, admission, promotion, release, and rjoq authority can arise only
+from their separately owned, explicitly capability-bearing protocols and
+retained evidence.

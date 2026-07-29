@@ -4,8 +4,11 @@
 //! parsing, registration lookup, lifecycle work, or authority-bearing
 //! admission. Unknown tags are refused rather than preserved or guessed.
 
+use crate::canonical::CanonicalFrameV1;
+use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
 use core::fmt;
 use core::num::NonZeroU16;
+use fs_blake3::ContentHash;
 
 /// The public Runner product generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -485,6 +488,396 @@ closed_u16_catalog! {
     }
 }
 
+/// Maximum number of registered family decision-detail namespaces.
+///
+/// The single fixed base namespace is additional and does not consume a
+/// family registration slot.
+pub const DECISION_DETAIL_NAMESPACE_MAX_V2: usize = 64;
+
+/// Canonical identity domain for the sealed decision-detail namespace registry.
+pub const DECISION_DETAIL_NAMESPACE_REGISTRY_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.decision-detail-namespace-registry.v1";
+
+/// Non-wire classification of a sealed decision-detail namespace.
+///
+/// This classification cannot add a terminal state, refusal reason,
+/// precedence rule, or authority-bearing decision. It identifies only whether
+/// a namespace is the base diagnostic vocabulary or a bounded family detail
+/// refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DecisionDetailNamespaceClassV1 {
+    /// The unnamespaced closed base diagnostic vocabulary.
+    Base,
+    /// A separately registered, non-authoritative family-detail namespace.
+    RegisteredFamily,
+}
+
+impl DecisionDetailNamespaceClassV1 {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Base => 0,
+            Self::RegisteredFamily => 1,
+        }
+    }
+}
+
+/// Sealed `u16` identity of one decision-detail namespace.
+///
+/// Construction is private to the crate-owned registry. Code zero is reserved
+/// for the closed base vocabulary; registered family namespaces are nonzero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DecisionDetailNamespaceV2(u16);
+
+impl DecisionDetailNamespaceV2 {
+    const BASE: Self = Self(0);
+
+    pub(crate) const fn registered(code: u16) -> Self {
+        Self(code)
+    }
+
+    /// Exact unsigned 16-bit namespace code.
+    #[must_use]
+    pub const fn code(self) -> u16 {
+        self.0
+    }
+
+    /// Whether this is the reserved base diagnostic vocabulary.
+    #[must_use]
+    pub const fn is_base(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// One frozen row in the sealed decision-detail namespace registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DecisionDetailNamespaceDescriptorV1 {
+    namespace: DecisionDetailNamespaceV2,
+    stable_name: &'static str,
+    owner: &'static str,
+    class: DecisionDetailNamespaceClassV1,
+}
+
+impl DecisionDetailNamespaceDescriptorV1 {
+    const fn new(
+        namespace: DecisionDetailNamespaceV2,
+        stable_name: &'static str,
+        owner: &'static str,
+        class: DecisionDetailNamespaceClassV1,
+    ) -> Self {
+        Self {
+            namespace,
+            stable_name,
+            owner,
+            class,
+        }
+    }
+
+    /// Sealed namespace identity.
+    #[must_use]
+    pub const fn namespace(self) -> DecisionDetailNamespaceV2 {
+        self.namespace
+    }
+
+    /// Stable lowercase registry name.
+    #[must_use]
+    pub const fn stable_name(self) -> &'static str {
+        self.stable_name
+    }
+
+    /// Sole schema owner that may define detail semantics in this namespace.
+    #[must_use]
+    pub const fn owner(self) -> &'static str {
+        self.owner
+    }
+
+    /// Base or registered-family classification.
+    #[must_use]
+    pub const fn class(self) -> DecisionDetailNamespaceClassV1 {
+        self.class
+    }
+}
+
+/// Reserved base-vocabulary namespace descriptor.
+pub const BASE_DECISION_DETAIL_NAMESPACE_V2: DecisionDetailNamespaceDescriptorV1 =
+    DecisionDetailNamespaceDescriptorV1::new(
+        DecisionDetailNamespaceV2::BASE,
+        "base-diagnostic",
+        "frankensim-epic-foundations-huq.24.1.1.1",
+        DecisionDetailNamespaceClassV1::Base,
+    );
+
+/// Reserved namespace for later comparison/effect conformance detail.
+///
+/// This row reserves an identity and an owner only. The downstream owner
+/// defines `MismatchDetailV2`, first-divergent-lane semantics, lane
+/// precedence, and comparison/effect contents.
+pub const CASE_CONFORMANCE_DETAIL_NAMESPACE_V2: DecisionDetailNamespaceDescriptorV1 =
+    DecisionDetailNamespaceDescriptorV1::new(
+        DecisionDetailNamespaceV2::registered(7),
+        "case-conformance-detail",
+        "frankensim-epic-foundations-huq.24.1.1.3.1",
+        DecisionDetailNamespaceClassV1::RegisteredFamily,
+    );
+
+/// Exact base plus currently reserved family namespace inventory.
+pub const FROZEN_DECISION_DETAIL_NAMESPACES_V2: [DecisionDetailNamespaceDescriptorV1; 2] = [
+    BASE_DECISION_DETAIL_NAMESPACE_V2,
+    CASE_CONFORMANCE_DETAIL_NAMESPACE_V2,
+];
+
+/// Source-defined, bounded, non-executable decision-detail registry.
+///
+/// The registry contains descriptor data only. It has no callback, parser,
+/// terminal-state table, refusal-reason table, precedence field, capability,
+/// or authority constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionDetailNamespaceRegistryV2 {
+    entries: Box<[DecisionDetailNamespaceDescriptorV1]>,
+    root: ContentHash,
+}
+
+impl DecisionDetailNamespaceRegistryV2 {
+    /// Reconstruct the one exact frozen registry from caller-presented rows.
+    ///
+    /// Input order is canonical and significant. Missing, extra, reordered,
+    /// colliding, owner-mutated, name-mutated, or class-mutated rows refuse.
+    pub fn reconstruct_frozen(
+        entries: &[DecisionDetailNamespaceDescriptorV1],
+    ) -> Result<Self, ConstructionErrorV2> {
+        let registry = Self::reconstruct_candidate(entries)?;
+        if registry.entries.as_ref() != FROZEN_DECISION_DETAIL_NAMESPACES_V2 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "decision_detail_namespace_registry.entries",
+                "the exact frozen base and registered-family inventory",
+                entries.len(),
+            ));
+        }
+        Ok(registry)
+    }
+
+    /// Construct the exact frozen registry.
+    ///
+    /// The static descriptor table is validated instead of trusted so drift
+    /// in its count, ordering, class, names, or owners fails tests and
+    /// downstream reconstruction.
+    #[must_use]
+    pub fn frozen() -> Self {
+        Self::reconstruct_frozen(&FROZEN_DECISION_DETAIL_NAMESPACES_V2)
+            .expect("the crate-owned namespace registry is internally valid")
+    }
+
+    /// Frozen descriptors in canonical namespace order.
+    #[must_use]
+    pub fn entries(&self) -> &[DecisionDetailNamespaceDescriptorV1] {
+        &self.entries
+    }
+
+    /// Domain-separated canonical registry root.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+
+    /// Look up one namespace, including the reserved base namespace.
+    ///
+    /// # Errors
+    ///
+    /// Unknown namespace codes are refused rather than retained or guessed.
+    pub fn lookup(
+        &self,
+        code: u16,
+    ) -> Result<DecisionDetailNamespaceDescriptorV1, ConstructionErrorV2> {
+        self.entries
+            .iter()
+            .copied()
+            .find(|entry| entry.namespace.code() == code)
+            .ok_or_else(|| {
+                ConstructionErrorV2::new(
+                    ConstructionErrorKindV2::UnknownCode,
+                    "decision_detail_namespace_registry.namespace",
+                    "one exact sealed namespace code",
+                    code,
+                )
+            })
+    }
+
+    /// Look up one nonzero registered family namespace.
+    ///
+    /// # Errors
+    ///
+    /// Unknown codes and the reserved base namespace are refused.
+    pub fn lookup_registered_family(
+        &self,
+        code: u16,
+    ) -> Result<DecisionDetailNamespaceDescriptorV1, ConstructionErrorV2> {
+        let descriptor = self.lookup(code)?;
+        if descriptor.class != DecisionDetailNamespaceClassV1::RegisteredFamily {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "decision_detail_namespace_registry.namespace",
+                "a registered family decision-detail namespace",
+                code,
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn reconstruct_candidate(
+        entries: &[DecisionDetailNamespaceDescriptorV1],
+    ) -> Result<Self, ConstructionErrorV2> {
+        let family_count = entries
+            .iter()
+            .filter(|entry| entry.class == DecisionDetailNamespaceClassV1::RegisteredFamily)
+            .count();
+        if family_count > DECISION_DETAIL_NAMESPACE_MAX_V2 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::TooLarge,
+                "decision_detail_namespace_registry.entries",
+                "the fixed base namespace plus at most sixty-four registered family namespaces",
+                family_count,
+            ));
+        }
+        if entries.is_empty() {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Missing,
+                "decision_detail_namespace_registry.entries",
+                "the reserved base namespace and registered family rows",
+                0,
+            ));
+        }
+
+        let mut previous_code = None;
+        let mut names = std::collections::BTreeSet::new();
+        let mut base_count = 0_usize;
+        for entry in entries {
+            let code = entry.namespace.code();
+            if previous_code.is_some_and(|previous| code <= previous) {
+                let kind = if previous_code == Some(code) {
+                    ConstructionErrorKindV2::Duplicate
+                } else {
+                    ConstructionErrorKindV2::OutOfOrder
+                };
+                return Err(ConstructionErrorV2::new(
+                    kind,
+                    "decision_detail_namespace_registry.namespace",
+                    "strictly increasing unique u16 namespace codes",
+                    code,
+                ));
+            }
+            previous_code = Some(code);
+            if !names.insert(entry.stable_name) {
+                return Err(ConstructionErrorV2::new(
+                    ConstructionErrorKindV2::Duplicate,
+                    "decision_detail_namespace_registry.stable_name",
+                    "unique stable namespace names",
+                    entry.stable_name,
+                ));
+            }
+            validate_registry_token(
+                "decision_detail_namespace_registry.stable_name",
+                entry.stable_name,
+            )?;
+            validate_registry_token("decision_detail_namespace_registry.owner", entry.owner)?;
+            match (code, entry.class) {
+                (0, DecisionDetailNamespaceClassV1::Base) => base_count += 1,
+                (0, DecisionDetailNamespaceClassV1::RegisteredFamily)
+                | (_, DecisionDetailNamespaceClassV1::Base) => {
+                    return Err(ConstructionErrorV2::new(
+                        ConstructionErrorKindV2::Incompatible,
+                        "decision_detail_namespace_registry.class",
+                        "code zero is Base and every nonzero code is RegisteredFamily",
+                        code,
+                    ));
+                }
+                (_, DecisionDetailNamespaceClassV1::RegisteredFamily) => {}
+            }
+        }
+        if base_count != 1 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Missing,
+                "decision_detail_namespace_registry.base",
+                "exactly one Base descriptor at namespace zero",
+                base_count,
+            ));
+        }
+
+        let root = decision_detail_namespace_registry_root(entries)?;
+        Ok(Self {
+            entries: entries.to_vec().into_boxed_slice(),
+            root,
+        })
+    }
+}
+
+fn validate_registry_token(field: &'static str, value: &str) -> Result<(), ConstructionErrorV2> {
+    if value.is_empty() || value.len() > 128 {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::OutOfRange,
+            field,
+            "one through 128 lowercase token bytes",
+            value.len(),
+        ));
+    }
+    let mut previous_separator = true;
+    for byte in value.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_separator = false;
+        } else if matches!(byte, b'.' | b'_' | b'-') && !previous_separator {
+            previous_separator = true;
+        } else {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                field,
+                "lowercase alphanumeric segments separated by dot, underscore, or hyphen",
+                value,
+            ));
+        }
+    }
+    if previous_separator {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Incompatible,
+            field,
+            "a token ending in an alphanumeric byte",
+            value,
+        ));
+    }
+    Ok(())
+}
+
+fn decision_detail_namespace_registry_root(
+    entries: &[DecisionDetailNamespaceDescriptorV1],
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSDDNRG\x01", 16 * 1024)?;
+    frame.push_u32(
+        "decision_detail_namespace_registry.count",
+        u32::try_from(entries.len()).map_err(|_| {
+            ConstructionErrorV2::new(
+                ConstructionErrorKindV2::TooLarge,
+                "decision_detail_namespace_registry.count",
+                "a count representable as u32",
+                entries.len(),
+            )
+        })?,
+    )?;
+    for entry in entries {
+        frame.push_u16(
+            "decision_detail_namespace_registry.namespace",
+            entry.namespace.code(),
+        )?;
+        frame.push_u8(
+            "decision_detail_namespace_registry.class",
+            entry.class.code(),
+        )?;
+        frame.push_str(
+            "decision_detail_namespace_registry.stable_name",
+            entry.stable_name,
+        )?;
+        frame.push_str("decision_detail_namespace_registry.owner", entry.owner)?;
+    }
+    Ok(frame.root(DECISION_DETAIL_NAMESPACE_REGISTRY_DOMAIN_V1))
+}
+
 /// One outer-tag descriptor for a registered-payload catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaggedCatalogDescriptorV2 {
@@ -835,6 +1228,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the generic oracle receives each independent operation needed to audit a closed tagged catalog without coupling production traits"
+    )]
     fn assert_tagged_catalog<T>(
         catalog: &'static str,
         actual: &[TaggedCatalogDescriptorV2],
@@ -1667,5 +2064,171 @@ mod tests {
             "registered-axis",
             11,
         );
+    }
+
+    #[test]
+    fn decision_detail_registry_reconstructs_the_exact_base_and_family_inventory() {
+        let registry = DecisionDetailNamespaceRegistryV2::frozen();
+        assert_eq!(
+            registry.entries(),
+            &[
+                BASE_DECISION_DETAIL_NAMESPACE_V2,
+                CASE_CONFORMANCE_DETAIL_NAMESPACE_V2
+            ]
+        );
+        let base = registry.lookup(0).expect("reserved base namespace");
+        assert!(base.namespace().is_base());
+        assert_eq!(base.class(), DecisionDetailNamespaceClassV1::Base);
+        assert_eq!(base.stable_name(), "base-diagnostic");
+        assert_eq!(base.owner(), "frankensim-epic-foundations-huq.24.1.1.1");
+
+        let family = registry
+            .lookup_registered_family(7)
+            .expect("reserved downstream family namespace");
+        assert_eq!(family.namespace().code(), 7);
+        assert_eq!(
+            family.class(),
+            DecisionDetailNamespaceClassV1::RegisteredFamily
+        );
+        assert_eq!(family.stable_name(), "case-conformance-detail");
+        assert_eq!(family.owner(), "frankensim-epic-foundations-huq.24.1.1.3.1");
+        assert_eq!(
+            DecisionDetailNamespaceRegistryV2::reconstruct_frozen(registry.entries())
+                .expect("exact reconstruction")
+                .root(),
+            registry.root()
+        );
+    }
+
+    #[test]
+    fn decision_detail_registry_refuses_unknown_collision_reorder_and_count_cap() {
+        let registry = DecisionDetailNamespaceRegistryV2::frozen();
+        assert_eq!(
+            registry.lookup(8).expect_err("unknown namespace").kind(),
+            ConstructionErrorKindV2::UnknownCode
+        );
+        assert_eq!(
+            registry
+                .lookup_registered_family(0)
+                .expect_err("base is not a family")
+                .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let duplicate_code = [
+            BASE_DECISION_DETAIL_NAMESPACE_V2,
+            DecisionDetailNamespaceDescriptorV1::new(
+                DecisionDetailNamespaceV2::BASE,
+                "other-base",
+                "other-owner",
+                DecisionDetailNamespaceClassV1::Base,
+            ),
+        ];
+        assert_eq!(
+            DecisionDetailNamespaceRegistryV2::reconstruct_candidate(&duplicate_code)
+                .expect_err("duplicate namespace")
+                .kind(),
+            ConstructionErrorKindV2::Duplicate
+        );
+
+        let duplicate_name = [
+            BASE_DECISION_DETAIL_NAMESPACE_V2,
+            DecisionDetailNamespaceDescriptorV1::new(
+                DecisionDetailNamespaceV2::registered(1),
+                "base-diagnostic",
+                "other-owner",
+                DecisionDetailNamespaceClassV1::RegisteredFamily,
+            ),
+        ];
+        assert_eq!(
+            DecisionDetailNamespaceRegistryV2::reconstruct_candidate(&duplicate_name)
+                .expect_err("duplicate name")
+                .kind(),
+            ConstructionErrorKindV2::Duplicate
+        );
+
+        let reordered = [
+            CASE_CONFORMANCE_DETAIL_NAMESPACE_V2,
+            BASE_DECISION_DETAIL_NAMESPACE_V2,
+        ];
+        assert_eq!(
+            DecisionDetailNamespaceRegistryV2::reconstruct_frozen(&reordered)
+                .expect_err("reordered registry")
+                .kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
+
+        let mut exact_cap = Vec::with_capacity(DECISION_DETAIL_NAMESPACE_MAX_V2 + 1);
+        exact_cap.push(BASE_DECISION_DETAIL_NAMESPACE_V2);
+        for code in 1..=DECISION_DETAIL_NAMESPACE_MAX_V2 {
+            exact_cap.push(DecisionDetailNamespaceDescriptorV1::new(
+                DecisionDetailNamespaceV2::registered(
+                    u16::try_from(code).expect("bounded test namespace"),
+                ),
+                Box::leak(format!("family-detail-{code}").into_boxed_str()),
+                "other-owner",
+                DecisionDetailNamespaceClassV1::RegisteredFamily,
+            ));
+        }
+        DecisionDetailNamespaceRegistryV2::reconstruct_candidate(&exact_cap)
+            .expect("the fixed base row plus exactly 64 family rows");
+        let mut over_cap = exact_cap;
+        over_cap.push(DecisionDetailNamespaceDescriptorV1::new(
+            DecisionDetailNamespaceV2::registered(65),
+            "family-detail-65",
+            "other-owner",
+            DecisionDetailNamespaceClassV1::RegisteredFamily,
+        ));
+        assert_eq!(
+            DecisionDetailNamespaceRegistryV2::reconstruct_candidate(&over_cap)
+                .expect_err("one-over namespace count")
+                .kind(),
+            ConstructionErrorKindV2::TooLarge
+        );
+    }
+
+    #[test]
+    fn every_decision_detail_registry_field_moves_identity_and_exactness_refuses() {
+        let base = DecisionDetailNamespaceRegistryV2::frozen();
+        let original = CASE_CONFORMANCE_DETAIL_NAMESPACE_V2;
+        let mutations = [
+            DecisionDetailNamespaceDescriptorV1::new(
+                DecisionDetailNamespaceV2::registered(8),
+                original.stable_name(),
+                original.owner(),
+                original.class(),
+            ),
+            DecisionDetailNamespaceDescriptorV1::new(
+                original.namespace(),
+                "case-conformance-detail-mutated",
+                original.owner(),
+                original.class(),
+            ),
+            DecisionDetailNamespaceDescriptorV1::new(
+                original.namespace(),
+                original.stable_name(),
+                "frankensim-epic-foundations-huq.24.1.1.3.2",
+                original.class(),
+            ),
+            DecisionDetailNamespaceDescriptorV1::new(
+                original.namespace(),
+                original.stable_name(),
+                original.owner(),
+                DecisionDetailNamespaceClassV1::Base,
+            ),
+        ];
+
+        for mutation in mutations {
+            let candidate = [BASE_DECISION_DETAIL_NAMESPACE_V2, mutation];
+            assert_ne!(
+                decision_detail_namespace_registry_root(&candidate)
+                    .expect("bounded mutation identity"),
+                base.root()
+            );
+            assert!(
+                DecisionDetailNamespaceRegistryV2::reconstruct_frozen(&candidate).is_err(),
+                "every namespace, name, owner, or class mutation must refuse exact reconstruction"
+            );
+        }
     }
 }

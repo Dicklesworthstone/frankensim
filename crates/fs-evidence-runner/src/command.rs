@@ -1,11 +1,285 @@
 //! Frozen command-selection provenance and applicability table.
 
 use crate::budget::AdmittedRunnerBudgetsV2;
-use crate::catalog::{ArtifactDispositionV2, RunProfileV2, RunnerCommandV2};
+use crate::catalog::{
+    ArtifactDispositionV2, DiagnosticCodeV2, ProofExitV2, RunProfileV2, RunnerCommandV2,
+};
 use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
 use crate::identity::{CaseManifestRootV2, SourceIdentityRootV2};
 use crate::publication::PublicationSelectionV2;
 use crate::value::StableTokenV2;
+
+/// Cardinality of one caller-presented command selector.
+///
+/// This is a non-wire, pure-validation vocabulary. `Duplicate` means the same
+/// selector value was repeated; `Ambiguous` means multiple distinct values
+/// were presented for a singular selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommandSelectorCardinalityV2 {
+    /// No value was presented.
+    Absent,
+    /// Exactly one value was presented.
+    Singular,
+    /// One value was presented more than once.
+    Duplicate,
+    /// Multiple distinct values were presented.
+    Ambiguous,
+}
+
+impl CommandSelectorCardinalityV2 {
+    /// Exact closed cardinality vocabulary.
+    pub const ALL: [Self; 4] = [
+        Self::Absent,
+        Self::Singular,
+        Self::Duplicate,
+        Self::Ambiguous,
+    ];
+}
+
+/// One caller-selectable command dimension in deterministic validation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommandSelectorFieldV2 {
+    /// Registered family selector.
+    Family,
+    /// Registered family-mode selector.
+    Mode,
+    /// Smoke-or-Full profile selector.
+    Profile,
+    /// Immutable negative-case selector.
+    NegativeCase,
+    /// Immutable replay-source selector.
+    ReplaySource,
+}
+
+impl CommandSelectorFieldV2 {
+    /// Frozen first-error validation order.
+    pub const ALL: [Self; 5] = [
+        Self::Family,
+        Self::Mode,
+        Self::Profile,
+        Self::NegativeCase,
+        Self::ReplaySource,
+    ];
+
+    /// Stable field name used by diagnostics and logs.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Family => "command.selector.family",
+            Self::Mode => "command.selector.mode",
+            Self::Profile => "command.selector.profile",
+            Self::NegativeCase => "command.selector.negative_case",
+            Self::ReplaySource => "command.selector.replay_source",
+        }
+    }
+}
+
+/// Exact applicability requirement for one caller selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommandSelectorExpectationV2 {
+    /// The command forbids the caller selector.
+    Absent,
+    /// The command requires exactly one caller selector value.
+    Singular,
+}
+
+/// Exact Usage-class boundary crossed by caller selector validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommandSelectorUsageKindV2 {
+    /// A required singular selector was omitted.
+    Missing,
+    /// One selector value was repeated.
+    Duplicate,
+    /// Multiple distinct values competed for a singular selector.
+    Ambiguous,
+    /// A selector was presented to a command that does not accept it.
+    Inapplicable,
+}
+
+/// Caller selector cardinalities before sealed-manifest or source projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommandSelectorPresenceV2 {
+    family: CommandSelectorCardinalityV2,
+    mode: CommandSelectorCardinalityV2,
+    profile: CommandSelectorCardinalityV2,
+    negative_case: CommandSelectorCardinalityV2,
+    replay_source: CommandSelectorCardinalityV2,
+}
+
+impl CommandSelectorPresenceV2 {
+    /// Construct one complete caller-selector cardinality vector.
+    #[must_use]
+    pub const fn new(
+        family: CommandSelectorCardinalityV2,
+        mode: CommandSelectorCardinalityV2,
+        profile: CommandSelectorCardinalityV2,
+        negative_case: CommandSelectorCardinalityV2,
+        replay_source: CommandSelectorCardinalityV2,
+    ) -> Self {
+        Self {
+            family,
+            mode,
+            profile,
+            negative_case,
+            replay_source,
+        }
+    }
+
+    /// Exact valid caller-selector vector for a command.
+    ///
+    /// `Check` and `SelfTest` obtain their internal family/mode/profile from
+    /// sealed manifests, while `Negative` and `Replay` obtain those values
+    /// from their selected immutable case/source. Those derived values are not
+    /// caller selectors and therefore remain absent here.
+    #[must_use]
+    pub const fn exact_for(command: RunnerCommandV2) -> Self {
+        match command {
+            RunnerCommandV2::List | RunnerCommandV2::Check | RunnerCommandV2::SelfTest => {
+                Self::new(
+                    CommandSelectorCardinalityV2::Absent,
+                    CommandSelectorCardinalityV2::Absent,
+                    CommandSelectorCardinalityV2::Absent,
+                    CommandSelectorCardinalityV2::Absent,
+                    CommandSelectorCardinalityV2::Absent,
+                )
+            }
+            RunnerCommandV2::Run => Self::new(
+                CommandSelectorCardinalityV2::Singular,
+                CommandSelectorCardinalityV2::Singular,
+                CommandSelectorCardinalityV2::Singular,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+            ),
+            RunnerCommandV2::Negative => Self::new(
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Singular,
+                CommandSelectorCardinalityV2::Absent,
+            ),
+            RunnerCommandV2::Replay => Self::new(
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Absent,
+                CommandSelectorCardinalityV2::Singular,
+            ),
+        }
+    }
+
+    /// Cardinality of one named selector.
+    #[must_use]
+    pub const fn cardinality(&self, field: CommandSelectorFieldV2) -> CommandSelectorCardinalityV2 {
+        match field {
+            CommandSelectorFieldV2::Family => self.family,
+            CommandSelectorFieldV2::Mode => self.mode,
+            CommandSelectorFieldV2::Profile => self.profile,
+            CommandSelectorFieldV2::NegativeCase => self.negative_case,
+            CommandSelectorFieldV2::ReplaySource => self.replay_source,
+        }
+    }
+}
+
+/// Deterministic Usage-class refusal for a caller-selector vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommandSelectorUsageV2 {
+    kind: CommandSelectorUsageKindV2,
+    field: CommandSelectorFieldV2,
+    expected: CommandSelectorExpectationV2,
+    observed: CommandSelectorCardinalityV2,
+}
+
+impl CommandSelectorUsageV2 {
+    /// Exact Usage boundary.
+    #[must_use]
+    pub const fn proof_exit(&self) -> ProofExitV2 {
+        ProofExitV2::Usage
+    }
+
+    /// Exact base diagnostic required for this Usage boundary.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> DiagnosticCodeV2 {
+        DiagnosticCodeV2::RunnerUsage
+    }
+
+    /// Stable refusal class.
+    #[must_use]
+    pub const fn kind(&self) -> CommandSelectorUsageKindV2 {
+        self.kind
+    }
+
+    /// First invalid selector in the frozen validation order.
+    #[must_use]
+    pub const fn field(&self) -> CommandSelectorFieldV2 {
+        self.field
+    }
+
+    /// Exact command-specific applicability requirement.
+    #[must_use]
+    pub const fn expected(&self) -> CommandSelectorExpectationV2 {
+        self.expected
+    }
+
+    /// Exact presented cardinality.
+    #[must_use]
+    pub const fn observed(&self) -> CommandSelectorCardinalityV2 {
+        self.observed
+    }
+
+    /// Stable diagnostic owner.
+    #[must_use]
+    pub const fn owner(&self) -> &'static str {
+        "fs-evidence-runner.command-selectors"
+    }
+}
+
+/// Validate the complete caller-selector applicability vector for one command.
+///
+/// This function performs no token parsing, manifest lookup, defaulting, or
+/// I/O. A successful `Negative` or `Replay` presence check still requires the
+/// later sealed projection represented by [`CommandSelectionV2`].
+pub fn validate_command_selector_presence_v2(
+    command: RunnerCommandV2,
+    presented: CommandSelectorPresenceV2,
+) -> Result<(), CommandSelectorUsageV2> {
+    let exact = CommandSelectorPresenceV2::exact_for(command);
+    for field in CommandSelectorFieldV2::ALL {
+        let expected = match exact.cardinality(field) {
+            CommandSelectorCardinalityV2::Absent => CommandSelectorExpectationV2::Absent,
+            CommandSelectorCardinalityV2::Singular => CommandSelectorExpectationV2::Singular,
+            CommandSelectorCardinalityV2::Duplicate | CommandSelectorCardinalityV2::Ambiguous => {
+                unreachable!("the frozen command table contains only absent or singular cells")
+            }
+        };
+        let observed = presented.cardinality(field);
+        let valid = matches!(
+            (expected, observed),
+            (
+                CommandSelectorExpectationV2::Absent,
+                CommandSelectorCardinalityV2::Absent
+            ) | (
+                CommandSelectorExpectationV2::Singular,
+                CommandSelectorCardinalityV2::Singular
+            )
+        );
+        if valid {
+            continue;
+        }
+        let kind = match observed {
+            CommandSelectorCardinalityV2::Absent => CommandSelectorUsageKindV2::Missing,
+            CommandSelectorCardinalityV2::Singular => CommandSelectorUsageKindV2::Inapplicable,
+            CommandSelectorCardinalityV2::Duplicate => CommandSelectorUsageKindV2::Duplicate,
+            CommandSelectorCardinalityV2::Ambiguous => CommandSelectorUsageKindV2::Ambiguous,
+        };
+        return Err(CommandSelectorUsageV2 {
+            kind,
+            field,
+            expected,
+            observed,
+        });
+    }
+    Ok(())
+}
 
 /// Exact source of family, mode, and profile for one command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +413,20 @@ impl CommandSelectionV2 {
 /// Validated command intent after sealed-manifest projection and budget
 /// admission. It is not a parser result, lifecycle record, or execution grant.
 ///
+/// The safe `List` constructor produces typed absence for every
+/// command-inapplicable field:
+///
+/// ```
+/// use fs_evidence_runner::{CommandIntentV2, RunnerCommandV2};
+///
+/// let intent = CommandIntentV2::list();
+/// assert_eq!(intent.command(), RunnerCommandV2::List);
+/// assert!(intent.selection().is_none());
+/// assert!(intent.budgets().is_none());
+/// assert!(intent.disposition().is_none());
+/// assert!(intent.publication_selection().is_none());
+/// ```
+///
 /// Validated fields cannot be mutated after construction:
 ///
 /// ```compile_fail
@@ -147,6 +435,16 @@ impl CommandSelectionV2 {
 /// fn forge_command(intent: &mut CommandIntentV2) {
 ///     intent.command = fs_evidence_runner::RunnerCommandV2::Replay;
 /// }
+/// ```
+///
+/// A validated command intent cannot be converted into an authority scope:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::CommandIntentV2;
+/// use fs_evidence_runner::identity::AuthorityScopeRootV2;
+///
+/// let intent = CommandIntentV2::list();
+/// let _authority: AuthorityScopeRootV2 = intent.into();
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandIntentV2 {
@@ -317,7 +615,12 @@ fn provenance_name(provenance: &CommandSelectionProvenanceV2) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandIntentV2, CommandSelectionProvenanceV2, CommandSelectionV2};
+    use super::{
+        CommandIntentV2, CommandSelectionProvenanceV2, CommandSelectionV2,
+        CommandSelectorCardinalityV2, CommandSelectorExpectationV2, CommandSelectorFieldV2,
+        CommandSelectorPresenceV2, CommandSelectorUsageKindV2,
+        validate_command_selector_presence_v2,
+    };
     use crate::budget::{AdmittedRunnerBudgetsV2, RunnerBudgetsCandidateV2, RunnerBudgetsV2};
     use crate::catalog::{
         ArtifactDispositionV2, DestinationAdmissionModeV2, DigestRoleV2, LogicalUnitV2,
@@ -446,7 +749,102 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test intentionally preserves the complete command-by-selector-by-publication acceptance table as one literal oracle"
+    )]
     fn exact_command_table_accepts_all_and_only_frozen_cells() {
+        let selector_commands = [
+            RunnerCommandV2::List,
+            RunnerCommandV2::Check,
+            RunnerCommandV2::SelfTest,
+            RunnerCommandV2::Run,
+            RunnerCommandV2::Negative,
+            RunnerCommandV2::Replay,
+        ];
+        for command in selector_commands {
+            let required = match command {
+                RunnerCommandV2::List | RunnerCommandV2::Check | RunnerCommandV2::SelfTest => {
+                    [false, false, false, false, false]
+                }
+                RunnerCommandV2::Run => [true, true, true, false, false],
+                RunnerCommandV2::Negative => [false, false, false, true, false],
+                RunnerCommandV2::Replay => [false, false, false, false, true],
+            };
+            let mut accepted = 0_u32;
+            for ordinal in 0..4_usize.pow(5) {
+                let mut remainder = ordinal;
+                let mut cells = [CommandSelectorCardinalityV2::Absent; 5];
+                for cell in &mut cells {
+                    *cell = CommandSelectorCardinalityV2::ALL[remainder % 4];
+                    remainder /= 4;
+                }
+                let presented = CommandSelectorPresenceV2::new(
+                    cells[0], cells[1], cells[2], cells[3], cells[4],
+                );
+                let expected_error = CommandSelectorFieldV2::ALL
+                    .into_iter()
+                    .zip(required)
+                    .zip(cells)
+                    .find_map(|((field, required), observed)| {
+                        let expected = if required {
+                            CommandSelectorExpectationV2::Singular
+                        } else {
+                            CommandSelectorExpectationV2::Absent
+                        };
+                        let exact = if required {
+                            CommandSelectorCardinalityV2::Singular
+                        } else {
+                            CommandSelectorCardinalityV2::Absent
+                        };
+                        (observed != exact).then(|| {
+                            let kind = match observed {
+                                CommandSelectorCardinalityV2::Absent => {
+                                    CommandSelectorUsageKindV2::Missing
+                                }
+                                CommandSelectorCardinalityV2::Singular => {
+                                    CommandSelectorUsageKindV2::Inapplicable
+                                }
+                                CommandSelectorCardinalityV2::Duplicate => {
+                                    CommandSelectorUsageKindV2::Duplicate
+                                }
+                                CommandSelectorCardinalityV2::Ambiguous => {
+                                    CommandSelectorUsageKindV2::Ambiguous
+                                }
+                            };
+                            (kind, field, expected, observed)
+                        })
+                    });
+                match (
+                    validate_command_selector_presence_v2(command, presented),
+                    expected_error,
+                ) {
+                    (Ok(()), None) => accepted += 1,
+                    (Err(error), Some((kind, field, expected, observed))) => {
+                        assert_eq!(error.proof_exit(), crate::catalog::ProofExitV2::Usage);
+                        assert_eq!(
+                            error.diagnostic_code(),
+                            crate::catalog::DiagnosticCodeV2::RunnerUsage
+                        );
+                        assert_eq!(error.kind(), kind);
+                        assert_eq!(error.field(), field);
+                        assert_eq!(error.field().name(), field.name());
+                        assert_eq!(error.expected(), expected);
+                        assert_eq!(error.observed(), observed);
+                        assert_eq!(error.owner(), "fs-evidence-runner.command-selectors");
+                    }
+                    (actual, expected) => panic!(
+                        "selector Cartesian mismatch for {command:?}, ordinal {ordinal}: \
+                         actual={actual:?}, expected={expected:?}"
+                    ),
+                }
+            }
+            assert_eq!(
+                accepted, 1,
+                "exactly one of all 4^5 selector-cardinality cells is valid for {command:?}"
+            );
+        }
+
         let commands = [
             RunnerCommandV2::Check,
             RunnerCommandV2::SelfTest,

@@ -1,7 +1,10 @@
 //! Structured, bounded, non-executable Runner diagnostics and repairs.
 
 use crate::canonical::CanonicalFrameV1;
-use crate::catalog::{DiagnosticCodeV2, RepairActionKindV2, RetryabilityV2};
+use crate::catalog::{
+    DecisionDetailNamespaceRegistryV2, DecisionDetailNamespaceV2, DiagnosticCodeV2,
+    RepairActionKindV2, RetryabilityV2,
+};
 use crate::construction::{ConstructionErrorKindV2, ConstructionErrorV2};
 use crate::identity::{ArtifactContentRootV2, DigestValueV2, NoClaimScopeRootV1};
 use crate::value::{NumericValueV2, QuantityV2, StableTokenV2, TypedValueV2};
@@ -24,6 +27,11 @@ pub const DIAGNOSTIC_REPAIRS_MAX_V2: usize = 16;
 /// Canonical actionable-diagnostic identity domain.
 pub const ACTIONABLE_DIAGNOSTIC_DOMAIN_V1: &str =
     "org.frankensim.fs-evidence-runner.actionable-diagnostic.v1";
+/// Maximum encoded bytes represented by one registered decision detail.
+pub const REGISTERED_DECISION_DETAIL_MAX_BYTES_V2: u32 = 65_536;
+/// Canonical domain for a non-authoritative registered-detail projection.
+pub const REGISTERED_DECISION_DETAIL_PROJECTION_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.registered-decision-detail-projection.v1";
 
 /// Exact base or separately registered diagnostic reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,8 +49,28 @@ pub enum DiagnosticCodeRefV2 {
 
 impl DiagnosticCodeRefV2 {
     /// Construct a family diagnostic reference without colliding with base
-    /// namespace semantics.
+    /// namespace semantics or an unknown family namespace.
     pub fn registered(namespace: u16, code: u16) -> Result<Self, ConstructionErrorV2> {
+        Self::registered_in(
+            &DecisionDetailNamespaceRegistryV2::frozen(),
+            namespace,
+            code,
+        )
+    }
+
+    /// Construct a family diagnostic reference against one exact sealed
+    /// namespace registry.
+    ///
+    /// # Errors
+    ///
+    /// Zero or unknown namespaces and zero family-local codes refuse. The
+    /// reserved base namespace cannot be used as a registered-family
+    /// namespace.
+    pub fn registered_in(
+        registry: &DecisionDetailNamespaceRegistryV2,
+        namespace: u16,
+        code: u16,
+    ) -> Result<Self, ConstructionErrorV2> {
         let namespace = NonZeroU16::new(namespace).ok_or_else(|| {
             ConstructionErrorV2::new(
                 ConstructionErrorKindV2::Zero,
@@ -59,6 +87,7 @@ impl DiagnosticCodeRefV2 {
                 code,
             )
         })?;
+        registry.lookup_registered_family(namespace.get())?;
         Ok(Self::Registered { namespace, code })
     }
 
@@ -88,6 +117,155 @@ impl DiagnosticCodeRefV2 {
             Self::Registered { code, .. } => code.get(),
         }
     }
+}
+
+/// Bounded reference to one downstream-owned registered decision detail.
+///
+/// This value is deliberately non-authoritative: it binds only the sealed
+/// namespace, family-local detail code, opaque content root, encoded length,
+/// and registry root. It contains no terminal state, refusal reason,
+/// precedence rule, capability, authority decision, or executable callback.
+/// The comparison/effect owner defines structured mismatch semantics,
+/// including the first-divergent lane; this base type does not.
+///
+/// ```compile_fail
+/// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
+/// use fs_evidence_runner::ProofExitV2;
+///
+/// fn extend_terminal(detail: &RegisteredDecisionDetailProjectionV2) -> ProofExitV2 {
+///     detail.terminal_state
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
+/// use fs_evidence_runner::RefusedReasonV2;
+///
+/// fn extend_refusal(detail: &RegisteredDecisionDetailProjectionV2) -> RefusedReasonV2 {
+///     detail.refused_reason
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fs_evidence_runner::diagnostic::RegisteredDecisionDetailProjectionV2;
+///
+/// fn mint_authority(detail: &RegisteredDecisionDetailProjectionV2) {
+///     detail.admit_authority();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RegisteredDecisionDetailProjectionV2 {
+    namespace: DecisionDetailNamespaceV2,
+    detail_code: NonZeroU16,
+    content_root: ContentHash,
+    encoded_length: u32,
+    registry_root: ContentHash,
+    root: ContentHash,
+}
+
+impl RegisteredDecisionDetailProjectionV2 {
+    /// Validate a sealed family namespace, nonzero local code, and bounded
+    /// retained-detail length, then freeze a non-authoritative identity.
+    pub fn new(
+        registry: &DecisionDetailNamespaceRegistryV2,
+        namespace: u16,
+        detail_code: u16,
+        content_root: ContentHash,
+        encoded_length: u32,
+    ) -> Result<Self, ConstructionErrorV2> {
+        let descriptor = registry.lookup_registered_family(namespace)?;
+        let detail_code = NonZeroU16::new(detail_code).ok_or_else(|| {
+            ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Zero,
+                "registered_decision_detail.detail_code",
+                "a nonzero family-local u16 detail code",
+                detail_code,
+            )
+        })?;
+        if encoded_length == 0 || encoded_length > REGISTERED_DECISION_DETAIL_MAX_BYTES_V2 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::OutOfRange,
+                "registered_decision_detail.encoded_length",
+                "one through 65536 encoded detail bytes",
+                encoded_length,
+            ));
+        }
+        let namespace = descriptor.namespace();
+        let registry_root = registry.root();
+        let root = registered_decision_detail_root(
+            namespace,
+            detail_code,
+            content_root,
+            encoded_length,
+            registry_root,
+        )?;
+        Ok(Self {
+            namespace,
+            detail_code,
+            content_root,
+            encoded_length,
+            registry_root,
+            root,
+        })
+    }
+
+    /// Sealed registered-family namespace.
+    #[must_use]
+    pub const fn namespace(&self) -> DecisionDetailNamespaceV2 {
+        self.namespace
+    }
+
+    /// Nonzero family-local detail code.
+    #[must_use]
+    pub const fn detail_code(&self) -> u16 {
+        self.detail_code.get()
+    }
+
+    /// Opaque presented content root of the downstream-owned detail bytes.
+    #[must_use]
+    pub const fn content_root(&self) -> ContentHash {
+        self.content_root
+    }
+
+    /// Exact bounded encoded byte length.
+    #[must_use]
+    pub const fn encoded_length(&self) -> u32 {
+        self.encoded_length
+    }
+
+    /// Exact namespace-registry root against which this detail was admitted.
+    #[must_use]
+    pub const fn registry_root(&self) -> ContentHash {
+        self.registry_root
+    }
+
+    /// Domain-separated, explicitly non-authoritative projection root.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+}
+
+fn registered_decision_detail_root(
+    namespace: DecisionDetailNamespaceV2,
+    detail_code: NonZeroU16,
+    content_root: ContentHash,
+    encoded_length: u32,
+    registry_root: ContentHash,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSDDPRJ\x01", 256)?;
+    frame.push_bytes(
+        "registered_decision_detail.registry_root",
+        registry_root.as_bytes(),
+    )?;
+    frame.push_u16("registered_decision_detail.namespace", namespace.code())?;
+    frame.push_u16("registered_decision_detail.detail_code", detail_code.get())?;
+    frame.push_bytes(
+        "registered_decision_detail.content_root",
+        content_root.as_bytes(),
+    )?;
+    frame.push_u32("registered_decision_detail.encoded_length", encoded_length)?;
+    Ok(frame.root(REGISTERED_DECISION_DETAIL_PROJECTION_DOMAIN_V1))
 }
 
 /// Inline replacement for a value too large for the mandatory diagnostic.
@@ -194,19 +372,19 @@ impl RepairActionV2 {
                 rank,
             ));
         }
-        if let (Some(expected), Some(replacement)) = (&expected, &replacement) {
-            if expected.compatibility_tag() != replacement.compatibility_tag() {
-                return Err(ConstructionErrorV2::new(
-                    ConstructionErrorKindV2::Incompatible,
-                    "repair.replacement",
-                    "the same typed-value shape as expected",
-                    format_args!(
-                        "{:?}/{:?}",
-                        expected.compatibility_tag(),
-                        replacement.compatibility_tag()
-                    ),
-                ));
-            }
+        if let (Some(expected), Some(replacement)) = (&expected, &replacement)
+            && expected.compatibility_tag() != replacement.compatibility_tag()
+        {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::Incompatible,
+                "repair.replacement",
+                "the same typed-value shape as expected",
+                format_args!(
+                    "{:?}/{:?}",
+                    expected.compatibility_tag(),
+                    replacement.compatibility_tag()
+                ),
+            ));
         }
         let display_hint = display_hint
             .map(validate_display_hint)
@@ -717,11 +895,15 @@ fn encode_digest(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2, ActionableDiagnosticV2, DiagnosticCodeRefV2,
-        DiagnosticEnvelopeGrantsV2, DiagnosticOverflowRefV2, DiagnosticValueV2,
-        REPAIR_ACTION_MAX_BYTES_V2, RepairActionV2,
+        ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2, ActionableDiagnosticV2, ConstructionErrorKindV2,
+        DiagnosticCodeRefV2, DiagnosticEnvelopeGrantsV2, DiagnosticOverflowRefV2,
+        DiagnosticValueV2, REGISTERED_DECISION_DETAIL_MAX_BYTES_V2, REPAIR_ACTION_MAX_BYTES_V2,
+        RegisteredDecisionDetailProjectionV2, RepairActionV2, registered_decision_detail_root,
     };
-    use crate::catalog::{DiagnosticCodeV2, DigestRoleV2, RepairActionKindV2, RetryabilityV2};
+    use crate::catalog::{
+        DecisionDetailNamespaceRegistryV2, DecisionDetailNamespaceV2, DiagnosticCodeV2,
+        DigestRoleV2, RepairActionKindV2, RetryabilityV2,
+    };
     use crate::identity::{ArtifactContentRootV2, NoClaimScopeRootV1};
     use crate::value::{OpaqueBytesV2, StableTokenV2, TextV2, TypedValueV2};
 
@@ -828,7 +1010,114 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps the complete repair-kind, rank, and display-boundary construction matrix in one auditable oracle"
+    )]
     fn every_repair_kind_rank_and_display_boundary_is_constructible_or_refused_exactly() {
+        let minimal = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            None,
+            None,
+            token("b"),
+            None,
+        )
+        .expect("minimum canonical repair");
+        assert_eq!(
+            minimal.canonical_len(),
+            27,
+            "minimum frame includes every mandatory field and absence tag"
+        );
+
+        let zero_opaque = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(Vec::new()).expect("zero-byte opaque value"),
+            ))),
+            None,
+            token("b"),
+            None,
+        )
+        .expect("zero-byte nested value");
+        assert_eq!(zero_opaque.canonical_len(), minimal.canonical_len() + 8);
+        let exact_payload = REPAIR_ACTION_MAX_BYTES_V2 - zero_opaque.canonical_len();
+        assert_eq!(exact_payload, 989);
+        let exact = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x5a; exact_payload]).expect("exact-cap opaque value"),
+            ))),
+            None,
+            token("b"),
+            None,
+        )
+        .expect("exact 1024-byte repair");
+        assert_eq!(exact.canonical_len(), REPAIR_ACTION_MAX_BYTES_V2);
+
+        let one_over = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x5a; exact_payload + 1])
+                    .expect("value remains inside its independent bound"),
+            ))),
+            None,
+            token("b"),
+            None,
+        )
+        .expect_err("complete repair one byte over the cap");
+        assert_eq!(one_over.kind(), ConstructionErrorKindV2::TooLarge);
+        assert_eq!(one_over.field(), "repair.display_hint");
+        assert_eq!(one_over.observed(), "1025");
+
+        let cumulative_payload = REPAIR_ACTION_MAX_BYTES_V2 - minimal.canonical_len() - 16;
+        assert_eq!(cumulative_payload, 981);
+        let expected_payload = cumulative_payload / 2;
+        let replacement_payload = cumulative_payload - expected_payload;
+        let cumulative_exact = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x41; expected_payload]).expect("expected half"),
+            ))),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x42; replacement_payload]).expect("replacement half"),
+            ))),
+            token("b"),
+            None,
+        )
+        .expect("checked cumulative nested lengths at the exact cap");
+        assert_eq!(cumulative_exact.canonical_len(), REPAIR_ACTION_MAX_BYTES_V2);
+        let cumulative_overflow = RepairActionV2::new(
+            1,
+            RepairActionKindV2::ChangeArguments,
+            token("a"),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x41; expected_payload]).expect("expected half"),
+            ))),
+            Some(DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                OpaqueBytesV2::new(vec![0x42; replacement_payload + 1])
+                    .expect("replacement one-over remains value-valid"),
+            ))),
+            token("b"),
+            None,
+        )
+        .expect_err("checked cumulative nested lengths refuse one-over");
+        assert_eq!(
+            cumulative_overflow.kind(),
+            ConstructionErrorKindV2::TooLarge
+        );
+        assert_eq!(cumulative_overflow.field(), "repair.display_hint");
+        assert_eq!(cumulative_overflow.observed(), "1025");
+
         for (index, kind) in RepairActionKindV2::ALL.into_iter().enumerate() {
             let rank = u8::try_from(index + 1).expect("twelve repair kinds");
             let value = repair_with(rank, kind, None, None, Some("x".repeat(256)))
@@ -985,6 +1274,12 @@ mod tests {
 
         assert!(DiagnosticCodeRefV2::registered(0, 1).is_err());
         assert!(DiagnosticCodeRefV2::registered(1, 0).is_err());
+        assert_eq!(
+            DiagnosticCodeRefV2::registered(8, 1)
+                .expect_err("unknown family namespace")
+                .kind(),
+            ConstructionErrorKindV2::UnknownCode
+        );
         assert!(
             diagnostic(
                 DiagnosticCodeRefV2::Base(DiagnosticCodeV2::RunnerUsage),
@@ -1048,7 +1343,274 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_repair_rank_refuses_while_count_remains_within_limit() {
+        let error = diagnostic(
+            DiagnosticCodeRefV2::Base(DiagnosticCodeV2::RunnerUsage),
+            RetryabilityV2::Never,
+            None,
+            None,
+            "runner.owner",
+            Vec::new(),
+            no_claim(),
+            vec![repair(1), repair(1)],
+            DiagnosticEnvelopeGrantsV2::base_maxima(),
+        )
+        .expect_err("duplicate rank two is a within-limit ordering failure");
+        assert_eq!(error.kind(), ConstructionErrorKindV2::OutOfOrder);
+        assert_eq!(error.field(), "diagnostic.repair_rank");
+        assert_eq!(error.observed(), "1");
+    }
+
+    #[test]
+    fn registered_detail_projection_is_bounded_sealed_and_non_authoritative() {
+        let registry = DecisionDetailNamespaceRegistryV2::frozen();
+        let content_root = fs_blake3::hash_domain("test.decision-detail-content.v1", b"detail");
+        let detail = RegisteredDecisionDetailProjectionV2::new(&registry, 7, 9, content_root, 1)
+            .expect("sealed family detail");
+        assert_eq!(detail.namespace().code(), 7);
+        assert_eq!(detail.detail_code(), 9);
+        assert_eq!(detail.content_root(), content_root);
+        assert_eq!(detail.encoded_length(), 1);
+        assert_eq!(detail.registry_root(), registry.root());
+        assert_eq!(
+            detail.root(),
+            RegisteredDecisionDetailProjectionV2::new(&registry, 7, 9, content_root, 1)
+                .expect("deterministic reconstruction")
+                .root()
+        );
+
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(&registry, 0, 9, content_root, 1).is_err(),
+            "the base namespace cannot masquerade as registered family detail"
+        );
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(&registry, 8, 9, content_root, 1).is_err(),
+            "unknown namespaces refuse"
+        );
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(&registry, 7, 0, content_root, 1).is_err(),
+            "family-local detail code is nonzero"
+        );
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(&registry, 7, 9, content_root, 0).is_err()
+        );
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(
+                &registry,
+                7,
+                9,
+                content_root,
+                REGISTERED_DECISION_DETAIL_MAX_BYTES_V2,
+            )
+            .is_ok()
+        );
+        assert!(
+            RegisteredDecisionDetailProjectionV2::new(
+                &registry,
+                7,
+                9,
+                content_root,
+                REGISTERED_DECISION_DETAIL_MAX_BYTES_V2 + 1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn every_registered_detail_identity_field_moves_the_projection_root() {
+        use std::num::NonZeroU16;
+
+        let registry = DecisionDetailNamespaceRegistryV2::frozen();
+        let content_root = fs_blake3::hash_domain("test.decision-detail-content.v1", b"detail");
+        let other_content_root =
+            fs_blake3::hash_domain("test.decision-detail-content.v1", b"other");
+        let namespace = registry
+            .lookup_registered_family(7)
+            .expect("registered namespace")
+            .namespace();
+        let code = NonZeroU16::new(9).expect("nonzero code");
+        let base =
+            registered_decision_detail_root(namespace, code, content_root, 17, registry.root())
+                .expect("base detail root");
+        let mutations = [
+            registered_decision_detail_root(
+                DecisionDetailNamespaceV2::registered(8),
+                code,
+                content_root,
+                17,
+                registry.root(),
+            )
+            .expect("namespace mutation root"),
+            registered_decision_detail_root(
+                namespace,
+                NonZeroU16::new(10).expect("nonzero code"),
+                content_root,
+                17,
+                registry.root(),
+            )
+            .expect("detail-code mutation root"),
+            registered_decision_detail_root(
+                namespace,
+                code,
+                other_content_root,
+                17,
+                registry.root(),
+            )
+            .expect("content mutation root"),
+            registered_decision_detail_root(namespace, code, content_root, 18, registry.root())
+                .expect("length mutation root"),
+            registered_decision_detail_root(
+                namespace,
+                code,
+                content_root,
+                17,
+                fs_blake3::hash_domain("test.registry-root.v1", b"mutated"),
+            )
+            .expect("registry mutation root"),
+        ];
+        for mutation in mutations {
+            assert_ne!(mutation, base);
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test exhaustively checks the coupled diagnostic frame and every enclosing encoded-byte grant"
+    )]
     fn complete_frame_and_every_enclosing_grant_are_jointly_feasible() {
+        let build_cap_fixture =
+            |expected_payload: Option<usize>,
+             observed_payload: Option<usize>,
+             grants: DiagnosticEnvelopeGrantsV2| {
+                let expected = expected_payload.map(|length| {
+                    DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                        OpaqueBytesV2::new(vec![0x41; length])
+                            .expect("diagnostic cap fixture remains value-valid"),
+                    ))
+                });
+                let observed = observed_payload.map(|length| {
+                    DiagnosticValueV2::Inline(TypedValueV2::OpaqueBytes(
+                        OpaqueBytesV2::new(vec![0x42; length])
+                            .expect("diagnostic cap fixture remains value-valid"),
+                    ))
+                });
+                let minimum_repair = RepairActionV2::new(
+                    1,
+                    RepairActionKindV2::ChangeArguments,
+                    token("a"),
+                    None,
+                    None,
+                    token("b"),
+                    None,
+                )
+                .expect("minimum nested repair");
+                diagnostic(
+                    DiagnosticCodeRefV2::Base(DiagnosticCodeV2::RunnerUsage),
+                    RetryabilityV2::Never,
+                    expected,
+                    observed,
+                    "a",
+                    Vec::new(),
+                    no_claim(),
+                    vec![minimum_repair],
+                    grants,
+                )
+            };
+
+        let minimum = build_cap_fixture(None, None, DiagnosticEnvelopeGrantsV2::base_maxima())
+            .expect("minimum complete diagnostic");
+        assert_eq!(
+            minimum.canonical_len(),
+            158,
+            "minimum frame includes every mandatory field, digest, repair, and absence tag"
+        );
+        let zero_opaque =
+            build_cap_fixture(Some(0), None, DiagnosticEnvelopeGrantsV2::base_maxima())
+                .expect("zero-byte expected value");
+        assert_eq!(zero_opaque.canonical_len(), minimum.canonical_len() + 8);
+        let exact_payload = ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2 - zero_opaque.canonical_len();
+        assert_eq!(exact_payload, 8026);
+        let exact_grant = u64::try_from(ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2)
+            .expect("diagnostic cap is representable as u64");
+        let exact_grants = DiagnosticEnvelopeGrantsV2 {
+            record_bytes: exact_grant,
+            case_bytes: exact_grant,
+            run_bytes: exact_grant,
+            stdout_bytes: exact_grant,
+            stderr_bytes: exact_grant,
+        };
+        let exact = build_cap_fixture(Some(exact_payload), None, exact_grants)
+            .expect("exact 8192-byte diagnostic fits every exact enclosing grant");
+        assert_eq!(exact.canonical_len(), ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2);
+
+        let one_over = build_cap_fixture(
+            Some(exact_payload + 1),
+            None,
+            DiagnosticEnvelopeGrantsV2::base_maxima(),
+        )
+        .expect_err("complete diagnostic one byte over the cap");
+        assert_eq!(one_over.kind(), ConstructionErrorKindV2::TooLarge);
+        assert_eq!(one_over.field(), "diagnostic.repair");
+        assert_eq!(one_over.observed(), "8193");
+
+        let zero_both =
+            build_cap_fixture(Some(0), Some(0), DiagnosticEnvelopeGrantsV2::base_maxima())
+                .expect("two zero-byte inline values");
+        assert_eq!(zero_both.canonical_len(), minimum.canonical_len() + 16);
+        let cumulative_payload = ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2 - zero_both.canonical_len();
+        assert_eq!(cumulative_payload, 8018);
+        let expected_payload = cumulative_payload / 2;
+        let observed_payload = cumulative_payload - expected_payload;
+        let cumulative_exact = build_cap_fixture(
+            Some(expected_payload),
+            Some(observed_payload),
+            DiagnosticEnvelopeGrantsV2::base_maxima(),
+        )
+        .expect("checked expected-plus-observed lengths at the exact cap");
+        assert_eq!(
+            cumulative_exact.canonical_len(),
+            ACTIONABLE_DIAGNOSTIC_MAX_BYTES_V2
+        );
+        let cumulative_overflow = build_cap_fixture(
+            Some(expected_payload),
+            Some(observed_payload + 1),
+            DiagnosticEnvelopeGrantsV2::base_maxima(),
+        )
+        .expect_err("checked expected-plus-observed lengths refuse one-over");
+        assert_eq!(
+            cumulative_overflow.kind(),
+            ConstructionErrorKindV2::TooLarge
+        );
+        assert_eq!(cumulative_overflow.field(), "diagnostic.repair");
+        assert_eq!(cumulative_overflow.observed(), "8193");
+
+        for (index, field) in [
+            "diagnostic.record_bytes",
+            "diagnostic.case_bytes",
+            "diagnostic.run_bytes",
+            "diagnostic.stdout_bytes",
+            "diagnostic.stderr_bytes",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut one_under = exact_grants;
+            match index {
+                0 => one_under.record_bytes -= 1,
+                1 => one_under.case_bytes -= 1,
+                2 => one_under.run_bytes -= 1,
+                3 => one_under.stdout_bytes -= 1,
+                4 => one_under.stderr_bytes -= 1,
+                _ => unreachable!(),
+            }
+            let error = build_cap_fixture(Some(exact_payload), None, one_under)
+                .expect_err("one-under enclosing grant refuses an exact-cap diagnostic");
+            assert_eq!(error.kind(), ConstructionErrorKindV2::TooLarge);
+            assert_eq!(error.field(), field);
+            assert_eq!(error.observed(), "8192");
+        }
+
         let baseline = diagnostic(
             DiagnosticCodeRefV2::Base(DiagnosticCodeV2::RunnerUsage),
             RetryabilityV2::AfterInputChange,
@@ -1142,6 +1704,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test independently mutates every diagnostic identity field and retains all root comparisons in one literal oracle"
+    )]
     fn every_diagnostic_field_mutation_moves_the_root() {
         let build =
             |code, retryability, expected, observed, owner, prerequisites, scope, repairs| {

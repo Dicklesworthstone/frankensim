@@ -10,7 +10,8 @@ use crate::identity::{DigestValueV2, NoClaimScopeRootV1, RootCapabilityPolicyRoo
 use crate::publication::PublicationSelectionV2;
 use std::collections::BTreeSet;
 
-/// Maximum registrations of each root-policy kind in one family projection.
+/// Maximum aggregate registrations across every root-policy kind in one
+/// family projection.
 pub const ROOT_POLICY_REGISTRATIONS_MAX_V2: usize = 64;
 /// Canonical domain for one semantic root-capability policy.
 pub const ROOT_CAPABILITY_POLICY_DOMAIN_V1: &str =
@@ -76,6 +77,26 @@ impl RootPolicyRegistryProjectionV2 {
             "root_policy_registry.revocation_policy_ids",
             &revocation_policy_ids,
         )?;
+        let aggregate_count = freshness_policy_ids
+            .len()
+            .checked_add(revocation_policy_ids.len())
+            .and_then(|count| count.checked_add(overlap_policies.len()))
+            .ok_or_else(|| {
+                ConstructionErrorV2::new(
+                    ConstructionErrorKindV2::ArithmeticOverflow,
+                    "root_policy_registry.registrations",
+                    "an aggregate registration count representable as usize",
+                    "count overflow",
+                )
+            })?;
+        if aggregate_count > ROOT_POLICY_REGISTRATIONS_MAX_V2 {
+            return Err(ConstructionErrorV2::new(
+                ConstructionErrorKindV2::TooLarge,
+                "root_policy_registry.registrations",
+                "at most 64 aggregate freshness, revocation, and overlap registrations",
+                aggregate_count,
+            ));
+        }
         if overlap_policies.len() > ROOT_POLICY_REGISTRATIONS_MAX_V2 {
             return Err(ConstructionErrorV2::new(
                 ConstructionErrorKindV2::TooLarge,
@@ -133,6 +154,85 @@ impl RootPolicyRegistryProjectionV2 {
 
 /// Frozen semantic policy. Physical handles, slots, credentials, prefixes,
 /// generations, and acquisition attempts cannot be represented here.
+///
+/// The safe constructor accepts only closed semantic catalog values and the
+/// accessors expose only that canonical policy:
+///
+/// ```
+/// use fs_evidence_runner::capability::RootCapabilityPolicyV2;
+/// use fs_evidence_runner::catalog::{
+///     DigestRoleV2, PlatformPathProfileV2, RootCapabilityAccessV2,
+///     RootCapabilityRightV2, RootClassV2,
+/// };
+/// use fs_evidence_runner::identity::NoClaimScopeRootV1;
+///
+/// let no_claim_scope = NoClaimScopeRootV1::parse_presented(
+///     DigestRoleV2::ClaimScope,
+///     NoClaimScopeRootV1::DESCRIPTOR.domain(),
+///     &"00".repeat(32),
+/// )
+/// .unwrap();
+/// let policy = RootCapabilityPolicyV2::new(
+///     RootClassV2::InputArtifactRoot,
+///     PlatformPathProfileV2::PosixDescriptorRelativeV1,
+///     RootCapabilityAccessV2::ReadOnlyInput,
+///     vec![
+///         RootCapabilityRightV2::Traverse,
+///         RootCapabilityRightV2::ReadObject,
+///         RootCapabilityRightV2::Enumerate,
+///     ],
+///     1,
+///     1,
+///     1,
+///     no_claim_scope,
+/// )
+/// .unwrap();
+///
+/// assert_eq!(policy.access(), RootCapabilityAccessV2::ReadOnlyInput);
+/// assert_eq!(policy.rights().len(), 3);
+/// ```
+///
+/// Physical acquisition material has no slot in the semantic right vector.
+/// This one physical-only sum covers descriptors, handles, slots, paths,
+/// credentials, prefixes, generations, and acquisition attempts without
+/// depending on any downstream backend type:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::capability::RootCapabilityPolicyV2;
+/// use fs_evidence_runner::catalog::{
+///     DigestRoleV2, PlatformPathProfileV2, RootCapabilityAccessV2, RootClassV2,
+/// };
+/// use fs_evidence_runner::identity::NoClaimScopeRootV1;
+///
+/// enum PhysicalAcquisitionMaterial<'a> {
+///     Descriptor(i32),
+///     Handle(usize),
+///     Slot(u16),
+///     Path(&'a str),
+///     Credential(&'a [u8]),
+///     Prefix(&'a str),
+///     Generation(u64),
+///     Attempt(u64),
+/// }
+///
+/// let no_claim_scope = NoClaimScopeRootV1::parse_presented(
+///     DigestRoleV2::ClaimScope,
+///     NoClaimScopeRootV1::DESCRIPTOR.domain(),
+///     &"00".repeat(32),
+/// )
+/// .unwrap();
+/// let physical = PhysicalAcquisitionMaterial::Descriptor(7);
+/// let _policy = RootCapabilityPolicyV2::new(
+///     RootClassV2::InputArtifactRoot,
+///     PlatformPathProfileV2::PosixDescriptorRelativeV1,
+///     RootCapabilityAccessV2::ReadOnlyInput,
+///     vec![physical],
+///     1,
+///     1,
+///     1,
+///     no_claim_scope,
+/// );
+/// ```
 ///
 /// Fields and the semantic-root constructor remain private:
 ///
@@ -468,13 +568,26 @@ pub struct RootCapabilityPolicySetV2 {
 }
 
 impl RootCapabilityPolicySetV2 {
-    /// Validate command cardinality, root-class uniqueness, registration, and
+    /// Validate command cardinality, registration, root-class uniqueness, and
     /// Replay's shared declared-disjoint overlap policy.
     pub fn new(
         command: RunnerCommandV2,
         mut policies: Vec<RootCapabilityPolicyV2>,
         registry: &RootPolicyRegistryProjectionV2,
     ) -> Result<Self, ConstructionErrorV2> {
+        let expected_policy_count = match command {
+            RunnerCommandV2::List | RunnerCommandV2::Check | RunnerCommandV2::SelfTest => 0,
+            RunnerCommandV2::Run | RunnerCommandV2::Negative => 1,
+            RunnerCommandV2::Replay => 2,
+        };
+        if policies.len() != expected_policy_count {
+            return Err(cardinality_error(
+                command,
+                expected_policy_count,
+                policies.len(),
+            ));
+        }
+
         for policy in &policies {
             policy.validate_registration(registry)?;
         }
@@ -501,22 +614,13 @@ impl RootCapabilityPolicySetV2 {
         });
 
         match command {
-            RunnerCommandV2::List | RunnerCommandV2::Check | RunnerCommandV2::SelfTest => {
-                if !policies.is_empty() {
-                    return Err(cardinality_error(command, 0, policies.len()));
-                }
-            }
+            RunnerCommandV2::List | RunnerCommandV2::Check | RunnerCommandV2::SelfTest => {}
             RunnerCommandV2::Run | RunnerCommandV2::Negative => {
-                if policies.len() != 1
-                    || policies[0].access != RootCapabilityAccessV2::DurableOutput
-                {
+                if policies[0].access != RootCapabilityAccessV2::DurableOutput {
                     return Err(cardinality_error(command, 1, policies.len()));
                 }
             }
             RunnerCommandV2::Replay => {
-                if policies.len() != 2 {
-                    return Err(cardinality_error(command, 2, policies.len()));
-                }
                 let input = policies
                     .iter()
                     .find(|policy| policy.access == RootCapabilityAccessV2::ReadOnlyInput);
@@ -793,7 +897,7 @@ fn cardinality_error(
 mod tests {
     use super::{
         NarrowedPolicyViewV2, OverlapPolicyRegistrationV2, RootCapabilityPolicySetV2,
-        RootCapabilityPolicyV2, RootPolicyRegistryProjectionV2, expected_rights,
+        RootCapabilityPolicyV2, RootPolicyRegistryProjectionV2,
         validate_policy_against_selection_v2,
     };
     use crate::catalog::{
@@ -804,6 +908,134 @@ mod tests {
     use crate::identity::NoClaimScopeRootV1;
     use crate::path::{ContentStoreObjectKeyV1, LogicalBundlePathV1};
     use crate::publication::{PublicationSelectionV2, PublicationTargetV2};
+
+    #[derive(Clone, Copy)]
+    struct CapabilityOracleCell {
+        profile: PlatformPathProfileV2,
+        access: RootCapabilityAccessV2,
+        mode: DestinationAdmissionModeV2,
+        rights: &'static [RootCapabilityRightV2],
+    }
+
+    use RootCapabilityRightV2 as Right;
+
+    const FILE_INPUT_RIGHTS: &[Right] = &[Right::Traverse, Right::ReadObject, Right::Enumerate];
+    const FILE_ABSENT_OUTPUT_RIGHTS: &[Right] = &[
+        Right::Traverse,
+        Right::Enumerate,
+        Right::CreateObject,
+        Right::SyncObject,
+        Right::SyncContainer,
+    ];
+    const FILE_EMPTY_OUTPUT_RIGHTS: &[Right] = &[
+        Right::Traverse,
+        Right::Enumerate,
+        Right::CreateObject,
+        Right::PopulateEmptyDestination,
+        Right::SyncObject,
+        Right::SyncContainer,
+    ];
+    const STORE_INPUT_RIGHTS: &[Right] =
+        &[Right::ReadObject, Right::Enumerate, Right::QueryGeneration];
+    const STORE_ABSENT_OUTPUT_RIGHTS: &[Right] = &[
+        Right::CreateObject,
+        Right::QueryGeneration,
+        Right::CommitCompareAndSwap,
+    ];
+    const STORE_EMPTY_OUTPUT_RIGHTS: &[Right] = &[
+        Right::Enumerate,
+        Right::CreateObject,
+        Right::AcquireExclusiveLease,
+        Right::QueryGeneration,
+        Right::CommitCompareAndSwap,
+    ];
+
+    const CAPABILITY_ORACLE: [CapabilityOracleCell; 12] = [
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::PosixDescriptorRelativeV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: FILE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::PosixDescriptorRelativeV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: FILE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::PosixDescriptorRelativeV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: FILE_ABSENT_OUTPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::PosixDescriptorRelativeV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: FILE_EMPTY_OUTPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::WindowsHandleRelativeV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: FILE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::WindowsHandleRelativeV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: FILE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::WindowsHandleRelativeV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: FILE_ABSENT_OUTPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::WindowsHandleRelativeV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: FILE_EMPTY_OUTPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::ContentStoreObjectKeyV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: STORE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::ContentStoreObjectKeyV1,
+            access: RootCapabilityAccessV2::ReadOnlyInput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: STORE_INPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::ContentStoreObjectKeyV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::Absent,
+            rights: STORE_ABSENT_OUTPUT_RIGHTS,
+        },
+        CapabilityOracleCell {
+            profile: PlatformPathProfileV2::ContentStoreObjectKeyV1,
+            access: RootCapabilityAccessV2::DurableOutput,
+            mode: DestinationAdmissionModeV2::PreExistingEmpty,
+            rights: STORE_EMPTY_OUTPUT_RIGHTS,
+        },
+    ];
+
+    fn oracle_rights(
+        profile: PlatformPathProfileV2,
+        access: RootCapabilityAccessV2,
+        mode: DestinationAdmissionModeV2,
+    ) -> &'static [RootCapabilityRightV2] {
+        CAPABILITY_ORACLE
+            .iter()
+            .find(|cell| cell.profile == profile && cell.access == access && cell.mode == mode)
+            .expect("the handwritten oracle contains all 12 cells")
+            .rights
+    }
 
     fn no_claim(byte: u8) -> NoClaimScopeRootV1 {
         NoClaimScopeRootV1::parse_presented(
@@ -874,9 +1106,7 @@ mod tests {
         access: RootCapabilityAccessV2,
         destination_mode: DestinationAdmissionModeV2,
         rights: Vec<RootCapabilityRightV2>,
-        freshness_policy_id: u16,
-        revocation_policy_id: u16,
-        overlap_policy_id: u16,
+        registration_ids: [u16; 3],
         claim_byte: u8,
     ) -> Result<RootCapabilityPolicyV2, crate::ConstructionErrorV2> {
         RootCapabilityPolicyV2::new(
@@ -887,15 +1117,33 @@ mod tests {
             profile,
             access,
             if rights.is_empty() {
-                expected_rights(profile, access, destination_mode)
+                oracle_rights(profile, access, destination_mode).to_vec()
             } else {
                 rights
             },
-            freshness_policy_id,
-            revocation_policy_id,
-            overlap_policy_id,
+            registration_ids[0],
+            registration_ids[1],
+            registration_ids[2],
             no_claim(claim_byte),
         )
+    }
+
+    fn exact_policy(
+        profile: PlatformPathProfileV2,
+        access: RootCapabilityAccessV2,
+        destination_mode: DestinationAdmissionModeV2,
+        registration_ids: [u16; 3],
+        claim_byte: u8,
+    ) -> RootCapabilityPolicyV2 {
+        policy(
+            profile,
+            access,
+            destination_mode,
+            Vec::new(),
+            registration_ids,
+            claim_byte,
+        )
+        .expect("handwritten exact policy cell")
     }
 
     #[test]
@@ -927,13 +1175,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        assert!(
-            OverlapPolicyRegistrationV2::new(
-                0,
-                OverlapPolicyRelationV2::RequireInputOutputDisjoint
-            )
-            .is_err()
+        let zero_overlap = OverlapPolicyRegistrationV2::new(
+            0,
+            OverlapPolicyRelationV2::RequireInputOutputDisjoint,
+        )
+        .expect_err("overlap policy ID zero must refuse");
+        assert_eq!(zero_overlap.kind(), crate::ConstructionErrorKindV2::Zero);
+        assert_eq!(
+            zero_overlap.field(),
+            "root_policy_registry.overlap_policy_id"
         );
+        for (field, result) in [
+            (
+                "root_policy_registry.freshness_policy_ids",
+                RootPolicyRegistryProjectionV2::new(vec![0], Vec::new(), Vec::new()),
+            ),
+            (
+                "root_policy_registry.revocation_policy_ids",
+                RootPolicyRegistryProjectionV2::new(Vec::new(), vec![0], Vec::new()),
+            ),
+        ] {
+            let error = result.expect_err("zero registry IDs must refuse");
+            assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Zero);
+            assert_eq!(error.field(), field);
+        }
         assert!(RootPolicyRegistryProjectionV2::new(vec![1, 1], vec![], vec![]).is_err());
         assert!(RootPolicyRegistryProjectionV2::new(vec![], vec![1, 1], vec![]).is_err());
         assert!(
@@ -955,23 +1220,50 @@ mod tests {
             RootPolicyRegistryProjectionV2::new((1..=65).collect(), Vec::new(), Vec::new())
                 .is_err()
         );
+        RootPolicyRegistryProjectionV2::new(
+            (1..=22).collect(),
+            (1..=21).collect(),
+            (1..=21)
+                .map(|id| {
+                    OverlapPolicyRegistrationV2::new(
+                        id,
+                        OverlapPolicyRelationV2::RequireInputOutputDisjoint,
+                    )
+                    .expect("exact-cap overlap registration")
+                })
+                .collect(),
+        )
+        .expect("64 aggregate registrations are admitted");
+        let aggregate_one_over = RootPolicyRegistryProjectionV2::new(
+            (1..=22).collect(),
+            (1..=22).collect(),
+            (1..=21)
+                .map(|id| {
+                    OverlapPolicyRegistrationV2::new(
+                        id,
+                        OverlapPolicyRelationV2::RequireInputOutputDisjoint,
+                    )
+                    .expect("one-over overlap registration")
+                })
+                .collect(),
+        )
+        .expect_err("65 aggregate registrations must refuse");
+        assert_eq!(
+            aggregate_one_over.kind(),
+            crate::ConstructionErrorKindV2::TooLarge
+        );
+        assert_eq!(
+            aggregate_one_over.field(),
+            "root_policy_registry.registrations"
+        );
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the least-privilege test deliberately enumerates every command and every one-right mutation in one auditable matrix"
+    )]
     fn least_privilege_matrix_rejects_every_one_right_mutant() {
-        let profiles = [
-            PlatformPathProfileV2::PosixDescriptorRelativeV1,
-            PlatformPathProfileV2::WindowsHandleRelativeV1,
-            PlatformPathProfileV2::ContentStoreObjectKeyV1,
-        ];
-        let accesses = [
-            RootCapabilityAccessV2::ReadOnlyInput,
-            RootCapabilityAccessV2::DurableOutput,
-        ];
-        let modes = [
-            DestinationAdmissionModeV2::Absent,
-            DestinationAdmissionModeV2::PreExistingEmpty,
-        ];
         let all_rights = [
             RootCapabilityRightV2::Traverse,
             RootCapabilityRightV2::ReadObject,
@@ -984,85 +1276,147 @@ mod tests {
             RootCapabilityRightV2::QueryGeneration,
             RootCapabilityRightV2::CommitCompareAndSwap,
         ];
+        let mut refused_mutants = 0_usize;
 
-        for profile in profiles {
-            for access in accesses {
-                for mode in modes {
-                    let expected = expected_rights(profile, access, mode);
-                    let accepted = policy(profile, access, mode, expected.clone(), 1, 1, 1, 0)
-                        .expect("exact policy cell");
-                    accepted
-                        .validate_registration(&registry())
-                        .expect("registered policy");
-                    match access {
-                        RootCapabilityAccessV2::ReadOnlyInput => {
-                            let view =
-                                NarrowedPolicyViewV2::for_read_only(&accepted).expect("input view");
-                            assert_eq!(view.rights(), expected);
-                            assert_eq!(view.destination_mode(), None);
-                        }
-                        RootCapabilityAccessV2::DurableOutput => {
-                            let selected = selection(profile, mode);
-                            validate_policy_against_selection_v2(&accepted, &selected)
-                                .expect("exact output cell");
-                            let view = NarrowedPolicyViewV2::for_publication(&accepted, &selected)
-                                .expect("output view");
-                            assert_eq!(view.rights(), expected);
-                            assert_eq!(view.destination_mode(), Some(mode));
-                        }
-                    }
-
-                    for omitted in &expected {
-                        let mut mutant = expected.clone();
-                        mutant.retain(|right| right != omitted);
-                        assert_policy_mutant_refuses(profile, access, mode, mutant);
-                    }
-                    for added in all_rights
-                        .iter()
-                        .copied()
-                        .filter(|right| !expected.contains(right))
-                    {
-                        let mut mutant = expected.clone();
-                        mutant.push(added);
-                        assert_policy_mutant_refuses(profile, access, mode, mutant);
-                    }
-                    for omitted in &expected {
-                        for replacement in all_rights
-                            .iter()
-                            .copied()
-                            .filter(|right| !expected.contains(right))
-                        {
-                            let mut mutant = expected.clone();
-                            let slot = mutant
-                                .iter_mut()
-                                .find(|right| *right == omitted)
-                                .expect("present right");
-                            *slot = replacement;
-                            assert_policy_mutant_refuses(profile, access, mode, mutant);
-                        }
-                    }
+        for cell in CAPABILITY_ORACLE {
+            let expected = cell.rights;
+            let accepted = policy(
+                cell.profile,
+                cell.access,
+                cell.mode,
+                expected.to_vec(),
+                [1, 1, 1],
+                0,
+            )
+            .expect("exact handwritten policy cell");
+            accepted
+                .validate_registration(&registry())
+                .expect("registered policy");
+            assert_eq!(accepted.rights(), expected);
+            match cell.access {
+                RootCapabilityAccessV2::ReadOnlyInput => {
+                    let view = NarrowedPolicyViewV2::for_read_only(&accepted).expect("input view");
+                    assert_eq!(view.rights(), expected);
+                    assert_eq!(view.destination_mode(), None);
+                }
+                RootCapabilityAccessV2::DurableOutput => {
+                    let selected = selection(cell.profile, cell.mode);
+                    validate_policy_against_selection_v2(&accepted, &selected)
+                        .expect("exact output cell");
+                    let view = NarrowedPolicyViewV2::for_publication(&accepted, &selected)
+                        .expect("output view");
+                    assert_eq!(view.rights(), expected);
+                    assert_eq!(view.destination_mode(), Some(cell.mode));
                 }
             }
+
+            for omitted in expected {
+                let mut mutant = expected.to_vec();
+                mutant.retain(|right| right != omitted);
+                assert_policy_mutant_refuses(cell, mutant);
+                refused_mutants += 1;
+            }
+            for added in all_rights
+                .iter()
+                .copied()
+                .filter(|right| !expected.contains(right))
+            {
+                let mut mutant = expected.to_vec();
+                mutant.push(added);
+                assert_policy_mutant_refuses(cell, mutant);
+                refused_mutants += 1;
+            }
+            for omitted in expected {
+                for replacement in all_rights
+                    .iter()
+                    .copied()
+                    .filter(|right| !expected.contains(right))
+                {
+                    let mut mutant = expected.to_vec();
+                    let slot = mutant
+                        .iter_mut()
+                        .find(|right| *right == omitted)
+                        .expect("present right");
+                    *slot = replacement;
+                    assert_policy_mutant_refuses(cell, mutant);
+                    refused_mutants += 1;
+                }
+            }
+        }
+        assert_eq!(refused_mutants, 390);
+
+        let duplicate_cell = CAPABILITY_ORACLE[0];
+        let mut duplicate_rights = duplicate_cell.rights.to_vec();
+        duplicate_rights.push(duplicate_cell.rights[0]);
+        let duplicate = policy(
+            duplicate_cell.profile,
+            duplicate_cell.access,
+            duplicate_cell.mode,
+            duplicate_rights,
+            [1, 1, 1],
+            0,
+        )
+        .expect_err("a duplicate semantic right must refuse before canonical sorting");
+        assert_eq!(duplicate.kind(), crate::ConstructionErrorKindV2::Duplicate);
+        assert_eq!(duplicate.field(), "root_capability_policy.rights");
+
+        let empty = RootCapabilityPolicyV2::new(
+            RootClassV2::InputArtifactRoot,
+            PlatformPathProfileV2::PosixDescriptorRelativeV1,
+            RootCapabilityAccessV2::ReadOnlyInput,
+            Vec::new(),
+            1,
+            1,
+            1,
+            no_claim(0),
+        )
+        .expect_err("an empty semantic right set must refuse");
+        assert_eq!(empty.kind(), crate::ConstructionErrorKindV2::Missing);
+        assert_eq!(empty.field(), "root_capability_policy.rights");
+
+        for (registration_ids, field) in [
+            ([0, 1, 1], "root_capability_policy.freshness_policy_id"),
+            ([1, 0, 1], "root_capability_policy.revocation_policy_id"),
+            ([1, 1, 0], "root_capability_policy.overlap_policy_id"),
+        ] {
+            let error = policy(
+                duplicate_cell.profile,
+                duplicate_cell.access,
+                duplicate_cell.mode,
+                duplicate_cell.rights.to_vec(),
+                registration_ids,
+                0,
+            )
+            .expect_err("zero policy registration IDs must refuse intrinsically");
+            assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Zero);
+            assert_eq!(error.field(), field);
         }
     }
 
     fn assert_policy_mutant_refuses(
-        profile: PlatformPathProfileV2,
-        access: RootCapabilityAccessV2,
-        mode: DestinationAdmissionModeV2,
+        cell: CapabilityOracleCell,
         rights: Vec<RootCapabilityRightV2>,
     ) {
-        match policy(profile, access, mode, rights, 1, 1, 1, 0) {
-            Err(_) => {}
-            Ok(mutant) => match access {
+        match policy(cell.profile, cell.access, cell.mode, rights, [1, 1, 1], 0) {
+            Err(error) => {
+                assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Incompatible);
+                assert_eq!(error.field(), "root_capability_policy.rights");
+            }
+            Ok(mutant) => match cell.access {
                 RootCapabilityAccessV2::ReadOnlyInput => {
-                    assert!(NarrowedPolicyViewV2::for_read_only(&mutant).is_err());
+                    let error = NarrowedPolicyViewV2::for_read_only(&mutant)
+                        .expect_err("mutant input rights must refuse");
+                    assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Incompatible);
+                    assert_eq!(error.field(), "root_capability_policy.rights");
                 }
                 RootCapabilityAccessV2::DurableOutput => {
-                    assert!(
-                        validate_policy_against_selection_v2(&mutant, &selection(profile, mode))
-                            .is_err()
+                    let error = validate_policy_against_selection_v2(
+                        &mutant,
+                        &selection(cell.profile, cell.mode),
                     );
+                    let error = error.expect_err("mutant output rights must refuse");
+                    assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Incompatible);
+                    assert_eq!(error.field(), "root_capability_policy.rights");
                 }
             },
         }
@@ -1070,111 +1424,80 @@ mod tests {
 
     #[test]
     fn policy_root_binds_each_semantic_field_and_ignores_opaque_observations() {
-        let base = policy(
+        let base = exact_policy(
             PlatformPathProfileV2::PosixDescriptorRelativeV1,
             RootCapabilityAccessV2::DurableOutput,
             DestinationAdmissionModeV2::Absent,
-            Vec::new(),
-            1,
-            1,
-            1,
+            [1, 1, 1],
             0,
-        )
-        .expect("base policy");
+        );
         let base_root = base.semantic_root().bytes();
         let mutations = [
-            policy(
+            exact_policy(
                 PlatformPathProfileV2::WindowsHandleRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
-                1,
-                1,
-                1,
+                [1, 1, 1],
                 0,
-            )
-            .expect("profile mutation"),
+            ),
             RootCapabilityPolicyV2::new(
                 RootClassV2::from_tag(3, Some(7)).expect("registered root class"),
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
-                expected_rights(
+                oracle_rights(
                     PlatformPathProfileV2::PosixDescriptorRelativeV1,
                     RootCapabilityAccessV2::DurableOutput,
                     DestinationAdmissionModeV2::Absent,
-                ),
+                )
+                .to_vec(),
                 1,
                 1,
                 1,
                 no_claim(0),
             )
             .expect("root-class mutation"),
-            policy(
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::ReadOnlyInput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
-                1,
-                1,
-                1,
+                [1, 1, 1],
                 0,
-            )
-            .expect("access and rights mutation"),
-            policy(
+            ),
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::PreExistingEmpty,
-                Vec::new(),
-                1,
-                1,
-                1,
+                [1, 1, 1],
                 0,
-            )
-            .expect("rights mutation"),
-            policy(
+            ),
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
-                2,
-                1,
-                1,
+                [2, 1, 1],
                 0,
-            )
-            .expect("freshness mutation"),
-            policy(
+            ),
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
-                1,
-                2,
-                1,
+                [1, 2, 1],
                 0,
-            )
-            .expect("revocation mutation"),
-            policy(
+            ),
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
-                1,
-                1,
-                2,
+                [1, 1, 2],
                 0,
-            )
-            .expect("overlap mutation"),
-            policy(
+            ),
+            exact_policy(
                 PlatformPathProfileV2::PosixDescriptorRelativeV1,
                 RootCapabilityAccessV2::DurableOutput,
                 DestinationAdmissionModeV2::Absent,
-                Vec::new(),
+                [1, 1, 1],
                 1,
-                1,
-                1,
-                1,
-            )
-            .expect("no-claim mutation"),
+            ),
         ];
         for mutation in mutations {
             assert_ne!(mutation.semantic_root().bytes(), base_root);
@@ -1187,30 +1510,26 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps command cardinality precedence, registration failures, duplicate roots, canonical Replay ordering, and overlap-policy compatibility in one auditable policy-set matrix"
+    )]
     fn registration_and_command_policy_sets_are_exact() {
         let registry = registry();
-        let output = policy(
+        let output = exact_policy(
             PlatformPathProfileV2::ContentStoreObjectKeyV1,
             RootCapabilityAccessV2::DurableOutput,
             DestinationAdmissionModeV2::Absent,
-            Vec::new(),
-            1,
-            1,
-            1,
+            [1, 1, 1],
             0,
-        )
-        .expect("output");
-        let input = policy(
+        );
+        let input = exact_policy(
             PlatformPathProfileV2::ContentStoreObjectKeyV1,
             RootCapabilityAccessV2::ReadOnlyInput,
             DestinationAdmissionModeV2::Absent,
-            Vec::new(),
-            1,
-            1,
-            1,
+            [1, 1, 1],
             0,
-        )
-        .expect("input");
+        );
         assert!(
             RootCapabilityPolicySetV2::new(RunnerCommandV2::List, Vec::new(), &registry).is_ok()
         );
@@ -1240,53 +1559,65 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            RootCapabilityPolicySetV2::new(
-                RunnerCommandV2::Run,
-                vec![output.clone(), output],
-                &registry
-            )
-            .is_err()
-        );
-
-        let unregistered = policy(
+        let unregistered_for_oversized_set = exact_policy(
             PlatformPathProfileV2::ContentStoreObjectKeyV1,
             RootCapabilityAccessV2::DurableOutput,
             DestinationAdmissionModeV2::Absent,
-            Vec::new(),
-            3,
-            1,
-            1,
+            [3, 1, 1],
             0,
-        )
-        .expect("intrinsically valid");
-        assert!(unregistered.validate_registration(&registry).is_err());
-        let different_overlap = policy(
+        );
+        for oversized_policies in [
+            vec![unregistered_for_oversized_set, input.clone()],
+            vec![output.clone(), output.clone()],
+        ] {
+            let error =
+                RootCapabilityPolicySetV2::new(RunnerCommandV2::Run, oversized_policies, &registry)
+                    .expect_err("command cardinality precedes registration and duplicate checks");
+            assert_eq!(error.kind(), crate::ConstructionErrorKindV2::Incompatible);
+            assert_eq!(
+                error.field(),
+                "root_capability_policy_set.command_cardinality"
+            );
+            assert_eq!(error.expected(), "exactly one DurableOutput policy");
+            assert_eq!(error.observed(), "run/2");
+        }
+
+        for (registration_ids, field) in [
+            ([3, 1, 1], "root_capability_policy.freshness_policy_id"),
+            ([1, 3, 1], "root_capability_policy.revocation_policy_id"),
+            ([1, 1, 3], "root_capability_policy.overlap_policy_id"),
+        ] {
+            let unregistered = exact_policy(
+                PlatformPathProfileV2::ContentStoreObjectKeyV1,
+                RootCapabilityAccessV2::DurableOutput,
+                DestinationAdmissionModeV2::Absent,
+                registration_ids,
+                0,
+            );
+            let error = unregistered
+                .validate_registration(&registry)
+                .expect_err("every unregistered policy ID must refuse");
+            assert_eq!(error.kind(), crate::ConstructionErrorKindV2::UnknownCode);
+            assert_eq!(error.field(), field);
+        }
+        let different_overlap = exact_policy(
             PlatformPathProfileV2::ContentStoreObjectKeyV1,
             RootCapabilityAccessV2::ReadOnlyInput,
             DestinationAdmissionModeV2::Absent,
-            Vec::new(),
-            1,
-            1,
-            2,
+            [1, 1, 2],
             0,
-        )
-        .expect("intrinsically valid");
+        );
         assert!(
             RootCapabilityPolicySetV2::new(
                 RunnerCommandV2::Replay,
                 vec![
-                    policy(
+                    exact_policy(
                         PlatformPathProfileV2::ContentStoreObjectKeyV1,
                         RootCapabilityAccessV2::DurableOutput,
                         DestinationAdmissionModeV2::Absent,
-                        Vec::new(),
-                        1,
-                        1,
-                        1,
+                        [1, 1, 1],
                         0,
-                    )
-                    .expect("output"),
+                    ),
                     different_overlap,
                 ],
                 &registry,

@@ -47,6 +47,23 @@ impl PresentedDrainRootKindV2 {
 /// Each variant accepts only its nominal causal-root type. There is no generic
 /// digest/root payload, profile-filter case, or catch-all case.
 ///
+/// A checked nominal cancellation root enters only its matching cause
+/// variant:
+///
+/// ```
+/// use fs_evidence_runner::identity::CancelledStopRootV2;
+/// use fs_evidence_runner::state::NotRunCauseV2;
+///
+/// let root = CancelledStopRootV2::parse_presented(
+///     CancelledStopRootV2::DESCRIPTOR.role(),
+///     CancelledStopRootV2::DESCRIPTOR.domain(),
+///     &"55".repeat(32),
+/// )
+/// .unwrap();
+/// let cause = NotRunCauseV2::PriorCancelled(root);
+/// assert_eq!(cause.name(), "prior-cancelled");
+/// ```
+///
 /// Swapping nominal roots does not type-check:
 ///
 /// ```compile_fail
@@ -158,6 +175,21 @@ impl NotRunCauseV2 {
 /// semantic data.
 ///
 /// Fields are private, so validation cannot be bypassed with a struct literal:
+///
+/// ```
+/// use fs_evidence_runner::identity::CancelledStopRootV2;
+/// use fs_evidence_runner::state::{NotRunBasisV2, NotRunCauseV2};
+///
+/// let root = CancelledStopRootV2::parse_presented(
+///     CancelledStopRootV2::DESCRIPTOR.role(),
+///     CancelledStopRootV2::DESCRIPTOR.domain(),
+///     &"66".repeat(32),
+/// )
+/// .unwrap();
+/// let basis = NotRunBasisV2::new(NotRunCauseV2::PriorCancelled(root), 2, 5).unwrap();
+/// assert_eq!(basis.lowest_remaining_manifest_ordinal(), 2);
+/// assert_eq!(basis.remaining_case_count(5).unwrap(), 3);
+/// ```
 ///
 /// ```compile_fail
 /// use fs_evidence_runner::state::{NotRunBasisV2, NotRunCauseV2};
@@ -315,6 +347,38 @@ const fn validate_not_run_ordinal_v2(
 ///
 /// Fields are private so callers cannot manufacture a validated terminal
 /// combination without [`validate_state_cell_v2`].
+///
+/// ```
+/// use fs_evidence_runner::catalog::{ProofExitV2, StateBearingRecordRoleV2};
+/// use fs_evidence_runner::state::validate_state_cell_v2;
+///
+/// let cell = validate_state_cell_v2(
+///     StateBearingRecordRoleV2::ExecutedCaseTerminal,
+///     ProofExitV2::Pass,
+///     None,
+///     None,
+///     None,
+/// )
+/// .unwrap();
+/// assert_eq!(cell.state(), ProofExitV2::Pass);
+/// ```
+///
+/// An unvalidated candidate cannot convert directly into a validated terminal
+/// cell:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::catalog::{ProofExitV2, StateBearingRecordRoleV2};
+/// use fs_evidence_runner::state::{StateValidationInputV2, ValidatedStateCellV2};
+///
+/// let candidate = StateValidationInputV2::new(
+///     StateBearingRecordRoleV2::ExecutedCaseTerminal,
+///     ProofExitV2::Pass,
+///     None,
+///     None,
+///     None,
+/// );
+/// let _terminal: ValidatedStateCellV2 = candidate.into();
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedStateCellV2 {
     role: StateBearingRecordRoleV2,
@@ -568,7 +632,6 @@ pub const fn validate_state_cell_v2(
     }
 
     match (diagnostic_for_state(state), diagnostic) {
-        (None, None) => {}
         (None, Some(observed)) => {
             return Err(StateValidationErrorV2::UnexpectedDiagnostic { observed });
         }
@@ -578,11 +641,10 @@ pub const fn validate_state_cell_v2(
         (Some(expected), Some(observed)) if expected.code() != observed.code() => {
             return Err(StateValidationErrorV2::WrongDiagnostic { expected, observed });
         }
-        (Some(_), Some(_)) => {}
+        (None, None) | (Some(_), Some(_)) => {}
     }
 
     match (drain_basis_for(role, state), drain_basis) {
-        (None, None) => {}
         (None, Some(observed)) => {
             return Err(StateValidationErrorV2::UnexpectedDrainBasis { state, observed });
         }
@@ -592,7 +654,7 @@ pub const fn validate_state_cell_v2(
         (Some(expected), Some(observed)) if !same_drain_kind(expected, observed) => {
             return Err(StateValidationErrorV2::WrongDrainBasis { expected, observed });
         }
-        (Some(_), Some(_)) => {}
+        (None, None) | (Some(_), Some(_)) => {}
     }
 
     Ok(ValidatedStateCellV2 {
@@ -1082,7 +1144,6 @@ mod tests {
         }
 
         match (oracle_diagnostic(state), diagnostic) {
-            (None, None) => {}
             (None, Some(observed)) => {
                 return Err(StateValidationErrorV2::UnexpectedDiagnostic { observed });
             }
@@ -1092,11 +1153,10 @@ mod tests {
             (Some(expected), Some(observed)) if expected != observed => {
                 return Err(StateValidationErrorV2::WrongDiagnostic { expected, observed });
             }
-            (Some(_), Some(_)) => {}
+            (None, None) | (Some(_), Some(_)) => {}
         }
 
         match (oracle_drain(role, state), drain) {
-            (None, None) => {}
             (None, Some(observed)) => {
                 return Err(StateValidationErrorV2::UnexpectedDrainBasis { state, observed });
             }
@@ -1106,7 +1166,7 @@ mod tests {
             (Some(expected), Some(observed)) if expected != observed => {
                 return Err(StateValidationErrorV2::WrongDrainBasis { expected, observed });
             }
-            (Some(_), Some(_)) => {}
+            (None, None) | (Some(_), Some(_)) => {}
         }
 
         Ok(())

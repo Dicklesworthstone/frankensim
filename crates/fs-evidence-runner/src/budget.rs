@@ -6,7 +6,10 @@
 //! Neither stage performs I/O or grants execution, storage, or admission
 //! authority.
 
-use crate::catalog::{ArtifactDispositionV2, DigestRoleV2, LogicalUnitV2, RunProfileV2};
+use crate::catalog::{
+    ArtifactDispositionV2, DigestRoleV2, LogicalUnitV2, RepairActionKindV2, RunProfileV2,
+};
+use crate::extension::BaseExtensionRegistryProjectionV2;
 use crate::identity::{DigestValueV2, RunnerBudgetsRootV2};
 use crate::limits::RunnerLimitsV2;
 use fs_blake3::{ContentHash, hash_domain};
@@ -18,34 +21,53 @@ const SECOND_NS: u64 = 1_000_000_000;
 pub const RUNNER_BUDGETS_PROJECTION_DOMAIN_V1: &str =
     "org.frankensim.fs-evidence-runner.runner-budgets.v1";
 
+/// Canonical domain binding a registered-unit budget to the exact extension
+/// registry that established membership.
+pub const RUNNER_BUDGETS_EXTENSION_REGISTRY_BINDING_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.runner-budgets-extension-registry-binding.v1";
+
 /// Exact number of fields in the Runner V2 budget schema.
 pub const RUNNER_BUDGET_FIELD_COUNT_V2: usize = 18;
 
 /// One exact field in the ordered Runner V2 budget schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
-#[allow(
-    missing_docs,
-    reason = "variant semantics are frozen without duplication by RUNNER_BUDGET_DESCRIPTORS_V2"
-)]
 pub enum RunnerBudgetFieldV2 {
+    /// Total wall-clock allowance in nanoseconds.
     WallTimeNs = 1,
+    /// Maximum resident memory in logical bytes.
     MaxResidentBytes = 2,
+    /// Maximum number of child processes over the invocation.
     MaxChildProcesses = 3,
+    /// Maximum number of child processes active concurrently.
     MaxParallelChildren = 4,
+    /// Exact logical-work allowance.
     LogicalWorkLimit = 5,
+    /// Unit that interprets the logical-work allowance.
     LogicalWorkUnit = 6,
+    /// Aggregate lifecycle-document encoded bytes.
     LifecycleEncodedBytes = 7,
+    /// Atomic command-result stdout encoded bytes.
     CommandResultStdoutBytes = 8,
+    /// Aggregate child stdout encoded bytes.
     CombinedChildStdoutBytes = 9,
+    /// Aggregate child stderr encoded bytes.
     CombinedChildStderrBytes = 10,
+    /// Aggregate encoded bytes of published artifacts.
     ArtifactEncodedBytes = 11,
+    /// Aggregate stored bytes of published artifacts.
     ArtifactStoredBytes = 12,
+    /// Aggregate expanded bytes of published artifacts.
     ArtifactExpandedBytes = 13,
+    /// Aggregate stored bytes of the six system publication objects.
     SystemPublicationStoredBytes = 14,
+    /// Whole-publication stored bytes.
     PublicationStoredBytes = 15,
+    /// Stop-observation timeout in nanoseconds.
     StopObservationNs = 16,
+    /// Cancellation-drain timeout in nanoseconds.
     DrainNs = 17,
+    /// Finalization timeout in nanoseconds.
     FinalizeNs = 18,
 }
 
@@ -113,31 +135,35 @@ impl RunnerBudgetFieldV2 {
 
 /// Frozen primitive or tagged-sum width of one budget field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(
-    missing_docs,
-    reason = "variant meanings are the primitive-width names recorded by every descriptor"
-)]
 pub enum RunnerBudgetWidthV2 {
+    /// Unsigned 32-bit integer.
     U32,
+    /// Unsigned 64-bit integer.
     U64,
+    /// Unsigned 128-bit integer.
     U128,
+    /// Closed logical-unit tagged sum with an optional registered identifier.
     LogicalUnitTaggedSum,
 }
 
 /// Unit carried by a budget field and by its deterministic refusals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(
-    missing_docs,
-    reason = "variant meanings are the exact unit names recorded by every descriptor"
-)]
 pub enum RunnerBudgetUnitV2 {
+    /// Nanoseconds.
     Nanoseconds,
+    /// Logical bytes before storage-envelope interpretation.
     LogicalBytes,
+    /// Discrete object or process count.
     Count,
+    /// Exact logical-work magnitude.
     LogicalWork,
+    /// Closed tag interpreting logical work.
     LogicalWorkUnit,
+    /// Canonically encoded bytes.
     EncodedBytes,
+    /// Bytes charged to storage.
     StoredBytes,
+    /// Bytes after deterministic expansion.
     ExpandedBytes,
 }
 
@@ -288,32 +314,66 @@ pub const RUNNER_BUDGET_DESCRIPTORS_V2: [RunnerBudgetDescriptorV2; RUNNER_BUDGET
 
 /// Mutable, unadmitted input for intrinsic budget construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    missing_docs,
-    reason = "public candidate fields are completely described by RUNNER_BUDGET_DESCRIPTORS_V2"
-)]
 pub struct RunnerBudgetsCandidateV2 {
+    /// Candidate total wall-clock allowance in nanoseconds.
     pub wall_time_ns: u64,
+    /// Candidate maximum resident memory in logical bytes.
     pub max_resident_bytes: u64,
+    /// Candidate total child-process count.
     pub max_child_processes: u32,
+    /// Candidate concurrent child-process count.
     pub max_parallel_children: u32,
+    /// Candidate exact logical-work allowance.
     pub logical_work_limit: u128,
+    /// Candidate logical-work unit.
     pub logical_work_unit: LogicalUnitV2,
+    /// Candidate lifecycle-document encoded-byte allowance.
     pub lifecycle_encoded_bytes: u64,
+    /// Candidate atomic command-result stdout allowance.
     pub command_result_stdout_bytes: u64,
+    /// Candidate aggregate child-stdout allowance.
     pub combined_child_stdout_bytes: u64,
+    /// Candidate aggregate child-stderr allowance.
     pub combined_child_stderr_bytes: u64,
+    /// Candidate artifact encoded-byte allowance.
     pub artifact_encoded_bytes: u64,
+    /// Candidate artifact stored-byte allowance.
     pub artifact_stored_bytes: u64,
+    /// Candidate artifact expanded-byte allowance.
     pub artifact_expanded_bytes: u64,
+    /// Candidate system-object stored-byte allowance.
     pub system_publication_stored_bytes: u64,
+    /// Candidate whole-publication stored-byte allowance.
     pub publication_stored_bytes: u64,
+    /// Candidate stop-observation timeout in nanoseconds.
     pub stop_observation_ns: u64,
+    /// Candidate cancellation-drain timeout in nanoseconds.
     pub drain_ns: u64,
+    /// Candidate finalization timeout in nanoseconds.
     pub finalize_ns: u64,
 }
 
 /// Intrinsically valid, immutable Runner V2 budgets.
+///
+/// Admitted values are inspected through typed, read-only accessors:
+///
+/// ```
+/// use fs_evidence_runner::RunnerBudgetsV2;
+///
+/// fn wall_time_ns(budgets: &RunnerBudgetsV2) -> u64 {
+///     budgets.wall_time_ns()
+/// }
+/// ```
+///
+/// A caller cannot post-mutate or widen an intrinsically validated grant:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::RunnerBudgetsV2;
+///
+/// fn widen_wall_time(budgets: &mut RunnerBudgetsV2) {
+///     budgets.wall_time_ns = u64::MAX;
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunnerBudgetsV2 {
     wall_time_ns: u64,
@@ -336,8 +396,42 @@ pub struct RunnerBudgetsV2 {
     finalize_ns: u64,
 }
 
+/// Intrinsically valid budgets whose registered logical-work unit is bound to
+/// the exact extension registry that established membership.
+///
+/// The nested budget retains the frozen 18-field schema unchanged. The
+/// separate binding root prevents the same syntactic registered ID from being
+/// replayed under a different descriptor set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryBoundRunnerBudgetsV2 {
+    budgets: RunnerBudgetsV2,
+    extension_registry_root: ContentHash,
+    binding_root: ContentHash,
+}
+
 /// Contextually admitted budgets. This is still non-authoritative schema data:
 /// it proves only profile/disposition/limit consistency.
+///
+/// The nested immutable budget remains available through a read-only
+/// accessor:
+///
+/// ```
+/// use fs_evidence_runner::AdmittedRunnerBudgetsV2;
+///
+/// fn wall_time_ns(admitted: &AdmittedRunnerBudgetsV2) -> u64 {
+///     admitted.budgets().wall_time_ns()
+/// }
+/// ```
+///
+/// Contextual admission does not expose a cap-widening mutation path:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::AdmittedRunnerBudgetsV2;
+///
+/// fn widen_admitted_wall_time(admitted: &mut AdmittedRunnerBudgetsV2) {
+///     admitted.budgets.wall_time_ns = u64::MAX;
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmittedRunnerBudgetsV2 {
     budgets: RunnerBudgetsV2,
@@ -345,55 +439,81 @@ pub struct AdmittedRunnerBudgetsV2 {
     disposition: ArtifactDispositionV2,
 }
 
+/// Contextually admitted registered-unit budgets retaining their exact
+/// extension-registry membership binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryBoundAdmittedRunnerBudgetsV2 {
+    admitted: AdmittedRunnerBudgetsV2,
+    extension_registry_root: ContentHash,
+    binding_root: ContentHash,
+}
+
 /// Heterogeneous value retained by a budget refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(
-    missing_docs,
-    reason = "variant payloads are the exact frozen widths represented by their names"
-)]
 pub enum RunnerBudgetValueV2 {
+    /// Unsigned 32-bit value.
     U32(u32),
+    /// Unsigned 64-bit value.
     U64(u64),
+    /// Unsigned 128-bit value.
     U128(u128),
+    /// Logical-unit tag and its optional registered identifier.
     LogicalUnit {
+        /// Frozen closed-catalog or registered-unit tag.
         tag: u16,
+        /// Registered identifier, present only for the registered-unit tag.
         registered_id: Option<u16>,
     },
 }
 
 /// Exact expectation retained by a budget refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(
-    missing_docs,
-    reason = "variants are a closed predicate vocabulary whose payloads are self-describing"
-)]
 pub enum RunnerBudgetExpectationV2 {
+    /// The value must be nonzero.
     NonZero,
+    /// The value must be zero.
     Zero,
+    /// The value must not exceed the carried ceiling.
     AtMost(RunnerBudgetValueV2),
+    /// The value must meet or exceed the carried floor.
     AtLeast(RunnerBudgetValueV2),
+    /// The value must equal the carried value.
     Exactly(RunnerBudgetValueV2),
+    /// A registered logical unit must resolve in the exact bound extension
+    /// registry.
+    RegisteredInExtensionRegistry,
 }
 
 /// Deterministic class of a budget refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(
-    missing_docs,
-    reason = "variant names are the stable refusal classes documented by CONTRACT.md"
-)]
 pub enum RunnerBudgetViolationKindV2 {
+    /// An intrinsically required allowance was zero.
     Zero,
+    /// Concurrent children exceeded total children.
     ParallelChildrenExceedTotal,
+    /// Checked addition of timeout components overflowed.
     TimeoutSumOverflow,
+    /// Timeout components exceeded wall time.
     TimeoutSumExceedsWall,
+    /// A profile-owned ceiling was exceeded.
     ProfileCeilingExceeded,
+    /// An admitted Runner limit was exceeded.
     LimitExceeded,
+    /// The selected context requires zero.
     ContextualZeroRequired,
+    /// The selected context requires a nonzero value.
     ContextualNonZeroRequired,
+    /// Atomic stdout could not contain the lifecycle document.
     CommandResultCannotContainLifecycle,
+    /// Stored artifact bytes were below encoded artifact bytes.
     ArtifactStoredBelowEncoded,
+    /// Checked whole-publication addition overflowed.
     PublicationSumOverflow,
+    /// Whole-publication bytes disagreed with the exact component sum.
     PublicationEquationMismatch,
+    /// A syntactic registered logical-work unit was not resolved through an
+    /// exact extension registry.
+    UnregisteredLogicalWorkUnit,
 }
 
 /// Precise, bounded budget refusal.
@@ -457,11 +577,89 @@ impl RunnerBudgetViolationV2 {
     pub const fn owner(&self) -> &'static str {
         "fs-evidence-runner.runner-budgets"
     }
+
+    /// One-based rank of the primary bounded repair recommendation.
+    #[must_use]
+    pub const fn repair_rank(&self) -> u8 {
+        1
+    }
+
+    /// Closed non-executable repair class appropriate to this refusal.
+    #[must_use]
+    pub const fn repair_kind(&self) -> RepairActionKindV2 {
+        match self.expected {
+            RunnerBudgetExpectationV2::AtMost(_) => RepairActionKindV2::ReduceResourceDemand,
+            RunnerBudgetExpectationV2::RegisteredInExtensionRegistry => {
+                RepairActionKindV2::UpdatePolicyOrCapability
+            }
+            RunnerBudgetExpectationV2::NonZero
+            | RunnerBudgetExpectationV2::Zero
+            | RunnerBudgetExpectationV2::AtLeast(_)
+            | RunnerBudgetExpectationV2::Exactly(_) => RepairActionKindV2::ChangeArguments,
+        }
+    }
+
+    /// Stable structured repair target; this is data, not an executable command.
+    #[must_use]
+    pub const fn repair_target(&self) -> &'static str {
+        match self.kind {
+            RunnerBudgetViolationKindV2::TimeoutSumOverflow
+            | RunnerBudgetViolationKindV2::TimeoutSumExceedsWall => {
+                "stop_observation_ns-or-drain_ns-or-finalize_ns"
+            }
+            RunnerBudgetViolationKindV2::PublicationSumOverflow => {
+                "artifact_stored_bytes-or-system_publication_stored_bytes"
+            }
+            _ => self.field.descriptor().name,
+        }
+    }
 }
 
 impl RunnerBudgetsV2 {
-    /// Construct an intrinsically valid, immutable budget value.
+    /// Construct an intrinsically valid, immutable budget value using only
+    /// fixed logical-work units.
+    ///
+    /// A syntactic `LogicalUnitV2::RegisteredUnit` cannot establish registry
+    /// membership on this registry-free path.
     pub fn try_new(candidate: RunnerBudgetsCandidateV2) -> Result<Self, RunnerBudgetViolationV2> {
+        Self::try_new_intrinsic(candidate, None)
+    }
+
+    /// Construct intrinsically valid budgets while resolving a registered
+    /// logical-work unit through one exact extension-registry projection.
+    pub fn try_new_with_extension_registry(
+        candidate: RunnerBudgetsCandidateV2,
+        registry: &BaseExtensionRegistryProjectionV2,
+    ) -> Result<RegistryBoundRunnerBudgetsV2, RunnerBudgetViolationV2> {
+        let budgets = Self::try_new_intrinsic(candidate, Some(registry))?;
+        let extension_registry_root = *registry.root();
+        let binding_root =
+            runner_budgets_extension_registry_binding_root(&budgets, extension_registry_root);
+        Ok(RegistryBoundRunnerBudgetsV2 {
+            budgets,
+            extension_registry_root,
+            binding_root,
+        })
+    }
+
+    fn try_new_intrinsic(
+        candidate: RunnerBudgetsCandidateV2,
+        registry: Option<&BaseExtensionRegistryProjectionV2>,
+    ) -> Result<Self, RunnerBudgetViolationV2> {
+        if let Some(registered_id) = candidate.logical_work_unit.registered_id()
+            && registry.is_none_or(|registry| registry.logical_unit(registered_id).is_err())
+        {
+            return Err(RunnerBudgetViolationV2::new(
+                RunnerBudgetViolationKindV2::UnregisteredLogicalWorkUnit,
+                RunnerBudgetFieldV2::LogicalWorkUnit,
+                RunnerBudgetExpectationV2::RegisteredInExtensionRegistry,
+                RunnerBudgetValueV2::LogicalUnit {
+                    tag: candidate.logical_work_unit.tag(),
+                    registered_id: Some(registered_id),
+                },
+            ));
+        }
+
         for (field, value) in [
             (RunnerBudgetFieldV2::WallTimeNs, candidate.wall_time_ns),
             (
@@ -500,20 +698,19 @@ impl RunnerBudgetsV2 {
             ));
         }
 
-        let timeout_total = candidate
-            .stop_observation_ns
-            .checked_add(candidate.drain_ns)
-            .and_then(|value| value.checked_add(candidate.finalize_ns))
-            .ok_or_else(|| {
-                RunnerBudgetViolationV2::new(
-                    RunnerBudgetViolationKindV2::TimeoutSumOverflow,
-                    RunnerBudgetFieldV2::FinalizeNs,
-                    RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(
-                        candidate.wall_time_ns,
-                    )),
-                    RunnerBudgetValueV2::U64(u64::MAX),
-                )
-            })?;
+        let timeout_total_u128 = u128::from(candidate.stop_observation_ns)
+            + u128::from(candidate.drain_ns)
+            + u128::from(candidate.finalize_ns);
+        let timeout_total = u64::try_from(timeout_total_u128).map_err(|_| {
+            RunnerBudgetViolationV2::new(
+                RunnerBudgetViolationKindV2::TimeoutSumOverflow,
+                RunnerBudgetFieldV2::FinalizeNs,
+                RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U128(u128::from(
+                    candidate.wall_time_ns,
+                ))),
+                RunnerBudgetValueV2::U128(timeout_total_u128),
+            )
+        })?;
         if timeout_total > candidate.wall_time_ns {
             return Err(RunnerBudgetViolationV2::new(
                 RunnerBudgetViolationKindV2::TimeoutSumExceedsWall,
@@ -553,6 +750,22 @@ impl RunnerBudgetsV2 {
         disposition: ArtifactDispositionV2,
         limits: &RunnerLimitsV2,
     ) -> Result<AdmittedRunnerBudgetsV2, RunnerBudgetViolationV2> {
+        self.validate_profile_and_process_context(profile, disposition)?;
+        self.validate_limit_grants(limits)?;
+        self.validate_internal_relations()?;
+        self.validate_disposition_and_publication(disposition)?;
+        Ok(AdmittedRunnerBudgetsV2 {
+            budgets: self,
+            profile,
+            disposition,
+        })
+    }
+
+    fn validate_profile_and_process_context(
+        &self,
+        profile: RunProfileV2,
+        disposition: ArtifactDispositionV2,
+    ) -> Result<(), RunnerBudgetViolationV2> {
         let (max_wall_time_ns, max_resident_bytes, max_parallel, max_children) =
             profile_ceilings(profile);
         require_at_most_u64(
@@ -590,7 +803,13 @@ impl RunnerBudgetsV2 {
                 RunnerBudgetValueV2::U32(0),
             ));
         }
+        Ok(())
+    }
 
+    fn validate_limit_grants(
+        &self,
+        limits: &RunnerLimitsV2,
+    ) -> Result<(), RunnerBudgetViolationV2> {
         require_limit(
             RunnerBudgetFieldV2::LifecycleEncodedBytes,
             self.lifecycle_encoded_bytes,
@@ -636,7 +855,10 @@ impl RunnerBudgetsV2 {
             self.publication_stored_bytes,
             limits.publication_stored_bytes(),
         )?;
+        Ok(())
+    }
 
+    fn validate_internal_relations(&self) -> Result<(), RunnerBudgetViolationV2> {
         if self.command_result_stdout_bytes < self.lifecycle_encoded_bytes {
             return Err(RunnerBudgetViolationV2::new(
                 RunnerBudgetViolationKindV2::CommandResultCannotContainLifecycle,
@@ -657,7 +879,13 @@ impl RunnerBudgetsV2 {
                 RunnerBudgetValueV2::U64(self.artifact_stored_bytes),
             ));
         }
+        Ok(())
+    }
 
+    fn validate_disposition_and_publication(
+        &self,
+        disposition: ArtifactDispositionV2,
+    ) -> Result<(), RunnerBudgetViolationV2> {
         match disposition {
             ArtifactDispositionV2::LifecycleOnlyNoBundle => {
                 for (field, value) in [
@@ -716,12 +944,7 @@ impl RunnerBudgetsV2 {
                 RunnerBudgetValueV2::U64(self.publication_stored_bytes),
             ));
         }
-
-        Ok(AdmittedRunnerBudgetsV2 {
-            budgets: self,
-            profile,
-            disposition,
-        })
+        Ok(())
     }
 
     /// Exact ordered value projection for tests, source closure, and the
@@ -971,6 +1194,71 @@ impl RunnerBudgetsV2 {
     }
 }
 
+impl RegistryBoundRunnerBudgetsV2 {
+    /// Read-only access to the unchanged frozen 18-field budget value.
+    #[must_use]
+    pub const fn budgets(&self) -> &RunnerBudgetsV2 {
+        &self.budgets
+    }
+
+    /// Exact extension-registry projection root that established membership.
+    #[must_use]
+    pub const fn extension_registry_root(&self) -> ContentHash {
+        self.extension_registry_root
+    }
+
+    /// Domain-separated semantic binding of budget and registry roots.
+    #[must_use]
+    pub const fn semantic_binding_root(&self) -> ContentHash {
+        self.binding_root
+    }
+
+    /// Contextually admit the bound budgets without discarding the exact
+    /// registry-membership witness.
+    pub fn admit(
+        self,
+        profile: RunProfileV2,
+        disposition: ArtifactDispositionV2,
+        limits: &RunnerLimitsV2,
+    ) -> Result<RegistryBoundAdmittedRunnerBudgetsV2, RunnerBudgetViolationV2> {
+        Ok(RegistryBoundAdmittedRunnerBudgetsV2 {
+            admitted: self.budgets.admit(profile, disposition, limits)?,
+            extension_registry_root: self.extension_registry_root,
+            binding_root: self.binding_root,
+        })
+    }
+}
+
+impl RegistryBoundAdmittedRunnerBudgetsV2 {
+    /// Read-only contextually admitted budget.
+    #[must_use]
+    pub const fn admitted(&self) -> &AdmittedRunnerBudgetsV2 {
+        &self.admitted
+    }
+
+    /// Exact extension-registry projection root that established membership.
+    #[must_use]
+    pub const fn extension_registry_root(&self) -> ContentHash {
+        self.extension_registry_root
+    }
+
+    /// Domain-separated semantic budget/registry binding.
+    #[must_use]
+    pub const fn semantic_binding_root(&self) -> ContentHash {
+        self.binding_root
+    }
+}
+
+fn runner_budgets_extension_registry_binding_root(
+    budgets: &RunnerBudgetsV2,
+    extension_registry_root: ContentHash,
+) -> ContentHash {
+    let mut bytes = Vec::with_capacity(64);
+    bytes.extend_from_slice(budgets.canonical_projection_root().as_bytes());
+    bytes.extend_from_slice(extension_registry_root.as_bytes());
+    hash_domain(RUNNER_BUDGETS_EXTENSION_REGISTRY_BINDING_DOMAIN_V1, &bytes)
+}
+
 impl AdmittedRunnerBudgetsV2 {
     /// Intrinsically valid budgets admitted by this contextual witness.
     #[must_use]
@@ -1052,21 +1340,29 @@ pub fn checked_publication_stored_bytes(
     artifact_stored_bytes: u64,
     system_publication_stored_bytes: u64,
 ) -> Result<u64, RunnerBudgetViolationV2> {
-    artifact_stored_bytes
-        .checked_add(system_publication_stored_bytes)
-        .ok_or_else(|| {
-            RunnerBudgetViolationV2::new(
-                RunnerBudgetViolationKindV2::PublicationSumOverflow,
-                RunnerBudgetFieldV2::PublicationStoredBytes,
-                RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(u64::MAX)),
-                RunnerBudgetValueV2::U64(artifact_stored_bytes),
-            )
-        })
+    let exact_sum = u128::from(artifact_stored_bytes) + u128::from(system_publication_stored_bytes);
+    u64::try_from(exact_sum).map_err(|_| {
+        RunnerBudgetViolationV2::new(
+            RunnerBudgetViolationKindV2::PublicationSumOverflow,
+            RunnerBudgetFieldV2::PublicationStoredBytes,
+            RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U128(u128::from(u64::MAX))),
+            RunnerBudgetValueV2::U128(exact_sum),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::ArtifactRoleV2;
+    use crate::extension::{
+        BaseExtensionRegistryProjectionV2, RegisteredArtifactRoleDescriptorV2,
+        RegisteredLogicalUnitDescriptorV2,
+    };
+    use crate::identity::NoClaimScopeRootV1;
+    use crate::value::StableTokenV2;
+
+    const TEST_MIB: u64 = 1024 * 1024;
 
     const EXPECTED_NAMES: [&str; RUNNER_BUDGET_FIELD_COUNT_V2] = [
         "wall_time_ns",
@@ -1110,6 +1406,51 @@ mod tests {
         RunnerBudgetWidthV2::U64,
     ];
 
+    const EXPECTED_UNITS: [RunnerBudgetUnitV2; RUNNER_BUDGET_FIELD_COUNT_V2] = [
+        RunnerBudgetUnitV2::Nanoseconds,
+        RunnerBudgetUnitV2::LogicalBytes,
+        RunnerBudgetUnitV2::Count,
+        RunnerBudgetUnitV2::Count,
+        RunnerBudgetUnitV2::LogicalWork,
+        RunnerBudgetUnitV2::LogicalWorkUnit,
+        RunnerBudgetUnitV2::EncodedBytes,
+        RunnerBudgetUnitV2::EncodedBytes,
+        RunnerBudgetUnitV2::EncodedBytes,
+        RunnerBudgetUnitV2::EncodedBytes,
+        RunnerBudgetUnitV2::EncodedBytes,
+        RunnerBudgetUnitV2::StoredBytes,
+        RunnerBudgetUnitV2::ExpandedBytes,
+        RunnerBudgetUnitV2::StoredBytes,
+        RunnerBudgetUnitV2::StoredBytes,
+        RunnerBudgetUnitV2::Nanoseconds,
+        RunnerBudgetUnitV2::Nanoseconds,
+        RunnerBudgetUnitV2::Nanoseconds,
+    ];
+
+    const EXPECTED_DURABLE_VALUES: [RunnerBudgetValueV2; RUNNER_BUDGET_FIELD_COUNT_V2] = [
+        RunnerBudgetValueV2::U64(100_000_000_000),
+        RunnerBudgetValueV2::U64(1_073_741_824),
+        RunnerBudgetValueV2::U32(8),
+        RunnerBudgetValueV2::U32(4),
+        RunnerBudgetValueV2::U128(1_000),
+        RunnerBudgetValueV2::LogicalUnit {
+            tag: 11,
+            registered_id: None,
+        },
+        RunnerBudgetValueV2::U64(1_000),
+        RunnerBudgetValueV2::U64(4_000),
+        RunnerBudgetValueV2::U64(2_000),
+        RunnerBudgetValueV2::U64(1_000),
+        RunnerBudgetValueV2::U64(100),
+        RunnerBudgetValueV2::U64(104),
+        RunnerBudgetValueV2::U64(200),
+        RunnerBudgetValueV2::U64(72),
+        RunnerBudgetValueV2::U64(176),
+        RunnerBudgetValueV2::U64(1_000_000_000),
+        RunnerBudgetValueV2::U64(1_000_000_000),
+        RunnerBudgetValueV2::U64(1_000_000_000),
+    ];
+
     fn durable_candidate() -> RunnerBudgetsCandidateV2 {
         RunnerBudgetsCandidateV2 {
             wall_time_ns: 100 * SECOND_NS,
@@ -1146,6 +1487,31 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the helper compares every independent field of the frozen structured refusal tuple"
+    )]
+    fn assert_refusal_tuple(
+        error: RunnerBudgetViolationV2,
+        kind: RunnerBudgetViolationKindV2,
+        field: RunnerBudgetFieldV2,
+        unit: RunnerBudgetUnitV2,
+        expected: RunnerBudgetExpectationV2,
+        observed: RunnerBudgetValueV2,
+        repair_kind: RepairActionKindV2,
+        repair_target: &str,
+    ) {
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.field(), field);
+        assert_eq!(error.unit(), unit);
+        assert_eq!(error.expected(), expected);
+        assert_eq!(error.observed(), observed);
+        assert_eq!(error.owner(), "fs-evidence-runner.runner-budgets");
+        assert_eq!(error.repair_rank(), 1);
+        assert_eq!(error.repair_kind(), repair_kind);
+        assert_eq!(error.repair_target(), repair_target);
+    }
+
     #[test]
     fn independent_literal_oracle_freezes_all_18_fields_and_widths() {
         assert_eq!(RunnerBudgetFieldV2::ALL.len(), 18);
@@ -1160,20 +1526,62 @@ mod tests {
             assert_eq!(descriptor.field, field);
             assert_eq!(descriptor.name, EXPECTED_NAMES[index]);
             assert_eq!(descriptor.width, EXPECTED_WIDTHS[index]);
+            assert_eq!(descriptor.unit, EXPECTED_UNITS[index]);
         }
         assert_eq!(RunnerBudgetFieldV2::from_ordinal(0), None);
         assert_eq!(RunnerBudgetFieldV2::from_ordinal(19), None);
+
+        let budgets = RunnerBudgetsV2::try_new(durable_candidate()).expect("literal fixture");
+        for (field, expected) in RunnerBudgetFieldV2::ALL
+            .into_iter()
+            .zip(EXPECTED_DURABLE_VALUES)
+        {
+            assert_eq!(
+                budgets.value(field),
+                expected,
+                "{}",
+                field.descriptor().name
+            );
+        }
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps every intrinsic nonzero relation and timeout-arithmetic boundary in one literal refusal oracle"
+    )]
     fn intrinsic_nonzero_relations_and_timeout_arithmetic_refuse_precisely() {
-        for field in [
-            RunnerBudgetFieldV2::WallTimeNs,
-            RunnerBudgetFieldV2::MaxResidentBytes,
-            RunnerBudgetFieldV2::CommandResultStdoutBytes,
-            RunnerBudgetFieldV2::StopObservationNs,
-            RunnerBudgetFieldV2::DrainNs,
-            RunnerBudgetFieldV2::FinalizeNs,
+        for (field, unit, repair_target) in [
+            (
+                RunnerBudgetFieldV2::WallTimeNs,
+                RunnerBudgetUnitV2::Nanoseconds,
+                "wall_time_ns",
+            ),
+            (
+                RunnerBudgetFieldV2::MaxResidentBytes,
+                RunnerBudgetUnitV2::LogicalBytes,
+                "max_resident_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::CommandResultStdoutBytes,
+                RunnerBudgetUnitV2::EncodedBytes,
+                "command_result_stdout_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::StopObservationNs,
+                RunnerBudgetUnitV2::Nanoseconds,
+                "stop_observation_ns",
+            ),
+            (
+                RunnerBudgetFieldV2::DrainNs,
+                RunnerBudgetUnitV2::Nanoseconds,
+                "drain_ns",
+            ),
+            (
+                RunnerBudgetFieldV2::FinalizeNs,
+                RunnerBudgetUnitV2::Nanoseconds,
+                "finalize_ns",
+            ),
         ] {
             let mut candidate = durable_candidate();
             match field {
@@ -1188,16 +1596,30 @@ mod tests {
                 _ => unreachable!(),
             }
             let error = RunnerBudgetsV2::try_new(candidate).unwrap_err();
-            assert_eq!(error.kind(), RunnerBudgetViolationKindV2::Zero);
-            assert_eq!(error.field(), field);
+            assert_refusal_tuple(
+                error,
+                RunnerBudgetViolationKindV2::Zero,
+                field,
+                unit,
+                RunnerBudgetExpectationV2::NonZero,
+                RunnerBudgetValueV2::U64(0),
+                RepairActionKindV2::ChangeArguments,
+                repair_target,
+            );
         }
 
         let mut candidate = durable_candidate();
         candidate.max_parallel_children = 9;
         let error = RunnerBudgetsV2::try_new(candidate).unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::ParallelChildrenExceedTotal
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::ParallelChildrenExceedTotal,
+            RunnerBudgetFieldV2::MaxParallelChildren,
+            RunnerBudgetUnitV2::Count,
+            RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U32(8)),
+            RunnerBudgetValueV2::U32(9),
+            RepairActionKindV2::ReduceResourceDemand,
+            "max_parallel_children",
         );
 
         let mut candidate = durable_candidate();
@@ -1205,77 +1627,170 @@ mod tests {
         candidate.drain_ns = 1;
         candidate.finalize_ns = 1;
         let error = RunnerBudgetsV2::try_new(candidate).unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::TimeoutSumOverflow
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::TimeoutSumOverflow,
+            RunnerBudgetFieldV2::FinalizeNs,
+            RunnerBudgetUnitV2::Nanoseconds,
+            RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U128(u128::from(
+                candidate.wall_time_ns,
+            ))),
+            RunnerBudgetValueV2::U128(u128::from(u64::MAX) + 1),
+            RepairActionKindV2::ReduceResourceDemand,
+            "stop_observation_ns-or-drain_ns-or-finalize_ns",
         );
 
         let mut candidate = durable_candidate();
         candidate.wall_time_ns = 3 * SECOND_NS - 1;
         let error = RunnerBudgetsV2::try_new(candidate).unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::TimeoutSumExceedsWall
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::TimeoutSumExceedsWall,
+            RunnerBudgetFieldV2::FinalizeNs,
+            RunnerBudgetUnitV2::Nanoseconds,
+            RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(3 * SECOND_NS - 1)),
+            RunnerBudgetValueV2::U64(3 * SECOND_NS),
+            RepairActionKindV2::ReduceResourceDemand,
+            "stop_observation_ns-or-drain_ns-or-finalize_ns",
         );
+
+        let mut exact = durable_candidate();
+        exact.wall_time_ns = 3 * SECOND_NS;
+        RunnerBudgetsV2::try_new(exact).expect("timeout sum equal to wall time");
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test exhaustively couples both profiles with all exact and one-over contextual ceilings"
+    )]
     fn profile_boundaries_are_exact_and_one_over_refuses() {
-        let limits = RunnerLimitsV2::base(RunProfileV2::Smoke);
-        let mut candidate = durable_candidate();
-        candidate.wall_time_ns = 900 * SECOND_NS;
-        candidate.max_resident_bytes = 16 * GIB;
-        candidate.max_parallel_children = 32;
-        candidate.max_child_processes = 256;
-        RunnerBudgetsV2::try_new(candidate)
-            .unwrap()
-            .admit(
-                RunProfileV2::Smoke,
-                ArtifactDispositionV2::DurableBundleRequired,
-                &limits,
-            )
-            .unwrap();
-
-        for field in [
-            RunnerBudgetFieldV2::WallTimeNs,
-            RunnerBudgetFieldV2::MaxResidentBytes,
-            RunnerBudgetFieldV2::MaxChildProcesses,
-            RunnerBudgetFieldV2::MaxParallelChildren,
+        for (profile, wall_time_ns, resident_bytes, parallel_children, total_children) in [
+            (RunProfileV2::Smoke, 900 * SECOND_NS, 16 * GIB, 32, 256),
+            (RunProfileV2::Full, 86_400 * SECOND_NS, 128 * GIB, 64, 256),
         ] {
+            let limits = RunnerLimitsV2::base(profile);
             let mut candidate = durable_candidate();
-            match field {
-                RunnerBudgetFieldV2::WallTimeNs => {
-                    candidate.wall_time_ns = 900 * SECOND_NS + 1;
-                }
-                RunnerBudgetFieldV2::MaxResidentBytes => {
-                    candidate.max_resident_bytes = 16 * GIB + 1;
-                }
-                RunnerBudgetFieldV2::MaxChildProcesses => {
-                    candidate.max_child_processes = 257;
-                }
-                RunnerBudgetFieldV2::MaxParallelChildren => {
-                    candidate.max_child_processes = 256;
-                    candidate.max_parallel_children = 33;
-                }
-                _ => unreachable!(),
-            }
-            let error = RunnerBudgetsV2::try_new(candidate)
-                .unwrap()
+            candidate.wall_time_ns = wall_time_ns;
+            candidate.max_resident_bytes = resident_bytes;
+            candidate.max_parallel_children = parallel_children;
+            candidate.max_child_processes = total_children;
+            let exact = RunnerBudgetsV2::try_new(candidate)
+                .expect("intrinsically valid exact profile vector")
                 .admit(
-                    RunProfileV2::Smoke,
+                    profile,
                     ArtifactDispositionV2::DurableBundleRequired,
                     &limits,
                 )
-                .unwrap_err();
+                .expect("all four exact profile ceilings");
+            assert_eq!(exact.profile(), profile);
             assert_eq!(
-                error.kind(),
-                RunnerBudgetViolationKindV2::ProfileCeilingExceeded
+                exact.disposition(),
+                ArtifactDispositionV2::DurableBundleRequired
             );
-            assert_eq!(error.field(), field);
+            assert_eq!(exact.budgets().wall_time_ns(), wall_time_ns);
+            assert_eq!(exact.budgets().max_resident_bytes(), resident_bytes);
+            assert_eq!(exact.budgets().max_parallel_children(), parallel_children);
+            assert_eq!(exact.budgets().max_child_processes(), total_children);
+
+            for field in [
+                RunnerBudgetFieldV2::WallTimeNs,
+                RunnerBudgetFieldV2::MaxResidentBytes,
+                RunnerBudgetFieldV2::MaxChildProcesses,
+                RunnerBudgetFieldV2::MaxParallelChildren,
+            ] {
+                let mut candidate = durable_candidate();
+                match field {
+                    RunnerBudgetFieldV2::WallTimeNs => {
+                        candidate.wall_time_ns = wall_time_ns + 1;
+                    }
+                    RunnerBudgetFieldV2::MaxResidentBytes => {
+                        candidate.max_resident_bytes = resident_bytes + 1;
+                    }
+                    RunnerBudgetFieldV2::MaxChildProcesses => {
+                        candidate.max_child_processes = total_children + 1;
+                    }
+                    RunnerBudgetFieldV2::MaxParallelChildren => {
+                        candidate.max_child_processes = total_children;
+                        candidate.max_parallel_children = parallel_children + 1;
+                    }
+                    _ => unreachable!(),
+                }
+                let error = RunnerBudgetsV2::try_new(candidate)
+                    .expect("one-over profile vector remains intrinsically valid")
+                    .admit(
+                        profile,
+                        ArtifactDispositionV2::DurableBundleRequired,
+                        &limits,
+                    )
+                    .expect_err("one-over profile ceiling");
+                assert_eq!(
+                    error.kind(),
+                    RunnerBudgetViolationKindV2::ProfileCeilingExceeded
+                );
+                assert_eq!(error.field(), field);
+                assert_eq!(error.unit(), field.descriptor().unit);
+                let (expected, observed) = match field {
+                    RunnerBudgetFieldV2::WallTimeNs => (
+                        RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(wall_time_ns)),
+                        RunnerBudgetValueV2::U64(wall_time_ns + 1),
+                    ),
+                    RunnerBudgetFieldV2::MaxResidentBytes => (
+                        RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(resident_bytes)),
+                        RunnerBudgetValueV2::U64(resident_bytes + 1),
+                    ),
+                    RunnerBudgetFieldV2::MaxChildProcesses => (
+                        RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U32(total_children)),
+                        RunnerBudgetValueV2::U32(total_children + 1),
+                    ),
+                    RunnerBudgetFieldV2::MaxParallelChildren => (
+                        RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U32(
+                            parallel_children,
+                        )),
+                        RunnerBudgetValueV2::U32(parallel_children + 1),
+                    ),
+                    _ => unreachable!(),
+                };
+                assert_eq!(error.expected(), expected);
+                assert_eq!(error.observed(), observed);
+                assert_eq!(error.owner(), "fs-evidence-runner.runner-budgets");
+            }
         }
+
+        let shared = RunnerBudgetsV2::try_new(durable_candidate())
+            .expect("one intrinsic vector valid for both profiles");
+        let smoke = shared
+            .admit(
+                RunProfileV2::Smoke,
+                ArtifactDispositionV2::DurableBundleRequired,
+                &RunnerLimitsV2::base(RunProfileV2::Smoke),
+            )
+            .expect("shared vector is Smoke-admissible");
+        let full = shared
+            .admit(
+                RunProfileV2::Full,
+                ArtifactDispositionV2::DurableBundleRequired,
+                &RunnerLimitsV2::base(RunProfileV2::Full),
+            )
+            .expect("shared vector is Full-admissible");
+        assert_eq!(
+            smoke.budgets().semantic_root(),
+            full.budgets().semantic_root(),
+            "intrinsic budget identity is context-free"
+        );
+        assert_ne!(
+            smoke, full,
+            "profile remains an identity-sensitive field of contextual admission"
+        );
+        assert_eq!(smoke.profile(), RunProfileV2::Smoke);
+        assert_eq!(full.profile(), RunProfileV2::Full);
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test is the single exhaustive oracle for lifecycle-only zero rules and durable publication algebra"
+    )]
     fn disposition_zero_rules_and_publication_equation_are_exact() {
         let limits = RunnerLimitsV2::base(RunProfileV2::Smoke);
         let admitted = RunnerBudgetsV2::try_new(lifecycle_candidate())
@@ -1291,17 +1806,116 @@ mod tests {
             ArtifactDispositionV2::LifecycleOnlyNoBundle
         );
 
-        let error = RunnerBudgetsV2::try_new(durable_candidate())
+        for (field, unit, repair_target) in [
+            (
+                RunnerBudgetFieldV2::ArtifactEncodedBytes,
+                RunnerBudgetUnitV2::EncodedBytes,
+                "artifact_encoded_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::ArtifactStoredBytes,
+                RunnerBudgetUnitV2::StoredBytes,
+                "artifact_stored_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::ArtifactExpandedBytes,
+                RunnerBudgetUnitV2::ExpandedBytes,
+                "artifact_expanded_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::SystemPublicationStoredBytes,
+                RunnerBudgetUnitV2::StoredBytes,
+                "system_publication_stored_bytes",
+            ),
+            (
+                RunnerBudgetFieldV2::PublicationStoredBytes,
+                RunnerBudgetUnitV2::StoredBytes,
+                "publication_stored_bytes",
+            ),
+        ] {
+            let mut candidate = lifecycle_candidate();
+            match field {
+                RunnerBudgetFieldV2::ArtifactEncodedBytes => {
+                    candidate.artifact_encoded_bytes = 1;
+                    candidate.artifact_stored_bytes = 1;
+                    candidate.publication_stored_bytes = 1;
+                }
+                RunnerBudgetFieldV2::ArtifactStoredBytes => {
+                    candidate.artifact_stored_bytes = 1;
+                    candidate.publication_stored_bytes = 1;
+                }
+                RunnerBudgetFieldV2::ArtifactExpandedBytes => {
+                    candidate.artifact_expanded_bytes = 1;
+                }
+                RunnerBudgetFieldV2::SystemPublicationStoredBytes => {
+                    candidate.system_publication_stored_bytes = 1;
+                    candidate.publication_stored_bytes = 1;
+                }
+                RunnerBudgetFieldV2::PublicationStoredBytes => {
+                    candidate.publication_stored_bytes = 1;
+                }
+                _ => unreachable!(),
+            }
+            let error = RunnerBudgetsV2::try_new(candidate)
+                .unwrap()
+                .admit(
+                    RunProfileV2::Smoke,
+                    ArtifactDispositionV2::LifecycleOnlyNoBundle,
+                    &limits,
+                )
+                .unwrap_err();
+            assert_refusal_tuple(
+                error,
+                RunnerBudgetViolationKindV2::ContextualZeroRequired,
+                field,
+                unit,
+                RunnerBudgetExpectationV2::Zero,
+                RunnerBudgetValueV2::U64(1),
+                RepairActionKindV2::ChangeArguments,
+                repair_target,
+            );
+        }
+
+        let mut candidate = durable_candidate();
+        candidate.command_result_stdout_bytes = candidate.lifecycle_encoded_bytes - 1;
+        let error = RunnerBudgetsV2::try_new(candidate)
             .unwrap()
             .admit(
                 RunProfileV2::Smoke,
-                ArtifactDispositionV2::LifecycleOnlyNoBundle,
+                ArtifactDispositionV2::DurableBundleRequired,
                 &limits,
             )
             .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::ContextualZeroRequired
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::CommandResultCannotContainLifecycle,
+            RunnerBudgetFieldV2::CommandResultStdoutBytes,
+            RunnerBudgetUnitV2::EncodedBytes,
+            RunnerBudgetExpectationV2::AtLeast(RunnerBudgetValueV2::U64(1_000)),
+            RunnerBudgetValueV2::U64(999),
+            RepairActionKindV2::ChangeArguments,
+            "command_result_stdout_bytes",
+        );
+
+        let mut candidate = durable_candidate();
+        candidate.artifact_stored_bytes = candidate.artifact_encoded_bytes - 1;
+        let error = RunnerBudgetsV2::try_new(candidate)
+            .unwrap()
+            .admit(
+                RunProfileV2::Smoke,
+                ArtifactDispositionV2::DurableBundleRequired,
+                &limits,
+            )
+            .unwrap_err();
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::ArtifactStoredBelowEncoded,
+            RunnerBudgetFieldV2::ArtifactStoredBytes,
+            RunnerBudgetUnitV2::StoredBytes,
+            RunnerBudgetExpectationV2::AtLeast(RunnerBudgetValueV2::U64(100)),
+            RunnerBudgetValueV2::U64(99),
+            RepairActionKindV2::ChangeArguments,
+            "artifact_stored_bytes",
         );
 
         let mut candidate = durable_candidate();
@@ -1314,9 +1928,15 @@ mod tests {
                 &limits,
             )
             .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::PublicationEquationMismatch
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::PublicationEquationMismatch,
+            RunnerBudgetFieldV2::PublicationStoredBytes,
+            RunnerBudgetUnitV2::StoredBytes,
+            RunnerBudgetExpectationV2::Exactly(RunnerBudgetValueV2::U64(176)),
+            RunnerBudgetValueV2::U64(175),
+            RepairActionKindV2::ChangeArguments,
+            "publication_stored_bytes",
         );
 
         let mut candidate = durable_candidate();
@@ -1330,13 +1950,45 @@ mod tests {
                 &limits,
             )
             .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            RunnerBudgetViolationKindV2::ContextualNonZeroRequired
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::ContextualNonZeroRequired,
+            RunnerBudgetFieldV2::MaxChildProcesses,
+            RunnerBudgetUnitV2::Count,
+            RunnerBudgetExpectationV2::NonZero,
+            RunnerBudgetValueV2::U32(0),
+            RepairActionKindV2::ChangeArguments,
+            "max_child_processes",
+        );
+
+        let mut candidate = durable_candidate();
+        candidate.system_publication_stored_bytes = 0;
+        candidate.publication_stored_bytes = candidate.artifact_stored_bytes;
+        let error = RunnerBudgetsV2::try_new(candidate)
+            .unwrap()
+            .admit(
+                RunProfileV2::Smoke,
+                ArtifactDispositionV2::DurableBundleRequired,
+                &limits,
+            )
+            .unwrap_err();
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::ContextualNonZeroRequired,
+            RunnerBudgetFieldV2::SystemPublicationStoredBytes,
+            RunnerBudgetUnitV2::StoredBytes,
+            RunnerBudgetExpectationV2::NonZero,
+            RunnerBudgetValueV2::U64(0),
+            RepairActionKindV2::ChangeArguments,
+            "system_publication_stored_bytes",
         );
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test intentionally enumerates every independently admitted output grant and its exact limit refusal tuple"
+    )]
     fn every_output_grant_is_checked_against_the_admitted_limits() {
         let limits = RunnerLimitsV2::base(RunProfileV2::Smoke);
         for field in [
@@ -1351,49 +2003,98 @@ mod tests {
             RunnerBudgetFieldV2::PublicationStoredBytes,
         ] {
             let mut candidate = durable_candidate();
-            match field {
+            let (ceiling, unit, repair_target) = match field {
                 RunnerBudgetFieldV2::LifecycleEncodedBytes => {
-                    candidate.lifecycle_encoded_bytes =
-                        limits.lifecycle_document_encoded_bytes() + 1;
+                    let ceiling = limits.lifecycle_document_encoded_bytes();
+                    candidate.lifecycle_encoded_bytes = ceiling + 1;
                     candidate.command_result_stdout_bytes = candidate.lifecycle_encoded_bytes;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::EncodedBytes,
+                        "lifecycle_encoded_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::CommandResultStdoutBytes => {
-                    candidate.command_result_stdout_bytes =
-                        limits.command_result_stdout_bytes() + 1;
+                    let ceiling = limits.command_result_stdout_bytes();
+                    candidate.command_result_stdout_bytes = ceiling + 1;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::EncodedBytes,
+                        "command_result_stdout_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::CombinedChildStdoutBytes => {
-                    candidate.combined_child_stdout_bytes =
-                        limits.combined_child_stdout_bytes() + 1;
+                    let ceiling = limits.combined_child_stdout_bytes();
+                    candidate.combined_child_stdout_bytes = ceiling + 1;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::EncodedBytes,
+                        "combined_child_stdout_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::CombinedChildStderrBytes => {
-                    candidate.combined_child_stderr_bytes =
-                        limits.combined_child_stderr_bytes() + 1;
+                    let ceiling = limits.combined_child_stderr_bytes();
+                    candidate.combined_child_stderr_bytes = ceiling + 1;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::EncodedBytes,
+                        "combined_child_stderr_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::ArtifactEncodedBytes => {
-                    candidate.artifact_encoded_bytes = limits.bundle_encoded_bytes() + 1;
+                    let ceiling = limits.bundle_encoded_bytes();
+                    candidate.artifact_encoded_bytes = ceiling + 1;
                     candidate.artifact_stored_bytes = candidate.artifact_encoded_bytes;
                     candidate.publication_stored_bytes =
                         candidate.artifact_stored_bytes + candidate.system_publication_stored_bytes;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::EncodedBytes,
+                        "artifact_encoded_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::ArtifactStoredBytes => {
-                    candidate.artifact_stored_bytes = limits.artifact_stored_aggregate_bytes() + 1;
+                    let ceiling = limits.artifact_stored_aggregate_bytes();
+                    candidate.artifact_stored_bytes = ceiling + 1;
                     candidate.publication_stored_bytes =
                         candidate.artifact_stored_bytes + candidate.system_publication_stored_bytes;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::StoredBytes,
+                        "artifact_stored_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::ArtifactExpandedBytes => {
-                    candidate.artifact_expanded_bytes = limits.bundle_expanded_bytes() + 1;
+                    let ceiling = limits.bundle_expanded_bytes();
+                    candidate.artifact_expanded_bytes = ceiling + 1;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::ExpandedBytes,
+                        "artifact_expanded_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::SystemPublicationStoredBytes => {
-                    candidate.system_publication_stored_bytes =
-                        limits.system_publication_stored_bytes() + 1;
+                    let ceiling = limits.system_publication_stored_bytes();
+                    candidate.system_publication_stored_bytes = ceiling + 1;
                     candidate.publication_stored_bytes =
                         candidate.artifact_stored_bytes + candidate.system_publication_stored_bytes;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::StoredBytes,
+                        "system_publication_stored_bytes",
+                    )
                 }
                 RunnerBudgetFieldV2::PublicationStoredBytes => {
-                    candidate.publication_stored_bytes = limits.publication_stored_bytes() + 1;
+                    let ceiling = limits.publication_stored_bytes();
+                    candidate.publication_stored_bytes = ceiling + 1;
+                    (
+                        ceiling,
+                        RunnerBudgetUnitV2::StoredBytes,
+                        "publication_stored_bytes",
+                    )
                 }
                 _ => unreachable!(),
-            }
+            };
             let error = RunnerBudgetsV2::try_new(candidate)
                 .unwrap()
                 .admit(
@@ -1402,28 +2103,144 @@ mod tests {
                     &limits,
                 )
                 .unwrap_err();
-            assert_eq!(error.kind(), RunnerBudgetViolationKindV2::LimitExceeded);
-            assert_eq!(error.field(), field);
+            let expected_ceiling = match field {
+                RunnerBudgetFieldV2::LifecycleEncodedBytes => 4 * TEST_MIB,
+                RunnerBudgetFieldV2::CommandResultStdoutBytes => 5 * TEST_MIB,
+                RunnerBudgetFieldV2::CombinedChildStdoutBytes => 16 * TEST_MIB,
+                RunnerBudgetFieldV2::CombinedChildStderrBytes => TEST_MIB / 4,
+                RunnerBudgetFieldV2::ArtifactEncodedBytes
+                | RunnerBudgetFieldV2::ArtifactExpandedBytes => 64 * TEST_MIB,
+                RunnerBudgetFieldV2::ArtifactStoredBytes => 65 * TEST_MIB,
+                RunnerBudgetFieldV2::SystemPublicationStoredBytes => 8 * TEST_MIB,
+                RunnerBudgetFieldV2::PublicationStoredBytes => 73 * TEST_MIB,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                ceiling, expected_ceiling,
+                "{repair_target} Smoke ceiling drifted from the literal refusal oracle",
+            );
+            assert_refusal_tuple(
+                error,
+                RunnerBudgetViolationKindV2::LimitExceeded,
+                field,
+                unit,
+                RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U64(expected_ceiling)),
+                RunnerBudgetValueV2::U64(expected_ceiling + 1),
+                RepairActionKindV2::ReduceResourceDemand,
+                repair_target,
+            );
         }
     }
 
     #[test]
-    fn logical_work_is_exact_u128_with_a_tagged_unit() {
+    fn logical_work_is_exact_u128_and_registered_units_require_exact_registry_membership() {
         let mut candidate = durable_candidate();
         candidate.logical_work_limit = u128::MAX;
         candidate.logical_work_unit = LogicalUnitV2::from_tag(16, Some(65_535)).unwrap();
-        let budgets = RunnerBudgetsV2::try_new(candidate).unwrap();
-        assert_eq!(budgets.logical_work_limit(), u128::MAX);
+        let error = RunnerBudgetsV2::try_new(candidate).expect_err("bare registered unit");
+        assert_refusal_tuple(
+            error,
+            RunnerBudgetViolationKindV2::UnregisteredLogicalWorkUnit,
+            RunnerBudgetFieldV2::LogicalWorkUnit,
+            RunnerBudgetUnitV2::LogicalWorkUnit,
+            RunnerBudgetExpectationV2::RegisteredInExtensionRegistry,
+            RunnerBudgetValueV2::LogicalUnit {
+                tag: 16,
+                registered_id: Some(65_535),
+            },
+            RepairActionKindV2::UpdatePolicyOrCapability,
+            "logical_work_unit",
+        );
+
+        let no_claim = NoClaimScopeRootV1::parse_presented(
+            DigestRoleV2::ClaimScope,
+            NoClaimScopeRootV1::DESCRIPTOR.domain(),
+            &"55".repeat(32),
+        )
+        .unwrap();
+        let name = StableTokenV2::new("org.example.unit.work").unwrap();
+        let owner = StableTokenV2::new("org.example.owner").unwrap();
+        let same_numeric_wrong_category = RegisteredArtifactRoleDescriptorV2::new(
+            ArtifactRoleV2::from_tag(8, Some(65_535)).unwrap(),
+            StableTokenV2::new("org.example.role.work").unwrap(),
+            owner.clone(),
+            no_claim.clone(),
+        )
+        .unwrap();
+        let limits = RunnerLimitsV2::base(RunProfileV2::Smoke);
+        let wrong_category = BaseExtensionRegistryProjectionV2::try_new(
+            &limits,
+            &[same_numeric_wrong_category],
+            &[],
+            &[],
+        )
+        .unwrap();
         assert_eq!(
-            budgets.logical_work_unit(),
+            RunnerBudgetsV2::try_new_with_extension_registry(candidate, &wrong_category)
+                .expect_err("same numeric ID in a role namespace")
+                .kind(),
+            RunnerBudgetViolationKindV2::UnregisteredLogicalWorkUnit
+        );
+
+        let descriptor = RegisteredLogicalUnitDescriptorV2::new(
+            candidate.logical_work_unit,
+            name,
+            owner,
+            no_claim,
+        )
+        .unwrap();
+        let registry =
+            BaseExtensionRegistryProjectionV2::try_new(&limits, &[], &[descriptor], &[]).unwrap();
+        let bound = RunnerBudgetsV2::try_new_with_extension_registry(candidate, &registry).unwrap();
+        assert_eq!(bound.budgets().logical_work_limit(), u128::MAX);
+        assert_eq!(
+            bound.budgets().logical_work_unit(),
             LogicalUnitV2::from_tag(16, Some(65_535)).unwrap()
         );
-        let projection = budgets.canonical_projection();
+        assert_eq!(bound.extension_registry_root(), *registry.root());
+        let projection = bound.budgets().canonical_projection();
         assert!(
             projection
                 .windows(4)
                 .any(|window| window == [0, 16, 255, 255])
         );
+
+        let alternate_descriptor = RegisteredLogicalUnitDescriptorV2::new(
+            candidate.logical_work_unit,
+            StableTokenV2::new("org.example.unit.work").unwrap(),
+            StableTokenV2::new("org.example.alternate-owner").unwrap(),
+            NoClaimScopeRootV1::parse_presented(
+                DigestRoleV2::ClaimScope,
+                NoClaimScopeRootV1::DESCRIPTOR.domain(),
+                &"55".repeat(32),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let alternate_registry =
+            BaseExtensionRegistryProjectionV2::try_new(&limits, &[], &[alternate_descriptor], &[])
+                .unwrap();
+        let alternate_bound =
+            RunnerBudgetsV2::try_new_with_extension_registry(candidate, &alternate_registry)
+                .unwrap();
+        assert_eq!(
+            bound.budgets().semantic_root(),
+            alternate_bound.budgets().semantic_root(),
+            "the frozen 18-field budget identity remains unchanged"
+        );
+        assert_ne!(
+            bound.semantic_binding_root(),
+            alternate_bound.semantic_binding_root(),
+            "registry descriptor drift must move the enclosing membership binding"
+        );
+        let admitted = bound
+            .admit(
+                RunProfileV2::Smoke,
+                ArtifactDispositionV2::DurableBundleRequired,
+                &limits,
+            )
+            .expect("registry-bound budget admission");
+        assert_eq!(admitted.extension_registry_root(), *registry.root());
     }
 
     #[test]
@@ -1485,6 +2302,18 @@ mod tests {
                 RunnerBudgetFieldV2::FinalizeNs => candidate.finalize_ns += 1,
             }
             let mutated = RunnerBudgetsV2::try_new(candidate).unwrap();
+            let changed_fields = RunnerBudgetFieldV2::ALL
+                .into_iter()
+                .filter(|candidate_field| {
+                    mutated.value(*candidate_field) != base.value(*candidate_field)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                changed_fields,
+                vec![field],
+                "{} mutation must change exactly its own typed budget field",
+                field.descriptor().name
+            );
             assert_ne!(
                 mutated.canonical_projection(),
                 base_projection,
@@ -1519,6 +2348,12 @@ mod tests {
         );
         assert_eq!(error.observed(), RunnerBudgetValueV2::U32(9));
         assert_eq!(error.owner(), "fs-evidence-runner.runner-budgets");
+        assert_eq!(error.repair_rank(), 1);
+        assert_eq!(
+            error.repair_kind(),
+            RepairActionKindV2::ReduceResourceDemand
+        );
+        assert_eq!(error.repair_target(), "max_parallel_children");
     }
 
     #[test]
@@ -1541,6 +2376,46 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), RunnerBudgetViolationKindV2::LimitExceeded);
 
+        let error = checked_publication_stored_bytes(u64::MAX, 1).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            RunnerBudgetViolationKindV2::PublicationSumOverflow
+        );
+        assert_eq!(error.field(), RunnerBudgetFieldV2::PublicationStoredBytes);
+        assert_eq!(error.unit(), RunnerBudgetUnitV2::StoredBytes);
+        assert_eq!(
+            error.expected(),
+            RunnerBudgetExpectationV2::AtMost(RunnerBudgetValueV2::U128(u128::from(u64::MAX,)))
+        );
+        assert_eq!(
+            error.observed(),
+            RunnerBudgetValueV2::U128(u128::from(u64::MAX) + 1)
+        );
+        assert_eq!(error.owner(), "fs-evidence-runner.runner-budgets");
+        assert_eq!(error.repair_rank(), 1);
+        assert_eq!(
+            error.repair_kind(),
+            RepairActionKindV2::ReduceResourceDemand
+        );
+        assert_eq!(
+            error.repair_target(),
+            "artifact_stored_bytes-or-system_publication_stored_bytes"
+        );
+    }
+
+    #[test]
+    fn publication_accounting_accepts_zero_one_exact_and_maximum_boundaries() {
+        assert_eq!(checked_publication_stored_bytes(0, 0).unwrap(), 0);
+        assert_eq!(checked_publication_stored_bytes(1, 0).unwrap(), 1);
+        assert_eq!(checked_publication_stored_bytes(0, 1).unwrap(), 1);
+        assert_eq!(
+            checked_publication_stored_bytes(u64::MAX - 1, 1).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            checked_publication_stored_bytes(u64::MAX, 0).unwrap(),
+            u64::MAX
+        );
         let error = checked_publication_stored_bytes(u64::MAX, 1).unwrap_err();
         assert_eq!(
             error.kind(),

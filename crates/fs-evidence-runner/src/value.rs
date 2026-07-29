@@ -83,6 +83,34 @@ pub enum ValueError {
 ///
 /// The denominator is nonzero, and every value is stored in lowest terms.
 /// Private fields prevent bypassing the checked constructors.
+///
+/// ```
+/// use fs_evidence_runner::RationalV2;
+///
+/// let value = RationalV2::new(6, 8).unwrap();
+/// assert_eq!(value.numerator(), 3);
+/// assert_eq!(value.denominator(), 4);
+/// ```
+///
+/// Raw parts cannot be mistaken for a validated rational:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::RationalV2;
+///
+/// let _unchecked = RationalV2 {
+///     numerator: 2,
+///     denominator: 4,
+/// };
+/// ```
+///
+/// A validated rational is read-only after construction:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::RationalV2;
+///
+/// let mut value = RationalV2::new(3, 4).unwrap();
+/// value.numerator = 9;
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RationalV2 {
     numerator: i128,
@@ -151,20 +179,50 @@ fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
 }
 
 fn signed_from_magnitude(negative: bool, magnitude: u128) -> i128 {
+    const I128_MIN_MAGNITUDE: u128 = 1_u128 << 127;
+
     if !negative {
         // A positive i128 input cannot produce a magnitude above i128::MAX.
-        return magnitude as i128;
+        return i128::try_from(magnitude).expect("positive i128 magnitude");
     }
 
-    const I128_MIN_MAGNITUDE: u128 = 1_u128 << 127;
     if magnitude == I128_MIN_MAGNITUDE {
         i128::MIN
     } else {
-        -(magnitude as i128)
+        -i128::try_from(magnitude).expect("negative non-minimum i128 magnitude")
     }
 }
 
 /// A canonical decimal representing `coefficient * 10^(-scale)`.
+///
+/// Construction must pass through [`DecimalV2::new`] or
+/// [`DecimalV2::from_canonical_parts`]:
+///
+/// ```
+/// use fs_evidence_runner::DecimalV2;
+///
+/// let value = DecimalV2::new(1_250, 3).unwrap();
+/// assert_eq!(value.coefficient(), 125);
+/// assert_eq!(value.scale(), 2);
+/// ```
+///
+/// ```compile_fail
+/// use fs_evidence_runner::DecimalV2;
+///
+/// let _unchecked = DecimalV2 {
+///     coefficient: 10,
+///     scale: 1,
+/// };
+/// ```
+///
+/// Canonical decimal parts cannot be changed after validation:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::DecimalV2;
+///
+/// let mut value = DecimalV2::new(125, 2).unwrap();
+/// value.scale = 3;
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DecimalV2 {
     coefficient: i128,
@@ -370,6 +428,35 @@ impl SiDimensionExponentsV2 {
 }
 
 /// A canonical unit scale and its seven SI base-dimension exponents.
+///
+/// ```
+/// use fs_evidence_runner::UnitV2;
+///
+/// let unit = UnitV2::from_parts(1, 1, [1, 0, -1, 0, 0, 0, 0]).unwrap();
+/// assert_eq!(unit.scale().numerator(), 1);
+/// assert_eq!(unit.exponents().as_array(), &[1, 0, -1, 0, 0, 0, 0]);
+/// ```
+///
+/// A raw rational cannot bypass the positive-scale check:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::{RationalV2, UnitV2};
+///
+/// let raw_scale = RationalV2::new(0, 1).unwrap();
+/// let _unchecked = UnitV2 {
+///     scale: raw_scale,
+///     exponents: fs_evidence_runner::value::SiDimensionExponentsV2::new([0; 7]),
+/// };
+/// ```
+///
+/// A validated unit cannot be rescaled after construction:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::{RationalV2, UnitV2};
+///
+/// let mut unit = UnitV2::from_parts(1, 1, [0; 7]).unwrap();
+/// unit.scale = RationalV2::new(2, 1).unwrap();
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct UnitV2 {
     scale: RationalV2,
@@ -438,6 +525,30 @@ impl QuantityV2 {
 }
 
 /// Bounded lowercase ASCII token with explicit nonempty segments.
+///
+/// ```
+/// use fs_evidence_runner::StableTokenV2;
+///
+/// let token = StableTokenV2::new("family.mode-v2").unwrap();
+/// assert_eq!(token.as_str(), "family.mode-v2");
+/// ```
+///
+/// Plain strings are intentionally not implicitly promoted:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::StableTokenV2;
+///
+/// let _unchecked: StableTokenV2 = "raw.token".to_owned();
+/// ```
+///
+/// The validated token cannot be extended through its read-only accessor:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::StableTokenV2;
+///
+/// let mut token = StableTokenV2::new("family.mode").unwrap();
+/// token.0.push_str("-unvalidated");
+/// ```
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StableTokenV2(String);
 
@@ -498,6 +609,30 @@ fn validate_stable_token(value: &str) -> Result<(), ValueError> {
 }
 
 /// Bounded UTF-8 text preserved byte-for-byte.
+///
+/// ```
+/// use fs_evidence_runner::TextV2;
+///
+/// let text = TextV2::new("bounded text").unwrap();
+/// assert_eq!(text.as_str(), "bounded text");
+/// ```
+///
+/// Plain strings remain distinct from length-checked text:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::TextV2;
+///
+/// let _unchecked: TextV2 = String::new();
+/// ```
+///
+/// Validated text cannot be enlarged behind the byte-length check:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::TextV2;
+///
+/// let mut text = TextV2::new("bounded").unwrap();
+/// text.0.push_str("unvalidated");
+/// ```
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextV2(String);
 
@@ -528,6 +663,31 @@ impl TextV2 {
 }
 
 /// Bounded opaque bytes with no implied encoding or authority.
+///
+/// A byte vector is not a validated value until [`OpaqueBytesV2::new`]
+/// accepts its length:
+///
+/// ```
+/// use fs_evidence_runner::value::OpaqueBytesV2;
+///
+/// let bytes = OpaqueBytesV2::new(vec![1, 2, 3]).unwrap();
+/// assert_eq!(bytes.as_bytes(), &[1, 2, 3]);
+/// ```
+///
+/// ```compile_fail
+/// use fs_evidence_runner::value::OpaqueBytesV2;
+///
+/// let _unchecked: OpaqueBytesV2 = Vec::new();
+/// ```
+///
+/// Validated opaque bytes cannot be appended after the bound was checked:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::value::OpaqueBytesV2;
+///
+/// let mut bytes = OpaqueBytesV2::new(vec![1, 2, 3]).unwrap();
+/// bytes.0.push(4);
+/// ```
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OpaqueBytesV2(Vec<u8>);
 
@@ -632,6 +792,41 @@ impl TypedValueV2 {
 }
 
 /// Explicit typed presence; absence is never inferred from a payload sentinel.
+///
+/// An all-zero digest is a present payload with wire tag 1, while absence has
+/// wire tag 0:
+///
+/// ```
+/// use fs_evidence_runner::catalog::DigestRoleV2;
+/// use fs_evidence_runner::identity::{DigestValueV2, SourceIdentityRootV2};
+/// use fs_evidence_runner::TypedOptionV1;
+///
+/// let zero_digest = DigestValueV2::from_array(
+///     DigestRoleV2::Source,
+///     SourceIdentityRootV2::DESCRIPTOR.domain_witness(),
+///     [0_u8; 32],
+/// );
+/// let present = TypedOptionV1::Present(zero_digest);
+/// let absent: TypedOptionV1<DigestValueV2> = TypedOptionV1::Absent;
+///
+/// assert_eq!(present.wire_tag(), 1);
+/// assert_eq!(absent.wire_tag(), 0);
+/// ```
+///
+/// A digest value, including all-zero bytes, cannot be used as typed absence:
+///
+/// ```compile_fail
+/// use fs_evidence_runner::catalog::DigestRoleV2;
+/// use fs_evidence_runner::identity::{DigestValueV2, SourceIdentityRootV2};
+/// use fs_evidence_runner::TypedOptionV1;
+///
+/// let zero_digest = DigestValueV2::from_array(
+///     DigestRoleV2::Source,
+///     SourceIdentityRootV2::DESCRIPTOR.domain_witness(),
+///     [0_u8; 32],
+/// );
+/// let _absence: TypedOptionV1<DigestValueV2> = zero_digest;
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TypedOptionV1<T> {
     /// No payload, tag 0.
@@ -799,6 +994,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps every signed and unsigned integer width, both extrema, and all crossing conversions in one exact oracle"
+    )]
     fn every_integer_width_preserves_both_extrema_exactly() {
         assert_eq!(NumericValueV2::I8(i8::MIN), NumericValueV2::I8(-128));
         assert_eq!(NumericValueV2::I8(i8::MAX), NumericValueV2::I8(127));
@@ -848,6 +1047,73 @@ mod tests {
             NumericValueV2::U128(u128::MAX),
             NumericValueV2::U128(u128::MAX)
         );
+
+        macro_rules! assert_checked_signed_width {
+            ($kind:ident, $primitive:ty) => {{
+                let minimum = i128::from(<$primitive>::MIN);
+                let maximum = i128::from(<$primitive>::MAX);
+                assert_eq!(
+                    <$primitive>::try_from(minimum)
+                        .map(NumericValueV2::$kind)
+                        .expect("the exact signed minimum converts without loss"),
+                    NumericValueV2::$kind(<$primitive>::MIN)
+                );
+                assert_eq!(
+                    <$primitive>::try_from(maximum)
+                        .map(NumericValueV2::$kind)
+                        .expect("the exact signed maximum converts without loss"),
+                    NumericValueV2::$kind(<$primitive>::MAX)
+                );
+                assert!(
+                    <$primitive>::try_from(minimum - 1).is_err(),
+                    "one below {} must refuse",
+                    stringify!($primitive)
+                );
+                assert!(
+                    <$primitive>::try_from(maximum + 1).is_err(),
+                    "one above {} must refuse",
+                    stringify!($primitive)
+                );
+            }};
+        }
+        assert_checked_signed_width!(I8, i8);
+        assert_checked_signed_width!(I16, i16);
+        assert_checked_signed_width!(I32, i32);
+        assert_checked_signed_width!(I64, i64);
+        assert!(i128::try_from(u128::MAX).is_err());
+
+        macro_rules! assert_checked_unsigned_width {
+            ($kind:ident, $primitive:ty) => {{
+                let maximum = u128::from(<$primitive>::MAX);
+                assert_eq!(
+                    <$primitive>::try_from(0_u128)
+                        .map(NumericValueV2::$kind)
+                        .expect("zero converts without loss"),
+                    NumericValueV2::$kind(<$primitive>::MIN)
+                );
+                assert_eq!(
+                    <$primitive>::try_from(maximum)
+                        .map(NumericValueV2::$kind)
+                        .expect("the exact unsigned maximum converts without loss"),
+                    NumericValueV2::$kind(<$primitive>::MAX)
+                );
+                assert!(
+                    <$primitive>::try_from(maximum + 1).is_err(),
+                    "one above {} must refuse",
+                    stringify!($primitive)
+                );
+                assert!(
+                    <$primitive>::try_from(-1_i128).is_err(),
+                    "negative input must refuse for {}",
+                    stringify!($primitive)
+                );
+            }};
+        }
+        assert_checked_unsigned_width!(U8, u8);
+        assert_checked_unsigned_width!(U16, u16);
+        assert_checked_unsigned_width!(U32, u32);
+        assert_checked_unsigned_width!(U64, u64);
+        assert!(u128::try_from(-1_i128).is_err());
 
         let exact_float_boundary = 1_u64 << 53;
         assert_eq!(
