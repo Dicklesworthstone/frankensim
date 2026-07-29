@@ -1053,6 +1053,12 @@ oracle; the variable LeafExtension bound above follows its one-through-64 role
 grammar. Every proportional count, edge aggregate, and canonical length uses
 checked arithmetic. Production-valid boundary proof constructs the largest
 semantically valid source-frozen value and every exact cardinality maximum.
+Manifest admission independently recomputes the FrozenBase registry root and
+every bound LeafExtension registry root from the exact kind, owner, fragment
+ID, inherited FrozenBase root, and descriptor content before duplicate,
+ordering, resolver, graph, or authority joins. A stored registry root is never
+accepted as its own identity oracle.
+
 When a jointly maximal combination cannot satisfy an earlier invariant, the
 test proves the exact named refusal instead of padding, weakening, or mutating
 the component to manufacture a guard-length value.
@@ -1106,6 +1112,44 @@ decode, and mint no compatibility, scientific, admission, close-decision, or
 other authority. Logging cannot create source-frozen authority merely by
 repeating a root; its result-free case manifest is derived only from a
 successfully validated schema-impact manifest.
+
+The Phase-1 downstream handoff separately exposes the complete immutable
+`RunnerV2PhaseOneExpectedLedgerV1`; the six closed partition names or their
+aggregate counts are not a substitute for that ledger. Every
+`RunnerV2PhaseOneExpectedLedgerCellV1` binds one contiguous ledger ordinal,
+the exact source ordinal, distinct stable ledger-cell ID, source case ID,
+source class and slash-separated path, close group and facet, execution scope,
+partition, expected closed decision, exactly one expected-result root or
+registered reason, semantic journey, route ID and owner, compatible-source
+snapshot, source close-manifest and source-closure roots, optional historical
+downstream-contribution root, Five Explicits root, source cell root, and
+no-claim. The expected-result root is only a source-declared
+expected-decision contract. It is never an observed or output root, and a
+downstream executor must derive its actual root from the real outcome rather
+than copying the declaration.
+
+Ledger admission reconstructs every row from the exact full-set close
+manifest, rejects any missing, extra, duplicate, reordered, reclassified,
+wrong-result, wrong-reason, wrong-owner, wrong-route, stale, or mixed-snapshot
+row, and independently reconciles all six per-partition counts and ordered
+ledger-cell/source-case ID sets. Its root binds the independent six-name/code
+vocabulary root, every complete ordered row, all ordered per-partition ID
+sets, and zero required unexpected mismatches, execution failures, and
+unexplained skips. A vocabulary-only, count-only, subset, or metadata-only
+root cannot satisfy the ledger contract.
+
+`RunnerV2PhaseOneContractContributionV2` binds that complete ledger root into
+the downstream case-manifest declaration root, immutable payload root,
+result-free contribution, distinct Deferred envelope, and aggregate
+projection root. It still performs no downstream file read, process launch,
+case execution, result matching, artifact retention, or authority grant. The
+production-field mutation proof changes one real schema-field declaration
+and verifies identity propagation through the enclosing frame, impact row,
+impact manifest, schema-impact projection, payload, result-free contribution,
+Deferred envelope, and aggregate while every unaffected sibling remains
+byte-identical. Independent literal encoders, exact-set/order mutations, and
+decision/root mismatch tests prevent any production table, advertised total,
+or downstream result from acting as its own oracle.
 
 ## Invariants
 

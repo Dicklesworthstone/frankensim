@@ -6,7 +6,7 @@
 //! 2. a caller-selected, manifest-ordered executable subset; and
 //! 3. presented result records joined back to that exact subset.
 //!
-//! The frozen base enumerates the current 215 non-manifest Rust tests and all 68
+//! The frozen base enumerates the current 217 non-manifest Rust tests and all 68
 //! `compile_fail` contracts. The historical aggregate is recorded as 130
 //! ratified cases plus an eighty-five-case delta, but this source does not pretend
 //! to recover a per-case historical membership label that was never retained.
@@ -662,7 +662,7 @@ pub(crate) fn schema_impact_manifest_root_from_exact_frame_v1(
 pub const BASE_COVERAGE_PREEXISTING_UNIT_CASE_COUNT_V1: usize = 130;
 
 /// Exact Rust-test delta added by the same implementation train.
-pub const BASE_COVERAGE_POST_RATIFICATION_UNIT_CASE_DELTA_V1: usize = 85;
+pub const BASE_COVERAGE_POST_RATIFICATION_UNIT_CASE_DELTA_V1: usize = 87;
 
 /// Exact current non-manifest Rust-test total frozen by this source inventory.
 pub const BASE_COVERAGE_RUST_TEST_CASE_COUNT_V1: usize =
@@ -688,7 +688,7 @@ pub const BASE_COVERAGE_BOUNDARY_CASE_COUNT_V1: usize = 53;
 pub const BASE_COVERAGE_PROPERTY_METAMORPHIC_CASE_COUNT_V1: usize = 24;
 
 /// Exact number of schema and descriptor cases.
-pub const BASE_COVERAGE_SCHEMA_DESCRIPTOR_CASE_COUNT_V1: usize = 48;
+pub const BASE_COVERAGE_SCHEMA_DESCRIPTOR_CASE_COUNT_V1: usize = 50;
 
 /// Exact number of mutation and malformed-presentation cases.
 pub const BASE_COVERAGE_MUTATION_CASE_COUNT_V1: usize = 61;
@@ -985,7 +985,7 @@ pub struct BaseCoverageManifestV1 {
 }
 
 impl BaseCoverageManifestV1 {
-    /// Construct the frozen 215-Rust-test, 68-compile-fail, and
+    /// Construct the frozen 217-Rust-test, 68-compile-fail, and
     /// manifest-contract source inventory without extension rows.
     pub fn frozen() -> Result<Self, ConstructionErrorV2> {
         let declarations = frozen_base_declarations()?;
@@ -7707,6 +7707,8 @@ const RUST_TEST_MODULE_TEMPLATES_V1: &[RustTestModuleTemplateV1] = &[
                 BaseCoverageManifestClassV1::SchemaDescriptor,
                 &[
                     "component_descriptor_bytes_and_roots_match_independent_literal_oracles",
+                    "registry_row_and_manifest_roots_match_independent_literal_oracles",
+                    "production_meta_manifest_matches_independent_literal_oracle",
                     "nominal_root_registry_and_compatible_snapshot_are_exact",
                     "schema_impact_closed_catalogs_wrappers_frames_and_rows_are_exact",
                     "schema_impact_disposition_authority_policy_and_surface_matrix_is_exhaustive",
@@ -11859,7 +11861,7 @@ fn frozen_base_declarations() -> Result<Vec<BaseCoverageCaseDeclarationV1>, Cons
         return Err(refusal(
             ConstructionErrorKindV2::Incompatible,
             "coverage.base.case_count",
-            "the exact 215 classified Rust tests, 68 compile-fail cases, and 29 manifest-contract cases",
+            "the exact 217 classified Rust tests, 68 compile-fail cases, and 29 manifest-contract cases",
             declarations.len(),
         ));
     }
@@ -11963,7 +11965,7 @@ fn frozen_rust_test_declarations() -> Result<Vec<BaseCoverageCaseDeclarationV1>,
         return Err(refusal(
             ConstructionErrorKindV2::Incompatible,
             "coverage.rust_test.total",
-            "exactly 215 tests partitioned once across all six required evidence classes",
+            "exactly 217 tests partitioned once across all six required evidence classes",
             declarations.len(),
         ));
     }
@@ -12809,8 +12811,8 @@ mod tests {
         let second = BaseCoverageManifestV1::frozen().expect("deterministic manifest");
         assert_eq!(first, second);
         assert_eq!(BASE_COVERAGE_PREEXISTING_UNIT_CASE_COUNT_V1, 130);
-        assert_eq!(BASE_COVERAGE_POST_RATIFICATION_UNIT_CASE_DELTA_V1, 85);
-        assert_eq!(BASE_COVERAGE_RUST_TEST_CASE_COUNT_V1, 215);
+        assert_eq!(BASE_COVERAGE_POST_RATIFICATION_UNIT_CASE_DELTA_V1, 87);
+        assert_eq!(BASE_COVERAGE_RUST_TEST_CASE_COUNT_V1, 217);
         assert_eq!(
             BASE_COVERAGE_UNIT_CASE_COUNT_V1,
             BASE_COVERAGE_RUST_TEST_CASE_COUNT_V1
@@ -13458,7 +13460,7 @@ mod tests {
     #[test]
     fn full_set_close_manifest_exactly_covers_nine_groups_and_twenty_two_facets() {
         let source = super::frozen_full_source_manifest_v1().expect("full source manifest");
-        assert_eq!(source.cases().len(), 433);
+        assert_eq!(source.cases().len(), 435);
         assert_eq!(
             [
                 source.case_count(BaseCoverageManifestClassV1::ProjectionE2e),
@@ -13480,7 +13482,7 @@ mod tests {
             121
         );
         let manifest = BaseCoverageCloseManifestV1::frozen().expect("full close manifest");
-        assert_eq!(manifest.cells().len(), 433);
+        assert_eq!(manifest.cells().len(), 435);
         assert_eq!(manifest.cells().len(), source.cases().len());
         assert_eq!(manifest.source_manifest_root(), source.root());
         for group in BaseCoverageCloseGroupV1::ALL {

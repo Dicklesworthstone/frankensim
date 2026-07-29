@@ -91,6 +91,24 @@ pub const SCHEMA_IMPACT_ROW_MAX_BYTES_V1: usize = 1_048_576;
 /// Maximum canonical bytes for one schema-impact manifest.
 pub const SCHEMA_IMPACT_MANIFEST_MAX_BYTES_V1: usize = 1_048_576;
 
+/// Tight canonical-byte bound reachable by one admitted V1 field descriptor.
+pub const CANONICAL_SCHEMA_FIELD_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1: usize = 298;
+/// Tight canonical-byte bound reachable by one admitted V1 version-slot descriptor.
+pub const CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1: usize = 558;
+/// Tight canonical-byte bound reachable by one admitted V1 frame descriptor.
+pub const CANONICAL_SCHEMA_FRAME_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1: usize = 77_631;
+/// Tight canonical-byte bound reachable by one admitted V1 LeafExtension registry fragment.
+pub const LEAF_EXTENSION_NOMINAL_ROOT_REGISTRY_FRAGMENT_GRAMMAR_MAX_BYTES_V1: usize = 27_417;
+/// Tight V1 impact-row bound excluding only the source-path payload bytes.
+///
+/// The four-byte source-path length prefix is already included.
+pub const SCHEMA_IMPACT_ROW_GRAMMAR_BASE_MAX_BYTES_V1: usize = 477_318;
+/// Tight canonical-byte bound reachable by one admitted V1 impact row.
+pub const SCHEMA_IMPACT_ROW_GRAMMAR_MAX_BYTES_V1: usize =
+    SCHEMA_IMPACT_ROW_GRAMMAR_BASE_MAX_BYTES_V1 + SCHEMA_IMPACT_SOURCE_PATH_MAX_BYTES_V1;
+/// Tight canonical-byte bound reachable by one admitted V1 schema-impact manifest.
+pub const SCHEMA_IMPACT_MANIFEST_GRAMMAR_MAX_BYTES_V1: usize = 119_685;
+
 /// Domain of the private field-descriptor identity.
 pub const CANONICAL_SCHEMA_FIELD_DESCRIPTOR_DOMAIN_V1: &str =
     "org.frankensim.fs-evidence-runner.canonical-schema-field-descriptor.v1";
@@ -1705,7 +1723,7 @@ impl LeafExtensionNominalRootRegistryFragmentV1 {
     /// This is crate-private so public callers cannot assemble an open
     /// descriptor vector. Later leaf modules use this exact source-frozen
     /// path and are themselves included in the compatible source closure.
-    fn from_source_frozen(
+    pub(crate) fn from_source_frozen(
         owner_leaf_id: &'static str,
         fragment_id: &'static str,
         descriptors: &'static [BaseCoverageCloseNominalRootDescriptorV1],
@@ -3436,12 +3454,40 @@ fn validate_extension_fragment_identities_v1(
     frozen_base: &FrozenBaseNominalRootRegistryFragmentV1,
     extensions: &[LeafExtensionNominalRootRegistryFragmentV1],
 ) -> Result<(), ConstructionErrorV2> {
+    let expected_frozen_base_root = nominal_registry_fragment_root_v1(
+        NominalRootRegistryKindV1::FrozenCore,
+        None,
+        None,
+        None,
+        frozen_base.descriptors(),
+    )?;
+    if frozen_base.root() != expected_frozen_base_root {
+        return Err(redacted_refusal(
+            ConstructionErrorKindV2::Incompatible,
+            "schema_impact.manifest.frozen_base_root",
+            "the exact content-derived FrozenBase registry root",
+        ));
+    }
     for extension in extensions {
         if extension.frozen_base_root() != frozen_base.root() {
             return Err(redacted_refusal(
                 ConstructionErrorKindV2::Incompatible,
                 "schema_impact.manifest.extension_frozen_base_root",
                 "the exact FrozenBase witness bound by this manifest",
+            ));
+        }
+        let expected_extension_root = nominal_registry_fragment_root_v1(
+            NominalRootRegistryKindV1::LeafExtension,
+            Some(extension.owner_leaf_id()),
+            Some(extension.fragment_id()),
+            Some(extension.frozen_base_root()),
+            extension.descriptors(),
+        )?;
+        if extension.root() != expected_extension_root {
+            return Err(redacted_refusal(
+                ConstructionErrorKindV2::Incompatible,
+                "schema_impact.manifest.extension_fragment_root",
+                "the exact content-derived LeafExtension registry root",
             ));
         }
     }
@@ -7170,8 +7216,351 @@ mod tests {
         assert_eq!(SCHEMA_IMPACT_GRAPH_EDGES_PER_MANIFEST_MAX_V1, 512);
         assert_eq!(LEAF_NOMINAL_ROOT_ROLES_MAX_V1, 64);
         assert_eq!(CANONICAL_SCHEMA_FIELD_DESCRIPTOR_MAX_BYTES_V1, 1_024);
+        assert_eq!(CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_MAX_BYTES_V1, 2_048);
+        assert_eq!(CANONICAL_SCHEMA_FRAME_DESCRIPTOR_MAX_BYTES_V1, 262_144);
+        assert_eq!(NOMINAL_ROOT_REGISTRY_FRAGMENT_MAX_BYTES_V1, 65_536);
         assert_eq!(SCHEMA_IMPACT_ROW_MAX_BYTES_V1, 1_048_576);
         assert_eq!(SCHEMA_IMPACT_MANIFEST_MAX_BYTES_V1, 1_048_576);
+
+        let length_prefixed = |payload_length: usize| {
+            core::mem::size_of::<u32>()
+                .checked_add(payload_length)
+                .expect("bounded grammar term")
+        };
+        let field_grammar_bound = [
+            CANONICAL_SCHEMA_FIELD_DESCRIPTOR_MAGIC_V1.len(),
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_FIELD_NAME_MAX_BYTES_V1),
+            length_prefixed(CANONICAL_SEMANTIC_TYPE_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u8>(),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u8>(),
+            core::mem::size_of::<u16>(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked field grammar bound");
+        assert_eq!(
+            field_grammar_bound,
+            CANONICAL_SCHEMA_FIELD_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1
+        );
+
+        let slot_grammar_bound = [
+            CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_MAGIC_V1.len(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_SLOT_ID_MAX_BYTES_V1),
+            length_prefixed(CANONICAL_SCHEMA_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_SCHEMA_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_ROOT_ROLE_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked version-slot grammar bound");
+        assert_eq!(
+            slot_grammar_bound,
+            CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1
+        );
+
+        let reciprocal_pair_count = CANONICAL_SCHEMA_FIELDS_MAX_V1 / 2;
+        assert_eq!(
+            reciprocal_pair_count
+                .checked_mul(2)
+                .expect("checked reciprocal field count"),
+            CANONICAL_SCHEMA_FIELDS_MAX_V1
+        );
+        let presence_field_bytes = CANONICAL_SCHEMA_FIELD_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1
+            .checked_sub(core::mem::size_of::<u16>())
+            .expect("a PresenceFlag has no version-slot code");
+        let frame_grammar_bound = [
+            CANONICAL_SCHEMA_FRAME_DESCRIPTOR_MAGIC_V1.len(),
+            length_prefixed(CANONICAL_RUST_SCHEMA_NAME_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_SCHEMA_DOMAIN_MAX_BYTES_V1),
+            length_prefixed(CANONICAL_SCHEMA_MAGIC_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(RUNNER_V2_PREDECESSOR_POLICY.name().len()),
+            core::mem::size_of::<u32>(),
+            reciprocal_pair_count
+                .checked_mul(length_prefixed(presence_field_bytes))
+                .expect("checked PresenceFlag aggregate"),
+            reciprocal_pair_count
+                .checked_mul(length_prefixed(
+                    CANONICAL_SCHEMA_FIELD_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1,
+                ))
+                .expect("checked PresentWhen aggregate"),
+            core::mem::size_of::<u8>(),
+            length_prefixed(CANONICAL_ROOT_ROLE_ID_MAX_BYTES_V1),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked frame grammar bound");
+        assert_eq!(
+            frame_grammar_bound,
+            CANONICAL_SCHEMA_FRAME_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1
+        );
+
+        let registry_descriptor_bytes = [
+            core::mem::size_of::<u32>(),
+            length_prefixed(CANONICAL_ROOT_ROLE_ID_MAX_BYTES_V1),
+            length_prefixed(CANONICAL_SCHEMA_DOMAIN_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(RUNNER_V2_PREDECESSOR_POLICY.name().len()),
+            length_prefixed(SCHEMA_IMPACT_NO_CLAIM_MAX_BYTES_V1),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked registry-descriptor grammar bound");
+        let registry_grammar_bound = [
+            NOMINAL_ROOT_REGISTRY_MAGIC_V1.len(),
+            core::mem::size_of::<u8>(),
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u8>(),
+            length_prefixed(SCHEMA_IMPACT_LEAF_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u8>(),
+            length_prefixed(NOMINAL_ROOT_REGISTRY_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u8>(),
+            32,
+            core::mem::size_of::<u32>(),
+            LEAF_NOMINAL_ROOT_ROLES_MAX_V1
+                .checked_mul(registry_descriptor_bytes)
+                .expect("checked registry-descriptor aggregate"),
+            length_prefixed(NOMINAL_ROOT_REGISTRY_FRAGMENT_NO_CLAIM_V1.len()),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked registry grammar bound");
+        assert_eq!(
+            registry_grammar_bound,
+            LEAF_EXTENSION_NOMINAL_ROOT_REGISTRY_FRAGMENT_GRAMMAR_MAX_BYTES_V1
+        );
+
+        let frame_binding_bytes = [
+            core::mem::size_of::<u8>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_SCHEMA_FRAME_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked frame-binding grammar bound");
+        let slot_collection_bytes = core::mem::size_of::<u32>()
+            .checked_add(
+                SCHEMA_IMPACT_PARENT_SLOTS_PER_ROW_MAX_V1
+                    .checked_mul(length_prefixed(
+                        CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1,
+                    ))
+                    .expect("checked slot aggregate"),
+            )
+            .expect("checked slot collection");
+        let row_grammar_base_bound = [
+            SCHEMA_IMPACT_ROW_MAGIC_V1.len(),
+            length_prefixed(CANONICAL_SCHEMA_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u8>() + core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(RUNNER_V2_PREDECESSOR_POLICY.name().len()),
+            frame_binding_bytes,
+            frame_binding_bytes,
+            // The largest valid migrated row has no legacy container.
+            core::mem::size_of::<u8>(),
+            length_prefixed(SCHEMA_IMPACT_LEAF_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u32>()
+                .checked_add(
+                    SCHEMA_IMPACT_AUTHORITY_SURFACES_PER_ROW_MAX_V1
+                        .checked_mul(core::mem::size_of::<u16>())
+                        .expect("checked authority-surface aggregate"),
+                )
+                .expect("checked authority-surface collection"),
+            core::mem::size_of::<u32>()
+                .checked_add(
+                    SCHEMA_IMPACT_PREDECESSORS_PER_ROW_MAX_V1
+                        .checked_mul(length_prefixed(CANONICAL_SCHEMA_ID_MAX_BYTES_V1))
+                        .expect("checked predecessor aggregate"),
+                )
+                .expect("checked predecessor collection"),
+            slot_collection_bytes,
+            slot_collection_bytes,
+            32,
+            length_prefixed(SCHEMA_IMPACT_NO_CLAIM_MAX_BYTES_V1),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked impact-row grammar bound");
+        assert_eq!(
+            row_grammar_base_bound,
+            SCHEMA_IMPACT_ROW_GRAMMAR_BASE_MAX_BYTES_V1
+        );
+        assert_eq!(
+            row_grammar_base_bound
+                .checked_add(SCHEMA_IMPACT_SOURCE_PATH_MAX_BYTES_V1)
+                .expect("checked source-path payload"),
+            SCHEMA_IMPACT_ROW_GRAMMAR_MAX_BYTES_V1
+        );
+
+        let manifest_extension_bytes = [
+            length_prefixed(SCHEMA_IMPACT_LEAF_ID_MAX_BYTES_V1),
+            length_prefixed(NOMINAL_ROOT_REGISTRY_ID_MAX_BYTES_V1),
+            32,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked manifest-extension grammar bound");
+        let manifest_entry_bytes = [
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(CANONICAL_SCHEMA_ID_MAX_BYTES_V1),
+            32,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked manifest-entry grammar bound");
+        let manifest_grammar_bound = [
+            SCHEMA_IMPACT_MANIFEST_MAGIC_V1.len(),
+            length_prefixed(SCHEMA_IMPACT_LEAF_ID_MAX_BYTES_V1),
+            core::mem::size_of::<u16>(),
+            core::mem::size_of::<u16>(),
+            length_prefixed(RUNNER_V2_PREDECESSOR_POLICY.name().len()),
+            32,
+            32,
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u32>(),
+            core::mem::size_of::<u32>(),
+            NOMINAL_ROOT_EXTENSION_REGISTRIES_PER_MANIFEST_MAX_V1
+                .checked_mul(manifest_extension_bytes)
+                .expect("checked manifest-extension aggregate"),
+            core::mem::size_of::<u32>(),
+            SCHEMA_IMPACT_ROWS_PER_LEAF_MANIFEST_MAX_V1
+                .checked_mul(manifest_entry_bytes)
+                .expect("checked manifest-entry aggregate"),
+            length_prefixed(SCHEMA_IMPACT_NO_CLAIM_MAX_BYTES_V1),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .expect("checked manifest grammar bound");
+        assert_eq!(
+            manifest_grammar_bound,
+            SCHEMA_IMPACT_MANIFEST_GRAMMAR_MAX_BYTES_V1
+        );
+
+        for (grammar_bound, guard) in [
+            (
+                CANONICAL_SCHEMA_FIELD_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1,
+                CANONICAL_SCHEMA_FIELD_DESCRIPTOR_MAX_BYTES_V1,
+            ),
+            (
+                CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1,
+                CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_MAX_BYTES_V1,
+            ),
+            (
+                CANONICAL_SCHEMA_FRAME_DESCRIPTOR_GRAMMAR_MAX_BYTES_V1,
+                CANONICAL_SCHEMA_FRAME_DESCRIPTOR_MAX_BYTES_V1,
+            ),
+            (
+                LEAF_EXTENSION_NOMINAL_ROOT_REGISTRY_FRAGMENT_GRAMMAR_MAX_BYTES_V1,
+                NOMINAL_ROOT_REGISTRY_FRAGMENT_MAX_BYTES_V1,
+            ),
+            (
+                SCHEMA_IMPACT_ROW_GRAMMAR_MAX_BYTES_V1,
+                SCHEMA_IMPACT_ROW_MAX_BYTES_V1,
+            ),
+            (
+                SCHEMA_IMPACT_MANIFEST_GRAMMAR_MAX_BYTES_V1,
+                SCHEMA_IMPACT_MANIFEST_MAX_BYTES_V1,
+            ),
+        ] {
+            assert!(
+                grammar_bound < guard,
+                "the admitted V1 grammar remains strictly below its defensive guard"
+            );
+        }
+
+        fn assert_shared_canonical_guard_seam(guard: usize, field: &'static str) {
+            let exact_invocations = std::cell::Cell::new(0_u8);
+            let exact = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
+                exact_invocations.set(exact_invocations.get() + 1);
+                for _ in 1..guard {
+                    sink.push_u8(field, 0)?;
+                }
+                Ok(())
+            })
+            .expect("the shared seam accepts an exactly guard-length frame");
+            assert_eq!(exact.as_bytes().len(), guard);
+            assert_eq!(
+                exact_invocations.get(),
+                2,
+                "an admitted frame performs one count pass and one encode pass"
+            );
+
+            let one_over_invocations = std::cell::Cell::new(0_u8);
+            let one_over = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
+                one_over_invocations.set(one_over_invocations.get() + 1);
+                for _ in 0..guard {
+                    sink.push_u8(field, 0)?;
+                }
+                Ok(())
+            })
+            .expect_err("guard plus one must refuse during count-only preflight");
+            assert_eq!(one_over.kind(), ConstructionErrorKindV2::TooLarge);
+            assert_eq!(one_over.field(), field);
+            assert_eq!(
+                one_over_invocations.get(),
+                1,
+                "guard-plus-one refusal happens before output materialization"
+            );
+        }
+
+        for (guard, field) in [
+            (
+                CANONICAL_SCHEMA_FIELD_DESCRIPTOR_MAX_BYTES_V1,
+                "schema_impact.guard.field_descriptor",
+            ),
+            (
+                CANONICAL_SCHEMA_VERSION_SLOT_DESCRIPTOR_MAX_BYTES_V1,
+                "schema_impact.guard.version_slot_descriptor",
+            ),
+            (
+                CANONICAL_SCHEMA_FRAME_DESCRIPTOR_MAX_BYTES_V1,
+                "schema_impact.guard.frame_descriptor",
+            ),
+            (
+                NOMINAL_ROOT_REGISTRY_FRAGMENT_MAX_BYTES_V1,
+                "schema_impact.guard.registry_fragment",
+            ),
+            (SCHEMA_IMPACT_ROW_MAX_BYTES_V1, "schema_impact.guard.row"),
+            (
+                SCHEMA_IMPACT_MANIFEST_MAX_BYTES_V1,
+                "schema_impact.guard.manifest",
+            ),
+        ] {
+            assert_shared_canonical_guard_seam(guard, field);
+        }
+
+        let arithmetic_overflow = crate::canonical::checked_canonical_frame_length_v1(
+            "schema_impact.guard.checked_arithmetic",
+            usize::MAX,
+            1,
+            usize::MAX,
+        )
+        .expect_err("checked frame-length overflow refuses without allocation");
+        assert_eq!(
+            arithmetic_overflow.kind(),
+            ConstructionErrorKindV2::ArithmeticOverflow
+        );
+        assert_eq!(
+            arithmetic_overflow.field(),
+            "schema_impact.guard.checked_arithmetic"
+        );
     }
 
     #[test]
@@ -8878,6 +9267,38 @@ mod tests {
                 .kind(),
             ConstructionErrorKindV2::Incompatible
         );
+        let duplicate_predecessor =
+            CanonicalSchemaIdV1::new("test-duplicate-predecessor").expect("predecessor");
+        let mut duplicate_predecessors = valid_source.clone();
+        duplicate_predecessors.construction_predecessors =
+            vec![duplicate_predecessor.clone(), duplicate_predecessor];
+        let duplicate_predecessors =
+            source_frozen_schema_impact_row_v1(duplicate_predecessors, snapshot)
+                .expect_err("duplicate predecessors refuse before disposition checks");
+        assert_eq!(
+            duplicate_predecessors.field(),
+            "schema_impact.row.predecessors"
+        );
+        assert_eq!(
+            duplicate_predecessors.kind(),
+            ConstructionErrorKindV2::Duplicate
+        );
+        let mut reversed_predecessors = valid_source.clone();
+        reversed_predecessors.construction_predecessors = vec![
+            CanonicalSchemaIdV1::new("test-z-predecessor").expect("later predecessor"),
+            CanonicalSchemaIdV1::new("test-a-predecessor").expect("earlier predecessor"),
+        ];
+        let reversed_predecessors =
+            source_frozen_schema_impact_row_v1(reversed_predecessors, snapshot)
+                .expect_err("reversed predecessors refuse before disposition checks");
+        assert_eq!(
+            reversed_predecessors.field(),
+            "schema_impact.row.predecessors"
+        );
+        assert_eq!(
+            reversed_predecessors.kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
 
         let slot_sample = slot_fixture(CanonicalSchemaSlotUseV1::AuthoritativeConstruction, vec![]);
         let mut too_many_slots = valid_source.clone();
@@ -8889,6 +9310,31 @@ mod tests {
                 .kind(),
             ConstructionErrorKindV2::TooLarge
         );
+        let duplicate_slots = validate_slot_order_v1(
+            &[slot_sample.slot.clone(), slot_sample.slot.clone()],
+            "schema_impact.row.child_slots",
+        )
+        .expect_err("duplicate slots refuse before row semantics");
+        assert_eq!(duplicate_slots.field(), "schema_impact.row.child_slots");
+        assert_eq!(duplicate_slots.kind(), ConstructionErrorKindV2::Duplicate);
+        let later_slot = version_slot(
+            2,
+            "later-alpha-child-slot",
+            "test-beta-parent",
+            CanonicalFrameVersionV1::V1,
+            2,
+            "test-alpha-child",
+            CanonicalFrameVersionV1::V1,
+            "test-alpha-child-root",
+            CanonicalSchemaSlotUseV1::AuthoritativeConstruction,
+        );
+        let reversed_slots = validate_slot_order_v1(
+            &[later_slot, slot_sample.slot.clone()],
+            "schema_impact.row.child_slots",
+        )
+        .expect_err("reversed slots refuse before row semantics");
+        assert_eq!(reversed_slots.field(), "schema_impact.row.child_slots");
+        assert_eq!(reversed_slots.kind(), ConstructionErrorKindV2::OutOfOrder);
 
         let mut wrong_slot_semantic = new_row_source(
             "test-beta-parent",
@@ -9022,6 +9468,24 @@ mod tests {
             &ALPHA_EXTENSION_ROLES,
             &frozen,
         );
+        let mut forged_frozen_base = frozen.clone();
+        forged_frozen_base.root = alpha.root();
+        let forged_frozen_base = manifest(
+            "mutation-leaf",
+            snapshot,
+            &forged_frozen_base,
+            Vec::new(),
+            vec![(SchemaImpactManifestRelationV1::Owned, compiled_row.clone())],
+        )
+        .expect_err("stored FrozenBase root must exact-match its canonical content");
+        assert_eq!(
+            forged_frozen_base.field(),
+            "schema_impact.manifest.frozen_base_root"
+        );
+        assert_eq!(
+            forged_frozen_base.kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
         let mut alternate_fragment = extension_with_member(
             "alpha-leaf",
             "alpha-fragment",
@@ -9085,6 +9549,40 @@ mod tests {
         );
 
         let beta = extension("beta-leaf", "beta-fragment", &BETA_EXTENSION_ROLES, &frozen);
+        let mut forged_fragment_root = alpha.clone();
+        forged_fragment_root.root = beta.root();
+        let forged_fragment_root = manifest(
+            "mutation-leaf",
+            snapshot,
+            &frozen,
+            vec![forged_fragment_root],
+            vec![(SchemaImpactManifestRelationV1::Owned, compiled_row.clone())],
+        )
+        .expect_err("stored extension root must exact-match its canonical content");
+        assert_eq!(
+            forged_fragment_root.field(),
+            "schema_impact.manifest.extension_fragment_root"
+        );
+        assert_eq!(
+            forged_fragment_root.kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let reversed_fragment_order = manifest(
+            "mutation-leaf",
+            snapshot,
+            &frozen,
+            vec![beta.clone(), alpha.clone()],
+            vec![(SchemaImpactManifestRelationV1::Owned, compiled_row.clone())],
+        )
+        .expect_err("nonduplicate extension fragments require canonical presentation order");
+        assert_eq!(
+            reversed_fragment_order.field(),
+            "schema_impact.manifest.extension_fragments"
+        );
+        assert_eq!(
+            reversed_fragment_order.kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
         let duplicate_after_inversion = manifest(
             "mutation-leaf",
             snapshot,
@@ -9254,6 +9752,72 @@ mod tests {
         )
         .expect_err("presented rows must match derived order");
         assert_eq!(reordered.kind(), ConstructionErrorKindV2::OutOfOrder);
+
+        let (_, tie_source_member) = compiled_source_basis();
+        let tie_a = admit_row(
+            new_row_source(
+                "test-tie-a",
+                "tie-leaf",
+                frame(
+                    "TestTieA",
+                    "test-tie-a",
+                    b"TEST_TIE_A",
+                    CanonicalFrameVersionV1::V1,
+                    Vec::new(),
+                    None,
+                ),
+                tie_source_member.clone(),
+            ),
+            fixture.snapshot,
+        );
+        let tie_b = admit_row(
+            new_row_source(
+                "test-tie-b",
+                "tie-leaf",
+                frame(
+                    "TestTieB",
+                    "test-tie-b",
+                    b"TEST_TIE_B",
+                    CanonicalFrameVersionV1::V1,
+                    Vec::new(),
+                    None,
+                ),
+                tie_source_member,
+            ),
+            fixture.snapshot,
+        );
+        let stable_tie = manifest(
+            "tie-leaf",
+            fixture.snapshot,
+            &fixture.frozen,
+            Vec::new(),
+            vec![
+                (SchemaImpactManifestRelationV1::Owned, tie_a.clone()),
+                (SchemaImpactManifestRelationV1::Owned, tie_b.clone()),
+            ],
+        )
+        .expect("bytewise schema ID breaks independent Kahn-ready ties");
+        assert_eq!(
+            stable_tie
+                .entries()
+                .iter()
+                .map(|entry| entry.row().schema_id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-tie-a", "test-tie-b"]
+        );
+        let reversed_tie = manifest(
+            "tie-leaf",
+            fixture.snapshot,
+            &fixture.frozen,
+            Vec::new(),
+            vec![
+                (SchemaImpactManifestRelationV1::Owned, tie_b),
+                (SchemaImpactManifestRelationV1::Owned, tie_a),
+            ],
+        )
+        .expect_err("caller order cannot override bytewise Kahn-ready tie-breaking");
+        assert_eq!(reversed_tie.field(), "schema_impact.manifest.entries");
+        assert_eq!(reversed_tie.kind(), ConstructionErrorKindV2::OutOfOrder);
 
         let wrong_relation = manifest(
             "beta-leaf",

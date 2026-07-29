@@ -38,11 +38,11 @@ use crate::construction::{
 };
 use crate::coverage::{
     BaseCoverageCaseDeclarationV1, BaseCoverageCheckedReportV1,
-    BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseDeferredEvidenceEnvelopeV1,
-    BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
-    BaseCoverageCloseDecisionV1, BaseCoverageCloseExecutionScopeV1, BaseCoverageCloseFacetV1,
-    BaseCoverageCloseGroupV1, BaseCoverageCloseManifestCellV1, BaseCoverageCloseManifestV1,
-    BaseCoverageClosePartitionV1, BaseCoverageCloseReasonCodeV1,
+    BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseDecisionV1,
+    BaseCoverageCloseDeferredEvidenceEnvelopeV1, BaseCoverageCloseDeferredObservationContractV1,
+    BaseCoverageCloseDownstreamContributionV2, BaseCoverageCloseExecutionScopeV1,
+    BaseCoverageCloseFacetV1, BaseCoverageCloseGroupV1, BaseCoverageCloseManifestCellV1,
+    BaseCoverageCloseManifestV1, BaseCoverageClosePartitionV1, BaseCoverageCloseReasonCodeV1,
     BaseCoverageCloseRetainedRelativeArtifactPolicyV1, BaseCoverageManifestClassV1,
     BaseCoverageManifestV1, BaseCoveragePresentedOutcomeV1, BaseCoveragePresentedResultV1,
     CanonicalSchemaImpactDispositionV1, CompatibleSourceSnapshotRootV1, DeferredReasonV1,
@@ -294,6 +294,14 @@ const RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1: [&str; 6] = [
     "unsupported",
     "inapplicable",
 ];
+
+const RUNNER_V2_PHASE_ONE_SEMANTIC_JOURNEY_V1: &str = "runner-v2-phase1-contract";
+const RUNNER_V2_PHASE_ONE_LEDGER_ROW_NO_CLAIM_V1: &str =
+    "phase1-ledger-row-is-expected-contract-not-execution-actual-roots-require-real-observation";
+const RUNNER_V2_PHASE_ONE_PARTITION_VOCABULARY_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-partition-vocabulary.v1";
+const RUNNER_V2_PHASE_ONE_EXPECTED_RESULT_DOMAIN_V1: &str =
+    "org.frankensim.fs-evidence-runner.phase-one-expected-result.v1";
 
 /// Sole declaration owner of one compiled base source input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1276,6 +1284,7 @@ pub struct RunnerV2PhaseOneContractContributionV2 {
     source_closure_root: ContentHash,
     base_coverage_manifest_root: ContentHash,
     case_manifest_contract_root: ContentHash,
+    expected_ledger: RunnerV2PhaseOneExpectedLedgerV1,
     expected_partitions_root: ContentHash,
     payload_root: ContentHash,
     contribution: BaseCoverageCloseDownstreamContributionV2,
@@ -1312,10 +1321,15 @@ impl RunnerV2PhaseOneContractContributionV2 {
             ));
         }
 
-        let case_manifest_contract_root =
-            phase_one_case_manifest_contract_root_v1(&base_coverage_close_manifest)?;
-        let expected_partitions_root =
-            phase_one_expected_partitions_root_v1(&base_coverage_close_manifest)?;
+        let expected_ledger = RunnerV2PhaseOneExpectedLedgerV1::build_from(
+            &base_coverage_close_manifest,
+            &source_closure,
+        )?;
+        let expected_partitions_root = expected_ledger.root();
+        let case_manifest_contract_root = phase_one_case_manifest_contract_root_v1(
+            &base_coverage_close_manifest,
+            expected_partitions_root,
+        )?;
         let target_root = phase_one_target_contract_root_v1()?;
         let feature_set_root = phase_one_feature_contract_root_v1()?;
         let build_contract_root =
@@ -1387,6 +1401,7 @@ impl RunnerV2PhaseOneContractContributionV2 {
             source_closure_root: source_closure.root(),
             base_coverage_manifest_root: base_coverage_manifest.root(),
             case_manifest_contract_root,
+            expected_ledger,
             expected_partitions_root,
             payload_root,
             contribution,
@@ -1417,6 +1432,12 @@ impl RunnerV2PhaseOneContractContributionV2 {
     #[must_use]
     pub const fn case_manifest_contract_root(&self) -> ContentHash {
         self.case_manifest_contract_root
+    }
+
+    /// Complete source-authoritative result-free expected ledger.
+    #[must_use]
+    pub const fn expected_ledger(&self) -> &RunnerV2PhaseOneExpectedLedgerV1 {
+        &self.expected_ledger
     }
 
     /// Exact declaration-side expected partition root.
@@ -1727,9 +1748,15 @@ fn validate_exact_phase_one_observer_contract_v1(
     Ok(())
 }
 
+/// One immutable, result-free row in the source-authoritative Phase-1 ledger.
+///
+/// Every field is expected contract data. No member records a matched result,
+/// runtime observation, retained execution artifact, or downstream success.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PhaseOneCloseLedgerCellV1 {
+pub struct RunnerV2PhaseOneExpectedLedgerCellV1 {
+    ledger_ordinal: u32,
     source_ordinal: u32,
+    cell_id: StableTokenV2,
     source_case_id: Box<str>,
     source_class: BaseCoverageManifestClassV1,
     source_path: Box<str>,
@@ -1738,16 +1765,47 @@ struct PhaseOneCloseLedgerCellV1 {
     execution_scope: BaseCoverageCloseExecutionScopeV1,
     partition: BaseCoverageClosePartitionV1,
     expected_decision: BaseCoverageCloseDecisionV1,
+    expected_result_root: Option<ContentHash>,
     expected_reason: Option<BaseCoverageCloseReasonCodeV1>,
+    semantic_journey: StableTokenV2,
+    route_id: StableTokenV2,
+    route_owner: Box<str>,
+    compatible_source_snapshot_root: ContentHash,
+    case_manifest_root: ContentHash,
+    source_closure_root: ContentHash,
     downstream_contribution_root: Option<ContentHash>,
     five_explicits_root: ContentHash,
     cell_root: ContentHash,
+    no_claim: StableTokenV2,
 }
 
-impl PhaseOneCloseLedgerCellV1 {
-    fn from_close_cell(cell: &BaseCoverageCloseManifestCellV1) -> Self {
-        Self {
+impl RunnerV2PhaseOneExpectedLedgerCellV1 {
+    fn from_close_cell(
+        ledger_ordinal: u32,
+        cell: &BaseCoverageCloseManifestCellV1,
+        close_manifest: &BaseCoverageCloseManifestV1,
+        source_closure: &RunnerV2BaseSourceClosureV1,
+    ) -> Result<Self, ConstructionErrorV2> {
+        let cell_id = token(&format!("phase1-ledger-cell-{ledger_ordinal}"))?;
+        let expected_result_root = if cell.expected_reason().is_none() {
+            Some(phase_one_expected_result_root_v1(
+                ledger_ordinal,
+                &cell_id,
+                cell.source_case_id(),
+                cell.partition(),
+                cell.expected_decision(),
+                cell.root(),
+                source_closure.snapshot_root(),
+                close_manifest.root(),
+                source_closure.root(),
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            ledger_ordinal,
             source_ordinal: cell.source_ordinal(),
+            cell_id,
             source_case_id: cell.source_case_id().into(),
             source_class: cell.source_class(),
             source_path: cell.source_path().into(),
@@ -1756,18 +1814,372 @@ impl PhaseOneCloseLedgerCellV1 {
             execution_scope: cell.execution_scope(),
             partition: cell.partition(),
             expected_decision: cell.expected_decision(),
+            expected_result_root,
             expected_reason: cell.expected_reason(),
+            semantic_journey: token(RUNNER_V2_PHASE_ONE_SEMANTIC_JOURNEY_V1)?,
+            route_id: token(RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1)?,
+            route_owner: RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1.into(),
+            compatible_source_snapshot_root: source_closure.snapshot_root(),
+            case_manifest_root: close_manifest.root(),
+            source_closure_root: source_closure.root(),
             downstream_contribution_root: cell
                 .downstream_contribution()
                 .map(crate::coverage::BaseCoverageCloseDownstreamContributionV1::root),
             five_explicits_root: cell.five_explicits().root(),
             cell_root: cell.root(),
+            no_claim: token(RUNNER_V2_PHASE_ONE_LEDGER_ROW_NO_CLAIM_V1)?,
+        })
+    }
+
+    /// One-based ordinal in the complete canonical Phase-1 ledger.
+    #[must_use]
+    pub const fn ledger_ordinal(&self) -> u32 {
+        self.ledger_ordinal
+    }
+
+    /// One-based ordinal of the source close-manifest cell.
+    #[must_use]
+    pub const fn source_ordinal(&self) -> u32 {
+        self.source_ordinal
+    }
+
+    /// Stable Phase-1 ledger-cell identifier.
+    #[must_use]
+    pub const fn cell_id(&self) -> &StableTokenV2 {
+        &self.cell_id
+    }
+
+    /// Exact source-coverage case identifier.
+    #[must_use]
+    pub fn source_case_id(&self) -> &str {
+        &self.source_case_id
+    }
+
+    /// Exact frozen source-coverage class.
+    #[must_use]
+    pub const fn source_class(&self) -> BaseCoverageManifestClassV1 {
+        self.source_class
+    }
+
+    /// Exact slash-separated source path.
+    #[must_use]
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+
+    /// Exact AC53 close group.
+    #[must_use]
+    pub const fn group(&self) -> BaseCoverageCloseGroupV1 {
+        self.group
+    }
+
+    /// Exact AC53 close facet.
+    #[must_use]
+    pub const fn facet(&self) -> BaseCoverageCloseFacetV1 {
+        self.facet
+    }
+
+    /// Exact declaration-side execution scope.
+    #[must_use]
+    pub const fn execution_scope(&self) -> BaseCoverageCloseExecutionScopeV1 {
+        self.execution_scope
+    }
+
+    /// Exact expected close partition.
+    #[must_use]
+    pub const fn partition(&self) -> BaseCoverageClosePartitionV1 {
+        self.partition
+    }
+
+    /// Exact expected closed decision.
+    #[must_use]
+    pub const fn expected_decision(&self) -> BaseCoverageCloseDecisionV1 {
+        self.expected_decision
+    }
+
+    /// Source-declared expected-decision contract root when the row has no reason.
+    ///
+    /// This is not an observed/output root. A downstream executor must derive
+    /// its actual root from the real outcome and must never copy this value.
+    #[must_use]
+    pub const fn expected_result_root(&self) -> Option<ContentHash> {
+        self.expected_result_root
+    }
+
+    /// Exact registered reason when an expected-decision root is inapplicable.
+    #[must_use]
+    pub const fn expected_reason(&self) -> Option<BaseCoverageCloseReasonCodeV1> {
+        self.expected_reason
+    }
+
+    /// Exact semantic-journey identifier.
+    #[must_use]
+    pub const fn semantic_journey(&self) -> &StableTokenV2 {
+        &self.semantic_journey
+    }
+
+    /// Exact downstream Phase-1 route identifier.
+    #[must_use]
+    pub const fn route_id(&self) -> &StableTokenV2 {
+        &self.route_id
+    }
+
+    /// Exact designated downstream route owner.
+    #[must_use]
+    pub fn route_owner(&self) -> &str {
+        &self.route_owner
+    }
+
+    /// Exact compatible source-snapshot root.
+    #[must_use]
+    pub const fn compatible_source_snapshot_root(&self) -> ContentHash {
+        self.compatible_source_snapshot_root
+    }
+
+    /// Exact immutable source close-manifest root.
+    #[must_use]
+    pub const fn case_manifest_root(&self) -> ContentHash {
+        self.case_manifest_root
+    }
+
+    /// Exact compiled source-closure root.
+    #[must_use]
+    pub const fn source_closure_root(&self) -> ContentHash {
+        self.source_closure_root
+    }
+
+    /// Compatibility V1 downstream-contribution root, when the source cell has one.
+    #[must_use]
+    pub const fn downstream_contribution_root(&self) -> Option<ContentHash> {
+        self.downstream_contribution_root
+    }
+
+    /// Exact Five Explicits declaration root.
+    #[must_use]
+    pub const fn five_explicits_root(&self) -> ContentHash {
+        self.five_explicits_root
+    }
+
+    /// Exact source close-manifest cell root.
+    #[must_use]
+    pub const fn cell_root(&self) -> ContentHash {
+        self.cell_root
+    }
+
+    /// Exact result-free ledger-row no-claim.
+    #[must_use]
+    pub const fn no_claim(&self) -> &StableTokenV2 {
+        &self.no_claim
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the expected-result identity visibly binds every non-reason Phase-1 ledger coordinate"
+)]
+fn phase_one_expected_result_root_v1(
+    ledger_ordinal: u32,
+    cell_id: &StableTokenV2,
+    source_case_id: &str,
+    partition: BaseCoverageClosePartitionV1,
+    expected_decision: BaseCoverageCloseDecisionV1,
+    close_cell_root: ContentHash,
+    compatible_source_snapshot_root: ContentHash,
+    case_manifest_root: ContentHash,
+    source_closure_root: ContentHash,
+) -> Result<ContentHash, ConstructionErrorV2> {
+    if ledger_ordinal == 0 {
+        return Err(ConstructionErrorV2::new(
+            ConstructionErrorKindV2::Zero,
+            "projection.phase_one.expected_result.ledger_ordinal",
+            "one nonzero Phase-1 ledger ordinal",
+            ledger_ordinal,
+        ));
+    }
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1EXPECTEDRESULT\x01", 2 * 1024)?;
+    frame.push_u32("expected_result.ledger_ordinal", ledger_ordinal)?;
+    frame.push_str("expected_result.cell_id", cell_id.as_str())?;
+    frame.push_str("expected_result.source_case_id", source_case_id)?;
+    frame.push_u16("expected_result.partition", partition.code())?;
+    frame.push_u16(
+        "expected_result.expected_decision",
+        expected_decision.code(),
+    )?;
+    frame.push_bytes(
+        "expected_result.close_cell_root",
+        close_cell_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "expected_result.compatible_source_snapshot_root",
+        compatible_source_snapshot_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "expected_result.case_manifest_root",
+        case_manifest_root.as_bytes(),
+    )?;
+    frame.push_bytes(
+        "expected_result.source_closure_root",
+        source_closure_root.as_bytes(),
+    )?;
+    frame.push_str(
+        "expected_result.no_claim",
+        "expected-result-root-is-a-source-declared-expected-decision-contract-not-an-observed-output-downstream-actual-roots-must-be-derived-from-real-outcomes-not-copied",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_RESULT_DOMAIN_V1))
+}
+
+fn phase_one_partition_vocabulary_root_v1() -> Result<ContentHash, ConstructionErrorV2> {
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1PARTITIONVOCAB\x01", 4 * 1024)?;
+    frame.push_u32(
+        "vocabulary.partition_count",
+        checked_u32(
+            RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1.len(),
+            "projection.phase_one.partition_vocabulary_count",
+        )?,
+    )?;
+    for (index, name) in RUNNER_V2_PHASE_ONE_EXPECTED_PARTITION_NAMES_V1
+        .iter()
+        .enumerate()
+    {
+        let partition = BaseCoverageClosePartitionV1::ALL[index];
+        if partition.stable_name() != *name {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.phase_one.partition_vocabulary",
+                "the exact six-name closed partition vocabulary in code order",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
         }
+        frame.push_u16("vocabulary.partition_code", partition.code())?;
+        frame.push_str("vocabulary.partition_name", name)?;
+    }
+    frame.push_str(
+        "vocabulary.no_claim",
+        "partition-vocabulary-root-proves-closed-names-and-codes-not-ledger-membership-or-execution",
+    )?;
+    Ok(frame.root(RUNNER_V2_PHASE_ONE_PARTITION_VOCABULARY_DOMAIN_V1))
+}
+
+/// Source-authoritative, immutable, result-free Phase-1 expected ledger.
+///
+/// The downstream owner can inspect every exact row through this public
+/// surface. The ledger contains no matched counts, observations, or execution
+/// artifacts and cannot claim that the owner ran the designated route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerV2PhaseOneExpectedLedgerV1 {
+    source_manifest_root: ContentHash,
+    reason_registry_root: ContentHash,
+    close_manifest_root: ContentHash,
+    compatible_source_snapshot_root: ContentHash,
+    source_closure_root: ContentHash,
+    partition_vocabulary_root: ContentHash,
+    cells: Box<[RunnerV2PhaseOneExpectedLedgerCellV1]>,
+    partition_cell_counts: [u32; 6],
+    root: ContentHash,
+}
+
+impl RunnerV2PhaseOneExpectedLedgerV1 {
+    /// Reconstruct the exact frozen ledger without performing execution.
+    pub fn frozen() -> Result<Self, ConstructionErrorV2> {
+        let close_manifest = BaseCoverageCloseManifestV1::frozen()?;
+        let source_closure = RunnerV2BaseSourceClosureV1::frozen()?;
+        Self::build_from(&close_manifest, &source_closure)
+    }
+
+    fn build_from(
+        close_manifest: &BaseCoverageCloseManifestV1,
+        source_closure: &RunnerV2BaseSourceClosureV1,
+    ) -> Result<Self, ConstructionErrorV2> {
+        let cells = phase_one_close_ledger_cells_for_source_v1(close_manifest, source_closure)?;
+        let root = phase_one_expected_partitions_root_from_ledger_v1(
+            close_manifest,
+            source_closure,
+            &cells,
+        )?;
+        let mut partition_cell_counts = [0_u32; 6];
+        for cell in &cells {
+            let index = usize::from(cell.partition.code() - 1);
+            partition_cell_counts[index] = partition_cell_counts[index]
+                .checked_add(1)
+                .ok_or_else(sequence_overflow)?;
+        }
+        Ok(Self {
+            source_manifest_root: close_manifest.source_manifest_root(),
+            reason_registry_root: close_manifest.reason_registry_root(),
+            close_manifest_root: close_manifest.root(),
+            compatible_source_snapshot_root: source_closure.snapshot_root(),
+            source_closure_root: source_closure.root(),
+            partition_vocabulary_root: phase_one_partition_vocabulary_root_v1()?,
+            cells: cells.into_boxed_slice(),
+            partition_cell_counts,
+            root,
+        })
+    }
+
+    /// Exact source-coverage manifest root.
+    #[must_use]
+    pub const fn source_manifest_root(&self) -> ContentHash {
+        self.source_manifest_root
+    }
+
+    /// Exact closed reason-registry root.
+    #[must_use]
+    pub const fn reason_registry_root(&self) -> ContentHash {
+        self.reason_registry_root
+    }
+
+    /// Exact full-set close-manifest root.
+    #[must_use]
+    pub const fn close_manifest_root(&self) -> ContentHash {
+        self.close_manifest_root
+    }
+
+    /// Exact compatible source-snapshot root shared by every row.
+    #[must_use]
+    pub const fn compatible_source_snapshot_root(&self) -> ContentHash {
+        self.compatible_source_snapshot_root
+    }
+
+    /// Exact compiled source-closure root shared by every row.
+    #[must_use]
+    pub const fn source_closure_root(&self) -> ContentHash {
+        self.source_closure_root
+    }
+
+    /// Exact independent six-name/code partition-vocabulary root.
+    #[must_use]
+    pub const fn partition_vocabulary_root(&self) -> ContentHash {
+        self.partition_vocabulary_root
+    }
+
+    /// Complete ledger rows in canonical close-manifest order.
+    #[must_use]
+    pub fn cells(&self) -> &[RunnerV2PhaseOneExpectedLedgerCellV1] {
+        &self.cells
+    }
+
+    /// Independently checked exact cell count for one closed partition.
+    #[must_use]
+    pub const fn partition_cell_count(&self, partition: BaseCoverageClosePartitionV1) -> u32 {
+        self.partition_cell_counts[partition as usize - 1]
+    }
+
+    /// Canonical root binding all rows, vocabulary, and partition ID sets.
+    #[must_use]
+    pub const fn root(&self) -> ContentHash {
+        self.root
+    }
+
+    /// Runtime observations embedded in this result-free declaration.
+    #[must_use]
+    pub const fn execution_observation_count(&self) -> u32 {
+        0
     }
 }
 
 fn phase_one_case_manifest_contract_root_v1(
     close_manifest: &BaseCoverageCloseManifestV1,
+    expected_ledger_root: ContentHash,
 ) -> Result<ContentHash, ConstructionErrorV2> {
     phase_one_case_manifest_contract_root_from_components_v1(
         close_manifest.source_manifest_root(),
@@ -1777,6 +2189,7 @@ fn phase_one_case_manifest_contract_root_v1(
             close_manifest.cells().len(),
             "projection.phase_one.close_manifest_cell_count",
         )?,
+        expected_ledger_root,
     )
 }
 
@@ -1785,6 +2198,7 @@ fn phase_one_case_manifest_contract_root_from_components_v1(
     reason_registry_root: ContentHash,
     close_manifest_root: ContentHash,
     close_manifest_cell_count: u32,
+    expected_ledger_root: ContentHash,
 ) -> Result<ContentHash, ConstructionErrorV2> {
     if close_manifest_cell_count == 0 {
         return Err(ConstructionErrorV2::new(
@@ -1824,10 +2238,17 @@ fn phase_one_case_manifest_contract_root_from_components_v1(
         "manifest.reason_registry_root",
         reason_registry_root.as_bytes(),
     )?;
-    frame.push_bytes("manifest.close_manifest_root", close_manifest_root.as_bytes())?;
+    frame.push_bytes(
+        "manifest.close_manifest_root",
+        close_manifest_root.as_bytes(),
+    )?;
     frame.push_u32(
         "manifest.close_manifest_cell_count",
         close_manifest_cell_count,
+    )?;
+    frame.push_bytes(
+        "manifest.expected_ledger_root",
+        expected_ledger_root.as_bytes(),
     )?;
     frame.push_u16("manifest.declaration_only", 1)?;
     frame.push_str(
@@ -1839,24 +2260,34 @@ fn phase_one_case_manifest_contract_root_from_components_v1(
 
 fn phase_one_close_ledger_cells_v1(
     close_manifest: &BaseCoverageCloseManifestV1,
-) -> Vec<PhaseOneCloseLedgerCellV1> {
+) -> Result<Vec<RunnerV2PhaseOneExpectedLedgerCellV1>, ConstructionErrorV2> {
+    let source_closure = RunnerV2BaseSourceClosureV1::frozen()?;
+    phase_one_close_ledger_cells_for_source_v1(close_manifest, &source_closure)
+}
+
+fn phase_one_close_ledger_cells_for_source_v1(
+    close_manifest: &BaseCoverageCloseManifestV1,
+    source_closure: &RunnerV2BaseSourceClosureV1,
+) -> Result<Vec<RunnerV2PhaseOneExpectedLedgerCellV1>, ConstructionErrorV2> {
     close_manifest
         .cells()
         .iter()
-        .map(PhaseOneCloseLedgerCellV1::from_close_cell)
+        .enumerate()
+        .map(|(index, cell)| {
+            RunnerV2PhaseOneExpectedLedgerCellV1::from_close_cell(
+                checked_u32(index + 1, "projection.phase_one.close_ledger_ordinal")?,
+                cell,
+                close_manifest,
+                source_closure,
+            )
+        })
         .collect()
-}
-
-fn phase_one_expected_partitions_root_v1(
-    close_manifest: &BaseCoverageCloseManifestV1,
-) -> Result<ContentHash, ConstructionErrorV2> {
-    let cells = phase_one_close_ledger_cells_v1(close_manifest);
-    phase_one_expected_partitions_root_from_ledger_v1(close_manifest, &cells)
 }
 
 fn phase_one_expected_partitions_root_from_ledger_v1(
     close_manifest: &BaseCoverageCloseManifestV1,
-    cells: &[PhaseOneCloseLedgerCellV1],
+    source_closure: &RunnerV2BaseSourceClosureV1,
+    cells: &[RunnerV2PhaseOneExpectedLedgerCellV1],
 ) -> Result<ContentHash, ConstructionErrorV2> {
     let expected_cells = close_manifest.cells();
     if cells.len() != expected_cells.len() {
@@ -1872,23 +2303,29 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
         ));
     }
     for (index, (presented, expected)) in cells.iter().zip(expected_cells).enumerate() {
-        let expected_ordinal =
-            checked_u32(index + 1, "projection.phase_one.close_ledger_ordinal")?;
-        if presented.source_ordinal != expected_ordinal
+        let expected_ordinal = checked_u32(index + 1, "projection.phase_one.close_ledger_ordinal")?;
+        if presented.ledger_ordinal != expected_ordinal
+            || presented.source_ordinal != expected_ordinal
             || presented.source_ordinal != expected.source_ordinal()
         {
             return Err(ConstructionErrorV2::new(
                 ConstructionErrorKindV2::OutOfOrder,
                 "projection.phase_one.close_ledger_ordinal",
                 "the exact contiguous source-manifest ordinal in canonical order",
-                presented.source_ordinal,
+                presented.ledger_ordinal,
             ));
         }
-        if presented != &PhaseOneCloseLedgerCellV1::from_close_cell(expected) {
+        let exact = RunnerV2PhaseOneExpectedLedgerCellV1::from_close_cell(
+            expected_ordinal,
+            expected,
+            close_manifest,
+            source_closure,
+        )?;
+        if presented != &exact {
             return Err(ConstructionErrorV2::new_redacted(
                 ConstructionErrorKindV2::Incompatible,
                 "projection.phase_one.close_ledger_cell",
-                "the exact stable ID, source, classification, reason, contribution, Five Explicits, and cell root",
+                "the exact IDs, source, classification, result-or-reason, route, snapshot, manifests, contribution, Five Explicits, cell root, and no-claim",
                 ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
@@ -1916,6 +2353,41 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
             ConstructionObservedDataClassV2::CallerControlledText,
         ));
     }
+    for partition in BaseCoverageClosePartitionV1::ALL {
+        let presented_ids = cells
+            .iter()
+            .filter(|cell| cell.partition == partition)
+            .map(|cell| {
+                (
+                    cell.ledger_ordinal,
+                    cell.cell_id.as_str().to_owned(),
+                    cell.source_case_id.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let independent_manifest_ids = expected_cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.partition() == partition)
+            .map(|(index, cell)| {
+                let ordinal =
+                    checked_u32(index + 1, "projection.phase_one.partition_id_set_ordinal")?;
+                Ok((
+                    ordinal,
+                    format!("phase1-ledger-cell-{ordinal}"),
+                    cell.source_case_id().to_owned(),
+                ))
+            })
+            .collect::<Result<Vec<_>, ConstructionErrorV2>>()?;
+        if presented_ids != independent_manifest_ids {
+            return Err(ConstructionErrorV2::new_redacted(
+                ConstructionErrorKindV2::Incompatible,
+                "projection.phase_one.partition_id_sets",
+                "the independently recomputed exact ordered cell-ID set for each partition",
+                ConstructionObservedDataClassV2::CallerControlledText,
+            ));
+        }
+    }
     let counted_total = presented_partition_counts
         .iter()
         .try_fold(0_u32, |total, count| {
@@ -1930,17 +2402,11 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
             ConstructionErrorKindV2::Incompatible,
             "projection.phase_one.close_ledger_partition_sum",
             "an exact partition sum equal to the full close-manifest cell count",
-            ConstructionObservedV2::unsigned_pair(
-                u64::from(counted_total),
-                u64::from(exact_total),
-            ),
+            ConstructionObservedV2::unsigned_pair(u64::from(counted_total), u64::from(exact_total)),
         ));
     }
 
-    let mut frame = CanonicalFrameV1::new(
-        b"FSPHASE1PARTITIONS\x01",
-        2 * 1024 * 1024,
-    )?;
+    let mut frame = CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 2 * 1024 * 1024)?;
     frame.push_bytes(
         "partitions.source_manifest_root",
         close_manifest.source_manifest_root().as_bytes(),
@@ -1952,6 +2418,18 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
     frame.push_bytes(
         "partitions.close_manifest_root",
         close_manifest.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "partitions.compatible_source_snapshot_root",
+        source_closure.snapshot_root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "partitions.source_closure_root",
+        source_closure.root().as_bytes(),
+    )?;
+    frame.push_bytes(
+        "partitions.vocabulary_root",
+        phase_one_partition_vocabulary_root_v1()?.as_bytes(),
     )?;
     frame.push_u32(
         "partitions.count",
@@ -1973,10 +2451,7 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
                 ConstructionObservedDataClassV2::CallerControlledText,
             ));
         }
-        frame.push_u16(
-            "partitions.code",
-            partition.code(),
-        )?;
+        frame.push_u16("partitions.code", partition.code())?;
         frame.push_str("partitions.name", name)?;
         frame.push_u32(
             "partitions.expected_cell_count",
@@ -1986,7 +2461,9 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
     }
     frame.push_u32("partitions.cell_count", exact_total)?;
     for cell in cells {
+        frame.push_u32("partitions.cell.ledger_ordinal", cell.ledger_ordinal)?;
         frame.push_u32("partitions.cell.ordinal", cell.source_ordinal)?;
+        frame.push_str("partitions.cell.cell_id", cell.cell_id.as_str())?;
         frame.push_str("partitions.cell.stable_id", &cell.source_case_id)?;
         frame.push_u16("partitions.cell.source_class", cell.source_class as u16)?;
         frame.push_str("partitions.cell.source_path", &cell.source_path)?;
@@ -2002,12 +2479,37 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
             cell.expected_decision.code(),
         )?;
         frame.push_presence(
+            "partitions.cell.expected_result_present",
+            cell.expected_result_root.is_some(),
+        )?;
+        if let Some(root) = cell.expected_result_root {
+            frame.push_bytes("partitions.cell.expected_result_root", root.as_bytes())?;
+        }
+        frame.push_presence(
             "partitions.cell.expected_reason_present",
             cell.expected_reason.is_some(),
         )?;
         if let Some(reason) = cell.expected_reason {
             frame.push_u16("partitions.cell.expected_reason", reason.code())?;
         }
+        frame.push_str(
+            "partitions.cell.semantic_journey",
+            cell.semantic_journey.as_str(),
+        )?;
+        frame.push_str("partitions.cell.route_id", cell.route_id.as_str())?;
+        frame.push_str("partitions.cell.route_owner", &cell.route_owner)?;
+        frame.push_bytes(
+            "partitions.cell.compatible_source_snapshot_root",
+            cell.compatible_source_snapshot_root.as_bytes(),
+        )?;
+        frame.push_bytes(
+            "partitions.cell.case_manifest_root",
+            cell.case_manifest_root.as_bytes(),
+        )?;
+        frame.push_bytes(
+            "partitions.cell.source_closure_root",
+            cell.source_closure_root.as_bytes(),
+        )?;
         frame.push_presence(
             "partitions.cell.downstream_contribution_present",
             cell.downstream_contribution_root.is_some(),
@@ -2023,6 +2525,33 @@ fn phase_one_expected_partitions_root_from_ledger_v1(
             cell.five_explicits_root.as_bytes(),
         )?;
         frame.push_bytes("partitions.cell.root", cell.cell_root.as_bytes())?;
+        frame.push_str("partitions.cell.no_claim", cell.no_claim.as_str())?;
+    }
+    frame.push_u32(
+        "partitions.partition_id_set_count",
+        checked_u32(
+            BaseCoverageClosePartitionV1::ALL.len(),
+            "projection.phase_one.partition_id_set_count",
+        )?,
+    )?;
+    for partition in BaseCoverageClosePartitionV1::ALL {
+        let members = cells
+            .iter()
+            .filter(|cell| cell.partition == partition)
+            .collect::<Vec<_>>();
+        frame.push_u16("partitions.id_set.partition", partition.code())?;
+        frame.push_u32(
+            "partitions.id_set.cell_count",
+            checked_u32(
+                members.len(),
+                "projection.phase_one.partition_id_set_cell_count",
+            )?,
+        )?;
+        for member in members {
+            frame.push_u32("partitions.id_set.ledger_ordinal", member.ledger_ordinal)?;
+            frame.push_str("partitions.id_set.cell_id", member.cell_id.as_str())?;
+            frame.push_str("partitions.id_set.source_case_id", &member.source_case_id)?;
+        }
     }
     frame.push_u32("partitions.required_unexpected_mismatches", 0)?;
     frame.push_u32("partitions.required_execution_failures", 0)?;
@@ -16182,8 +16711,8 @@ mod tests {
         RunnerV2PhaseOneContractContributionV2, compare_base_e2e_journey_results_v1,
         encode_construction_error, execute_case, expected_source_identity_root, journey_root,
         journey_row_id_oracle, journey_row_root, phase_one_build_contract_root_v1,
-        phase_one_case_manifest_contract_root_from_components_v1,
-        phase_one_close_ledger_cells_v1, phase_one_contribution_projection_root_v2,
+        phase_one_case_manifest_contract_root_from_components_v1, phase_one_close_ledger_cells_v1,
+        phase_one_contribution_projection_root_v2,
         phase_one_expected_partitions_root_from_ledger_v1, phase_one_payload_root_v2,
         reconstruct_exact_local_coverage_report, run_base_e2e_journey_v1,
         run_base_e2e_projection_v1, schema_impact_projection_root_v2,
@@ -16197,8 +16726,8 @@ mod tests {
         BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseContributionBudgetsV1,
         BaseCoverageCloseDeferredEvidenceEnvelopeV1,
         BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
-        BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseManifestV1,
-        BaseCoverageClosePartitionV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
+        BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseManifestV1, BaseCoverageClosePartitionV1,
+        BaseCoverageCloseReasonCodeV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
         BaseCoverageManifestClassV1, CanonicalSchemaImpactDispositionV1, DeferredReasonV1,
         RuntimeObservationDispositionV1, compatible_source_snapshot_root_from_exact_frame_v1,
         frozen_downstream_close_contribution_budgets_v1,
@@ -16407,54 +16936,40 @@ mod tests {
     }
 
     fn vocabulary_only_phase_one_partition_root_v1() -> fs_blake3::ContentHash {
-        let names = [
-            "positive",
-            "expected-refusal",
-            "expected-failure",
-            "mutation",
-            "unsupported",
-            "inapplicable",
+        let literals = [
+            (1_u16, "positive"),
+            (2_u16, "expected-refusal"),
+            (3_u16, "expected-failure"),
+            (4_u16, "mutation"),
+            (5_u16, "unsupported"),
+            (6_u16, "inapplicable"),
         ];
         let mut frame =
-            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 4 * 1024)
-                .expect("legacy vocabulary-only frame");
+            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONVOCAB\x01", 4 * 1024)
+                .expect("independent vocabulary-only frame");
         frame
-            .push_u32("partitions.count", 6)
+            .push_u32("vocabulary.partition_count", 6)
             .expect("partition count");
-        for (index, name) in names.iter().enumerate() {
+        for (code, name) in literals {
             frame
-                .push_u16(
-                    "partitions.code",
-                    u16::try_from(index + 1).expect("six bounded partition codes"),
-                )
+                .push_u16("vocabulary.partition_code", code)
                 .expect("partition code");
             frame
-                .push_str("partitions.name", name)
+                .push_str("vocabulary.partition_name", name)
                 .expect("partition name");
-            frame
-                .push_u16("partitions.eventual_owner_requires_exact_match", 1)
-                .expect("partition exact-match flag");
         }
         frame
-            .push_u32("partitions.required_unexpected_mismatches", 0)
-            .expect("zero mismatches");
-        frame
-            .push_u32("partitions.required_execution_failures", 0)
-            .expect("zero failures");
-        frame
-            .push_u32("partitions.required_unexplained_skips", 0)
-            .expect("zero skips");
-        frame
             .push_str(
-                "partitions.no_claim",
-                "expected-partitions-do-not-prove-owner-execution-or-matched-results",
+                "vocabulary.no_claim",
+                "partition-vocabulary-root-proves-closed-names-and-codes-not-ledger-membership-or-execution",
             )
-            .expect("partition no-claim");
-        frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1)
+            .expect("vocabulary no-claim");
+        frame.root("org.frankensim.fs-evidence-runner.phase-one-partition-vocabulary.v1")
     }
 
     fn count_only_phase_one_partition_root_v1(
         close_manifest: &BaseCoverageCloseManifestV1,
+        source_closure: &RunnerV2BaseSourceClosureV1,
     ) -> fs_blake3::ContentHash {
         let mut frame =
             crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 64 * 1024)
@@ -16477,6 +16992,24 @@ mod tests {
                 close_manifest.root().as_bytes(),
             )
             .expect("close-manifest root");
+        frame
+            .push_bytes(
+                "partitions.compatible_source_snapshot_root",
+                source_closure.snapshot_root().as_bytes(),
+            )
+            .expect("compatible snapshot root");
+        frame
+            .push_bytes(
+                "partitions.source_closure_root",
+                source_closure.root().as_bytes(),
+            )
+            .expect("source-closure root");
+        frame
+            .push_bytes(
+                "partitions.vocabulary_root",
+                vocabulary_only_phase_one_partition_root_v1().as_bytes(),
+            )
+            .expect("independent vocabulary root");
         frame
             .push_u32("partitions.count", 6)
             .expect("partition count");
@@ -16524,6 +17057,358 @@ mod tests {
             )
             .expect("partition no-claim");
         frame.root(RUNNER_V2_PHASE_ONE_EXPECTED_PARTITIONS_DOMAIN_V1)
+    }
+
+    fn independent_phase_one_expected_result_root_v1(
+        ledger_ordinal: u32,
+        cell_id: &str,
+        cell: &crate::coverage::BaseCoverageCloseManifestCellV1,
+        close_manifest: &BaseCoverageCloseManifestV1,
+        source_closure: &RunnerV2BaseSourceClosureV1,
+    ) -> fs_blake3::ContentHash {
+        let mut frame =
+            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1EXPECTEDRESULT\x01", 2 * 1024)
+                .expect("independent expected-result frame");
+        frame
+            .push_u32("expected_result.ledger_ordinal", ledger_ordinal)
+            .expect("ledger ordinal");
+        frame
+            .push_str("expected_result.cell_id", cell_id)
+            .expect("cell ID");
+        frame
+            .push_str("expected_result.source_case_id", cell.source_case_id())
+            .expect("source case ID");
+        frame
+            .push_u16("expected_result.partition", cell.partition().code())
+            .expect("partition");
+        frame
+            .push_u16(
+                "expected_result.expected_decision",
+                cell.expected_decision().code(),
+            )
+            .expect("expected decision");
+        frame
+            .push_bytes("expected_result.close_cell_root", cell.root().as_bytes())
+            .expect("close-cell root");
+        frame
+            .push_bytes(
+                "expected_result.compatible_source_snapshot_root",
+                source_closure.snapshot_root().as_bytes(),
+            )
+            .expect("snapshot root");
+        frame
+            .push_bytes(
+                "expected_result.case_manifest_root",
+                close_manifest.root().as_bytes(),
+            )
+            .expect("case-manifest root");
+        frame
+            .push_bytes(
+                "expected_result.source_closure_root",
+                source_closure.root().as_bytes(),
+            )
+            .expect("source-closure root");
+        frame
+            .push_str(
+                "expected_result.no_claim",
+                "expected-result-root-is-a-source-declared-expected-decision-contract-not-an-observed-output-downstream-actual-roots-must-be-derived-from-real-outcomes-not-copied",
+            )
+            .expect("expected-result no-claim");
+        frame.root("org.frankensim.fs-evidence-runner.phase-one-expected-result.v1")
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the independent handwritten oracle intentionally repeats the complete AC64 frame instead of calling the production encoder"
+    )]
+    fn independent_phase_one_full_ledger_root_v1(
+        close_manifest: &BaseCoverageCloseManifestV1,
+        source_closure: &RunnerV2BaseSourceClosureV1,
+    ) -> fs_blake3::ContentHash {
+        let partition_literals = [
+            (BaseCoverageClosePartitionV1::Positive, 1_u16, "positive"),
+            (
+                BaseCoverageClosePartitionV1::ExpectedRefusal,
+                2_u16,
+                "expected-refusal",
+            ),
+            (
+                BaseCoverageClosePartitionV1::ExpectedFailure,
+                3_u16,
+                "expected-failure",
+            ),
+            (BaseCoverageClosePartitionV1::Mutation, 4_u16, "mutation"),
+            (
+                BaseCoverageClosePartitionV1::Unsupported,
+                5_u16,
+                "unsupported",
+            ),
+            (
+                BaseCoverageClosePartitionV1::Inapplicable,
+                6_u16,
+                "inapplicable",
+            ),
+        ];
+        let mut counts = [0_u32; 6];
+        for cell in close_manifest.cells() {
+            let index = usize::from(cell.partition().code() - 1);
+            counts[index] = counts[index].checked_add(1).expect("bounded count");
+        }
+        let mut frame =
+            crate::canonical::CanonicalFrameV1::new(b"FSPHASE1PARTITIONS\x01", 2 * 1024 * 1024)
+                .expect("independent full-ledger frame");
+        frame
+            .push_bytes(
+                "partitions.source_manifest_root",
+                close_manifest.source_manifest_root().as_bytes(),
+            )
+            .expect("source-manifest root");
+        frame
+            .push_bytes(
+                "partitions.reason_registry_root",
+                close_manifest.reason_registry_root().as_bytes(),
+            )
+            .expect("reason-registry root");
+        frame
+            .push_bytes(
+                "partitions.close_manifest_root",
+                close_manifest.root().as_bytes(),
+            )
+            .expect("close-manifest root");
+        frame
+            .push_bytes(
+                "partitions.compatible_source_snapshot_root",
+                source_closure.snapshot_root().as_bytes(),
+            )
+            .expect("snapshot root");
+        frame
+            .push_bytes(
+                "partitions.source_closure_root",
+                source_closure.root().as_bytes(),
+            )
+            .expect("source-closure root");
+        frame
+            .push_bytes(
+                "partitions.vocabulary_root",
+                vocabulary_only_phase_one_partition_root_v1().as_bytes(),
+            )
+            .expect("independent vocabulary root");
+        frame
+            .push_u32("partitions.count", 6)
+            .expect("partition vocabulary count");
+        for (index, (_, code, name)) in partition_literals.iter().copied().enumerate() {
+            frame
+                .push_u16("partitions.code", code)
+                .expect("partition code");
+            frame
+                .push_str("partitions.name", name)
+                .expect("partition name");
+            frame
+                .push_u32("partitions.expected_cell_count", counts[index])
+                .expect("partition cell count");
+            frame
+                .push_u16("partitions.eventual_owner_requires_exact_match", 1)
+                .expect("exact-match flag");
+        }
+        frame
+            .push_u32(
+                "partitions.cell_count",
+                u32::try_from(close_manifest.cells().len()).expect("bounded cell count"),
+            )
+            .expect("cell count");
+        for (index, cell) in close_manifest.cells().iter().enumerate() {
+            let ordinal = u32::try_from(index + 1).expect("bounded ledger ordinal");
+            let cell_id = format!("phase1-ledger-cell-{ordinal}");
+            frame
+                .push_u32("partitions.cell.ledger_ordinal", ordinal)
+                .expect("ledger ordinal");
+            frame
+                .push_u32("partitions.cell.ordinal", cell.source_ordinal())
+                .expect("source ordinal");
+            frame
+                .push_str("partitions.cell.cell_id", &cell_id)
+                .expect("cell ID");
+            frame
+                .push_str("partitions.cell.stable_id", cell.source_case_id())
+                .expect("source case ID");
+            frame
+                .push_u16("partitions.cell.source_class", cell.source_class() as u16)
+                .expect("source class");
+            frame
+                .push_str("partitions.cell.source_path", cell.source_path())
+                .expect("source path");
+            frame
+                .push_u16("partitions.cell.group", cell.group().code())
+                .expect("group");
+            frame
+                .push_u16("partitions.cell.facet", cell.facet().code())
+                .expect("facet");
+            frame
+                .push_u16(
+                    "partitions.cell.execution_scope",
+                    cell.execution_scope().code(),
+                )
+                .expect("execution scope");
+            frame
+                .push_u16("partitions.cell.partition", cell.partition().code())
+                .expect("partition");
+            frame
+                .push_u16(
+                    "partitions.cell.expected_decision",
+                    cell.expected_decision().code(),
+                )
+                .expect("expected decision");
+            let expected_result_root = cell.expected_reason().is_none().then(|| {
+                independent_phase_one_expected_result_root_v1(
+                    ordinal,
+                    &cell_id,
+                    cell,
+                    close_manifest,
+                    source_closure,
+                )
+            });
+            frame
+                .push_presence(
+                    "partitions.cell.expected_result_present",
+                    expected_result_root.is_some(),
+                )
+                .expect("expected-result presence");
+            if let Some(root) = expected_result_root {
+                frame
+                    .push_bytes("partitions.cell.expected_result_root", root.as_bytes())
+                    .expect("expected-result root");
+            }
+            frame
+                .push_presence(
+                    "partitions.cell.expected_reason_present",
+                    cell.expected_reason().is_some(),
+                )
+                .expect("reason presence");
+            if let Some(reason) = cell.expected_reason() {
+                frame
+                    .push_u16("partitions.cell.expected_reason", reason.code())
+                    .expect("reason");
+            }
+            frame
+                .push_str(
+                    "partitions.cell.semantic_journey",
+                    "runner-v2-phase1-contract",
+                )
+                .expect("semantic journey");
+            frame
+                .push_str(
+                    "partitions.cell.route_id",
+                    RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                )
+                .expect("route ID");
+            frame
+                .push_str(
+                    "partitions.cell.route_owner",
+                    RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                )
+                .expect("route owner");
+            frame
+                .push_bytes(
+                    "partitions.cell.compatible_source_snapshot_root",
+                    source_closure.snapshot_root().as_bytes(),
+                )
+                .expect("row snapshot root");
+            frame
+                .push_bytes(
+                    "partitions.cell.case_manifest_root",
+                    close_manifest.root().as_bytes(),
+                )
+                .expect("row case-manifest root");
+            frame
+                .push_bytes(
+                    "partitions.cell.source_closure_root",
+                    source_closure.root().as_bytes(),
+                )
+                .expect("row source-closure root");
+            let downstream_root = cell
+                .downstream_contribution()
+                .map(crate::coverage::BaseCoverageCloseDownstreamContributionV1::root);
+            frame
+                .push_presence(
+                    "partitions.cell.downstream_contribution_present",
+                    downstream_root.is_some(),
+                )
+                .expect("downstream contribution presence");
+            if let Some(root) = downstream_root {
+                frame
+                    .push_bytes(
+                        "partitions.cell.downstream_contribution_root",
+                        root.as_bytes(),
+                    )
+                    .expect("downstream contribution root");
+            }
+            frame
+                .push_bytes(
+                    "partitions.cell.five_explicits_root",
+                    cell.five_explicits().root().as_bytes(),
+                )
+                .expect("Five Explicits root");
+            frame
+                .push_bytes("partitions.cell.root", cell.root().as_bytes())
+                .expect("cell root");
+            frame
+                .push_str(
+                    "partitions.cell.no_claim",
+                    "phase1-ledger-row-is-expected-contract-not-execution-actual-roots-require-real-observation",
+                )
+                .expect("row no-claim");
+        }
+        frame
+            .push_u32("partitions.partition_id_set_count", 6)
+            .expect("partition ID-set count");
+        for (partition, _, _) in partition_literals {
+            let members = close_manifest
+                .cells()
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.partition() == partition)
+                .collect::<Vec<_>>();
+            frame
+                .push_u16("partitions.id_set.partition", partition.code())
+                .expect("ID-set partition");
+            frame
+                .push_u32(
+                    "partitions.id_set.cell_count",
+                    u32::try_from(members.len()).expect("bounded ID-set count"),
+                )
+                .expect("ID-set cell count");
+            for (index, cell) in members {
+                let ordinal = u32::try_from(index + 1).expect("bounded member ordinal");
+                frame
+                    .push_u32("partitions.id_set.ledger_ordinal", ordinal)
+                    .expect("ID-set ordinal");
+                frame
+                    .push_str(
+                        "partitions.id_set.cell_id",
+                        &format!("phase1-ledger-cell-{ordinal}"),
+                    )
+                    .expect("ID-set cell ID");
+                frame
+                    .push_str("partitions.id_set.source_case_id", cell.source_case_id())
+                    .expect("ID-set source case ID");
+            }
+        }
+        frame
+            .push_u32("partitions.required_unexpected_mismatches", 0)
+            .expect("zero mismatches");
+        frame
+            .push_u32("partitions.required_execution_failures", 0)
+            .expect("zero failures");
+        frame
+            .push_u32("partitions.required_unexplained_skips", 0)
+            .expect("zero skips");
+        frame
+            .push_str(
+                "partitions.no_claim",
+                "expected-partitions-do-not-prove-owner-execution-or-matched-results",
+            )
+            .expect("ledger no-claim");
+        frame.root("org.frankensim.fs-evidence-runner.phase-one-expected-partitions.v1")
     }
 
     #[test]
@@ -17102,6 +17987,417 @@ mod tests {
             variants.len()
         );
 
+        let close_manifest =
+            BaseCoverageCloseManifestV1::frozen().expect("exact full-set close manifest");
+        let source_closure = RunnerV2BaseSourceClosureV1::frozen().expect("exact source closure");
+        let exact_ledger =
+            phase_one_close_ledger_cells_v1(&close_manifest).expect("exact Phase-1 close ledger");
+        assert_eq!(exact_ledger.len(), close_manifest.cells().len());
+        let mut exact_cell_ids = std::collections::BTreeSet::new();
+        let mut exact_case_ids = std::collections::BTreeSet::new();
+        for (index, cell) in exact_ledger.iter().enumerate() {
+            let ordinal = u32::try_from(index + 1).expect("bounded ledger ordinal");
+            assert_eq!(cell.ledger_ordinal, ordinal);
+            assert_eq!(cell.source_ordinal, ordinal);
+            assert_eq!(
+                cell.cell_id.as_str(),
+                format!("phase1-ledger-cell-{ordinal}")
+            );
+            assert!(exact_cell_ids.insert(cell.cell_id.as_str()));
+            assert!(exact_case_ids.insert(cell.source_case_id.as_ref()));
+            assert_ne!(
+                cell.expected_result_root.is_some(),
+                cell.expected_reason.is_some(),
+                "every row carries exactly one expected result root or registered reason"
+            );
+            assert_eq!(
+                cell.semantic_journey.as_str(),
+                super::RUNNER_V2_PHASE_ONE_SEMANTIC_JOURNEY_V1
+            );
+            assert_eq!(
+                cell.route_id.as_str(),
+                RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1
+            );
+            assert_eq!(
+                cell.route_owner.as_ref(),
+                RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1
+            );
+            assert_eq!(
+                cell.compatible_source_snapshot_root,
+                source_closure.snapshot_root()
+            );
+            assert_eq!(cell.case_manifest_root, close_manifest.root());
+            assert_eq!(cell.source_closure_root, source_closure.root());
+            assert_eq!(
+                cell.no_claim.as_str(),
+                super::RUNNER_V2_PHASE_ONE_LEDGER_ROW_NO_CLAIM_V1
+            );
+        }
+        assert_eq!(exact_cell_ids.len(), exact_ledger.len());
+        assert_eq!(exact_case_ids.len(), exact_ledger.len());
+        assert_eq!(projection.expected_ledger().cells(), exact_ledger);
+        assert_eq!(
+            projection.expected_ledger(),
+            &super::RunnerV2PhaseOneExpectedLedgerV1::frozen()
+                .expect("public frozen Phase-1 expected ledger")
+        );
+        assert_eq!(
+            projection.expected_ledger().source_manifest_root(),
+            close_manifest.source_manifest_root()
+        );
+        assert_eq!(
+            projection.expected_ledger().reason_registry_root(),
+            close_manifest.reason_registry_root()
+        );
+        assert_eq!(
+            projection.expected_ledger().close_manifest_root(),
+            close_manifest.root()
+        );
+        assert_eq!(
+            projection
+                .expected_ledger()
+                .compatible_source_snapshot_root(),
+            source_closure.snapshot_root()
+        );
+        assert_eq!(
+            projection.expected_ledger().source_closure_root(),
+            source_closure.root()
+        );
+        assert_eq!(
+            projection.expected_ledger().partition_vocabulary_root(),
+            vocabulary_only_phase_one_partition_root_v1(),
+            "the production vocabulary root must match an independent literal oracle"
+        );
+        assert_eq!(
+            projection.expected_ledger().execution_observation_count(),
+            0
+        );
+        for partition in BaseCoverageClosePartitionV1::ALL {
+            assert_eq!(
+                usize::try_from(projection.expected_ledger().partition_cell_count(partition))
+                    .expect("bounded partition count"),
+                exact_ledger
+                    .iter()
+                    .filter(|cell| cell.partition == partition)
+                    .count()
+            );
+        }
+        assert_eq!(
+            projection.case_manifest_contract_root(),
+            phase_one_case_manifest_contract_root_from_components_v1(
+                close_manifest.source_manifest_root(),
+                close_manifest.reason_registry_root(),
+                close_manifest.root(),
+                u32::try_from(close_manifest.cells().len()).expect("bounded close cell count"),
+                projection.expected_partitions_root(),
+            )
+            .expect("exact case-manifest contract root")
+        );
+        assert_eq!(
+            projection.expected_partitions_root(),
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &exact_ledger,
+            )
+            .expect("exact full-ledger partition root")
+        );
+        assert_eq!(
+            projection.expected_partitions_root(),
+            independent_phase_one_full_ledger_root_v1(&close_manifest, &source_closure),
+            "the production ledger root must match the handwritten literal encoder"
+        );
+        assert_ne!(
+            projection.expected_partitions_root(),
+            vocabulary_only_phase_one_partition_root_v1(),
+            "the six-name vocabulary alone cannot identify the full ledger"
+        );
+        assert_ne!(
+            projection.expected_partitions_root(),
+            count_only_phase_one_partition_root_v1(&close_manifest, &source_closure),
+            "exact aggregate counts alone cannot identify ordered ledger rows"
+        );
+
+        let exact_cell_count =
+            u32::try_from(close_manifest.cells().len()).expect("bounded close cell count");
+        let case_manifest_root_variants = [
+            phase_one_case_manifest_contract_root_from_components_v1(
+                hash_domain(
+                    "projection-test-phase-one-source-manifest-axis.v1",
+                    b"mutant",
+                ),
+                close_manifest.reason_registry_root(),
+                close_manifest.root(),
+                exact_cell_count,
+                projection.expected_partitions_root(),
+            )
+            .expect("source-manifest-root variant"),
+            phase_one_case_manifest_contract_root_from_components_v1(
+                close_manifest.source_manifest_root(),
+                hash_domain(
+                    "projection-test-phase-one-reason-registry-axis.v1",
+                    b"mutant",
+                ),
+                close_manifest.root(),
+                exact_cell_count,
+                projection.expected_partitions_root(),
+            )
+            .expect("reason-registry-root variant"),
+            phase_one_case_manifest_contract_root_from_components_v1(
+                close_manifest.source_manifest_root(),
+                close_manifest.reason_registry_root(),
+                hash_domain(
+                    "projection-test-phase-one-close-manifest-axis.v1",
+                    b"mutant",
+                ),
+                exact_cell_count,
+                projection.expected_partitions_root(),
+            )
+            .expect("close-manifest-root variant"),
+            phase_one_case_manifest_contract_root_from_components_v1(
+                close_manifest.source_manifest_root(),
+                close_manifest.reason_registry_root(),
+                close_manifest.root(),
+                exact_cell_count
+                    .checked_add(1)
+                    .expect("bounded count variant"),
+                projection.expected_partitions_root(),
+            )
+            .expect("close-manifest-count variant"),
+            phase_one_case_manifest_contract_root_from_components_v1(
+                close_manifest.source_manifest_root(),
+                close_manifest.reason_registry_root(),
+                close_manifest.root(),
+                exact_cell_count,
+                hash_domain(
+                    "projection-test-phase-one-expected-ledger-axis.v1",
+                    b"mutant",
+                ),
+            )
+            .expect("expected-ledger-root variant"),
+        ];
+        assert!(
+            case_manifest_root_variants
+                .iter()
+                .all(|root| *root != projection.case_manifest_contract_root())
+        );
+        assert_eq!(
+            case_manifest_root_variants
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            case_manifest_root_variants.len()
+        );
+
+        let mut missing_ledger_cell = exact_ledger.clone();
+        missing_ledger_cell.pop();
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &missing_ledger_cell,
+            )
+            .expect_err("a missing full-ledger row must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Missing
+        );
+        let mut reordered_ledger = exact_ledger.clone();
+        reordered_ledger.swap(0, 1);
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &reordered_ledger,
+            )
+            .expect_err("reordered full-ledger rows must refuse")
+            .kind(),
+            ConstructionErrorKindV2::OutOfOrder
+        );
+        let mut reclassified_ledger = exact_ledger.clone();
+        reclassified_ledger[0].source_class =
+            if reclassified_ledger[0].source_class == BaseCoverageManifestClassV1::Unit {
+                BaseCoverageManifestClassV1::Boundary
+            } else {
+                BaseCoverageManifestClassV1::Unit
+            };
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &reclassified_ledger,
+            )
+            .expect_err("source reclassification must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut wrong_cell_root_ledger = exact_ledger.clone();
+        wrong_cell_root_ledger[0].cell_root =
+            hash_domain("projection-test-phase-one-cell-root-axis.v1", b"mutant");
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_cell_root_ledger,
+            )
+            .expect_err("close-cell root substitution must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let expected_result_index = exact_ledger
+            .iter()
+            .position(|cell| cell.expected_result_root.is_some())
+            .expect("at least one exact expected-result row");
+        let mut wrong_result_ledger = exact_ledger.clone();
+        wrong_result_ledger[expected_result_index].expected_result_root = Some(hash_domain(
+            "projection-test-phase-one-expected-result-axis.v1",
+            b"mutant",
+        ));
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_result_ledger,
+            )
+            .expect_err("wrong expected-result root must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut decision_root_mismatch_ledger = exact_ledger.clone();
+        let original_expected_decision =
+            decision_root_mismatch_ledger[expected_result_index].expected_decision;
+        decision_root_mismatch_ledger[expected_result_index].expected_decision =
+            BaseCoverageCloseDecisionV1::ALL
+                .into_iter()
+                .find(|decision| *decision != original_expected_decision)
+                .expect("more than one closed decision");
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &decision_root_mismatch_ledger,
+            )
+            .expect_err("decision/root mismatch must refuse before close reporting")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let reason_index = exact_ledger
+            .iter()
+            .position(|cell| cell.expected_reason.is_some())
+            .expect("at least one registered-reason row");
+        let original_reason = exact_ledger[reason_index]
+            .expected_reason
+            .expect("registered reason");
+        let alternate_reason = BaseCoverageCloseReasonCodeV1::ALL
+            .into_iter()
+            .find(|reason| *reason != original_reason)
+            .expect("more than one registered reason");
+        let mut wrong_reason_ledger = exact_ledger.clone();
+        wrong_reason_ledger[reason_index].expected_reason = Some(alternate_reason);
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_reason_ledger,
+            )
+            .expect_err("wrong registered reason must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let mut wrong_owner_ledger = exact_ledger.clone();
+        wrong_owner_ledger[0].route_owner = "frankensim-test-wrong-route-owner".into();
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_owner_ledger,
+            )
+            .expect_err("wrong route owner must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut wrong_route_ledger = exact_ledger.clone();
+        wrong_route_ledger[0].route_id =
+            StableTokenV2::new("runner-v2.route.mutant.v1").expect("valid mutant route");
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_route_ledger,
+            )
+            .expect_err("wrong route must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut stale_snapshot_ledger = exact_ledger.clone();
+        stale_snapshot_ledger[0].compatible_source_snapshot_root = hash_domain(
+            "projection-test-phase-one-stale-snapshot-axis.v1",
+            b"mutant",
+        );
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &stale_snapshot_ledger,
+            )
+            .expect_err("mixed compatible source snapshot must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut wrong_source_closure_ledger = exact_ledger.clone();
+        wrong_source_closure_ledger[0].source_closure_root = hash_domain(
+            "projection-test-phase-one-source-closure-axis.v1",
+            b"mutant",
+        );
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_source_closure_ledger,
+            )
+            .expect_err("wrong source-closure root must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+        let mut wrong_row_no_claim_ledger = exact_ledger.clone();
+        wrong_row_no_claim_ledger[0].no_claim =
+            StableTokenV2::new("mutant-phase1-ledger-row-no-claim")
+                .expect("valid mutant row no-claim");
+        assert_eq!(
+            phase_one_expected_partitions_root_from_ledger_v1(
+                &close_manifest,
+                &source_closure,
+                &wrong_row_no_claim_ledger,
+            )
+            .expect_err("wrong row no-claim must refuse")
+            .kind(),
+            ConstructionErrorKindV2::Incompatible
+        );
+
+        let mut every_row_root_mutant = exact_ledger.clone();
+        for index in 0..every_row_root_mutant.len() {
+            let original = every_row_root_mutant[index].cell_root;
+            every_row_root_mutant[index].cell_root = hash_domain(
+                "projection-test-phase-one-every-row-root-axis.v1",
+                &u32::try_from(index)
+                    .expect("bounded row index")
+                    .to_be_bytes(),
+            );
+            assert_eq!(
+                phase_one_expected_partitions_root_from_ledger_v1(
+                    &close_manifest,
+                    &source_closure,
+                    &every_row_root_mutant,
+                )
+                .expect_err("every individual close-row root mutant must refuse")
+                .kind(),
+                ConstructionErrorKindV2::Incompatible,
+                "row index {index}"
+            );
+            every_row_root_mutant[index].cell_root = original;
+        }
+
         assert_eq!(
             frozen_downstream_close_contribution_budgets_v1(0, 1)
                 .expect_err("zero child budget must refuse")
@@ -17291,6 +18587,262 @@ mod tests {
             .kind(),
             ConstructionErrorKindV2::Incompatible
         );
+
+        let mutant_manifest = runner_v2_base_schema_impact_field_name_mutant_manifest_v1()
+            .expect("production-shape field-name mutant manifest");
+        let exact_manifest = projection.schema_impact_projection().manifest();
+        assert_eq!(
+            mutant_manifest.issuer_leaf_id(),
+            exact_manifest.issuer_leaf_id()
+        );
+        assert_eq!(
+            mutant_manifest.compatible_source_snapshot_root(),
+            exact_manifest.compatible_source_snapshot_root()
+        );
+        assert_eq!(
+            mutant_manifest.frozen_base_registry(),
+            exact_manifest.frozen_base_registry()
+        );
+        assert_eq!(
+            mutant_manifest.leaf_extension_registries(),
+            exact_manifest.leaf_extension_registries()
+        );
+        assert_eq!(
+            mutant_manifest.graph_edge_count(),
+            exact_manifest.graph_edge_count()
+        );
+        assert_eq!(mutant_manifest.no_claim(), exact_manifest.no_claim());
+        assert_ne!(mutant_manifest.root(), exact_manifest.root());
+        assert_eq!(
+            &mutant_manifest.entries()[1..],
+            &exact_manifest.entries()[1..],
+            "the frame-descriptor and version-slot meta rows remain exact siblings"
+        );
+
+        let exact_field_row = exact_manifest.entries()[0].row();
+        let mutant_field_row = mutant_manifest.entries()[0].row();
+        assert_eq!(mutant_field_row.schema_id(), exact_field_row.schema_id());
+        assert_eq!(
+            mutant_field_row.disposition(),
+            exact_field_row.disposition()
+        );
+        assert_eq!(
+            mutant_field_row.migration_policy(),
+            exact_field_row.migration_policy()
+        );
+        assert_eq!(
+            mutant_field_row.prior_frame(),
+            exact_field_row.prior_frame()
+        );
+        assert_eq!(
+            mutant_field_row.legacy_container(),
+            exact_field_row.legacy_container()
+        );
+        assert_eq!(
+            mutant_field_row.owner_leaf_id(),
+            exact_field_row.owner_leaf_id()
+        );
+        assert_eq!(
+            mutant_field_row.source_path(),
+            exact_field_row.source_path()
+        );
+        assert_eq!(
+            mutant_field_row.authority_surfaces(),
+            exact_field_row.authority_surfaces()
+        );
+        assert_eq!(
+            mutant_field_row.construction_predecessors(),
+            exact_field_row.construction_predecessors()
+        );
+        assert_eq!(
+            mutant_field_row.legal_parent_slots(),
+            exact_field_row.legal_parent_slots()
+        );
+        assert_eq!(
+            mutant_field_row.legal_child_slots(),
+            exact_field_row.legal_child_slots()
+        );
+        assert_eq!(
+            mutant_field_row.compatible_source_snapshot_root(),
+            exact_field_row.compatible_source_snapshot_root()
+        );
+        assert_eq!(mutant_field_row.no_claim(), exact_field_row.no_claim());
+        assert_ne!(mutant_field_row.root(), exact_field_row.root());
+
+        let exact_field_binding = exact_field_row
+            .authoritative_frame()
+            .expect("exact field meta frame");
+        let mutant_field_binding = mutant_field_row
+            .authoritative_frame()
+            .expect("mutant field meta frame");
+        assert_eq!(
+            mutant_field_binding.authority_state(),
+            exact_field_binding.authority_state()
+        );
+        let exact_field_frame = exact_field_binding.descriptor();
+        let mutant_field_frame = mutant_field_binding.descriptor();
+        assert_eq!(
+            mutant_field_frame.rust_schema_name(),
+            exact_field_frame.rust_schema_name()
+        );
+        assert_eq!(
+            mutant_field_frame.frame_version(),
+            exact_field_frame.frame_version()
+        );
+        assert_eq!(mutant_field_frame.domain(), exact_field_frame.domain());
+        assert_eq!(mutant_field_frame.magic(), exact_field_frame.magic());
+        assert_eq!(
+            mutant_field_frame.nominal_role(),
+            exact_field_frame.nominal_role()
+        );
+        assert_eq!(
+            mutant_field_frame.fields().len(),
+            exact_field_frame.fields().len()
+        );
+        assert_eq!(
+            &mutant_field_frame.fields()[1..],
+            &exact_field_frame.fields()[1..],
+            "only the first field descriptor changes"
+        );
+        let exact_first_field = &exact_field_frame.fields()[0];
+        let mutant_first_field = &mutant_field_frame.fields()[0];
+        assert_eq!(exact_first_field.field_name().as_str(), "ordinal");
+        assert_eq!(mutant_first_field.field_name().as_str(), "ordinal-mutant");
+        assert_eq!(mutant_first_field.ordinal(), exact_first_field.ordinal());
+        assert_eq!(
+            mutant_first_field.field_code(),
+            exact_first_field.field_code()
+        );
+        assert_eq!(
+            mutant_first_field.semantic_type_id(),
+            exact_first_field.semantic_type_id()
+        );
+        assert_eq!(
+            mutant_first_field.wire_kind(),
+            exact_first_field.wire_kind()
+        );
+        assert_eq!(mutant_first_field.layout(), exact_first_field.layout());
+        assert_eq!(
+            mutant_first_field.related_field_code(),
+            exact_first_field.related_field_code()
+        );
+        assert_eq!(
+            mutant_first_field.version_slot_code(),
+            exact_first_field.version_slot_code()
+        );
+        assert_ne!(
+            mutant_first_field.descriptor_identity(),
+            exact_first_field.descriptor_identity()
+        );
+        assert_ne!(
+            mutant_field_frame.descriptor_identity(),
+            exact_field_frame.descriptor_identity()
+        );
+
+        let mutant_schema_projection =
+            RunnerV2BaseSchemaImpactProjectionV2::build_exact(mutant_manifest)
+                .expect("production-shape mutant projects through exact V2 shape validation");
+        assert_eq!(
+            mutant_schema_projection.source_path_count(),
+            projection.schema_impact_projection().source_path_count()
+        );
+        assert_eq!(
+            mutant_schema_projection.owned_row_count(),
+            projection.schema_impact_projection().owned_row_count()
+        );
+        assert_eq!(
+            mutant_schema_projection.consumed_row_count(),
+            projection.schema_impact_projection().consumed_row_count()
+        );
+        assert_ne!(
+            mutant_schema_projection.rows()[0].schema_impact_row_root(),
+            projection.schema_impact_projection().rows()[0].schema_impact_row_root()
+        );
+        assert_ne!(
+            mutant_schema_projection.rows()[0].root(),
+            projection.schema_impact_projection().rows()[0].root()
+        );
+        assert_eq!(
+            &mutant_schema_projection.rows()[1..],
+            &projection.schema_impact_projection().rows()[1..]
+        );
+        assert_ne!(
+            mutant_schema_projection.root(),
+            projection.schema_impact_projection().root()
+        );
+        assert_eq!(mutant_schema_projection.execution_observation_count(), 0);
+
+        let mutant_payload_root = phase_one_payload_root_v2(
+            &source_closure,
+            projection.base_coverage_manifest_root(),
+            &mutant_schema_projection,
+            projection.expected_partitions_root(),
+            projection.contribution().target_root(),
+            projection.contribution().feature_set_root(),
+            projection.contribution().log_schema_root(),
+        )
+        .expect("mutant projection propagates into the Phase-1 payload");
+        assert_ne!(mutant_payload_root, projection.payload_root());
+        let mutant_build_identity = super::parse_phase_one_build_identity(
+            phase_one_build_contract_root_v1(&source_closure, &mutant_schema_projection)
+                .expect("mutant projection propagates into the build contract"),
+        )
+        .expect("mutant build identity");
+        assert_ne!(
+            &mutant_build_identity,
+            projection.contribution().build_root()
+        );
+        let mutant_contribution = {
+            let mut fixture = base.clone();
+            fixture.payload_root = mutant_payload_root;
+            fixture.schema_root = mutant_schema_projection.root();
+            fixture.build_root = mutant_build_identity;
+            fixture
+                .build()
+                .expect("mutant meta-field propagates into a result-free contribution")
+        };
+        assert_ne!(mutant_contribution.root(), projection.contribution().root());
+        assert_eq!(mutant_contribution.payload_root(), mutant_payload_root);
+        assert_eq!(
+            mutant_contribution.schema_root(),
+            mutant_schema_projection.root()
+        );
+        assert_eq!(mutant_contribution.execution_actual_field_count(), 0);
+        let mutant_deferred_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
+            &mutant_contribution,
+            StableTokenV2::new(RUNNER_V2_PHASE_ONE_DEFERRED_ENVELOPE_NO_CLAIM_V1)
+                .expect("exact Deferred no-claim"),
+        )
+        .expect("result-free mutant Deferred envelope");
+        assert_eq!(
+            mutant_deferred_envelope.disposition(),
+            RuntimeObservationDispositionV1::Deferred
+        );
+        assert_eq!(
+            mutant_deferred_envelope.evidence_kind(),
+            BaseCoverageCloseEvidenceKindV1::ImmutableDownstreamContribution
+        );
+        assert_eq!(
+            mutant_deferred_envelope.deferred_reason(),
+            DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner
+        );
+        assert_eq!(mutant_deferred_envelope.execution_actual_field_count(), 0);
+        assert_ne!(
+            mutant_deferred_envelope.root(),
+            projection.deferred_envelope().root()
+        );
+        let mutant_aggregate_root = phase_one_contribution_projection_root_v2(
+            &mutant_schema_projection,
+            projection.source_closure_root(),
+            projection.base_coverage_manifest_root(),
+            projection.case_manifest_contract_root(),
+            projection.expected_partitions_root(),
+            mutant_payload_root,
+            &mutant_contribution,
+            &mutant_deferred_envelope,
+        )
+        .expect("mutant contribution remains a valid result-free Deferred aggregate");
+        assert_ne!(mutant_aggregate_root, projection.root());
 
         let alternate_envelope = BaseCoverageCloseDeferredEvidenceEnvelopeV1::new(
             projection.contribution(),
@@ -19178,12 +20730,12 @@ mod tests {
             (BaseCoverageManifestClassV1::ExternalGovernance, 1),
             (BaseCoverageManifestClassV1::Boundary, 53),
             (BaseCoverageManifestClassV1::PropertyMetamorphic, 24),
-            (BaseCoverageManifestClassV1::SchemaDescriptor, 48),
+            (BaseCoverageManifestClassV1::SchemaDescriptor, 50),
             (BaseCoverageManifestClassV1::Mutation, 61),
             (BaseCoverageManifestClassV1::NoMockIntegration, 17),
         ];
         let manifest = projection.coverage_manifest();
-        assert_eq!(manifest.cases().len(), 433);
+        assert_eq!(manifest.cases().len(), 435);
         for (class, expected_count) in expected_counts {
             assert_eq!(manifest.case_count(class), expected_count);
             assert!(manifest.case_count(class) > 0);
@@ -19198,7 +20750,7 @@ mod tests {
         let close_manifest = projection.close_manifest();
         assert_eq!(close_manifest.source_manifest_root(), manifest.root());
         assert_eq!(close_manifest.cells().len(), manifest.cases().len());
-        assert_eq!(close_manifest.cells().len(), 433);
+        assert_eq!(close_manifest.cells().len(), 435);
         for group in crate::coverage::BaseCoverageCloseGroupV1::ALL {
             assert!(
                 close_manifest.group_count(group) > 0,
