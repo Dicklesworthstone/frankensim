@@ -107,10 +107,16 @@ fn parse_nodes(text: &str) -> Result<Vec<BeadNode>, String> {
         let parsed = JsonParser::with_string_limit(line, MAX_TRACKER_STRING_BYTES)
             .finish()
             .map_err(|error| {
-                format!("{ISSUES_PATH} line {} is not valid JSON: {error}", index + 1)
+                format!(
+                    "{ISSUES_PATH} line {} is not valid JSON: {error}",
+                    index + 1
+                )
             })?;
         let JsonValue::Object(map) = &parsed else {
-            return Err(format!("{ISSUES_PATH} line {} is not a JSON object", index + 1));
+            return Err(format!(
+                "{ISSUES_PATH} line {} is not a JSON object",
+                index + 1
+            ));
         };
         let string_field = |key: &str| match map.get(key) {
             Some(JsonValue::String(value)) => Some(value.clone()),
@@ -126,7 +132,10 @@ fn parse_nodes(text: &str) -> Result<Vec<BeadNode>, String> {
         let (estimate_hours, weight_defaulted) = match map.get("estimated_minutes") {
             Some(JsonValue::Number(raw)) => {
                 let minutes = raw.parse::<f64>().map_err(|error| {
-                    format!("{ISSUES_PATH} line {index}: bad estimated_minutes: {error}", index = index + 1)
+                    format!(
+                        "{ISSUES_PATH} line {index}: bad estimated_minutes: {error}",
+                        index = index + 1
+                    )
                 })?;
                 if !(minutes.is_finite() && minutes >= 0.0) {
                     return Err(format!(
@@ -190,9 +199,7 @@ fn project(text: &str) -> Result<Projection, String> {
         .collect();
     let mut edges_blocks = 0usize;
     let mut edges_parent_child = 0usize;
-    let mut dag = fs_tropical::TaskDag::new(
-        nodes.iter().map(|node| node.estimate_hours).collect(),
-    );
+    let mut dag = fs_tropical::TaskDag::new(nodes.iter().map(|node| node.estimate_hours).collect());
     for (to_index, node) in nodes.iter().enumerate() {
         for successor in &node.successors {
             let (kind, target) = successor
@@ -238,7 +245,11 @@ fn project(text: &str) -> Result<Projection, String> {
         .collect();
     let spine_positions = SPINE_BEADS
         .iter()
-        .filter_map(|id| slack_hours.get(*id).map(|slack| ((*id).to_string(), *slack)))
+        .filter_map(|id| {
+            slack_hours
+                .get(*id)
+                .map(|slack| ((*id).to_string(), *slack))
+        })
         .collect();
     Ok(Projection {
         issues_fnv: fnv1a64(text.as_bytes()),
@@ -278,8 +289,7 @@ fn attach_bv_comparison(root: &Path, projection: &mut Projection) {
     let Ok(text) = String::from_utf8(output.stdout) else {
         return;
     };
-    let Ok(parsed) = JsonParser::with_string_limit(&text, MAX_TRACKER_STRING_BYTES).finish()
-    else {
+    let Ok(parsed) = JsonParser::with_string_limit(&text, MAX_TRACKER_STRING_BYTES).finish() else {
         return;
     };
     let JsonValue::Object(map) = &parsed else {
@@ -295,10 +305,9 @@ fn attach_bv_comparison(root: &Path, projection: &mut Projection) {
         let JsonValue::Object(recommendation) = recommendation else {
             continue;
         };
-        let (Some(JsonValue::String(id)), Some(JsonValue::Number(score))) = (
-            recommendation.get("id"),
-            recommendation.get("score"),
-        ) else {
+        let (Some(JsonValue::String(id)), Some(JsonValue::Number(score))) =
+            (recommendation.get("id"), recommendation.get("score"))
+        else {
             continue;
         };
         let Ok(score) = score.parse::<f64>() else {
@@ -369,14 +378,13 @@ fn render(projection: &Projection) -> String {
     let slack_len = projection.slack_hours.len();
     for (index, (id, slack)) in projection.slack_hours.iter().enumerate() {
         let comma = if index + 1 == slack_len { "" } else { "," };
-        out.push_str(&format!(
-            "    \"{id}\": {}{comma}\n",
-            render_f64(*slack)
-        ));
+        out.push_str(&format!("    \"{id}\": {}{comma}\n", render_f64(*slack)));
     }
     out.push_str("  },\n");
     if projection.bv_available {
-        out.push_str("  \"bv_comparison\": {\n    \"status\": \"measured\",\n    \"bv_top10\": [\n");
+        out.push_str(
+            "  \"bv_comparison\": {\n    \"status\": \"measured\",\n    \"bv_top10\": [\n",
+        );
         let top_len = projection.bv_top.len();
         for (index, (id, score, slack)) in projection.bv_top.iter().enumerate() {
             let comma = if index + 1 == top_len { "" } else { "," };
@@ -636,12 +644,7 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
             // is undefined until the cycle breaks.
             if let Err(error) = project(&issues) {
                 if error.contains("CYCLE") {
-                    return (
-                        vec![violation(format!(
-                            "live tracker: {error}"
-                        ))],
-                        notes,
-                    );
+                    return (vec![violation(format!("live tracker: {error}"))], notes);
                 }
                 // A non-cycle live parse failure is a tracker-format problem
                 // the snapshot gate already owns; stay a note here.
@@ -829,7 +832,10 @@ mod tests {
         let tampered = rendered.replace("\"a\": 0", "\"a\": 5");
         if tampered != rendered {
             let error = parse_artifact(&tampered).expect_err("slack tamper must refuse");
-            assert!(error.contains("inconsistent") || error.contains("slack"), "{error}");
+            assert!(
+                error.contains("inconsistent") || error.contains("slack"),
+                "{error}"
+            );
         }
     }
 
