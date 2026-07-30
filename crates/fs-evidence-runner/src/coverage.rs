@@ -6,9 +6,9 @@
 //! 2. a caller-selected, manifest-ordered executable subset; and
 //! 3. presented result records joined back to that exact subset.
 //!
-//! The frozen base enumerates the current 217 non-manifest Rust tests and all 68
+//! The frozen base enumerates the current 217 non-manifest Rust tests and all 78
 //! `compile_fail` contracts. The historical aggregate is recorded as 130
-//! ratified cases plus an eighty-five-case delta, but this source does not pretend
+//! ratified cases plus an eighty-seven-case delta, but this source does not pretend
 //! to recover a per-case historical membership label that was never retained.
 //! Every current Rust test has a handwritten evidence-class assignment:
 //! focused unit, boundary, property/metamorphic, schema/descriptor, mutation,
@@ -697,7 +697,7 @@ pub const BASE_COVERAGE_MUTATION_CASE_COUNT_V1: usize = 61;
 pub const BASE_COVERAGE_NO_MOCK_INTEGRATION_CASE_COUNT_V1: usize = 17;
 
 /// Exact number of compile-fail contracts in the ratified base inventory.
-pub const BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1: usize = 68;
+pub const BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1: usize = 78;
 
 /// Exact number of unit tests that protect this manifest contract itself.
 pub const BASE_COVERAGE_MANIFEST_CONTRACT_CASE_COUNT_V1: usize = 29;
@@ -748,7 +748,7 @@ pub const BASE_COVERAGE_SOURCE_PATH_MAX_BYTES_V1: usize = 240;
 pub enum BaseCoverageManifestClassV1 {
     /// Focused local behavior not primarily proving another evidence class.
     Unit = 1,
-    /// The 68 source-frozen Rustdoc compile-fail contracts.
+    /// The 78 source-frozen Rustdoc compile-fail contracts.
     CompileFailDoctest = 2,
     /// Unit tests protecting this manifest and join implementation.
     ManifestContract = 3,
@@ -985,7 +985,7 @@ pub struct BaseCoverageManifestV1 {
 }
 
 impl BaseCoverageManifestV1 {
-    /// Construct the frozen 217-Rust-test, 68-compile-fail, and
+    /// Construct the frozen 217-Rust-test, 78-compile-fail, and
     /// manifest-contract source inventory without extension rows.
     pub fn frozen() -> Result<Self, ConstructionErrorV2> {
         let declarations = frozen_base_declarations()?;
@@ -8118,6 +8118,66 @@ const COMPILE_FAIL_TEMPLATES_V1: &[CompileFailTemplateV1] = &[
     CompileFailTemplateV1 {
         module: "value",
         source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f32-bits-has-no-implicit-cmp",
+        expected_error_code: "E0599",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f32-bits-has-no-relational-order",
+        expected_error_code: "E0369",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f32-bits-has-no-btree-order",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f32-bits-has-no-default-sort",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f32-bits-has-no-key-sort",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f64-bits-has-no-implicit-cmp",
+        expected_error_code: "E0599",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f64-bits-has-no-relational-order",
+        expected_error_code: "E0369",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f64-bits-has-no-btree-order",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f64-bits-has-no-default-sort",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
+        case_name: "f64-bits-has-no-key-sort",
+        expected_error_code: "E0277",
+    },
+    CompileFailTemplateV1 {
+        module: "value",
+        source_path: "crates/fs-evidence-runner/src/value.rs",
         case_name: "private-unit-fields",
         expected_error_code: "E0451",
     },
@@ -11861,7 +11921,7 @@ fn frozen_base_declarations() -> Result<Vec<BaseCoverageCaseDeclarationV1>, Cons
         return Err(refusal(
             ConstructionErrorKindV2::Incompatible,
             "coverage.base.case_count",
-            "the exact 217 classified Rust tests, 68 compile-fail cases, and 29 manifest-contract cases",
+            "the exact 217 classified Rust tests, 78 compile-fail cases, and 29 manifest-contract cases",
             declarations.len(),
         ));
     }
@@ -12515,13 +12575,14 @@ mod tests {
         ),
     ];
 
-    const COMPILE_FAIL_ERROR_CODE_DISTRIBUTION_V1: [(&str, usize); 9] = [
-        ("E0277", 3),
+    const COMPILE_FAIL_ERROR_CODE_DISTRIBUTION_V1: [(&str, usize); 10] = [
+        ("E0277", 9),
         ("E0308", 24),
+        ("E0369", 2),
         ("E0423", 2),
         ("E0432", 1),
         ("E0451", 7),
-        ("E0599", 3),
+        ("E0599", 5),
         ("E0609", 3),
         ("E0616", 20),
         ("E0624", 5),
@@ -12832,12 +12893,12 @@ mod tests {
             first.case_count(BaseCoverageManifestClassV1::CompileFailDoctest),
             BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1
         );
-        assert_eq!(BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1, 68);
+        assert_eq!(BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1, 78);
         let compile_fail_fences = compile_fail_fences_v1(
             &COMPILE_FAIL_RUSTDOC_SOURCES_V1,
             BASE_COVERAGE_COMPILE_FAIL_CASE_COUNT_V1,
         )
-        .expect("all 68 Rustdoc compile-fail fences are singly cause-gated");
+        .expect("all 78 Rustdoc compile-fail fences are singly cause-gated");
         assert_eq!(
             compile_fail_distribution_v1(
                 compile_fail_fences
@@ -12930,7 +12991,7 @@ mod tests {
             first.case_count(BaseCoverageManifestClassV1::ManifestContract),
             BASE_COVERAGE_MANIFEST_CONTRACT_CASE_COUNT_V1
         );
-        assert_eq!(first.cases().len(), 288);
+        assert_eq!(first.cases().len(), 324);
         assert_eq!(
             BaseCoverageManifestClassV1::ALL,
             [
@@ -13460,7 +13521,7 @@ mod tests {
     #[test]
     fn full_set_close_manifest_exactly_covers_nine_groups_and_twenty_two_facets() {
         let source = super::frozen_full_source_manifest_v1().expect("full source manifest");
-        assert_eq!(source.cases().len(), 435);
+        assert_eq!(source.cases().len(), 445);
         assert_eq!(
             [
                 source.case_count(BaseCoverageManifestClassV1::ProjectionE2e),
@@ -13482,7 +13543,7 @@ mod tests {
             121
         );
         let manifest = BaseCoverageCloseManifestV1::frozen().expect("full close manifest");
-        assert_eq!(manifest.cells().len(), 435);
+        assert_eq!(manifest.cells().len(), 445);
         assert_eq!(manifest.cells().len(), source.cases().len());
         assert_eq!(manifest.source_manifest_root(), source.root());
         for group in BaseCoverageCloseGroupV1::ALL {

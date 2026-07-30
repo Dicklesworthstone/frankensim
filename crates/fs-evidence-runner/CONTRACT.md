@@ -11,10 +11,11 @@ selection, capability policy, and presented identity references explicit
 before lifecycle, process, storage, verification, or admission implementations
 are allowed to consume them.
 
-This initial slice is declarations and validation only. It does not execute a
-case, emit lifecycle records, parse hostile bytes, access a filesystem, spawn a
-process, persist an object, publish a bundle, verify scientific evidence, or
-mint authority.
+This base family is declarations and bounded, in-memory validation, including
+the explicitly named pure Stage-A local evaluators. It does not execute an
+external, lifecycle, or release-built case, emit lifecycle records, parse
+hostile bytes, access a filesystem, spawn a process, persist an object, publish
+a bundle, verify scientific evidence, or mint authority.
 
 As a TOOL crate, it may orchestrate lower layers. No product-layer crate may
 depend on it, and no type in this crate becomes a lower-layer authority merely
@@ -1522,6 +1523,327 @@ are exact-set compared with that independent selection, so a missing, extra,
 or non-local observation refuses instead of silently narrowing or widening
 the checked scope.
 
+## Runner V2 Stage-A base-values declaration and rootless local evaluator
+
+`runner_v2::work_packages::base_values` owns the source-authoritative Stage-A
+declaration and pure domain evaluator for foundational work package
+`frankensim-epic-foundations-huq.24.1.1.1.1`, under the semantic ownership of
+parent `frankensim-epic-foundations-huq.24.1.1.1`. The public declaration
+surface is `declare_24_1_1_1_1_v1`,
+`RunnerV2BaseValuesStageADeclarationV1`, and
+`RunnerV2StageADeclarationRootV1`. The rootless handoff and its read-only
+inspection types are public, but their constructors and
+`evaluate_24_1_1_1_1_cell_v1` remain crate-private. Stage A does not expose a
+public `run_*` function. Work package
+`frankensim-epic-foundations-huq.24.1.1.1.7` is the sole owner of the future
+public `run_24_1_1_1_1_v1` wrapper, fresh evaluator invocation, and
+attempt-specific execution evidence.
+
+The declaration is canonical result-free contract data. It exact-binds the
+package ID, stable cells, independent expected-oracle rows, parent-projection
+rows, inspectable fixture and operation declarations, per-cell result-free case
+manifests, retained-domain obligations, auxiliary mutation obligations,
+declaration-side Five Explicits, local route, deferred common requirements,
+future broad-source requirements, the child owner-source fragment, the current
+dependency-source closure, schema-impact deferral, rootless AC58 fragment,
+shard and resume inapplicability, and no-claim. Its root contains no evaluator
+invocation result or runtime actual.
+
+### Exact operation, fixture, and oracle inventory
+
+The new evaluator corpus contains exactly `71 * 12 + 15 = 867` source-ordered
+cells. Every one of the 71 `RunnerLimitsV2` fields has a distinct cell for
+every boundary kind in this exact order:
+
+1. `Zero`
+2. `One`
+3. `StructuralMinimum`
+4. `OneBelowStructuralMinimum`
+5. `SmokeCeiling`
+6. `SmokeTightened`
+7. `SmokeOneOver`
+8. `FullCeiling`
+9. `FullTightened`
+10. `FullOneOver`
+11. `RepresentationalMaximum`
+12. `CheckedRepresentationalOverflowRefusal`
+
+A semantically undefined combination remains present with a typed
+`Inapplicable` expectation. Coincident numeric values do not collapse cell
+IDs. The canonical tightening rule, exact overflow operation, expected
+outcome/reason/partition, and independent oracle are declaration data; none is
+inferred from the evaluator result or from the production descriptor table
+under test.
+
+Each independent oracle row binds the cell ID, outcome, reason, partition,
+ordered numeric cardinality, and every numeric name, heterogeneous value, and
+unit. Diagnostic presence is explicit; when present, the root also binds its
+code, owner, retryability, ordered prerequisite cardinality and identities,
+and ordered repair cardinality, rank, kind, and target. Root-sensitivity tests
+mutate each of those components independently, including numeric order,
+diagnostic presence, prerequisite identity, and repair cardinality. The fresh
+867-row exact join compares every nested field rather than only the outer
+outcome. Its frozen aggregate is 422 accepted, 389 refused, and 56
+inapplicable rows; 2,617 numeric observations; 445 diagnostics; 388 repairs;
+and 56 prerequisites. The 852 limit rows account for 411 accepted, 388
+refused, and 53 inapplicable rows, with refusal reasons partitioned as 201
+above-ceiling, 20 fixed-representation, 59 below-minimum, 37 joint-feasibility,
+and 71 checked-overflow cases.
+
+The remaining fifteen cells are, in exact source order:
+
+1. typed absence distinct from present zero;
+2. named binary32 IEEE total order;
+3. named binary64 IEEE total order;
+4. exact `None` capability contract;
+5. exact deferred-common-requirement membership;
+6. reordered deferred-common-requirement refusal;
+7. exact future-source membership;
+8. rootless AC58 classification;
+9. exact owner-source fragment;
+10. exact local route;
+11. diagnostic redaction and forbidden-value no-echo;
+12. structured reproduction declaration;
+13. compile-fail implicit IEEE ordering surface;
+14. shard inapplicability; and
+15. resume inapplicability.
+
+The redaction cell consumes an owned sentinel value through the real redaction
+boundary and then drops it. Its checked observed field is exactly the bounded
+redaction placeholder, while the sentinel must be absent from the structured
+observation, `Display`, `Debug`, and complete raw-cell `Debug` projections.
+This is a non-echo proof over a presented sensitive value, not a test that
+starts with an already-redacted placeholder.
+
+Every cell publicly exposes its stable ordinal and ID, verification group,
+typed operation, source-ordered companion normalization, independent oracle
+root, and result-free case-manifest root. The shared limit fixture is likewise
+inspectable: it has exactly one executable case, zero family rows for that
+case, an explicitly present-empty declared-minimum list, and checked lifecycle
+minimum `3 + (2 + 0) = 5`. A tightened limit cell carries an exact
+source-ordered list with at most one row per companion field and the exact
+same-width value needed to preserve joint feasibility. The per-cell case
+manifest binds the exact operation, companion values, shared fixture, and
+declaration-side Five Explicits; it is never an outcome or invocation record.
+
+The declaration also preserves the complete ordered pre-Runner-V2 checked-value
+obligation catalog outside these 867 new cells. Its eight closed facets are
+numeric literals; units; tokens/text/paths; catalogs and nominal identities;
+property/metamorphic behavior; mutation/refusal behavior; API/compile-fail
+behavior; and fault/resource/no-mock integration. These retained obligations
+preserve all existing integer, rational, decimal, IEEE, unit, token, text,
+opaque-byte, path, catalog, nominal-root, normalization, determinism,
+mutation, redaction, and local-integration functionality; they are not
+silently counted as new evaluator cells. A separate exact 71-row auxiliary
+mutation catalog binds one stable, field-ordinal-matched wrong-primitive-width
+refusal obligation for every limit field. It is also outside the 867-cell
+count.
+
+### Direct Five Explicits and capability-none declaration
+
+Stage A directly binds its source, build inputs, toolchain, target/profile,
+schema inventory, and feature declaration. No ordinal, cell ID, class, path,
+facet, scope, owner, expected partition, or other classification axis may
+synthesize any of those identities. The exact dependency-source bytes form
+the source identity. Build identity separately binds the workspace and crate
+manifests, `Cargo.lock`, `constellation.lock`, this contract, and the
+`fs-blake3` manifest. Toolchain identity binds `rust-toolchain.toml`. Target is
+`TargetIndependentPureValidation`, profile is `CrateTest`, and the feature
+declaration is an explicitly rooted exact-empty set validated against the
+absence of a crate feature table and the absence of every implicit Cargo
+feature introduced by `optional = true` in normal, build, nested dependency,
+or target-specific dependency tables. Comments, quoted text, `optional =
+false`, and unrelated metadata do not create false feature declarations.
+
+Numeric inputs, numeric grants, and expected numeric observations are each
+explicitly present and exactly empty. Seed is explicitly inapplicable under
+`NoRandomnessByContract`. The exact `LocalSourceValidation` hard/soft budget
+rows are:
+
+| Axis | Hard | Soft | Unit |
+| --- | ---: | ---: | --- |
+| time | 60,000,000,000 | 45,000,000,000 | nanoseconds |
+| memory | 536,870,912 | 402,653,184 | logical bytes |
+| logical work | 1,000,000 | 750,000 | operations |
+| processes | 1 | 0 | count |
+| artifacts | 67,108,864 | 50,331,648 | encoded bytes |
+| output | 5,242,880 | 4,194,304 | encoded bytes |
+| logs | 67,108,864 | 50,331,648 | encoded bytes |
+
+Every Stage-A cell binds the frozen
+`BaseCoverageCloseCapabilityRegistryV1`,
+`BaseCoverageCloseCapabilityProfileRegistryV1`, and
+`BaseCoverageCloseCapabilityContractV1` for profile
+`fs-evidence-runner.close-capability.none.v1`. Required and permitted
+capability sets are both exactly empty. A Bead, owner, route, driver, script,
+or physical resource is never a capability. Granted, observed, returned,
+revoked, and resource-reconciliation values belong to later runtime evidence
+and are structurally absent here.
+
+### Deferred common contracts, routes, and projections
+
+The exact ordered 31-row `RunnerV2CommonContractRequirementV1` catalog
+preregisters every canonical, execution, and retention slot later owned by
+work packages `.4`, `.5`, and `.6`. Each row binds its stable slot ID, API and
+wire versions, no-predecessor rule, semantic and realization owners, future
+nominal role/domain, exact nonempty subset of the canonical/execution/retention
+planes, fulfillment stage, `.7` resolution owner, no-claim, and an uninhabited
+typed future root that must be `Absent`. Missing, extra, duplicate, reordered,
+unknown-version, wrong-owner, wrong-role/domain/plane/stage, wildcard,
+range-only, predicted, classification-derived, copied, raw-hash, or
+prematurely realized requirements refuse.
+
+The child declares exactly one route:
+`runner-v2.route.24-1-1-1-1.local.work-package.v1`, class `LocalOnly`,
+future public entry point
+`fs_evidence_runner::runner_v2::work_packages::run_24_1_1_1_1_v1`,
+execution owner `.7`, capability profile `None`, and typed-absent external
+driver. Route counts are exactly `LocalInProcess = 1`, `ExecutionOwned = 0`,
+`ContributionOnly = 0`, and `Inapplicable = 0`. This is a route declaration,
+not evidence that the wrapper exists or ran.
+
+Every one of the 867 stable cells has exactly one ordered result-free
+parent-projection row. It binds the cell, consumer route and owner, dispatcher,
+expected partition, per-cell case-manifest root, no-claim, and the exact future
+POSIX and native-Windows E2E paths:
+
+- `scripts/ci/runner_v2_base_work_packages_e2e.sh`
+- `scripts/ci/runner_v2_base_work_packages_e2e.ps1`
+
+Wildcards, subset selection, transitive route inference, hidden skips, and
+downstream status substitution refuse. Stage A does not claim either script
+exists or executed.
+
+### Source fragments and typed future source absence
+
+The content-rooted owner-source fragment and the dependency-source closure are
+distinct exact sets. The owner fragment has exactly these two child-owned
+members:
+
+- `crates/fs-evidence-runner/src/runner_v2/handoff.rs`
+- `crates/fs-evidence-runner/src/runner_v2/work_packages/base_values.rs`
+
+The current dependency-source closure has exactly sixteen content-rooted
+members whose bytes can change Stage-A semantics:
+
+- `crates/fs-blake3/src/lib.rs`
+- `crates/fs-evidence-runner/src/lib.rs`
+- `crates/fs-evidence-runner/src/canonical.rs`
+- `crates/fs-evidence-runner/src/catalog.rs`
+- `crates/fs-evidence-runner/src/construction.rs`
+- `crates/fs-evidence-runner/src/coverage.rs`
+- `crates/fs-evidence-runner/src/identity.rs`
+- `crates/fs-evidence-runner/src/limits.rs`
+- `crates/fs-evidence-runner/src/path.rs`
+- `crates/fs-evidence-runner/src/projection.rs`
+- `crates/fs-evidence-runner/src/schema_impact.rs`
+- `crates/fs-evidence-runner/src/value.rs`
+- `crates/fs-evidence-runner/src/runner_v2.rs`
+- `crates/fs-evidence-runner/src/runner_v2/handoff.rs`
+- `crates/fs-evidence-runner/src/runner_v2/work_packages.rs`
+- `crates/fs-evidence-runner/src/runner_v2/work_packages/base_values.rs`
+
+The two-member ownership statement cannot stand in for the sixteen-member
+semantic dependency closure, and neither can stand in for the complete broad
+crate closure or live revision/supply-chain proof.
+
+Every current owner and dependency member is declared from one
+workspace-relative source literal that feeds both its logical path and its
+compile-time byte inclusion. Exact-set validation independently recomputes the
+expected member root from separately included expected bytes and the nominal
+owner/dependency hash domain; it does not merely trust the presented root.
+Negative conformance tests refuse missing, extra, duplicate, reordered, and
+wrong-path members as well as wrong, swapped, correctly resealed altered, and
+wrong-domain content roots.
+
+The existing broad source inventory has 27 members. Stage A freezes these
+thirteen final ordinals and paths as typed-absent future content requirements,
+yielding an eventual 40-member broad inventory:
+
+1. `crates/fs-evidence-runner/src/runner_v2.rs`
+2. `crates/fs-evidence-runner/src/runner_v2/handoff.rs`
+3. `crates/fs-evidence-runner/src/runner_v2/work_packages.rs`
+4. `crates/fs-evidence-runner/src/runner_v2/work_packages/base_values.rs`
+5. `crates/fs-evidence-runner/src/runner_v2/work_packages/diagnostics.rs`
+6. `crates/fs-evidence-runner/src/runner_v2/work_packages/schema_registry.rs`
+7. `crates/fs-evidence-runner/src/runner_v2/work_packages/runtime_evidence.rs`
+8. `crates/fs-evidence-runner/src/runner_v2/work_packages/routes.rs`
+9. `crates/fs-evidence-runner/src/runner_v2/work_packages/detailed_logging.rs`
+10. `crates/fs-evidence-runner/src/runner_v2/work_packages/execution.rs`
+11. `crates/fs-evidence-runner/tests/runner_v2_base_work_packages.rs`
+12. `scripts/ci/runner_v2_base_work_packages_e2e.sh`
+13. `scripts/ci/runner_v2_base_work_packages_e2e.ps1`
+
+Every future content root is `TypedOptionV1::Absent` in Stage A, including for
+a path whose local source happens to exist. The final ordinal/path inventory
+is a requirement for `.7` to resolve on one compatible snapshot, not a present
+40-member source-closure claim.
+
+### AC58 ownership and the rootless handoff
+
+The owned Stage-A schema inventory is exactly 43 distinct names. Exactly 42
+canonical names are exact-set in `RunnerV2SchemaImpactDeferralV1` for resolution
+by the dedicated `.3` schema-registry owner, including the
+`runner-v2-raw-outcome-reason-contract-v1` compatibility contract. The
+forty-third name is the separately classified rootless handoff described below.
+The future `.3` manifest root is typed absent. Stage A does not fabricate a
+`CanonicalSchemaImpactRowV1`, historical/current frame, legacy container,
+migration result, or schema-impact manifest root for those schemas.
+
+The sole local AC58 exception is the exact
+`runner-v2-local-work-package-handoff-v1` semantic type. Its lightweight
+`RunnerV2RootlessAc58FragmentV1` declares
+`InapplicableNoCanonicalFrame`, `NoSchemaPredecessor`, an explicitly
+present-empty authority surface, and the Stage-A no-claim. This fragment is
+bound by the Stage-A declaration but is not a canonical schema-impact row and
+does not give the handoff canonical bytes or an identity.
+
+`RunnerV2LocalWorkPackageHandoffV1` is a bounded, source-ordered,
+noncanonical, non-authoritative Rust value. The admitted complete report has
+at most 2,048 cells; each cell has at most eight safe typed numeric
+observations; each diagnostic has at most eight strictly ordered
+prerequisites and four contiguously ranked non-executable repairs. Accepted
+cells carry no diagnostic, and every refused, failed, unsupported, or
+inapplicable cell carries exactly one. Cell IDs and observation names are
+strictly ordered and unique.
+
+The handoff contains only package and cell identity, raw checked outcome and
+reason, safe typed numeric observations, and bounded structured diagnostics.
+It contains no expected result, oracle root, executable repair text, canonical
+bytes or root, attempt identity, actual Five Explicits, AC57 disposition or
+envelope, canonical route/log/reproduction/receipt/telemetry root, execution
+partition, retained-artifact claim, physical capability/resource value, or
+authority. Public accessors permit inspection only; compile-fail tests freeze
+the absence of caller construction, root conversion, attempt access, and
+canonical-content substitution.
+
+### Stage-A proof and no-claim boundary
+
+`declare_24_1_1_1_1_v1` never invokes the evaluator. Unit, literal, boundary,
+property/metamorphic, state/model, mutation, API/compile-fail,
+fault/resource/cancellation-model, safe-field/redaction, reproduction,
+source-closure, and no-mock local-integration tests invoke the real
+crate-private evaluator afresh and compare its complete source-ordered handoff
+with independent declaration-side expectations. Those reports and verdicts
+are ephemeral verification; they do not become `.7` execution evidence.
+
+The common JSONL event, terminal reservation, redaction, first-divergence,
+reproduction, relative-artifact, raw-audit, telemetry, and operator-view
+contracts are typed future requirements for `.6`. Stage A emits no JSONL,
+terminal log, reproduction instance, retained artifact, receipt, telemetry, or
+operator view. Sharding and resume are explicitly inapplicable because the
+bounded local evaluator is a complete single pass and each invocation
+recomputes the entire package.
+
+Acceptance proves only that the canonical Stage-A declaration is complete,
+that the pure evaluator obeys its checked domain contract when freshly
+invoked, and that the rootless handoff preserves its structural no-authority
+boundary. It proves no external or release-built execution, actual runtime
+Five Explicits, AC57 observation, acquired capability, resource
+reconciliation, retained or durable artifact, common log/reproduction/receipt
+instance, telemetry, scientific validity, admission, promotion, DSR success,
+release E2E result, or downstream authority.
+
 ## Conformance tests
 
 The base slice requires all of the following independent evidence classes:
@@ -1546,6 +1868,15 @@ The base slice requires all of the following independent evidence classes:
    no-mock integration, projection, logging, and source-closure classes
    reported separately;
 10. in-process, source-closed Runner V2 base E2E projection tests.
+
+The frozen base coverage inventory contains exactly 78 source-classified
+compile-fail contracts. Ten of them independently reject implicit `cmp`, `<`,
+`BTreeSet`, slice `sort`, and `sort_by_key` use for each of the binary32 and
+binary64 wrapper types. Each fence carries one expected compiler error code,
+and the inventory test exact-matches the complete error-code distribution. The
+frozen base total is therefore exactly `217 + 78 + 29 = 324`; adding the exact
+121 close-extension cells yields exactly 445 full source-manifest and close
+cells.
 
 Command-applicability evidence enumerates all `4^5` selector-cardinality
 vectors for each of the six commands, accepts exactly one vector per command,

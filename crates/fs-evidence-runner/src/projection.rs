@@ -16724,7 +16724,7 @@ mod tests {
     use crate::construction::ConstructionErrorKindV2;
     use crate::coverage::{
         BaseCoverageCloseCapabilityProfileV1, BaseCoverageCloseContributionBudgetsV1,
-        BaseCoverageCloseDeferredEvidenceEnvelopeV1,
+        BaseCoverageCloseDecisionV1, BaseCoverageCloseDeferredEvidenceEnvelopeV1,
         BaseCoverageCloseDeferredObservationContractV1, BaseCoverageCloseDownstreamContributionV2,
         BaseCoverageCloseEvidenceKindV1, BaseCoverageCloseManifestV1, BaseCoverageClosePartitionV1,
         BaseCoverageCloseReasonCodeV1, BaseCoverageCloseRetainedRelativeArtifactPolicyV1,
@@ -20720,7 +20720,7 @@ mod tests {
         let projection = RunnerV2BaseE2eProjectionV1::frozen().expect("frozen projection");
         let expected_counts = [
             (BaseCoverageManifestClassV1::Unit, 12),
-            (BaseCoverageManifestClassV1::CompileFailDoctest, 68),
+            (BaseCoverageManifestClassV1::CompileFailDoctest, 78),
             (BaseCoverageManifestClassV1::ManifestContract, 29),
             (BaseCoverageManifestClassV1::ProjectionE2e, 98),
             (BaseCoverageManifestClassV1::RuntimeLogging, 1),
@@ -20735,7 +20735,7 @@ mod tests {
             (BaseCoverageManifestClassV1::NoMockIntegration, 17),
         ];
         let manifest = projection.coverage_manifest();
-        assert_eq!(manifest.cases().len(), 435);
+        assert_eq!(manifest.cases().len(), 445);
         for (class, expected_count) in expected_counts {
             assert_eq!(manifest.case_count(class), expected_count);
             assert!(manifest.case_count(class) > 0);
@@ -20750,7 +20750,7 @@ mod tests {
         let close_manifest = projection.close_manifest();
         assert_eq!(close_manifest.source_manifest_root(), manifest.root());
         assert_eq!(close_manifest.cells().len(), manifest.cases().len());
-        assert_eq!(close_manifest.cells().len(), 435);
+        assert_eq!(close_manifest.cells().len(), 445);
         for group in crate::coverage::BaseCoverageCloseGroupV1::ALL {
             assert!(
                 close_manifest.group_count(group) > 0,

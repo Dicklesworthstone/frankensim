@@ -42,6 +42,7 @@ pub mod logging;
 pub mod path;
 pub mod projection;
 pub mod publication;
+pub mod runner_v2;
 pub mod schema_impact;
 pub mod state;
 pub mod value;

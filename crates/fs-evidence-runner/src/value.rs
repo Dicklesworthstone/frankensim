@@ -305,6 +305,47 @@ impl DecimalV2 {
 }
 
 /// Exact, unordered IEEE-754 binary32 representation.
+///
+/// Ordering is deliberately unavailable unless the caller names
+/// [`F32BitsV2::ieee_total_cmp_v1`] explicitly:
+///
+/// ```compile_fail,E0599
+/// use fs_evidence_runner::value::F32BitsV2;
+///
+/// let left = F32BitsV2::from_bits(0);
+/// let right = F32BitsV2::from_bits(1);
+/// let _ = left.cmp(&right);
+/// ```
+///
+/// ```compile_fail,E0369
+/// use fs_evidence_runner::value::F32BitsV2;
+///
+/// let left = F32BitsV2::from_bits(0);
+/// let right = F32BitsV2::from_bits(1);
+/// let _ = left < right;
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F32BitsV2;
+/// use std::collections::BTreeSet;
+///
+/// let mut values = BTreeSet::new();
+/// values.insert(F32BitsV2::from_bits(0));
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F32BitsV2;
+///
+/// let mut values = vec![F32BitsV2::from_bits(1), F32BitsV2::from_bits(0)];
+/// values.sort();
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F32BitsV2;
+///
+/// let mut values = vec![F32BitsV2::from_bits(1), F32BitsV2::from_bits(0)];
+/// values.sort_by_key(|value| *value);
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct F32BitsV2(u32);
@@ -333,9 +374,62 @@ impl F32BitsV2 {
     pub fn to_f32(self) -> f32 {
         f32::from_bits(self.0)
     }
+
+    /// Compare two preserved values using Rust's explicit IEEE-754 total-order
+    /// policy.
+    ///
+    /// This named policy orders signed zero, infinities, and NaN payloads
+    /// deterministically. It does not make raw-bit identity a semantic
+    /// scientific order, and the wrapper deliberately remains neither
+    /// [`Ord`] nor [`PartialOrd`].
+    #[must_use]
+    pub fn ieee_total_cmp_v1(self, other: Self) -> core::cmp::Ordering {
+        self.to_f32().total_cmp(&other.to_f32())
+    }
 }
 
 /// Exact, unordered IEEE-754 binary64 representation.
+///
+/// Ordering is deliberately unavailable unless the caller names
+/// [`F64BitsV2::ieee_total_cmp_v1`] explicitly:
+///
+/// ```compile_fail,E0599
+/// use fs_evidence_runner::value::F64BitsV2;
+///
+/// let left = F64BitsV2::from_bits(0);
+/// let right = F64BitsV2::from_bits(1);
+/// let _ = left.cmp(&right);
+/// ```
+///
+/// ```compile_fail,E0369
+/// use fs_evidence_runner::value::F64BitsV2;
+///
+/// let left = F64BitsV2::from_bits(0);
+/// let right = F64BitsV2::from_bits(1);
+/// let _ = left < right;
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F64BitsV2;
+/// use std::collections::BTreeSet;
+///
+/// let mut values = BTreeSet::new();
+/// values.insert(F64BitsV2::from_bits(0));
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F64BitsV2;
+///
+/// let mut values = vec![F64BitsV2::from_bits(1), F64BitsV2::from_bits(0)];
+/// values.sort();
+/// ```
+///
+/// ```compile_fail,E0277
+/// use fs_evidence_runner::value::F64BitsV2;
+///
+/// let mut values = vec![F64BitsV2::from_bits(1), F64BitsV2::from_bits(0)];
+/// values.sort_by_key(|value| *value);
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct F64BitsV2(u64);
@@ -363,6 +457,18 @@ impl F64BitsV2 {
     #[must_use]
     pub fn to_f64(self) -> f64 {
         f64::from_bits(self.0)
+    }
+
+    /// Compare two preserved values using Rust's explicit IEEE-754 total-order
+    /// policy.
+    ///
+    /// This named policy orders signed zero, infinities, and NaN payloads
+    /// deterministically. It does not make raw-bit identity a semantic
+    /// scientific order, and the wrapper deliberately remains neither
+    /// [`Ord`] nor [`PartialOrd`].
+    #[must_use]
+    pub fn ieee_total_cmp_v1(self, other: Self) -> core::cmp::Ordering {
+        self.to_f64().total_cmp(&other.to_f64())
     }
 }
 
@@ -3137,6 +3243,37 @@ mod tests {
         ] {
             assert_eq!(F64BitsV2::from_bits(bits).bits(), bits);
         }
+        use core::cmp::Ordering;
+
+        let negative_zero_f32 = F32BitsV2::from_bits((-0.0_f32).to_bits());
+        let positive_zero_f32 = F32BitsV2::from_bits(0.0_f32.to_bits());
+        assert_eq!(
+            negative_zero_f32.ieee_total_cmp_v1(positive_zero_f32),
+            Ordering::Less
+        );
+        assert_eq!(
+            positive_zero_f32.ieee_total_cmp_v1(negative_zero_f32),
+            Ordering::Greater
+        );
+        let nan_a_f32 = F32BitsV2::from_bits(0x7fc0_0001);
+        let nan_b_f32 = F32BitsV2::from_bits(0x7fc0_0002);
+        assert_eq!(nan_a_f32.ieee_total_cmp_v1(nan_b_f32), Ordering::Less);
+        assert_eq!(nan_a_f32.ieee_total_cmp_v1(nan_a_f32), Ordering::Equal);
+
+        let negative_zero_f64 = F64BitsV2::from_bits((-0.0_f64).to_bits());
+        let positive_zero_f64 = F64BitsV2::from_bits(0.0_f64.to_bits());
+        assert_eq!(
+            negative_zero_f64.ieee_total_cmp_v1(positive_zero_f64),
+            Ordering::Less
+        );
+        assert_eq!(
+            positive_zero_f64.ieee_total_cmp_v1(negative_zero_f64),
+            Ordering::Greater
+        );
+        let nan_a_f64 = F64BitsV2::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b_f64 = F64BitsV2::from_bits(0x7ff8_0000_0000_0002);
+        assert_eq!(nan_a_f64.ieee_total_cmp_v1(nan_b_f64), Ordering::Less);
+        assert_eq!(nan_a_f64.ieee_total_cmp_v1(nan_a_f64), Ordering::Equal);
     }
 
     #[test]
