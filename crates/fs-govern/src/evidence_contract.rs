@@ -1713,6 +1713,9 @@ pub enum EvidenceState {
     Proposed,
     Checked,
     Adjudicated,
+    /// Terminal failure of the exact evidence object whose identity is carried
+    /// here. [`EvidenceLifecycle::transition`] refuses an identity from any
+    /// other evidence object before replacing the lifecycle token.
     Failed(EvidenceId),
     Cancelled(CancellationReceipt),
 }
@@ -1737,8 +1740,10 @@ impl EvidenceState {
         )
     }
 
-    /// Monotone lifecycle transition.  Cancellation may terminate proposed or
-    /// checked work only after request/drain/finalize evidence exists.
+    /// Monotone lifecycle-shape transition. Cancellation may terminate
+    /// proposed or checked work only after request/drain/finalize evidence
+    /// exists. Exact binding of a [`Self::Failed`] payload requires the
+    /// evidence context owned by [`EvidenceLifecycle::transition`].
     pub fn transition(self, next: Self) -> Result<Self, AuthorityError> {
         if self.is_terminal() {
             return Err(AuthorityError::TerminalState { state: self.code() });
@@ -1779,6 +1784,13 @@ impl EvidenceLifecycle {
     pub fn transition(&mut self, next: EvidenceState) -> Result<(), AuthorityError> {
         let predecessor = self.identity;
         let state = self.state.transition(next)?;
+        if let EvidenceState::Failed(failure) = state
+            && failure != self.evidence.identity()
+        {
+            return Err(AuthorityError::IdentityMismatch {
+                what: "failed evidence does not match lifecycle evidence",
+            });
+        }
         let successor = Self::from_state(self.evidence, state, Some(predecessor));
         *self = successor;
         Ok(())
@@ -3341,7 +3353,7 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
         identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: EVIDENCE_STATE_IDENTITY_DOMAIN,
         identity_sources: "exact evidence reference, predecessor, lifecycle/cancellation fields",
-        binding: "exclusive transitions replace the token; terminal states cannot revive",
+        binding: "failure binds the exact evidence; exclusive transitions replace the token; terminal states cannot revive",
         no_claim: "lifecycle completion does not establish statement truth",
     },
     AuthorityCatalogRow {

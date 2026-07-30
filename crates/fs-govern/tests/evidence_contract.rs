@@ -15,15 +15,16 @@ use fs_govern::{
         ExactInstanceAdmission, ExactInstanceDecisionCandidate, ExactInstanceVerdict,
         FiveExplicits, InferenceRule, InvalidationState, KernelState,
         LEGACY_AUTHORITY_SCHEMA_VERSION, LegacyAuthorityRankV0, LegacyAuthorityV0,
-        MAX_AUTHORITY_LOG_BYTES, NONVACUOUS_EVIDENCE_IDENTITY_DOMAIN, NoClaimBoundary,
-        NonvacuityKind, NonvacuityState, NonvacuityStrength, NonvacuousEvidence,
-        NonvacuousEvidenceId, PROOF_LANE_IDENTITY_SCHEMA_VERSION, QuantifiedDomain, Quantifier,
-        QuantifierBlock, REPRODUCED_EVIDENCE_IDENTITY_DOMAIN,
-        REPRODUCTION_FAILED_EVIDENCE_IDENTITY_DOMAIN, RETIRED_AUTHORITY_CATALOG_SCHEMA_VERSION,
-        RETIRED_AUTHORITY_SCHEMA_VERSION, ReproducedEvidence, ReproducedEvidenceId,
-        ReproductionFailedEvidence, ReproductionFailedEvidenceId, ReproductionState,
-        SATISFIABLE_EVIDENCE_IDENTITY_DOMAIN, SEMANTIC_CLAIM_IDENTITY_DOMAIN, SatisfiabilityState,
-        SatisfiableEvidence, SatisfiableEvidenceId, ScaleState, TruthRequirement, TruthState,
+        MAX_AUTHORITY_LOG_BYTES, MAX_AUTHORITY_SET_MEMBERS, MAX_AUTHORITY_TEXT_BYTES,
+        NONVACUOUS_EVIDENCE_IDENTITY_DOMAIN, NoClaimBoundary, NonvacuityKind, NonvacuityState,
+        NonvacuityStrength, NonvacuousEvidence, NonvacuousEvidenceId,
+        PROOF_LANE_IDENTITY_SCHEMA_VERSION, QuantifiedDomain, Quantifier, QuantifierBlock,
+        REPRODUCED_EVIDENCE_IDENTITY_DOMAIN, REPRODUCTION_FAILED_EVIDENCE_IDENTITY_DOMAIN,
+        RETIRED_AUTHORITY_CATALOG_SCHEMA_VERSION, RETIRED_AUTHORITY_SCHEMA_VERSION,
+        ReproducedEvidence, ReproducedEvidenceId, ReproductionFailedEvidence,
+        ReproductionFailedEvidenceId, ReproductionState, SATISFIABLE_EVIDENCE_IDENTITY_DOMAIN,
+        SEMANTIC_CLAIM_IDENTITY_DOMAIN, SatisfiabilityState, SatisfiableEvidence,
+        SatisfiableEvidenceId, ScaleState, TruthRequirement, TruthState,
         UNSATISFIABLE_EVIDENCE_IDENTITY_DOMAIN, UnitFactor, UnitSystem, UnsatisfiableEvidence,
         UnsatisfiableEvidenceId, VACUOUS_EVIDENCE_IDENTITY_DOMAIN, VacuousEvidence,
         VacuousEvidenceId, VersionBinding, assess_runtime_candidate, authority_catalog_json,
@@ -1615,6 +1616,71 @@ fn g0_cancellation_is_request_drain_finalize_and_terminal() {
 }
 
 #[test]
+fn g0_lifecycle_failure_binds_the_exact_evidence_and_is_terminal() {
+    let claim = basic_claim();
+    let owned = evidence(&claim, EvidenceKind::Support, "owned-lifecycle-evidence");
+    let same_claim_other = evidence(&claim, EvidenceKind::Support, "same-claim-other-evidence");
+    let other_claim = claim_with(
+        &[],
+        Quantifier::ForAll,
+        101,
+        vec![CapabilityBinding::new("runtime-admit", 1).expect("capability")],
+        &["not cross-ISA bit stability"],
+    );
+    let other_claim_evidence =
+        evidence(&other_claim, EvidenceKind::Support, "other-claim-evidence");
+
+    let mut proposed = EvidenceLifecycle::proposed(owned);
+    let proposed_id = proposed.identity();
+    assert!(matches!(
+        proposed.transition(EvidenceState::Failed(same_claim_other.identity())),
+        Err(AuthorityError::IdentityMismatch {
+            what: "failed evidence does not match lifecycle evidence"
+        })
+    ));
+    assert_eq!(proposed.identity(), proposed_id);
+    assert_eq!(proposed.predecessor(), None);
+    assert_eq!(proposed.state(), EvidenceState::Proposed);
+
+    proposed
+        .transition(EvidenceState::Failed(owned.identity()))
+        .expect("the exact proposed evidence may fail");
+    assert_eq!(proposed.predecessor(), Some(proposed_id));
+    assert_eq!(proposed.state(), EvidenceState::Failed(owned.identity()));
+    let failed_id = proposed.identity();
+    assert!(matches!(
+        proposed.transition(EvidenceState::Checked),
+        Err(AuthorityError::TerminalState { state: "failed" })
+    ));
+    assert_eq!(proposed.identity(), failed_id);
+
+    let mut checked = EvidenceLifecycle::proposed(owned);
+    checked
+        .transition(EvidenceState::Checked)
+        .expect("proposed evidence may be checked");
+    let checked_id = checked.identity();
+    assert!(matches!(
+        checked.transition(EvidenceState::Failed(other_claim_evidence.identity())),
+        Err(AuthorityError::IdentityMismatch {
+            what: "failed evidence does not match lifecycle evidence"
+        })
+    ));
+    assert_eq!(checked.identity(), checked_id);
+    assert_eq!(checked.state(), EvidenceState::Checked);
+    assert_eq!(
+        checked.predecessor(),
+        Some(EvidenceLifecycle::proposed(owned).identity())
+    );
+
+    checked
+        .transition(EvidenceState::Failed(owned.identity()))
+        .expect("the exact checked evidence may fail");
+    assert_eq!(checked.predecessor(), Some(checked_id));
+    assert_eq!(checked.state(), EvidenceState::Failed(owned.identity()));
+    assert!(checked.state().is_terminal());
+}
+
+#[test]
 fn g0_edges_adjudication_and_revocation_bind_exact_instances() {
     let claim = basic_claim();
     let state = full_proved_state(claim.clone());
@@ -2907,6 +2973,126 @@ fn g0_limits_duplicates_and_default_inference_rules_fail_closed() {
         InferenceRule::new("future theorem", 0, hash("rule")),
         Err(AuthorityError::InvalidValue { .. })
     ));
+}
+
+#[test]
+fn g0_declared_constructor_caps_and_missing_identities_fail_at_the_boundary() {
+    assert_eq!(
+        ClaimStatement::new(&[]),
+        Err(AuthorityError::EmptyField {
+            what: "statement clause"
+        })
+    );
+    assert_eq!(
+        VersionBinding::new(" \t\n", "1"),
+        Err(AuthorityError::EmptyField {
+            what: "version component"
+        })
+    );
+    assert_eq!(
+        VersionBinding::new("solver", " \r\n"),
+        Err(AuthorityError::EmptyField {
+            what: "component version"
+        })
+    );
+
+    let maximum_text = "x".repeat(MAX_AUTHORITY_TEXT_BYTES);
+    let maximum_binding =
+        VersionBinding::new(&maximum_text, "1").expect("the declared text maximum is admitted");
+    assert_eq!(maximum_binding.component(), maximum_text);
+    let overlong_text = "x".repeat(MAX_AUTHORITY_TEXT_BYTES + 1);
+    assert_eq!(
+        VersionBinding::new(&overlong_text, "1"),
+        Err(AuthorityError::TooLarge {
+            what: "version component",
+            observed: MAX_AUTHORITY_TEXT_BYTES + 1,
+            cap: MAX_AUTHORITY_TEXT_BYTES,
+        })
+    );
+
+    let maximum_clauses = (0..MAX_AUTHORITY_SET_MEMBERS)
+        .map(|index| format!("clause-{index:03}"))
+        .collect::<Vec<_>>();
+    let maximum_clause_refs = maximum_clauses
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let maximum_statement =
+        ClaimStatement::new(&maximum_clause_refs).expect("the declared set maximum is admitted");
+    assert_eq!(maximum_statement.clauses().len(), MAX_AUTHORITY_SET_MEMBERS);
+
+    let overfull_clauses = (0..=MAX_AUTHORITY_SET_MEMBERS)
+        .map(|index| format!("clause-{index:03}"))
+        .collect::<Vec<_>>();
+    let overfull_clause_refs = overfull_clauses
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ClaimStatement::new(&overfull_clause_refs),
+        Err(AuthorityError::TooLarge {
+            what: "statement clause",
+            observed: MAX_AUTHORITY_SET_MEMBERS + 1,
+            cap: MAX_AUTHORITY_SET_MEMBERS,
+        })
+    );
+
+    let claim = basic_claim();
+    let missing = ContentHash::from_slice(&[0; 32]).expect("32-byte missing-identity fixture");
+    assert_eq!(
+        EvidenceRef::new(
+            EvidenceKind::Support,
+            claim.identity(),
+            missing,
+            hash("checker"),
+            AUTHORITY_ALGEBRA_VERSION,
+        ),
+        Err(AuthorityError::MissingIdentity {
+            what: "evidence artifact"
+        })
+    );
+    assert_eq!(
+        EvidenceRef::new(
+            EvidenceKind::Support,
+            claim.identity(),
+            hash("artifact"),
+            missing,
+            AUTHORITY_ALGEBRA_VERSION,
+        ),
+        Err(AuthorityError::MissingIdentity {
+            what: "evidence checker"
+        })
+    );
+    assert_eq!(
+        fs_govern::evidence_contract::CancellationReceipt::new(
+            missing,
+            hash("drain"),
+            hash("finalize"),
+        ),
+        Err(AuthorityError::MissingIdentity {
+            what: "cancellation request"
+        })
+    );
+    assert_eq!(
+        fs_govern::evidence_contract::CancellationReceipt::new(
+            hash("request"),
+            missing,
+            hash("finalize"),
+        ),
+        Err(AuthorityError::MissingIdentity {
+            what: "cancellation drain"
+        })
+    );
+    assert_eq!(
+        fs_govern::evidence_contract::CancellationReceipt::new(
+            hash("request"),
+            hash("drain"),
+            missing,
+        ),
+        Err(AuthorityError::MissingIdentity {
+            what: "cancellation finalize"
+        })
+    );
 }
 
 #[test]

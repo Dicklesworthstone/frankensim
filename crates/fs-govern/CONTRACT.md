@@ -68,7 +68,7 @@ JSON/Markdown renderers may mislabel that identity as v2.
 | `vacuous-evidence` | `2` | `2` | `frankensim.fs-govern.vacuous-evidence.v2` | vacuous evidence reference, strength kind, context, fibre | negative polarity and exact strength are type- and identity-bound | one strength class cannot widen without an inference rule |
 | `reproduction-failed-evidence` | `2` | `2` | `frankensim.fs-govern.reproduction-failed-evidence.v2` | reproduction-failed evidence reference | type and identity both bind failed-reproduction polarity | failure evidence is not authenticated adjudication |
 | `reproduced-evidence` | `2` | `2` | `frankensim.fs-govern.reproduced-evidence.v2` | reproduced evidence reference | type and identity both bind successful-reproduction polarity | reproduction is distinct from proof and admission |
-| `evidence-state` | `2` | `2` | `frankensim.fs-govern.evidence-state.v2` | exact evidence reference, predecessor, lifecycle/cancellation fields | exclusive transitions replace the token; terminal states cannot revive | lifecycle completion does not establish statement truth |
+| `evidence-state` | `2` | `2` | `frankensim.fs-govern.evidence-state.v2` | exact evidence reference, predecessor, lifecycle/cancellation fields | failure binds the exact evidence; exclusive transitions replace the token; terminal states cannot revive | lifecycle completion does not establish statement truth |
 | `authority-state` | `2` | `2` | `frankensim.fs-govern.authority-state.v2` | exact claim and all orthogonal authority axes | split scientific/exact refinement, clear runtime substitution, deny-biased meet | descriptive classifications are not authenticated authority |
 | `exact-instance-decision` | `2` | `2` | `frankensim.fs-govern.exact-instance-decision.v2` | claim, policy, checker, verdict, artifact, schema | runtime validation requires admitted polarity and exact field agreement | decision candidate is not an authenticated admission receipt |
 | `invalidation-binding` | `2` | `2` | `frankensim.fs-govern.invalidation-binding.v2` | target claim/state/head/generation and verified tombstone | private constructor binds the exact live predecessor atomically | binding is not cryptographic receipt authentication |
@@ -176,12 +176,14 @@ Phase 0B-B's authenticated checker receipt must verify actual possession.
 `EvidenceLifecycle` binds an exact evidence reference to `EvidenceState` under
 `frankensim.fs-govern.evidence-state.v2`. The state advances only
 `Proposed -> Checked -> Adjudicated`, or to a terminal `Failed`/`Cancelled`
-state. Cancellation requires nonzero identities for request, drain and
-finalize; terminal states cannot transition or revive. Lifecycle tokens are
-non-`Clone`/non-`Copy`; validated transitions atomically replace the exclusive
-token, and successor identity binds the predecessor. Recreating a descriptive
-Proposed root remains possible, so durable single-writer/CAS enforcement is
-explicitly Phase 0B-B.
+state. A `Failed` payload is the exact identity of the evidence object owned by
+that lifecycle; same-claim siblings and evidence from another claim refuse
+before token replacement. Cancellation requires nonzero identities for
+request, drain and finalize; terminal states cannot transition or revive.
+Lifecycle tokens are non-`Clone`/non-`Copy`; validated transitions atomically
+replace the exclusive token, and successor identity binds the predecessor.
+Recreating a descriptive Proposed root remains possible, so durable
+single-writer/CAS enforcement is explicitly Phase 0B-B.
 
 A `CounterexampleCandidate` and `AttackEdge` bind the exact target and domain
 but grant no refutation authority. Only a descriptive `GenuineCounterexample`
@@ -215,14 +217,16 @@ bounds the returned record, not transient `String` allocation during rendering.
 ### Evidence and no-claim boundary
 
 G0/G3 coverage owns canonical identity equivalence/sensitivity, partial-order
-and deny-biased clear-product laws, invalid product states, exact binding,
-schema refusal, migration demotion, typed satisfiability/nonvacuity separation,
-terminal cancellation, adjudication/revocation, policy guards and bounded log
-shape. Compile-fail documentation prevents descriptive state/assessment values
-from widening into opaque grants/admissions. The central batch must still
-execute those suites and catalog drift checks; this module alone does not
-implement Phase 0B-B wire decoding, durable admission receipts/current-head
-storage, package/checker/ledger adapters, signatures, or production runtime
+and deny-biased clear-product laws, invalid product states, exact binding
+including lifecycle failure identity, schema refusal, migration demotion, typed
+satisfiability/nonvacuity separation, terminal failure/cancellation,
+adjudication/revocation, policy guards, exact text/set cap boundaries, missing
+identity refusal, and bounded log shape. Compile-fail documentation prevents
+descriptive state/assessment values from widening into opaque
+grants/admissions. The central batch must still execute those suites and
+catalog drift checks; this module alone does not implement Phase 0B-B wire
+decoding, durable admission receipts/current-head storage,
+package/checker/ledger adapters, signatures, or production runtime
 consumption. The separate `evidence_graph` module below supplies descriptive
 Phase 0B-C graph/planning candidates without widening this authority boundary.
 
