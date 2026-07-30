@@ -56,8 +56,8 @@ pub use lease::{
     LeaseDelegationRefusal, LeaseIdentity, LeaseIdentityPathError, LeaseReceipt,
     LeaseReceiptVerificationError, LeaseRefusal, LeaseSealRefusal, OperationMemoryLease,
     PreparedPublishedTransfer, PublishedTransfer, PublishedTransferBinding,
-    PublishedTransferCloseReceipt, PublishedTransferReceipt, PublishedTransferRefusal,
-    PublishedTransferRollbackReceipt, SealedLeaseReceipt,
+    PublishedTransferCloseReceipt, PublishedTransferEnvelope, PublishedTransferReceipt,
+    PublishedTransferRefusal, PublishedTransferRollbackReceipt, SealedLeaseReceipt,
 };
 pub use lease_vec::LeasedVec;
 pub use pool::{PoolItem, ShardStats, ShardedPool, ShardedPoolStats};

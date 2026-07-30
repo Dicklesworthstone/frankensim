@@ -905,7 +905,13 @@ fn prepared_publication_explicit_and_drop_rollback_return_staging_exactly_once()
         .expect("first preparation fits");
     let rollback = explicit.rollback().expect("explicit rollback succeeds");
     rollback
-        .verify_for(root_id, None, child_id, explicit_binding)
+        .verify_for(
+            root_id,
+            None,
+            child_id,
+            explicit_binding,
+            PublishedTransferEnvelope::payload_only(7),
+        )
         .expect("rollback receipt verifies");
     assert!(!rollback.implicit_rollback);
     assert_eq!(child.used_bytes(), 0);

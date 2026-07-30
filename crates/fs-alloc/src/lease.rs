@@ -4565,6 +4565,7 @@ mod tests {
             parent_identity: None,
             child_identity,
             binding,
+            envelope: PublishedTransferEnvelope::payload_only(8),
             bytes: 8,
             prepared_sequence: 4,
             resolved_sequence: Some(5),
