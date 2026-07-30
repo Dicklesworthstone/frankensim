@@ -630,7 +630,9 @@ mod tests {
         assert_eq!(cell("beads-actionable"), "count");
         // The e2e lane has no retained receipt: NO-DATA, never a zero.
         assert_eq!(cell("spine-e2e-lane-green"), "no-data");
-        assert_eq!(cell("spine-critical-path-positions"), "no-data");
+        // The tropical critical path landed (kx95s): a measured ratio whose
+        // numerator is a REAL ZERO (no spine bead is on the path today).
+        assert_eq!(cell("spine-critical-path-positions"), "ratio");
         // And the discrimination itself: a NO-DATA status and a measured
         // zero-status are different renderings of different facts.
         assert_ne!("no-data", "count");

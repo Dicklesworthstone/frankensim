@@ -1,0 +1,35 @@
+{
+  "schema": "frankensim-suite-known-red-v1",
+  "bead": "frankensim-fluz9",
+  "note": "Every entry is a test that is RED on purpose and ON THE RECORD: disposition blocked-upstream names the owning bead; repaired entries must be removed deliberately (the suite-receipt gate nags until they are). A test may enter this registry only with a named owner bead and an honest disposition — never to make a failure invisible.",
+  "known_red": [
+    {
+      "test": "travel::tests::gc_reclaims_only_unreferenced",
+      "crate": "fs-ledger",
+      "owner_bead": "frankensim-fsqlite-fk-cascade-ordering-f2jag",
+      "disposition": "blocked-upstream",
+      "why": "FrankenSQLite runs ON DELETE CASCADE actions before deleting the parent row; the ledger's sidecar guards rely on real-SQLite ordering. Deliberately left red rather than weakened (see bead proof)."
+    },
+    {
+      "test": "qty_crosswalk_artifacts_are_gc_roots",
+      "crate": "fs-ledger",
+      "owner_bead": "frankensim-fsqlite-fk-cascade-ordering-f2jag",
+      "disposition": "blocked-upstream",
+      "why": "Same upstream FK-cascade ordering root cause (tests/crosswalk.rs)."
+    },
+    {
+      "test": "runtime_state_artifacts_are_gc_roots",
+      "crate": "fs-ledger",
+      "owner_bead": "frankensim-fsqlite-fk-cascade-ordering-f2jag",
+      "disposition": "blocked-upstream",
+      "why": "Same upstream FK-cascade ordering root cause (tests/state_checkpoint.rs)."
+    },
+    {
+      "test": "vc_005_gc_never_collects_live_branch_artifacts",
+      "crate": "fs-ledger",
+      "owner_bead": "frankensim-fsqlite-fk-cascade-ordering-f2jag",
+      "disposition": "blocked-upstream",
+      "why": "Same upstream FK-cascade ordering root cause (tests/vcs.rs)."
+    }
+  ]
+}
