@@ -453,6 +453,12 @@ fn stderr_tail(stderr: &str) -> String {
 }
 
 /// Run one test executable with JSON output into the crate outcome.
+///
+/// The suite must survive a hung target unattended (measured live: a storm
+/// lane deadlocked all-threads-futex for 30+ minutes, bead frankensim-kh5tf).
+/// std offers no child timeout, so a watchdog thread reaps the child after
+/// [`TARGET_TIMEOUT_SECS`]; the outcome records the kill as a timeout, never
+/// as a pass and never as a hang.
 fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcome) {
     let child = Command::new(executable)
         .args(["-Z", "unstable-options", "--format", "json"])
@@ -468,11 +474,15 @@ fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcom
             return;
         }
     };
-    let wait = child.wait_with_output();
-    // A real timeout needs a watchdog; std has none. The honest version:
-    // record elapsed time and mark targets that exceed the bound.
+    let pid = child.id();
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(TARGET_TIMEOUT_SECS));
+        // std has no portable kill-by-pid; the project is unix-only, and a
+        // kill on an already-reaped pid is a harmless ignored error.
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
     let start = std::time::Instant::now();
-    match wait {
+    match child.wait_with_output() {
         Ok(output) => {
             let elapsed = start.elapsed().as_secs();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -500,9 +510,9 @@ fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcom
                     output.status.code()
                 ));
             }
-            if elapsed > TARGET_TIMEOUT_SECS {
+            if elapsed >= TARGET_TIMEOUT_SECS {
                 outcome.target_error = Some(format!(
-                    "target exceeded the {TARGET_TIMEOUT_SECS}s bound (took {elapsed}s)"
+                    "target exceeded the {TARGET_TIMEOUT_SECS}s bound (killed at {elapsed}s)"
                 ));
             }
         }
@@ -510,6 +520,7 @@ fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcom
             outcome.target_error = Some(format!("cannot await {}: {error}", executable.display()));
         }
     }
+    drop(watchdog);
 }
 
 fn run_doc_tests(root: &Path, package: &str, package_root: &Path, outcome: &mut TargetOutcome) {
