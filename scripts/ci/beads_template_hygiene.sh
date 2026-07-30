@@ -10536,25 +10536,94 @@ def v2_safe_member(value: str, *, label: str) -> str:
         raise InputRefused(f"{label} is unsafe") from error
 
 
+def v2_register_member_identity(
+    seen: dict[tuple[int, int], str],
+    *,
+    device: int,
+    inode: int,
+    link_count: int,
+    relative: str,
+    kind: str,
+) -> None:
+    if kind not in {"directory", "file"}:
+        raise EvidenceFailed("v2 bundle identity kind is unknown")
+    identity = (device, inode)
+    if identity in seen:
+        raise InputRefused(
+            "v2 bundle contains an inode alias between "
+            f"{seen[identity]!r} and {relative!r}"
+        )
+    if kind == "file" and link_count != 1:
+        raise InputRefused(
+            f"v2 bundle file {relative!r} has an external hard-link alias"
+        )
+    seen[identity] = relative
+
+
 def v2_enumerate_bundle(directory: Path) -> tuple[list[str], list[str]]:
     files: list[str] = []
     directories: list[str] = []
+    identities: dict[tuple[int, int], str] = {}
+    try:
+        root_stat = os.lstat(directory)
+    except OSError as error:
+        raise InputRefused("v2 bundle root cannot be inspected safely") from error
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise InputRefused("v2 bundle root is not a directory")
+    v2_register_member_identity(
+        identities,
+        device=root_stat.st_dev,
+        inode=root_stat.st_ino,
+        link_count=root_stat.st_nlink,
+        relative=".",
+        kind="directory",
+    )
     for root_text, names, filenames in os.walk(directory, followlinks=False):
         root = Path(root_text)
         names.sort(key=lambda value: value.encode("utf-8"))
         filenames.sort(key=lambda value: value.encode("utf-8"))
         for name in list(names):
             candidate = root / name
-            if candidate.is_symlink() or not candidate.is_dir():
+            try:
+                member_stat = os.lstat(candidate)
+            except OSError as error:
+                raise InputRefused(
+                    "v2 bundle directory changed during enumeration"
+                ) from error
+            if not stat.S_ISDIR(member_stat.st_mode):
                 raise InputRefused("v2 bundle contains an unsafe directory")
             relative = candidate.relative_to(directory).as_posix()
-            directories.append(v2_safe_member(relative, label="bundle directory"))
+            relative = v2_safe_member(relative, label="bundle directory")
+            v2_register_member_identity(
+                identities,
+                device=member_stat.st_dev,
+                inode=member_stat.st_ino,
+                link_count=member_stat.st_nlink,
+                relative=relative,
+                kind="directory",
+            )
+            directories.append(relative)
         for name in filenames:
             candidate = root / name
-            if candidate.is_symlink() or not candidate.is_file():
+            try:
+                member_stat = os.lstat(candidate)
+            except OSError as error:
+                raise InputRefused(
+                    "v2 bundle file changed during enumeration"
+                ) from error
+            if not stat.S_ISREG(member_stat.st_mode):
                 raise InputRefused("v2 bundle contains an unsafe file")
             relative = candidate.relative_to(directory).as_posix()
-            files.append(v2_safe_member(relative, label="bundle member"))
+            relative = v2_safe_member(relative, label="bundle member")
+            v2_register_member_identity(
+                identities,
+                device=member_stat.st_dev,
+                inode=member_stat.st_ino,
+                link_count=member_stat.st_nlink,
+                relative=relative,
+                kind="file",
+            )
+            files.append(relative)
     files.sort(key=lambda value: value.encode("utf-8"))
     directories.sort(key=lambda value: value.encode("utf-8"))
     v2_assert_unique(files, label="v2 bundle files")
@@ -11174,20 +11243,39 @@ class V2CheckCollector:
         callback: Callable[[], Any],
         *,
         contains: str | None = None,
+        projection: Callable[[], Any] | None = None,
+        projection_label: str | None = None,
     ) -> None:
-        before = semantic_root({"case": self.case_id, "check": check_id})
+        if projection is None:
+            projection = lambda: {
+                "collector_check_roots": [
+                    row["semantic_root"] for row in self.rows
+                ],
+                "command_receipts": list(_command_receipts),
+                "signal_name": _signal_name,
+            }
+            projection_label = "HARNESS_PROCESS_STATE"
+        elif not projection_label:
+            raise EvidenceFailed(
+                f"{self.case_id}/{check_id} stateful refusal lacks a projection label"
+            )
+        before_value = projection()
+        before = semantic_root(before_value)
         error = expect_error(error_type, callback, contains=contains)
-        after = semantic_root({"case": self.case_id, "check": check_id})
+        after_value = projection()
+        after = semantic_root(after_value)
         self.check(
             check_id,
             before == after and error.terminal == error_type.terminal,
             expected={
                 "terminal": error_type.terminal,
                 "unchanged_projection_root": before,
+                "projection_label": projection_label,
             },
             observed={
                 "terminal": error.terminal,
                 "unchanged_projection_root": after,
+                "projection_label": projection_label,
                 "diagnostic_root": text_root(str(error)),
             },
         )
@@ -12604,7 +12692,7 @@ def v2_execute_source_cases(
             "unrelated-drift-stable-selected-key",
             first_capture["semantic_root"] != second_capture["semantic_root"]
             and v2_target_root(selected) == v2_target_root(dict(selected)),
-            expected=selected["target_root"],
+            expected=v2_target_root(selected),
             observed=v2_target_root(selected),
         )
         selected_mutations = {
@@ -12614,8 +12702,6 @@ def v2_execute_source_cases(
                 "dependencies",
                 [{"id": "changed-neighbor", "type": "blocks"}],
             ),
-            "owner": ("tracker_owner", "changed-owner"),
-            "consumer": ("terminal_consumer", "changed-consumer"),
         }
         for name, (field, value) in selected_mutations.items():
             changed = json.loads(json.dumps(selected))
@@ -12647,6 +12733,53 @@ def v2_execute_source_cases(
                         if name == "dependency"
                         else v2_target_root(changed)
                     ),
+                },
+            )
+        inventory = v2_synthetic_inventory([selected])
+        base_receipts = v2_synthetic_receipts(
+            inventory,
+            declared=True,
+        )
+        base_authority = v2_derive_authority(
+            inventory,
+            base_receipts,
+            current_br_version="0.2.19",
+        )
+        base_plan, _ = v2_build_review_plan(
+            inventory,
+            base_authority,
+            max_targets=1,
+        )
+        base_child_key = base_plan["children"][0]["child_key"]
+        for name, field, value in (
+            ("owner", "implementation_owner", "changed-owner"),
+            ("consumer", "terminal_consumer", "changed-consumer"),
+        ):
+            changed_receipts = json.loads(json.dumps(base_receipts))
+            changed_receipt = changed_receipts["receipts"][0]
+            changed_receipt[field] = value
+            changed_receipt.pop("semantic_root", None)
+            changed_receipts["receipts"][0] = v2_rooted(changed_receipt)
+            changed_receipts.pop("semantic_root", None)
+            changed_receipts = v2_rooted(changed_receipts)
+            changed_authority = v2_derive_authority(
+                inventory,
+                changed_receipts,
+                current_br_version="0.2.19",
+            )
+            changed_plan, _ = v2_build_review_plan(
+                inventory,
+                changed_authority,
+                max_targets=1,
+            )
+            changed_child_key = changed_plan["children"][0]["child_key"]
+            checks.check(
+                f"selected-{name}-receipt-invalidates-child-key",
+                changed_child_key != base_child_key,
+                expected="different child key",
+                observed={
+                    "before": base_child_key,
+                    "after": changed_child_key,
                 },
             )
     else:
@@ -13087,6 +13220,14 @@ def v2_execute_packing_cases(
             expected="different vector",
             observed=v2_hard_vector(base, changed_authority),
         )
+        changed_authority = dict(authority)
+        changed_authority["remediation_route"] = "MANUAL_BR_REVIEW"
+        checks.check(
+            "hard-key-remediation-route",
+            v2_hard_vector(base, changed_authority) != base_vector,
+            expected="different vector",
+            observed=v2_hard_vector(base, changed_authority),
+        )
     elif slug == "packing-compatible-receipt":
         plan, _, _ = v2_plan_for_count(2, max_targets=10)
         checks.check(
@@ -13248,6 +13389,103 @@ def v2_execute_packing_cases(
                     "children": witness["objective"]["child_count"],
                 },
             )
+        minute_loads = (240, 240, 160, 160, 80, 80)
+        byte_loads = (900, 100, 800, 200, 700, 300)
+        inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    index,
+                    review_minutes=minutes,
+                    retained_payload_bytes=byte_loads[index],
+                )
+                for index, minutes in enumerate(minute_loads)
+            ]
+        )
+        authority = v2_synthetic_authority(inventory, compatible=True)
+        authority_by_id = {
+            row["target_id"]: row for row in authority["decisions"]
+        }
+        rows = [
+            (target, authority_by_id[target["id"]])
+            for target in inventory["rows"]
+        ]
+
+        def independent_load(
+            group: Sequence[
+                tuple[Mapping[str, Any], Mapping[str, Any]]
+            ],
+        ) -> tuple[int, int, int]:
+            return (
+                sum(int(decision["review_minutes"]) for _, decision in group),
+                sum(int(target["retained_payload_bytes"]) for target, _ in group),
+                len(group),
+            )
+
+        def independent_key(
+            groups: Sequence[
+                Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]]
+            ],
+        ) -> tuple[Any, ...]:
+            loads = [independent_load(group) for group in groups]
+            return (
+                len(groups),
+                max(load[0] for load in loads),
+                max(load[1] for load in loads),
+                max(load[2] for load in loads),
+                tuple(sorted(loads, reverse=True)),
+                tuple(
+                    sorted(
+                        tuple(sorted(target["id"] for target, _ in group))
+                        for group in groups
+                    )
+                ),
+            )
+
+        independent_best: tuple[Any, ...] | None = None
+
+        def enumerate_partitions(
+            index: int,
+            groups: list[
+                list[tuple[Mapping[str, Any], Mapping[str, Any]]]
+            ],
+        ) -> None:
+            nonlocal independent_best
+            if index == len(rows):
+                candidate = independent_key(groups)
+                if independent_best is None or candidate < independent_best:
+                    independent_best = candidate
+                return
+            row = rows[index]
+            for group_index in range(len(groups) + 1):
+                if group_index == len(groups):
+                    groups.append([row])
+                    enumerate_partitions(index + 1, groups)
+                    groups.pop()
+                    continue
+                proposed = [*groups[group_index], row]
+                minutes, retained_bytes, target_count = independent_load(proposed)
+                if (
+                    target_count > 3
+                    or minutes > V2_REVIEW_MINUTES_CAP
+                    or retained_bytes > V2_CHILD_PAYLOAD_CAP
+                ):
+                    continue
+                groups[group_index].append(row)
+                enumerate_partitions(index + 1, groups)
+                groups[group_index].pop()
+
+        enumerate_partitions(0, [])
+        actual_bins, actual_witness = v2_pack_group(rows, max_targets=3)
+        actual_key = independent_key(actual_bins)
+        checks.check(
+            "independent-enumeration-confirms-varied-load-optimum",
+            independent_best is not None
+            and actual_key == independent_best
+            and actual_witness["objective"]
+            == v2_objective_document(actual_bins),
+            expected=independent_best,
+            observed=actual_key,
+        )
     elif slug == "packing-large-gap-witness":
         plan, _, _ = v2_plan_for_count(14, max_targets=10)
         witness = plan["packing_witnesses"][0]
@@ -13833,6 +14071,62 @@ def v2_execute_history_cases(
             expected={"cells": 25, "issues": 25, "zero": 0},
             observed=zero["counts"],
         )
+        sparse_inventory = v2_synthetic_inventory(
+            [v2_synthetic_target(100, priority=2, status="open")]
+        )
+        sparse_source_root = semantic_root({"fixture": "sparse-cells"})
+        sparse = v2_build_zero_sets(
+            source_root=sparse_source_root,
+            inventory=sparse_inventory,
+            prior_campaign=v2_empty_prior_campaign(),
+        )
+        sparse_zero_receipts = [
+            cell["zero_receipt"]
+            for cell in sparse["cells"]
+            if cell["zero_receipt"] is not None
+        ]
+        sparse_roots_valid = True
+        for receipt in sparse_zero_receipts:
+            try:
+                verify_semantic_root(
+                    receipt,
+                    label="sparse zero receipt",
+                )
+            except HarnessError:
+                sparse_roots_valid = False
+        checks.check(
+            "sparse-24-zero-receipts-rooted",
+            len(sparse_zero_receipts) == 24
+            and sparse_roots_valid
+            and all(
+                receipt["count"] == 0
+                and receipt["source_root"] == sparse_source_root
+                and receipt["inventory_root"]
+                == sparse_inventory["semantic_root"]
+                for receipt in sparse_zero_receipts
+            ),
+            expected={"zero_receipts": 24, "issues": 1},
+            observed=sparse["counts"],
+        )
+        empty_inventory = v2_synthetic_inventory([])
+        empty = v2_build_zero_sets(
+            source_root=semantic_root({"fixture": "empty-cells"}),
+            inventory=empty_inventory,
+            prior_campaign=v2_empty_prior_campaign(),
+        )
+        checks.check(
+            "empty-all-cells-have-zero-receipts",
+            empty["counts"]
+            == {
+                "cells": 25,
+                "zero_receipts": 25,
+                "issues": 0,
+                "movements": 0,
+            }
+            and all(cell["zero_receipt"] is not None for cell in empty["cells"]),
+            expected={"cells": 25, "zero_receipts": 25, "issues": 0},
+            observed=empty["counts"],
+        )
     elif slug in {
         "movement-cross-lane",
         "movement-live-to-history",
@@ -14112,6 +14406,53 @@ def v2_execute_artifact_cases(
             expected != extra,
             expected=expected,
             observed=extra,
+        )
+        identities: dict[tuple[int, int], str] = {}
+        v2_register_member_identity(
+            identities,
+            device=1,
+            inode=100,
+            link_count=1,
+            relative="source-v2.json",
+            kind="file",
+        )
+        identity_projection = lambda: [
+            {
+                "device": device,
+                "inode": inode,
+                "path": path,
+            }
+            for (device, inode), path in sorted(identities.items())
+        ]
+        checks.refuses(
+            "inode-alias-refused",
+            InputRefused,
+            lambda: v2_register_member_identity(
+                identities,
+                device=1,
+                inode=100,
+                link_count=1,
+                relative="inventory-v2.json",
+                kind="file",
+            ),
+            contains="inode alias",
+            projection=identity_projection,
+            projection_label="BUNDLE_MEMBER_IDENTITIES",
+        )
+        checks.refuses(
+            "external-hardlink-refused",
+            InputRefused,
+            lambda: v2_register_member_identity(
+                identities,
+                device=1,
+                inode=101,
+                link_count=2,
+                relative="authority-v2.json",
+                kind="file",
+            ),
+            contains="hard-link alias",
+            projection=identity_projection,
+            projection_label="BUNDLE_MEMBER_IDENTITIES",
         )
     elif slug == "log-assertion-argv-evidence":
         payloads, _ = v2_synthetic_payloads(manifest)
