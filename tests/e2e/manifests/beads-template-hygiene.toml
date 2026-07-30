@@ -1,0 +1,1174 @@
+schema = "frankensim.beads-template-hygiene-manifest.v1"
+schema_version = 1
+manifest_id = "beads-template-hygiene-v1"
+suite_id = "template-lint"
+bead_id = "frankensim-semantic-bead-template-hygiene-961yr.1"
+manifest_path = "tests/e2e/manifests/beads-template-hygiene.toml"
+harness_path = "scripts/ci/beads_template_hygiene.sh"
+immutable = true
+case_count = 21
+suite_status = "NO_DATA_UNTIL_HARNESS_AND_RETAINED_RUN_EXIST"
+authority = "TEST_CONTRACT_ONLY"
+no_claim = "This manifest fixes the harness protocol and expected fixture outcomes. It does not repair a Bead, approve target semantics, authenticate a live tracker snapshot, prove the lint rules complete, or authorize capability promotion."
+case_order = [
+  "template-lint.inventory-empty",
+  "template-lint.inventory-live",
+  "template-lint.overlap-partitions",
+  "template-lint.section-only",
+  "template-lint.substantive-omission",
+  "template-lint.wrong-type",
+  "template-lint.rollup-gap",
+  "template-lint.owner-review",
+  "template-lint.historical-review",
+  "template-lint.p0-shard",
+  "template-lint.p1-shard",
+  "template-lint.p2-p3-shard",
+  "template-lint.br-only-apply",
+  "template-lint.concurrent-drift",
+  "template-lint.partial-batch",
+  "template-lint.copied-boilerplate",
+  "template-lint.scope-loss",
+  "template-lint.inverse-replay",
+  "template-lint.new-issue-regression",
+  "template-lint.zero-debt-closeout",
+  "template-lint.artifact-replay",
+]
+
+[schema_contract]
+unknown_keys = "REFUSE"
+duplicate_keys = "REFUSE"
+duplicate_case_ids = "REFUSE"
+missing_case_ids = "REFUSE"
+extra_case_ids = "REFUSE"
+ordinal_policy = "dense unsigned integers 1 through case_count"
+ordering_policy = "ordinal ascending; case_order and case records must agree byte-for-byte"
+input_order_invariant = true
+case_id_encoding = "UTF-8"
+case_id_pattern = "^template-lint\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+required_case_fields = [
+  "ordinal",
+  "id",
+  "role",
+  "mode",
+  "fixture",
+  "perturbation",
+  "expected_terminal",
+  "expected_exit",
+  "expected_subject_terminal",
+  "expected_inner_br_category",
+  "expected_event_stages",
+  "expected_artifacts",
+  "mutation",
+  "replay",
+  "expected_live_target_mutation",
+  "expected_fixture_mutation",
+  "inverse_required",
+  "mutation_expectation",
+  "authority",
+  "no_claim",
+  "assertions",
+]
+allowed_roles = [
+  "positive",
+  "boundary",
+  "negative",
+  "mutation",
+  "replay",
+  "closeout",
+]
+allowed_modes = [
+  "--list",
+  "--check",
+  "--self-test",
+  "--inventory",
+  "--plan",
+  "--apply-manifest REL",
+  "--negative CASE",
+  "--replay REL",
+  "--closeout",
+]
+allowed_terminals = [
+  "Pass",
+  "UsageRefused",
+  "InputRefused",
+  "NoData",
+  "EvidenceFailed",
+  "CancelledDrained",
+  "InfrastructureFailed",
+  "InternalFault",
+]
+allowed_subject_terminals = [
+  "PASS",
+  "EXPECTED_REFUSAL",
+  "APPLIED_AND_INVERTIBLE",
+  "ROLLED_BACK",
+  "RESTORED",
+  "CLOSEOUT_GREEN",
+  "REPLAY_EQUIVALENT",
+]
+terminal_exit_map = [
+  "Pass=0",
+  "UsageRefused=2",
+  "InputRefused=3",
+  "NoData=4",
+  "EvidenceFailed=5",
+  "CancelledDrained=6",
+  "InfrastructureFailed=7",
+  "InternalFault=8",
+]
+allowed_mutation_bindings = [
+  "none",
+  "fixture-br-update-then-inverse",
+  "fixture-br-drift-then-inverse",
+  "fixture-br-update-failure-then-inverse",
+  "fixture-br-create-then-close-containment",
+]
+allowed_replay_bindings = [
+  "none",
+  "inverse",
+  "artifact-only",
+]
+allowed_inner_br_categories = [
+  "READ_SUCCESS",
+  "NO_MUTATING_BR_CALL",
+  "SINGLE_UPDATE_AND_INVERSE_SUCCESS",
+  "SETUP_UPDATE_THEN_GUARD_REFUSAL",
+  "FORWARD_UPDATE_FAILURE_THEN_INVERSE_SUCCESS",
+  "SETUP_CREATE_THEN_CLOSE_SUCCESS",
+]
+
+[source_contract]
+tracker_cli = "br"
+diagnostic_cli = "bv"
+diagnostic_mode = "robot flags only"
+mutation_transport = "br CLI only"
+direct_tracker_file_edits = "FORBIDDEN"
+network_access = "FORBIDDEN"
+ambient_environment_authority = "NONE"
+lint_commands = [
+  "br lint --status open --json --no-auto-flush --no-auto-import --no-color",
+  "br lint --status in_progress --json --no-auto-flush --no-auto-import --no-color",
+  "br lint --status blocked --json --no-auto-flush --no-auto-import --no-color",
+  "br lint --status deferred --json --no-auto-flush --no-auto-import --no-color",
+  "br lint --status closed --json --no-auto-flush --no-auto-import --no-color",
+  "br lint --status all --json --no-auto-flush --no-auto-import --no-color",
+]
+metadata_join_commands = [
+  "br list --status open --limit 0 --json --no-auto-flush --no-auto-import --no-color",
+  "br list --status in_progress --limit 0 --json --no-auto-flush --no-auto-import --no-color",
+  "br list --status blocked --limit 0 --json --no-auto-flush --no-auto-import --no-color",
+  "br list --status deferred --deferred --limit 0 --json --no-auto-flush --no-auto-import --no-color",
+  "br list --status closed --limit 0 --json --no-auto-flush --no-auto-import --no-color",
+  "br show ID --json --no-auto-flush --no-auto-import --no-color",
+]
+environment_variables_to_unset = [
+  "BD_DB",
+  "BD_DATABASE",
+  "BEADS_JSONL",
+  "BR_OUTPUT_FORMAT",
+  "TOON_DEFAULT_FORMAT",
+  "RUST_LOG",
+]
+forbidden_flags = [
+  "--allow-stale",
+  "--force",
+]
+implicit_last_touched_issue = "FORBIDDEN"
+lint_warning_classes = [
+  "MissingAcceptanceCriteria",
+  "MissingStepsToReproduce",
+  "MissingSuccessCriteria",
+]
+semantic_dispositions = [
+  "SECTION_NAME_ONLY",
+  "SUBSTANTIVE_SEMANTIC_OMISSION",
+  "MALFORMED_OR_WRONG_TYPE",
+  "ROLLUP_CHILD_SET_GAP",
+  "OWNER_REVIEW_REQUIRED",
+  "HISTORICAL_IMMUTABLE_REVIEW",
+]
+required_source_identity_fields = [
+  "br_tool_identity",
+  "br_capabilities_contract_identity",
+  "br_lint_rule_identity",
+  "beads_database_semantic_projection_root",
+  "beads_export_sync_status_and_witness",
+  "status_cut",
+  "inventory_membership_root",
+  "manifest_identity",
+  "harness_identity",
+]
+source_identity_semantics = "Tracker-file byte identities are retained diagnostics, not semantic authority. Admission is bound to br version/capabilities, br sync --status, exact list/show/lint projections captured twice, and the export witness when available."
+required_joined_issue_fields = [
+  "issue_id",
+  "title",
+  "issue_type",
+  "status",
+  "priority",
+  "owner",
+  "parent",
+  "missing_section",
+  "existing_relevant_clauses",
+  "dependencies",
+  "implementation_owner",
+  "evidence_owner",
+  "terminal_owner",
+  "testing_obligation",
+  "logging_obligation",
+  "replay_obligation",
+  "source_closure_obligation",
+  "authority",
+  "no_claim",
+  "disposition",
+  "disposition_rationale",
+  "disposition_falsifier",
+]
+source_drift_policy = "REFUSE_BEFORE_TARGET_MUTATION"
+count_preserving_membership_drift = "REFUSE"
+field_order_dependency = "FORBIDDEN"
+deferred_issue_policy = "Capture independently, classify no more strongly than OWNER_REVIEW_REQUIRED, and exclude from every V1 apply manifest until explicitly reactivated and re-inventoried."
+
+[br_contract]
+version_command = "br version --json"
+version_identity_fields = [
+  "version",
+  "build",
+  "commit",
+  "target",
+  "features",
+]
+capabilities_command = "br capabilities --json"
+capabilities_contract_field = "contract_version"
+capabilities_contract_version = "br.capabilities.v1"
+command_schema_is_stable_authority = false
+lint_operation_class = "mixed"
+lint_result_shape = "{total: integer warning count, issues: integer distinct issue count, results: array}"
+lint_row_shape = "{id, title, type, missing, warnings, suggestions}"
+list_result_shape = "{total, issues: array, limit, offset, has_more}"
+show_result_shape = "array of issue-detail objects"
+lint_type_field = "type"
+list_and_show_type_field = "issue_type"
+status_cuts = [
+  "open",
+  "in_progress",
+  "blocked",
+  "deferred",
+  "closed",
+  "all",
+]
+issue_types = [
+  "bug",
+  "task",
+  "feature",
+  "epic",
+  "chore",
+  "docs",
+  "question",
+  "custom:*",
+]
+priorities = [0, 1, 2, 3, 4]
+lint_rule_matrix = [
+  "bug: Acceptance Criteria plus Steps to Reproduce",
+  "task: Acceptance Criteria",
+  "feature: Acceptance Criteria",
+  "epic: Success Criteria",
+  "chore: no required lint section",
+  "docs: no required lint section",
+  "question: no required lint section",
+  "custom:*: no required lint section unless an explicitly versioned repository template rule says otherwise",
+]
+all_status_cut_identity = "all is the exact set union of independently captured open, in_progress, blocked, deferred, and closed cuts"
+json_shape_policy = "Validate names and types; never depend on object-field order, and never confuse lint issues integer with list issues array."
+
+[classification_contract]
+unit = "one issue plus its complete exact warning-row set"
+conservative_precedence = [
+  "HISTORICAL_IMMUTABLE_REVIEW",
+  "OWNER_REVIEW_REQUIRED",
+  "ROLLUP_CHILD_SET_GAP",
+  "SUBSTANTIVE_SEMANTIC_OMISSION",
+  "MALFORMED_OR_WRONG_TYPE",
+  "SECTION_NAME_ONLY",
+]
+candidate_pattern_is_approval = false
+nonempty_structured_acceptance_is_sufficient = false
+inline_acceptance_marker_is_sufficient = false
+byte_identical_generic_body_is_sufficient = false
+mixed_warning_policy = "Retain every warning row, classify conflicting, mixed, ownership-sensitive, or insufficient evidence as OWNER_REVIEW_REQUIRED, and forbid heading-only auto-approval."
+closed_policy = "Always HISTORICAL_IMMUTABLE_REVIEW, even when a weaker candidate signal is present."
+deferred_policy = "At most OWNER_REVIEW_REQUIRED; never apply while deferred."
+malformed_or_wrong_type_proof = "The only defect is an exact required-heading/type mismatch and every required issue-specific semantic obligation is otherwise complete; any mixed warning or uncertainty escalates to OWNER_REVIEW_REQUIRED."
+section_name_only_proof = "Complete issue-specific semantics already exist verbatim, every required warning is heading-only, no mixed warning or copied body is present, and an exact-root owner review approves only navigation insertion."
+
+[partition_contract]
+row_identity = "issue_id plus warning_class plus missing_section"
+set_a = "exact issue IDs missing Acceptance Criteria"
+set_s = "exact issue IDs missing Steps to Reproduce"
+set_c = "exact issue IDs missing Success Criteria"
+required_partitions = [
+  "A_only",
+  "S_only",
+  "C_only",
+  "A_and_S_only",
+  "A_and_C_only",
+  "S_and_C_only",
+  "A_and_S_and_C",
+]
+arithmetic_identity = "union_count = A_only + S_only + C_only + A_and_S_only + A_and_C_only + S_and_C_only + A_and_S_and_C"
+counts_are_derived = true
+counts_authorize_repair = false
+lexical_similarity_authorizes_repair = false
+
+[caps]
+max_cases = 21
+max_inventory_rows = 4096
+max_warning_rows = 8192
+max_warnings_per_issue = 16
+max_targets_per_plan_shard = 25
+max_targets_per_apply_manifest = 1
+max_attempts_per_case = 3
+max_case_id_bytes = 128
+max_issue_id_bytes = 256
+max_title_bytes = 4096
+max_clause_bytes = 65536
+max_relative_path_bytes = 512
+max_command_arguments = 64
+max_command_argument_bytes = 4096
+max_log_events = 262144
+max_log_line_bytes = 16384
+max_artifact_bytes = 67108864
+cap_exceeded_terminal = "EXPECTED_REFUSAL"
+cap_exceeded_live_target_mutation = false
+
+[cli]
+mode_is_required = true
+multiple_modes = "REFUSE"
+unknown_mode = "REFUSE"
+unknown_option = "REFUSE"
+relative_paths_only = true
+successful_expectation_exit = 0
+assertion_failure_exit = 5
+usage_error_exit = 2
+input_or_schema_refusal_exit = 3
+source_drift_or_apply_refusal_exit = 3
+cancelled_exit = 6
+expected_exit_scope = "case harness exit after comparing the observed subject terminal with this manifest"
+
+[harness_binding]
+outer_terminal_field = "expected_terminal"
+outer_exit_field = "expected_exit"
+subject_terminal_field = "expected_subject_terminal"
+mutation_field = "mutation"
+replay_field = "replay"
+success_rule = "The harness emits outer Pass/0 only after the fixture produces its expected subject terminal, mutation/restoration projection, replay projection, event stages, and artifacts."
+negative_case_rule = "An expected refusal is a subject terminal asserted by the fixture; observing that refusal is an outer Pass/0, while failure to refuse is EvidenceFailed/5."
+no_data_rule = "The suite remains NoData/4 until both manifest and harness exist and a retained complete run passes; manifest presence alone is not evidence."
+
+[[cli.mode]]
+name = "list"
+syntax = "--list"
+mutates = false
+contract = "Emit the 21 case IDs in frozen manifest order and nothing inferred from the live tracker."
+
+[[cli.mode]]
+name = "check"
+syntax = "--check"
+mutates = false
+contract = "Validate manifest schema, exact case inventory, harness binding, caps, and source readability without classifying or changing a Bead."
+
+[[cli.mode]]
+name = "self-test"
+syntax = "--self-test"
+mutates = false
+contract = "Run every frozen fixture in a disjoint test repository and require its expected terminal, exit, artifacts, and restoration seal."
+
+[[cli.mode]]
+name = "inventory"
+syntax = "--inventory"
+mutates = false
+contract = "Capture exact lint memberships, overlaps, joined issue metadata, source identities, and an inventory root; findings are data rather than an apply authorization."
+
+[[cli.mode]]
+name = "plan"
+syntax = "--plan"
+mutates = false
+contract = "Produce deterministic bounded shards and explicit semantic dispositions; refuse any row that lacks its required owner review."
+
+[[cli.mode]]
+name = "apply-manifest"
+syntax = "--apply-manifest REL"
+mutates = true
+contract = "Apply one exact reviewed bounded manifest through br only, bind every precondition, and retain an inverse br plan before the first write."
+
+[[cli.mode]]
+name = "negative"
+syntax = "--negative CASE"
+mutates = false
+contract = "Run one frozen adversarial fixture; exit zero only when the specified unsafe or stale operation is refused with no live-target mutation."
+
+[[cli.mode]]
+name = "replay"
+syntax = "--replay REL"
+mutates = false
+contract = "Reconstruct inventory and plan solely from retained relative artifacts into a disjoint output root and compare semantic roots."
+
+[[cli.mode]]
+name = "closeout"
+syntax = "--closeout"
+mutates = false
+contract = "Require exact zero live debt, independent inventory reconstruction, zero unreviewed rows, complete inverse/replay artifacts, and a terminal source-closure seal."
+
+[mutation_contract]
+live_target_default = "READ_ONLY"
+fixture_repository_default = "READ_ONLY"
+apply_preconditions = [
+  "manifest identity matches",
+  "source identities match",
+  "exact issue membership matches",
+  "issue metadata and semantic roots match",
+  "the sole row has disposition SECTION_NAME_ONLY",
+  "the sole row matches one exact plan proposal and proposal root",
+  "the sole row carries an explicit current-owner review receipt bound to every source and proposal root",
+  "the V1 apply manifest names exactly one explicit issue ID",
+  "the issue is not deferred or closed",
+  "complete inverse br commands are retained before the first write",
+]
+review_receipt_fields = [
+  "schema",
+  "issue_id",
+  "reviewed_by",
+  "current_owner",
+  "source_root",
+  "inventory_root",
+  "plan_root",
+  "proposal_root",
+  "old_field_root",
+  "new_field_root",
+  "reservation_receipt",
+  "no_claim",
+]
+review_receipt_policy = "The harness verifies exact field/root equality and requires reviewed_by to equal the current assignee or owner. The receipt is an explicit workflow attestation, not cryptographic identity or semantic authority, and an unassigned issue cannot be applied."
+v1_apply_atomicity = "One explicit issue ID and one br update command per apply manifest; multi-target apply is forbidden until br exposes a transaction or compare-and-swap primitive covering the whole set."
+pre_update_observation = "Read the explicit ID with br show and require the planned semantic root immediately before br update."
+post_update_observation = "Read the same explicit ID with br show and require the exact planned post-state semantic root immediately after br update."
+implicit_issue_selection = "FORBIDDEN"
+force_update = "FORBIDDEN"
+section_name_only_change = "Add only the missing literal navigation heading around already complete issue-specific criteria; preserve every existing semantic clause byte-for-byte."
+substantive_auto_fill = "FORBIDDEN"
+copied_boilerplate = "FORBIDDEN"
+direct_database_or_jsonl_write = "FORBIDDEN"
+partial_success = "FORBIDDEN"
+failure_policy = "Run retained inverse br commands in reverse order, verify the pre-run semantic root, and refuse a green terminal if restoration is incomplete."
+read_only_modes_must_preserve = [
+  "live Beads semantic root",
+  "live issue membership",
+  "live issue fields",
+  "live dependency graph",
+  "live export state",
+]
+
+[logging]
+format = "JSONL"
+encoding = "UTF-8"
+schema = "frankensim.beads-template-hygiene-event.v1"
+deterministic = true
+redacted = true
+sequence = "dense unsigned integers starting at zero"
+stable_event_order = "case ordinal, attempt, stage ordinal, issue ID byte order, warning class byte order"
+required_fields = [
+  "schema",
+  "tool",
+  "rule",
+  "source",
+  "run",
+  "case",
+  "attempt",
+  "stage",
+  "sequence",
+  "issue",
+  "warning",
+  "disposition",
+  "shard",
+  "old_semantic_root",
+  "new_semantic_root",
+  "command",
+  "result",
+  "first_divergence",
+  "caps",
+  "terminal",
+  "inverse_br_command",
+  "safe_relative_artifacts",
+  "reproduction",
+]
+field_presence_policy = "Every event carries every required field. Stage-inapplicable payload fields are explicit nulls; omitted required fields refuse replay."
+nullable_until_applicable = [
+  "issue",
+  "warning",
+  "disposition",
+  "shard",
+  "old_semantic_root",
+  "new_semantic_root",
+  "command",
+  "result",
+  "first_divergence",
+  "terminal",
+  "inverse_br_command",
+  "reproduction",
+]
+command_representation = "argv array, never a shell-expanded string"
+terminal_event_required = true
+terminal_event_must_be_last = true
+terminal_event_binds = [
+  "source identities",
+  "manifest identity",
+  "case order",
+  "event sequence",
+  "inventory root",
+  "plan root",
+  "before and after semantic roots",
+  "artifact paths",
+  "exit code",
+]
+forbidden_fields = [
+  "secret",
+  "token",
+  "credential",
+  "environment value",
+  "absolute path",
+  "process ID",
+  "thread ID",
+  "scheduler timing",
+  "wall-clock timestamp",
+  "bulk issue description",
+]
+truncation_policy = "REFUSE_GREEN_AND_REPORT_FIRST_DIVERGENCE"
+
+[artifact_contract]
+output_root = "artifacts/beads-template-hygiene"
+paths_are_relative = true
+overwrite_existing_run = false
+artifact_union = [
+  "source.json",
+  "inventory.json",
+  "partitions.json",
+  "plan.json",
+  "events.jsonl",
+  "terminal.json",
+  "reproduce.txt",
+]
+case_expected_artifacts_are_controlling = true
+publication_order = "Write all non-terminal artifacts, write the complete events.jsonl whose unique terminal event is its last row, then write terminal.json as the final run seal. A green consumer requires exact complete artifact membership plus both agreeing terminals; any interrupted prefix refuses."
+terminal_seal_rule = "terminal.json binds the ordered identities of every other artifact and the pre-terminal event prefix. It does not contain or bind its own byte identity; the terminal artifact identity is computed externally after publication, avoiding a circular self-hash."
+apply_only_artifacts = [
+  "apply-manifest.json",
+  "inverse-br.json",
+  "restoration.json",
+]
+artifact_order = "UTF-8 bytewise relative path"
+artifact_identity = "semantic root over schema, length, relative path, and canonical bytes"
+absolute_paths = "REFUSE"
+symlinks = "REFUSE"
+path_traversal = "REFUSE"
+empty_or_dot_component = "REFUSE_BEFORE_NORMALIZATION"
+backslash_or_drive_prefix = "REFUSE"
+tilde_prefix = "REFUSE"
+control_or_nul_character = "REFUSE"
+unicode_normalization = "Require NFC and compare the original spelling before constructing a path object."
+max_path_depth = 32
+max_component_bytes = 128
+existing_output_target = "REFUSE, including byte-identical content; restart uses a new explicit disjoint run directory."
+parent_symlink_race_policy = "Open each parent without following symlinks immediately before publication; any identity change refuses."
+
+[replay_contract]
+artifact_only = true
+cli_scope = "--replay REL is artifact-only and can never execute an inverse br command. Inverse replay is a mutation fixture exercised by --self-test after an explicitly isolated apply."
+live_tracker_reads = "FORBIDDEN"
+live_tracker_writes = "FORBIDDEN"
+network_access = "FORBIDDEN"
+output_root = "caller-supplied disjoint relative directory"
+overwrite = "FORBIDDEN"
+required_reconstruction = [
+  "source identity projection",
+  "exact warning-row membership",
+  "all overlap partitions and derived counts",
+  "joined issue semantic projection",
+  "disposition set and rationale identities",
+  "bounded shard membership and order",
+  "inventory root",
+  "plan root",
+  "terminal projection",
+]
+equivalence = "byte-identical canonical semantic projection and roots"
+first_divergence_required = true
+inverse_plan_required_for_mutating_runs = true
+replay_mints_authority = false
+no_claim = "Artifact-only replay demonstrates deterministic reconstruction of the retained run projection. It does not authenticate the producer, validate owner judgments, prove the lint taxonomy complete, or show that the current live tracker still matches."
+
+[[case]]
+ordinal = 1
+id = "template-lint.inventory-empty"
+role = "boundary"
+mode = "--inventory"
+fixture = "inventory-empty"
+perturbation = "none"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "partition", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "No target or fixture mutation; emit exact empty warning sets, partitions, and zero derived counts."
+authority = "INVENTORY_ONLY"
+no_claim = "An empty fixture proves empty-set handling only; it does not prove the live repository has zero debt."
+assertions = [
+  "Every warning-class membership and overlap partition is the empty set.",
+  "All derived counts are zero and the inventory root is deterministic.",
+  "The terminal log is present even when there are no issue rows.",
+]
+
+[[case]]
+ordinal = 2
+id = "template-lint.inventory-live"
+role = "positive"
+mode = "--inventory"
+fixture = "inventory-live"
+perturbation = "permute lint result rows and JSON object-field order while retaining exact semantic membership"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "partition", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Read-only exact-set capture; no warning count or membership is changed."
+authority = "INVENTORY_ONLY"
+no_claim = "Capturing a live-shaped fixture records its rows but does not approve any repair or classify owner intent automatically."
+assertions = [
+  "All warning rows are joined to status, priority, type, owner, parent, dependencies, obligations, authority, and no-claim fields.",
+  "Input object and field order do not affect canonical row order or the inventory root.",
+  "Unknown, duplicate, or malformed rows refuse instead of being dropped.",
+]
+
+[[case]]
+ordinal = 3
+id = "template-lint.overlap-partitions"
+role = "boundary"
+mode = "--inventory"
+fixture = "overlap-partitions"
+perturbation = "cover every exclusive A, S, and C overlap partition, then inject one hidden duplicate in the negative twin"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "partition", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Read-only set arithmetic; no overlapping issue is duplicated into an apply plan."
+authority = "INVENTORY_ONLY"
+no_claim = "Correct partition arithmetic does not establish that any missing section is merely lexical."
+assertions = [
+  "All seven exclusive A, S, and C overlap partitions contain their exact expected issue IDs.",
+  "Union and per-warning counts are recomputed from membership rather than trusted from summary counts.",
+  "A hidden or duplicated overlap row changes the semantic root and refuses a green terminal.",
+]
+
+[[case]]
+ordinal = 4
+id = "template-lint.section-only"
+role = "positive"
+mode = "--plan"
+fixture = "section-only"
+perturbation = "remove only the literal required heading while retaining complete issue-specific criteria verbatim"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Plan only the literal heading insertion; preserve the complete issue-specific criteria byte-for-byte."
+authority = "PLAN_ONLY"
+no_claim = "SECTION_NAME_ONLY authorizes no substantive wording change and grants no authority beyond navigation repair."
+assertions = [
+  "The fixture already contains complete issue-specific acceptance semantics verbatim.",
+  "The disposition is exactly SECTION_NAME_ONLY with rationale and a falsifier.",
+  "The plan changes only the missing literal heading and is deterministic under input reordering.",
+]
+
+[[case]]
+ordinal = 5
+id = "template-lint.substantive-omission"
+role = "negative"
+mode = "--negative CASE"
+fixture = "substantive-omission"
+perturbation = "remove issue-specific acceptance obligations rather than only their navigation heading"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Refuse automatic content generation before any mutation; retain the row for explicit owner review."
+authority = "OWNER_REVIEW_REQUIRED"
+no_claim = "The harness can detect missing semantics but cannot invent acceptance meaning, evidence authority, or user intent."
+assertions = [
+  "The disposition is SUBSTANTIVE_SEMANTIC_OMISSION.",
+  "No generic or copied acceptance text appears in the generated plan.",
+  "The refusal names the missing semantic obligations and required owner.",
+]
+
+[[case]]
+ordinal = 6
+id = "template-lint.wrong-type"
+role = "negative"
+mode = "--negative CASE"
+fixture = "wrong-type"
+perturbation = "change an issue type without changing the frozen lint warning and planned semantic root"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Refuse repair when warning semantics, issue type, or required section family disagree."
+authority = "OWNER_REVIEW_REQUIRED"
+no_claim = "A type mismatch is evidence of malformed planning metadata, not permission to coerce the issue into another type."
+assertions = [
+  "The disposition is MALFORMED_OR_WRONG_TYPE.",
+  "The exact issue type and warning class participate in the semantic root.",
+  "Changing only the issue type invalidates a previously generated plan.",
+]
+
+[[case]]
+ordinal = 7
+id = "template-lint.rollup-gap"
+role = "negative"
+mode = "--negative CASE"
+fixture = "rollup-gap"
+perturbation = "drop one governed child while retaining the same parent summary and terminal prose"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Refuse parent closure or heading-only repair until the exact governed child set and terminal ownership are reconciled."
+authority = "ROLLUP_REVIEW_ONLY"
+no_claim = "A complete-looking parent section does not prove its child inventory, dependencies, or delegated evidence complete."
+assertions = [
+  "The disposition is ROLLUP_CHILD_SET_GAP.",
+  "Dropped, extra, or reordered governed children are reported by exact identity.",
+  "No parent success or closeout claim is synthesized from child counts.",
+]
+
+[[case]]
+ordinal = 8
+id = "template-lint.owner-review"
+role = "negative"
+mode = "--negative CASE"
+fixture = "owner-review"
+perturbation = "omit review, bind review to the wrong owner, and replay a valid review after semantic-root drift"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "review", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Keep the row out of every apply shard until an explicit current owner review is bound to the exact semantic root."
+authority = "OWNER_REVIEW_REQUIRED"
+no_claim = "Assignment metadata alone is not semantic approval and the harness cannot impersonate an owner."
+assertions = [
+  "The disposition is OWNER_REVIEW_REQUIRED.",
+  "Missing, stale, wrong-owner, or root-mismatched review refuses planning.",
+  "A valid review is scoped to one exact issue version and cannot be reused after drift.",
+]
+
+[[case]]
+ordinal = 9
+id = "template-lint.historical-review"
+role = "negative"
+mode = "--negative CASE"
+fixture = "historical-review"
+perturbation = "present a closed historical warning row as if it were eligible for an ordinary live apply"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "historical-review", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Classify and report closed historical debt without rewriting the issue or its proof history."
+authority = "HISTORICAL_REVIEW_ONLY"
+no_claim = "Historical review records a gap but cannot retroactively manufacture acceptance evidence or alter a closed verdict."
+assertions = [
+  "The disposition is HISTORICAL_IMMUTABLE_REVIEW.",
+  "Closed issue fields and dependency history remain unchanged.",
+  "Any attempted apply to the historical row refuses before mutation.",
+]
+
+[[case]]
+ordinal = 10
+id = "template-lint.p0-shard"
+role = "positive"
+mode = "--plan"
+fixture = "p0-shard"
+perturbation = "supply more than one planning shard worth of P0 rows across multiple owners and authority domains"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "shard", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Produce read-only P0 planning shards of at most 25 exact reviewed targets, one owner and authority domain per shard; each later V1 apply manifest contains exactly one target."
+authority = "PLAN_ONLY"
+no_claim = "Priority determines scheduling order, not semantic similarity, repair safety, or authority."
+assertions = [
+  "Every P0 target appears exactly once in stable issue-ID order.",
+  "No planning shard exceeds max_targets_per_plan_shard or crosses a status, owner, or authority domain.",
+  "Deferred P0 rows remain visible in owner-review shards and are ineligible for apply.",
+  "Unreviewed and non-SECTION_NAME_ONLY rows remain refused.",
+]
+
+[[case]]
+ordinal = 11
+id = "template-lint.p1-shard"
+role = "positive"
+mode = "--plan"
+fixture = "p1-shard"
+perturbation = "shuffle eligible P1 rows and interleave ineligible rows from every other priority and status"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "shard", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Produce read-only P1 shards after the frozen inventory, without borrowing P0 review or crossing authority domains."
+authority = "PLAN_ONLY"
+no_claim = "A P1 shard is a bounded proposal, not proof that its target wording is correct or ready to apply."
+assertions = [
+  "Every eligible P1 target appears exactly once in stable issue-ID order.",
+  "The plan is invariant to lint and metadata input order.",
+  "P0, P2, P3, P4, closed, and unreviewed rows are excluded by exact identity; deferred P1 rows remain isolated owner-review work.",
+]
+
+[[case]]
+ordinal = 12
+id = "template-lint.p2-p3-shard"
+role = "positive"
+mode = "--plan"
+fixture = "p2-p3-shard"
+perturbation = "shuffle mixed P2, P3, and P4 rows, then mutate one priority after inventory in the negative twin"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "PASS"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "shard", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Produce bounded P2 then P3 then P4 planning shards while retaining distinct priority membership and one authority domain per shard; each later V1 apply manifest contains exactly one target."
+authority = "PLAN_ONLY"
+no_claim = "Combining the scheduling lane does not merge P2, P3, or P4 semantics, statuses, or review obligations."
+assertions = [
+  "P2 targets precede P3 targets, P3 targets precede P4 targets, and every row retains its original priority in every artifact.",
+  "Every eligible target appears exactly once and no shard exceeds 25 targets.",
+  "A priority mutation after inventory invalidates the plan.",
+]
+
+[[case]]
+ordinal = 13
+id = "template-lint.br-only-apply"
+role = "mutation"
+mode = "--apply-manifest REL"
+fixture = "br-only-apply"
+perturbation = "attempt one direct tracker-file write in the negative twin and one explicit-ID br update in the positive fixture"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "APPLIED_AND_INVERTIBLE"
+mutation = "fixture-br-update-then-inverse"
+replay = "inverse"
+expected_inner_br_category = "SINGLE_UPDATE_AND_INVERSE_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "reserve", "pre-observe", "apply", "post-observe", "export", "inverse", "restore", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "apply-manifest.json", "inverse-br.json", "restoration.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = true
+inverse_required = true
+mutation_expectation = "In the isolated fixture only, apply one exact reviewed target through one explicit-ID br update, export through br, retain its inverse br command first, and restore the initial semantic root."
+authority = "BOUNDED_FIXTURE_MUTATION_ONLY"
+no_claim = "A successful fixture apply does not authorize applying the same text or command to the live repository."
+assertions = [
+  "Every mutation event records argv-form br and inverse br commands.",
+  "Direct writes to tracker database or export files are detected and refused.",
+  "The applied heading-only change preserves all pre-existing semantic clauses and is fully invertible.",
+]
+
+[[case]]
+ordinal = 14
+id = "template-lint.concurrent-drift"
+role = "negative"
+mode = "--negative CASE"
+fixture = "concurrent-drift"
+perturbation = "perform an explicit-ID fixture br update after plan publication and before the apply pre-observation"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "fixture-br-drift-then-inverse"
+replay = "inverse"
+expected_inner_br_category = "SETUP_UPDATE_THEN_GUARD_REFUSAL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "fixture-drift", "pre-observe", "refuse", "inverse", "restore", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "inverse-br.json", "restoration.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = true
+inverse_required = true
+mutation_expectation = "Move one fixture issue through br after planning; the stale apply must perform zero writes, identify the first changed identity, and restore fixture setup through br."
+authority = "REFUSAL_ONLY"
+no_claim = "Detecting one modeled race does not prove freedom from every concurrent schedule."
+assertions = [
+  "Count-preserving and count-changing source drift both invalidate the plan.",
+  "The refusal identifies the first divergent source or issue semantic root.",
+  "No stale plan target is mutated and the final fixture root equals its pre-test root.",
+]
+
+[[case]]
+ordinal = 15
+id = "template-lint.partial-batch"
+role = "mutation"
+mode = "--apply-manifest REL"
+fixture = "partial-batch"
+perturbation = "inject failure after the single explicit-ID br update but before export publication and terminal sealing"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "ROLLED_BACK"
+mutation = "fixture-br-update-failure-then-inverse"
+replay = "inverse"
+expected_inner_br_category = "FORWARD_UPDATE_FAILURE_THEN_INVERSE_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "pre-observe", "apply", "inject-failure", "inverse", "restore", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "apply-manifest.json", "inverse-br.json", "restoration.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = true
+inverse_required = true
+mutation_expectation = "Inject a failure after at least one isolated fixture br update, run inverse commands in reverse order, and refuse green unless the complete pre-run root is restored."
+authority = "ROLLBACK_EVIDENCE_ONLY"
+no_claim = "Successful compensation in the bounded fixture is not atomicity proof for arbitrary tracker failures."
+assertions = [
+  "A partial apply never produces a success terminal or publishable closeout artifact.",
+  "All completed writes have previously retained inverse commands.",
+  "Restoration checks exact fields, membership, dependencies, and semantic root rather than counts alone.",
+]
+
+[[case]]
+ordinal = 16
+id = "template-lint.copied-boilerplate"
+role = "negative"
+mode = "--negative CASE"
+fixture = "copied-boilerplate"
+perturbation = "substitute identical generic criteria for distinct issue-specific obligations, including one cosmetic paraphrase"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "classify", "plan", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Refuse plans that copy generic criteria across semantically distinct issues or erase issue-specific obligations."
+authority = "REFUSAL_ONLY"
+no_claim = "Textual uniqueness alone does not prove criteria substantive; owner review and issue-specific coverage remain mandatory."
+assertions = [
+  "Copied generic clauses across different targets are detected before apply.",
+  "A cosmetic rewording does not bypass obligation and authority checks.",
+  "The refusal names each uncovered issue-specific obligation without reproducing bulk descriptions.",
+]
+
+[[case]]
+ordinal = 17
+id = "template-lint.scope-loss"
+role = "negative"
+mode = "--negative CASE"
+fixture = "scope-loss"
+perturbation = "replace, drop, duplicate, and cross-status-move warning rows while preserving aggregate warning and issue counts"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "none"
+replay = "none"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "source", "inventory", "join", "partition", "compare", "refuse", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Refuse count-preserving dropped, substituted, duplicated, or cross-status targets before mutation."
+authority = "REFUSAL_ONLY"
+no_claim = "Equal summary counts are never evidence of equal scope or semantic completeness."
+assertions = [
+  "Exact membership roots detect replacement of one issue by another at the same count.",
+  "Status-cut and overlap membership participate in the plan identity.",
+  "The first missing, extra, or duplicated row is logged deterministically.",
+]
+
+[[case]]
+ordinal = 18
+id = "template-lint.inverse-replay"
+role = "replay"
+mode = "--self-test"
+fixture = "inverse-replay"
+perturbation = "perform one explicit-ID fixture apply, then reorder or truncate one inverse command in negative twins"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "RESTORED"
+mutation = "fixture-br-update-then-inverse"
+replay = "inverse"
+expected_inner_br_category = "SINGLE_UPDATE_AND_INVERSE_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "plan", "pre-observe", "apply", "post-observe", "inverse-replay", "restore", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "apply-manifest.json", "inverse-br.json", "restoration.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = true
+inverse_required = true
+mutation_expectation = "Apply an isolated fixture shard through br, replay the retained inverse through br, and prove exact pre-run semantic-root restoration."
+authority = "RESTORATION_EVIDENCE_ONLY"
+no_claim = "Inverse replay proves restoration for the retained fixture transition, not universal rollback correctness."
+assertions = [
+  "The inverse plan is complete before the first forward mutation.",
+  "Forward and inverse commands are replayed in deterministic order with bounded logs.",
+  "The restored issue fields, dependencies, membership, export projection, and semantic root equal the pre-run state.",
+]
+
+[[case]]
+ordinal = 19
+id = "template-lint.new-issue-regression"
+role = "negative"
+mode = "--negative CASE"
+fixture = "new-issue-regression"
+perturbation = "create one new deficient fixture issue through br after a zero-debt inventory and before closeout"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "EXPECTED_REFUSAL"
+mutation = "fixture-br-create-then-close-containment"
+replay = "none"
+expected_inner_br_category = "SETUP_CREATE_THEN_CLOSE_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "fixture-create", "closeout-inventory", "compare", "refuse", "inverse", "restore", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "inverse-br.json", "restoration.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = true
+inverse_required = false
+mutation_expectation = "Create a new deficient issue through br in the isolated fixture, require closeout refusal, then close it through br. Closing contains active debt but intentionally retains one exact historical fixture row; the harness must not falsely claim full membership restoration."
+authority = "REGRESSION_GATE_ONLY"
+no_claim = "One injected regression does not prove every future Bead template or lint rule covered."
+assertions = [
+  "A new warning row changes exact membership and prevents zero-debt closeout.",
+  "The diagnostic names the new issue, warning class, status cut, and first divergent root.",
+  "Closing the injected fixture restores the active zero-debt projection but adds exactly one named closed historical row; no deletion or full-root restoration is claimed.",
+  "No baseline update, waiver, silent exclusion, or destructive fixture cleanup is permitted.",
+]
+
+[[case]]
+ordinal = 20
+id = "template-lint.zero-debt-closeout"
+role = "closeout"
+mode = "--closeout"
+fixture = "zero-debt-closeout"
+perturbation = "none; negative twins inject one warning, one missing replay artifact, and one incomplete inverse seal"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "CLOSEOUT_GREEN"
+mutation = "none"
+replay = "artifact-only"
+expected_inner_br_category = "READ_SUCCESS"
+expected_event_stages = ["start", "source", "inventory", "join", "partition", "independent-reconstruction", "artifact-replay", "source-closure", "publish", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Read-only closeout; require independently reconstructed exact empty debt and complete retained run evidence."
+authority = "CLOSEOUT_EVIDENCE_ONLY"
+no_claim = "Zero warnings under the pinned lint rules do not prove every Bead semantically complete or the lint taxonomy exhaustive."
+assertions = [
+  "All warning memberships and overlap partitions are exactly empty across required status cuts.",
+  "Independent reconstruction agrees on source, inventory, partition, and plan roots.",
+  "Every prior mutating run has a complete restoration or accepted apply seal and artifact replay succeeds.",
+]
+
+[[case]]
+ordinal = 21
+id = "template-lint.artifact-replay"
+role = "replay"
+mode = "--replay REL"
+fixture = "artifact-replay"
+perturbation = "deny live tracker access, then mutate, truncate, reorder, omit, and path-escape one retained artifact in negative twins"
+expected_terminal = "Pass"
+expected_exit = 0
+expected_subject_terminal = "REPLAY_EQUIVALENT"
+mutation = "none"
+replay = "artifact-only"
+expected_inner_br_category = "NO_MUTATING_BR_CALL"
+expected_event_stages = ["start", "artifact-admission", "reconstruct", "compare", "publish-disjoint", "terminal"]
+expected_artifacts = ["source.json", "inventory.json", "partitions.json", "plan.json", "events.jsonl", "terminal.json", "reproduce.txt"]
+expected_live_target_mutation = false
+expected_fixture_mutation = false
+inverse_required = false
+mutation_expectation = "Read retained artifacts only, write to a new disjoint relative output root, and never read or mutate the live tracker."
+authority = "ARTIFACT_REPLAY_ONLY"
+no_claim = "Replay equivalence is deterministic reconstruction evidence, not authentication, current-state proof, semantic approval, or capability authority."
+assertions = [
+  "Replay succeeds with live tracker access denied.",
+  "Inventory, partition, plan, event-terminal, and artifact roots match the retained canonical projection.",
+  "Any missing, reordered, truncated, path-unsafe, or byte-mutated artifact reports the first divergence and refuses green.",
+]

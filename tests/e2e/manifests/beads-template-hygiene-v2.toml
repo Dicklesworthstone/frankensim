@@ -1,0 +1,1606 @@
+schema = "frankensim.beads-template-hygiene-manifest.v2"
+schema_version = 2
+manifest_id = "beads-template-hygiene-v2"
+suite_id = "template-lint-v2"
+bead_id = "frankensim-semantic-bead-template-hygiene-961yr.1.1"
+manifest_path = "tests/e2e/manifests/beads-template-hygiene-v2.toml"
+harness_path = "scripts/ci/beads_template_hygiene.sh"
+immutable_after_acceptance = true
+criterion_count = 25
+case_count = 96
+assertion_count = 96
+suite_status = "NO_DATA_UNTIL_V2_HARNESS_AND_RETAINED_RUN_EXIST"
+authority = "TEST_CONTRACT_ONLY"
+tracker_authority = "READ_ONLY"
+no_claim = "This manifest specifies deterministic review and history planning evidence. It does not mutate or repair a Bead, approve target semantics, authenticate a reviewer, admit a conditional-write capability, complete target implementation, validate scientific or performance claims, authorize product or promotion state, or authorize release."
+
+case_order = [
+  "template-lint-v2.schema-closed-manifest",
+  "template-lint-v2.schema-executable-assertions",
+  "template-lint-v2.cli-help-modes",
+  "template-lint-v2.cli-exclusive-mode",
+  "template-lint-v2.cli-artifact-grammar",
+  "template-lint-v2.cli-path-admission",
+  "template-lint-v2.cli-review-receipts",
+  "template-lint-v2.cli-filters-explain",
+  "template-lint-v2.ux-empty-synopsis",
+  "template-lint-v2.ux-large-synopsis",
+  "template-lint-v2.ux-streams-color-tty",
+  "template-lint-v2.compat-v1-immutable",
+  "template-lint-v2.source-zero-one",
+  "template-lint-v2.source-rows-9-10-11",
+  "template-lint-v2.source-rows-12-13",
+  "template-lint-v2.source-rows-24-25-26",
+  "template-lint-v2.source-rows-4096",
+  "template-lint-v2.source-warnings-8192",
+  "template-lint-v2.source-all-types-statuses-priorities",
+  "template-lint-v2.source-warning-partitions",
+  "template-lint-v2.source-double-capture-coherent",
+  "template-lint-v2.source-within-run-drift",
+  "template-lint-v2.source-count-preserving-swap",
+  "template-lint-v2.source-cross-run-drift-scope",
+  "template-lint-v2.row-complete-planned-child",
+  "template-lint-v2.row-dispositions-distinct",
+  "template-lint-v2.authority-candidate-provenance",
+  "template-lint-v2.authority-self-report-declared",
+  "template-lint-v2.authority-external-receipt",
+  "template-lint-v2.capability-valid-missing-failed",
+  "template-lint-v2.capability-lying-nonatomic-version",
+  "template-lint-v2.readiness-two-gate-truth-table",
+  "template-lint-v2.route-manual-distinct",
+  "template-lint-v2.route-deferred-reactivation",
+  "template-lint-v2.route-active-owner-conflict",
+  "template-lint-v2.route-no-target-mutation",
+  "template-lint-v2.packing-hard-keys",
+  "template-lint-v2.packing-compatible-receipt",
+  "template-lint-v2.packing-generic-merge-refused",
+  "template-lint-v2.packing-rationale-falsifier",
+  "template-lint-v2.packing-target-cap-10-25",
+  "template-lint-v2.packing-minutes-479-480-481",
+  "template-lint-v2.packing-transport-cap-boundaries",
+  "template-lint-v2.packing-exact-small-optimum",
+  "template-lint-v2.packing-large-gap-witness",
+  "template-lint-v2.packing-order-invariant",
+  "template-lint-v2.packing-refinement-imbalance",
+  "template-lint-v2.packing-oversize-escalation",
+  "template-lint-v2.history-known-closer",
+  "template-lint-v2.history-legacy-closer",
+  "template-lint-v2.history-unknown-conflicted-closer",
+  "template-lint-v2.history-timestamp-reason",
+  "template-lint-v2.history-missing-audit-event",
+  "template-lint-v2.history-duplicate-conflicting-order",
+  "template-lint-v2.history-consumer-candidates",
+  "template-lint-v2.history-immutable-relations",
+  "template-lint-v2.zero-all-priority-status-cells",
+  "template-lint-v2.movement-cross-lane",
+  "template-lint-v2.movement-live-to-history",
+  "template-lint-v2.movement-history-to-live",
+  "template-lint-v2.artifact-review-base-set",
+  "template-lint-v2.artifact-history-base-set",
+  "template-lint-v2.artifact-not-requested-projection",
+  "template-lint-v2.artifact-oversize-inventory",
+  "template-lint-v2.artifact-no-overwrite-partial",
+  "template-lint-v2.artifact-membership-path-safety",
+  "template-lint-v2.log-assertion-argv-evidence",
+  "template-lint-v2.log-raw-result-redaction",
+  "template-lint-v2.log-order-terminal",
+  "template-lint-v2.replay-review-offline",
+  "template-lint-v2.replay-history-offline",
+  "template-lint-v2.replay-tamper-live-denied",
+  "template-lint-v2.mutation-forged-approval",
+  "template-lint-v2.mutation-forged-capability-deferred",
+  "template-lint-v2.mutation-missing-payload-edge",
+  "template-lint-v2.mutation-relation-neighbor-drift",
+  "template-lint-v2.mutation-dropped-duplicate-target",
+  "template-lint-v2.fault-output-lock-export",
+  "template-lint-v2.cancel-signals-drained",
+  "template-lint-v2.restart-deterministic",
+  "template-lint-v2.resource-all-caps",
+  "template-lint-v2.mutation-truncation-oversize-root",
+  "template-lint-v2.fault-partial-publication-conflict",
+  "template-lint-v2.fault-replay-manual-recovery",
+  "template-lint-v2.nomock-br-robot-cells",
+  "template-lint-v2.nomock-audit-known-legacy-conflict",
+  "template-lint-v2.nomock-current-br-two-gate-nodata",
+  "template-lint-v2.nomock-review-plan",
+  "template-lint-v2.nomock-history-plan",
+  "template-lint-v2.nomock-unrelated-drift-stability",
+  "template-lint-v2.nomock-selected-drift-refusal",
+  "template-lint-v2.nomock-active-conflict-deferred",
+  "template-lint-v2.nomock-oversize",
+  "template-lint-v2.nomock-offline-replay",
+  "template-lint-v2.nomock-live-target-unchanged",
+  "template-lint-v2.nomock-v1-regression",
+]
+
+[schema_contract]
+unknown_keys = "REFUSE_RECURSIVELY"
+duplicate_keys = "REFUSE"
+duplicate_case_ids = "REFUSE"
+duplicate_assertion_ids = "REFUSE"
+missing_case_ids = "REFUSE"
+extra_case_ids = "REFUSE"
+missing_assertion_ids = "REFUSE"
+extra_assertion_ids = "REFUSE"
+ordinal_policy = "dense unsigned integers 1 through case_count"
+case_order_policy = "case_order and case ordinals and IDs must agree byte-for-byte"
+assertion_order_policy = "one executable assertion per case in case ordinal order"
+criterion_policy = "AC01 through AC25 exactly once and each references only executable assertion IDs"
+criterion_bijection = true
+closed_inline_tables = true
+prose_assertions_authorize_pass = false
+compiled_executor_required = true
+aggregate_check_count_authorizes_pass = false
+case_id_pattern = "^template-lint-v2\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+assertion_id_pattern = "^v2\\.case\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+allowed_top_level_keys = [
+  "schema",
+  "schema_version",
+  "manifest_id",
+  "suite_id",
+  "bead_id",
+  "manifest_path",
+  "harness_path",
+  "immutable_after_acceptance",
+  "criterion_count",
+  "case_count",
+  "assertion_count",
+  "suite_status",
+  "authority",
+  "tracker_authority",
+  "no_claim",
+  "case_order",
+  "schema_contract",
+  "compatibility_contract",
+  "source_contract",
+  "row_contract",
+  "authority_contract",
+  "packing_contract",
+  "history_contract",
+  "cli_contract",
+  "synopsis_contract",
+  "artifact_contract",
+  "logging_contract",
+  "replay_contract",
+  "caps",
+  "case_contract",
+  "criterion",
+  "case",
+]
+
+[compatibility_contract]
+v1_manifest_path = "tests/e2e/manifests/beads-template-hygiene.toml"
+v1_harness_path = "scripts/ci/beads_template_hygiene.sh"
+v1_schema = "frankensim.beads-template-hygiene-manifest.v1"
+v1_case_count = 21
+v1_assertion_count = 148
+v1_case_manifest_semantic_root = "sha256-v1:da9c12d5361aec0c99c576f0aa408a7073fa437aec4eae4425f41a0fbbce9295"
+v1_manifest_content_root = "sha256-v1:f5f76e0518007e7da971992c4782b35513fd185608c1e72b7d1c9c7c1e1b8c1e"
+v1_harness_content_root = "sha256-v1:5ba72ab813f965d1599155239a8789e8833ca40998801f76544ec6aa55013a77"
+v1_manifest_adopted_git_blob = "c8929908e0670f518564304803e493f612fb6ef6"
+v1_harness_adopted_git_blob = "91cc9326e090fcbfa6ec9a4a2cae66692da6a700"
+adoption_head = "ffa8867fd2a5d84ac4e87dee370d162bc1f9f4fc"
+adoption_source_root = "sha256-v1:66b7a2c6bad25e24475cd3ec8d5bbc0295ba93997573071deabfb3b75f066a95"
+adoption_inventory_root = "sha256-v1:3123b628f11a3dabdf9d45b71ef13400c719065d12080e952adf0a7524bf6a5b"
+adoption_issue_count = 1812
+adoption_warning_count = 2212
+adoption_artifact_dir = "target/beads-template-hygiene/adoption-pre-961yr-1-1-20260730T2018Z"
+v1_bytes_must_match_adopted_content_root = true
+v1_modes_load_v2_manifest = false
+v1_replay_loads_v2_manifest = false
+v1_manifest_may_depend_on_v2 = false
+v2_records_v1_baseline_identity_only = true
+v1_live_apply_authority = "NONE"
+v1_fixture_mutation_evidence = "HISTORICAL_DISJOINT_FIXTURE_ONLY"
+
+[source_contract]
+tracker_cli = "br"
+diagnostic_cli = "bv"
+diagnostic_mode = "robot flags only"
+network_access = "FORBIDDEN"
+tracker_mutation = "FORBIDDEN"
+direct_tracker_file_access = "FORBIDDEN"
+capture_count = 2
+capture_drift = "REFUSE_ENTIRE_RUN"
+count_preserving_relevant_drift = "REFUSE"
+all_status_partition = ["open", "in_progress", "blocked", "deferred", "closed"]
+priorities = [0, 1, 2, 3, 4]
+issue_types = ["bug", "task", "feature", "epic", "chore", "docs", "question", "custom:*"]
+warning_classes = ["MissingAcceptanceCriteria", "MissingStepsToReproduce", "MissingSuccessCriteria"]
+whole_source_roots_are_work_keys = false
+unrelated_cross_run_drift_preserves_selected_keys = true
+selected_field_drift_invalidates_affected_keys = true
+selected_membership_drift_invalidates_affected_keys = true
+selected_dependency_drift_invalidates_affected_keys = true
+selected_owner_or_consumer_drift_invalidates_affected_keys = true
+selected_receipt_drift_invalidates_affected_keys = true
+agent_mail_hints_are_replay_critical = false
+campaign_epoch_root_before_lane_projection = true
+all_status_partition_receipt_required = true
+
+[row_contract]
+required_fields = [
+  "issue_id",
+  "title",
+  "issue_type",
+  "priority",
+  "status",
+  "missing_sections",
+  "disposition",
+  "coordination_assignee",
+  "tracker_owner",
+  "domain_candidate",
+  "declared_domain_owner",
+  "declared_acceptance_owner",
+  "implementation_owner",
+  "evidence_owner",
+  "terminal_consumer",
+  "reviewer_provenance",
+  "source_closure",
+  "user_effect",
+  "no_claim",
+  "field_roots",
+  "target_implementation_estimated_minutes",
+  "target_implementation_estimate_state",
+  "review_minutes",
+  "generated_child_estimated_minutes",
+  "external_authority_adapter_identity",
+  "external_authority_receipt_root",
+  "external_authority_verdict",
+  "conditional_write_capability_identity",
+  "conditional_write_receipt_root",
+  "conditional_write_verdict",
+  "readiness",
+  "remediation_route",
+  "active_work_context",
+  "campaign_epoch_root",
+  "lane",
+  "movement_destination",
+]
+planned_child_required_fields = [
+  "title",
+  "issue_type",
+  "priority",
+  "desired_status",
+  "coordination_assignee",
+  "labels",
+  "lane_parent",
+  "external_ref_key_inputs",
+  "source_dependency_snapshot",
+  "intended_generated_edges",
+  "description_file_artifact",
+  "description_root",
+  "design",
+  "acceptance",
+  "notes",
+  "review_minutes",
+  "generated_child_estimated_minutes",
+  "target_implementation_estimates",
+  "target_implementation_estimated_minutes",
+  "target_implementation_estimate_states",
+  "target_ids",
+  "target_roots",
+  "disposition_workflow",
+  "external_authority_receipt_root",
+  "external_authority_verdict",
+  "conditional_write_receipt_root",
+  "conditional_write_verdict",
+  "readiness",
+  "remediation_route",
+  "falsifier",
+]
+planned_child_issue_type = "task"
+missing_payload_field = "REFUSE_PUBLICATION"
+target_fields_and_relations_remain_unchanged = true
+estimate_units = "nullable integer minutes with explicit DECLARED or NODATA state"
+review_estimate_does_not_replace_target_estimate = true
+
+[authority_contract]
+current_br_version = "0.2.19"
+readiness_states = ["REVIEW_ONLY", "DECLARED_READY", "MECHANICALLY_APPLY_ELIGIBLE"]
+remediation_routes = ["ANALYSIS_ONLY", "MANUAL_BR_REVIEW", "AUTOMATED_CONDITIONAL"]
+external_authority_verdicts = ["NODATA", "VALID", "INVALID", "EXPIRED", "REVOKED", "CONFLICTED"]
+conditional_write_verdicts = ["NODATA", "VALID", "FAILED", "LYING", "NON_ATOMIC", "VERSION_MISMATCHED", "CONFLICTED"]
+self_report_maximum_readiness = "DECLARED_READY"
+current_br_maximum_readiness = "DECLARED_READY"
+current_br_automation_terminal = "AUTOMATION_NODATA"
+mechanical_eligibility_requires_external_authority = true
+mechanical_eligibility_requires_atomic_conditional_write = true
+authority_alone_is_mechanical_eligibility = false
+capability_alone_is_mechanical_eligibility = false
+declared_manual_authorization_route = "MANUAL_BR_REVIEW"
+manual_route_grants_external_authority = false
+manual_route_grants_conditional_write = false
+manual_route_claims_no_clobber = false
+manual_route_claims_exactly_once = false
+deferred_route = "ANALYSIS_ONLY"
+deferred_authorization_override = "FORBIDDEN"
+deferred_requires_owner_reviewed_reactivation_and_fresh_replan = true
+active_target_default_child_status = "deferred"
+active_conflict_acknowledgement_grants_semantic_authority = false
+bare_issue_type_is_grouping_authority = false
+
+[packing_contract]
+hard_keys = ["priority", "status", "disposition", "issue_type", "missing_sections", "readiness", "remediation_route"]
+compatibility_receipt_fields = [
+  "coordination",
+  "declared_domain",
+  "user_effect",
+  "dependency_neighborhood",
+  "target_ids",
+  "target_roots",
+  "rationale",
+  "falsifier",
+]
+objective_order = [
+  "refuse incompatible grouping",
+  "minimize child count",
+  "minimize maximum review_minutes",
+  "minimize maximum retained payload bytes",
+  "minimize maximum target count",
+  "minimize lexicographically sorted descending integer review-load vectors",
+  "lexicographic target IDs",
+]
+review_load_tuple = ["review_minutes", "retained_payload_bytes", "target_count"]
+exact_optimality_max_targets = 13
+large_instance_requires_lower_bound = true
+large_instance_requires_gap_witness = true
+split_requires_rationale_and_falsifier = true
+singleton_requires_rationale_and_falsifier = true
+merge_requires_rationale_and_falsifier = true
+semantic_truncation = "FORBIDDEN"
+oversize_disposition = "OVERSIZE_REVIEW_REQUIRED"
+oversize_required_fields = [
+  "source_roots",
+  "field_roots",
+  "clause_roots",
+  "bounded_incomplete_index",
+  "canonical_br_show_argv",
+  "retained_full_plan_path",
+  "retained_full_plan_root",
+  "owner_questions",
+  "no_claim",
+]
+
+[history_contract]
+capture_command = "br audit log ID --json"
+capture_count = 2
+capture_drift = "REFUSE_ENTIRE_RUN"
+legacy_coverage_anchor_issue = "frankensim-70k6z"
+legacy_coverage_anchor_closed_at = "2026-07-28T21:55:21.825540Z"
+legacy_coverage_anchor_status_event_id = 2318
+legacy_coverage_anchor_close_event_id = 2319
+legacy_coverage_count = 726
+legacy_coverage_rows_root = "sha256-v1:e14558bfad8cc7b5a5e6a403af93e49f2120e1e0242feb835fe3cc4f271eeeb0"
+known_pair_max_skew_ms = 1000
+closer_states = ["KNOWN", "LEGACY_UNAVAILABLE", "CONFLICTED"]
+missing_close_actor = "NODATA_NEVER_INFER"
+missing_close_event = "REFUSE_UNLESS_EXACT_LEGACY_UNAVAILABLE_RULE_MATCHES"
+duplicate_close_event = "REFUSE"
+conflicting_close_event = "REFUSE"
+malformed_timestamp = "REFUSE"
+missing_reason = "REFUSE"
+event_order_violation = "REFUSE"
+required_fields = [
+  "closed_at",
+  "close_reason",
+  "closer_state",
+  "close_actor",
+  "close_actor_source",
+  "audit_event_root",
+  "ownership",
+  "comments",
+  "notes",
+  "parent",
+  "dependencies",
+  "source_roots",
+  "field_roots",
+  "citations",
+  "candidate_consumers",
+  "reviewed_consumers",
+  "proof",
+  "no_claim",
+]
+infer_closer_from_creator = false
+infer_closer_from_assignee = false
+infer_closer_from_self_report = false
+closed_source_mutation = "FORBIDDEN"
+closed_adjudication_owner = "frankensim-semantic-bead-template-hygiene-961yr.6"
+movement_classes = ["MOVED_TO_LANE", "MOVED_TO_HISTORY", "MOVED_FROM_HISTORY"]
+movement_requires_before_and_after_status = true
+movement_requires_source_and_destination_roots = true
+movement_requires_immutable_prior_evidence = true
+movement_requires_exact_successor_lineage = true
+
+[cli_contract]
+planner_modes = ["--review-plan", "--history-plan"]
+test_runner_modes = ["--self-test-v2", "--case-v2 CASE"]
+mode_is_required = true
+multiple_modes = "REFUSE"
+unknown_mode = "REFUSE"
+unknown_option = "REFUSE"
+artifact_grammar = "--artifact-root ROOT_REL --artifact-dir FRESH_RUN_REL"
+artifact_root_required = true
+artifact_dir_required = true
+output_option = "UNSUPPORTED_REFUSE"
+duplicate_options = "REFUSE"
+review_receipts_option = "--review-receipts REL"
+review_receipts_paths = "SAFE_RELATIVE_ONLY"
+existing_output = "REFUSE"
+unsafe_or_aliased_path = "REFUSE"
+symlinks = "REFUSE"
+successful_expectation_exit = 0
+usage_error_exit = 2
+input_refusal_exit = 3
+no_data_exit = 4
+evidence_failure_exit = 5
+cancelled_exit = 6
+infrastructure_failure_exit = 7
+internal_fault_exit = 8
+
+[synopsis_contract]
+encoding = "UTF-8"
+max_bytes = 8192
+max_selected_ids = 12
+required_counts = ["targets", "children", "readiness", "routes", "owners", "oversize", "zero_receipts"]
+required_work = ["total_review_minutes", "minimum_review_minutes", "maximum_review_minutes"]
+required_sections = [
+  "capacity_wave_forecast",
+  "active_conflicts",
+  "top_blockers",
+  "selected_ids",
+  "why_grouped",
+  "safe_next_action",
+  "artifacts",
+  "reproduction",
+  "no_claim",
+]
+truncation_is_synopsis_only = true
+truncation_requires_total = true
+truncation_requires_shown = true
+truncation_requires_notice = true
+machine_artifacts_may_be_truncated = false
+no_tty_dependency = true
+no_color_honored = true
+
+[artifact_contract]
+base_set = [
+  "source-v2.json",
+  "inventory-v2.json",
+  "authority-v2.json",
+  "review-plan-v2.json",
+  "history-v2.json",
+  "zero-sets-v2.json",
+  "events.jsonl",
+  "terminal.json",
+  "reproduce.txt",
+]
+base_set_count = 9
+review_plan_selected = "review-plan-v2.json"
+review_plan_not_requested = "history-v2.json"
+history_plan_selected = "history-v2.json"
+history_plan_not_requested = "review-plan-v2.json"
+not_requested_required_fields = ["schema", "mode", "state", "source_root", "inventory_root", "semantic_root", "no_claim"]
+not_requested_state = "NOT_REQUESTED"
+optional_content_registry = "oversize_content"
+oversize_inventory_required_fields = [
+  "relative_path",
+  "media_kind",
+  "schema_kind",
+  "byte_length",
+  "semantic_root",
+  "target_roots",
+  "field_roots",
+  "clause_roots",
+  "aggregate_cap_accounting",
+]
+unlisted_file = "REFUSE"
+duplicate_file = "REFUSE"
+missing_file = "REFUSE"
+changed_file = "REFUSE"
+unsafe_file = "REFUSE"
+extra_file = "REFUSE"
+overwrite = "FORBIDDEN"
+partial_output_is_complete = false
+terminal_event_unique_last = true
+terminal_json_final_seal = true
+artifact_order = "UTF-8 bytewise relative path"
+successful_or_semantic_refusal_run_requires_complete_base_set = true
+output_reservation_failure_may_claim_complete_bundle = false
+
+[logging_contract]
+format = "JSONL"
+encoding = "UTF-8"
+schema = "frankensim.beads-template-hygiene-event.v2"
+deterministic = true
+redacted = true
+sequence = "dense unsigned integers starting at zero"
+required_fields = [
+  "schema",
+  "case_id",
+  "assertion_id",
+  "executor_id",
+  "parameter_root",
+  "stage",
+  "sequence",
+  "argv",
+  "exit_code",
+  "result_category",
+  "semantic_projection",
+  "stdout_byte_length",
+  "stdout_root",
+  "stderr_byte_length",
+  "stderr_root",
+  "first_divergence",
+  "recovery",
+  "terminal",
+  "safe_relative_artifacts",
+  "no_claim",
+]
+argv_representation = "array"
+raw_stream_bodies_retained = false
+raw_stream_roots_cover_complete_bounded_stream = true
+terminal_event_required = true
+terminal_event_must_be_last = true
+assertion_start_event_required = true
+assertion_terminal_event_required = true
+case_terminal_binds_ordered_assertion_roots = true
+suite_terminal_binds_ordered_case_roots = true
+forbidden_content = [
+  "raw stdout body",
+  "raw stderr body",
+  "source_repo_path",
+  "absolute path",
+  "bulk issue body",
+  "credential",
+  "secret",
+  "token",
+  "environment value",
+  "process ID",
+  "thread ID",
+  "scheduler timing",
+  "wall-clock timestamp",
+]
+
+[replay_contract]
+artifact_only = true
+live_tracker_reads = "FORBIDDEN"
+live_tracker_writes = "FORBIDDEN"
+network_access = "FORBIDDEN"
+output_is_disjoint = true
+overwrite = "FORBIDDEN"
+v1_manifest_root_required = false
+v2_manifest_root_required = true
+selected_projection_required = true
+not_requested_projection_required = true
+all_status_partition_required = true
+oversize_inventory_required_when_nonempty = true
+missing_unlisted_duplicate_changed_unsafe_extra = "REFUSE"
+first_divergence_required = true
+replay_mints_authority = false
+replay_proves_current_tracker_state = false
+
+[caps]
+max_cases = 96
+max_inventory_rows = 4096
+max_warning_rows = 8192
+max_warnings_per_issue = 16
+default_targets_per_child = 10
+hard_max_targets_per_child = 25
+max_retained_child_payload_bytes = 262144
+max_description_bytes = 131072
+max_acceptance_bytes = 32768
+max_design_bytes = 16384
+max_notes_bytes = 16384
+max_aggregate_non_description_argv_bytes = 65536
+max_review_minutes_per_child = 480
+exact_optimality_max_targets = 13
+max_clause_bytes = 65536
+max_relative_path_bytes = 512
+max_path_depth = 32
+max_path_component_bytes = 128
+max_command_arguments = 64
+max_command_argument_bytes = 4096
+max_log_events = 262144
+max_log_line_bytes = 16384
+max_artifact_bytes = 67108864
+max_synopsis_bytes = 8192
+max_synopsis_selected_ids = 12
+cap_exceeded_terminal = "EXPECTED_REFUSAL_OR_OVERSIZE_REVIEW_REQUIRED_AS_SPECIFIED"
+cap_exceeded_live_target_mutation = false
+
+[case_contract]
+required_fields = ["ordinal", "id", "assertion_id", "criterion_ids", "kinds", "fixture_engine", "subject"]
+allowed_kinds = [
+  "unit",
+  "schema",
+  "boundary",
+  "property",
+  "metamorphic",
+  "mutation",
+  "state",
+  "fault",
+  "resource",
+  "cancellation",
+  "restart",
+  "no_mock_e2e",
+  "logging",
+  "replay",
+  "compatibility",
+  "ux",
+]
+allowed_fixture_engines = ["PURE_PROJECTION", "RELEASED_BR", "RELEASED_BR_AUDIT", "RELEASED_BR_ROBOT", "ARTIFACT_ONLY"]
+runner = "--case-v2 CASE"
+expected_outer_terminal = "Pass"
+expected_outer_exit = 0
+expected_live_tracker_mutation = false
+compiled_executor_id = "assertion_id"
+assertion_evidence_required = true
+assertion_skip_is_pass = false
+expected_refusal_requires_unchanged_projection = true
+expected_nodata_requires_unchanged_projection = true
+aggregate_count_only_is_pass = false
+
+[[criterion]]
+id = "AC01"
+assertion_ids = ["v2.case.source-zero-one", "v2.case.source-rows-9-10-11", "v2.case.source-rows-12-13", "v2.case.source-rows-24-25-26", "v2.case.source-rows-4096", "v2.case.source-warnings-8192", "v2.case.source-all-types-statuses-priorities", "v2.case.source-warning-partitions", "v2.case.source-double-capture-coherent", "v2.case.source-within-run-drift", "v2.case.source-count-preserving-swap", "v2.case.source-cross-run-drift-scope"]
+
+[[criterion]]
+id = "AC02"
+assertion_ids = ["v2.case.row-complete-planned-child", "v2.case.authority-candidate-provenance", "v2.case.authority-self-report-declared", "v2.case.authority-external-receipt", "v2.case.capability-valid-missing-failed", "v2.case.capability-lying-nonatomic-version", "v2.case.readiness-two-gate-truth-table", "v2.case.route-manual-distinct", "v2.case.route-deferred-reactivation", "v2.case.route-active-owner-conflict", "v2.case.nomock-current-br-two-gate-nodata"]
+
+[[criterion]]
+id = "AC03"
+assertion_ids = ["v2.case.authority-candidate-provenance", "v2.case.authority-self-report-declared", "v2.case.authority-external-receipt", "v2.case.capability-valid-missing-failed", "v2.case.capability-lying-nonatomic-version", "v2.case.readiness-two-gate-truth-table", "v2.case.route-manual-distinct", "v2.case.packing-generic-merge-refused", "v2.case.nomock-current-br-two-gate-nodata"]
+
+[[criterion]]
+id = "AC04"
+assertion_ids = ["v2.case.packing-hard-keys", "v2.case.packing-compatible-receipt", "v2.case.packing-generic-merge-refused", "v2.case.packing-rationale-falsifier", "v2.case.packing-order-invariant", "v2.case.packing-refinement-imbalance"]
+
+[[criterion]]
+id = "AC05"
+assertion_ids = ["v2.case.packing-target-cap-10-25", "v2.case.packing-minutes-479-480-481", "v2.case.packing-transport-cap-boundaries", "v2.case.packing-exact-small-optimum", "v2.case.packing-large-gap-witness", "v2.case.packing-order-invariant", "v2.case.packing-refinement-imbalance", "v2.case.packing-oversize-escalation", "v2.case.resource-all-caps", "v2.case.mutation-truncation-oversize-root", "v2.case.nomock-oversize"]
+
+[[criterion]]
+id = "AC06"
+assertion_ids = ["v2.case.row-complete-planned-child", "v2.case.packing-transport-cap-boundaries", "v2.case.mutation-missing-payload-edge"]
+
+[[criterion]]
+id = "AC07"
+assertion_ids = ["v2.case.row-dispositions-distinct", "v2.case.packing-generic-merge-refused"]
+
+[[criterion]]
+id = "AC08"
+assertion_ids = ["v2.case.history-known-closer", "v2.case.history-legacy-closer", "v2.case.history-unknown-conflicted-closer", "v2.case.history-timestamp-reason", "v2.case.history-missing-audit-event", "v2.case.history-duplicate-conflicting-order", "v2.case.history-consumer-candidates", "v2.case.history-immutable-relations", "v2.case.nomock-audit-known-legacy-conflict"]
+
+[[criterion]]
+id = "AC09"
+assertion_ids = ["v2.case.cli-help-modes", "v2.case.cli-exclusive-mode", "v2.case.cli-artifact-grammar", "v2.case.cli-path-admission", "v2.case.artifact-review-base-set", "v2.case.artifact-history-base-set", "v2.case.artifact-not-requested-projection", "v2.case.artifact-oversize-inventory", "v2.case.artifact-no-overwrite-partial", "v2.case.artifact-membership-path-safety", "v2.case.log-assertion-argv-evidence", "v2.case.log-raw-result-redaction", "v2.case.log-order-terminal", "v2.case.replay-review-offline", "v2.case.replay-history-offline", "v2.case.replay-tamper-live-denied", "v2.case.nomock-review-plan", "v2.case.nomock-history-plan", "v2.case.nomock-offline-replay"]
+
+[[criterion]]
+id = "AC10"
+assertion_ids = ["v2.case.source-all-types-statuses-priorities", "v2.case.zero-all-priority-status-cells", "v2.case.nomock-br-robot-cells"]
+
+[[criterion]]
+id = "AC11"
+assertion_ids = ["v2.case.source-zero-one", "v2.case.source-rows-9-10-11", "v2.case.source-rows-12-13", "v2.case.source-rows-24-25-26", "v2.case.source-rows-4096", "v2.case.source-warnings-8192", "v2.case.source-all-types-statuses-priorities", "v2.case.row-complete-planned-child", "v2.case.row-dispositions-distinct", "v2.case.authority-candidate-provenance", "v2.case.authority-self-report-declared", "v2.case.authority-external-receipt", "v2.case.capability-valid-missing-failed", "v2.case.capability-lying-nonatomic-version", "v2.case.readiness-two-gate-truth-table", "v2.case.route-manual-distinct", "v2.case.route-deferred-reactivation", "v2.case.route-active-owner-conflict", "v2.case.packing-target-cap-10-25", "v2.case.packing-minutes-479-480-481", "v2.case.packing-transport-cap-boundaries", "v2.case.packing-oversize-escalation", "v2.case.history-known-closer", "v2.case.history-legacy-closer", "v2.case.history-unknown-conflicted-closer", "v2.case.history-timestamp-reason", "v2.case.history-missing-audit-event", "v2.case.history-duplicate-conflicting-order", "v2.case.history-consumer-candidates", "v2.case.resource-all-caps"]
+
+[[criterion]]
+id = "AC12"
+assertion_ids = ["v2.case.source-warning-partitions", "v2.case.source-double-capture-coherent", "v2.case.source-within-run-drift", "v2.case.source-count-preserving-swap", "v2.case.source-cross-run-drift-scope", "v2.case.authority-candidate-provenance", "v2.case.packing-compatible-receipt", "v2.case.packing-exact-small-optimum", "v2.case.packing-large-gap-witness", "v2.case.packing-order-invariant", "v2.case.packing-refinement-imbalance", "v2.case.zero-all-priority-status-cells", "v2.case.movement-cross-lane", "v2.case.movement-live-to-history", "v2.case.movement-history-to-live", "v2.case.artifact-oversize-inventory", "v2.case.replay-review-offline", "v2.case.replay-history-offline", "v2.case.replay-tamper-live-denied", "v2.case.nomock-unrelated-drift-stability", "v2.case.nomock-selected-drift-refusal"]
+
+[[criterion]]
+id = "AC13"
+assertion_ids = ["v2.case.mutation-forged-approval", "v2.case.mutation-forged-capability-deferred", "v2.case.mutation-missing-payload-edge", "v2.case.mutation-relation-neighbor-drift", "v2.case.mutation-dropped-duplicate-target", "v2.case.fault-output-lock-export", "v2.case.cancel-signals-drained", "v2.case.restart-deterministic", "v2.case.resource-all-caps", "v2.case.mutation-truncation-oversize-root", "v2.case.fault-partial-publication-conflict", "v2.case.fault-replay-manual-recovery", "v2.case.nomock-br-robot-cells", "v2.case.nomock-audit-known-legacy-conflict", "v2.case.nomock-current-br-two-gate-nodata", "v2.case.nomock-review-plan", "v2.case.nomock-history-plan", "v2.case.nomock-unrelated-drift-stability", "v2.case.nomock-selected-drift-refusal", "v2.case.nomock-active-conflict-deferred", "v2.case.nomock-oversize", "v2.case.nomock-offline-replay", "v2.case.nomock-live-target-unchanged", "v2.case.nomock-v1-regression"]
+
+[[criterion]]
+id = "AC14"
+assertion_ids = ["v2.case.compat-v1-immutable", "v2.case.nomock-v1-regression"]
+
+[[criterion]]
+id = "AC15"
+assertion_ids = ["v2.case.schema-closed-manifest", "v2.case.schema-executable-assertions", "v2.case.compat-v1-immutable", "v2.case.artifact-not-requested-projection", "v2.case.replay-tamper-live-denied", "v2.case.nomock-v1-regression"]
+
+[[criterion]]
+id = "AC16"
+assertion_ids = ["v2.case.source-double-capture-coherent", "v2.case.source-within-run-drift", "v2.case.source-count-preserving-swap", "v2.case.source-cross-run-drift-scope", "v2.case.movement-cross-lane", "v2.case.movement-live-to-history", "v2.case.movement-history-to-live", "v2.case.mutation-relation-neighbor-drift", "v2.case.nomock-unrelated-drift-stability", "v2.case.nomock-selected-drift-refusal"]
+
+[[criterion]]
+id = "AC17"
+assertion_ids = ["v2.case.source-cross-run-drift-scope", "v2.case.movement-cross-lane", "v2.case.movement-live-to-history", "v2.case.movement-history-to-live"]
+
+[[criterion]]
+id = "AC18"
+assertion_ids = ["v2.case.packing-target-cap-10-25", "v2.case.packing-minutes-479-480-481", "v2.case.packing-transport-cap-boundaries", "v2.case.packing-exact-small-optimum", "v2.case.packing-large-gap-witness", "v2.case.packing-order-invariant", "v2.case.packing-refinement-imbalance"]
+
+[[criterion]]
+id = "AC19"
+assertion_ids = ["v2.case.cli-review-receipts", "v2.case.row-complete-planned-child", "v2.case.authority-external-receipt", "v2.case.capability-valid-missing-failed", "v2.case.capability-lying-nonatomic-version", "v2.case.readiness-two-gate-truth-table", "v2.case.route-manual-distinct", "v2.case.route-deferred-reactivation", "v2.case.route-active-owner-conflict", "v2.case.packing-target-cap-10-25", "v2.case.packing-minutes-479-480-481", "v2.case.packing-transport-cap-boundaries", "v2.case.packing-oversize-escalation", "v2.case.mutation-forged-capability-deferred", "v2.case.mutation-missing-payload-edge", "v2.case.nomock-current-br-two-gate-nodata"]
+
+[[criterion]]
+id = "AC20"
+assertion_ids = ["v2.case.route-active-owner-conflict", "v2.case.route-no-target-mutation", "v2.case.nomock-br-robot-cells", "v2.case.nomock-active-conflict-deferred", "v2.case.nomock-live-target-unchanged"]
+
+[[criterion]]
+id = "AC21"
+assertion_ids = ["v2.case.cli-help-modes", "v2.case.cli-filters-explain", "v2.case.ux-empty-synopsis", "v2.case.ux-large-synopsis", "v2.case.ux-streams-color-tty", "v2.case.nomock-review-plan", "v2.case.nomock-history-plan"]
+
+[[criterion]]
+id = "AC22"
+assertion_ids = ["v2.case.schema-executable-assertions", "v2.case.history-known-closer", "v2.case.history-legacy-closer", "v2.case.history-unknown-conflicted-closer", "v2.case.history-timestamp-reason", "v2.case.history-missing-audit-event", "v2.case.history-duplicate-conflicting-order", "v2.case.movement-cross-lane", "v2.case.movement-live-to-history", "v2.case.movement-history-to-live", "v2.case.log-raw-result-redaction", "v2.case.log-order-terminal", "v2.case.mutation-forged-approval", "v2.case.mutation-forged-capability-deferred", "v2.case.mutation-missing-payload-edge", "v2.case.mutation-relation-neighbor-drift", "v2.case.mutation-dropped-duplicate-target", "v2.case.fault-output-lock-export", "v2.case.cancel-signals-drained", "v2.case.restart-deterministic", "v2.case.resource-all-caps", "v2.case.mutation-truncation-oversize-root", "v2.case.fault-partial-publication-conflict", "v2.case.fault-replay-manual-recovery"]
+
+[[criterion]]
+id = "AC23"
+assertion_ids = ["v2.case.compat-v1-immutable", "v2.case.nomock-v1-regression"]
+
+[[criterion]]
+id = "AC24"
+assertion_ids = ["v2.case.cli-exclusive-mode", "v2.case.cli-artifact-grammar", "v2.case.cli-path-admission", "v2.case.artifact-review-base-set", "v2.case.artifact-history-base-set", "v2.case.artifact-not-requested-projection", "v2.case.artifact-oversize-inventory", "v2.case.artifact-no-overwrite-partial", "v2.case.artifact-membership-path-safety", "v2.case.fault-output-lock-export"]
+
+[[criterion]]
+id = "AC25"
+assertion_ids = ["v2.case.source-double-capture-coherent", "v2.case.source-within-run-drift", "v2.case.source-count-preserving-swap", "v2.case.source-cross-run-drift-scope", "v2.case.history-known-closer", "v2.case.history-legacy-closer", "v2.case.history-unknown-conflicted-closer", "v2.case.history-timestamp-reason", "v2.case.history-missing-audit-event", "v2.case.history-duplicate-conflicting-order", "v2.case.history-consumer-candidates", "v2.case.history-immutable-relations", "v2.case.zero-all-priority-status-cells", "v2.case.movement-cross-lane", "v2.case.movement-live-to-history", "v2.case.movement-history-to-live", "v2.case.replay-history-offline", "v2.case.nomock-audit-known-legacy-conflict", "v2.case.nomock-history-plan"]
+
+[[case]]
+ordinal = 1
+id = "template-lint-v2.schema-closed-manifest"
+assertion_id = "v2.case.schema-closed-manifest"
+criterion_ids = ["AC15"]
+kinds = ["schema"]
+fixture_engine = "PURE_PROJECTION"
+subject = "recursive closed-schema validation, duplicate and unknown key refusal"
+
+[[case]]
+ordinal = 2
+id = "template-lint-v2.schema-executable-assertions"
+assertion_id = "v2.case.schema-executable-assertions"
+criterion_ids = ["AC15", "AC22"]
+kinds = ["schema", "logging"]
+fixture_engine = "PURE_PROJECTION"
+subject = "criterion, case, compiled executor, assertion-result, and evidence-root bijection; prose and aggregate counts cannot pass"
+
+[[case]]
+ordinal = 3
+id = "template-lint-v2.cli-help-modes"
+assertion_id = "v2.case.cli-help-modes"
+criterion_ids = ["AC09", "AC21"]
+kinds = ["unit", "ux"]
+fixture_engine = "PURE_PROJECTION"
+subject = "help for review-plan, history-plan, filters, explanation, review receipts, artifact grammar, and versioned test runner"
+
+[[case]]
+ordinal = 4
+id = "template-lint-v2.cli-exclusive-mode"
+assertion_id = "v2.case.cli-exclusive-mode"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["unit", "mutation"]
+fixture_engine = "PURE_PROJECTION"
+subject = "zero or multiple modes, unknown mode, and duplicate mode refusal"
+
+[[case]]
+ordinal = 5
+id = "template-lint-v2.cli-artifact-grammar"
+assertion_id = "v2.case.cli-artifact-grammar"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["unit", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "exact artifact-root and fresh artifact-dir grammar; output alias and duplicate output options refuse"
+
+[[case]]
+ordinal = 6
+id = "template-lint-v2.cli-path-admission"
+assertion_id = "v2.case.cli-path-admission"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["unit", "mutation", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "relative NFC bounded disjoint no-overwrite paths; dot, parent, backslash, drive, tilde, control, alias, and symlink paths refuse"
+
+[[case]]
+ordinal = 7
+id = "template-lint-v2.cli-review-receipts"
+assertion_id = "v2.case.cli-review-receipts"
+criterion_ids = ["AC19"]
+kinds = ["unit", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "safe relative review-receipts input, closed receipt schema, missing declarations REVIEW_ONLY, and unsafe input refusal"
+
+[[case]]
+ordinal = 8
+id = "template-lint-v2.cli-filters-explain"
+assertion_id = "v2.case.cli-filters-explain"
+criterion_ids = ["AC21"]
+kinds = ["unit", "ux"]
+fixture_engine = "PURE_PROJECTION"
+subject = "deterministic status, priority, route, readiness, target filters and one-target explanation"
+
+[[case]]
+ordinal = 9
+id = "template-lint-v2.ux-empty-synopsis"
+assertion_id = "v2.case.ux-empty-synopsis"
+criterion_ids = ["AC21"]
+kinds = ["boundary", "ux"]
+fixture_engine = "PURE_PROJECTION"
+subject = "empty campaign synopsis with exact zero counts, work, blockers, next action, artifacts, reproduction, and no-claim"
+
+[[case]]
+ordinal = 10
+id = "template-lint-v2.ux-large-synopsis"
+assertion_id = "v2.case.ux-large-synopsis"
+criterion_ids = ["AC21"]
+kinds = ["boundary", "ux"]
+fixture_engine = "PURE_PROJECTION"
+subject = "8192-byte and 12-selected-ID synopsis caps, deterministic previews, totals, shown counts, and truncation notices without artifact truncation"
+
+[[case]]
+ordinal = 11
+id = "template-lint-v2.ux-streams-color-tty"
+assertion_id = "v2.case.ux-streams-color-tty"
+criterion_ids = ["AC21"]
+kinds = ["unit", "ux"]
+fixture_engine = "PURE_PROJECTION"
+subject = "stdout and stderr separation, typed exits, no TTY dependency, and NO_COLOR behavior"
+
+[[case]]
+ordinal = 12
+id = "template-lint-v2.compat-v1-immutable"
+assertion_id = "v2.case.compat-v1-immutable"
+criterion_ids = ["AC14", "AC15", "AC23"]
+kinds = ["compatibility", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "adopted v1 byte, Git blob, semantic-root, 21-case, 148-assertion, artifact, replay, and no-v2-dependency invariants"
+
+[[case]]
+ordinal = 13
+id = "template-lint-v2.source-zero-one"
+assertion_id = "v2.case.source-zero-one"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["unit", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "exact zero and one row source, inventory, partitions, zero receipts, and terminal evidence"
+
+[[case]]
+ordinal = 14
+id = "template-lint-v2.source-rows-9-10-11"
+assertion_id = "v2.case.source-rows-9-10-11"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "9, 10, and 11 compatible target packing and exact membership"
+
+[[case]]
+ordinal = 15
+id = "template-lint-v2.source-rows-12-13"
+assertion_id = "v2.case.source-rows-12-13"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "12 and 13 row exact-optimality boundary and exact membership"
+
+[[case]]
+ordinal = 16
+id = "template-lint-v2.source-rows-24-25-26"
+assertion_id = "v2.case.source-rows-24-25-26"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "24, 25, and 26 row hard-cap boundary; 26 rows split and configured cap 26 refuses"
+
+[[case]]
+ordinal = 17
+id = "template-lint-v2.source-rows-4096"
+assertion_id = "v2.case.source-rows-4096"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["boundary", "resource"]
+fixture_engine = "PURE_PROJECTION"
+subject = "4096-row exact cap and 4097-row typed refusal with unchanged tracker"
+
+[[case]]
+ordinal = 18
+id = "template-lint-v2.source-warnings-8192"
+assertion_id = "v2.case.source-warnings-8192"
+criterion_ids = ["AC01", "AC11"]
+kinds = ["boundary", "resource"]
+fixture_engine = "PURE_PROJECTION"
+subject = "8192-warning exact cap and 8193-warning typed refusal with exact warning membership"
+
+[[case]]
+ordinal = 19
+id = "template-lint-v2.source-all-types-statuses-priorities"
+assertion_id = "v2.case.source-all-types-statuses-priorities"
+criterion_ids = ["AC01", "AC10", "AC11"]
+kinds = ["unit", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "all P0-P4, statuses, issue types, dispositions, missing-section sets, readiness states, and routes"
+
+[[case]]
+ordinal = 20
+id = "template-lint-v2.source-warning-partitions"
+assertion_id = "v2.case.source-warning-partitions"
+criterion_ids = ["AC01", "AC12"]
+kinds = ["property", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "exact warning-row partitions, arithmetic, rooted zero sets, input-order invariance, and hidden duplicate refusal"
+
+[[case]]
+ordinal = 21
+id = "template-lint-v2.source-double-capture-coherent"
+assertion_id = "v2.case.source-double-capture-coherent"
+criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "two equal bounded observations bind coherent tool, rule, DB, export, source, field, status, priority, and dependency identities"
+
+[[case]]
+ordinal = 22
+id = "template-lint-v2.source-within-run-drift"
+assertion_id = "v2.case.source-within-run-drift"
+criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "any between-observation issue, relation, closure, lane, authority, or capability drift refuses the entire incoherent run"
+
+[[case]]
+ordinal = 23
+id = "template-lint-v2.source-count-preserving-swap"
+assertion_id = "v2.case.source-count-preserving-swap"
+criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
+kinds = ["mutation", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "equal-count replacement, drop-plus-add, duplicate, warning, and status swaps refuse by exact membership"
+
+[[case]]
+ordinal = 24
+id = "template-lint-v2.source-cross-run-drift-scope"
+assertion_id = "v2.case.source-cross-run-drift-scope"
+criterion_ids = ["AC01", "AC12", "AC16", "AC17", "AC25"]
+kinds = ["property", "metamorphic", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "unrelated cross-run drift changes observation roots but preserves selected keys; relevant fields, receipts, membership, owners, consumers, and lanes invalidate affected keys"
+
+[[case]]
+ordinal = 25
+id = "template-lint-v2.row-complete-planned-child"
+assertion_id = "v2.case.row-complete-planned-child"
+criterion_ids = ["AC02", "AC06", "AC11", "AC19"]
+kinds = ["schema", "unit"]
+fixture_engine = "PURE_PROJECTION"
+subject = "all source-row and planned-child fields, roots, edges, payloads, estimates, readiness, route, and falsifier are present and typed"
+
+[[case]]
+ordinal = 26
+id = "template-lint-v2.row-dispositions-distinct"
+assertion_id = "v2.case.row-dispositions-distinct"
+criterion_ids = ["AC07", "AC11"]
+kinds = ["unit", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "malformed, rollup, owner questions, substantive proof, byte-preserving heading, immutable history, and oversize workflows never collapse to generic text"
+
+[[case]]
+ordinal = 27
+id = "template-lint-v2.authority-candidate-provenance"
+assertion_id = "v2.case.authority-candidate-provenance"
+criterion_ids = ["AC02", "AC03", "AC11", "AC12"]
+kinds = ["unit", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "label, path, parent, contract, and consumer candidates retain provenance and falsifiers but never self-approve"
+
+[[case]]
+ordinal = 28
+id = "template-lint-v2.authority-self-report-declared"
+assertion_id = "v2.case.authority-self-report-declared"
+criterion_ids = ["AC02", "AC03", "AC11"]
+kinds = ["unit", "mutation"]
+fixture_engine = "PURE_PROJECTION"
+subject = "self-reported coordination and reviewer declaration reach at most DECLARED_READY and never external or mechanical authority"
+
+[[case]]
+ordinal = 29
+id = "template-lint-v2.authority-external-receipt"
+assertion_id = "v2.case.authority-external-receipt"
+criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
+kinds = ["unit", "mutation", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "root-bound valid, missing, stale, wrong-scope, forged, expired, revoked, and conflicted external-authority receipts"
+
+[[case]]
+ordinal = 30
+id = "template-lint-v2.capability-valid-missing-failed"
+assertion_id = "v2.case.capability-valid-missing-failed"
+criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
+kinds = ["unit", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "valid, missing, and failed conditional-write capability records remain separate from authority"
+
+[[case]]
+ordinal = 31
+id = "template-lint-v2.capability-lying-nonatomic-version"
+assertion_id = "v2.case.capability-lying-nonatomic-version"
+criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "lying, ordinary-update, check-then-write, advisory-lock, non-atomic, and version-mismatched capability refusal"
+
+[[case]]
+ordinal = 32
+id = "template-lint-v2.readiness-two-gate-truth-table"
+assertion_id = "v2.case.readiness-two-gate-truth-table"
+criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
+kinds = ["unit", "property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "complete external-authority by conditional-capability truth table and current-tool DECLARED_READY ceiling"
+
+[[case]]
+ordinal = 33
+id = "template-lint-v2.route-manual-distinct"
+assertion_id = "v2.case.route-manual-distinct"
+criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
+kinds = ["unit", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "ANALYSIS_ONLY, MANUAL_BR_REVIEW, and AUTOMATED_CONDITIONAL remain separate from readiness; manual route claims no CAS, no-clobber, or exactly-once"
+
+[[case]]
+ordinal = 34
+id = "template-lint-v2.route-deferred-reactivation"
+assertion_id = "v2.case.route-deferred-reactivation"
+criterion_ids = ["AC02", "AC11", "AC19"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "deferred target always ANALYSIS_ONLY until exact owner-reviewed reactivation, fresh coherent capture, reinventory, and replan"
+
+[[case]]
+ordinal = 35
+id = "template-lint-v2.route-active-owner-conflict"
+assertion_id = "v2.case.route-active-owner-conflict"
+criterion_ids = ["AC02", "AC11", "AC19", "AC20"]
+kinds = ["unit", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "in-progress or assigned active work emits operational-conflict receipt and deferred coordination without semantic authority"
+
+[[case]]
+ordinal = 36
+id = "template-lint-v2.route-no-target-mutation"
+assertion_id = "v2.case.route-no-target-mutation"
+criterion_ids = ["AC20"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "every planning, receipt, route, explanation, and failure path preserves target fields, comments, assignment, priority, status, and relations"
+
+[[case]]
+ordinal = 37
+id = "template-lint-v2.packing-hard-keys"
+assertion_id = "v2.case.packing-hard-keys"
+criterion_ids = ["AC04"]
+kinds = ["unit", "mutation"]
+fixture_engine = "PURE_PROJECTION"
+subject = "priority, status, disposition, type, exact missing-section set, and readiness differences always partition"
+
+[[case]]
+ordinal = 38
+id = "template-lint-v2.packing-compatible-receipt"
+assertion_id = "v2.case.packing-compatible-receipt"
+criterion_ids = ["AC04", "AC12"]
+kinds = ["unit", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "target-complete compatibility receipt binds coordination, declared domain, user effect, dependency neighborhood, roots, rationale, and falsifier"
+
+[[case]]
+ordinal = 39
+id = "template-lint-v2.packing-generic-merge-refused"
+assertion_id = "v2.case.packing-generic-merge-refused"
+criterion_ids = ["AC03", "AC04", "AC07"]
+kinds = ["mutation", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "bare type, lexical similarity, copied prose, aggregate counts, or generic domain cannot justify multi-target grouping"
+
+[[case]]
+ordinal = 40
+id = "template-lint-v2.packing-rationale-falsifier"
+assertion_id = "v2.case.packing-rationale-falsifier"
+criterion_ids = ["AC04"]
+kinds = ["unit", "schema"]
+fixture_engine = "PURE_PROJECTION"
+subject = "every split, singleton, and merge has a nonempty root-bound rationale and falsifier"
+
+[[case]]
+ordinal = 41
+id = "template-lint-v2.packing-target-cap-10-25"
+assertion_id = "v2.case.packing-target-cap-10-25"
+criterion_ids = ["AC05", "AC11", "AC18", "AC19"]
+kinds = ["boundary", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "default 10, reviewed 25, configured 26 refusal, and 26-target population split without semantic loss"
+
+[[case]]
+ordinal = 42
+id = "template-lint-v2.packing-minutes-479-480-481"
+assertion_id = "v2.case.packing-minutes-479-480-481"
+criterion_ids = ["AC05", "AC11", "AC18", "AC19"]
+kinds = ["boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "479, 480, and 481 integer review-minute boundary, split or oversize escalation, and preserved target implementation estimate"
+
+[[case]]
+ordinal = 43
+id = "template-lint-v2.packing-transport-cap-boundaries"
+assertion_id = "v2.case.packing-transport-cap-boundaries"
+criterion_ids = ["AC05", "AC06", "AC11", "AC18", "AC19"]
+kinds = ["boundary", "resource"]
+fixture_engine = "PURE_PROJECTION"
+subject = "n-1, n, n+1 for description, acceptance, design, notes, aggregate argv, retained payload, argument, path, log, and artifact caps"
+
+[[case]]
+ordinal = 44
+id = "template-lint-v2.packing-exact-small-optimum"
+assertion_id = "v2.case.packing-exact-small-optimum"
+criterion_ids = ["AC05", "AC12", "AC18"]
+kinds = ["property", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "exact lexicographic packing optimum for all bounded fixtures through 13 targets with independently checked certificate"
+
+[[case]]
+ordinal = 45
+id = "template-lint-v2.packing-large-gap-witness"
+assertion_id = "v2.case.packing-large-gap-witness"
+criterion_ids = ["AC05", "AC12", "AC18"]
+kinds = ["property", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "large-instance deterministic plan retains lower bound, achieved objective, and explicit integer gap witness"
+
+[[case]]
+ordinal = 46
+id = "template-lint-v2.packing-order-invariant"
+assertion_id = "v2.case.packing-order-invariant"
+criterion_ids = ["AC04", "AC05", "AC12", "AC18"]
+kinds = ["property", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "source, warning, issue, receipt, dependency, and object-field permutations preserve exact plan keys and packing"
+
+[[case]]
+ordinal = 47
+id = "template-lint-v2.packing-refinement-imbalance"
+assertion_id = "v2.case.packing-refinement-imbalance"
+criterion_ids = ["AC04", "AC05", "AC12", "AC18"]
+kinds = ["property", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "compatibility refinement never merges newly incompatible rows and objective compares sorted review-minute, byte, and target-count vectors deterministically"
+
+[[case]]
+ordinal = 48
+id = "template-lint-v2.packing-oversize-escalation"
+assertion_id = "v2.case.packing-oversize-escalation"
+criterion_ids = ["AC05", "AC11", "AC19"]
+kinds = ["boundary", "resource", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "single-target over-cap escalation retains roots, incomplete bounded index, canonical br-show argv, full artifact, owner questions, and no-claim"
+
+[[case]]
+ordinal = 49
+id = "template-lint-v2.history-known-closer"
+assertion_id = "v2.case.history-known-closer"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["unit", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "unique well-formed close audit event yields KNOWN actor and exact source, timestamp, reason, and event root"
+
+[[case]]
+ordinal = 50
+id = "template-lint-v2.history-legacy-closer"
+assertion_id = "v2.case.history-legacy-closer"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["boundary", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "exact legacy-unavailable rule yields immutable accounting with NoData actor and no inferred closer"
+
+[[case]]
+ordinal = 51
+id = "template-lint-v2.history-unknown-conflicted-closer"
+assertion_id = "v2.case.history-unknown-conflicted-closer"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "unknown nonlegacy and conflicting actors refuse; creator, assignee, and self-report cannot substitute"
+
+[[case]]
+ordinal = 52
+id = "template-lint-v2.history-timestamp-reason"
+assertion_id = "v2.case.history-timestamp-reason"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["unit", "mutation", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "valid boundary timestamps pass; malformed, missing, ambiguous timestamps and missing reasons refuse deterministically"
+
+[[case]]
+ordinal = 53
+id = "template-lint-v2.history-missing-audit-event"
+assertion_id = "v2.case.history-missing-audit-event"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "missing close event refuses unless exact rooted legacy-unavailable rule matches"
+
+[[case]]
+ordinal = 54
+id = "template-lint-v2.history-duplicate-conflicting-order"
+assertion_id = "v2.case.history-duplicate-conflicting-order"
+criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "duplicate, conflicting, reordered, and between-capture audit events refuse with first divergence"
+
+[[case]]
+ordinal = 55
+id = "template-lint-v2.history-consumer-candidates"
+assertion_id = "v2.case.history-consumer-candidates"
+criterion_ids = ["AC08", "AC11", "AC25"]
+kinds = ["unit", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "candidate and independently reviewed consumers are separate, provenance-bound, and nonauthoritative by default"
+
+[[case]]
+ordinal = 56
+id = "template-lint-v2.history-immutable-relations"
+assertion_id = "v2.case.history-immutable-relations"
+criterion_ids = ["AC08", "AC25"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "closed source bytes, comments, notes, parent, dependencies, ownership, citations, and roots remain unchanged"
+
+[[case]]
+ordinal = 57
+id = "template-lint-v2.zero-all-priority-status-cells"
+assertion_id = "v2.case.zero-all-priority-status-cells"
+criterion_ids = ["AC10", "AC12", "AC25"]
+kinds = ["property", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "every P0-P4 by open, in-progress, blocked, deferred, and closed cell has exact membership or root-bound zero receipt"
+
+[[case]]
+ordinal = 58
+id = "template-lint-v2.movement-cross-lane"
+assertion_id = "v2.case.movement-cross-lane"
+criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "priority or status movement invalidates source and destination, emits MOVED_TO_LANE, and retains one current mapping plus reviewed successor lineage"
+
+[[case]]
+ordinal = 59
+id = "template-lint-v2.movement-live-to-history"
+assertion_id = "v2.case.movement-live-to-history"
+criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "coherent cross-campaign closure emits MOVED_TO_HISTORY with before/after status, roots, prior evidence, and exact successor"
+
+[[case]]
+ordinal = 60
+id = "template-lint-v2.movement-history-to-live"
+assertion_id = "v2.case.movement-history-to-live"
+criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
+kinds = ["property", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "coherent cross-campaign reopening emits MOVED_FROM_HISTORY; within-run close or reopen drift refuses and all-status partition remains exact"
+
+[[case]]
+ordinal = 61
+id = "template-lint-v2.artifact-review-base-set"
+assertion_id = "v2.case.artifact-review-base-set"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["schema", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "review-plan mode emits exactly nine base files with populated review and rooted NOT_REQUESTED history"
+
+[[case]]
+ordinal = 62
+id = "template-lint-v2.artifact-history-base-set"
+assertion_id = "v2.case.artifact-history-base-set"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["schema", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "history-plan mode emits exactly nine base files with populated history and rooted NOT_REQUESTED review"
+
+[[case]]
+ordinal = 63
+id = "template-lint-v2.artifact-not-requested-projection"
+assertion_id = "v2.case.artifact-not-requested-projection"
+criterion_ids = ["AC09", "AC15", "AC24"]
+kinds = ["schema", "mutation", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "nonselected document has closed schema, mode, NOT_REQUESTED state, source and inventory roots, semantic root, and no-claim; empty success masquerade refuses"
+
+[[case]]
+ordinal = 64
+id = "template-lint-v2.artifact-oversize-inventory"
+assertion_id = "v2.case.artifact-oversize-inventory"
+criterion_ids = ["AC09", "AC12", "AC24"]
+kinds = ["schema", "mutation", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "oversize content registry binds safe path, media/schema, bytes, semantic and target/field/clause roots, and aggregate cap"
+
+[[case]]
+ordinal = 65
+id = "template-lint-v2.artifact-no-overwrite-partial"
+assertion_id = "v2.case.artifact-no-overwrite-partial"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["mutation", "fault", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "existing output and partial prefix refuse; semantic refusal after reservation retains complete non-green base set; reservation failure claims no bundle"
+
+[[case]]
+ordinal = 66
+id = "template-lint-v2.artifact-membership-path-safety"
+assertion_id = "v2.case.artifact-membership-path-safety"
+criterion_ids = ["AC09", "AC24"]
+kinds = ["mutation", "replay", "resource"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "missing, unlisted, duplicate, changed, unsafe, symlink, extra, over-cap, and Unicode-aliased files refuse"
+
+[[case]]
+ordinal = 67
+id = "template-lint-v2.log-assertion-argv-evidence"
+assertion_id = "v2.case.log-assertion-argv-evidence"
+criterion_ids = ["AC09"]
+kinds = ["logging", "schema"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "case/assertion/executor IDs, parameter roots, argv arrays, exit/category, semantic projection, evidence roots, event spans, and first divergence"
+
+[[case]]
+ordinal = 68
+id = "template-lint-v2.log-raw-result-redaction"
+assertion_id = "v2.case.log-raw-result-redaction"
+criterion_ids = ["AC09", "AC22"]
+kinds = ["logging", "mutation"]
+fixture_engine = "PURE_PROJECTION"
+subject = "credential, environment, source path, absolute path, PID, timing, bulk body, and raw-stream injection retains only allowlisted projection, lengths, and full bounded stream roots"
+
+[[case]]
+ordinal = 69
+id = "template-lint-v2.log-order-terminal"
+assertion_id = "v2.case.log-order-terminal"
+criterion_ids = ["AC09", "AC22"]
+kinds = ["logging", "state"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "dense deterministic assertion and event order, unique-last terminal event, final terminal seal, and ordered assertion/case root binding"
+
+[[case]]
+ordinal = 70
+id = "template-lint-v2.replay-review-offline"
+assertion_id = "v2.case.replay-review-offline"
+criterion_ids = ["AC09", "AC12"]
+kinds = ["replay", "property"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "offline review-plan replay reconstructs exact source, inventory, authority, plan, zero, NOT_REQUESTED history, events, and terminal roots"
+
+[[case]]
+ordinal = 71
+id = "template-lint-v2.replay-history-offline"
+assertion_id = "v2.case.replay-history-offline"
+criterion_ids = ["AC09", "AC12", "AC25"]
+kinds = ["replay", "property"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "offline history-plan replay reconstructs audit, history, all-status, zero, movement, NOT_REQUESTED review, events, and terminal roots"
+
+[[case]]
+ordinal = 72
+id = "template-lint-v2.replay-tamper-live-denied"
+assertion_id = "v2.case.replay-tamper-live-denied"
+criterion_ids = ["AC09", "AC12", "AC15"]
+kinds = ["replay", "mutation"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "live tracker and network denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse"
+
+[[case]]
+ordinal = 73
+id = "template-lint-v2.mutation-forged-approval"
+assertion_id = "v2.case.mutation-forged-approval"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "fake, self-issued, wrong-reviewer, stale, count-only, root-mismatched, and aggregate approval refuse; authority-only mechanical labeling refuses"
+
+[[case]]
+ordinal = 74
+id = "template-lint-v2.mutation-forged-capability-deferred"
+assertion_id = "v2.case.mutation-forged-capability-deferred"
+criterion_ids = ["AC13", "AC19", "AC22"]
+kinds = ["mutation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "forged, lying, non-atomic capability and any deferred-target apply or route upgrade refuse"
+
+[[case]]
+ordinal = 75
+id = "template-lint-v2.mutation-missing-payload-edge"
+assertion_id = "v2.case.mutation-missing-payload-edge"
+criterion_ids = ["AC06", "AC13", "AC19", "AC22"]
+kinds = ["mutation", "schema"]
+fixture_engine = "PURE_PROJECTION"
+subject = "missing planned payload field, target, root, edge, reversed edge, duplicate edge, or undeclared edge refuses publication"
+
+[[case]]
+ordinal = 76
+id = "template-lint-v2.mutation-relation-neighbor-drift"
+assertion_id = "v2.case.mutation-relation-neighbor-drift"
+criterion_ids = ["AC13", "AC16", "AC22"]
+kinds = ["mutation", "metamorphic"]
+fixture_engine = "PURE_PROJECTION"
+subject = "relation metadata versus neighbor projection drift is distinguished and invalidates only affected logical keys"
+
+[[case]]
+ordinal = 77
+id = "template-lint-v2.mutation-dropped-duplicate-target"
+assertion_id = "v2.case.mutation-dropped-duplicate-target"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["mutation", "property"]
+fixture_engine = "PURE_PROJECTION"
+subject = "dropped, duplicated, substituted, cross-lane, and cross-status targets refuse despite equal counts"
+
+[[case]]
+ordinal = 78
+id = "template-lint-v2.fault-output-lock-export"
+assertion_id = "v2.case.fault-output-lock-export"
+criterion_ids = ["AC13", "AC22", "AC24"]
+kinds = ["fault", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "output reservation, open, write, parent identity, lock, export-status, and export-read faults retain typed non-green evidence and no complete-prefix claim"
+
+[[case]]
+ordinal = 79
+id = "template-lint-v2.cancel-signals-drained"
+assertion_id = "v2.case.cancel-signals-drained"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["cancellation", "state"]
+fixture_engine = "PURE_PROJECTION"
+subject = "SIGINT and SIGTERM at source, audit, packing, publication, and replay boundaries drain and never leave a green prefix"
+
+[[case]]
+ordinal = 80
+id = "template-lint-v2.restart-deterministic"
+assertion_id = "v2.case.restart-deterministic"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["restart", "property"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "fresh-run restart after cancellation or fault reconstructs the same logical keys, deterministic errors, and no-overwrite behavior"
+
+[[case]]
+ordinal = 81
+id = "template-lint-v2.resource-all-caps"
+assertion_id = "v2.case.resource-all-caps"
+criterion_ids = ["AC05", "AC11", "AC13", "AC22"]
+kinds = ["resource", "boundary"]
+fixture_engine = "PURE_PROJECTION"
+subject = "independent n-1, n, n+1 assertions for row, warning, field, payload, argv, path, artifact, event, log-line, synopsis, and selected-ID caps"
+
+[[case]]
+ordinal = 82
+id = "template-lint-v2.mutation-truncation-oversize-root"
+assertion_id = "v2.case.mutation-truncation-oversize-root"
+criterion_ids = ["AC05", "AC13", "AC22"]
+kinds = ["mutation", "resource", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "semantic truncation, bounded-index completeness claim, oversize path/root swap, omitted content, and aggregate-cap laundering refuse"
+
+[[case]]
+ordinal = 83
+id = "template-lint-v2.fault-partial-publication-conflict"
+assertion_id = "v2.case.fault-partial-publication-conflict"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["fault", "state", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "fail-sealed conflict artifact, partial publication, duplicate terminal, changed parent, and terminal disagreement remain non-green with recovery"
+
+[[case]]
+ordinal = 84
+id = "template-lint-v2.fault-replay-manual-recovery"
+assertion_id = "v2.case.fault-replay-manual-recovery"
+criterion_ids = ["AC13", "AC22"]
+kinds = ["fault", "replay", "state"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "replay mismatch, ambiguous source, irreconcilable audit conflict, and publication ambiguity retain first divergence and MANUAL_RECOVERY_REQUIRED"
+
+[[case]]
+ordinal = 85
+id = "template-lint-v2.nomock-br-robot-cells"
+assertion_id = "v2.case.nomock-br-robot-cells"
+criterion_ids = ["AC10", "AC13", "AC20"]
+kinds = ["no_mock_e2e", "state"]
+fixture_engine = "RELEASED_BR_ROBOT"
+subject = "released br and robot-only bv fixture covers active, deferred, P4, ownerless, authority, consumer, and exact zero cells"
+
+[[case]]
+ordinal = 86
+id = "template-lint-v2.nomock-audit-known-legacy-conflict"
+assertion_id = "v2.case.nomock-audit-known-legacy-conflict"
+criterion_ids = ["AC08", "AC13", "AC25"]
+kinds = ["no_mock_e2e", "state"]
+fixture_engine = "RELEASED_BR_AUDIT"
+subject = "released br audit fixture covers known closer, exact legacy unavailability, malformed, duplicate, conflicting, missing, and ordered close events"
+
+[[case]]
+ordinal = 87
+id = "template-lint-v2.nomock-current-br-two-gate-nodata"
+assertion_id = "v2.case.nomock-current-br-two-gate-nodata"
+criterion_ids = ["AC02", "AC03", "AC13", "AC19"]
+kinds = ["no_mock_e2e", "state"]
+fixture_engine = "RELEASED_BR"
+subject = "current br 0.2.19 with valid authority and capability NoData remains DECLARED_READY, AUTOMATION_NODATA, and unchanged"
+
+[[case]]
+ordinal = 88
+id = "template-lint-v2.nomock-review-plan"
+assertion_id = "v2.case.nomock-review-plan"
+criterion_ids = ["AC09", "AC13", "AC21"]
+kinds = ["no_mock_e2e", "logging", "replay"]
+fixture_engine = "RELEASED_BR"
+subject = "released br review-plan produces bounded synopsis, exact nine-file bundle, complete rows and planning witnesses, redacted logs, and replay"
+
+[[case]]
+ordinal = 89
+id = "template-lint-v2.nomock-history-plan"
+assertion_id = "v2.case.nomock-history-plan"
+criterion_ids = ["AC09", "AC13", "AC21", "AC25"]
+kinds = ["no_mock_e2e", "logging", "replay"]
+fixture_engine = "RELEASED_BR_AUDIT"
+subject = "released br history-plan produces bounded synopsis, exact nine-file bundle, immutable history and movement witnesses, redacted logs, and replay"
+
+[[case]]
+ordinal = 90
+id = "template-lint-v2.nomock-unrelated-drift-stability"
+assertion_id = "v2.case.nomock-unrelated-drift-stability"
+criterion_ids = ["AC12", "AC13", "AC16"]
+kinds = ["no_mock_e2e", "metamorphic"]
+fixture_engine = "RELEASED_BR"
+subject = "coherent released-br fixture changes unrelated nonselected issue and capability version; observation roots change while selected logical keys remain stable"
+
+[[case]]
+ordinal = 91
+id = "template-lint-v2.nomock-selected-drift-refusal"
+assertion_id = "v2.case.nomock-selected-drift-refusal"
+criterion_ids = ["AC12", "AC13", "AC16"]
+kinds = ["no_mock_e2e", "mutation"]
+fixture_engine = "RELEASED_BR"
+subject = "released-br fixture changes selected field, warning, dependency, owner, consumer, authority, and capability roots and observes exact affected-key invalidation"
+
+[[case]]
+ordinal = 92
+id = "template-lint-v2.nomock-active-conflict-deferred"
+assertion_id = "v2.case.nomock-active-conflict-deferred"
+criterion_ids = ["AC13", "AC20"]
+kinds = ["no_mock_e2e", "state"]
+fixture_engine = "RELEASED_BR"
+subject = "released-br in-progress and assigned targets emit operational conflicts, deferred child coordination, no comments, and no target mutation"
+
+[[case]]
+ordinal = 93
+id = "template-lint-v2.nomock-oversize"
+assertion_id = "v2.case.nomock-oversize"
+criterion_ids = ["AC05", "AC13"]
+kinds = ["no_mock_e2e", "resource", "replay"]
+fixture_engine = "RELEASED_BR"
+subject = "released-br large target produces OVERSIZE_REVIEW_REQUIRED roots, incomplete bounded index, full retained artifact inventory, redacted logs, and replay"
+
+[[case]]
+ordinal = 94
+id = "template-lint-v2.nomock-offline-replay"
+assertion_id = "v2.case.nomock-offline-replay"
+criterion_ids = ["AC09", "AC13"]
+kinds = ["no_mock_e2e", "replay"]
+fixture_engine = "ARTIFACT_ONLY"
+subject = "retained released-tool review and history bundles replay with live tracker and network denied and reproduce exact selected and NOT_REQUESTED projections"
+
+[[case]]
+ordinal = 95
+id = "template-lint-v2.nomock-live-target-unchanged"
+assertion_id = "v2.case.nomock-live-target-unchanged"
+criterion_ids = ["AC13", "AC20"]
+kinds = ["no_mock_e2e", "property", "state"]
+fixture_engine = "RELEASED_BR"
+subject = "before and after live semantic projections prove no issue, relation, assignment, status, priority, comment, dependency, DB, or export mutation by any v2 read-only mode"
+
+[[case]]
+ordinal = 96
+id = "template-lint-v2.nomock-v1-regression"
+assertion_id = "v2.case.nomock-v1-regression"
+criterion_ids = ["AC13", "AC14", "AC15", "AC23"]
+kinds = ["no_mock_e2e", "compatibility", "replay"]
+fixture_engine = "RELEASED_BR"
+subject = "frozen v1 21-case and 148-assertion suite, artifact replay, fixture-only mutation boundary, content identities, and v2-root independence remain exact"
