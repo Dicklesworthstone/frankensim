@@ -5958,6 +5958,17 @@ where
 ///         key_policy,
 ///         context: "forged",
 ///         root_charter: unreachable!(),
+///         scope: unreachable!(),
+///         verifier_capability: unreachable!(),
+///         admission_capability: unreachable!(),
+///         verification_statement: unreachable!(),
+///         admission_statement: unreachable!(),
+///         disposition: unreachable!(),
+///         request_id: unreachable!(),
+///         verification_decision: unreachable!(),
+///         admission_decision: unreachable!(),
+///         decision_id: unreachable!(),
+///         root_instance: unreachable!(),
 ///     }
 /// }
 /// ```
