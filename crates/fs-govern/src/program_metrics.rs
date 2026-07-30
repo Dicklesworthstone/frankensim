@@ -1462,6 +1462,11 @@ pub struct SpineMetricsSource {
     pub beads_blocked: Option<usize>,
     /// Snapshot beads with no non-closed blocker.
     pub beads_actionable: Option<usize>,
+    /// Reality-check spine beads sitting on the certified tropical critical
+    /// path (slack zero), from the tropical-path artifact.
+    pub spine_on_critical_path: Option<usize>,
+    /// Reality-check spine beads tracked by the tropical-path artifact.
+    pub spine_tracked: Option<usize>,
 }
 
 /// Registry values the FrankenSim projection reads.
@@ -1627,6 +1632,8 @@ const MATURITY_SOURCE: &str = "capability-maturity.json";
 const SPINE_RATCHET_SOURCE: &str =
     "spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet)";
 const SPINE_METRICS_SOURCE: &str = "spine-metrics.json (xtask spine-metrics beads snapshot)";
+const TROPICAL_PATH_SOURCE: &str =
+    "tropical-critical-path.json (fs-tropical over the bead graph, xtask tropical-path)";
 const IMPORT_SOURCE: &str =
     "fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json}";
 
@@ -1987,12 +1994,9 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
             MetricFamily::Governance,
             MetricDirection::HigherIsBetter,
             match (sources.spine.stages_executing, sources.spine.stages_total) {
-                (Some(executing), Some(total)) => ratio_or_no_data(
-                    executing,
-                    total,
-                    "no solve stage is declared",
-                    None,
-                ),
+                (Some(executing), Some(total)) => {
+                    ratio_or_no_data(executing, total, "no solve stage is declared", None)
+                }
                 _ => no_data(
                     "the spine ratchet cannot be derived from the live fs-cli source, so the \
                      executing prefix is unknown rather than zero",
@@ -2026,12 +2030,9 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
             MetricFamily::Governance,
             MetricDirection::LowerIsBetter,
             match (sources.spine.beads_blocked, sources.spine.beads_open) {
-                (Some(blocked), Some(open)) => ratio_or_no_data(
-                    blocked,
-                    open,
-                    "no open bead exists in the snapshot",
-                    None,
-                ),
+                (Some(blocked), Some(open)) => {
+                    ratio_or_no_data(blocked, open, "no open bead exists in the snapshot", None)
+                }
                 _ => no_data(
                     "the beads tracker snapshot artifact is absent or unreadable; the \
                      dashboard does not invent a ratio from a live tracker",
@@ -2062,17 +2063,29 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
         )?,
         MetricRow::try_new(
             "spine-critical-path-positions",
-            "Spine beads on the certified tropical critical path, with slack",
+            "Reality-check spine beads on the certified tropical critical path",
             MetricFamily::Governance,
-            MetricDirection::Neutral,
-            no_data(
-                "the certified tropical critical path over the bead graph has not landed, \
-                 so spine-bead path positions and per-bead slack are not computable",
-                Some("frankensim-kx95s"),
-            ),
-            &[],
-            "when the path lands this row measures WHERE the spine sits on it; until then \
-             any position number would be invented",
+            MetricDirection::HigherIsBetter,
+            match (
+                sources.spine.spine_on_critical_path,
+                sources.spine.spine_tracked,
+            ) {
+                (Some(on_path), Some(tracked)) => ratio_or_no_data(
+                    on_path,
+                    tracked,
+                    "no spine bead is tracked by the tropical artifact",
+                    None,
+                ),
+                _ => no_data(
+                    "the certified tropical critical path over the bead graph has not landed, \
+                     so spine-bead path positions and per-bead slack are not computable",
+                    Some("frankensim-kx95s"),
+                ),
+            },
+            &[TROPICAL_PATH_SOURCE],
+            "slack is computed over ESTIMATES with a recorded default for unestimated beads; \
+             a spine bead off the path buys nothing by being rushed, and one on it sets the \
+             makespan",
         )?,
     ];
     Ok(rows)

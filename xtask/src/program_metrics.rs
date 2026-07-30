@@ -26,7 +26,7 @@ use fs_vvreg::scorecard::build_scorecard;
 use super::Violation;
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::maturity;
-use crate::{spine_metrics, spine_ratchet};
+use crate::{spine_metrics, spine_ratchet, tropical_path};
 
 pub(crate) const CHECK: &str = "program-metrics";
 const MARKDOWN_PATH: &str = "program-metrics.md";
@@ -393,12 +393,27 @@ fn spine_sources(root: &Path) -> SpineMetricsSource {
             (executing, stages.len())
         });
     let snapshot = spine_metrics::load(root);
+    let tropical = tropical_path::load(root);
+    let spine_on_path = tropical.as_ref().map(|artifact| {
+        tropical_path::SPINE_BEADS
+            .iter()
+            .filter(|id| artifact.slack_hours.get(**id) == Some(&0.0))
+            .count()
+    });
+    let spine_tracked = tropical.as_ref().map(|artifact| {
+        tropical_path::SPINE_BEADS
+            .iter()
+            .filter(|id| artifact.slack_hours.contains_key(**id))
+            .count()
+    });
     SpineMetricsSource {
         stages_executing: stages.map(|(executing, _)| executing),
         stages_total: stages.map(|(_, total)| total),
         beads_open: snapshot.map(|snapshot| snapshot.open),
         beads_blocked: snapshot.map(|snapshot| snapshot.blocked),
         beads_actionable: snapshot.map(|snapshot| snapshot.actionable),
+        spine_on_critical_path: spine_on_path,
+        spine_tracked,
     }
 }
 

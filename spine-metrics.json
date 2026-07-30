@@ -2,7 +2,7 @@
   "schema": "frankensim-spine-metrics-v1",
   "bead": "frankensim-o5et9",
   "beads": {
-    "issues_fnv1a64": "018b7fb1365a44b5",
+    "issues_fnv1a64": "05b0e485482e332b",
     "open": 1744,
     "blocked": 1456,
     "actionable": 288

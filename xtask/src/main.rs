@@ -69,6 +69,7 @@ mod schemas;
 mod source_manifest;
 mod spine_metrics;
 mod spine_ratchet;
+mod tropical_path;
 mod vv_scorecard;
 
 use bootstrap_provenance::{
@@ -8424,6 +8425,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "generate-tropical-path" => {
+            return match tropical_path::generate(&root) {
+                Ok(()) => {
+                    eprintln!("tropical critical path artifact regenerated");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         "compatibility-report" => {
             // `--candidate <lock>` adjudicates a PROPOSED pin set; without it the
             // comparison is against the live checkouts.
@@ -8569,6 +8582,11 @@ fn main() -> ExitCode {
             policy_notes = notes;
             (violations, vec![spine_metrics::CHECK])
         }
+        "check-tropical-path" => {
+            let (violations, notes) = tropical_path::check(&root);
+            policy_notes = notes;
+            (violations, vec![tropical_path::CHECK])
+        }
         "check-spine-ratchet" => (spine_ratchet::check(&root), vec![spine_ratchet::CHECK]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
         "check-all" => {
@@ -8622,6 +8640,9 @@ fn main() -> ExitCode {
             let spine_metrics_report = spine_metrics::check(&root);
             v.extend(spine_metrics_report.0);
             policy_notes.extend(spine_metrics_report.1);
+            let tropical_report = tropical_path::check(&root);
+            v.extend(tropical_report.0);
+            policy_notes.extend(tropical_report.1);
             v.extend(check_citable_producers(&root));
             (
                 v,
@@ -8658,6 +8679,7 @@ fn main() -> ExitCode {
                     "closure-evidence",
                     spine_ratchet::CHECK,
                     spine_metrics::CHECK,
+                    tropical_path::CHECK,
                     CITABLE_PRODUCER_CHECK,
                 ],
             )
@@ -8668,8 +8690,8 @@ fn main() -> ExitCode {
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
                  check-identities|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
-                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|record-program-metrics|compatibility-report|lock-constellation|\
-                 check-constellation|check-spine-metrics|depgraph-receipt|matdb-pack"
+                 check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|generate-tropical-path|record-program-metrics|compatibility-report|lock-constellation|\
+                 check-constellation|check-spine-metrics|check-tropical-path|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;
         }

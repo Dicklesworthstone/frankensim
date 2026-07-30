@@ -77,14 +77,25 @@ fn count_issues(text: &str) -> Result<Snapshot, String> {
         let parsed = JsonParser::with_string_limit(line, MAX_TRACKER_STRING_BYTES)
             .finish()
             .map_err(|error| {
-                format!("{ISSUES_PATH} line {} is not valid JSON: {error}", index + 1)
+                format!(
+                    "{ISSUES_PATH} line {} is not valid JSON: {error}",
+                    index + 1
+                )
             })?;
         let JsonValue::Object(map) = &parsed else {
-            return Err(format!("{ISSUES_PATH} line {} is not a JSON object", index + 1));
+            return Err(format!(
+                "{ISSUES_PATH} line {} is not a JSON object",
+                index + 1
+            ));
         };
         let id = match map.get("id") {
             Some(JsonValue::String(id)) => id.clone(),
-            _ => return Err(format!("{ISSUES_PATH} line {} has no string `id`", index + 1)),
+            _ => {
+                return Err(format!(
+                    "{ISSUES_PATH} line {} has no string `id`",
+                    index + 1
+                ));
+            }
         };
         let status = match map.get("status") {
             Some(JsonValue::String(status)) => status.clone(),
@@ -104,7 +115,8 @@ fn count_issues(text: &str) -> Result<Snapshot, String> {
                         index + 1
                     ));
                 };
-                let is_blocks = matches!(dep.get("type"), Some(JsonValue::String(t)) if t == "blocks");
+                let is_blocks =
+                    matches!(dep.get("type"), Some(JsonValue::String(t)) if t == "blocks");
                 if is_blocks {
                     match dep.get("depends_on_id") {
                         Some(JsonValue::String(target)) => blocking.push(target.clone()),

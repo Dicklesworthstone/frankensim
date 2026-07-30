@@ -4513,6 +4513,7 @@ dependencies = [
  "fs-matdb",
  "fs-obs",
  "fs-qty",
+ "fs-tropical",
  "fs-vvreg",
 ]
 
