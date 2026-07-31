@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_left
+from contextlib import contextmanager
 import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -37,7 +39,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 try:
     import tomllib
@@ -120,6 +122,13 @@ V2_PREFLIGHT_TERMINAL_SCHEMA = (
 )
 V2_EXECUTION_TERMINAL_SCHEMA = (
     "frankensim.beads-template-hygiene.execution-terminal.v2"
+)
+V2_REPLAY_RESULT_SCHEMA = (
+    "frankensim.beads-template-hygiene.replay-result.v2"
+)
+V2_REPLAY_RESULT_NO_CLAIM = (
+    "offline replay proves exact retained reconstruction only and does not "
+    "prove current tracker state or mint authority"
 )
 V2_REFUSAL_PROJECTION_SCHEMA = (
     "frankensim.beads-template-hygiene.refusal-projection.v2"
@@ -206,6 +215,12 @@ V2_SEMANTIC_SIGNAL_BY_DISPOSITION = {
     "CONTRIBUTION_ONLY": "ROUTED",
     "BLOCKED_AUTHORITY": "BLOCKED",
     "TYPED_INAPPLICABLE": "NOT_APPLICABLE",
+}
+V2_SEMANTIC_EXACT_SIGNAL_DIMENSION = {
+    "ROLLUP_ONLY": ("dependencies", "ROUTED"),
+    "CONTRIBUTION_ONLY": ("user_value", "ROUTED"),
+    "BLOCKED_AUTHORITY": ("authority", "BLOCKED"),
+    "TYPED_INAPPLICABLE": ("user_value", "NOT_APPLICABLE"),
 }
 V2_PACKING_HARD_KEYS = (
     "priority",
@@ -572,6 +587,7 @@ V2_SOURCE_ALL_ISSUE_FIELDS = frozenset(
         "design",
         "notes",
         "estimated_minutes",
+        "ephemeral",
         "updated_at",
         "dependencies",
         "dependents",
@@ -871,6 +887,21 @@ V2_EXECUTION_TERMINAL_FIELDS = frozenset(
         "semantic_root",
     }
 )
+V2_REPLAY_RESULT_FIELDS = frozenset(
+    {
+        "schema",
+        "terminal",
+        "subject_mode",
+        "artifact_dir",
+        "retained_terminal_root",
+        "replay_terminal_root",
+        "live_tracker_reads",
+        "live_tracker_writes",
+        "network_access",
+        "no_claim",
+        "semantic_root",
+    }
+)
 V2_HISTORY_ROW_FIELDS = frozenset(
     {
         "issue_id",
@@ -962,6 +993,10 @@ V2_SOURCE_ISSUE_NO_CLAIM = (
 V2_SOURCE_OBSERVATION_NO_CLAIM = (
     "double-captured br projections are tracker-read-only source evidence; "
     "they neither authenticate people nor grant mutation authority"
+)
+V2_AUDIT_BRACKET_NO_CLAIM = (
+    "the rooted bracket binds audit reads between coherent source rounds; "
+    "it is process-local ordering, not a transactional snapshot or authority"
 )
 V2_REVIEW_RECEIPTS_NO_CLAIM = (
     "review receipts are root-bound declarations only; they do not "
@@ -1204,6 +1239,8 @@ _cancel_requested = False
 _command_receipts: list[dict[str, Any]] = []
 _v2_nomock_history_cache: dict[str, Any] | None = None
 _v2_outer_execution_context: dict[str, str] | None = None
+_v2_offline_replay_depth = 0
+_v2_offline_replay_scope_lock = threading.RLock()
 
 
 def request_cancel(_signum: int, _frame: object) -> None:
@@ -1269,6 +1306,21 @@ class PublishedV2Refusal(HarnessError):
 def check_cancel() -> None:
     if _cancel_requested:
         raise CancelledDrained("cancellation requested; no mutation is in flight")
+
+
+@contextmanager
+def v2_offline_replay_scope() -> Iterator[None]:
+    """Fail closed on every subprocess while any offline replay is active."""
+    global _v2_offline_replay_depth
+    with _v2_offline_replay_scope_lock:
+        _v2_offline_replay_depth += 1
+    try:
+        yield
+    finally:
+        with _v2_offline_replay_scope_lock:
+            if _v2_offline_replay_depth <= 0:
+                raise EvidenceFailed("offline replay scope depth underflow")
+            _v2_offline_replay_depth -= 1
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -1495,6 +1547,148 @@ def bounded_read(
     return payload
 
 
+def v2_read_repo_relative_file_strict(
+    value: str,
+    *,
+    label: str,
+    cap: int = CAPS["input_artifact_bytes"],
+) -> bytes:
+    relative = safe_relative(value, label=label)
+    if type(cap) is not int or cap < 0:
+        raise EvidenceFailed(f"{label} strict-read cap is invalid")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NONBLOCK", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_descriptors: list[int] = []
+    directory_links: list[tuple[int, str, int, int, int]] = []
+    file_descriptor: int | None = None
+    try:
+        root_descriptor = os.open(REPO_ROOT, directory_flags)
+        directory_descriptors.append(root_descriptor)
+        current_descriptor = root_descriptor
+        for part in relative.parts[:-1]:
+            child_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=current_descriptor,
+            )
+            child_stat = os.fstat(child_descriptor)
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise InputRefused(
+                    f"{label} contains a non-directory component"
+                )
+            directory_descriptors.append(child_descriptor)
+            directory_links.append(
+                (
+                    current_descriptor,
+                    part,
+                    child_stat.st_dev,
+                    child_stat.st_ino,
+                    stat.S_IFMT(child_stat.st_mode),
+                )
+            )
+            current_descriptor = child_descriptor
+        leaf = relative.parts[-1]
+        file_descriptor = os.open(
+            leaf,
+            file_flags,
+            dir_fd=current_descriptor,
+        )
+        before = os.fstat(file_descriptor)
+        before_entry = os.stat(
+            leaf,
+            dir_fd=current_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_dev != before_entry.st_dev
+            or before.st_ino != before_entry.st_ino
+            or stat.S_IFMT(before.st_mode)
+            != stat.S_IFMT(before_entry.st_mode)
+        ):
+            raise InputRefused(
+                f"{label} is not one uniquely linked regular file"
+            )
+        if before.st_size > cap:
+            raise InputRefused(f"{label} exceeds its bounded byte cap")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(
+                file_descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise InputRefused(f"{label} changed while being read")
+            chunks.append(chunk)
+            offset += len(chunk)
+        if os.pread(file_descriptor, 1, offset):
+            raise InputRefused(f"{label} grew while being read")
+        after = os.fstat(file_descriptor)
+        after_entry = os.stat(
+            leaf,
+            dir_fd=current_descriptor,
+            follow_symlinks=False,
+        )
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if (
+            after.st_nlink != 1
+            or any(
+                getattr(before, field) != getattr(after, field)
+                for field in stable_fields
+            )
+            or after.st_dev != after_entry.st_dev
+            or after.st_ino != after_entry.st_ino
+            or stat.S_IFMT(after.st_mode)
+            != stat.S_IFMT(after_entry.st_mode)
+        ):
+            raise InputRefused(f"{label} changed while being read")
+        for parent, name, device, inode, file_type in directory_links:
+            retained_entry = os.stat(
+                name,
+                dir_fd=parent,
+                follow_symlinks=False,
+            )
+            if (
+                retained_entry.st_dev != device
+                or retained_entry.st_ino != inode
+                or stat.S_IFMT(retained_entry.st_mode) != file_type
+            ):
+                raise InputRefused(
+                    f"{label} path identity changed while being read"
+                )
+        return b"".join(chunks)
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InputRefused(f"{label} cannot be opened safely") from error
+    finally:
+        if file_descriptor is not None:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+        for descriptor in reversed(directory_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def write_once(path: Path, payload: bytes) -> str:
     check_cancel()
     if len(payload) > CAPS["artifact_bytes"]:
@@ -1541,6 +1735,12 @@ def run_command(
     stdout_bytes_cap: int | None = None,
     stderr_bytes_cap: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    with _v2_offline_replay_scope_lock:
+        offline_replay_active = _v2_offline_replay_depth > 0
+    if offline_replay_active:
+        raise EvidenceFailed(
+            "offline v2 replay forbids every subprocess invocation"
+        )
     if honor_cancel:
         check_cancel()
     argv_values = [str(value) for value in argv]
@@ -1872,8 +2072,11 @@ def run_command(
     return completed
 
 
-def br_json(*arguments: str) -> Any:
-    completed = run_command(("br", *arguments))
+def br_json(
+    *arguments: str,
+    br_cwd: Path = REPO_ROOT,
+) -> Any:
+    completed = run_command(("br", *arguments), command_cwd=br_cwd)
     try:
         return strict_json_loads(
             completed.stdout.encode("utf-8"),
@@ -1886,12 +2089,15 @@ def br_json(*arguments: str) -> Any:
         ) from error
 
 
-def br_read_json(*arguments: str) -> Any:
-    return br_json(*arguments, *BR_READ_FLAGS)
+def br_read_json(
+    *arguments: str,
+    br_cwd: Path = REPO_ROOT,
+) -> Any:
+    return br_json(*arguments, *BR_READ_FLAGS, br_cwd=br_cwd)
 
 
-def br_version() -> dict[str, Any]:
-    document = br_read_json("version", "--json")
+def br_version(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
+    document = br_read_json("version", "--json", br_cwd=br_cwd)
     if not isinstance(document, dict):
         raise InfrastructureFailed("br version --json did not return an object")
     required = {"version", "build", "commit", "target", "features"}
@@ -1955,8 +2161,8 @@ def v2_normalize_br_capability_commands(
     return normalized
 
 
-def br_capabilities() -> dict[str, Any]:
-    document = br_read_json("capabilities", "--json")
+def br_capabilities(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
+    document = br_read_json("capabilities", "--json", br_cwd=br_cwd)
     if not isinstance(document, dict):
         raise InfrastructureFailed("br capabilities --json did not return an object")
     if document.get("contract_version") != "br.capabilities.v1":
@@ -3979,6 +4185,10 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         raise InfrastructureFailed(
             f"v2 br issue {issue_id} has invalid estimated minutes"
         )
+    if "ephemeral" in issue and type(issue["ephemeral"]) is not bool:
+        raise InfrastructureFailed(
+            f"v2 br issue {issue_id} has invalid ephemeral state"
+        )
     for relation_field in ("dependencies", "dependents"):
         relations = issue.get(relation_field)
         if relations is None:
@@ -4070,6 +4280,7 @@ def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
     }
     return {
         **stable,
+        "ephemeral": issue.get("ephemeral") is True,
         "created_at": str(issue.get("created_at") or ""),
         "created_by": str(issue.get("created_by") or ""),
         "closed_at": str(issue.get("closed_at") or ""),
@@ -4086,7 +4297,11 @@ def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
+def v2_show_all_issues(
+    issue_ids: Sequence[str],
+    *,
+    br_cwd: Path = REPO_ROOT,
+) -> list[dict[str, Any]]:
     if len(issue_ids) > V2_INVENTORY_ROWS_CAP:
         raise InputRefused(
             f"v2 source has more than {V2_INVENTORY_ROWS_CAP} issue rows"
@@ -4097,7 +4312,12 @@ def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
     for offset in range(0, len(issue_ids), batch_size):
         check_cancel()
         batch = issue_ids[offset : offset + batch_size]
-        document = br_read_json("show", *batch, "--json")
+        document = br_read_json(
+            "show",
+            *batch,
+            "--json",
+            br_cwd=br_cwd,
+        )
         if not isinstance(document, list):
             raise InfrastructureFailed("v2 br show batch did not return an array")
         if len(document) != len(batch):
@@ -4129,10 +4349,16 @@ def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
     return rows
 
 
-def lint_scopes() -> dict[str, Any]:
+def lint_scopes(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for scope in LINT_SCOPES:
-        document = br_read_json("lint", "--status", scope, "--json")
+        document = br_read_json(
+            "lint",
+            "--status",
+            scope,
+            "--json",
+            br_cwd=br_cwd,
+        )
         if not isinstance(document, dict) or not isinstance(document.get("results"), list):
             raise InfrastructureFailed(f"br lint {scope} has no results array")
         total = document.get("total")
@@ -5109,6 +5335,22 @@ class LiveSnapshot:
     all_issues: tuple[dict[str, Any], ...] = ()
 
 
+@dataclass(frozen=True)
+class V2LiveCaptureRound:
+    ordinal: int
+    issue_ids: tuple[str, ...]
+    full_issues: tuple[dict[str, Any], ...]
+    lint: dict[str, Any]
+    tracker_status: dict[str, Any]
+    sync_status: dict[str, Any]
+    export_witness: dict[str, Any]
+    version: dict[str, Any]
+    capabilities: dict[str, Any]
+    source_files: tuple[dict[str, Any], ...]
+    rule_contract: dict[str, Any]
+    capture_state: dict[str, Any]
+
+
 V2_CAPTURE_STATE_KEYS = {
     "issue_ids",
     "issue_count",
@@ -5124,6 +5366,1001 @@ V2_CAPTURE_STATE_KEYS = {
     "rule_contract_root",
     "semantic_root",
 }
+V2_SOURCE_CAPTURE_CONTRACT_FIELDS = frozenset(
+    {
+        "count",
+        "coherent",
+        "tracker_cli",
+        "direct_tracker_file_access",
+        "network_access",
+        "audit_bracket",
+    }
+)
+V2_AUDIT_BRACKET_FIELDS = frozenset(
+    {
+        "state",
+        "position",
+        "source_before_ordinal",
+        "source_after_ordinal",
+        "audit_capture_ordinals",
+        "source_before_root",
+        "source_after_root",
+        "audit_capture_root",
+        "no_claim",
+        "semantic_root",
+    }
+)
+
+V2_BR_STATUS_SUMMARY_FIELDS = frozenset(
+    {
+        "average_lead_time_hours",
+        "blocked_issues",
+        "closed_issues",
+        "deferred_issues",
+        "draft_issues",
+        "epics_eligible_for_closure",
+        "in_progress_issues",
+        "open_issues",
+        "pinned_issues",
+        "ready_issues",
+        "tombstone_issues",
+        "total_issues",
+    }
+)
+V2_BR_SYNC_FIELDS = frozenset(
+    {
+        "db_newer",
+        "dirty_count",
+        "git_export",
+        "jsonl_content_hash",
+        "jsonl_exists",
+        "jsonl_newer",
+        "last_export_time",
+        "last_import_time",
+        "reliability_audit",
+        "workspace_health",
+    }
+)
+V2_BR_RELIABILITY_FIELDS = frozenset(
+    {"anomalies", "anomaly_count", "health", "source"}
+)
+V2_BR_RELIABILITY_ANOMALY_FIELDS = frozenset(
+    {"code", "message", "severity"}
+)
+V2_BR_GIT_EXPORT_FIELDS = frozenset(
+    {
+        "available",
+        "head_hash",
+        "index_clean",
+        "tracked",
+        "worktree_clean",
+        "worktree_hash",
+    }
+)
+V2_BR_WITNESS_FIELDS = frozenset(
+    {
+        "base_comparison",
+        "base_jsonl_path",
+        "base_parallel_work_plan",
+        "base_reuse_materialization",
+        "base_reuse_plan",
+        "jsonl_path",
+        "witness",
+    }
+)
+V2_BR_WITNESS_BODY_FIELDS = frozenset(
+    {
+        "byte_count",
+        "chunk_size_lines",
+        "chunks",
+        "line_count",
+        "root_hash",
+        "schema_version",
+    }
+)
+V2_BR_WITNESS_CHUNK_FIELDS = frozenset(
+    {
+        "byte_count",
+        "first_line_hash",
+        "hash",
+        "index",
+        "last_line_hash",
+        "line_count",
+        "start_line",
+    }
+)
+V2_BR_WITNESS_COMPARISON_FIELDS = frozenset(
+    {
+        "added_byte_count",
+        "added_chunks",
+        "base_byte_count",
+        "base_chunk_count",
+        "base_line_count",
+        "candidate_byte_count",
+        "candidate_chunk_count",
+        "candidate_line_count",
+        "changed_base_byte_count",
+        "changed_candidate_byte_count",
+        "changed_chunks",
+        "chunk_size_lines_match",
+        "comparable_chunk_count",
+        "drift_detected",
+        "first_changed_chunk_index",
+        "removed_byte_count",
+        "removed_chunks",
+        "root_hashes_match",
+        "safe_reuse_prefix_chunks",
+        "schema_versions_match",
+        "unchanged_byte_count",
+        "unchanged_chunks",
+    }
+)
+V2_BR_WITNESS_ACTION_FIELDS = frozenset(
+    {
+        "action",
+        "base_index",
+        "byte_count",
+        "candidate_index",
+        "line_count",
+        "start_line",
+    }
+)
+V2_BR_WITNESS_SCHEDULE_FIELDS = frozenset(
+    {
+        "candidate_output_actions",
+        "candidate_output_byte_count",
+        "candidate_output_line_count",
+        "deterministic_candidate_order",
+        "dropped_byte_count",
+        "max_parallel_candidate_actions",
+        "metadata_only_drop_actions",
+        "read_added_actions",
+        "read_added_byte_count",
+        "rebuild_actions",
+        "rebuild_byte_count",
+        "reusable_actions",
+        "reusable_byte_count",
+        "total_actions",
+    }
+)
+V2_BR_WITNESS_MATERIALIZATION_FIELDS = frozenset(
+    {
+        "dropped_byte_count",
+        "dropped_chunks",
+        "output_byte_count",
+        "read_added_byte_count",
+        "read_added_chunks",
+        "rebuilt_byte_count",
+        "rebuilt_chunks",
+        "reused_byte_count",
+        "reused_chunks",
+    }
+)
+V2_BR_WITNESS_PARALLEL_FIELDS = frozenset(
+    {
+        "batches",
+        "candidate_output_batches",
+        "deterministic_batch_order",
+        "max_parallelism",
+        "metadata_only_drop_batches",
+        "total_batches",
+    }
+)
+V2_BR_WITNESS_BATCH_FIELDS = frozenset(
+    {
+        "action_count",
+        "actions",
+        "byte_count",
+        "candidate_end_index",
+        "candidate_start_index",
+        "index",
+        "kind",
+        "line_count",
+    }
+)
+
+
+def v2_br_exact_mapping(
+    value: Any,
+    fields: Iterable[str],
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    expected = set(fields)
+    if not isinstance(value, dict) or set(value) != expected:
+        actual = set(value) if isinstance(value, dict) else set()
+        raise error_type(
+            f"{label} has a non-closed schema; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    return dict(value)
+
+
+def v2_br_nonnegative_int(
+    value: Any,
+    *,
+    label: str,
+    cap: int,
+    error_type: type[HarnessError],
+) -> int:
+    if type(value) is not int or value < 0 or value > cap:
+        raise error_type(f"{label} is not an exact bounded nonnegative integer")
+    return value
+
+
+def v2_br_hash(
+    value: Any,
+    *,
+    label: str,
+    width: int,
+    error_type: type[HarnessError],
+) -> str:
+    if not isinstance(value, str) or re.fullmatch(
+        rf"[0-9a-f]{{{width}}}", value
+    ) is None:
+        raise error_type(f"{label} is not a canonical lowercase hash")
+    return value
+
+
+def v2_normalize_br_status(
+    document: Any,
+    *,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    outer = v2_br_exact_mapping(
+        document,
+        {"summary"},
+        label="br status",
+        error_type=error_type,
+    )
+    summary = v2_br_exact_mapping(
+        outer["summary"],
+        V2_BR_STATUS_SUMMARY_FIELDS,
+        label="br status summary",
+        error_type=error_type,
+    )
+    for field in V2_BR_STATUS_SUMMARY_FIELDS - {"average_lead_time_hours"}:
+        v2_br_nonnegative_int(
+            summary[field],
+            label=f"br status summary {field}",
+            cap=V2_INVENTORY_ROWS_CAP,
+            error_type=error_type,
+        )
+    lead_time = summary["average_lead_time_hours"]
+    if type(lead_time) is not float or not math.isfinite(lead_time) or lead_time < 0:
+        raise error_type("br status average lead time is not a finite nonnegative float")
+    total = summary["total_issues"]
+    for field in (
+        "blocked_issues",
+        "epics_eligible_for_closure",
+        "pinned_issues",
+        "ready_issues",
+    ):
+        if summary[field] > total:
+            raise error_type(f"br status summary {field} exceeds total issues")
+    return {"summary": summary}
+
+
+def v2_normalize_br_sync_status(
+    document: Any,
+    *,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    optional_fields = {
+        "jsonl_content_hash",
+        "last_export_time",
+        "last_import_time",
+    }
+    if not isinstance(document, dict) or not (
+        V2_BR_SYNC_FIELDS - optional_fields
+    ).issubset(document) or not set(document).issubset(V2_BR_SYNC_FIELDS):
+        raise error_type("br sync status has a non-closed schema")
+    normalized = dict(document)
+    for field in optional_fields:
+        normalized.setdefault(field, None)
+    for field in ("db_newer", "jsonl_exists", "jsonl_newer"):
+        if type(normalized[field]) is not bool:
+            raise error_type(f"br sync status {field} is not an exact boolean")
+    v2_br_nonnegative_int(
+        normalized["dirty_count"],
+        label="br sync status dirty_count",
+        cap=V2_INVENTORY_ROWS_CAP,
+        error_type=error_type,
+    )
+    if normalized["jsonl_exists"]:
+        v2_br_hash(
+            normalized["jsonl_content_hash"],
+            label="br sync status JSONL content hash",
+            width=64,
+            error_type=error_type,
+        )
+    elif normalized["jsonl_content_hash"] not in {"", None}:
+        raise error_type("br sync status has a hash for an absent JSONL export")
+    for field in ("last_export_time", "last_import_time"):
+        value = normalized[field]
+        if value is not None and not isinstance(value, str):
+            raise error_type(f"br sync status {field} is not a string or null")
+        if value:
+            try:
+                v2_parse_timestamp(value, label=f"br sync status {field}")
+            except HarnessError as error:
+                raise error_type(f"br sync status {field} is malformed") from error
+    if not isinstance(normalized["workspace_health"], str) or not normalized[
+        "workspace_health"
+    ]:
+        raise error_type("br sync status workspace health is empty or malformed")
+    reliability = v2_br_exact_mapping(
+        normalized["reliability_audit"],
+        V2_BR_RELIABILITY_FIELDS,
+        label="br sync reliability audit",
+        error_type=error_type,
+    )
+    anomalies = reliability["anomalies"]
+    anomaly_count = v2_br_nonnegative_int(
+        reliability["anomaly_count"],
+        label="br sync reliability anomaly_count",
+        cap=V2_INVENTORY_ROWS_CAP,
+        error_type=error_type,
+    )
+    if not isinstance(anomalies, list) or anomaly_count != len(anomalies):
+        raise error_type("br sync reliability anomaly count differs from its rows")
+    normalized_anomalies: list[dict[str, str]] = []
+    anomaly_codes: list[str] = []
+    for index, raw_anomaly in enumerate(anomalies):
+        anomaly = v2_br_exact_mapping(
+            raw_anomaly,
+            V2_BR_RELIABILITY_ANOMALY_FIELDS,
+            label=f"br sync reliability anomaly {index}",
+            error_type=error_type,
+        )
+        if any(
+            not isinstance(anomaly[field], str) or not anomaly[field]
+            for field in ("code", "message", "severity")
+        ) or anomaly["severity"] not in {
+            "healthy",
+            "degraded",
+            "recoverable",
+            "unsafe",
+        }:
+            raise error_type(
+                f"br sync reliability anomaly {index} is malformed"
+            )
+        anomaly_codes.append(anomaly["code"])
+        normalized_anomalies.append(anomaly)
+    if len(anomaly_codes) != len(set(anomaly_codes)):
+        raise error_type("br sync reliability anomaly codes are duplicated")
+    if (
+        reliability["source"] != "sync.status"
+        or reliability["health"]
+        not in {"healthy", "degraded", "recoverable", "unsafe"}
+        or normalized["workspace_health"] != reliability["health"]
+        or (reliability["health"] == "healthy") != (anomaly_count == 0)
+    ):
+        raise error_type("br sync reliability audit identity is malformed")
+    reliability["anomalies"] = normalized_anomalies
+    git_export = normalized["git_export"]
+    if git_export == {"available": False}:
+        normalized_git_export = {"available": False}
+    else:
+        optional_git_fields = {"head_hash"}
+        if not isinstance(git_export, dict) or not (
+            V2_BR_GIT_EXPORT_FIELDS - optional_git_fields
+        ).issubset(git_export) or not set(git_export).issubset(
+            V2_BR_GIT_EXPORT_FIELDS
+        ):
+            raise error_type("br sync git export has a non-closed schema")
+        normalized_git_export = dict(git_export)
+        normalized_git_export.setdefault("head_hash", None)
+        for field in ("available", "tracked", "worktree_clean", "index_clean"):
+            if type(normalized_git_export[field]) is not bool:
+                raise error_type(f"br sync git export {field} is not boolean")
+        if normalized_git_export["available"] is not True:
+            raise error_type("br sync unavailable git export has extra fields")
+        v2_br_hash(
+            normalized_git_export["worktree_hash"],
+            label="br sync git export worktree_hash",
+            width=40,
+            error_type=error_type,
+        )
+        if normalized_git_export["tracked"]:
+            v2_br_hash(
+                normalized_git_export["head_hash"],
+                label="br sync git export head_hash",
+                width=40,
+                error_type=error_type,
+            )
+        elif normalized_git_export["head_hash"] is not None:
+            raise error_type("untracked br sync git export has a head hash")
+        if (
+            normalized_git_export["tracked"]
+            and normalized_git_export["worktree_clean"]
+            and normalized_git_export["index_clean"]
+            and normalized_git_export["head_hash"]
+            != normalized_git_export["worktree_hash"]
+        ):
+            raise error_type("clean br sync git export hashes disagree")
+    normalized["reliability_audit"] = reliability
+    normalized["git_export"] = normalized_git_export
+    return normalized
+
+
+def v2_normalize_br_witness_actions(
+    value: Any,
+    *,
+    chunks: Sequence[Mapping[str, Any]],
+    comparison: Mapping[str, Any],
+    require_complete_candidate_coverage: bool = True,
+    error_type: type[HarnessError],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 2 * V2_INVENTORY_ROWS_CAP:
+        raise error_type("br witness actions are malformed or over cap")
+    normalized: list[dict[str, Any]] = []
+    candidate_indices: list[int] = []
+    dropped_indices: list[int] = []
+    drops_started = False
+    comparable = comparison["comparable_chunk_count"]
+    base_chunk_count = comparison["base_chunk_count"]
+    witnesses_comparable = (
+        comparison["schema_versions_match"]
+        and comparison["chunk_size_lines_match"]
+    )
+    for index, raw in enumerate(value):
+        action = v2_br_exact_mapping(
+            raw,
+            V2_BR_WITNESS_ACTION_FIELDS,
+            label=f"br witness action {index}",
+            error_type=error_type,
+        )
+        kind = action["action"]
+        if kind not in {
+            "reuse_unchanged",
+            "rebuild_candidate",
+            "read_added",
+            "drop_removed",
+        }:
+            raise error_type(f"br witness action {index} has an unknown kind")
+        for field in ("start_line", "line_count", "byte_count"):
+            v2_br_nonnegative_int(
+                action[field],
+                label=f"br witness action {index} {field}",
+                cap=RUN_ARTIFACT_CAP,
+                error_type=error_type,
+            )
+        base_index = action["base_index"]
+        candidate_index = action["candidate_index"]
+        if kind == "drop_removed":
+            if type(base_index) is not int or candidate_index is not None:
+                raise error_type(f"br witness action {index} index contract differs")
+            if base_index < comparable or base_index >= base_chunk_count:
+                raise error_type(f"br witness action {index} base index is invalid")
+            drops_started = True
+            dropped_indices.append(base_index)
+        elif type(candidate_index) is not int:
+            raise error_type(f"br witness action {index} index contract differs")
+        if candidate_index is not None:
+            if drops_started:
+                raise error_type("br witness candidate action follows a drop action")
+            if candidate_index < 0 or candidate_index >= len(chunks):
+                raise error_type(f"br witness action {index} candidate index is invalid")
+            if candidate_index < comparable:
+                if (
+                    base_index != candidate_index
+                    or kind not in {"reuse_unchanged", "rebuild_candidate"}
+                ):
+                    raise error_type(
+                        f"br witness action {index} comparable index contract differs"
+                    )
+            elif (
+                base_index is not None
+                or kind
+                != (
+                    "read_added"
+                    if witnesses_comparable
+                    else "rebuild_candidate"
+                )
+            ):
+                raise error_type(
+                    f"br witness action {index} tail index contract differs"
+                )
+            chunk = chunks[candidate_index]
+            if any(
+                action[field] != chunk[field]
+                for field in ("start_line", "line_count", "byte_count")
+            ):
+                raise error_type(f"br witness action {index} differs from its chunk")
+            candidate_indices.append(candidate_index)
+        normalized.append(action)
+    if require_complete_candidate_coverage:
+        if candidate_indices != list(range(len(chunks))):
+            raise error_type("br witness candidate actions do not exact-cover chunks")
+        if dropped_indices != list(range(comparable, base_chunk_count)):
+            raise error_type("br witness dropped actions do not exact-cover base tail")
+    else:
+        if candidate_indices != sorted(set(candidate_indices)):
+            raise error_type("br witness candidate actions are noncanonical")
+        if dropped_indices != sorted(set(dropped_indices)):
+            raise error_type("br witness dropped actions are noncanonical")
+    return normalized
+
+
+def v2_normalize_br_export_witness(
+    document: Any,
+    *,
+    workspace_root: Path = REPO_ROOT,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    normalized = v2_br_exact_mapping(
+        document,
+        V2_BR_WITNESS_FIELDS,
+        label="br export witness",
+        error_type=error_type,
+    )
+    path_contract = {
+        "jsonl_path": (
+            str(workspace_root / ".beads" / "issues.jsonl"),
+            ".beads/issues.jsonl",
+        ),
+        "base_jsonl_path": (
+            str(workspace_root / ".beads" / "beads.base.jsonl"),
+            ".beads/beads.base.jsonl",
+        ),
+    }
+    for field, (absolute, relative) in path_contract.items():
+        if normalized[field] not in {absolute, relative}:
+            raise error_type(f"br export witness {field} is outside its fixed path")
+        normalized[field] = relative
+    witness = v2_br_exact_mapping(
+        normalized["witness"],
+        V2_BR_WITNESS_BODY_FIELDS,
+        label="br export witness body",
+        error_type=error_type,
+    )
+    if witness["schema_version"] != "br.jsonl-witness.v1":
+        raise error_type("br export witness has an unknown schema version")
+    line_count = v2_br_nonnegative_int(
+        witness["line_count"],
+        label="br export witness line_count",
+        cap=V2_INVENTORY_ROWS_CAP,
+        error_type=error_type,
+    )
+    byte_count = v2_br_nonnegative_int(
+        witness["byte_count"],
+        label="br export witness byte_count",
+        cap=RUN_ARTIFACT_CAP,
+        error_type=error_type,
+    )
+    chunk_size = v2_br_nonnegative_int(
+        witness["chunk_size_lines"],
+        label="br export witness chunk_size_lines",
+        cap=V2_INVENTORY_ROWS_CAP,
+        error_type=error_type,
+    )
+    if chunk_size == 0:
+        raise error_type("br export witness chunk size is zero")
+    v2_br_hash(
+        witness["root_hash"],
+        label="br export witness root_hash",
+        width=64,
+        error_type=error_type,
+    )
+    raw_chunks = witness["chunks"]
+    if not isinstance(raw_chunks, list) or len(raw_chunks) > V2_INVENTORY_ROWS_CAP:
+        raise error_type("br export witness chunks are malformed or over cap")
+    chunks: list[dict[str, Any]] = []
+    next_line = 0
+    total_bytes = 0
+    for index, raw_chunk in enumerate(raw_chunks):
+        chunk = v2_br_exact_mapping(
+            raw_chunk,
+            V2_BR_WITNESS_CHUNK_FIELDS,
+            label=f"br export witness chunk {index}",
+            error_type=error_type,
+        )
+        if chunk["index"] != index or chunk["start_line"] != next_line:
+            raise error_type("br export witness chunk order or line offset differs")
+        chunk_lines = v2_br_nonnegative_int(
+            chunk["line_count"],
+            label=f"br export witness chunk {index} line_count",
+            cap=chunk_size,
+            error_type=error_type,
+        )
+        chunk_bytes = v2_br_nonnegative_int(
+            chunk["byte_count"],
+            label=f"br export witness chunk {index} byte_count",
+            cap=RUN_ARTIFACT_CAP,
+            error_type=error_type,
+        )
+        if chunk_lines == 0 or (index + 1 < len(raw_chunks) and chunk_lines != chunk_size):
+            raise error_type("br export witness chunk line count is noncanonical")
+        for field in ("hash", "first_line_hash", "last_line_hash"):
+            v2_br_hash(
+                chunk[field],
+                label=f"br export witness chunk {index} {field}",
+                width=64,
+                error_type=error_type,
+            )
+        next_line += chunk_lines
+        total_bytes += chunk_bytes
+        if total_bytes > RUN_ARTIFACT_CAP:
+            raise error_type("br export witness chunk bytes exceed the cap")
+        chunks.append(chunk)
+    if (line_count == 0) != (not chunks):
+        raise error_type("br export witness empty membership is inconsistent")
+    if next_line != line_count or total_bytes != byte_count:
+        raise error_type("br export witness chunk arithmetic differs")
+    witness["chunks"] = chunks
+
+    comparison = v2_br_exact_mapping(
+        normalized["base_comparison"],
+        V2_BR_WITNESS_COMPARISON_FIELDS,
+        label="br export witness base comparison",
+        error_type=error_type,
+    )
+    integer_fields = V2_BR_WITNESS_COMPARISON_FIELDS - {
+        "chunk_size_lines_match",
+        "drift_detected",
+        "first_changed_chunk_index",
+        "root_hashes_match",
+        "schema_versions_match",
+    }
+    for field in integer_fields:
+        v2_br_nonnegative_int(
+            comparison[field],
+            label=f"br export witness comparison {field}",
+            cap=RUN_ARTIFACT_CAP,
+            error_type=error_type,
+        )
+    for field in (
+        "chunk_size_lines_match",
+        "drift_detected",
+        "root_hashes_match",
+        "schema_versions_match",
+    ):
+        if type(comparison[field]) is not bool:
+            raise error_type(f"br export witness comparison {field} is not boolean")
+    first_changed = comparison["first_changed_chunk_index"]
+    maximum_chunks = max(
+        comparison["base_chunk_count"],
+        comparison["candidate_chunk_count"],
+    )
+    if first_changed is not None and (
+        type(first_changed) is not int
+        or first_changed < 0
+        or first_changed > maximum_chunks
+    ):
+        raise error_type("br export witness first changed chunk index is invalid")
+    witnesses_comparable = (
+        comparison["schema_versions_match"]
+        and comparison["chunk_size_lines_match"]
+    )
+    comparable = (
+        min(
+            comparison["base_chunk_count"],
+            comparison["candidate_chunk_count"],
+        )
+        if witnesses_comparable
+        else 0
+    )
+    if (
+        comparison["comparable_chunk_count"] != comparable
+        or comparison["unchanged_chunks"] + comparison["changed_chunks"]
+        != comparable
+        or comparison["added_chunks"]
+        != comparison["candidate_chunk_count"] - comparable
+        or comparison["removed_chunks"]
+        != comparison["base_chunk_count"] - comparable
+        or comparison["base_byte_count"]
+        != comparison["unchanged_byte_count"]
+        + comparison["changed_base_byte_count"]
+        + comparison["removed_byte_count"]
+        or comparison["candidate_byte_count"]
+        != comparison["unchanged_byte_count"]
+        + comparison["changed_candidate_byte_count"]
+        + comparison["added_byte_count"]
+        or comparison["safe_reuse_prefix_chunks"]
+        > comparison["unchanged_chunks"]
+        or comparison["candidate_chunk_count"] != len(chunks)
+        or comparison["candidate_line_count"] != line_count
+        or comparison["candidate_byte_count"] != byte_count
+        or comparison["drift_detected"]
+        != (not (witnesses_comparable and comparison["root_hashes_match"]))
+    ):
+        raise error_type("br export witness comparison arithmetic differs")
+    if not comparison["drift_detected"] and (
+        first_changed is not None
+        or any(
+            comparison[field] != 0
+            for field in (
+                "added_byte_count",
+                "added_chunks",
+                "changed_base_byte_count",
+                "changed_candidate_byte_count",
+                "changed_chunks",
+                "removed_byte_count",
+                "removed_chunks",
+            )
+        )
+    ):
+        raise error_type("br export witness no-drift comparison is inconsistent")
+
+    reuse_plan = v2_br_exact_mapping(
+        normalized["base_reuse_plan"],
+        {"actions", "comparison", "schedule"},
+        label="br export witness reuse plan",
+        error_type=error_type,
+    )
+    if reuse_plan["comparison"] != comparison:
+        raise error_type("br export witness repeated comparison differs")
+    actions = v2_normalize_br_witness_actions(
+        reuse_plan["actions"],
+        chunks=chunks,
+        comparison=comparison,
+        error_type=error_type,
+    )
+    candidate_action_kinds = [
+        action["action"]
+        for action in actions
+        if action["candidate_index"] is not None
+    ]
+    safe_prefix = 0
+    for kind in candidate_action_kinds:
+        if kind != "reuse_unchanged":
+            break
+        safe_prefix += 1
+    first_changed = next(
+        (
+            index
+            for index, kind in enumerate(candidate_action_kinds)
+            if kind != "reuse_unchanged"
+        ),
+        (
+            actions[len(candidate_action_kinds)]["base_index"]
+            if len(actions) > len(candidate_action_kinds)
+            else (None if witnesses_comparable else 0)
+        ),
+    )
+    if (
+        comparison["safe_reuse_prefix_chunks"] != safe_prefix
+        or comparison["first_changed_chunk_index"] != first_changed
+    ):
+        raise error_type(
+            "br export witness changed-index or reusable-prefix evidence differs"
+        )
+    schedule = v2_br_exact_mapping(
+        reuse_plan["schedule"],
+        V2_BR_WITNESS_SCHEDULE_FIELDS,
+        label="br export witness schedule",
+        error_type=error_type,
+    )
+    for field in V2_BR_WITNESS_SCHEDULE_FIELDS - {"deterministic_candidate_order"}:
+        v2_br_nonnegative_int(
+            schedule[field],
+            label=f"br export witness schedule {field}",
+            cap=RUN_ARTIFACT_CAP,
+            error_type=error_type,
+        )
+    if schedule["deterministic_candidate_order"] is not True:
+        raise error_type("br export witness candidate action order is nondeterministic")
+    by_kind = Counter(action["action"] for action in actions)
+    bytes_by_kind = Counter()
+    for action in actions:
+        bytes_by_kind[action["action"]] += action["byte_count"]
+    candidate_actions = [
+        action for action in actions if action["candidate_index"] is not None
+    ]
+    if (
+        schedule["total_actions"] != len(actions)
+        or schedule["candidate_output_actions"] != len(candidate_actions)
+        or schedule["max_parallel_candidate_actions"] != len(candidate_actions)
+        or schedule["metadata_only_drop_actions"] != by_kind["drop_removed"]
+        or schedule["reusable_actions"] != by_kind["reuse_unchanged"]
+        or schedule["rebuild_actions"] != by_kind["rebuild_candidate"]
+        or schedule["read_added_actions"] != by_kind["read_added"]
+        or schedule["candidate_output_line_count"] != line_count
+        or schedule["candidate_output_byte_count"] != byte_count
+        or schedule["reusable_byte_count"] != bytes_by_kind["reuse_unchanged"]
+        or schedule["rebuild_byte_count"] != bytes_by_kind["rebuild_candidate"]
+        or schedule["read_added_byte_count"] != bytes_by_kind["read_added"]
+        or schedule["dropped_byte_count"] != bytes_by_kind["drop_removed"]
+        or by_kind["reuse_unchanged"] != comparison["unchanged_chunks"]
+        or by_kind["rebuild_candidate"]
+        != (
+            comparison["changed_chunks"]
+            if witnesses_comparable
+            else comparison["added_chunks"]
+        )
+        or by_kind["read_added"]
+        != (comparison["added_chunks"] if witnesses_comparable else 0)
+        or by_kind["drop_removed"] != comparison["removed_chunks"]
+    ):
+        raise error_type("br export witness schedule arithmetic differs")
+    reuse_plan["actions"] = actions
+    reuse_plan["schedule"] = schedule
+
+    materialization = v2_br_exact_mapping(
+        normalized["base_reuse_materialization"],
+        V2_BR_WITNESS_MATERIALIZATION_FIELDS,
+        label="br export witness reuse materialization",
+        error_type=error_type,
+    )
+    for field in V2_BR_WITNESS_MATERIALIZATION_FIELDS:
+        v2_br_nonnegative_int(
+            materialization[field],
+            label=f"br export witness materialization {field}",
+            cap=RUN_ARTIFACT_CAP,
+            error_type=error_type,
+        )
+    if (
+        materialization["reused_chunks"] != by_kind["reuse_unchanged"]
+        or materialization["rebuilt_chunks"] != by_kind["rebuild_candidate"]
+        or materialization["read_added_chunks"] != by_kind["read_added"]
+        or materialization["dropped_chunks"] != by_kind["drop_removed"]
+        or materialization["reused_byte_count"]
+        != bytes_by_kind["reuse_unchanged"]
+        or materialization["rebuilt_byte_count"]
+        != bytes_by_kind["rebuild_candidate"]
+        or materialization["read_added_byte_count"] != bytes_by_kind["read_added"]
+        or materialization["dropped_byte_count"] != bytes_by_kind["drop_removed"]
+        or materialization["output_byte_count"] != byte_count
+        or materialization["output_byte_count"]
+        != materialization["reused_byte_count"]
+        + materialization["rebuilt_byte_count"]
+        + materialization["read_added_byte_count"]
+    ):
+        raise error_type("br export witness materialization arithmetic differs")
+
+    parallel = v2_br_exact_mapping(
+        normalized["base_parallel_work_plan"],
+        V2_BR_WITNESS_PARALLEL_FIELDS,
+        label="br export witness parallel plan",
+        error_type=error_type,
+    )
+    for field in V2_BR_WITNESS_PARALLEL_FIELDS - {
+        "batches",
+        "deterministic_batch_order",
+    }:
+        v2_br_nonnegative_int(
+            parallel[field],
+            label=f"br export witness parallel plan {field}",
+            cap=V2_INVENTORY_ROWS_CAP,
+            error_type=error_type,
+        )
+    if parallel["deterministic_batch_order"] is not True or parallel[
+        "max_parallelism"
+    ] == 0:
+        raise error_type("br export witness parallel plan is nondeterministic")
+    raw_batches = parallel["batches"]
+    if not isinstance(raw_batches, list) or len(raw_batches) > V2_INVENTORY_ROWS_CAP:
+        raise error_type("br export witness batches are malformed or over cap")
+    batches: list[dict[str, Any]] = []
+    batched_actions: list[dict[str, Any]] = []
+    for index, raw_batch in enumerate(raw_batches):
+        batch = v2_br_exact_mapping(
+            raw_batch,
+            V2_BR_WITNESS_BATCH_FIELDS,
+            label=f"br export witness batch {index}",
+            error_type=error_type,
+        )
+        if batch["index"] != index or batch["kind"] not in {
+            "candidate_output",
+            "metadata_only_drop",
+        }:
+            raise error_type("br export witness batch identity is noncanonical")
+        batch_actions = v2_normalize_br_witness_actions(
+            batch["actions"],
+            chunks=chunks,
+            comparison=comparison,
+            require_complete_candidate_coverage=False,
+            error_type=error_type,
+        )
+        if not batch_actions or len(batch_actions) > parallel["max_parallelism"]:
+            raise error_type(
+                "br export witness batch is empty or exceeds max parallelism"
+            )
+        candidate_indices = [
+            action["candidate_index"]
+            for action in batch_actions
+            if action["candidate_index"] is not None
+        ]
+        if batch["kind"] == "candidate_output":
+            if not candidate_indices or len(candidate_indices) != len(batch_actions):
+                raise error_type(
+                    "br export witness candidate batch is empty or contains a drop"
+                )
+            expected_start = candidate_indices[0] if candidate_indices else 0
+            expected_end = (
+                candidate_indices[-1] + 1 if candidate_indices else expected_start
+            )
+        else:
+            if any(
+                action["action"] != "drop_removed"
+                for action in batch_actions
+            ):
+                raise error_type(
+                    "br export witness metadata-only batch contains an output action"
+                )
+            expected_start = None
+            expected_end = None
+        if (
+            type(batch["action_count"]) is not int
+            or batch["action_count"] != len(batch_actions)
+            or batch["candidate_start_index"] != expected_start
+            or batch["candidate_end_index"] != expected_end
+            or type(batch["line_count"]) is not int
+            or batch["line_count"] != sum(
+                action["line_count"] for action in batch_actions
+            )
+            or type(batch["byte_count"]) is not int
+            or batch["byte_count"] != sum(
+                action["byte_count"] for action in batch_actions
+            )
+        ):
+            raise error_type("br export witness batch arithmetic differs")
+        batch["actions"] = batch_actions
+        batches.append(batch)
+        batched_actions.extend(batch_actions)
+    if (
+        parallel["total_batches"] != len(batches)
+        or parallel["candidate_output_batches"]
+        != sum(batch["kind"] == "candidate_output" for batch in batches)
+        or parallel["metadata_only_drop_batches"]
+        != sum(batch["kind"] == "metadata_only_drop" for batch in batches)
+        or batched_actions != actions
+    ):
+        raise error_type("br export witness parallel batch coverage differs")
+    parallel["batches"] = batches
+
+    normalized["witness"] = witness
+    normalized["base_comparison"] = comparison
+    normalized["base_reuse_plan"] = reuse_plan
+    normalized["base_reuse_materialization"] = materialization
+    normalized["base_parallel_work_plan"] = parallel
+    return normalized
+
+
+def v2_validate_live_envelope_consistency(
+    *,
+    tracker_status: Mapping[str, Any],
+    sync_status: Mapping[str, Any],
+    export_witness: Mapping[str, Any],
+    full_issues: Sequence[Mapping[str, Any]],
+    error_type: type[HarnessError],
+) -> None:
+    summary = tracker_status["summary"]
+    status_counts = Counter(str(issue.get("status") or "") for issue in full_issues)
+    total = len(full_issues)
+    inferred_blocked = total - sum(
+        summary[field]
+        for field in (
+            "open_issues",
+            "in_progress_issues",
+            "deferred_issues",
+            "closed_issues",
+        )
+    )
+    if (
+        summary["total_issues"] != total
+        or summary["open_issues"] != status_counts["open"]
+        or summary["in_progress_issues"] != status_counts["in_progress"]
+        or summary["deferred_issues"] != status_counts["deferred"]
+        or summary["closed_issues"] != status_counts["closed"]
+        or inferred_blocked != status_counts["blocked"]
+        or summary["draft_issues"] != 0
+        or summary["tombstone_issues"] != 0
+    ):
+        raise error_type("br status summary disagrees with the all-status source")
+    witness = export_witness["witness"]
+    comparison = export_witness["base_comparison"]
+    exported_issue_count = sum(
+        issue.get("ephemeral") is not True for issue in full_issues
+    )
+    if (
+        sync_status["jsonl_exists"] is not True
+        or witness["line_count"] != exported_issue_count
+        or comparison["candidate_line_count"] != exported_issue_count
+    ):
+        raise error_type("br sync witness disagrees with the all-status source")
 
 
 def v2_source_file_identities() -> list[dict[str, Any]]:
@@ -5216,6 +6453,58 @@ def v2_validate_capture_pair(
             f"{changed}"
         )
     return str(after["semantic_root"])
+
+
+def v2_validate_source_capture_contract(
+    capture_contract: Any,
+    *,
+    audit_capture: Mapping[str, Any],
+    coherent_capture_root: str,
+) -> None:
+    if not isinstance(capture_contract, dict):
+        raise InputRefused("v2 source capture contract is not an object")
+    v2_exact_keys(
+        capture_contract,
+        V2_SOURCE_CAPTURE_CONTRACT_FIELDS,
+        label="v2 source capture contract",
+    )
+    if (
+        capture_contract["count"] != 2
+        or capture_contract["coherent"] is not True
+        or capture_contract["tracker_cli"] != "br"
+        or capture_contract["direct_tracker_file_access"] is not False
+        or capture_contract["network_access"] is not False
+    ):
+        raise InputRefused("v2 source capture contract scalars differ")
+    bracket = capture_contract["audit_bracket"]
+    if not isinstance(bracket, dict):
+        raise InputRefused("v2 source audit bracket is not an object")
+    v2_exact_keys(
+        bracket,
+        V2_AUDIT_BRACKET_FIELDS,
+        label="v2 source audit bracket",
+    )
+    verify_semantic_root(bracket, label="v2 source audit bracket")
+    not_requested = "state" in audit_capture
+    expected = v2_rooted(
+        {
+            "state": "NOT_REQUESTED" if not_requested else "CAPTURED",
+            "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+            "source_before_ordinal": 1,
+            "source_after_ordinal": 2,
+            "audit_capture_ordinals": [] if not_requested else [1, 2],
+            "source_before_root": coherent_capture_root,
+            "source_after_root": coherent_capture_root,
+            "audit_capture_root": audit_capture.get("semantic_root"),
+            "no_claim": V2_AUDIT_BRACKET_NO_CLAIM,
+        }
+    )
+    if bracket != expected:
+        divergence = first_projection_divergence(expected, bracket)
+        raise InputRefused(
+            "v2 source audit bracket differs at "
+            f"{divergence or '$'}"
+        )
 
 
 def collect_live(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
@@ -5354,77 +6643,170 @@ def collect_live(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     )
 
 
-def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
-    _command_receipts.clear()
-    rule_contract = {
+def v2_source_rule_contract() -> dict[str, Any]:
+    return {
         "required_sections_by_type": REQUIRED_SECTIONS_BY_TYPE,
         "clause_terms": list(CLAUSE_TERMS),
         "classifier": "independent-template-findings-v2",
     }
-    source_files_before = v2_source_file_identities()
-    status_before = br_read_json("status", "--json", "--no-activity")
-    sync_before = br_read_json("sync", "--status", "--json")
-    witness_before = br_read_json("sync", "--witness", "--json")
-    version_before = br_version()
-    capabilities_before = br_capabilities()
-    list_before_document = br_read_json("list", "--all", "--json", "--limit", "0")
-    issue_ids_before = v2_list_issue_ids(
-        list_before_document,
-        label="v2 br list before",
-    )
-    full_before = v2_show_all_issues(issue_ids_before)
-    v2_validate_source_graph(full_before)
-    lint_before = lint_scopes()
-    capture_before = v2_capture_state(
-        issue_ids=issue_ids_before,
-        full_issues=full_before,
-        lint=lint_before,
-        tracker_status=status_before,
-        sync_status=sync_before,
-        export_witness=witness_before,
-        version=version_before,
-        capabilities=capabilities_before,
-        source_files=source_files_before,
-        rule_contract=rule_contract,
+
+
+def v2_not_requested_audit_capture() -> dict[str, Any]:
+    return v2_rooted(
+        {
+            "state": "NOT_REQUESTED",
+            "capture_count": 0,
+            "issue_ids": [],
+            "documents": [],
+            "command_receipts": [],
+            "raw_stream_bodies_retained": False,
+            "no_claim": V2_AUDIT_NOT_REQUESTED_NO_CLAIM,
+        }
     )
 
-    check_cancel()
-    status_after = br_read_json("status", "--json", "--no-activity")
-    sync_after = br_read_json("sync", "--status", "--json")
-    witness_after = br_read_json("sync", "--witness", "--json")
-    version_after = br_version()
-    capabilities_after = br_capabilities()
-    list_after_document = br_read_json("list", "--all", "--json", "--limit", "0")
-    issue_ids_after = v2_list_issue_ids(
-        list_after_document,
-        label="v2 br list after",
+
+def v2_capture_live_round(
+    case_manifest: Mapping[str, Any],
+    rule_contract: Mapping[str, Any],
+    *,
+    ordinal: int,
+    br_cwd: Path = REPO_ROOT,
+) -> V2LiveCaptureRound:
+    if ordinal not in {1, 2}:
+        raise EvidenceFailed("v2 source capture ordinal must be one or two")
+    workspace_root = Path(br_cwd).resolve()
+    source_files_before = (
+        v2_source_file_identities() if ordinal == 1 else None
     )
-    full_after = v2_show_all_issues(issue_ids_after)
-    v2_validate_source_graph(full_after)
-    lint_after = lint_scopes()
-    source_files_after = v2_source_file_identities()
-    capture_after = v2_capture_state(
-        issue_ids=issue_ids_after,
-        full_issues=full_after,
-        lint=lint_after,
-        tracker_status=status_after,
-        sync_status=sync_after,
-        export_witness=witness_after,
-        version=version_after,
-        capabilities=capabilities_after,
-        source_files=source_files_after,
+    status = v2_normalize_br_status(
+        br_read_json(
+            "status",
+            "--json",
+            "--no-activity",
+            br_cwd=br_cwd,
+        ),
+        error_type=InfrastructureFailed,
+    )
+    sync_status = v2_normalize_br_sync_status(
+        br_read_json(
+            "sync",
+            "--status",
+            "--json",
+            br_cwd=br_cwd,
+        ),
+        error_type=InfrastructureFailed,
+    )
+    export_witness = v2_normalize_br_export_witness(
+        br_read_json(
+            "sync",
+            "--witness",
+            "--json",
+            br_cwd=br_cwd,
+        ),
+        workspace_root=workspace_root,
+        error_type=InfrastructureFailed,
+    )
+    version = br_version(br_cwd=br_cwd)
+    capabilities = br_capabilities(br_cwd=br_cwd)
+    listed = br_read_json(
+        "list",
+        "--all",
+        "--json",
+        "--limit",
+        "0",
+        br_cwd=br_cwd,
+    )
+    issue_ids = v2_list_issue_ids(
+        listed,
+        label=f"v2 br list capture {ordinal}",
+    )
+    full_issues = v2_show_all_issues(issue_ids, br_cwd=br_cwd)
+    v2_validate_source_graph(full_issues)
+    lint = lint_scopes(br_cwd=br_cwd)
+    source_files = source_files_before or v2_source_file_identities()
+    v2_validate_live_envelope_consistency(
+        tracker_status=status,
+        sync_status=sync_status,
+        export_witness=export_witness,
+        full_issues=full_issues,
+        error_type=InfrastructureFailed,
+    )
+    capture_state = v2_capture_state(
+        issue_ids=issue_ids,
+        full_issues=full_issues,
+        lint=lint,
+        tracker_status=status,
+        sync_status=sync_status,
+        export_witness=export_witness,
+        version=version,
+        capabilities=capabilities,
+        source_files=source_files,
         rule_contract=rule_contract,
     )
-    coherent_capture_root = v2_validate_capture_pair(
-        capture_before,
-        capture_after,
+    return V2LiveCaptureRound(
+        ordinal=ordinal,
+        issue_ids=tuple(issue_ids),
+        full_issues=tuple(full_issues),
+        lint=lint,
+        tracker_status=status,
+        sync_status=sync_status,
+        export_witness=export_witness,
+        version=version,
+        capabilities=capabilities,
+        source_files=tuple(source_files),
+        rule_contract=dict(rule_contract),
+        capture_state=capture_state,
     )
+
+
+def v2_build_audit_bracket(
+    before: V2LiveCaptureRound,
+    after: V2LiveCaptureRound,
+    audit_capture: Mapping[str, Any],
+) -> dict[str, Any]:
+    if before.ordinal != 1 or after.ordinal != 2:
+        raise EvidenceFailed("v2 audit bracket source ordinals differ")
+    verify_semantic_root(audit_capture, label="v2 bracketed audit capture")
+    not_requested = "state" in audit_capture
+    if (
+        (not_requested and audit_capture.get("capture_count") != 0)
+        or (not not_requested and audit_capture.get("capture_count") != 2)
+    ):
+        raise EvidenceFailed("v2 bracketed audit capture count differs")
+    return v2_rooted(
+        {
+            "state": "NOT_REQUESTED" if not_requested else "CAPTURED",
+            "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+            "source_before_ordinal": 1,
+            "source_after_ordinal": 2,
+            "audit_capture_ordinals": [] if not_requested else [1, 2],
+            "source_before_root": before.capture_state["semantic_root"],
+            "source_after_root": after.capture_state["semantic_root"],
+            "audit_capture_root": audit_capture["semantic_root"],
+            "no_claim": V2_AUDIT_BRACKET_NO_CLAIM,
+        }
+    )
+
+
+def v2_finalize_live_capture_pair(
+    case_manifest: Mapping[str, Any],
+    *,
+    before: V2LiveCaptureRound,
+    after: V2LiveCaptureRound,
+    audit_capture: Mapping[str, Any],
+) -> LiveSnapshot:
+    coherent_capture_root = v2_validate_capture_pair(
+        before.capture_state,
+        after.capture_state,
+    )
+    audit_bracket = v2_build_audit_bracket(before, after, audit_capture)
+    full_after = list(after.full_issues)
     if len(full_after) > V2_INVENTORY_ROWS_CAP:
         raise InputRefused(
             f"v2 source exceeds {V2_INVENTORY_ROWS_CAP} issue rows"
         )
     for issue in full_after:
-        if issue["status"] not in {"open", "in_progress", "blocked", "deferred", "closed"}:
+        if issue["status"] not in STATUS_SCOPES:
             raise EvidenceFailed(
                 f"{issue['id']} has unpartitioned status {issue['status']}"
             )
@@ -5432,13 +6814,12 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
             raise EvidenceFailed(
                 f"{issue['id']} has unpartitioned priority {issue['priority']}"
             )
-
     independent = {
         issue["id"]: findings
         for issue in full_after
         if (findings := independent_template_findings(issue))
     }
-    lint_ids = set(lint_result_map(lint_after))
+    lint_ids = set(lint_result_map(after.lint))
     nonclosed_ids = {
         str(issue["id"])
         for issue in full_after
@@ -5456,29 +6837,28 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
             "tracker_cli": "br",
             "direct_tracker_file_access": False,
             "network_access": False,
+            "audit_bracket": audit_bracket,
         },
-        "br_version": version_after,
-        "br_capabilities": capabilities_after,
-        "tracker_status": status_after,
-        "sync_status": sync_after,
-        "export_witness": witness_after,
+        "br_version": after.version,
+        "br_capabilities": after.capabilities,
+        "tracker_status": after.tracker_status,
+        "sync_status": after.sync_status,
+        "export_witness": after.export_witness,
         "case_manifest_root": case_manifest["semantic_root"],
         "case_manifest_content_identity": case_manifest["content_identity"],
         "coherent_capture_root": coherent_capture_root,
-        "source_files": source_files_after,
-        "rule_contract_root": semantic_root(rule_contract),
+        "source_files": list(after.source_files),
+        "rule_contract_root": semantic_root(after.rule_contract),
         "live_issue_count": len(full_after),
         "live_issue_projection_root": semantic_root(full_after),
         "lint_issue_ids_root": semantic_root(sorted(lint_ids)),
-        "independent_finding_issue_ids_root": semantic_root(
-            sorted(independent)
-        ),
+        "independent_finding_issue_ids_root": semantic_root(sorted(independent)),
         "nonclosed_issue_ids_root": semantic_root(sorted(nonclosed_ids)),
         "selected_review_issue_ids_root": semantic_root(target_ids),
         "selected_review_issue_count": len(target_ids),
         "nonclosed_issue_count": len(nonclosed_ids),
         "closed_finding_issue_count": len(finding_ids - nonclosed_ids),
-        "status_cut": ["open", "in_progress", "blocked", "deferred", "closed"],
+        "status_cut": list(STATUS_SCOPES),
         "command_receipts": [
             {"capture_sequence": index, **receipt}
             for index, receipt in enumerate(_command_receipts)
@@ -5487,7 +6867,7 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     }
     source["semantic_root"] = semantic_root(source)
     inventory = assemble_inventory(
-        lint_after,
+        after.lint,
         target_issues,
         source,
         independent,
@@ -5495,12 +6875,104 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     )
     plan = build_plan(inventory, target_issues)
     return LiveSnapshot(
-        lint_after,
+        after.lint,
         target_issues,
         source,
         inventory,
         plan,
         tuple(full_after),
+    )
+
+
+def v2_issue_matches_source_filters(
+    issue: Mapping[str, Any],
+    *,
+    priority_filter: set[str] | None,
+    status_filter: set[str] | None,
+    target_filter: set[str] | None,
+) -> bool:
+    issue_id = str(issue["id"])
+    return (
+        (priority_filter is None or f"P{issue['priority']}" in priority_filter)
+        and (status_filter is None or issue["status"] in status_filter)
+        and (target_filter is None or issue_id in target_filter)
+    )
+
+
+def v2_history_audit_ids_from_round(
+    capture: V2LiveCaptureRound,
+    *,
+    manifest: Mapping[str, Any],
+    priority_filter: set[str] | None,
+    status_filter: set[str] | None,
+    target_filter: set[str] | None,
+) -> list[str]:
+    independent_ids = {
+        issue["id"]
+        for issue in capture.full_issues
+        if independent_template_findings(issue)
+    }
+    source_inventory_ids = (
+        {
+            issue["id"]
+            for issue in capture.full_issues
+            if issue["status"] != "closed"
+        }
+        | set(lint_result_map(capture.lint))
+        | independent_ids
+    )
+    if target_filter is not None:
+        unknown_targets = sorted(target_filter - source_inventory_ids)
+        if unknown_targets:
+            raise UsageRefused(
+                "--targets contains IDs outside the exact planner inventory: "
+                + ", ".join(unknown_targets)
+            )
+    audit_ids = {
+        issue["id"]
+        for issue in capture.full_issues
+        if issue["id"] in source_inventory_ids
+        and issue["status"] == "closed"
+        and v2_issue_matches_source_filters(
+            issue,
+            priority_filter=priority_filter,
+            status_filter=status_filter,
+            target_filter=target_filter,
+        )
+    }
+    anchor = str(manifest["history_contract"]["legacy_coverage_anchor_issue"])
+    if anchor not in set(capture.issue_ids):
+        raise EvidenceFailed("v2 history anchor is absent from the source capture")
+    audit_ids.add(anchor)
+    return sorted(audit_ids)
+
+
+def collect_live_v2(
+    case_manifest: Mapping[str, Any],
+    *,
+    br_cwd: Path = REPO_ROOT,
+) -> LiveSnapshot:
+    _command_receipts.clear()
+    rule_contract = v2_source_rule_contract()
+    before = v2_capture_live_round(
+        case_manifest,
+        rule_contract,
+        ordinal=1,
+        br_cwd=br_cwd,
+    )
+    audit_capture = v2_not_requested_audit_capture()
+    check_cancel()
+    after = v2_capture_live_round(
+        case_manifest,
+        rule_contract,
+        ordinal=2,
+        br_cwd=br_cwd,
+    )
+    return v2_finalize_live_capture_pair(
+        case_manifest,
+        before=before,
+        after=after,
+        audit_capture=audit_capture,
     )
 
 
@@ -7601,9 +9073,307 @@ FIXTURE_BR_ROOT_REL = PurePosixPath(
 )
 FIXTURE_BR_DB_REL = FIXTURE_BR_ROOT_REL / ".beads" / "beads.db"
 FIXTURE_BR_DB_ARG = ".beads/beads.db"
+# This inode is intentionally persistent: releasing a lease unlocks and closes
+# it but never unlinks it, so every process coordinates on one stable target.
+FIXTURE_BR_LOCK_REL = PurePosixPath(
+    "target/beads-template-hygiene/self-test-br-fixture.lock"
+)
+FIXTURE_BR_LOCK_TIMEOUT_SECONDS = 30.0
+FIXTURE_BR_LOCK_POLL_SECONDS = 0.05
 FIXTURE_BR_STABLE_TITLE = "Template hygiene no-mock stable fixture"
 FIXTURE_BR_REGRESSION_TITLE = "Template hygiene no-mock regression fixture"
-_fixture_br_context_cache: dict[str, str] | None = None
+FIXTURE_BR_STABLE_DESCRIPTION = (
+    "Stable no-mock fixture baseline.\n\n"
+    "Completion is checked only inside this isolated br database."
+)
+FIXTURE_BR_REGRESSION_DESCRIPTION = (
+    "Intentionally missing an acceptance section."
+)
+
+
+@dataclass(frozen=True)
+class FixtureBrLease:
+    descriptor: int = field(repr=False)
+    lock_path: Path = field(repr=False)
+    device: int
+    inode: int
+    contended: bool
+    wait_polls: int
+
+
+_fixture_br_thread_guard = threading.RLock()
+_fixture_br_lock_depth = 0
+_fixture_br_active_lease: FixtureBrLease | None = None
+
+
+def _fixture_br_open_lock_descriptor() -> tuple[int, Path, os.stat_result]:
+    lock_path = resolve_safe(
+        str(FIXTURE_BR_LOCK_REL),
+        label="no-mock fixture lock",
+    )
+    lock_parent = resolve_safe(
+        str(FIXTURE_BR_LOCK_REL.parent),
+        label="no-mock fixture lock parent",
+    )
+    try:
+        lock_parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise InfrastructureFailed(
+            "no-mock fixture lock parent could not be created safely"
+        ) from error
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor_flags = os.O_RDWR | os.O_CREAT
+    descriptor_flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptor_flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor_flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    try:
+        parent_descriptor = os.open(lock_parent, directory_flags)
+        parent_before = os.fstat(parent_descriptor)
+        if not stat.S_ISDIR(parent_before.st_mode):
+            raise InfrastructureFailed(
+                "no-mock fixture lock parent is not a directory"
+            )
+        descriptor = os.open(
+            FIXTURE_BR_LOCK_REL.name,
+            descriptor_flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        descriptor_state = os.fstat(descriptor)
+        path_state = os.lstat(lock_path)
+        parent_after = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISREG(descriptor_state.st_mode)
+            or descriptor_state.st_nlink != 1
+            or not stat.S_ISREG(path_state.st_mode)
+            or path_state.st_nlink != 1
+            or descriptor_state.st_dev != path_state.st_dev
+            or descriptor_state.st_ino != path_state.st_ino
+            or parent_before.st_dev != parent_after.st_dev
+            or parent_before.st_ino != parent_after.st_ino
+        ):
+            raise InfrastructureFailed(
+                "no-mock fixture lock path identity is unsafe"
+            )
+        result = descriptor
+        descriptor = None
+        return result, lock_path, descriptor_state
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InfrastructureFailed(
+            "no-mock fixture lock could not be opened safely"
+        ) from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if parent_descriptor is not None:
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                pass
+
+
+def _fixture_br_acquire_file_lock() -> FixtureBrLease:
+    descriptor, lock_path, descriptor_state = _fixture_br_open_lock_descriptor()
+    deadline = time.monotonic() + FIXTURE_BR_LOCK_TIMEOUT_SECONDS
+    contended = False
+    wait_polls = 0
+    acquired = False
+    try:
+        while True:
+            check_cancel()
+            try:
+                fcntl.flock(
+                    descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                acquired = True
+                break
+            except BlockingIOError:
+                contended = True
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EINTR}:
+                    raise InfrastructureFailed(
+                        "no-mock fixture lock acquisition failed"
+                    ) from error
+                contended = True
+            if time.monotonic() >= deadline:
+                raise InfrastructureFailed(
+                    "no-mock fixture lock acquisition exceeded its bounded timeout"
+                )
+            wait_polls += 1
+            time.sleep(FIXTURE_BR_LOCK_POLL_SECONDS)
+        path_state = os.lstat(lock_path)
+        locked_state = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(path_state.st_mode)
+            or path_state.st_nlink != 1
+            or locked_state.st_nlink != 1
+            or locked_state.st_dev != descriptor_state.st_dev
+            or locked_state.st_ino != descriptor_state.st_ino
+            or path_state.st_dev != locked_state.st_dev
+            or path_state.st_ino != locked_state.st_ino
+        ):
+            raise InfrastructureFailed(
+                "no-mock fixture lock identity changed during acquisition"
+            )
+        return FixtureBrLease(
+            descriptor=descriptor,
+            lock_path=lock_path,
+            device=int(locked_state.st_dev),
+            inode=int(locked_state.st_ino),
+            contended=contended,
+            wait_polls=wait_polls,
+        )
+    except BaseException:
+        if acquired:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _fixture_br_release_file_lock(lease: FixtureBrLease) -> None:
+    failure: OSError | None = None
+    try:
+        descriptor_state = os.fstat(lease.descriptor)
+        path_state = os.lstat(lease.lock_path)
+        if (
+            not stat.S_ISREG(descriptor_state.st_mode)
+            or descriptor_state.st_nlink != 1
+            or not stat.S_ISREG(path_state.st_mode)
+            or path_state.st_nlink != 1
+            or descriptor_state.st_dev != lease.device
+            or descriptor_state.st_ino != lease.inode
+            or path_state.st_dev != lease.device
+            or path_state.st_ino != lease.inode
+        ):
+            raise InfrastructureFailed(
+                "no-mock fixture lock identity changed while held"
+            )
+    except OSError as error:
+        failure = error
+    finally:
+        try:
+            fcntl.flock(lease.descriptor, fcntl.LOCK_UN)
+        except OSError as error:
+            failure = failure or error
+        try:
+            os.close(lease.descriptor)
+        except OSError as error:
+            failure = failure or error
+    if failure is not None:
+        raise InfrastructureFailed(
+            "no-mock fixture lock could not be released safely"
+        ) from failure
+
+
+@contextmanager
+def fixture_br_lease() -> Iterator[FixtureBrLease]:
+    global _fixture_br_active_lease, _fixture_br_lock_depth
+    deadline = time.monotonic() + FIXTURE_BR_LOCK_TIMEOUT_SECONDS
+    while not _fixture_br_thread_guard.acquire(blocking=False):
+        check_cancel()
+        if time.monotonic() >= deadline:
+            raise InfrastructureFailed(
+                "no-mock fixture in-process lease exceeded its bounded timeout"
+            )
+        time.sleep(FIXTURE_BR_LOCK_POLL_SECONDS)
+    entered = False
+    outermost = _fixture_br_lock_depth == 0
+    try:
+        if outermost:
+            _fixture_br_active_lease = _fixture_br_acquire_file_lock()
+        lease = _fixture_br_active_lease
+        if lease is None:
+            raise InfrastructureFailed(
+                "no-mock fixture lease state is internally inconsistent"
+            )
+        _fixture_br_lock_depth += 1
+        entered = True
+        yield lease
+    finally:
+        release_error: HarnessError | None = None
+        if entered:
+            _fixture_br_lock_depth -= 1
+            if outermost:
+                lease = _fixture_br_active_lease
+                _fixture_br_active_lease = None
+                if lease is not None:
+                    try:
+                        _fixture_br_release_file_lock(lease)
+                    except HarnessError as error:
+                        release_error = error
+        _fixture_br_thread_guard.release()
+        if release_error is not None:
+            raise release_error
+
+
+def fixture_br_external_lock_probe(
+    lease: FixtureBrLease,
+    *,
+    expected: str,
+) -> None:
+    if expected not in {"ACQUIRED", "CONTENDED"}:
+        raise EvidenceFailed("fixture lock probe expectation is unknown")
+    try:
+        path_state = os.lstat(lease.lock_path)
+    except OSError as error:
+        raise InfrastructureFailed(
+            "fixture lock probe path cannot be inspected safely"
+        ) from error
+    if (
+        not stat.S_ISREG(path_state.st_mode)
+        or path_state.st_nlink != 1
+        or path_state.st_dev != lease.device
+        or path_state.st_ino != lease.inode
+    ):
+        raise InfrastructureFailed(
+            "fixture lock probe path identity differs from its lease"
+        )
+    probe = (
+        "import fcntl, os, stat, sys\n"
+        "flags = os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)\n"
+        "descriptor = os.open(sys.argv[1], flags)\n"
+        "try:\n"
+        "    value = os.fstat(descriptor)\n"
+        "    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:\n"
+        "        raise SystemExit(3)\n"
+        "    try:\n"
+        "        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    except BlockingIOError:\n"
+        "        state = 'CONTENDED'\n"
+        "    else:\n"
+        "        state = 'ACQUIRED'\n"
+        "        fcntl.flock(descriptor, fcntl.LOCK_UN)\n"
+        "    sys.stdout.write(state)\n"
+        "finally:\n"
+        "    os.close(descriptor)\n"
+    )
+    completed = run_command(
+        (sys.executable, "-c", probe, str(lease.lock_path)),
+        record_global_receipt=False,
+        stdout_bytes_cap=32,
+        stderr_bytes_cap=1024,
+    )
+    observed = completed.stdout.strip()
+    if observed != expected:
+        raise EvidenceFailed(
+            "fixture lock cross-process probe differed: "
+            f"expected {expected}, observed {observed or 'EMPTY'}"
+        )
 
 
 def fixture_equal(actual: Any, expected: Any, label: str) -> None:
@@ -7850,17 +9620,18 @@ def fixture_br_run(
     *arguments: str,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    fixture_root = resolve_safe(
-        str(FIXTURE_BR_ROOT_REL),
-        label="no-mock fixture root",
-        must_exist=True,
-    )
-    return run_command(
-        fixture_br_argv(*arguments),
-        input_text=input_text,
-        command_cwd=fixture_root,
-        record_global_receipt=False,
-    )
+    with fixture_br_lease():
+        fixture_root = resolve_safe(
+            str(FIXTURE_BR_ROOT_REL),
+            label="no-mock fixture root",
+            must_exist=True,
+        )
+        return run_command(
+            fixture_br_argv(*arguments),
+            input_text=input_text,
+            command_cwd=fixture_root,
+            record_global_receipt=False,
+        )
 
 
 def fixture_br_json(
@@ -8008,9 +9779,11 @@ def fixture_br_set_description(issue_id: str, description: str) -> None:
 
 
 def fixture_br_context() -> dict[str, str]:
-    global _fixture_br_context_cache
-    if _fixture_br_context_cache is not None:
-        return dict(_fixture_br_context_cache)
+    with fixture_br_lease():
+        return _fixture_br_context_locked()
+
+
+def _fixture_br_context_locked() -> dict[str, str]:
     try:
         fixture_root = resolve_safe(
             str(FIXTURE_BR_ROOT_REL),
@@ -8031,13 +9804,16 @@ def fixture_br_context() -> dict[str, str]:
                 title=FIXTURE_BR_STABLE_TITLE,
                 slug="template-hygiene-stable",
                 status="open",
-                description=(
-                    "Stable no-mock fixture baseline.\n\n"
-                    "Completion is checked only inside this isolated br database."
-                ),
+                description=FIXTURE_BR_STABLE_DESCRIPTION,
             )
         stable_id = str(stable["id"])
         fixture_br_set_status(stable_id, "open")
+        stable = fixture_br_show(stable_id)
+        if str(stable.get("description") or "") != FIXTURE_BR_STABLE_DESCRIPTION:
+            fixture_br_set_description(
+                stable_id,
+                FIXTURE_BR_STABLE_DESCRIPTION,
+            )
 
         regression = fixture_br_find_by_title(FIXTURE_BR_REGRESSION_TITLE)
         if regression is None:
@@ -8045,17 +9821,25 @@ def fixture_br_context() -> dict[str, str]:
                 title=FIXTURE_BR_REGRESSION_TITLE,
                 slug="template-hygiene-regression",
                 status="closed",
-                description="Intentionally missing an acceptance section.",
+                description=FIXTURE_BR_REGRESSION_DESCRIPTION,
             )
         regression_id = str(regression["id"])
         fixture_br_set_status(regression_id, "closed")
+        regression = fixture_br_show(regression_id)
+        if (
+            str(regression.get("description") or "")
+            != FIXTURE_BR_REGRESSION_DESCRIPTION
+        ):
+            fixture_br_set_description(
+                regression_id,
+                FIXTURE_BR_REGRESSION_DESCRIPTION,
+            )
 
-        _fixture_br_context_cache = {
+        return {
             "db": str(FIXTURE_BR_DB_REL),
             "stable_id": stable_id,
             "regression_id": regression_id,
         }
-        return dict(_fixture_br_context_cache)
     except InfrastructureFailed as error:
         raise NoData(
             "no-mock br fixture unavailable without touching live Beads; "
@@ -8064,6 +9848,20 @@ def fixture_br_context() -> dict[str, str]:
 
 
 def fixture_br_description_round_trip(
+    case_id: str,
+    *,
+    assert_stale_guard: bool = False,
+    inject_failure: bool = False,
+) -> dict[str, Any]:
+    with fixture_br_lease():
+        return _fixture_br_description_round_trip_locked(
+            case_id,
+            assert_stale_guard=assert_stale_guard,
+            inject_failure=inject_failure,
+        )
+
+
+def _fixture_br_description_round_trip_locked(
     case_id: str,
     *,
     assert_stale_guard: bool = False,
@@ -8123,6 +9921,11 @@ def fixture_br_description_round_trip(
 
 
 def fixture_br_regression_round_trip() -> dict[str, Any]:
+    with fixture_br_lease():
+        return _fixture_br_regression_round_trip_locked()
+
+
+def _fixture_br_regression_round_trip_locked() -> dict[str, Any]:
     context = fixture_br_context()
     issue_id = context["regression_id"]
     fixture_br_set_status(issue_id, "closed")
@@ -9362,6 +11165,8 @@ def v2_validate_semantic_dimension_receipts(
 ) -> bool:
     if not isinstance(rows, list):
         raise InputRefused(f"{label} must be an array")
+    if disposition not in V2_SEMANTIC_REVIEW_DISPOSITIONS:
+        raise InputRefused(f"{label} has an unknown semantic disposition")
     if not rows:
         if allow_empty:
             return False
@@ -9420,21 +11225,44 @@ def v2_validate_semantic_dimension_receipts(
         raise InputRefused(
             f"{label} dimensions are missing, duplicated, or noncanonical"
         )
-    expected_signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[disposition]
-    if expected_signal not in observed_verdicts:
-        raise InputRefused(
-            f"{label} has no {expected_signal} verdict for {disposition}"
+    verdict_by_dimension = dict(
+        zip(observed_dimensions, observed_verdicts, strict=True)
+    )
+    if disposition == "REMEDIATION_REQUIRED":
+        if any(
+            verdict not in {"SATISFIED", "FINDING"}
+            for verdict in observed_verdicts
+        ):
+            raise InputRefused(
+                f"{label} REMEDIATION_REQUIRED allows only SATISFIED or FINDING"
+            )
+        if "FINDING" not in observed_verdicts:
+            raise InputRefused(
+                f"{label} REMEDIATION_REQUIRED requires at least one FINDING"
+            )
+    elif disposition == "REVIEWED_NO_CHANGE":
+        if any(verdict != "SATISFIED" for verdict in observed_verdicts):
+            raise InputRefused(
+                f"{label} REVIEWED_NO_CHANGE requires every dimension SATISFIED"
+            )
+    else:
+        signal_dimension, expected_signal = (
+            V2_SEMANTIC_EXACT_SIGNAL_DIMENSION[disposition]
         )
-    if disposition == "REVIEWED_NO_CHANGE" and any(
-        verdict != "SATISFIED" for verdict in observed_verdicts
-    ):
-        raise InputRefused(
-            f"{label} REVIEWED_NO_CHANGE requires every dimension SATISFIED"
-        )
-    if disposition != "REMEDIATION_REQUIRED" and "FINDING" in observed_verdicts:
-        raise InputRefused(
-            f"{label} contains a finding without REMEDIATION_REQUIRED"
-        )
+        expected_verdicts = {
+            dimension: (
+                expected_signal
+                if dimension == signal_dimension
+                else "SATISFIED"
+            )
+            for dimension in V2_SEMANTIC_REVIEW_DIMENSIONS
+        }
+        if verdict_by_dimension != expected_verdicts:
+            raise InputRefused(
+                f"{label} {disposition} requires exactly "
+                f"{signal_dimension}={expected_signal} and every other "
+                "dimension SATISFIED"
+            )
     return True
 
 
@@ -10361,11 +12189,13 @@ def v2_capture_one_audit(
     issue_id: str,
     *,
     capture_ordinal: int,
+    br_cwd: Path = REPO_ROOT,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     argv = ["br", "audit", "log", issue_id, "--json", *BR_READ_FLAGS]
     receipts: list[dict[str, Any]] = []
     completed = run_command(
         argv,
+        command_cwd=br_cwd,
         record_global_receipt=False,
         receipt_sink=receipts.append,
         stdout_bytes_cap=V2_AUDIT_STREAM_BYTES_CAP,
@@ -10397,6 +12227,7 @@ def v2_capture_audit_round(
     issue_ids: Sequence[str],
     *,
     capture_ordinal: int,
+    br_cwd: Path = REPO_ROOT,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     if (
         not isinstance(issue_ids, Sequence)
@@ -10428,6 +12259,7 @@ def v2_capture_audit_round(
                     v2_capture_one_audit,
                     issue_id,
                     capture_ordinal=capture_ordinal,
+                    br_cwd=br_cwd,
                 )
             ] = issue_id
             if len(pending) == V2_AUDIT_WORKERS:
@@ -10469,6 +12301,7 @@ def v2_capture_audit_round(
                         v2_capture_one_audit,
                         next_issue_id,
                         capture_ordinal=capture_ordinal,
+                        br_cwd=br_cwd,
                     )
                 ] = next_issue_id
     results.sort(key=lambda row: row[0])
@@ -10479,15 +12312,19 @@ def v2_capture_audit_round(
 
 def v2_capture_histories(
     issue_ids: Sequence[str],
+    *,
+    br_cwd: Path = REPO_ROOT,
 ) -> dict[str, Any]:
     first, first_receipts = v2_capture_audit_round(
         issue_ids,
         capture_ordinal=1,
+        br_cwd=br_cwd,
     )
     check_cancel()
     second, second_receipts = v2_capture_audit_round(
         issue_ids,
         capture_ordinal=2,
+        br_cwd=br_cwd,
     )
     if first != second:
         first_ids = sorted(set(first) | set(second))
@@ -11351,12 +13188,58 @@ def v2_preflight_zero_array(
     return value
 
 
+def v2_current_finding_ids(
+    *,
+    current_universe: Sequence[Mapping[str, Any]],
+    supplied: Sequence[str] | None,
+) -> list[str]:
+    universe_ids = {
+        str(row.get("id") or "")
+        for row in current_universe
+        if isinstance(row, Mapping)
+    }
+    if supplied is None:
+        values = [
+            str(row.get("id") or "")
+            for row in current_universe
+            if isinstance(row, Mapping) and row.get("missing_sections")
+        ]
+    else:
+        if isinstance(supplied, (str, bytes, bytearray)):
+            raise EvidenceFailed("current finding IDs are not an array")
+        values = list(supplied)
+    if (
+        any(not isinstance(value, str) or not value for value in values)
+        or len(values) != len(set(values))
+    ):
+        raise EvidenceFailed("current finding IDs are malformed or duplicated")
+    normalized = sorted(values)
+    unknown = sorted(set(normalized) - universe_ids)
+    if unknown:
+        raise EvidenceFailed(
+            "current finding IDs escape the full source universe; "
+            f"first={unknown[0]}"
+        )
+    return normalized
+
+
+def v2_snapshot_current_finding_ids(snapshot: LiveSnapshot) -> list[str]:
+    lint_ids = set(lint_result_map(snapshot.lint))
+    independent_ids = {
+        str(row["id"])
+        for row in snapshot.all_issues
+        if independent_template_findings(row)
+    }
+    return sorted(lint_ids | independent_ids)
+
+
 def v2_build_zero_sets(
     *,
     source_root: str,
     inventory: Mapping[str, Any],
     prior_campaign: Mapping[str, Any],
     current_universe: Sequence[Mapping[str, Any]] | None = None,
+    current_finding_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(inventory, Mapping) or not isinstance(
         prior_campaign, Mapping
@@ -11377,6 +13260,15 @@ def v2_build_zero_sets(
         label="zero-set current universe rows",
         allow_sequence=True,
     )
+    if current_universe is not None and current_finding_ids is None:
+        raise EvidenceFailed(
+            "zero-set full current universe requires explicit current finding IDs"
+        )
+    normalized_finding_ids = v2_current_finding_ids(
+        current_universe=universe_rows_input,
+        supplied=current_finding_ids,
+    )
+    current_finding_id_set = set(normalized_finding_ids)
     cells: list[dict[str, Any]] = []
     all_ids: list[str] = []
     expected_ids = sorted(row["id"] for row in inventory_rows)
@@ -11476,7 +13368,8 @@ def v2_build_zero_sets(
                 "prior campaign target is absent from the current source "
                 f"universe; first={issue_id}"
             )
-        if current["status"] != "closed":
+        has_current_finding = issue_id in current_finding_id_set
+        if not has_current_finding and current["status"] != "closed":
             raise InputRefused(
                 "prior campaign target left the selected scope without a "
                 f"clean closed successor; first={issue_id}"
@@ -11488,7 +13381,16 @@ def v2_build_zero_sets(
                 "priority": current["priority"],
                 "destination_root": current["target_root"],
                 "current_universe_root": current_universe_root,
-                "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
+                "finding_state": (
+                    "CURRENT_FINDING"
+                    if has_current_finding
+                    else "NO_CURRENT_FINDING"
+                ),
+                "reason": (
+                    "FILTERED_CURRENT_FINDING"
+                    if has_current_finding
+                    else "CLOSED_WITHOUT_CURRENT_FINDING"
+                ),
                 "no_claim": (
                     "the successor accounts for scope movement only and "
                     "does not re-adjudicate closure or prove implementation"
@@ -11507,6 +13409,17 @@ def v2_build_zero_sets(
     destination_root_kind = {
         row["id"]: "INVENTORY_TARGET" for row in inventory_rows
     }
+    destination_finding_state = {
+        row["id"]: (
+            "CURRENT_FINDING"
+            if row["id"] in current_finding_id_set
+            else "NO_CURRENT_FINDING"
+        )
+        for row in inventory_rows
+    }
+    destination_reason = {
+        row["id"]: "SELECTED_INVENTORY" for row in inventory_rows
+    }
     current_for_movement.update(
         {
             row["issue_id"]: {
@@ -11520,10 +13433,21 @@ def v2_build_zero_sets(
     )
     destination_root_kind.update(
         {
-            row["issue_id"]: "FULL_UNIVERSE_SUCCESSOR"
+            row["issue_id"]: (
+                "FULL_UNIVERSE_FILTERED_FINDING"
+                if row["finding_state"] == "CURRENT_FINDING"
+                else "FULL_UNIVERSE_CLEAN_SUCCESSOR"
+            )
             for row in scope_successors
         }
     )
+    destination_finding_state.update(
+        {row["issue_id"]: row["finding_state"] for row in scope_successors}
+    )
+    destination_reason.update(
+        {row["issue_id"]: row["reason"] for row in scope_successors}
+    )
+    current_finding_issue_ids_root = semantic_root(normalized_finding_ids)
     movements: list[dict[str, Any]] = []
     for issue_id in sorted(set(prior_rows) & set(current_for_movement)):
         current = current_for_movement[issue_id]
@@ -11556,7 +13480,10 @@ def v2_build_zero_sets(
             "source_root": prior["target_root"],
             "destination_root": current["target_root"],
             "destination_root_kind": destination_root_kind[issue_id],
+            "destination_finding_state": destination_finding_state[issue_id],
+            "destination_reason": destination_reason[issue_id],
             "current_universe_root": current_universe_root,
+            "current_finding_issue_ids_root": current_finding_issue_ids_root,
             "prior_campaign_root": prior_campaign["semantic_root"],
             "prior_campaign_epoch_root": prior_campaign[
                 "campaign_epoch_root"
@@ -11569,7 +13496,14 @@ def v2_build_zero_sets(
                     "source_root": prior["target_root"],
                     "destination_root": current["target_root"],
                     "destination_root_kind": destination_root_kind[issue_id],
+                    "destination_finding_state": (
+                        destination_finding_state[issue_id]
+                    ),
+                    "destination_reason": destination_reason[issue_id],
                     "current_universe_root": current_universe_root,
+                    "current_finding_issue_ids_root": (
+                        current_finding_issue_ids_root
+                    ),
                     "before_status": before_status,
                     "after_status": after_status,
                     "before_priority": before_priority,
@@ -11593,6 +13527,7 @@ def v2_build_zero_sets(
         "partition_issue_ids_root": partition_issue_ids_root,
         "current_universe_root": current_universe_root,
         "current_universe_count": len(current_universe_projection),
+        "current_finding_issue_ids_root": current_finding_issue_ids_root,
         "scope_successors": scope_successors,
         "movements": movements,
         "prior_campaign_root": prior_campaign["semantic_root"],
@@ -11622,6 +13557,7 @@ def v2_build_zero_sets(
         inventory=inventory,
         prior_campaign=prior_campaign,
         current_universe=current_universe,
+        current_finding_ids=normalized_finding_ids,
     )
     return result
 
@@ -11633,6 +13569,7 @@ def v2_validate_zero_sets(
     inventory: Mapping[str, Any],
     prior_campaign: Mapping[str, Any],
     current_universe: Sequence[Mapping[str, Any]] | None = None,
+    current_finding_ids: Sequence[str] | None = None,
 ) -> None:
     root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
 
@@ -11660,6 +13597,7 @@ def v2_validate_zero_sets(
             "partition_issue_ids_root",
             "current_universe_root",
             "current_universe_count",
+            "current_finding_issue_ids_root",
             "scope_successors",
             "movements",
             "prior_campaign_root",
@@ -11682,6 +13620,15 @@ def v2_validate_zero_sets(
         label="zero-set current universe rows",
         allow_sequence=True,
     )
+    if current_universe is not None and current_finding_ids is None:
+        raise EvidenceFailed(
+            "zero-set full current universe requires explicit current finding IDs"
+        )
+    normalized_finding_ids = v2_current_finding_ids(
+        current_universe=universe_rows,
+        supplied=current_finding_ids,
+    )
+    current_finding_id_set = set(normalized_finding_ids)
     cells = v2_preflight_zero_array(
         zero_sets.get("cells"),
         label="zero-set cells",
@@ -11808,8 +13755,12 @@ def v2_validate_zero_sets(
         or type(zero_sets["current_universe_count"]) is not int
         or zero_sets["current_universe_count"]
         != len(current_universe_projection)
+        or zero_sets["current_finding_issue_ids_root"]
+        != semantic_root(normalized_finding_ids)
     ):
-        raise EvidenceFailed("zero-set current universe binding differs")
+        raise EvidenceFailed(
+            "zero-set current universe or finding binding differs"
+        )
 
     expected_coordinates = [
         (priority, status)
@@ -12049,7 +14000,8 @@ def v2_validate_zero_sets(
                 "prior campaign target is absent from the current source "
                 f"universe; first={issue_id}"
             )
-        if current["status"] != "closed":
+        has_current_finding = issue_id in current_finding_id_set
+        if not has_current_finding and current["status"] != "closed":
             raise InputRefused(
                 "prior campaign target left the selected scope without a "
                 f"clean closed successor; first={issue_id}"
@@ -12062,7 +14014,16 @@ def v2_validate_zero_sets(
                     "priority": current["priority"],
                     "destination_root": current["target_root"],
                     "current_universe_root": expected_universe_root,
-                    "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
+                    "finding_state": (
+                        "CURRENT_FINDING"
+                        if has_current_finding
+                        else "NO_CURRENT_FINDING"
+                    ),
+                    "reason": (
+                        "FILTERED_CURRENT_FINDING"
+                        if has_current_finding
+                        else "CLOSED_WITHOUT_CURRENT_FINDING"
+                    ),
                     "no_claim": (
                         "the successor accounts for scope movement only and "
                         "does not re-adjudicate closure or prove implementation"
@@ -12072,12 +14033,23 @@ def v2_validate_zero_sets(
         )
     expected_scope_successors.sort(key=lambda row: row["issue_id"])
     if scope_successors != expected_scope_successors:
-        raise EvidenceFailed("zero-set clean-closure successors differ")
+        raise EvidenceFailed("zero-set typed scope successors differ")
     current_for_movement: dict[str, Mapping[str, Any]] = dict(
         inventory_by_id
     )
     destination_root_kind = {
         issue_id: "INVENTORY_TARGET" for issue_id in inventory_by_id
+    }
+    destination_finding_state = {
+        issue_id: (
+            "CURRENT_FINDING"
+            if issue_id in current_finding_id_set
+            else "NO_CURRENT_FINDING"
+        )
+        for issue_id in inventory_by_id
+    }
+    destination_reason = {
+        issue_id: "SELECTED_INVENTORY" for issue_id in inventory_by_id
     }
     current_for_movement.update(
         {
@@ -12092,10 +14064,27 @@ def v2_validate_zero_sets(
     )
     destination_root_kind.update(
         {
-            row["issue_id"]: "FULL_UNIVERSE_SUCCESSOR"
+            row["issue_id"]: (
+                "FULL_UNIVERSE_FILTERED_FINDING"
+                if row["finding_state"] == "CURRENT_FINDING"
+                else "FULL_UNIVERSE_CLEAN_SUCCESSOR"
+            )
             for row in expected_scope_successors
         }
     )
+    destination_finding_state.update(
+        {
+            row["issue_id"]: row["finding_state"]
+            for row in expected_scope_successors
+        }
+    )
+    destination_reason.update(
+        {
+            row["issue_id"]: row["reason"]
+            for row in expected_scope_successors
+        }
+    )
+    current_finding_issue_ids_root = semantic_root(normalized_finding_ids)
 
     expected_movements: list[dict[str, Any]] = []
     for issue_id in sorted(set(prior_by_id) & set(current_for_movement)):
@@ -12134,7 +14123,14 @@ def v2_validate_zero_sets(
                 "source_root": prior["target_root"],
                 "destination_root": current["target_root"],
                 "destination_root_kind": destination_root_kind[issue_id],
+                "destination_finding_state": (
+                    destination_finding_state[issue_id]
+                ),
+                "destination_reason": destination_reason[issue_id],
                 "current_universe_root": expected_universe_root,
+                "current_finding_issue_ids_root": (
+                    current_finding_issue_ids_root
+                ),
                 "prior_campaign_root": prior_campaign["semantic_root"],
                 "prior_campaign_epoch_root": prior_campaign[
                     "campaign_epoch_root"
@@ -12149,7 +14145,14 @@ def v2_validate_zero_sets(
                         "destination_root_kind": (
                             destination_root_kind[issue_id]
                         ),
+                        "destination_finding_state": (
+                            destination_finding_state[issue_id]
+                        ),
+                        "destination_reason": destination_reason[issue_id],
                         "current_universe_root": expected_universe_root,
+                        "current_finding_issue_ids_root": (
+                            current_finding_issue_ids_root
+                        ),
                         "before_status": before_status,
                         "after_status": after_status,
                         "before_priority": before_priority,
@@ -12178,7 +14181,10 @@ def v2_validate_zero_sets(
                 "source_root",
                 "destination_root",
                 "destination_root_kind",
+                "destination_finding_state",
+                "destination_reason",
                 "current_universe_root",
+                "current_finding_issue_ids_root",
                 "prior_campaign_root",
                 "prior_campaign_epoch_root",
                 "current_campaign_root",
@@ -12439,6 +14445,126 @@ V2_REVIEW_RECEIPT_FIELDS = {
     "gate_admission_verdict",
     "no_claim",
 }
+V2_REVIEW_RECEIPT_SCOPE_SCHEMA = (
+    "frankensim.beads-template-hygiene.review-receipt-scope.v2"
+)
+V2_REVIEW_RECEIPT_PROVENANCE_FIELDS = (
+    "inventory_root",
+    "campaign_epoch_root",
+)
+V2_REVIEW_RECEIPT_SCOPE_FIELDS = (
+    "target_id",
+    "target_root",
+    "reviewer",
+    "reviewer_kind",
+    "coordination_assignee",
+    "declared_domain_owner",
+    "declared_acceptance_owner",
+    "implementation_owner",
+    "evidence_owner",
+    "terminal_consumer",
+    "source_closure",
+    "user_effect",
+    "review_minutes",
+    "semantic_review_disposition",
+    "semantic_review_dimensions",
+    "semantic_review_rationale",
+    "semantic_review_falsifier",
+    "compatibility_key",
+    "compatibility_target_ids",
+    "compatibility_receipt_root",
+    "compatibility_rationale",
+    "compatibility_falsifier",
+    "manual_authorization",
+    "manual_authorization_source",
+    "external_authority_adapter",
+    "external_authority_receipt_root",
+    "external_authority_verdict",
+    "conditional_capability_identity",
+    "conditional_capability_receipt_root",
+    "conditional_capability_verdict",
+    "gate_admission_receipt_root",
+    "gate_admission_verdict",
+    "no_claim",
+)
+if (
+    len(V2_REVIEW_RECEIPT_SCOPE_FIELDS)
+    != len(set(V2_REVIEW_RECEIPT_SCOPE_FIELDS))
+    or len(V2_REVIEW_RECEIPT_PROVENANCE_FIELDS)
+    != len(set(V2_REVIEW_RECEIPT_PROVENANCE_FIELDS))
+    or bool(
+        set(V2_REVIEW_RECEIPT_SCOPE_FIELDS)
+        & set(V2_REVIEW_RECEIPT_PROVENANCE_FIELDS)
+    )
+    or (
+        set(V2_REVIEW_RECEIPT_SCOPE_FIELDS)
+        | set(V2_REVIEW_RECEIPT_PROVENANCE_FIELDS)
+    )
+    != V2_REVIEW_RECEIPT_FIELDS
+):
+    raise RuntimeError(
+        "review receipt scope/provenance fields do not exactly partition "
+        "the closed receipt schema"
+    )
+
+
+def v2_review_receipt_scope_root(receipt: Mapping[str, Any]) -> str:
+    receipt_fields = set(receipt) - {"semantic_root"}
+    if receipt_fields != V2_REVIEW_RECEIPT_FIELDS:
+        raise InputRefused(
+            "review receipt scope root requires the exact closed row schema"
+        )
+    return semantic_root(
+        {
+            "schema": V2_REVIEW_RECEIPT_SCOPE_SCHEMA,
+            "receipt": {
+                field: receipt[field]
+                for field in V2_REVIEW_RECEIPT_SCOPE_FIELDS
+            },
+        }
+    )
+
+
+def v2_validate_review_receipt_document_provenance(
+    receipt_document: Mapping[str, Any],
+    receipts: Sequence[Any],
+    *,
+    inventory: Mapping[str, Any] | None,
+    label: str,
+) -> None:
+    for field in V2_REVIEW_RECEIPT_PROVENANCE_FIELDS:
+        value = receipt_document.get(field)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256-v1:[0-9a-f]{64}", value) is None
+        ):
+            raise InputRefused(f"{label} {field} is malformed")
+    if not receipts and inventory is not None and (
+        receipt_document["inventory_root"] != inventory.get("semantic_root")
+        or receipt_document["campaign_epoch_root"]
+        != inventory.get("campaign_epoch_root")
+    ):
+        raise InputRefused(
+            f"{label} empty envelope does not bind the current campaign"
+        )
+
+
+def v2_validate_review_receipt_row_provenance(
+    receipt: Mapping[str, Any],
+    receipt_document: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    for field in V2_REVIEW_RECEIPT_PROVENANCE_FIELDS:
+        value = receipt.get(field)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256-v1:[0-9a-f]{64}", value) is None
+            or value != receipt_document[field]
+        ):
+            raise InputRefused(
+                f"{label} {field} differs from its provenance envelope"
+            )
 
 V2_AUTHORITY_IDENTITY_FIELDS = (
     "reviewer",
@@ -12636,10 +14762,13 @@ def v2_load_review_receipts(
             inventory_root=str(inventory["semantic_root"]),
             campaign_epoch_root=str(inventory["campaign_epoch_root"]),
         )
-    path = resolve_safe(relative, label="review receipts", must_exist=True)
-    if path.suffix != ".json":
+    relative_path = safe_relative(relative, label="review receipts")
+    if relative_path.suffix != ".json":
         raise InputRefused("review receipts must be a closed JSON document")
-    payload = bounded_read(path)
+    payload = v2_read_repo_relative_file_strict(
+        relative,
+        label="review receipts",
+    )
     document = strict_json_loads(
         payload,
         label="review receipts",
@@ -12669,15 +14798,17 @@ def v2_load_review_receipts(
         or document["no_claim"] != V2_REVIEW_RECEIPTS_NO_CLAIM
     ):
         raise InputRefused("review receipts contain invalid document scalars")
-    if document["inventory_root"] != inventory["semantic_root"]:
-        raise InputRefused("review receipts bind a different inventory root")
-    if document["campaign_epoch_root"] != inventory["campaign_epoch_root"]:
-        raise InputRefused("review receipts bind a different campaign epoch")
     receipts = document["receipts"]
     if not isinstance(receipts, list):
         raise InputRefused("review receipts must contain an array")
     if len(receipts) > V2_INVENTORY_ROWS_CAP:
         raise InputRefused("review receipts exceed the inventory-row cap")
+    v2_validate_review_receipt_document_provenance(
+        document,
+        receipts,
+        inventory=inventory,
+        label="review receipts",
+    )
     inventory_by_id = {row["id"]: row for row in inventory["rows"]}
     normalized: list[dict[str, Any]] = []
     for index, receipt in enumerate(receipts):
@@ -12695,10 +14826,11 @@ def v2_load_review_receipts(
             raise InputRefused(f"review receipt targets unknown {target_id}")
         if receipt["target_root"] != inventory_by_id[target_id]["target_root"]:
             raise InputRefused(f"review receipt target root drifted for {target_id}")
-        if receipt["inventory_root"] != inventory["semantic_root"]:
-            raise InputRefused(f"review receipt inventory root drifted for {target_id}")
-        if receipt["campaign_epoch_root"] != inventory["campaign_epoch_root"]:
-            raise InputRefused(f"review receipt campaign root drifted for {target_id}")
+        v2_validate_review_receipt_row_provenance(
+            receipt,
+            document,
+            label=f"review receipt {target_id}",
+        )
         review_minutes = receipt["review_minutes"]
         if type(review_minutes) is not int or review_minutes < 0:
             raise InputRefused(f"review receipt minutes are invalid for {target_id}")
@@ -13087,9 +15219,6 @@ def v2_validate_receipt_bindings(
         not required_document_keys.issubset(receipt_document)
         or not set(receipt_document).issubset(allowed_document_keys)
         or receipt_document.get("schema") != V2_REVIEW_RECEIPTS_SCHEMA
-        or receipt_document.get("inventory_root") != inventory.get("semantic_root")
-        or receipt_document.get("campaign_epoch_root")
-        != inventory.get("campaign_epoch_root")
         or not isinstance(receipt_document.get("source"), str)
         or not str(receipt_document.get("source")).strip()
         or receipt_document.get("no_claim")
@@ -13102,6 +15231,12 @@ def v2_validate_receipt_bindings(
         or len(rows) > V2_INVENTORY_ROWS_CAP
     ):
         raise InputRefused("review receipts must contain an array")
+    v2_validate_review_receipt_document_provenance(
+        receipt_document,
+        rows,
+        inventory=inventory,
+        label="review receipts",
+    )
     verify_semantic_root(receipt_document, label="v2 review receipts")
     v2_validate_review_receipt_source_identity(
         receipt_document,
@@ -13124,14 +15259,15 @@ def v2_validate_receipt_bindings(
         if target_id not in inventory_by_id:
             raise InputRefused(f"review receipt targets unknown {target_id}")
         target = inventory_by_id[target_id]
-        if (
-            receipt["target_root"] != target["target_root"]
-            or receipt["inventory_root"] != inventory["semantic_root"]
-            or receipt["campaign_epoch_root"] != inventory["campaign_epoch_root"]
-        ):
+        if receipt["target_root"] != target["target_root"]:
             raise InputRefused(
-                f"review receipt exact source roots drifted for {target_id}"
+                f"review receipt target root drifted for {target_id}"
             )
+        v2_validate_review_receipt_row_provenance(
+            receipt,
+            receipt_document,
+            label=f"review receipt {target_id}",
+        )
         review_minutes = receipt["review_minutes"]
         if type(review_minutes) is not int or review_minutes < 0:
             raise InputRefused(f"review receipt minutes are invalid for {target_id}")
@@ -13325,6 +15461,11 @@ def v2_derive_authority(
             label=f"authority inventory target {target['id']}",
         )
         receipt = receipts.get(target["id"])
+        receipt_scope_root = (
+            v2_review_receipt_scope_root(receipt)
+            if receipt is not None
+            else None
+        )
         semantic_review_complete = bool(
             receipt and receipt["semantic_review_dimensions"]
         )
@@ -13339,7 +15480,7 @@ def v2_derive_authority(
             else "UNREVIEWED"
         )
         semantic_review_receipt_root = (
-            receipt["semantic_root"]
+            receipt_scope_root
             if semantic_review_complete and receipt
             else None
         )
@@ -13518,7 +15659,7 @@ def v2_derive_authority(
                     else "NODATA"
                 ),
                 "receipt_root": (
-                    receipt["semantic_root"]
+                    receipt_scope_root
                     if review_declared and receipt
                     else None
                 ),
@@ -16732,7 +18873,7 @@ def v2_reproduction_argv(
             raise EvidenceFailed("v2 replay reproduction lacks its input")
         return [
             str(SCRIPT_REL),
-            "--replay",
+            "--replay-v2",
             str(safe_relative(replay_input, label="replay input")),
             "--artifact-root",
             str(safe_relative(artifact_root, label="artifact root")),
@@ -16770,6 +18911,55 @@ def v2_reproduction_argv(
     return argv
 
 
+V2_SENSITIVE_KEY_TERMINALS = frozenset(
+    {"password", "passwd", "secret", "credential", "token"}
+)
+V2_SENSITIVE_KEYS = frozenset(
+    {
+        "api_key",
+        "private_key",
+        "authorization",
+        "proxy_authorization",
+    }
+)
+
+
+def v2_is_sensitive_key(value: Any) -> bool:
+    normalized = str(value).strip().lower().replace("-", "_")
+    normalized = normalized.lstrip("_")
+    segments = [
+        segment
+        for segment in re.split(r"[./:\[\]]+", normalized)
+        if segment
+    ]
+    if not segments:
+        return False
+    final = segments[-1]
+    return (
+        final in V2_SENSITIVE_KEYS
+        or final.split("_")[-1] in V2_SENSITIVE_KEY_TERMINALS
+    )
+
+
+def v2_redacted_value(value: str) -> str:
+    if re.fullmatch(r"<redacted(?::[0-9a-f]{64})?>", value):
+        return value
+    return (
+        "<redacted:"
+        + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        + ">"
+    )
+
+
+def v2_contains_absolute_path(value: str) -> bool:
+    return bool(
+        value.startswith("/")
+        or str(REPO_ROOT) in value
+        or re.search(r"(?<![A-Za-z0-9_.-])/[A-Za-z0-9_.~-]", value)
+        or re.search(r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\\\|\\\\\\\\)", value)
+    )
+
+
 def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
     if len(argv) > V2_COMMAND_ARGUMENTS_CAP:
         raise EvidenceFailed("v2 command receipt exceeds its argument-count cap")
@@ -16779,62 +18969,130 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
         value = str(raw)
         if len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP:
             raise EvidenceFailed("v2 command receipt exceeds its argument-byte cap")
-        sensitive_flag = (
-            re.fullmatch(
-                r"(?i)-{1,2}(?:password|secret|credential|access[_-]?token)",
-                value,
-            )
-            is not None
-        )
-        sensitive_assignment = (
-            re.search(
-                r"(?i)(?:password|secret|credential|access[_-]?token)=",
-                value,
-            )
-            is not None
-        )
-        already_redacted = (
-            re.fullmatch(r"<redacted:[0-9a-f]{64}>", value) is not None
-        )
-        if sensitive_value_pending and already_redacted:
-            result.append(value)
+        already_redacted = re.fullmatch(
+            r"<redacted(?::[0-9a-f]{64})?>", value
+        ) is not None
+        if sensitive_value_pending:
+            result.append(value if already_redacted else v2_redacted_value(value))
             sensitive_value_pending = False
             continue
-        must_redact = (
-            sensitive_value_pending
-            or value.startswith("/")
-            or str(REPO_ROOT) in value
-            or sensitive_assignment
+        option_name = value.split("=", 1)[0]
+        sensitive_flag = (
+            option_name.startswith("-")
+            and "=" not in value
+            and v2_is_sensitive_key(option_name.lstrip("-"))
         )
-        if sensitive_flag and not sensitive_value_pending:
+        assignment_key = value.split("=", 1)[0] if "=" in value else ""
+        sensitive_assignment = bool(
+            assignment_key
+            and v2_is_sensitive_key(assignment_key.lstrip("-"))
+        )
+        authorization_header = bool(
+            re.match(r"(?i)^(?:proxy-)?authorization\s*:", value)
+            or re.search(r"(?i)\bbearer\s+\S+", value)
+        )
+        if sensitive_flag:
             result.append(value)
             sensitive_value_pending = True
             continue
-        if must_redact:
-            result.append(
-                "<redacted:"
-                + hashlib.sha256(value.encode("utf-8")).hexdigest()
-                + ">"
-            )
+        if (
+            sensitive_assignment
+            or authorization_header
+            or v2_contains_absolute_path(value)
+        ):
+            result.append(v2_redacted_value(value))
         else:
             result.append(value)
-        sensitive_value_pending = bool(
-            sensitive_value_pending and sensitive_flag
-        )
     return result
 
 
-def v2_bounded_diagnostic_summary(value: Any) -> str:
-    text = str(value).replace(str(REPO_ROOT), "<repo>")
-    text = re.sub(
-        r"(?i)(password|secret|credential|access[_-]?token)"
-        r"(\s*[:=]\s*)[^\s,;]+",
-        r"\1\2<redacted>",
-        text,
+def v2_redact_contextual_text(value: str) -> str:
+    text = value.replace(str(REPO_ROOT), "<repo>")
+
+    authorization_header = re.compile(
+        r"(?im)(?P<prefix>\b(?:Proxy-)?Authorization\s*:\s*)"
+        r"(?P<body>[^\r\n]*)"
     )
+
+    def redact_authorization(match: re.Match[str]) -> str:
+        return match.group("prefix") + "<redacted>"
+
+    text = authorization_header.sub(redact_authorization, text)
+
+    quoted_assignment = re.compile(
+        r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+        r"(?P<sep>\s*[:=]\s*)"
+        r"(?P<quote>[\"'])(?P<body>.*?)(?P=quote)"
+        ,
+        flags=re.DOTALL,
+    )
+
+    def redact_quoted(match: re.Match[str]) -> str:
+        if not v2_is_sensitive_key(match.group("key")):
+            return match.group(0)
+        body = match.group("body")
+        replacement = body if body == "<redacted>" else "<redacted>"
+        return (
+            match.group("key")
+            + match.group("sep")
+            + match.group("quote")
+            + replacement
+            + match.group("quote")
+        )
+
+    text = quoted_assignment.sub(redact_quoted, text)
+    for quote in ('"', "'"):
+        unclosed_quote = re.compile(
+            r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+            r"(?P<sep>\s*[:=]\s*)"
+            + re.escape(quote)
+            + r"(?P<body>[^" + re.escape(quote) + r"]*)\Z",
+            flags=re.DOTALL,
+        )
+
+        def redact_unclosed(
+            match: re.Match[str],
+            *,
+            quote_character: str = quote,
+        ) -> str:
+            if not v2_is_sensitive_key(match.group("key")):
+                return match.group(0)
+            return (
+                match.group("key")
+                + match.group("sep")
+                + quote_character
+                + "<redacted>"
+            )
+
+        text = unclosed_quote.sub(redact_unclosed, text)
+    unquoted_assignment = re.compile(
+        r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+        r"(?P<sep>\s*[:=]\s*)"
+        r"(?P<body>[^\s,;]+)"
+    )
+
+    def redact_unquoted(match: re.Match[str]) -> str:
+        if not v2_is_sensitive_key(match.group("key")):
+            return match.group(0)
+        body = match.group("body")
+        replacement = body if body == "<redacted>" else "<redacted>"
+        return match.group("key") + match.group("sep") + replacement
+
+    text = unquoted_assignment.sub(redact_unquoted, text)
+    split_option = re.compile(
+        r"(?P<key>--?[A-Za-z][A-Za-z0-9_-]{0,127})"
+        r"(?P<sep>\s+)"
+        r"(?P<body>\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    )
+
+    def redact_split(match: re.Match[str]) -> str:
+        if not v2_is_sensitive_key(match.group("key").lstrip("-")):
+            return match.group(0)
+        return match.group("key") + match.group("sep") + "<redacted>"
+
+    text = split_option.sub(redact_split, text)
     text = re.sub(
-        r"(?i)((?:-{1,2})?(?:password|secret|credential|access[_-]?token))"
-        r"(\s+)[^\s,;]+",
+        r"(?i)\b(Bearer)(\s+)(?!<redacted>)[^\s,;]+",
         r"\1\2<redacted>",
         text,
     )
@@ -16843,6 +19101,16 @@ def v2_bounded_diagnostic_summary(value: Any) -> str:
         "<absolute-path>",
         text,
     )
+    text = re.sub(
+        r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\\\|\\\\\\\\)[^\s,;]+",
+        "<absolute-path>",
+        text,
+    )
+    return text
+
+
+def v2_bounded_diagnostic_summary(value: Any) -> str:
+    text = v2_redact_contextual_text(str(value))
     text = " ".join(text.split())
     encoded = text.encode("utf-8")
     if len(encoded) <= V2_DIAGNOSTIC_SUMMARY_BYTES_CAP:
@@ -16853,6 +19121,89 @@ def v2_bounded_diagnostic_summary(value: Any) -> str:
     )
     prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
     return prefix + suffix
+
+
+def v2_assertion_evidence_projection(
+    value: Any,
+    *,
+    sensitive: bool = False,
+    depth: int = 0,
+) -> Any:
+    if depth > 32:
+        raise EvidenceFailed("assertion evidence exceeds its projection depth cap")
+    if sensitive:
+        projection = {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "value": v2_state_projection_value(value),
+        }
+        return {
+            "kind": "redacted",
+            "content_root": "sha256-v1:"
+            + hashlib.sha256(canonical_bytes(projection)).hexdigest(),
+        }
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    if isinstance(value, str):
+        if sensitive or v2_contains_absolute_path(value):
+            return v2_redacted_value(value)
+        redacted = v2_redact_contextual_text(value)
+        return redacted
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        payload = value.tobytes() if isinstance(value, memoryview) else bytes(value)
+        return {
+            "kind": "bytes",
+            "byte_length": len(payload),
+            "content_root": "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
+        }
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise EvidenceFailed(
+                    "assertion evidence mapping keys must be exact strings"
+                )
+            redacted_key = v2_redact_contextual_text(key)
+            projected_key = (
+                key
+                if redacted_key == key and not v2_contains_absolute_path(key)
+                else "<redacted-key:"
+                + hashlib.sha256(key.encode("utf-8")).hexdigest()
+                + ">"
+            )
+            if projected_key in projected:
+                raise EvidenceFailed(
+                    "assertion evidence mapping keys collide after projection"
+                )
+            projected[projected_key] = v2_assertion_evidence_projection(
+                item,
+                sensitive=v2_is_sensitive_key(key),
+                depth=depth + 1,
+            )
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [
+            v2_assertion_evidence_projection(
+                item,
+                sensitive=sensitive,
+                depth=depth + 1,
+            )
+            for item in value
+        ]
+    if isinstance(value, (set, frozenset)):
+        projected = [
+            v2_assertion_evidence_projection(
+                item,
+                sensitive=sensitive,
+                depth=depth + 1,
+            )
+            for item in value
+        ]
+        projected.sort(key=canonical_bytes)
+        return projected
+    return {
+        "kind": "opaque",
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+    }
 
 
 def v2_source_command_receipts(
@@ -18834,6 +21185,7 @@ def v2_execute_live_plan(
     mode: str,
     parsed: argparse.Namespace,
     manifest: Mapping[str, Any],
+    br_cwd: Path = REPO_ROOT,
 ) -> dict[str, Any]:
     artifact_dir = require_v2_artifact_grammar(parsed)
     output = resolve_run_dir(
@@ -18911,7 +21263,7 @@ def v2_execute_live_plan(
         artifact_root=parsed.artifact_root,
         artifact_dir=artifact_dir,
     )
-    stage = "source_capture"
+    stage = "source_capture_round_1"
     publication_started = False
     available_roots: dict[str, str | None] = {
         "source": None,
@@ -18922,7 +21274,43 @@ def v2_execute_live_plan(
         "zero_sets": None,
     }
     try:
-        snapshot = collect_live_v2(manifest)
+        _command_receipts.clear()
+        rule_contract = v2_source_rule_contract()
+        before = v2_capture_live_round(
+            manifest,
+            rule_contract,
+            ordinal=1,
+            br_cwd=br_cwd,
+        )
+        stage = "history_audit_between_source_rounds"
+        if mode == "history-plan":
+            audit_ids = v2_history_audit_ids_from_round(
+                before,
+                manifest=manifest,
+                priority_filter=priority_filter,
+                status_filter=status_filter,
+                target_filter=target_filter,
+            )
+            audit_capture = v2_capture_histories(
+                audit_ids,
+                br_cwd=br_cwd,
+            )
+        else:
+            audit_capture = v2_not_requested_audit_capture()
+        stage = "source_capture_round_2"
+        after = v2_capture_live_round(
+            manifest,
+            rule_contract,
+            ordinal=2,
+            br_cwd=br_cwd,
+        )
+        stage = "source_capture_coherence"
+        snapshot = v2_finalize_live_capture_pair(
+            manifest,
+            before=before,
+            after=after,
+            audit_capture=audit_capture,
+        )
         stage = "campaign_epoch"
         campaign_root, _ = v2_campaign_epoch(snapshot)
         stage = "inventory"
@@ -18936,6 +21324,26 @@ def v2_execute_live_plan(
             route_filter=route_filter,
         )
         available_roots["inventory"] = inventory["semantic_root"]
+        if mode == "history-plan":
+            expected_audit_ids = sorted(
+                {
+                    row["id"]
+                    for row in inventory["rows"]
+                    if row["status"] == "closed"
+                }
+                | {
+                    str(
+                        manifest["history_contract"][
+                            "legacy_coverage_anchor_issue"
+                        ]
+                    )
+                }
+            )
+            if audit_capture["issue_ids"] != expected_audit_ids:
+                raise EvidenceFailed(
+                    "v2 bracketed history audit membership differs from the "
+                    "post-capture selected inventory"
+                )
         stage = "review_receipt_admission"
         review_receipts = v2_load_review_receipts(
             parsed.review_receipts,
@@ -18951,35 +21359,6 @@ def v2_execute_live_plan(
         available_roots["authority"] = authority["semantic_root"]
         stage = "prior_campaign"
         prior_campaign = v2_load_prior_campaign(parsed.prior_campaign)
-        stage = "history_audit"
-        if mode == "history-plan":
-            audit_ids = sorted(
-                {
-                    row["id"]
-                    for row in inventory["rows"]
-                    if row["status"] == "closed"
-                }
-                | {
-                    str(
-                        manifest["history_contract"][
-                            "legacy_coverage_anchor_issue"
-                        ]
-                    )
-                }
-            )
-            audit_capture = v2_capture_histories(audit_ids)
-        else:
-            audit_capture = v2_rooted(
-                {
-                    "state": "NOT_REQUESTED",
-                    "capture_count": 0,
-                    "issue_ids": [],
-                    "documents": [],
-                    "command_receipts": [],
-                    "raw_stream_bodies_retained": False,
-                    "no_claim": V2_AUDIT_NOT_REQUESTED_NO_CLAIM,
-                }
-            )
         stage = "source_assembly"
         source = v2_build_source_document(
             snapshot=snapshot,
@@ -19034,6 +21413,7 @@ def v2_execute_live_plan(
             inventory=inventory,
             prior_campaign=prior_campaign,
             current_universe=snapshot.all_issues,
+            current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
         )
         available_roots["zero_sets"] = zero_sets["semantic_root"]
         stage = "bundle_assembly"
@@ -19469,6 +21849,7 @@ def v2_validate_source_full_issue(
         or issue["status"] not in STATUS_SCOPES
         or type(issue["priority"]) is not int
         or issue["priority"] not in range(5)
+        or type(issue["ephemeral"]) is not bool
         or issue["no_claim"] != V2_SOURCE_ISSUE_NO_CLAIM
         or (
             issue["estimated_minutes"] is not None
@@ -19813,8 +22194,8 @@ def v2_expected_observation_argv(
         ["br", "status", "--json", "--no-activity", *BR_READ_FLAGS],
         ["br", "sync", "--status", "--json", *BR_READ_FLAGS],
         ["br", "sync", "--witness", "--json", *BR_READ_FLAGS],
-        ["br", "version", "--json"],
-        ["br", "capabilities", "--json"],
+        ["br", "version", "--json", *BR_READ_FLAGS],
+        ["br", "capabilities", "--json", *BR_READ_FLAGS],
         ["br", "list", "--all", "--json", "--limit", "0", *BR_READ_FLAGS],
     ]
     batch_size = min(CAPS["show_batch"], 56)
@@ -20123,6 +22504,12 @@ def v2_validate_source_review_receipt_envelope(
         raise InputRefused(
             "v2 source review receipt envelope identity or no-claim differs"
         )
+    v2_validate_review_receipt_document_provenance(
+        receipt_document,
+        receipts,
+        inventory=None,
+        label="v2 source review receipts",
+    )
     verify_semantic_root(
         receipt_document,
         label="v2 source review receipt envelope",
@@ -20140,6 +22527,11 @@ def v2_validate_source_review_receipt_envelope(
         v2_exact_keys(
             receipt,
             {*V2_REVIEW_RECEIPT_FIELDS, "semantic_root"},
+            label=f"v2 source review receipt row {index}",
+        )
+        v2_validate_review_receipt_row_provenance(
+            receipt,
+            receipt_document,
             label=f"v2 source review receipt row {index}",
         )
         verify_semantic_root(
@@ -20617,10 +23009,18 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     }
     if roots != expected:
         raise EvidenceFailed("v2 source captured-input roots disagree")
+    campaign_issues = sorted(
+        (row for row in all_issues if row["status"] != "closed"),
+        key=lambda row: row["id"],
+    )
     if (
-        campaign["issue_count"] != len(all_issues)
+        campaign["issue_count"] != len(campaign_issues)
         or campaign["issue_ids_root"]
-        != semantic_root(sorted(row["id"] for row in all_issues))
+        != semantic_root([row["id"] for row in campaign_issues])
+        or campaign["projection_root"]
+        != semantic_root(
+            [v2_stable_issue_projection(row) for row in campaign_issues]
+        )
     ):
         raise EvidenceFailed("v2 source campaign membership receipt disagrees")
     observation_preflight = captured["observation"]
@@ -20770,15 +23170,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     )
     if (
         observation["schema"] != V2_SOURCE_SCHEMA
-        or not isinstance(capture_contract, dict)
-        or capture_contract
-        != {
-            "count": 2,
-            "coherent": True,
-            "tracker_cli": "br",
-            "direct_tracker_file_access": False,
-            "network_access": False,
-        }
         or not isinstance(br_version, dict)
         or set(br_version)
         != {"build", "commit", "features", "target", "version"}
@@ -20834,6 +23225,11 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         for field in root_fields
     ):
         raise InputRefused("v2 source observation contains a malformed root")
+    v2_validate_source_capture_contract(
+        capture_contract,
+        audit_capture=captured["audit_capture"],
+        coherent_capture_root=observation["coherent_capture_root"],
+    )
     observed_source_paths: list[str] = []
     for index, identity in enumerate(source_files):
         if not isinstance(identity, dict):
@@ -20905,6 +23301,33 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             "v2 source observation source-file identities are not bound to "
             "the executing harness and retained manifest baselines"
         )
+    normalized_tracker_status = v2_normalize_br_status(
+        observation["tracker_status"],
+        error_type=InputRefused,
+    )
+    normalized_sync_status = v2_normalize_br_sync_status(
+        observation["sync_status"],
+        error_type=InputRefused,
+    )
+    normalized_export_witness = v2_normalize_br_export_witness(
+        observation["export_witness"],
+        error_type=InputRefused,
+    )
+    if (
+        observation["tracker_status"] != normalized_tracker_status
+        or observation["sync_status"] != normalized_sync_status
+        or observation["export_witness"] != normalized_export_witness
+    ):
+        raise InputRefused(
+            "v2 source observation br envelopes are not canonically normalized"
+        )
+    v2_validate_live_envelope_consistency(
+        tracker_status=normalized_tracker_status,
+        sync_status=normalized_sync_status,
+        export_witness=normalized_export_witness,
+        full_issues=all_issues,
+        error_type=InputRefused,
+    )
     observation_receipts = v2_validate_source_command_receipts(
         observation,
         issue_ids=[row["id"] for row in all_issues],
@@ -20977,11 +23400,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             "v2 source observation membership, manifest, or count bindings "
             "disagree"
         )
-    rule_contract = {
-        "required_sections_by_type": REQUIRED_SECTIONS_BY_TYPE,
-        "clause_terms": list(CLAUSE_TERMS),
-        "classifier": "independent-template-findings-v2",
-    }
+    rule_contract = v2_source_rule_contract()
     expected_capture = v2_capture_state(
         issue_ids=sorted(row["id"] for row in all_issues),
         full_issues=all_issues,
@@ -21795,6 +24214,7 @@ def v2_reconstruct_retained(
         inventory=inventory,
         prior_campaign=source["captured"]["prior_campaign"],
         current_universe=snapshot.all_issues,
+        current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
     )
     subject_mode = str(terminal.get("subject_mode") or terminal.get("mode") or "")
     if subject_mode == "review-plan":
@@ -21834,6 +24254,7 @@ def v2_reconstruct_retained(
         inventory=inventory,
         prior_campaign=source["captured"]["prior_campaign"],
         current_universe=snapshot.all_issues,
+        current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
     )
     reconstructed = v2_bundle_payloads(
         mode=str(terminal["mode"]),
@@ -21866,7 +24287,48 @@ def v2_reconstruct_retained(
     )
 
 
-def v2_replay_bundle(
+def v2_validate_replay_result_document(
+    document: Mapping[str, Any],
+) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != V2_REPLAY_RESULT_FIELDS
+    ):
+        raise EvidenceFailed("v2 replay result has a non-closed schema")
+    try:
+        artifact_dir = safe_relative(
+            document["artifact_dir"],
+            label="v2 replay result artifact directory",
+        )
+    except (TypeError, UsageRefused) as error:
+        raise EvidenceFailed(
+            "v2 replay result artifact directory is unsafe"
+        ) from error
+    roots = (
+        document["retained_terminal_root"],
+        document["replay_terminal_root"],
+    )
+    if (
+        document["schema"] != V2_REPLAY_RESULT_SCHEMA
+        or document["terminal"] != "Pass"
+        or not isinstance(document["subject_mode"], str)
+        or document["subject_mode"] not in {"review-plan", "history-plan"}
+        or str(artifact_dir) != document["artifact_dir"]
+        or any(
+            not isinstance(root, str)
+            or re.fullmatch(r"sha256-v1:[0-9a-f]{64}", root) is None
+            for root in roots
+        )
+        or document["live_tracker_reads"] is not False
+        or document["live_tracker_writes"] is not False
+        or document["network_access"] is not False
+        or document["no_claim"] != V2_REPLAY_RESULT_NO_CLAIM
+    ):
+        raise EvidenceFailed("v2 replay result contract differs")
+    verify_semantic_root(document, label="v2 replay result")
+
+
+def _v2_replay_bundle_offline(
     *,
     artifact_root: str,
     input_dir: str,
@@ -21967,25 +24429,44 @@ def v2_replay_bundle(
         artifact_dir=output_dir,
         payloads=replay_payloads,
     )
-    return {
-        "schema": "frankensim.beads-template-hygiene.replay-result.v2",
-        "terminal": "Pass",
-        "subject_mode": terminal["subject_mode"],
-        "artifact_dir": publication["artifact_dir"],
-        "retained_terminal_root": terminal["semantic_root"],
-        "replay_terminal_root": strict_json_loads(
-            replay_payloads["terminal.json"],
-            label="v2 replay terminal",
-            require_canonical=True,
-        )["semantic_root"],
-        "live_tracker_reads": False,
-        "live_tracker_writes": False,
-        "network_access": False,
-        "no_claim": (
-            "offline replay proves exact retained reconstruction only and "
-            "does not prove current tracker state or mint authority"
-        ),
-    }
+    result = v2_rooted(
+        {
+            "schema": V2_REPLAY_RESULT_SCHEMA,
+            "terminal": "Pass",
+            "subject_mode": terminal["subject_mode"],
+            "artifact_dir": publication["artifact_dir"],
+            "retained_terminal_root": terminal["semantic_root"],
+            "replay_terminal_root": strict_json_loads(
+                replay_payloads["terminal.json"],
+                label="v2 replay terminal",
+                require_canonical=True,
+            )["semantic_root"],
+            "live_tracker_reads": False,
+            "live_tracker_writes": False,
+            "network_access": False,
+            "no_claim": V2_REPLAY_RESULT_NO_CLAIM,
+        }
+    )
+    v2_validate_replay_result_document(result)
+    return result
+
+
+def v2_replay_bundle(
+    *,
+    artifact_root: str,
+    input_dir: str,
+    output_dir: str,
+    accepted_manifest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    with v2_offline_replay_scope():
+        result = _v2_replay_bundle_offline(
+            artifact_root=artifact_root,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            accepted_manifest=accepted_manifest,
+        )
+    v2_validate_replay_result_document(result)
+    return result
 
 
 def peek_replay_schema(artifact_root: str, input_dir: str) -> str:
@@ -22156,11 +24637,12 @@ class V2CheckCollector:
 
     @staticmethod
     def _bounded(value: Any) -> Any:
-        payload = canonical_bytes(value)
+        projected = v2_assertion_evidence_projection(value)
+        payload = canonical_bytes(projected)
         if len(payload) <= 2_048:
-            return value
+            return projected
         return {
-            "projection_root": semantic_root(value),
+            "projection_root": semantic_root(projected),
             "canonical_bytes": len(payload),
         }
 
@@ -22200,7 +24682,9 @@ class V2CheckCollector:
         if condition is not True:
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} failed: "
-                f"expected {expected!r}, observed {observed!r}"
+                "expected/observed projections retained by root; "
+                f"expected_root={semantic_root(row['expected'])}, "
+                f"observed_root={semantic_root(row['observed'])}"
             )
 
     def refuses(
@@ -22493,6 +24977,24 @@ def v2_synthetic_inventory(
     )
 
 
+def v2_synthetic_semantic_dimension_verdict(
+    disposition: str,
+    dimension: str,
+) -> str:
+    if disposition == "REMEDIATION_REQUIRED":
+        return "FINDING" if dimension == "user_value" else "SATISFIED"
+    if disposition == "REVIEWED_NO_CHANGE":
+        return "SATISFIED"
+    if disposition not in V2_SEMANTIC_EXACT_SIGNAL_DIMENSION:
+        raise EvidenceFailed(
+            f"unsupported synthetic semantic disposition {disposition!r}"
+        )
+    signal_dimension, signal = V2_SEMANTIC_EXACT_SIGNAL_DIMENSION[
+        disposition
+    ]
+    return signal if dimension == signal_dimension else "SATISFIED"
+
+
 def v2_synthetic_receipts(
     inventory: Mapping[str, Any],
     *,
@@ -22537,18 +25039,14 @@ def v2_synthetic_receipts(
             semantic_disposition
             or str(target["semantic_review_disposition"])
         )
-        signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[
-            target_semantic_disposition
-        ]
         semantic_dimensions = (
             [
                 v2_semantic_dimension_receipt(
                     target_root=target["target_root"],
                     dimension=dimension,
-                    verdict=(
-                        signal
-                        if index == 0
-                        else "SATISFIED"
+                    verdict=v2_synthetic_semantic_dimension_verdict(
+                        target_semantic_disposition,
+                        dimension,
                     ),
                     reason=(
                         f"synthetic reviewed reason for {dimension}"
@@ -22557,9 +25055,7 @@ def v2_synthetic_receipts(
                         f"synthetic reviewed falsifier for {dimension}"
                     ),
                 )
-                for index, dimension in enumerate(
-                    V2_SEMANTIC_REVIEW_DIMENSIONS
-                )
+                for dimension in V2_SEMANTIC_REVIEW_DIMENSIONS
             ]
             if semantic_reviewed
             else []
@@ -22750,6 +25246,236 @@ def v2_fixture_manifest_with_history(
     return fixture
 
 
+def v2_fixture_br_envelopes(
+    full_issue: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    status = str(full_issue["status"])
+    tracker_status = v2_normalize_br_status(
+        {
+            "summary": {
+                "average_lead_time_hours": 0.0,
+                "blocked_issues": 0,
+                "closed_issues": int(status == "closed"),
+                "deferred_issues": int(status == "deferred"),
+                "draft_issues": 0,
+                "epics_eligible_for_closure": 0,
+                "in_progress_issues": int(status == "in_progress"),
+                "open_issues": int(status == "open"),
+                "pinned_issues": 0,
+                "ready_issues": 0,
+                "tombstone_issues": 0,
+                "total_issues": 1,
+            }
+        },
+        error_type=EvidenceFailed,
+    )
+    sync_status = v2_normalize_br_sync_status(
+        {
+            "db_newer": False,
+            "dirty_count": 0,
+            "git_export": {"available": False},
+            "jsonl_content_hash": "0" * 64,
+            "jsonl_exists": True,
+            "jsonl_newer": False,
+            "last_export_time": None,
+            "last_import_time": None,
+            "reliability_audit": {
+                "anomalies": [],
+                "anomaly_count": 0,
+                "health": "healthy",
+                "source": "sync.status",
+            },
+            "workspace_health": "healthy",
+        },
+        error_type=EvidenceFailed,
+    )
+    chunk = {
+        "byte_count": 1,
+        "first_line_hash": "1" * 64,
+        "hash": "2" * 64,
+        "index": 0,
+        "last_line_hash": "1" * 64,
+        "line_count": 1,
+        "start_line": 0,
+    }
+    action = {
+        "action": "reuse_unchanged",
+        "base_index": 0,
+        "byte_count": 1,
+        "candidate_index": 0,
+        "line_count": 1,
+        "start_line": 0,
+    }
+    comparison = {
+        "added_byte_count": 0,
+        "added_chunks": 0,
+        "base_byte_count": 1,
+        "base_chunk_count": 1,
+        "base_line_count": 1,
+        "candidate_byte_count": 1,
+        "candidate_chunk_count": 1,
+        "candidate_line_count": 1,
+        "changed_base_byte_count": 0,
+        "changed_candidate_byte_count": 0,
+        "changed_chunks": 0,
+        "chunk_size_lines_match": True,
+        "comparable_chunk_count": 1,
+        "drift_detected": False,
+        "first_changed_chunk_index": None,
+        "removed_byte_count": 0,
+        "removed_chunks": 0,
+        "root_hashes_match": True,
+        "safe_reuse_prefix_chunks": 1,
+        "schema_versions_match": True,
+        "unchanged_byte_count": 1,
+        "unchanged_chunks": 1,
+    }
+    export_witness = v2_normalize_br_export_witness(
+        {
+            "base_comparison": comparison,
+            "base_jsonl_path": ".beads/beads.base.jsonl",
+            "base_parallel_work_plan": {
+                "batches": [
+                    {
+                        "action_count": 1,
+                        "actions": [action],
+                        "byte_count": 1,
+                        "candidate_end_index": 1,
+                        "candidate_start_index": 0,
+                        "index": 0,
+                        "kind": "candidate_output",
+                        "line_count": 1,
+                    }
+                ],
+                "candidate_output_batches": 1,
+                "deterministic_batch_order": True,
+                "max_parallelism": 1,
+                "metadata_only_drop_batches": 0,
+                "total_batches": 1,
+            },
+            "base_reuse_materialization": {
+                "dropped_byte_count": 0,
+                "dropped_chunks": 0,
+                "output_byte_count": 1,
+                "read_added_byte_count": 0,
+                "read_added_chunks": 0,
+                "rebuilt_byte_count": 0,
+                "rebuilt_chunks": 0,
+                "reused_byte_count": 1,
+                "reused_chunks": 1,
+            },
+            "base_reuse_plan": {
+                "actions": [action],
+                "comparison": comparison,
+                "schedule": {
+                    "candidate_output_actions": 1,
+                    "candidate_output_byte_count": 1,
+                    "candidate_output_line_count": 1,
+                    "deterministic_candidate_order": True,
+                    "dropped_byte_count": 0,
+                    "max_parallel_candidate_actions": 1,
+                    "metadata_only_drop_actions": 0,
+                    "read_added_actions": 0,
+                    "read_added_byte_count": 0,
+                    "rebuild_actions": 0,
+                    "rebuild_byte_count": 0,
+                    "reusable_actions": 1,
+                    "reusable_byte_count": 1,
+                    "total_actions": 1,
+                },
+            },
+            "jsonl_path": ".beads/issues.jsonl",
+            "witness": {
+                "byte_count": 1,
+                "chunk_size_lines": 1,
+                "chunks": [chunk],
+                "line_count": 1,
+                "root_hash": "3" * 64,
+                "schema_version": "br.jsonl-witness.v1",
+            },
+        },
+        error_type=EvidenceFailed,
+    )
+    v2_validate_live_envelope_consistency(
+        tracker_status=tracker_status,
+        sync_status=sync_status,
+        export_witness=export_witness,
+        full_issues=[full_issue],
+        error_type=EvidenceFailed,
+    )
+    return tracker_status, sync_status, export_witness
+
+
+def v2_fixture_audit_capture(
+    full_issue: Mapping[str, Any],
+    *,
+    history_mode: bool,
+) -> dict[str, Any]:
+    if not history_mode:
+        return v2_not_requested_audit_capture()
+    audit_events = [
+        {
+            "id": 2,
+            "event_type": "closed",
+            "actor": "fixture-closer",
+            "timestamp": "2026-01-02T00:00:00.001000+00:00",
+            "comment": full_issue["close_reason"],
+        },
+        {
+            "id": 1,
+            "event_type": "status_changed",
+            "actor": "fixture-closer",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+            "old_value": "open",
+            "new_value": "closed",
+        },
+    ]
+    normalized_audit = v2_normalize_audit_document(
+        {"issue_id": full_issue["id"], "events": audit_events},
+        issue_id=full_issue["id"],
+    )
+    audit_stdout = canonical_bytes(
+        {"issue_id": full_issue["id"], "events": audit_events}
+    )
+    audit_argv = [
+        "br",
+        "audit",
+        "log",
+        full_issue["id"],
+        "--json",
+        *BR_READ_FLAGS,
+    ]
+    return v2_rooted(
+        {
+            "capture_count": 2,
+            "worker_bound": V2_AUDIT_WORKERS,
+            "issue_ids": [full_issue["id"]],
+            "documents": [normalized_audit],
+            "command_receipts": [
+                {
+                    "capture_ordinal": capture_ordinal,
+                    "issue_id": full_issue["id"],
+                    "argv": audit_argv,
+                    "exit_code": 0,
+                    "result_category": "SUCCESS",
+                    "stdout_byte_length": len(audit_stdout),
+                    "stdout_root": (
+                        "sha256-v1:" + hashlib.sha256(audit_stdout).hexdigest()
+                    ),
+                    "stderr_byte_length": 0,
+                    "stderr_root": (
+                        "sha256-v1:" + hashlib.sha256(b"").hexdigest()
+                    ),
+                    "raw_stream_bodies_retained": False,
+                }
+                for capture_ordinal in (1, 2)
+            ],
+            "raw_stream_bodies_retained": False,
+            "no_claim": V2_AUDIT_CAPTURE_NO_CLAIM,
+        }
+    )
+
+
 def v2_replayable_fixture_bundle(
     manifest: Mapping[str, Any],
     *,
@@ -22804,6 +25530,10 @@ def v2_replayable_fixture_bundle(
             }
         )
     full_issue = v2_full_issue_projection(raw_issue)
+    fixture_audit = v2_fixture_audit_capture(
+        full_issue,
+        history_mode=history_mode,
+    )
     missing = {
         full_issue["id"]: fixture_expected_missing(full_issue["type"])
     }
@@ -22884,9 +25614,11 @@ def v2_replayable_fixture_bundle(
         ],
         "operation_count": 1,
     }
-    fixture_tracker_status = {"fixture": True}
-    fixture_sync_status = {"fixture": True}
-    fixture_export_witness = {"fixture": True}
+    (
+        fixture_tracker_status,
+        fixture_sync_status,
+        fixture_export_witness,
+    ) = v2_fixture_br_envelopes(full_issue)
     fixture_source_files = v2_source_file_identities()
     fixture_source_files[2] = {
         **fixture_source_files[2],
@@ -22918,6 +25650,23 @@ def v2_replayable_fixture_bundle(
                 "tracker_cli": "br",
                 "direct_tracker_file_access": False,
                 "network_access": False,
+                "audit_bracket": v2_rooted(
+                    {
+                        "state": (
+                            "CAPTURED" if history_mode else "NOT_REQUESTED"
+                        ),
+                        "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+                        "source_before_ordinal": 1,
+                        "source_after_ordinal": 2,
+                        "audit_capture_ordinals": (
+                            [1, 2] if history_mode else []
+                        ),
+                        "source_before_root": fixture_capture["semantic_root"],
+                        "source_after_root": fixture_capture["semantic_root"],
+                        "audit_capture_root": fixture_audit["semantic_root"],
+                        "no_claim": V2_AUDIT_BRACKET_NO_CLAIM,
+                    }
+                ),
             },
             "br_version": fixture_br_version,
             "br_capabilities": fixture_br_capabilities,
@@ -22986,84 +25735,7 @@ def v2_replayable_fixture_bundle(
         current_br_version="0.2.19",
     )
     prior = v2_empty_prior_campaign()
-    if history_mode:
-        audit_events = [
-            {
-                "id": 2,
-                "event_type": "closed",
-                "actor": "fixture-closer",
-                "timestamp": "2026-01-02T00:00:00.001000+00:00",
-                "comment": full_issue["close_reason"],
-            },
-            {
-                "id": 1,
-                "event_type": "status_changed",
-                "actor": "fixture-closer",
-                "timestamp": "2026-01-02T00:00:00+00:00",
-                "old_value": "open",
-                "new_value": "closed",
-            },
-        ]
-        normalized_audit = v2_normalize_audit_document(
-            {
-                "issue_id": full_issue["id"],
-                "events": audit_events,
-            },
-            issue_id=full_issue["id"],
-        )
-        audit_stdout = canonical_bytes(
-            {"issue_id": full_issue["id"], "events": audit_events}
-        )
-        audit_argv = [
-            "br",
-            "audit",
-            "log",
-            full_issue["id"],
-            "--json",
-        ]
-        audit_receipts = [
-            {
-                "capture_ordinal": capture_ordinal,
-                "issue_id": full_issue["id"],
-                "argv": audit_argv,
-                "exit_code": 0,
-                "result_category": "SUCCESS",
-                "stdout_byte_length": len(audit_stdout),
-                "stdout_root": (
-                    "sha256-v1:"
-                    + hashlib.sha256(audit_stdout).hexdigest()
-                ),
-                "stderr_byte_length": 0,
-                "stderr_root": (
-                    "sha256-v1:" + hashlib.sha256(b"").hexdigest()
-                ),
-                "raw_stream_bodies_retained": False,
-            }
-            for capture_ordinal in (1, 2)
-        ]
-        audit = v2_rooted(
-            {
-                "capture_count": 2,
-                "worker_bound": V2_AUDIT_WORKERS,
-                "issue_ids": [full_issue["id"]],
-                "documents": [normalized_audit],
-                "command_receipts": audit_receipts,
-                "raw_stream_bodies_retained": False,
-                "no_claim": V2_AUDIT_CAPTURE_NO_CLAIM,
-            }
-        )
-    else:
-        audit = v2_rooted(
-            {
-                "state": "NOT_REQUESTED",
-                "capture_count": 0,
-                "issue_ids": [],
-                "documents": [],
-                "command_receipts": [],
-                "raw_stream_bodies_retained": False,
-                "no_claim": V2_AUDIT_NOT_REQUESTED_NO_CLAIM,
-            }
-        )
+    audit = fixture_audit
     source = v2_build_source_document(
         snapshot=snapshot,
         manifest=accepted_manifest,
@@ -23109,6 +25781,7 @@ def v2_replayable_fixture_bundle(
         inventory=inventory,
         prior_campaign=prior,
         current_universe=snapshot.all_issues,
+        current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
     )
     reproduction = [
         str(SCRIPT_REL),
@@ -24369,7 +27042,11 @@ def v2_execute_schema_cli_ux(
             and v2_raw_invocation_mode(
                 ["--replay", "retained-v2"]
             )
-            is None,
+            is None
+            and v2_raw_invocation_mode(
+                ["--replay-v2", "retained-v2"]
+            )
+            == "replay-v2",
             expected={
                 "schema": V2_EXECUTION_TERMINAL_SCHEMA,
                 "mode": "replay-v2",
@@ -24378,6 +27055,7 @@ def v2_execute_schema_cli_ux(
                     "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
                 ),
                 "raw_replay_preclassified": False,
+                "explicit_v2_replay_preclassified": True,
             },
             observed={
                 "schema": replay_execution_terminal["schema"],
@@ -24394,6 +27072,9 @@ def v2_execute_schema_cli_ux(
                 ],
                 "raw_replay_mode": v2_raw_invocation_mode(
                     ["--replay", "retained-v2"]
+                ),
+                "explicit_v2_replay_mode": v2_raw_invocation_mode(
+                    ["--replay-v2", "retained-v2"]
                 ),
             },
         )
@@ -25880,6 +28561,7 @@ def v2_execute_schema_cli_ux(
             "--history-plan",
             "--self-test-v2",
             "--case-v2",
+            "--replay-v2",
             "--review-receipts",
             "--prior-campaign",
             "--priorities",
@@ -25943,11 +28625,21 @@ def v2_execute_schema_cli_ux(
             contains="unrecognized arguments",
         )
         parsed = parse_arguments(["--self-test-v2"])
+        parsed_replay_v2 = parse_arguments(
+            ["--replay-v2", "target/retained-v2"]
+        )
         checks.check(
             "one-mode-admitted",
-            parsed.self_test_v2 is True,
-            expected=True,
-            observed=parsed.self_test_v2,
+            parsed.self_test_v2 is True
+            and parsed_replay_v2.replay_v2 == "target/retained-v2",
+            expected={
+                "self_test_v2": True,
+                "replay_v2": "target/retained-v2",
+            },
+            observed={
+                "self_test_v2": parsed.self_test_v2,
+                "replay_v2": parsed_replay_v2.replay_v2,
+            },
         )
     elif slug == "cli-artifact-grammar":
         missing_root = parse_arguments(
@@ -26038,6 +28730,170 @@ def v2_execute_schema_cli_ux(
             ),
             contains="path",
         )
+        with fixture_br_lease():
+            strict_root = resolve_safe(
+                "target/beads-template-hygiene/strict-read-fixture",
+                label="strict-read fixture root",
+            )
+            strict_root.mkdir(parents=True, exist_ok=True)
+            regular_path = strict_root / "regular.json"
+            linked_target_path = strict_root / "linked-target.json"
+            linked_alias_path = strict_root / "linked-alias.json"
+            symlink_path = strict_root / "symlink.json"
+            real_parent = strict_root / "real-parent"
+            parent_alias = strict_root / "parent-alias"
+            parent_member = real_parent / "member.json"
+            race_path = strict_root / "race.json"
+            regular_payload = b'{"fixture":"strict-read"}\n'
+            write_once(regular_path, regular_payload)
+            write_once(
+                linked_target_path,
+                b'{"fixture":"linked-target"}\n',
+            )
+            real_parent.mkdir(parents=True, exist_ok=True)
+            write_once(
+                parent_member,
+                b'{"fixture":"parent-member"}\n',
+            )
+            write_once(
+                race_path,
+                b'{"fixture":"mid-read-change"}\n',
+            )
+            if not os.path.lexists(linked_alias_path):
+                os.link(linked_target_path, linked_alias_path)
+            linked_target_state = os.lstat(linked_target_path)
+            linked_alias_state = os.lstat(linked_alias_path)
+            if (
+                linked_target_state.st_dev != linked_alias_state.st_dev
+                or linked_target_state.st_ino != linked_alias_state.st_ino
+                or linked_target_state.st_nlink < 2
+            ):
+                raise InfrastructureFailed(
+                    "strict-read hard-link fixture identity differs"
+                )
+            if not os.path.lexists(symlink_path):
+                os.symlink("regular.json", symlink_path)
+            if not symlink_path.is_symlink() or os.readlink(
+                symlink_path
+            ) != "regular.json":
+                raise InfrastructureFailed(
+                    "strict-read leaf-symlink fixture identity differs"
+                )
+            if not os.path.lexists(parent_alias):
+                os.symlink("real-parent", parent_alias)
+            if not parent_alias.is_symlink() or os.readlink(
+                parent_alias
+            ) != "real-parent":
+                raise InfrastructureFailed(
+                    "strict-read parent-symlink fixture identity differs"
+                )
+
+            def strict_fixture_relative(path: Path) -> str:
+                return path.relative_to(REPO_ROOT).as_posix()
+
+            checks.check(
+                "strict-reader-regular-file-exact",
+                v2_read_repo_relative_file_strict(
+                    strict_fixture_relative(regular_path),
+                    label="strict-read regular fixture",
+                )
+                == regular_payload,
+                expected={
+                    "bytes": len(regular_payload),
+                    "content_root": "sha256-v1:"
+                    + hashlib.sha256(regular_payload).hexdigest(),
+                },
+                observed={
+                    "bytes": len(regular_payload),
+                    "content_root": "sha256-v1:"
+                    + hashlib.sha256(
+                        v2_read_repo_relative_file_strict(
+                            strict_fixture_relative(regular_path),
+                            label="strict-read regular fixture evidence",
+                        )
+                    ).hexdigest(),
+                },
+            )
+            checks.refuses(
+                "strict-reader-leaf-symlink-refused",
+                InputRefused,
+                lambda: v2_read_repo_relative_file_strict(
+                    strict_fixture_relative(symlink_path),
+                    label="strict-read leaf symlink",
+                ),
+                contains="cannot be opened safely",
+            )
+            checks.refuses(
+                "strict-reader-hard-link-refused",
+                InputRefused,
+                lambda: v2_read_repo_relative_file_strict(
+                    strict_fixture_relative(linked_alias_path),
+                    label="strict-read hard link",
+                ),
+                contains="not one uniquely linked regular file",
+            )
+            checks.refuses(
+                "strict-reader-parent-symlink-refused",
+                InputRefused,
+                lambda: v2_read_repo_relative_file_strict(
+                    strict_fixture_relative(parent_alias / "member.json"),
+                    label="strict-read parent symlink",
+                ),
+                contains="cannot be opened safely",
+            )
+            checks.refuses(
+                "strict-reader-cap-plus-one-refused",
+                InputRefused,
+                lambda: v2_read_repo_relative_file_strict(
+                    strict_fixture_relative(regular_path),
+                    label="strict-read capped fixture",
+                    cap=len(regular_payload) - 1,
+                ),
+                contains="bounded byte cap",
+            )
+
+            def read_while_identity_changes() -> bytes:
+                original_pread = os.pread
+                touched = False
+
+                def touching_pread(
+                    descriptor: int,
+                    length: int,
+                    offset: int,
+                ) -> bytes:
+                    nonlocal touched
+                    payload = original_pread(descriptor, length, offset)
+                    if not touched:
+                        touched = True
+                        state = os.stat(
+                            race_path,
+                            follow_symlinks=False,
+                        )
+                        os.utime(
+                            race_path,
+                            ns=(
+                                state.st_atime_ns,
+                                state.st_mtime_ns + 1_000_000_000,
+                            ),
+                            follow_symlinks=False,
+                        )
+                    return payload
+
+                try:
+                    os.pread = touching_pread
+                    return v2_read_repo_relative_file_strict(
+                        strict_fixture_relative(race_path),
+                        label="strict-read changing fixture",
+                    )
+                finally:
+                    os.pread = original_pread
+
+            checks.refuses(
+                "strict-reader-mid-read-change-refused",
+                InputRefused,
+                read_while_identity_changes,
+                contains="changed while being read",
+            )
     elif slug == "cli-review-receipts":
         inventory = v2_synthetic_inventory([v2_synthetic_target(0)])
         empty = v2_load_review_receipts(None, inventory=inventory)
@@ -26135,6 +28991,26 @@ def v2_execute_schema_cli_ux(
             candidate["receipts"][0] = v2_rooted(receipt)
             return v2_rooted(candidate)
 
+        def set_semantic_dimension_verdict(
+            receipt: dict[str, Any],
+            dimension: str,
+            verdict: str,
+        ) -> None:
+            dimension_receipt = next(
+                row
+                for row in receipt["semantic_review_dimensions"]
+                if row["dimension"] == dimension
+            )
+            dimension_receipt.update(
+                v2_semantic_dimension_receipt(
+                    target_root=receipt["target_root"],
+                    dimension=dimension,
+                    verdict=verdict,
+                    reason=dimension_receipt["reason"],
+                    falsifier=dimension_receipt["falsifier"],
+                )
+            )
+
         base_reviewed = reviewed_documents["REMEDIATION_REQUIRED"]
         malformed_receipts: list[
             tuple[str, Callable[[dict[str, Any]], None], str]
@@ -26197,7 +29073,15 @@ def v2_execute_schema_cli_ux(
                     "target_root",
                     semantic_root({"stale": "target"}),
                 ),
-                "source roots drifted",
+                "target root drifted",
+            ),
+            (
+                "row-provenance-envelope-mismatch",
+                lambda row: row.__setitem__(
+                    "inventory_root",
+                    semantic_root({"different": "inventory"}),
+                ),
+                "differs from its provenance envelope",
             ),
             (
                 "affirmative-review-receipt-row-no-claim",
@@ -26219,6 +29103,34 @@ def v2_execute_schema_cli_ux(
                 ),
                 contains=diagnostic,
             )
+        source_provenance_mismatch = reroot_receipt_document(
+            base_reviewed,
+            lambda row: row.__setitem__(
+                "campaign_epoch_root",
+                semantic_root({"different": "campaign"}),
+            ),
+        )
+        checks.refuses(
+            "source-row-provenance-envelope-mismatch-refused",
+            InputRefused,
+            lambda: v2_validate_source_review_receipt_envelope(
+                source_provenance_mismatch
+            ),
+            contains="differs from its provenance envelope",
+        )
+        stale_empty_receipts = v2_empty_review_receipts(
+            inventory_root=semantic_root({"stale": "empty-inventory"}),
+            campaign_epoch_root=semantic_root({"stale": "empty-campaign"}),
+        )
+        checks.refuses(
+            "empty-receipt-envelope-remains-current-campaign-bound",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                stale_empty_receipts,
+                inventory,
+            ),
+            contains="empty envelope does not bind the current campaign",
+        )
         affirmative_document_claim = strict_json_loads(
             canonical_bytes(base_reviewed),
             label="affirmative review receipt document seed",
@@ -26272,6 +29184,125 @@ def v2_execute_schema_cli_ux(
                 inventory,
             ),
             contains="every dimension SATISFIED",
+        )
+
+        for disposition, (
+            signal_dimension,
+            signal,
+        ) in V2_SEMANTIC_EXACT_SIGNAL_DIMENSION.items():
+            wrong_dimension = next(
+                dimension
+                for dimension in V2_SEMANTIC_REVIEW_DIMENSIONS
+                if dimension != signal_dimension
+            )
+
+            def relocate_signal(
+                row: dict[str, Any],
+                *,
+                expected_dimension: str = signal_dimension,
+                misplaced_dimension: str = wrong_dimension,
+                misplaced_signal: str = signal,
+            ) -> None:
+                set_semantic_dimension_verdict(
+                    row,
+                    expected_dimension,
+                    "SATISFIED",
+                )
+                set_semantic_dimension_verdict(
+                    row,
+                    misplaced_dimension,
+                    misplaced_signal,
+                )
+
+            wrong_dimension_receipt = reroot_receipt_document(
+                reviewed_documents[disposition],
+                relocate_signal,
+            )
+            checks.refuses(
+                f"{disposition.lower()}-wrong-signal-dimension-refused",
+                InputRefused,
+                lambda candidate=wrong_dimension_receipt: (
+                    v2_validate_receipt_bindings(candidate, inventory)
+                ),
+                contains=f"requires exactly {signal_dimension}={signal}",
+            )
+
+            def add_ambiguous_signal(
+                row: dict[str, Any],
+                *,
+                extra_dimension: str = wrong_dimension,
+                extra_signal: str = signal,
+            ) -> None:
+                set_semantic_dimension_verdict(
+                    row,
+                    extra_dimension,
+                    extra_signal,
+                )
+
+            ambiguous_receipt = reroot_receipt_document(
+                reviewed_documents[disposition],
+                add_ambiguous_signal,
+            )
+            checks.refuses(
+                f"{disposition.lower()}-multiple-signal-dimensions-refused",
+                InputRefused,
+                lambda candidate=ambiguous_receipt: (
+                    v2_validate_receipt_bindings(candidate, inventory)
+                ),
+                contains=f"requires exactly {signal_dimension}={signal}",
+            )
+
+        remediation_without_finding = reroot_receipt_document(
+            reviewed_documents["REMEDIATION_REQUIRED"],
+            lambda row: set_semantic_dimension_verdict(
+                row,
+                "user_value",
+                "SATISFIED",
+            ),
+        )
+        checks.refuses(
+            "remediation-without-finding-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                remediation_without_finding,
+                inventory,
+            ),
+            contains="requires at least one FINDING",
+        )
+        remediation_with_routed_signal = reroot_receipt_document(
+            reviewed_documents["REMEDIATION_REQUIRED"],
+            lambda row: set_semantic_dimension_verdict(
+                row,
+                "dependencies",
+                "ROUTED",
+            ),
+        )
+        checks.refuses(
+            "remediation-ambiguous-routed-signal-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                remediation_with_routed_signal,
+                inventory,
+            ),
+            contains="allows only SATISFIED or FINDING",
+        )
+        remediation_with_multiple_findings = reroot_receipt_document(
+            reviewed_documents["REMEDIATION_REQUIRED"],
+            lambda row: set_semantic_dimension_verdict(
+                row,
+                "dependencies",
+                "FINDING",
+            ),
+        )
+        v2_validate_receipt_bindings(
+            remediation_with_multiple_findings,
+            inventory,
+        )
+        checks.check(
+            "remediation-multiple-findings-admitted",
+            True,
+            expected="admitted",
+            observed="admitted",
         )
 
         blocked_without_acceptance = reroot_receipt_document(
@@ -28022,6 +31053,7 @@ def v2_execute_source_cases(
             inventory=inventory,
             prior_campaign=v2_empty_prior_campaign(),
             current_universe=issues,
+            current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
         )
         checks.check(
             "production-zero-cells-rooted",
@@ -28552,6 +31584,135 @@ def v2_execute_source_cases(
             observed=second_selected_key,
         )
 
+        historical_receipts = v2_synthetic_receipts(
+            first_inventory,
+            semantic_reviewed=True,
+            semantic_disposition="REMEDIATION_REQUIRED",
+        )
+        historical_receipts = json.loads(
+            canonical_bytes(historical_receipts)
+        )
+        historical_receipts.pop("semantic_root", None)
+        historical_receipts["receipts"] = [
+            row
+            for row in historical_receipts["receipts"]
+            if row["target_id"] == "fixture-selected"
+        ]
+        historical_receipts = v2_rooted(historical_receipts)
+        v2_validate_receipt_bindings(
+            historical_receipts,
+            first_inventory,
+        )
+        v2_validate_receipt_bindings(
+            historical_receipts,
+            second_inventory,
+        )
+        first_reviewed_authority = v2_derive_authority(
+            first_inventory,
+            historical_receipts,
+            current_br_version="0.2.19",
+        )
+        second_reviewed_authority = v2_derive_authority(
+            second_inventory,
+            historical_receipts,
+            current_br_version="0.2.19",
+        )
+        first_reviewed_plan, _ = v2_build_review_plan(
+            first_inventory,
+            first_reviewed_authority,
+            max_targets=1,
+        )
+        second_reviewed_plan, _ = v2_build_review_plan(
+            second_inventory,
+            second_reviewed_authority,
+            max_targets=1,
+        )
+        first_reviewed_decision = next(
+            row
+            for row in first_reviewed_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        second_reviewed_decision = next(
+            row
+            for row in second_reviewed_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        reviewed_receipt = historical_receipts["receipts"][0]
+        reviewed_scope_root = v2_review_receipt_scope_root(
+            reviewed_receipt
+        )
+        checks.check(
+            "reviewed-receipt-admitted-after-unrelated-campaign-drift",
+            historical_receipts["inventory_root"]
+            == first_inventory["semantic_root"]
+            and historical_receipts["inventory_root"]
+            != second_inventory["semantic_root"]
+            and historical_receipts["campaign_epoch_root"]
+            == first_inventory["campaign_epoch_root"]
+            and historical_receipts["campaign_epoch_root"]
+            != second_inventory["campaign_epoch_root"],
+            expected="first-campaign provenance admitted by second campaign",
+            observed={
+                "receipt_inventory": historical_receipts["inventory_root"],
+                "second_inventory": second_inventory["semantic_root"],
+                "receipt_campaign": historical_receipts[
+                    "campaign_epoch_root"
+                ],
+                "second_campaign": second_inventory[
+                    "campaign_epoch_root"
+                ],
+            },
+        )
+        checks.check(
+            "reviewed-receipt-scope-root-stable-after-unrelated-drift",
+            first_reviewed_decision["semantic_review_receipt_root"]
+            == reviewed_scope_root
+            == second_reviewed_decision["semantic_review_receipt_root"]
+            and first_reviewed_decision["reviewer_provenance"][
+                "receipt_root"
+            ]
+            == reviewed_scope_root
+            == second_reviewed_decision["reviewer_provenance"][
+                "receipt_root"
+            ],
+            expected=reviewed_scope_root,
+            observed={
+                "first_semantic": first_reviewed_decision[
+                    "semantic_review_receipt_root"
+                ],
+                "second_semantic": second_reviewed_decision[
+                    "semantic_review_receipt_root"
+                ],
+                "first_reviewer": first_reviewed_decision[
+                    "reviewer_provenance"
+                ]["receipt_root"],
+                "second_reviewer": second_reviewed_decision[
+                    "reviewer_provenance"
+                ]["receipt_root"],
+            },
+        )
+        checks.check(
+            "reviewed-selected-decision-root-stable-after-unrelated-drift",
+            first_reviewed_decision["semantic_root"]
+            == second_reviewed_decision["semantic_root"],
+            expected=first_reviewed_decision["semantic_root"],
+            observed=second_reviewed_decision["semantic_root"],
+        )
+        first_reviewed_key = child_key_for(
+            first_reviewed_plan,
+            "fixture-selected",
+        )
+        second_reviewed_key = child_key_for(
+            second_reviewed_plan,
+            "fixture-selected",
+        )
+        checks.check(
+            "reviewed-selected-child-key-stable-after-unrelated-drift",
+            first_reviewed_key == second_reviewed_key,
+            expected=first_reviewed_key,
+            observed=second_reviewed_key,
+        )
+
         selected_mutations: list[
             tuple[
                 str,
@@ -28617,6 +31778,17 @@ def v2_execute_source_cases(
                     "after": changed_key,
                 },
             )
+            checks.refuses(
+                f"reviewed-receipt-selected-{name}-drift-refused",
+                InputRefused,
+                lambda changed_inventory=changed_inventory: (
+                    v2_validate_receipt_bindings(
+                        historical_receipts,
+                        changed_inventory,
+                    )
+                ),
+                contains="target root drifted",
+            )
 
         _, _, _, receipt_inventory = authentic_capture([selected_raw])
         inventory = receipt_inventory
@@ -28635,6 +31807,9 @@ def v2_execute_source_cases(
             max_targets=1,
         )
         base_child_key = base_plan["children"][0]["child_key"]
+        base_receipt_scope_root = v2_review_receipt_scope_root(
+            base_receipts["receipts"][0]
+        )
         for name, field, value in (
             ("owner", "implementation_owner", "changed-owner"),
             ("evidence-owner", "evidence_owner", "changed-evidence-owner"),
@@ -28658,13 +31833,19 @@ def v2_execute_source_cases(
                 max_targets=1,
             )
             changed_child_key = changed_plan["children"][0]["child_key"]
+            changed_receipt_scope_root = v2_review_receipt_scope_root(
+                changed_receipts["receipts"][0]
+            )
             checks.check(
                 f"selected-{name}-receipt-invalidates-child-key",
-                changed_child_key != base_child_key,
-                expected="different child key",
+                changed_child_key != base_child_key
+                and changed_receipt_scope_root != base_receipt_scope_root,
+                expected="different receipt scope root and child key",
                 observed={
-                    "before": base_child_key,
-                    "after": changed_child_key,
+                    "key_before": base_child_key,
+                    "key_after": changed_child_key,
+                    "scope_before": base_receipt_scope_root,
+                    "scope_after": changed_receipt_scope_root,
                 },
             )
     else:
@@ -29279,18 +32460,18 @@ def v2_execute_authority_cases(
             updated = dict(receipt)
             updated.pop("semantic_root", None)
             updated["semantic_review_disposition"] = disposition
-            signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[disposition]
             updated["semantic_review_dimensions"] = [
                 v2_semantic_dimension_receipt(
                     target_root=updated["target_root"],
                     dimension=dimension,
-                    verdict=signal if index == 0 else "SATISFIED",
+                    verdict=v2_synthetic_semantic_dimension_verdict(
+                        disposition,
+                        dimension,
+                    ),
                     reason=f"mixed reviewed reason for {dimension}",
                     falsifier=f"mixed reviewed falsifier for {dimension}",
                 )
-                for index, dimension in enumerate(
-                    V2_SEMANTIC_REVIEW_DIMENSIONS
-                )
+                for dimension in V2_SEMANTIC_REVIEW_DIMENSIONS
             ]
             if disposition == "BLOCKED_AUTHORITY":
                 updated["declared_acceptance_owner"] = ""
@@ -32993,6 +36174,11 @@ def v2_execute_history_cases(
             else [current_target]
         )
         current_id = current_target["id"]
+        movement_finding_ids = (
+            []
+            if slug == "movement-live-to-history"
+            else [current_id]
+        )
         prior = v2_rooted(
             {
                 "state": "PROVIDED",
@@ -33023,6 +36209,7 @@ def v2_execute_history_cases(
             inventory=inventory,
             prior_campaign=prior,
             current_universe=current_universe,
+            current_finding_ids=movement_finding_ids,
         )
         movement = zero["movements"][0]
         checks.check(
@@ -33033,7 +36220,7 @@ def v2_execute_history_cases(
             == zero["current_universe_root"]
             and movement["destination_root_kind"]
             == (
-                "FULL_UNIVERSE_SUCCESSOR"
+                "FULL_UNIVERSE_CLEAN_SUCCESSOR"
                 if slug == "movement-live-to-history"
                 else "INVENTORY_TARGET"
             )
@@ -33043,7 +36230,7 @@ def v2_execute_history_cases(
             expected={
                 "class": expected_class,
                 "destination_root_kind": (
-                    "FULL_UNIVERSE_SUCCESSOR"
+                    "FULL_UNIVERSE_CLEAN_SUCCESSOR"
                     if slug == "movement-live-to-history"
                     else "INVENTORY_TARGET"
                 ),
@@ -33072,6 +36259,7 @@ def v2_execute_history_cases(
                 inventory=inventory,
                 prior_campaign=prior,
                 current_universe=current_universe,
+                current_finding_ids=movement_finding_ids,
             ),
             contains="independently reconstructed",
             projection=lambda: malformed,
@@ -33086,7 +36274,7 @@ def v2_execute_history_cases(
         ):
             if movement[field] == replacement:
                 replacement = (
-                    "FULL_UNIVERSE_SUCCESSOR"
+                    "FULL_UNIVERSE_CLEAN_SUCCESSOR"
                     if field == "destination_root_kind"
                     else semantic_root({"forged": "other-universe"})
                 )
@@ -33105,6 +36293,7 @@ def v2_execute_history_cases(
                     inventory=inventory,
                     prior_campaign=prior,
                     current_universe=current_universe,
+                    current_finding_ids=movement_finding_ids,
                 ),
                 contains="independently reconstructed",
             )
@@ -33117,6 +36306,7 @@ def v2_execute_history_cases(
                     inventory=inventory,
                     prior_campaign=prior,
                     current_universe=[],
+                    current_finding_ids=[],
                 ),
                 contains="absent from the current source universe",
             )
@@ -33132,8 +36322,228 @@ def v2_execute_history_cases(
                     inventory=inventory,
                     prior_campaign=prior,
                     current_universe=[nonclosed_successor],
+                    current_finding_ids=[],
                 ),
                 contains="without a clean closed successor",
+            )
+            filtered_finding_target = v2_synthetic_target(
+                0,
+                status="closed",
+                priority=3,
+                missing_sections=("## Acceptance Criteria",),
+            )
+            filtered_zero = v2_build_zero_sets(
+                source_root=zero["source_root"],
+                inventory=v2_synthetic_inventory([]),
+                prior_campaign=prior,
+                current_universe=[filtered_finding_target],
+                current_finding_ids=[current_id],
+            )
+            filtered_successor = filtered_zero["scope_successors"][0]
+            filtered_movement = filtered_zero["movements"][0]
+            checks.check(
+                "filtered-closed-live-finding-not-clean-successor",
+                filtered_successor["finding_state"] == "CURRENT_FINDING"
+                and filtered_successor["reason"]
+                == "FILTERED_CURRENT_FINDING"
+                and filtered_successor["reason"]
+                != "CLOSED_WITHOUT_CURRENT_FINDING",
+                expected={
+                    "finding_state": "CURRENT_FINDING",
+                    "reason": "FILTERED_CURRENT_FINDING",
+                },
+                observed=filtered_successor,
+            )
+            checks.refuses(
+                "closed-without-current-finding-requires-unfiltered-absence",
+                EvidenceFailed,
+                lambda: v2_validate_zero_sets(
+                    filtered_zero,
+                    source_root=zero["source_root"],
+                    inventory=v2_synthetic_inventory([]),
+                    prior_campaign=prior,
+                    current_universe=[filtered_finding_target],
+                    current_finding_ids=[],
+                ),
+                contains="finding binding differs",
+            )
+            filtered_target_id = "fixture-filtered-current-finding"
+            filtered_anchor_id = "fixture-selected-filter-anchor"
+            _, _, filter_snapshot, _ = v2_authentic_projection_fixture(
+                [
+                    fixture_issue(
+                        issue_id=filtered_target_id,
+                        title="Filtered blocked current finding",
+                        status="blocked",
+                        priority=3,
+                    ),
+                    fixture_issue(
+                        issue_id=filtered_anchor_id,
+                        title="Selected open filter anchor",
+                        status="open",
+                        priority=0,
+                    ),
+                ],
+                missing_by_id={
+                    filtered_target_id: ("## Acceptance Criteria",),
+                    filtered_anchor_id: (),
+                },
+            )
+            filter_campaign_root, _ = v2_campaign_epoch(filter_snapshot)
+            filter_finding_ids = v2_snapshot_current_finding_ids(
+                filter_snapshot
+            )
+            filtered_prior = v2_rooted(
+                {
+                    "state": "PROVIDED",
+                    "bundle_path": "target/v2-fixture/filtered-prior-run",
+                    "terminal_root": semantic_root(
+                        {"terminal": "filtered-prior"}
+                    ),
+                    "inventory_root": semantic_root(
+                        {"inventory": "filtered-prior"}
+                    ),
+                    "campaign_epoch_root": semantic_root(
+                        {"campaign": "filtered-prior"}
+                    ),
+                    "rows": [
+                        {
+                            "id": filtered_target_id,
+                            "status": "open",
+                            "priority": 2,
+                            "target_root": semantic_root(
+                                {"before": filtered_target_id}
+                            ),
+                            "destination": "review-plan-v2.json",
+                        }
+                    ],
+                    "no_claim": V2_PRIOR_CAMPAIGN_PROVIDED_NO_CLAIM,
+                }
+            )
+
+            def filtered_projection(
+                *,
+                priorities: set[str] | None = None,
+                statuses: set[str] | None = None,
+                targets: set[str] | None = None,
+            ) -> tuple[dict[str, Any], dict[str, Any]]:
+                filtered_inventory = v2_build_inventory(
+                    filter_snapshot,
+                    campaign_epoch_root=filter_campaign_root,
+                    priority_filter=priorities,
+                    status_filter=statuses,
+                    target_filter=targets,
+                )
+                filtered_projection_zero = v2_build_zero_sets(
+                    source_root=semantic_root(
+                        {
+                            "fixture": "genuine-filtered-current-finding",
+                            "priorities": sorted(priorities or ()),
+                            "statuses": sorted(statuses or ()),
+                            "targets": sorted(targets or ()),
+                        }
+                    ),
+                    inventory=filtered_inventory,
+                    prior_campaign=filtered_prior,
+                    current_universe=filter_snapshot.all_issues,
+                    current_finding_ids=filter_finding_ids,
+                )
+                return filtered_inventory, filtered_projection_zero
+
+            priority_inventory, priority_zero = filtered_projection(
+                priorities={"P0"}
+            )
+            status_inventory, status_zero = filtered_projection(
+                statuses={"open"}
+            )
+            target_inventory, target_zero = filtered_projection(
+                targets={filtered_anchor_id}
+            )
+            checks.check(
+                "priority-filtered-current-finding-keeps-typed-destination",
+                priority_inventory["filters"]["priorities"] == ["P0"]
+                and [row["id"] for row in priority_inventory["rows"]]
+                == [filtered_anchor_id]
+                and priority_zero["scope_successors"][0]["status"]
+                == "blocked"
+                and priority_zero["scope_successors"][0]["finding_state"]
+                == "CURRENT_FINDING"
+                and priority_zero["movements"][0]["destination_root_kind"]
+                == "FULL_UNIVERSE_FILTERED_FINDING",
+                expected={
+                    "filter": ["P0"],
+                    "selected_ids": [filtered_anchor_id],
+                    "filtered_status": "blocked",
+                    "destination_root_kind": (
+                        "FULL_UNIVERSE_FILTERED_FINDING"
+                    ),
+                },
+                observed={
+                    "filters": priority_inventory["filters"],
+                    "selected_ids": [
+                        row["id"] for row in priority_inventory["rows"]
+                    ],
+                    "successors": priority_zero["scope_successors"],
+                    "movements": priority_zero["movements"],
+                },
+            )
+            checks.check(
+                "status-filtered-current-finding-keeps-typed-destination",
+                status_inventory["filters"]["statuses"] == ["open"]
+                and [row["id"] for row in status_inventory["rows"]]
+                == [filtered_anchor_id]
+                and status_zero["scope_successors"][0]["status"]
+                == "blocked"
+                and status_zero["scope_successors"][0]["reason"]
+                == "FILTERED_CURRENT_FINDING"
+                and status_zero["movements"][0]["class"]
+                == "MOVED_TO_LANE",
+                expected={
+                    "filter": ["open"],
+                    "selected_ids": [filtered_anchor_id],
+                    "filtered_status": "blocked",
+                    "reason": "FILTERED_CURRENT_FINDING",
+                    "movement_class": "MOVED_TO_LANE",
+                },
+                observed={
+                    "filters": status_inventory["filters"],
+                    "selected_ids": [
+                        row["id"] for row in status_inventory["rows"]
+                    ],
+                    "successors": status_zero["scope_successors"],
+                    "movements": status_zero["movements"],
+                },
+            )
+            checks.check(
+                "target-filtered-current-finding-keeps-typed-destination",
+                target_inventory["filters"]["targets"]
+                == [filtered_anchor_id]
+                and [row["id"] for row in target_inventory["rows"]]
+                == [filtered_anchor_id]
+                and target_zero["scope_successors"][0]["finding_state"]
+                == "CURRENT_FINDING"
+                and target_zero["movements"][0][
+                    "destination_finding_state"
+                ]
+                == "CURRENT_FINDING"
+                and target_zero["movements"][0][
+                    "current_finding_issue_ids_root"
+                ]
+                == target_zero["current_finding_issue_ids_root"],
+                expected={
+                    "filter": [filtered_anchor_id],
+                    "selected_ids": [filtered_anchor_id],
+                    "finding_state": "CURRENT_FINDING",
+                    "lineage_finding_root_bound": True,
+                },
+                observed={
+                    "filters": target_inventory["filters"],
+                    "selected_ids": [
+                        row["id"] for row in target_inventory["rows"]
+                    ],
+                    "successors": target_zero["scope_successors"],
+                    "movements": target_zero["movements"],
+                },
             )
     else:
         raise EvidenceFailed(f"no history executor for {slug}")
@@ -34348,6 +37758,13 @@ def v2_execute_artifact_cases(
             "split-secret",
             "--password",
             "password-secret",
+            "--token",
+            "short-token-secret",
+            "--api-key",
+            "api-key-secret",
+            "GITHUB_TOKEN=environment-secret",
+            "Authorization: Bearer header-secret",
+            'client_secret="quoted multiword secret"',
             "ordinary",
             f"prefix:{REPO_ROOT}/private",
         ]
@@ -34360,8 +37777,16 @@ def v2_execute_artifact_cases(
             and sanitized[3].startswith("<redacted:")
             and sanitized[4] == "--password"
             and sanitized[5].startswith("<redacted:")
-            and sanitized[6] == "ordinary"
+            and sanitized[6] == "--token"
             and sanitized[7].startswith("<redacted:")
+            and sanitized[8] == "--api-key"
+            and sanitized[9].startswith("<redacted:")
+            and all(
+                sanitized[index].startswith("<redacted:")
+                for index in (10, 11, 12)
+            )
+            and sanitized[13] == "ordinary"
+            and sanitized[14].startswith("<redacted:")
             and all(
                 secret
                 not in canonical_bytes(sanitized).decode("utf-8")
@@ -34369,6 +37794,11 @@ def v2_execute_artifact_cases(
                     "top-secret",
                     "split-secret",
                     "password-secret",
+                    "short-token-secret",
+                    "api-key-secret",
+                    "environment-secret",
+                    "header-secret",
+                    "quoted multiword secret",
                     str(REPO_ROOT),
                 )
             ),
@@ -34379,6 +37809,39 @@ def v2_execute_artifact_cases(
                 "ordinary": "retained",
             },
             observed=sanitized,
+        )
+        boundary_controls = [
+            "notsecret=value",
+            "--notsecret",
+            "secret sauce",
+            "--secret-sauce",
+            "ordinary",
+        ]
+        checks.check(
+            "sensitive-key-boundary-controls",
+            v2_sanitized_argv(boundary_controls) == boundary_controls
+            and not v2_is_sensitive_key("notsecret")
+            and not v2_is_sensitive_key("secret-sauce")
+            and v2_is_sensitive_key("GITHUB_TOKEN")
+            and v2_is_sensitive_key("client_secret")
+            and v2_is_sensitive_key("api-key"),
+            expected={
+                "boundary_controls_retained": True,
+                "exact_sensitive_suffixes_detected": True,
+            },
+            observed={
+                "sanitized": v2_sanitized_argv(boundary_controls),
+                "classifications": {
+                    value: v2_is_sensitive_key(value)
+                    for value in (
+                        "notsecret",
+                        "secret-sauce",
+                        "GITHUB_TOKEN",
+                        "client_secret",
+                        "api-key",
+                    )
+                },
+            },
         )
         checks.check(
             "split-redaction-deterministic-and-count-preserving",
@@ -34411,6 +37874,9 @@ def v2_execute_artifact_cases(
                 "bundle-split-token",
                 "--password",
                 "bundle-split-password",
+                "--api-key",
+                "bundle-api-key",
+                "GITHUB_TOKEN=bundle-environment-token",
                 "ordinary",
             ],
         )
@@ -34426,11 +37892,16 @@ def v2_execute_artifact_cases(
             "whole-refusal-bundle-redacts-split-secrets",
             b"bundle-split-token" not in refusal_bytes
             and b"bundle-split-password" not in refusal_bytes
+            and b"bundle-api-key" not in refusal_bytes
+            and b"bundle-environment-token" not in refusal_bytes
             and refusal_reproduction[1] == "--access-token"
             and refusal_reproduction[2].startswith("<redacted:")
             and refusal_reproduction[3] == "--password"
             and refusal_reproduction[4].startswith("<redacted:")
-            and refusal_reproduction[5] == "ordinary",
+            and refusal_reproduction[5] == "--api-key"
+            and refusal_reproduction[6].startswith("<redacted:")
+            and refusal_reproduction[7].startswith("<redacted:")
+            and refusal_reproduction[8] == "ordinary",
             expected={
                 "all_artifacts_redacted": True,
                 "option_names_retained": True,
@@ -34442,28 +37913,62 @@ def v2_execute_artifact_cases(
                 "reproduction": refusal_reproduction,
             },
         )
-        body = b"secret stream body"
-        receipt = {
-            "bytes": len(body),
-            "root": "sha256-v1:" + hashlib.sha256(body).hexdigest(),
-            "body_retained": False,
-        }
+        captured_receipts: list[dict[str, Any]] = []
+        completed = run_command(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys;sys.stdout.write(os.environ['FIXTURE_VALUE'])",
+            ],
+            environment_overrides={"FIXTURE_VALUE": "secret stream body"},
+            record_global_receipt=False,
+            receipt_sink=captured_receipts.append,
+        )
+        receipt = captured_receipts[0]["stdout"]
         checks.check(
             "raw-stream-root-only",
-            "secret stream body" not in canonical_bytes(receipt).decode("utf-8")
+            completed.stdout == "secret stream body"
+            and "secret stream body"
+            not in canonical_bytes(captured_receipts).decode("utf-8")
             and receipt["body_retained"] is False,
-            expected=False,
-            observed=receipt,
+            expected={"captured_body_retained": False, "receipt_body_retained": False},
+            observed={
+                "captured_body_retained": completed.stdout
+                != "secret stream body",
+                "receipt": receipt,
+            },
         )
         diagnostic = (
             f"{REPO_ROOT}/private/input "
             "access_token=diagnostic-secret "
+            'client_secret="diagnostic quoted secret" '
+            "Authorization: Bearer diagnostic-bearer\n"
             + ("bounded-detail-" * 80)
         )
         summary = v2_bounded_diagnostic_summary(diagnostic)
+        boundary_summary = v2_redact_contextual_text(
+            "Authorization: Basic diagnostic-basic\n"
+            "Proxy-Authorization: Bearer diagnostic-proxy\n"
+            'client_secret="diagnostic-line-one\ndiagnostic-line-two"\n'
+            "token='diagnostic-unterminated\ndiagnostic-tail"
+        )
         checks.check(
             "diagnostic-summary-redacted-bounded",
             "diagnostic-secret" not in summary
+            and "diagnostic quoted secret" not in summary
+            and "diagnostic-bearer" not in summary
+            and all(
+                secret not in boundary_summary
+                for secret in (
+                    "diagnostic-basic",
+                    "diagnostic-proxy",
+                    "diagnostic-line-one",
+                    "diagnostic-line-two",
+                    "diagnostic-unterminated",
+                    "diagnostic-tail",
+                )
+            )
+            and boundary_summary.count("<redacted>") == 4
             and str(REPO_ROOT) not in summary
             and "<redacted>" in summary
             and "<truncated:sha256-v1:" in summary
@@ -34476,7 +37981,92 @@ def v2_execute_artifact_cases(
             },
             observed={
                 "summary": summary,
+                "boundary_summary": boundary_summary,
                 "bytes": len(summary.encode("utf-8")),
+            },
+        )
+        retained_boundary = {
+            "ordinary": "retained detail",
+            "GITHUB_TOKEN": "retained-boundary-secret",
+            "nested": {
+                "client-secret": "nested-boundary-secret",
+                "authorization": "Bearer nested-bearer-secret",
+            },
+        }
+        projected_boundary = v2_assertion_evidence_projection(
+            retained_boundary
+        )
+        checks.check(
+            "production-retention-boundaries-redacted",
+            projected_boundary["ordinary"] == "retained detail"
+            and all(
+                secret not in canonical_bytes(projected_boundary).decode("utf-8")
+                for secret in (
+                    "retained-boundary-secret",
+                    "nested-boundary-secret",
+                    "nested-bearer-secret",
+                )
+            ),
+            expected={
+                "ordinary_retained": True,
+                "sensitive_values_retained": False,
+            },
+            observed=projected_boundary,
+        )
+        evidence_collector = V2CheckCollector(
+            "fixture-sensitive-evidence",
+            "fixture.sensitive-evidence",
+        )
+        evidence_collector.check(
+            "project-sensitive-metadata",
+            True,
+            expected={
+                "api_key": 123456,
+                "token": True,
+            },
+            observed={
+                "private-key": [
+                    "observed-evidence-secret",
+                    {"nested": False},
+                ],
+                "ordinary": "visible",
+            },
+        )
+        projected_evidence = evidence_collector.rows[0]
+        projected_path_key = v2_assertion_evidence_projection(
+            {f"{REPO_ROOT}/private-key-name": "visible-value"}
+        )
+        collision_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_assertion_evidence_projection(
+                {1: "first", "1": "second"}
+            ),
+            contains="mapping keys must be exact strings",
+        )
+        checks.check(
+            "assertion-evidence-sensitive-metadata-projected",
+            projected_evidence["expected"]["api_key"]["kind"]
+            == "redacted"
+            and projected_evidence["expected"]["token"]["kind"]
+            == "redacted"
+            and projected_evidence["observed"]["private-key"]["kind"]
+            == "redacted"
+            and projected_evidence["observed"]["ordinary"] == "visible"
+            and b"evidence-secret"
+            not in canonical_bytes(projected_evidence)
+            and str(REPO_ROOT)
+            not in canonical_bytes(projected_path_key).decode("utf-8")
+            and list(projected_path_key)[0].startswith("<redacted-key:")
+            and collision_error.terminal == "EvidenceFailed",
+            expected={
+                "sensitive_strings_numbers_booleans_and_lists": "redacted",
+                "path_bearing_key": "projected",
+                "non_string_key": "refused without collision",
+            },
+            observed={
+                "projected_evidence": projected_evidence,
+                "projected_path_key": projected_path_key,
+                "collision_terminal": collision_error.terminal,
             },
         )
         mutated_state = {"phase": "before"}
@@ -34639,6 +38229,165 @@ def v2_execute_artifact_cases(
                 "direct_tracker_file_access": reconstructed[0][
                     "direct_tracker_file_access"
                 ],
+            },
+        )
+        replay_result_seed = v2_rooted(
+            {
+                "schema": V2_REPLAY_RESULT_SCHEMA,
+                "terminal": "Pass",
+                "subject_mode": "review-plan",
+                "artifact_dir": "target/v2-fixture/replay-output",
+                "retained_terminal_root": terminal["semantic_root"],
+                "replay_terminal_root": semantic_root(
+                    {"fixture": "replay terminal"}
+                ),
+                "live_tracker_reads": False,
+                "live_tracker_writes": False,
+                "network_access": False,
+                "no_claim": V2_REPLAY_RESULT_NO_CLAIM,
+            }
+        )
+        v2_validate_replay_result_document(replay_result_seed)
+        checks.check(
+            "replay-result-valid-closed-rooted",
+            set(replay_result_seed) == V2_REPLAY_RESULT_FIELDS
+            and replay_result_seed["schema"] == V2_REPLAY_RESULT_SCHEMA
+            and replay_result_seed["semantic_root"]
+            == semantic_root(
+                {
+                    key: value
+                    for key, value in replay_result_seed.items()
+                    if key != "semantic_root"
+                }
+            ),
+            expected={
+                "schema": V2_REPLAY_RESULT_SCHEMA,
+                "fields": sorted(V2_REPLAY_RESULT_FIELDS),
+                "rooted": True,
+            },
+            observed={
+                "schema": replay_result_seed["schema"],
+                "fields": sorted(replay_result_seed),
+                "semantic_root": replay_result_seed["semantic_root"],
+            },
+        )
+
+        def reroot_replay_result(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(replay_result_seed),
+                label="v2 replay result mutation seed",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            mutation(candidate)
+            return v2_rooted(candidate)
+
+        checks.refuses(
+            "replay-result-extra-field-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                reroot_replay_result(
+                    lambda row: row.__setitem__("unexpected", True)
+                )
+            ),
+            contains="non-closed schema",
+        )
+        checks.refuses(
+            "replay-result-missing-field-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                reroot_replay_result(
+                    lambda row: row.pop("network_access")
+                )
+            ),
+            contains="non-closed schema",
+        )
+        checks.refuses(
+            "replay-result-nonpass-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                reroot_replay_result(
+                    lambda row: row.__setitem__(
+                        "terminal", "EvidenceFailed"
+                    )
+                )
+            ),
+            contains="contract differs",
+        )
+        checks.refuses(
+            "replay-result-live-activity-claim-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                reroot_replay_result(
+                    lambda row: row.__setitem__(
+                        "live_tracker_reads", True
+                    )
+                )
+            ),
+            contains="contract differs",
+        )
+        checks.refuses(
+            "replay-result-unsafe-artifact-path-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                reroot_replay_result(
+                    lambda row: row.__setitem__(
+                        "artifact_dir", "../escaped-replay"
+                    )
+                )
+            ),
+            contains="artifact directory is unsafe",
+        )
+        stale_replay_result = strict_json_loads(
+            canonical_bytes(replay_result_seed),
+            label="v2 replay result stale-root seed",
+            require_canonical=True,
+        )
+        stale_replay_result["replay_terminal_root"] = semantic_root(
+            {"fixture": "changed replay terminal"}
+        )
+        checks.refuses(
+            "replay-result-stale-root-refused",
+            EvidenceFailed,
+            lambda: v2_validate_replay_result_document(
+                stale_replay_result
+            ),
+            contains="semantic_root",
+        )
+
+        def forbidden_replay_subprocess() -> None:
+            with v2_offline_replay_scope():
+                with v2_offline_replay_scope():
+                    run_command(
+                        (sys.executable, "-c", "print('must-not-run')"),
+                        record_global_receipt=False,
+                    )
+
+        checks.refuses(
+            "offline-replay-subprocess-guard-refuses",
+            EvidenceFailed,
+            forbidden_replay_subprocess,
+            contains="forbids every subprocess",
+        )
+        post_guard = run_command(
+            (sys.executable, "-c", "print('guard-restored')"),
+            record_global_receipt=False,
+        )
+        checks.check(
+            "offline-replay-guard-reentrant-exception-safe",
+            _v2_offline_replay_depth == 0
+            and post_guard.returncode == 0
+            and post_guard.stdout == "guard-restored\n",
+            expected={
+                "scope_depth": 0,
+                "post_guard_stdout": "guard-restored\n",
+            },
+            observed={
+                "scope_depth": _v2_offline_replay_depth,
+                "post_guard_returncode": post_guard.returncode,
+                "post_guard_stdout_root": text_root(post_guard.stdout),
             },
         )
         source_seed = strict_json_loads(
@@ -35668,7 +39417,7 @@ def v2_execute_fault_resource_cases(
                 current_br_version="0.3.0",
                 allow_mechanical_fixture=True,
             ),
-            contains="exact source roots drifted",
+            contains="target root drifted",
         )
         untrusted = v2_synthetic_authority(
             inventory,
@@ -40243,8 +43992,77 @@ def v2_publish_and_read_persistent_fixture(
     return directory, retained, terminal, events
 
 
-def v2_fixture_fingerprint() -> dict[str, Any]:
-    context = fixture_br_context()
+def v2_fresh_nomock_artifact_location(
+    manifest: Mapping[str, Any],
+    *,
+    label: str,
+    identity_binding: Any,
+) -> tuple[str, str]:
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", label) is None:
+        raise EvidenceFailed("no-mock live artifact label is noncanonical")
+    try:
+        nonce = os.urandom(32).hex()
+    except OSError as error:
+        raise InfrastructureFailed(
+            "no-mock live artifact nonce could not be generated"
+        ) from error
+    identity = hashlib.sha256(
+        canonical_bytes(
+            {
+                "manifest_content_identity": manifest["content_identity"],
+                "label": label,
+                "identity_binding": identity_binding,
+                "nonce": nonce,
+            }
+        )
+    ).hexdigest()[:24]
+    artifact_root = "target/beads-template-hygiene/v2-live-e2e"
+    base = f"{label}-{identity}"
+    for attempt in range(1, V2_PERSISTENT_ATTEMPTS_CAP + 1):
+        check_cancel()
+        artifact_dir = (
+            base
+            if attempt == 1
+            else f"{base}-attempt-{attempt:04d}"
+        )
+        output = resolve_run_dir(
+            artifact_root,
+            artifact_dir,
+            label="no-mock live artifact candidate",
+        )
+        try:
+            value = os.lstat(output)
+        except FileNotFoundError:
+            return artifact_root, artifact_dir
+        except OSError as error:
+            raise InfrastructureFailed(
+                "no-mock live artifact candidate cannot be inspected safely"
+            ) from error
+        if not stat.S_ISDIR(value.st_mode):
+            raise EvidenceFailed(
+                "no-mock live artifact candidate collides with a non-directory"
+            )
+    raise EvidenceFailed(
+        "no-mock live artifact allocator exhausted its bounded fresh attempts"
+    )
+
+
+def v2_fixture_fingerprint(
+    context: Mapping[str, str],
+) -> dict[str, Any]:
+    with fixture_br_lease():
+        return _v2_fixture_fingerprint_locked(context)
+
+
+def _v2_fixture_fingerprint_locked(
+    context: Mapping[str, str],
+) -> dict[str, Any]:
+    expected_context_fields = {"db", "stable_id", "regression_id"}
+    if set(context) != expected_context_fields or any(
+        not isinstance(context[field], str) or not context[field]
+        for field in expected_context_fields
+    ):
+        raise EvidenceFailed("no-mock fixture fingerprint context is malformed")
     issue_ids = sorted(
         str(row["id"]) for row in fixture_br_list()
     )
@@ -40281,7 +44099,52 @@ def v2_fixture_fingerprint() -> dict[str, Any]:
     )
 
 
+V2_FIXTURE_BR_CASE_SLUGS = frozenset(
+    {
+        "nomock-current-br-two-gate-nodata",
+        "nomock-review-plan",
+        "nomock-history-plan",
+        "nomock-unrelated-drift-stability",
+        "nomock-selected-drift-refusal",
+        "nomock-active-conflict-deferred",
+        "nomock-oversize",
+        "nomock-offline-replay",
+        "nomock-live-target-unchanged",
+    }
+)
+
+
 def v2_execute_nomock_cases(
+    case: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    slug = str(case["id"]).removeprefix("template-lint-v2.")
+    if slug not in V2_FIXTURE_BR_CASE_SLUGS:
+        return _v2_execute_nomock_cases_impl(case, manifest)
+    with fixture_br_lease() as lease:
+        if slug == "nomock-live-target-unchanged":
+            fixture_br_external_lock_probe(
+                lease,
+                expected="CONTENDED",
+            )
+        result = _v2_execute_nomock_cases_impl(case, manifest)
+    if slug == "nomock-live-target-unchanged":
+        with fixture_br_lease() as reacquired:
+            if (
+                reacquired.device != lease.device
+                or reacquired.inode != lease.inode
+            ):
+                raise InfrastructureFailed(
+                    "fixture lock identity changed across release and reacquisition"
+                )
+            fixture_br_external_lock_probe(
+                reacquired,
+                expected="CONTENDED",
+            )
+    return result
+
+
+def _v2_execute_nomock_cases_impl(
     case: Mapping[str, Any],
     manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -40315,6 +44178,7 @@ def v2_execute_nomock_cases(
             inventory=production_inventory,
             prior_campaign=v2_empty_prior_campaign(),
             current_universe=snapshot.all_issues,
+            current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
         )
         v2_validate_zero_sets(
             production_zero,
@@ -40322,6 +44186,7 @@ def v2_execute_nomock_cases(
             inventory=production_inventory,
             prior_campaign=v2_empty_prior_campaign(),
             current_universe=snapshot.all_issues,
+            current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
         )
         statuses = Counter(str(row.get("status") or "") for row in issues)
         priorities = Counter(int(row.get("priority")) for row in issues)
@@ -40562,26 +44427,281 @@ def v2_execute_nomock_cases(
             observed=semantic_root(after),
         )
 
-    elif slug in {"nomock-review-plan", "nomock-history-plan"}:
-        subject_mode = (
-            "review-plan"
-            if slug == "nomock-review-plan"
-            else "history-plan"
-        )
-        if subject_mode == "history-plan":
-            live_history = v2_nomock_history_evidence(manifest)
-        else:
-            live_history = None
+    elif slug == "nomock-review-plan":
         context = fixture_br_context()
-        authentic_issue = (
-            fixture_br_show(context["stable_id"])
-            if subject_mode == "review-plan"
-            else None
+        stable_id = context["stable_id"]
+        fixture_root = resolve_safe(
+            str(FIXTURE_BR_ROOT_REL),
+            label="no-mock live review fixture root",
+            must_exist=True,
         )
+        fixture_before = v2_fixture_fingerprint(context)
+        artifact_root, artifact_dir = v2_fresh_nomock_artifact_location(
+            manifest,
+            label="released-review-plan",
+            identity_binding={
+                "fixture_root": fixture_before["semantic_root"],
+                "target_id": stable_id,
+            },
+        )
+        planner_arguments = parse_arguments(
+            [
+                "--review-plan",
+                "--artifact-root",
+                artifact_root,
+                "--artifact-dir",
+                artifact_dir,
+                "--targets",
+                stable_id,
+            ]
+        )
+        synopsis = v2_execute_live_plan(
+            mode="review-plan",
+            parsed=planner_arguments,
+            manifest=manifest,
+            br_cwd=fixture_root,
+        )
+        (
+            retained_directory,
+            payloads,
+            terminal,
+            events,
+        ) = v2_read_retained_bundle(
+            artifact_root=artifact_root,
+            input_dir=artifact_dir,
+        )
+        reconstructed = v2_reconstruct_retained(
+            artifact_root=artifact_root,
+            input_dir=artifact_dir,
+            payloads=payloads,
+            terminal=terminal,
+            events=events,
+            accepted_manifest=manifest,
+        )
+        source, inventory, authority, review, history, zero_sets, _ = (
+            reconstructed
+        )
+        observation = source["captured"]["observation"]
+        source_issue_ids = sorted(
+            str(row["id"])
+            for row in source["captured"]["all_issues"]
+        )
+        source_receipts = v2_validate_source_command_receipts(
+            observation,
+            issue_ids=source_issue_ids,
+        )
+        expected_source_receipts = [
+            {"capture_sequence": index, **receipt}
+            for index, receipt in enumerate(_command_receipts)
+        ]
+        expected_artifact_path = str(
+            safe_relative(artifact_root, label="no-mock artifact root")
+            / safe_relative(artifact_dir, label="no-mock artifact dir")
+        )
+        checks.check(
+            "exact-nine-file-released-bundle",
+            len(V2_RUN_ARTIFACTS) == 9
+            and len(payloads) == 9
+            and set(payloads) == set(V2_RUN_ARTIFACTS)
+            and terminal["base_artifacts"] == list(V2_RUN_ARTIFACTS)
+            and terminal["safe_relative_artifacts"]
+            == sorted(V2_RUN_ARTIFACTS)
+            and terminal["terminal"] == "Pass"
+            and terminal["bundle_state"] == "COMPLETE_GREEN"
+            and terminal["complete_evidence_bundle"] is True
+            and terminal["complete_green_prefix"] is True
+            and events[-1]["terminal"] == "Pass"
+            and synopsis["schema"]
+            == "frankensim.beads-template-hygiene.synopsis.v2"
+            and synopsis["mode"] == "review-plan"
+            and synopsis["artifacts"] == expected_artifact_path
+            and synopsis["reproduction"] == terminal["reproduction"]
+            and synopsis["selected_ids"] == {
+                "total": 1,
+                "shown": 1,
+                "ids": [stable_id],
+                "truncated": False,
+                "notice": None,
+            }
+            and source_issue_ids == fixture_before["issue_ids"]
+            and observation["live_issue_count"] == len(source_issue_ids)
+            and observation["command_receipts"]
+            == expected_source_receipts
+            and [row["argv"] for row in source_receipts]
+            == v2_expected_observation_argv(source_issue_ids)
+            and all(
+                row["exit_code"] == 0
+                and row["category"] == "SUCCESS"
+                and row["redaction_verdict"]
+                == "RAW_STREAM_BODIES_NOT_RETAINED"
+                for row in observation["command_receipts"]
+            )
+            and retained_directory
+            == resolve_run_dir(
+                artifact_root,
+                artifact_dir,
+                label="no-mock retained review plan",
+                must_exist=True,
+            ),
+            expected={
+                "base_artifacts": sorted(V2_RUN_ARTIFACTS),
+                "terminal": "Pass",
+                "bundle_state": "COMPLETE_GREEN",
+                "synopsis_mode": "review-plan",
+                "selected_ids": [stable_id],
+                "source_issue_ids": fixture_before["issue_ids"],
+                "source_command_count": len(
+                    v2_expected_observation_argv(source_issue_ids)
+                ),
+            },
+            observed={
+                "base_artifacts": sorted(payloads),
+                "terminal": terminal["terminal"],
+                "bundle_state": terminal["bundle_state"],
+                "synopsis_mode": synopsis["mode"],
+                "selected_ids": synopsis["selected_ids"]["ids"],
+                "source_issue_ids": source_issue_ids,
+                "source_command_count": len(source_receipts),
+                "source_command_root": semantic_root(source_receipts),
+            },
+        )
+
+        replay_root, replay_dir = v2_fresh_nomock_artifact_location(
+            manifest,
+            label="released-review-replay",
+            identity_binding={
+                "retained_terminal_root": terminal["semantic_root"],
+                "target_id": stable_id,
+            },
+        )
+        if replay_root != artifact_root:
+            raise EvidenceFailed(
+                "no-mock live review replay escaped its artifact root"
+            )
+        receipt_count_before_replay = len(_command_receipts)
+        replay_result = v2_replay_bundle(
+            artifact_root=artifact_root,
+            input_dir=artifact_dir,
+            output_dir=replay_dir,
+            accepted_manifest=manifest,
+        )
+        receipt_count_after_replay = len(_command_receipts)
+        (
+            replay_directory,
+            replay_payloads,
+            replay_terminal,
+            replay_events,
+        ) = v2_read_retained_bundle(
+            artifact_root=artifact_root,
+            input_dir=replay_dir,
+        )
+        replay_reconstructed = v2_reconstruct_retained(
+            artifact_root=artifact_root,
+            input_dir=replay_dir,
+            payloads=replay_payloads,
+            terminal=replay_terminal,
+            events=replay_events,
+            accepted_manifest=manifest,
+        )
+        checks.check(
+            "released-plan-offline-replay",
+            replay_result["terminal"] == "Pass"
+            and replay_result["subject_mode"] == "review-plan"
+            and replay_result["retained_terminal_root"]
+            == terminal["semantic_root"]
+            and replay_result["live_tracker_reads"] is False
+            and replay_result["live_tracker_writes"] is False
+            and replay_result["network_access"] is False
+            and replay_terminal["mode"] == "replay"
+            and replay_terminal["subject_mode"] == "review-plan"
+            and replay_terminal["bundle_state"] == "COMPLETE_GREEN"
+            and replay_terminal["terminal"] == "Pass"
+            and replay_terminal["replay_equivalence"][
+                "retained_terminal_root"
+            ]
+            == terminal["semantic_root"]
+            and replay_terminal["replay_equivalence"]["live_tracker_reads"]
+            is False
+            and replay_terminal["replay_equivalence"]["live_tracker_writes"]
+            is False
+            and replay_terminal["replay_equivalence"]["network_access"]
+            is False
+            and [row["semantic_root"] for row in replay_reconstructed[:6]]
+            == [row["semantic_root"] for row in reconstructed[:6]]
+            and receipt_count_after_replay == receipt_count_before_replay
+            and replay_directory != retained_directory,
+            expected={
+                "projection_roots": [
+                    row["semantic_root"] for row in reconstructed[:6]
+                ],
+                "live_tracker_reads": False,
+                "live_tracker_writes": False,
+                "network_access": False,
+                "new_source_commands": 0,
+                "disjoint_output": True,
+            },
+            observed={
+                "projection_roots": [
+                    row["semantic_root"]
+                    for row in replay_reconstructed[:6]
+                ],
+                "live_tracker_reads": replay_result[
+                    "live_tracker_reads"
+                ],
+                "live_tracker_writes": replay_result[
+                    "live_tracker_writes"
+                ],
+                "network_access": replay_result["network_access"],
+                "new_source_commands": (
+                    receipt_count_after_replay
+                    - receipt_count_before_replay
+                ),
+                "disjoint_output": replay_directory != retained_directory,
+            },
+        )
+
+        fixture_after = v2_fixture_fingerprint(context)
+        checks.check(
+            "mode-specific-projection-and-audit",
+            [row["id"] for row in inventory["rows"]] == [stable_id]
+            and review["state"] == "POPULATED"
+            and review["counts"]["targets"] == 1
+            and history["state"] == "NOT_REQUESTED"
+            and source["captured"]["audit_capture"]["state"]
+            == "NOT_REQUESTED"
+            and terminal["subject_mode"] == "review-plan"
+            and source["tracker_authority"] == "READ_ONLY"
+            and source["direct_tracker_file_access"] is False
+            and source["network_access"] is False
+            and fixture_after["semantic_root"]
+            == fixture_before["semantic_root"]
+            and authority["inventory_root"] == inventory["semantic_root"]
+            and zero_sets["inventory_root"] == inventory["semantic_root"],
+            expected={
+                "inventory_ids": [stable_id],
+                "review_state": "POPULATED",
+                "history_state": "NOT_REQUESTED",
+                "audit_state": "NOT_REQUESTED",
+                "tracker_authority": "READ_ONLY",
+                "fixture_root": fixture_before["semantic_root"],
+            },
+            observed={
+                "inventory_ids": [row["id"] for row in inventory["rows"]],
+                "review_state": review["state"],
+                "history_state": history["state"],
+                "audit_state": source["captured"]["audit_capture"]["state"],
+                "tracker_authority": source["tracker_authority"],
+                "fixture_root": fixture_after["semantic_root"],
+            },
+        )
+
+    elif slug == "nomock-history-plan":
+        live_history = v2_nomock_history_evidence(manifest)
+        context = fixture_br_context()
         payloads, accepted, retained = v2_replayable_fixture_bundle(
             manifest,
-            subject_mode=subject_mode,
-            issue=authentic_issue,
+            subject_mode="history-plan",
+            issue=None,
         )
         reconstructed = v2_reconstruct_payload_map(payloads, accepted)
         terminal = strict_json_loads(
@@ -40605,16 +44725,11 @@ def v2_execute_nomock_cases(
         )
         checks.check(
             "mode-specific-projection-and-audit",
-            (
-                reconstructed[3]["state"] == "POPULATED"
-                and reconstructed[4]["state"] == "NOT_REQUESTED"
-                if subject_mode == "review-plan"
-                else reconstructed[3]["state"] == "NOT_REQUESTED"
-                and reconstructed[4]["state"] == "POPULATED"
-                and live_history is not None
-                and live_history["legacy_count"] > 0
-            ),
-            expected=subject_mode,
+            reconstructed[3]["state"] == "NOT_REQUESTED"
+            and reconstructed[4]["state"] == "POPULATED"
+            and live_history["legacy_count"] > 0
+            and bool(context),
+            expected="history-plan",
             observed=(
                 reconstructed[3]["state"],
                 reconstructed[4]["state"],
@@ -40932,6 +45047,494 @@ def v2_execute_nomock_cases(
                         for row in replay_reconstructed[:6]
                     ],
                 )
+
+                def replay_subprocess_document(
+                    completed: subprocess.CompletedProcess[str],
+                    *,
+                    label: str,
+                ) -> dict[str, Any]:
+                    document = strict_json_loads(
+                        completed.stdout.encode("utf-8"),
+                        label=label,
+                        require_canonical=True,
+                    )
+                    if not isinstance(document, dict):
+                        raise EvidenceFailed(
+                            f"{label} did not emit one JSON object"
+                        )
+                    return document
+
+                try:
+                    replay_subprocess_nonce = os.urandom(32).hex()
+                except OSError as error:
+                    raise InfrastructureFailed(
+                        "explicit replay subprocess nonce could not be generated"
+                    ) from error
+                offline_path_entries = list(
+                    dict.fromkeys(
+                        (
+                            str(Path(sys.executable).parent),
+                            "/usr/bin",
+                            "/bin",
+                        )
+                    )
+                )
+                offline_path = os.pathsep.join(offline_path_entries)
+                tracker_cli_visible = any(
+                    os.access(Path(entry) / "br", os.X_OK)
+                    for entry in offline_path_entries
+                )
+                offline_environment = {"PATH": offline_path}
+
+                explicit_root, explicit_dir = v2_persistent_e2e_location(
+                    manifest,
+                    label="explicit-replay-v2-subprocess",
+                    identity_binding={
+                        "retained_terminal_root": retained_terminal[
+                            "semantic_root"
+                        ],
+                        "nonce": replay_subprocess_nonce,
+                    },
+                )
+                if explicit_root != artifact_root:
+                    raise EvidenceFailed(
+                        "explicit replay subprocess escaped its artifact root"
+                    )
+                explicit_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay-v2",
+                        artifact_dir,
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        explicit_dir,
+                    ),
+                    environment_overrides=offline_environment,
+                    record_global_receipt=False,
+                )
+                explicit_result = replay_subprocess_document(
+                    explicit_completed,
+                    label="explicit replay-v2 stdout",
+                )
+                v2_validate_replay_result_document(explicit_result)
+                (
+                    _,
+                    explicit_payloads,
+                    explicit_terminal,
+                    explicit_events,
+                ) = v2_read_retained_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=explicit_dir,
+                )
+                explicit_reconstructed = v2_reconstruct_retained(
+                    artifact_root=artifact_root,
+                    input_dir=explicit_dir,
+                    payloads=explicit_payloads,
+                    terminal=explicit_terminal,
+                    events=explicit_events,
+                    accepted_manifest=manifest,
+                )
+                checks.check(
+                    "explicit-replay-v2-subprocess-success-rooted",
+                    explicit_completed.returncode == 0
+                    and explicit_completed.stderr == ""
+                    and explicit_result["schema"]
+                    == V2_REPLAY_RESULT_SCHEMA
+                    and explicit_result["terminal"] == "Pass"
+                    and explicit_result["retained_terminal_root"]
+                    == retained_terminal["semantic_root"]
+                    and explicit_result["replay_terminal_root"]
+                    == explicit_terminal["semantic_root"]
+                    and [
+                        row["semantic_root"]
+                        for row in explicit_reconstructed[:6]
+                    ]
+                    == roots[subject_mode],
+                    expected={
+                        "exit_code": 0,
+                        "schema": V2_REPLAY_RESULT_SCHEMA,
+                        "terminal": "Pass",
+                        "retained_terminal_root": retained_terminal[
+                            "semantic_root"
+                        ],
+                        "projection_roots": roots[subject_mode],
+                    },
+                    observed={
+                        "exit_code": explicit_completed.returncode,
+                        "stderr_root": text_root(explicit_completed.stderr),
+                        "result": explicit_result,
+                        "projection_roots": [
+                            row["semantic_root"]
+                            for row in explicit_reconstructed[:6]
+                        ],
+                    },
+                )
+
+                wrong_v1_root, wrong_v1_input = (
+                    v2_fresh_nomock_artifact_location(
+                        manifest,
+                        label="explicit-replay-v1-probe",
+                        identity_binding={
+                            "nonce": replay_subprocess_nonce,
+                            "schema": RUN_TERMINAL_SCHEMA,
+                        },
+                    )
+                )
+                wrong_v1_directory = resolve_run_dir(
+                    wrong_v1_root,
+                    wrong_v1_input,
+                    label="explicit replay v1 schema probe",
+                )
+                wrong_v1_directory.mkdir(parents=True, exist_ok=False)
+                write_once(
+                    wrong_v1_directory / "terminal.json",
+                    canonical_bytes({"schema": RUN_TERMINAL_SCHEMA}),
+                )
+                wrong_v1_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay-v2",
+                        wrong_v1_input,
+                        "--artifact-root",
+                        wrong_v1_root,
+                        "--artifact-dir",
+                        f"wrong-v1-output-{replay_subprocess_nonce[:16]}",
+                    ),
+                    expected=(TERMINAL_EXIT["InputRefused"],),
+                    environment_overrides={
+                        **offline_environment,
+                        "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1",
+                    },
+                    record_global_receipt=False,
+                )
+                wrong_v1_document = replay_subprocess_document(
+                    wrong_v1_completed,
+                    label="explicit replay-v2 wrong-v1 stdout",
+                )
+                v2_validate_preflight_terminal_document(wrong_v1_document)
+                checks.check(
+                    "explicit-replay-v2-wrong-v1-refused-pre-manifest",
+                    wrong_v1_document["terminal"] == "InputRefused"
+                    and wrong_v1_document["mode"] == "replay-v2"
+                    and wrong_v1_document["schema"]
+                    == V2_PREFLIGHT_TERMINAL_SCHEMA
+                    and "manifest_root" not in wrong_v1_document
+                    and "manifest loading was forbidden"
+                    not in wrong_v1_document["diagnostic_summary"],
+                    expected={
+                        "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+                        "terminal": "InputRefused",
+                        "mode": "replay-v2",
+                        "manifest_loaded": False,
+                    },
+                    observed=wrong_v1_document,
+                )
+
+                auxiliary_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay-v2",
+                        artifact_dir,
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        f"aux-refusal-{replay_subprocess_nonce[:16]}",
+                        "--targets",
+                        context["stable_id"],
+                    ),
+                    expected=(TERMINAL_EXIT["UsageRefused"],),
+                    environment_overrides={
+                        **offline_environment,
+                        "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1",
+                    },
+                    record_global_receipt=False,
+                )
+                auxiliary_document = replay_subprocess_document(
+                    auxiliary_completed,
+                    label="explicit replay-v2 auxiliary refusal stdout",
+                )
+                v2_validate_preflight_terminal_document(auxiliary_document)
+                checks.check(
+                    "explicit-replay-v2-auxiliary-refused-pre-manifest",
+                    auxiliary_document["terminal"] == "UsageRefused"
+                    and auxiliary_document["mode"] == "replay-v2"
+                    and auxiliary_document["schema"]
+                    == V2_PREFLIGHT_TERMINAL_SCHEMA
+                    and "manifest_root" not in auxiliary_document
+                    and "manifest loading was forbidden"
+                    not in auxiliary_document["diagnostic_summary"],
+                    expected={
+                        "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+                        "terminal": "UsageRefused",
+                        "manifest_loaded": False,
+                    },
+                    observed=auxiliary_document,
+                )
+
+                path_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay-v2",
+                        "../escaped-replay-input",
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        f"path-refusal-{replay_subprocess_nonce[:16]}",
+                    ),
+                    expected=(TERMINAL_EXIT["UsageRefused"],),
+                    environment_overrides={
+                        **offline_environment,
+                        "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1",
+                    },
+                    record_global_receipt=False,
+                )
+                path_document = replay_subprocess_document(
+                    path_completed,
+                    label="explicit replay-v2 path refusal stdout",
+                )
+                v2_validate_preflight_terminal_document(path_document)
+                checks.check(
+                    "explicit-replay-v2-path-refused-pre-manifest",
+                    path_document["terminal"] == "UsageRefused"
+                    and path_document["mode"] == "replay-v2"
+                    and path_document["schema"]
+                    == V2_PREFLIGHT_TERMINAL_SCHEMA
+                    and "manifest_root" not in path_document
+                    and "manifest loading was forbidden"
+                    not in path_document["diagnostic_summary"],
+                    expected={
+                        "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+                        "terminal": "UsageRefused",
+                        "manifest_loaded": False,
+                    },
+                    observed=path_document,
+                )
+
+                accepted_failure_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay-v2",
+                        artifact_dir,
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        artifact_dir,
+                    ),
+                    expected=(TERMINAL_EXIT["InputRefused"],),
+                    environment_overrides=offline_environment,
+                    record_global_receipt=False,
+                )
+                accepted_failure_document = replay_subprocess_document(
+                    accepted_failure_completed,
+                    label="explicit replay-v2 accepted failure stdout",
+                )
+                v2_validate_execution_terminal_document(
+                    accepted_failure_document
+                )
+                checks.check(
+                    "explicit-replay-v2-accepted-failure-classified",
+                    accepted_failure_document["terminal"]
+                    == "InputRefused"
+                    and accepted_failure_document["mode"] == "replay-v2"
+                    and accepted_failure_document["phase"]
+                    == "OFFLINE_REPLAY"
+                    and accepted_failure_document["manifest_root"]
+                    == manifest["semantic_root"]
+                    and accepted_failure_document[
+                        "complete_evidence_bundle"
+                    ]
+                    is False,
+                    expected={
+                        "schema": V2_EXECUTION_TERMINAL_SCHEMA,
+                        "terminal": "InputRefused",
+                        "phase": "OFFLINE_REPLAY",
+                        "manifest_root": manifest["semantic_root"],
+                    },
+                    observed=accepted_failure_document,
+                )
+
+                legacy_root, legacy_dir = v2_persistent_e2e_location(
+                    manifest,
+                    label="legacy-replay-v2-autodetect",
+                    identity_binding={
+                        "retained_terminal_root": retained_terminal[
+                            "semantic_root"
+                        ],
+                        "nonce": replay_subprocess_nonce,
+                    },
+                )
+                if legacy_root != artifact_root:
+                    raise EvidenceFailed(
+                        "legacy replay subprocess escaped its artifact root"
+                    )
+                legacy_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay",
+                        artifact_dir,
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        legacy_dir,
+                    ),
+                    environment_overrides=offline_environment,
+                    record_global_receipt=False,
+                )
+                legacy_result = replay_subprocess_document(
+                    legacy_completed,
+                    label="legacy replay v2 autodetect stdout",
+                )
+                v2_validate_replay_result_document(legacy_result)
+                (
+                    _,
+                    legacy_payloads,
+                    legacy_terminal,
+                    legacy_events,
+                ) = v2_read_retained_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=legacy_dir,
+                )
+                checks.check(
+                    "legacy-replay-v2-autodetect-success",
+                    v2_raw_invocation_mode(
+                        ["--replay", artifact_dir]
+                    )
+                    is None
+                    and legacy_completed.returncode == 0
+                    and legacy_completed.stderr == ""
+                    and legacy_result["schema"] == V2_REPLAY_RESULT_SCHEMA
+                    and legacy_result["retained_terminal_root"]
+                    == retained_terminal["semantic_root"]
+                    and legacy_result["replay_terminal_root"]
+                    == legacy_terminal["semantic_root"],
+                    expected={
+                        "raw_preclassification": None,
+                        "autodetected_schema": V2_REPLAY_RESULT_SCHEMA,
+                        "terminal": "Pass",
+                    },
+                    observed={
+                        "raw_preclassification": v2_raw_invocation_mode(
+                            ["--replay", artifact_dir]
+                        ),
+                        "exit_code": legacy_completed.returncode,
+                        "stderr_root": text_root(legacy_completed.stderr),
+                        "result": legacy_result,
+                    },
+                )
+
+                legacy_path_completed = run_command(
+                    (
+                        str(REPO_ROOT / SCRIPT_REL),
+                        "--replay",
+                        "../escaped-replay-input",
+                        "--artifact-root",
+                        artifact_root,
+                        "--artifact-dir",
+                        f"legacy-path-{replay_subprocess_nonce[:16]}",
+                    ),
+                    expected=(TERMINAL_EXIT["UsageRefused"],),
+                    environment_overrides={
+                        **offline_environment,
+                        "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1",
+                    },
+                    record_global_receipt=False,
+                )
+                legacy_path_document = replay_subprocess_document(
+                    legacy_path_completed,
+                    label="legacy replay path refusal stdout",
+                )
+                checks.check(
+                    "legacy-replay-preclassification-asymmetry",
+                    legacy_path_document["schema"] == EVENT_SCHEMA
+                    and legacy_path_document["terminal"] == "UsageRefused"
+                    and legacy_path_document["mode"] == "replay"
+                    and "semantic_root" not in legacy_path_document
+                    and path_document["schema"]
+                    == V2_PREFLIGHT_TERMINAL_SCHEMA
+                    and "manifest loading was forbidden"
+                    not in str(legacy_path_document.get("detail") or ""),
+                    expected={
+                        "legacy_pre_detection_schema": EVENT_SCHEMA,
+                        "explicit_pre_detection_schema": (
+                            V2_PREFLIGHT_TERMINAL_SCHEMA
+                        ),
+                        "terminal": "UsageRefused",
+                    },
+                    observed={
+                        "legacy": legacy_path_document,
+                        "explicit": path_document,
+                    },
+                )
+
+                replay_subprocesses = (
+                    explicit_completed,
+                    wrong_v1_completed,
+                    auxiliary_completed,
+                    path_completed,
+                    accepted_failure_completed,
+                    legacy_completed,
+                    legacy_path_completed,
+                )
+                checks.check(
+                    "replay-subprocesses-prove-no-live-activity",
+                    tracker_cli_visible is False
+                    and len(_command_receipts) == before_receipts
+                    and all(row.stderr == "" for row in replay_subprocesses)
+                    and all(
+                        result[field] is False
+                        for result in (explicit_result, legacy_result)
+                        for field in (
+                            "live_tracker_reads",
+                            "live_tracker_writes",
+                            "network_access",
+                        )
+                    )
+                    and all(
+                        explicit_terminal["replay_equivalence"][field]
+                        is False
+                        and legacy_terminal["replay_equivalence"][field]
+                        is False
+                        for field in (
+                            "live_tracker_reads",
+                            "live_tracker_writes",
+                            "network_access",
+                        )
+                    )
+                    and explicit_reconstructed[0]["network_access"] is False
+                    and explicit_reconstructed[0][
+                        "direct_tracker_file_access"
+                    ]
+                    is False,
+                    expected={
+                        "tracker_cli_visible_in_child_path": False,
+                        "new_parent_command_receipts": 0,
+                        "stderr_empty": True,
+                        "result_activity": False,
+                        "retained_activity": False,
+                    },
+                    observed={
+                        "offline_path_root": text_root(offline_path),
+                        "tracker_cli_visible_in_child_path": (
+                            tracker_cli_visible
+                        ),
+                        "new_parent_command_receipts": (
+                            len(_command_receipts) - before_receipts
+                        ),
+                        "stderr_roots": [
+                            text_root(row.stderr)
+                            for row in replay_subprocesses
+                        ],
+                        "explicit_result": explicit_result,
+                        "legacy_result": legacy_result,
+                        "explicit_replay_equivalence": explicit_terminal[
+                            "replay_equivalence"
+                        ],
+                        "legacy_replay_equivalence": legacy_terminal[
+                            "replay_equivalence"
+                        ],
+                    },
+                )
         checks.check(
             "offline-denies-live-reads",
             len(_command_receipts) == before_receipts,
@@ -40940,7 +45543,8 @@ def v2_execute_nomock_cases(
         )
 
     elif slug == "nomock-live-target-unchanged":
-        before = v2_fixture_fingerprint()
+        context = fixture_br_context()
+        before = v2_fixture_fingerprint(context)
         v2_replayable_fixture_bundle(
             manifest,
             subject_mode="review-plan",
@@ -40949,7 +45553,7 @@ def v2_execute_nomock_cases(
             manifest,
             subject_mode="history-plan",
         )
-        after = v2_fixture_fingerprint()
+        after = v2_fixture_fingerprint(context)
         checks.check(
             "read-only-modes-preserve-full-fixture-fingerprint",
             before["semantic_root"] == after["semantic_root"],
@@ -42449,6 +47053,7 @@ def v2_raw_invocation_mode(arguments: Sequence[str]) -> str | None:
             ("--case-v2", "case-v2"),
             ("--review-plan", "review-plan"),
             ("--history-plan", "history-plan"),
+            ("--replay-v2", "replay-v2"),
         ):
             if argument == option or argument.startswith(option + "="):
                 return mode
@@ -42717,6 +47322,13 @@ def parse_arguments(arguments: Sequence[str]) -> argparse.Namespace:
     modes.add_argument("--apply-manifest", metavar="REL")
     modes.add_argument("--negative", metavar="CASE")
     modes.add_argument("--replay", metavar="REL")
+    modes.add_argument(
+        "--replay-v2",
+        metavar="REL",
+        help=(
+            "replay an explicitly versioned v2 bundle without live tracker reads"
+        ),
+    )
     modes.add_argument("--closeout", action="store_true", help="require zero lint debt")
     modes.add_argument(
         "--review-plan",
@@ -42913,8 +47525,13 @@ def main(arguments: Sequence[str]) -> int:
         json_stdout(synopsis)
         return 0
 
-    if parsed.replay:
-        schema = peek_replay_schema(parsed.artifact_root, parsed.replay)
+    replay_input = parsed.replay_v2 or parsed.replay
+    if replay_input:
+        schema = peek_replay_schema(parsed.artifact_root, replay_input)
+        if parsed.replay_v2 and schema != V2_TERMINAL_SCHEMA:
+            raise InputRefused(
+                "--replay-v2 requires a retained v2 terminal schema"
+            )
         if schema == V2_TERMINAL_SCHEMA:
             _v2_outer_mode = "replay-v2"
             if parsed.provided_options & v2_auxiliary_options:
@@ -42929,14 +47546,14 @@ def main(arguments: Sequence[str]) -> int:
                     "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
                 ),
             }
-            json_stdout(
-                v2_replay_bundle(
-                    artifact_root=parsed.artifact_root,
-                    input_dir=parsed.replay,
-                    output_dir=artifact_dir,
-                    accepted_manifest=manifest_v2,
-                )
+            replay_result = v2_replay_bundle(
+                artifact_root=parsed.artifact_root,
+                input_dir=replay_input,
+                output_dir=artifact_dir,
+                accepted_manifest=manifest_v2,
             )
+            v2_validate_replay_result_document(replay_result)
+            json_stdout(replay_result)
             return 0
         if schema != RUN_TERMINAL_SCHEMA:
             raise InputRefused("replay terminal schema is neither frozen v1 nor v2")
@@ -42946,7 +47563,7 @@ def main(arguments: Sequence[str]) -> int:
         artifact_dir = require_artifact_dir(parsed)
         result = replay_bundle(
             artifact_root=parsed.artifact_root,
-            input_dir=parsed.replay,
+            input_dir=replay_input,
             output_dir=artifact_dir,
             case_manifest_root=case_manifest["semantic_root"],
         )
