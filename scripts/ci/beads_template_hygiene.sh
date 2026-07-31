@@ -2744,6 +2744,8 @@ def v2_validate_status(
         or value != value.lower()
         or value != unicodedata.normalize("NFC", value)
         or value.startswith("-")
+        or value == "all"
+        or "," in value
         or len(value.encode("utf-8")) > V2_STATUS_BYTES_CAP
         or any(
             unicodedata.category(character).startswith("C")
@@ -5132,6 +5134,24 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             raise InfrastructureFailed(
                 f"v2 br issue {issue_id} has invalid rollup"
             )
+        try:
+            v2_validate_status(
+                rollup["status"],
+                label=f"v2 br issue {issue_id} rollup status",
+                error_type=InfrastructureFailed,
+            )
+            for descendant_status in rollup["descendants"]:
+                v2_validate_status(
+                    descendant_status,
+                    label=(
+                        f"v2 br issue {issue_id} rollup descendant status"
+                    ),
+                    error_type=InfrastructureFailed,
+                )
+        except HarnessError as error:
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid rollup"
+            ) from error
     estimate = issue.get("estimated_minutes")
     if estimate is not None and (
         type(estimate) is not int or estimate < 0
@@ -6082,6 +6102,9 @@ def assemble_inventory(
     include_issue_rows_without_findings: bool = False,
 ) -> dict[str, Any]:
     validate_scope_partitions(lint)
+    status_scopes = v2_canonical_status_scopes(
+        (scope for scope in lint if scope != "all")
+    )
     br_missing_by_id = lint_result_map(lint)
     independent = {
         str(issue_id): {
@@ -6116,7 +6139,7 @@ def assemble_inventory(
         if (text := str(issue.get("acceptance_criteria") or "").strip())
     )
     lint_status_by_id: dict[str, str] = {}
-    for status in STATUS_SCOPES:
+    for status in status_scopes:
         for lint_row in lint[status]["results"]:
             issue_id = str(lint_row.get("id", ""))
             lint_status_by_id[issue_id] = status
@@ -6329,7 +6352,7 @@ def assemble_inventory(
             ),
             "issue_ids": [row["id"] for row in rows if row["status"] == status],
         }
-        for status in STATUS_SCOPES
+        for status in status_scopes
     }
     warning_count_by_id = {
         row["id"]: len(row["missing_sections"]) for row in rows
@@ -6368,7 +6391,7 @@ def assemble_inventory(
                     str(row.get("id", "")) for row in lint[scope]["results"]
                 ],
             }
-            for scope in LINT_SCOPES
+            for scope in (*status_scopes, "all")
         },
         "combined_status_cuts": combined_status_cuts,
         "partitions": {
@@ -6478,6 +6501,14 @@ def build_plan(
     issue_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     issues = {str(row["id"]): row for row in issue_rows}
+    status_order = {
+        status: index
+        for index, status in enumerate(
+            v2_canonical_status_scopes(
+                row["status"] for row in inventory["rows"]
+            )
+        )
+    }
     groups: dict[
         tuple[int, str, int, str, str, str, str],
         list[Mapping[str, Any]],
@@ -6489,7 +6520,7 @@ def build_plan(
         key = (
             int(row["priority"]),
             priority_group(row["priority"]),
-            STATUS_ORDER[row["status"]],
+            status_order[row["status"]],
             row["status"],
             owner,
             row["authority_domain"],
@@ -6962,16 +6993,27 @@ def v2_normalize_br_status(
 def v2_normalize_br_sync_status(
     document: Any,
     *,
+    input_kind: str,
     error_type: type[HarnessError],
 ) -> dict[str, Any]:
+    if input_kind not in {"released_live", "retained"}:
+        raise error_type("br sync status input kind is unknown")
     optional_fields = {
         "jsonl_content_hash",
         "last_export_time",
         "last_import_time",
     }
-    if not isinstance(document, dict) or not (
-        V2_BR_SYNC_FIELDS - optional_fields
-    ).issubset(document) or not set(document).issubset(V2_BR_SYNC_FIELDS):
+    if not isinstance(document, dict):
+        raise error_type("br sync status has a non-closed schema")
+    document_fields = set(document)
+    if input_kind == "released_live":
+        valid_outer_schema = (
+            (V2_BR_SYNC_FIELDS - optional_fields).issubset(document_fields)
+            and document_fields.issubset(V2_BR_SYNC_FIELDS)
+        )
+    else:
+        valid_outer_schema = document_fields == V2_BR_SYNC_FIELDS
+    if not valid_outer_schema:
         raise error_type("br sync status has a non-closed schema")
     normalized = dict(document)
     for field in optional_fields:
@@ -7092,14 +7134,21 @@ def v2_normalize_br_sync_status(
     raw_git_export = normalized["git_export"]
     if not isinstance(raw_git_export, dict):
         raise error_type("br sync git export is not an object")
-    if set(raw_git_export) == V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS:
+    git_export_fields = set(raw_git_export)
+    if (
+        input_kind == "released_live"
+        and git_export_fields == V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS
+    ):
         normalized_git_export = {
             "state": "PROBED",
             **raw_git_export,
             "reason": None,
             "diagnostic_command": None,
         }
-    elif set(raw_git_export) == V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS:
+    elif (
+        input_kind == "released_live"
+        and git_export_fields == V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS
+    ):
         normalized_git_export = {
             "state": "NOT_PROBED",
             **raw_git_export,
@@ -7109,7 +7158,7 @@ def v2_normalize_br_sync_status(
             "head_hash": None,
             "worktree_hash": None,
         }
-    elif set(raw_git_export) == {"available"}:
+    elif input_kind == "released_live" and git_export_fields == {"available"}:
         normalized_git_export = {
             "state": "LEGACY_UNAVAILABLE",
             **raw_git_export,
@@ -7121,10 +7170,13 @@ def v2_normalize_br_sync_status(
             "head_hash": None,
             "worktree_hash": None,
         }
-    elif set(raw_git_export) == V2_BR_GIT_EXPORT_FIELDS:
+    elif input_kind == "retained" and git_export_fields == V2_BR_GIT_EXPORT_FIELDS:
         normalized_git_export = dict(raw_git_export)
     else:
-        raise error_type("br sync git export has a non-closed union schema")
+        raise error_type(
+            "br sync git export does not match its declared live or retained "
+            "closed union schema"
+        )
     git_state = normalized_git_export["state"]
     if git_state == "PROBED":
         if normalized_git_export["available"] is not True or any(
@@ -7389,29 +7441,39 @@ def v2_br_witness_root(
 def v2_normalize_br_export_witness(
     document: Any,
     *,
-    workspace_root: Path = REPO_ROOT,
+    input_kind: str,
+    workspace_root: Path | None = None,
     expected_chunk_size_lines: int | None = None,
     expected_max_parallelism: int | None = None,
     error_type: type[HarnessError],
 ) -> dict[str, Any]:
+    if input_kind not in {"released_live", "retained"}:
+        raise error_type("br export witness input kind is unknown")
+    if input_kind == "released_live" and workspace_root is None:
+        raise error_type("live br export witness lacks its workspace root")
+    if input_kind == "retained" and workspace_root is not None:
+        raise error_type("retained br export witness carries a live workspace root")
     if not isinstance(document, dict):
         raise error_type("br export witness is not an object")
     document_fields = set(document)
     raw_present_fields = (
         V2_BR_WITNESS_REQUIRED_RAW_FIELDS | V2_BR_WITNESS_BASE_FIELDS
     )
-    if document_fields == V2_BR_WITNESS_REQUIRED_RAW_FIELDS:
+    if (
+        input_kind == "released_live"
+        and document_fields == V2_BR_WITNESS_REQUIRED_RAW_FIELDS
+    ):
         normalized = {
             **document,
             "base_evidence_state": "ABSENT_NODATA",
             **{field: None for field in V2_BR_WITNESS_BASE_FIELDS},
         }
-    elif document_fields == raw_present_fields:
+    elif input_kind == "released_live" and document_fields == raw_present_fields:
         normalized = {
             **document,
             "base_evidence_state": "PRESENT",
         }
-    elif document_fields == V2_BR_WITNESS_FIELDS:
+    elif input_kind == "retained" and document_fields == V2_BR_WITNESS_FIELDS:
         normalized = dict(document)
     else:
         raise error_type(
@@ -7430,20 +7492,28 @@ def v2_normalize_br_export_witness(
         normalized[field] is None for field in V2_BR_WITNESS_BASE_FIELDS
     ):
         raise error_type("br export witness base evidence state is inconsistent")
-    path_contract = {
-        "jsonl_path": (
-            str(workspace_root / ".beads" / "issues.jsonl"),
-            ".beads/issues.jsonl",
-        ),
-        "base_jsonl_path": (
-            str(workspace_root / ".beads" / "beads.base.jsonl"),
-            ".beads/beads.base.jsonl",
-        ),
+    relative_paths = {
+        "jsonl_path": ".beads/issues.jsonl",
+        "base_jsonl_path": ".beads/beads.base.jsonl",
     }
-    for field, (absolute, relative) in path_contract.items():
+    live_root = workspace_root.resolve() if workspace_root is not None else None
+    for field, relative in relative_paths.items():
         if field == "base_jsonl_path" and base_evidence_state == "ABSENT_NODATA":
             continue
-        if normalized[field] not in {absolute, relative}:
+        expected_path = (
+            str(live_root / relative)
+            if input_kind == "released_live" and live_root is not None
+            else relative
+        )
+        if input_kind == "released_live" and live_root is not None:
+            resolved_path = (live_root / relative).resolve(strict=False)
+            if resolved_path != live_root and not resolved_path.is_relative_to(
+                live_root
+            ):
+                raise error_type(
+                    f"br export witness {field} resolves outside its workspace"
+                )
+        if normalized[field] != expected_path:
             raise error_type(f"br export witness {field} is outside its fixed path")
         normalized[field] = relative
     witness = v2_br_exact_mapping(
@@ -8110,8 +8180,7 @@ def v2_validate_live_envelope_consistency(
         or summary["blocked_issues"] < status_counts["blocked"]
         or summary["blocked_issues"]
         > summary["total_issues"] - summary["closed_issues"]
-        or summary["ready_issues"]
-        > summary["total_issues"] - summary["closed_issues"]
+        or summary["ready_issues"] > summary["open_issues"]
     ):
         raise error_type("br status summary disagrees with the all-status source")
     witness = export_witness["witness"]
@@ -8480,6 +8549,7 @@ def v2_capture_live_round(
             "--json",
             br_cwd=br_cwd,
         ),
+        input_kind="released_live",
         error_type=InfrastructureFailed,
     )
     export_witness = v2_normalize_br_export_witness(
@@ -8489,6 +8559,7 @@ def v2_capture_live_round(
             "--json",
             br_cwd=br_cwd,
         ),
+        input_kind="released_live",
         workspace_root=workspace_root,
         expected_chunk_size_lines=(
             V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
@@ -11343,6 +11414,8 @@ def fixture_expected_missing(issue_type: str) -> tuple[str, ...]:
 def fixture_lint(
     issues: Sequence[Mapping[str, Any]],
     missing: Mapping[str, Sequence[str]],
+    *,
+    status_scopes: Sequence[str] = STATUS_SCOPES,
 ) -> dict[str, Any]:
     if len(issues) > CAPS["issues"]:
         raise EvidenceFailed(
@@ -11359,6 +11432,8 @@ def fixture_lint(
             f"fixture missing map has unknown issue {extra_missing_ids[0]}"
         )
 
+    canonical_status_scopes = v2_canonical_status_scopes(status_scopes)
+    allowed_statuses = set(canonical_status_scopes)
     normalized_missing: dict[str, tuple[str, ...]] = {}
     warning_total = 0
     for issue in issues:
@@ -11366,7 +11441,7 @@ def fixture_lint(
         status = str(issue.get("status") or "")
         priority = issue.get("priority")
         issue_type = str(issue.get("type") or "")
-        if status not in STATUS_SCOPES:
+        if status not in allowed_statuses:
             raise EvidenceFailed(
                 f"fixture {issue_id} has unknown status {status!r}"
             )
@@ -11398,7 +11473,7 @@ def fixture_lint(
         )
 
     result: dict[str, Any] = {}
-    for scope in LINT_SCOPES:
+    for scope in (*canonical_status_scopes, "all"):
         selected: list[dict[str, Any]] = []
         for issue in sorted(issues, key=lambda row: str(row["id"])):
             sections = normalized_missing[str(issue["id"])]
@@ -11434,7 +11509,10 @@ def fixture_lint(
 
 def fixture_source(
     issues: Sequence[Mapping[str, Any]] = (),
+    *,
+    status_scopes: Sequence[str] = STATUS_SCOPES,
 ) -> dict[str, Any]:
+    canonical_status_scopes = v2_canonical_status_scopes(status_scopes)
     ordered_issues = sorted(
         (dict(issue) for issue in issues),
         key=lambda issue: str(issue.get("id") or ""),
@@ -11448,10 +11526,10 @@ def fixture_source(
         "lint_issue_projection_root": "fixture",
         "status_summary": {
             status: sum(issue.get("status") == status for issue in ordered_issues)
-            for status in STATUS_SCOPES
+            for status in canonical_status_scopes
         },
         "files": [],
-        "status_cut": list(LINT_SCOPES),
+        "status_cut": [*canonical_status_scopes, "all"],
     }
     source["semantic_root"] = semantic_root(source)
     return source
@@ -13259,6 +13337,52 @@ def v2_parse_csv_set(
     return selected
 
 
+def v2_parse_status_set(
+    value: str | None,
+    *,
+    label: str,
+) -> set[str] | None:
+    if value is None:
+        return None
+    members = value.split(",")
+    if (
+        not value
+        or len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP
+        or len(members) > V2_INVENTORY_ROWS_CAP
+        or any(member != member.strip() for member in members)
+        or "" in members
+    ):
+        raise UsageRefused(
+            f"{label} must be a bounded comma-separated set of canonical statuses"
+        )
+    if len(members) != len(set(members)):
+        raise UsageRefused(f"{label} contains duplicate values")
+    for index, member in enumerate(members):
+        v2_validate_status(
+            member,
+            label=f"{label} member {index}",
+            error_type=UsageRefused,
+        )
+    return set(members)
+
+
+def v2_validate_status_filter_membership(
+    selected: set[str] | None,
+    issues: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> None:
+    if selected is None:
+        return
+    allowed = set(V2_RELEASED_KNOWN_STATUSES) | set(
+        v2_status_scopes(issues, error_type=error_type)
+    )
+    unknown = sorted(selected - allowed, key=lambda value: value.encode("utf-8"))
+    if unknown:
+        raise error_type(f"{label} contains unknown values {unknown}")
+
+
 def v2_parse_target_set(
     value: str | None,
     *,
@@ -13291,8 +13415,6 @@ def v2_non_actionable_reasons(
     *,
     tracker_ready: bool,
 ) -> list[str]:
-    if tracker_ready:
-        return []
     issue_id = str(issue.get("id") or "")
     status = str(issue.get("status") or "")
     reasons: list[str] = []
@@ -13320,7 +13442,7 @@ def v2_non_actionable_reasons(
         for relation in (issue.get("dependencies") or ())
     ):
         reasons.append("nonterminal-blocking-dependency-present")
-    if not reasons:
+    if not reasons and not tracker_ready:
         reasons.append("tracker-ready-policy-exclusion")
     return reasons
 
@@ -13357,18 +13479,11 @@ def v2_validate_tracker_ready_membership(
         )
     for issue_id in ready_ids:
         issue = issue_by_id[issue_id]
-        status = str(issue.get("status") or "")
-        if (
-            v2_is_terminal_status(status)
-            or issue.get("pinned") is True
-            or status == "pinned"
-            or issue.get("ephemeral") is True
-            or issue.get("is_template") is True
-            or "-wisp-" in issue_id
-        ):
+        reasons = v2_non_actionable_reasons(issue, tracker_ready=True)
+        if reasons:
             raise error_type(
-                "tracker ready membership contains an absolute non-actionable "
-                f"issue: {issue_id}"
+                "tracker ready membership contains a non-actionable issue: "
+                f"{issue_id}; reasons={','.join(reasons)}"
             )
 
 
@@ -13752,7 +13867,7 @@ def v2_review_minutes(issue: Mapping[str, Any]) -> int:
 def v2_active_work_context(issue: Mapping[str, Any]) -> dict[str, Any]:
     assignee = str(issue.get("assignee") or "")
     status = str(issue.get("status") or "")
-    tracker_ready = issue.get("tracker_ready", status == "open") is True
+    tracker_ready = issue.get("tracker_ready") is True
     non_actionable_reasons = list(
         issue.get("non_actionable_reasons")
         or v2_non_actionable_reasons(
@@ -15556,13 +15671,22 @@ def v2_build_zero_sets(
         current_universe=universe_rows_input,
         supplied=current_finding_ids,
     )
+    status_scopes = v2_canonical_status_scopes(
+        [
+            *V2_RELEASED_KNOWN_STATUSES,
+            *(
+                row.get("status") if isinstance(row, Mapping) else None
+                for row in universe_rows_input
+            ),
+        ]
+    )
     current_finding_id_set = set(normalized_finding_ids)
     cells: list[dict[str, Any]] = []
     all_ids: list[str] = []
     expected_ids = sorted(row["id"] for row in inventory_rows)
     partition_issue_ids_root = semantic_root(expected_ids)
     for priority in range(5):
-        for status in STATUS_SCOPES:
+        for status in status_scopes:
             issue_ids = sorted(
                 row["id"]
                 for row in inventory_rows
@@ -15606,7 +15730,7 @@ def v2_build_zero_sets(
     v2_preflight_zero_array(
         cells,
         label="zero-set cells",
-        exact_count=25,
+        exact_count=5 * len(status_scopes),
     )
     cells = [v2_rooted(cell) for cell in cells]
     if sorted(all_ids) != expected_ids or len(all_ids) != len(set(all_ids)):
@@ -15620,7 +15744,7 @@ def v2_build_zero_sets(
             not isinstance(issue_id, str)
             or not issue_id
             or issue_id in current_universe_by_id
-            or status not in STATUS_SCOPES
+            or status not in status_scopes
             or type(priority) is not int
             or priority not in range(5)
         ):
@@ -15811,6 +15935,8 @@ def v2_build_zero_sets(
         "source_root": source_root,
         "inventory_root": inventory["semantic_root"],
         "campaign_epoch_root": inventory["campaign_epoch_root"],
+        "status_scopes": list(status_scopes),
+        "status_scopes_root": semantic_root(list(status_scopes)),
         "cells": cells,
         "partition_issue_ids_root": partition_issue_ids_root,
         "current_universe_root": current_universe_root,
@@ -15881,6 +16007,8 @@ def v2_validate_zero_sets(
             "source_root",
             "inventory_root",
             "campaign_epoch_root",
+            "status_scopes",
+            "status_scopes_root",
             "cells",
             "partition_issue_ids_root",
             "current_universe_root",
@@ -15916,11 +16044,26 @@ def v2_validate_zero_sets(
         current_universe=universe_rows,
         supplied=current_finding_ids,
     )
+    expected_status_scopes = v2_canonical_status_scopes(
+        [
+            *V2_RELEASED_KNOWN_STATUSES,
+            *(
+                row.get("status") if isinstance(row, Mapping) else None
+                for row in universe_rows
+            ),
+        ]
+    )
+    if (
+        zero_sets["status_scopes"] != list(expected_status_scopes)
+        or zero_sets["status_scopes_root"]
+        != semantic_root(list(expected_status_scopes))
+    ):
+        raise EvidenceFailed("zero-set status-scope partition differs")
     current_finding_id_set = set(normalized_finding_ids)
     cells = v2_preflight_zero_array(
         zero_sets.get("cells"),
         label="zero-set cells",
-        exact_count=25,
+        exact_count=5 * len(expected_status_scopes),
     )
     scope_successors = v2_preflight_zero_array(
         zero_sets.get("scope_successors"),
@@ -15978,7 +16121,7 @@ def v2_validate_zero_sets(
             or type(priority) is not int
             or priority not in range(5)
             or not isinstance(status, str)
-            or status not in STATUS_SCOPES
+            or status not in expected_status_scopes
         ):
             raise EvidenceFailed(
                 f"zero-set inventory row {index} has invalid coordinates"
@@ -16007,7 +16150,7 @@ def v2_validate_zero_sets(
             not isinstance(issue_id, str)
             or not issue_id
             or issue_id in current_universe_by_id
-            or status not in STATUS_SCOPES
+            or status not in expected_status_scopes
             or type(priority) is not int
             or priority not in range(5)
         ):
@@ -16053,7 +16196,7 @@ def v2_validate_zero_sets(
     expected_coordinates = [
         (priority, status)
         for priority in range(5)
-        for status in STATUS_SCOPES
+        for status in expected_status_scopes
     ]
     observed_ids: list[str] = []
     zero_receipt_count = 0
@@ -16258,13 +16401,17 @@ def v2_validate_zero_sets(
             or not issue_id
             or issue_id in prior_by_id
             or not isinstance(row.get("status"), str)
-            or row["status"] not in STATUS_SCOPES
             or type(row.get("priority")) is not int
             or row["priority"] not in range(5)
         ):
             raise EvidenceFailed(
                 f"zero-set prior row {index} has invalid coordinates"
             )
+        v2_validate_status(
+            row["status"],
+            label=f"zero-set prior row {index} status",
+            error_type=EvidenceFailed,
+        )
         expected_destination = (
             "history-v2.json"
             if row["status"] == "closed"
@@ -16474,7 +16621,7 @@ def v2_validate_zero_sets(
 
     counts = zero_sets["counts"]
     expected_counts = {
-        "cells": 25,
+        "cells": 5 * len(expected_status_scopes),
         "zero_receipts": zero_receipt_count,
         "issues": len(expected_ids),
         "scope_successors": len(expected_scope_successors),
@@ -20404,6 +20551,7 @@ def v2_validate_review_plan(
                 child["semantic_review_action"],
                 child["readiness"],
                 child["remediation_route"],
+                child["desired_status"],
             )
             if child["disposition_workflow"] == "OVERSIZE_REVIEW_REQUIRED":
                 observed_vector = (
@@ -23694,9 +23842,8 @@ def v2_execute_live_plan(
         allowed={f"P{priority}" for priority in range(5)},
         label="--priorities",
     )
-    status_filter = v2_parse_csv_set(
+    status_filter = v2_parse_status_set(
         parsed.statuses,
-        allowed={"open", "in_progress", "blocked", "deferred", "closed"},
         label="--statuses",
     )
     target_filter = v2_parse_target_set(
@@ -23776,6 +23923,12 @@ def v2_execute_live_plan(
             rule_contract,
             ordinal=1,
             br_cwd=br_cwd,
+        )
+        v2_validate_status_filter_membership(
+            status_filter,
+            before.full_issues,
+            label="--statuses",
+            error_type=UsageRefused,
         )
         stage = "history_audit_between_source_rounds"
         if mode == "history-plan":
@@ -26138,7 +26291,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             for value in filters["priorities"]
         )
         or any(
-            not isinstance(value, str) or value not in STATUS_SCOPES
+            not isinstance(value, str)
             for value in filters["statuses"]
         )
         or any(
@@ -26169,6 +26322,18 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         or filters["authority_filters_apply_to_selected_projection"] is not True
     ):
         raise EvidenceFailed("v2 source filter projection is malformed")
+    for index, value in enumerate(filters["statuses"]):
+        v2_validate_status(
+            value,
+            label=f"v2 source status filter row {index}",
+            error_type=EvidenceFailed,
+        )
+    v2_validate_status_filter_membership(
+        set(filters["statuses"]) or None,
+        all_issues,
+        label="v2 source status filter",
+        error_type=EvidenceFailed,
+    )
     observation = captured["observation"]
     v2_exact_keys(
         observation,
@@ -26340,10 +26505,12 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     )
     normalized_sync_status = v2_normalize_br_sync_status(
         observation["sync_status"],
+        input_kind="retained",
         error_type=InputRefused,
     )
     normalized_export_witness = v2_normalize_br_export_witness(
         observation["export_witness"],
+        input_kind="retained",
         expected_chunk_size_lines=(
             V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
         ),
@@ -28451,6 +28618,7 @@ def v2_fixture_br_envelopes(
             },
             "workspace_health": "healthy",
         },
+        input_kind="released_live",
         error_type=EvidenceFailed,
     )
     chunk = {
@@ -28515,7 +28683,9 @@ def v2_fixture_br_envelopes(
     export_witness = v2_normalize_br_export_witness(
         {
             "base_comparison": comparison,
-            "base_jsonl_path": ".beads/beads.base.jsonl",
+            "base_jsonl_path": str(
+                REPO_ROOT / ".beads" / "beads.base.jsonl"
+            ),
             "base_parallel_work_plan": {
                 "batches": batches,
                 "candidate_output_batches": exported_count,
@@ -28557,7 +28727,7 @@ def v2_fixture_br_envelopes(
                     "total_actions": exported_count,
                 },
             },
-            "jsonl_path": ".beads/issues.jsonl",
+            "jsonl_path": str(REPO_ROOT / ".beads" / "issues.jsonl"),
             "witness": {
                 "byte_count": exported_count,
                 "chunk_size_lines": (
@@ -28577,6 +28747,8 @@ def v2_fixture_br_envelopes(
                 "schema_version": "br.jsonl-witness.v1",
             },
         },
+        input_kind="released_live",
+        workspace_root=REPO_ROOT,
         error_type=EvidenceFailed,
     )
     v2_validate_live_envelope_consistency(
@@ -28723,6 +28895,9 @@ def v2_replayable_fixture_bundle(
             }
         )
     full_issue = v2_full_issue_projection(raw_issue)
+    fixture_status_scopes = v2_canonical_status_scopes(
+        [*V2_RELEASED_KNOWN_STATUSES, full_issue["status"]]
+    )
     fixture_audit = v2_fixture_audit_capture(
         full_issue,
         history_mode=history_mode,
@@ -28730,7 +28905,11 @@ def v2_replayable_fixture_bundle(
     missing = {
         full_issue["id"]: fixture_expected_missing(full_issue["type"])
     }
-    lint = fixture_lint([full_issue], missing)
+    lint = fixture_lint(
+        [full_issue],
+        missing,
+        status_scopes=fixture_status_scopes,
+    )
     accepted_manifest = dict(manifest)
     if history_mode:
         history_contract = dict(manifest["history_contract"])
@@ -28753,7 +28932,9 @@ def v2_replayable_fixture_bundle(
     lint_ids = sorted(lint_result_map(lint))
     independent_ids = [full_issue["id"]] if synthetic_findings else []
     nonclosed_ids = (
-        [] if full_issue["status"] == "closed" else [full_issue["id"]]
+        []
+        if v2_is_terminal_status(full_issue["status"])
+        else [full_issue["id"]]
     )
     selected_ids = sorted(
         set(lint_ids) | set(independent_ids) | set(nonclosed_ids)
@@ -29139,18 +29320,35 @@ def v2_authentic_projection_fixture(
         )
         for row in full_issues
     }
-    lint = fixture_lint(full_issues, normalized_missing)
+    fixture_status_scopes = v2_canonical_status_scopes(
+        [
+            *V2_RELEASED_KNOWN_STATUSES,
+            *(row["status"] for row in full_issues),
+        ]
+    )
+    lint = fixture_lint(
+        full_issues,
+        normalized_missing,
+        status_scopes=fixture_status_scopes,
+    )
     selected = [
         row
         for row in full_issues
-        if row["status"] != "closed" or normalized_missing[row["id"]]
+        if not v2_is_terminal_status(row["status"])
+        or (
+            row["status"] == "closed"
+            and normalized_missing[row["id"]]
+        )
     ]
     tracker_ready_issue_ids = sorted(
         row["id"]
         for row in full_issues
         if v2_fixture_br_envelopes(row)[0]["summary"]["ready_issues"] == 1
     )
-    source = fixture_source(full_issues)
+    source = fixture_source(
+        full_issues,
+        status_scopes=fixture_status_scopes,
+    )
     source.pop("semantic_root", None)
     source["tracker_ready_issue_ids"] = tracker_ready_issue_ids
     source["tracker_ready_issue_ids_root"] = semantic_root(
@@ -32749,9 +32947,8 @@ def v2_execute_schema_cli_ux(
             allowed={f"P{priority}" for priority in range(5)},
             label="priorities",
         )
-        parsed_statuses = v2_parse_csv_set(
+        parsed_statuses = v2_parse_status_set(
             parsed_filters.statuses,
-            allowed=STATUS_SCOPES,
             label="statuses",
         )
         parsed_targets = v2_parse_target_set(
@@ -32824,6 +33021,46 @@ def v2_execute_schema_cli_ux(
             expected="canonical option and sorted-set order",
             observed=canonical_reproduction,
         )
+        observed_custom_status_issues = [
+            fixture_issue(
+                issue_id="filter-observed-custom-status",
+                status="custom:review",
+            )
+        ]
+        released_and_custom_statuses = v2_parse_status_set(
+            "draft,tombstone,pinned,custom:review",
+            label="statuses",
+        )
+        v2_validate_status_filter_membership(
+            released_and_custom_statuses,
+            observed_custom_status_issues,
+            label="statuses",
+            error_type=UsageRefused,
+        )
+        malformed_status_filter_error = expect_error(
+            UsageRefused,
+            lambda: v2_parse_status_set("Open", label="statuses"),
+            contains="canonical released-br status",
+        )
+        checks.check(
+            "released-and-observed-custom-status-filters-admitted",
+            released_and_custom_statuses
+            == {"draft", "tombstone", "pinned", "custom:review"}
+            and malformed_status_filter_error.terminal == "UsageRefused",
+            expected={
+                "statuses": [
+                    "custom:review",
+                    "draft",
+                    "pinned",
+                    "tombstone",
+                ],
+                "malformed": "UsageRefused",
+            },
+            observed={
+                "statuses": sorted(released_and_custom_statuses or []),
+                "malformed": malformed_status_filter_error.terminal,
+            },
+        )
         checks.refuses(
             "unknown-filter-refused",
             UsageRefused,
@@ -32837,10 +33074,11 @@ def v2_execute_schema_cli_ux(
         checks.refuses(
             "unknown-status-filter-refused",
             UsageRefused,
-            lambda: v2_parse_csv_set(
-                "retired",
-                allowed=STATUS_SCOPES,
+            lambda: v2_validate_status_filter_membership(
+                v2_parse_status_set("retired", label="statuses"),
+                observed_custom_status_issues,
                 label="statuses",
+                error_type=UsageRefused,
             ),
             contains="unknown",
         )
@@ -33690,6 +33928,12 @@ def v2_execute_source_cases(
                     str(row["id"]): tuple(row.get("missing_sections") or ())
                     for row in ordered
                 },
+                status_scopes=v2_canonical_status_scopes(
+                    [
+                        *V2_RELEASED_KNOWN_STATUSES,
+                        *(row["status"] for row in ordered),
+                    ]
+                ),
             )
         )
         return v2_capture_state(
@@ -33782,6 +34026,68 @@ def v2_execute_source_cases(
                 "issue_count": empty_capture["issue_count"],
                 "full_issue_projection_root": empty_capture[
                     "full_issue_projection_root"
+                ],
+            },
+        )
+        ready_rows = [
+            v2_full_issue_projection(
+                fixture_issue(
+                    issue_id=f"fixture-ready-swap-{suffix}",
+                    status="open",
+                )
+            )
+            for suffix in ("aa", "bb")
+        ]
+        ready_lint = fixture_lint(
+            ready_rows,
+            {row["id"]: () for row in ready_rows},
+        )
+        ready_a_capture = capture_state(
+            ready_rows,
+            lint=ready_lint,
+            tracker_ready_issue_ids=[ready_rows[0]["id"]],
+        )
+        ready_b_capture = capture_state(
+            ready_rows,
+            lint=ready_lint,
+            tracker_ready_issue_ids=[ready_rows[1]["id"]],
+        )
+        checks.refuses(
+            "count-preserving-ready-membership-swap-refused",
+            InputRefused,
+            lambda: v2_validate_capture_pair(
+                ready_a_capture,
+                ready_b_capture,
+            ),
+            contains="tracker_ready_issue_ids_root",
+        )
+        expected_ready_argv = [
+            "br",
+            "ready",
+            "--json",
+            "--limit",
+            "0",
+            *BR_READ_FLAGS,
+        ]
+        round_argv = v2_expected_observation_round_argv(
+            [row["id"] for row in ready_rows]
+        )
+        checks.check(
+            "ready-membership-command-and-projection-are-explicit",
+            round_argv.count(expected_ready_argv) == 1
+            and round_argv.index(expected_ready_argv) == 7
+            and ready_a_capture["tracker_ready_issue_ids_root"]
+            == semantic_root([ready_rows[0]["id"]]),
+            expected={
+                "argv": expected_ready_argv,
+                "ordinal": 7,
+                "ready_root": semantic_root([ready_rows[0]["id"]]),
+            },
+            observed={
+                "argv_count": round_argv.count(expected_ready_argv),
+                "ordinal": round_argv.index(expected_ready_argv),
+                "ready_root": ready_a_capture[
+                    "tracker_ready_issue_ids_root"
                 ],
             },
         )
@@ -34034,6 +34340,7 @@ def v2_execute_source_cases(
         }
         normalized_probed_git = v2_normalize_br_sync_status(
             sync_with_probed_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
         )
         sync_with_sha256_git = strict_json_loads(
@@ -34045,6 +34352,7 @@ def v2_execute_source_cases(
         sync_with_sha256_git["git_export"]["worktree_hash"] = "a" * 64
         normalized_sha256_git = v2_normalize_br_sync_status(
             sync_with_sha256_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
         )
         sync_with_newly_staged_git = strict_json_loads(
@@ -34063,6 +34371,7 @@ def v2_execute_source_cases(
         )
         normalized_newly_staged_git = v2_normalize_br_sync_status(
             sync_with_newly_staged_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
         )
         sync_with_staged_removal_git = strict_json_loads(
@@ -34082,6 +34391,7 @@ def v2_execute_source_cases(
         )
         normalized_staged_removal_git = v2_normalize_br_sync_status(
             sync_with_staged_removal_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
         )
         sync_with_missing_untracked_git = strict_json_loads(
@@ -34101,6 +34411,7 @@ def v2_execute_source_cases(
         )
         normalized_missing_untracked_git = v2_normalize_br_sync_status(
             sync_with_missing_untracked_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
         )
         sync_with_mixed_git_hashes = strict_json_loads(
@@ -34113,6 +34424,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_sync_status(
                 sync_with_mixed_git_hashes,
+                input_kind="released_live",
                 error_type=EvidenceFailed,
             ),
             contains="mixes Git object formats",
@@ -34129,7 +34441,118 @@ def v2_execute_source_cases(
         }
         normalized_not_probed_git = v2_normalize_br_sync_status(
             sync_with_not_probed_git,
+            input_kind="released_live",
             error_type=EvidenceFailed,
+        )
+        sync_with_legacy_unavailable_git = strict_json_loads(
+            canonical_bytes(sync_with_not_probed_git),
+            label="sync legacy-unavailable union seed",
+            require_canonical=True,
+        )
+        sync_with_legacy_unavailable_git["git_export"] = {
+            "available": False
+        }
+        normalized_legacy_unavailable_git = v2_normalize_br_sync_status(
+            sync_with_legacy_unavailable_git,
+            input_kind="released_live",
+            error_type=EvidenceFailed,
+        )
+        live_sync_with_omitted_optional_fields = strict_json_loads(
+            canonical_bytes(sync_with_not_probed_git),
+            label="sync omitted optional fields seed",
+            require_canonical=True,
+        )
+        for optional_field in (
+            "jsonl_content_hash",
+            "last_export_time",
+            "last_import_time",
+        ):
+            live_sync_with_omitted_optional_fields.pop(optional_field)
+        normalized_live_sync_with_omissions = v2_normalize_br_sync_status(
+            live_sync_with_omitted_optional_fields,
+            input_kind="released_live",
+            error_type=EvidenceFailed,
+        )
+        retained_sync_with_omitted_optional_fields = strict_json_loads(
+            canonical_bytes(normalized_not_probed_git),
+            label="retained sync omitted optional fields seed",
+            require_canonical=True,
+        )
+        retained_sync_with_omitted_optional_fields.pop("last_export_time")
+        retained_sync_omission_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                retained_sync_with_omitted_optional_fields,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            ),
+            contains="non-closed schema",
+        )
+        raw_sync_as_retained_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                sync_with_not_probed_git,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            ),
+            contains="declared live or retained",
+        )
+        retained_sync_as_live_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                normalized_not_probed_git,
+                input_kind="released_live",
+                error_type=EvidenceFailed,
+            ),
+            contains="declared live or retained",
+        )
+        checks.check(
+            "sync-live-and-retained-shapes-are-not-interchangeable",
+            raw_sync_as_retained_error.terminal == "EvidenceFailed"
+            and retained_sync_as_live_error.terminal == "EvidenceFailed"
+            and retained_sync_omission_error.terminal == "EvidenceFailed"
+            and all(
+                normalized_live_sync_with_omissions[field] is None
+                for field in (
+                    "jsonl_content_hash",
+                    "last_export_time",
+                    "last_import_time",
+                )
+            )
+            and v2_normalize_br_sync_status(
+                normalized_not_probed_git,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            )
+            == normalized_not_probed_git,
+            expected={
+                "raw_as_retained": "EvidenceFailed",
+                "retained_as_live": "EvidenceFailed",
+                "retained_optional_omission": "EvidenceFailed",
+                "live_optional_omissions_normalized": True,
+                "retained_round_trip": True,
+            },
+            observed={
+                "raw_as_retained": raw_sync_as_retained_error.terminal,
+                "retained_as_live": retained_sync_as_live_error.terminal,
+                "retained_optional_omission": (
+                    retained_sync_omission_error.terminal
+                ),
+                "live_optional_omissions_normalized": all(
+                    normalized_live_sync_with_omissions[field] is None
+                    for field in (
+                        "jsonl_content_hash",
+                        "last_export_time",
+                        "last_import_time",
+                    )
+                ),
+                "retained_round_trip": v2_normalize_br_sync_status(
+                    normalized_not_probed_git,
+                    input_kind="retained",
+                    error_type=EvidenceFailed,
+                )
+                == normalized_not_probed_git,
+            },
         )
         sync_existing_without_hash = strict_json_loads(
             canonical_bytes(exported_sync_status),
@@ -34139,6 +34562,7 @@ def v2_execute_source_cases(
         sync_existing_without_hash["jsonl_content_hash"] = None
         normalized_existing_without_hash = v2_normalize_br_sync_status(
             sync_existing_without_hash,
+            input_kind="retained",
             error_type=EvidenceFailed,
         )
         sync_missing_with_stored_hash = strict_json_loads(
@@ -34149,6 +34573,7 @@ def v2_execute_source_cases(
         sync_missing_with_stored_hash["jsonl_exists"] = False
         normalized_missing_with_stored_hash = v2_normalize_br_sync_status(
             sync_missing_with_stored_hash,
+            input_kind="retained",
             error_type=EvidenceFailed,
         )
         invented_sync_anomaly = strict_json_loads(
@@ -34174,6 +34599,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_sync_status(
                 invented_sync_anomaly,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="not released-br exact",
@@ -34189,6 +34615,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_sync_status(
                 absent_newer_sync,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="absent JSONL export as newer",
@@ -34216,6 +34643,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_sync_status(
                 wrong_health_sync,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="audit identity is malformed",
@@ -34249,6 +34677,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_sync_status(
                 reversed_anomaly_sync,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="released-br order",
@@ -34286,6 +34715,7 @@ def v2_execute_source_cases(
                 EvidenceFailed,
                 lambda: v2_normalize_br_sync_status(
                     candidate,
+                    input_kind="retained",
                     error_type=EvidenceFailed,
                 ),
                 contains="impossible file state",
@@ -34324,8 +34754,11 @@ def v2_execute_source_cases(
             and mixed_git_hash_error.terminal == "EvidenceFailed"
             and normalized_not_probed_git["git_export"]["state"]
             == "NOT_PROBED"
+            and normalized_legacy_unavailable_git["git_export"]["state"]
+            == "LEGACY_UNAVAILABLE"
             and v2_normalize_br_sync_status(
                 normalized_not_probed_git,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             )
             == normalized_not_probed_git
@@ -34344,7 +34777,11 @@ def v2_execute_source_cases(
             and impossible_wal_pair_error.terminal == "EvidenceFailed",
             expected={
                 "omitted_average": None,
-                "git_states": ["PROBED", "NOT_PROBED"],
+                "git_states": [
+                    "PROBED",
+                    "NOT_PROBED",
+                    "LEGACY_UNAVAILABLE",
+                ],
                 "git_object_id_widths": [40, 64],
                 "git_index_head_states": [
                     "newly_staged",
@@ -34367,6 +34804,7 @@ def v2_execute_source_cases(
                 "git_states": [
                     normalized_probed_git["git_export"]["state"],
                     normalized_not_probed_git["git_export"]["state"],
+                    normalized_legacy_unavailable_git["git_export"]["state"],
                 ],
                 "git_object_id_widths": [
                     len(normalized_probed_git["git_export"]["head_hash"]),
@@ -34494,7 +34932,7 @@ def v2_execute_source_cases(
             },
         )
         empty_released_witness = {
-            "jsonl_path": ".beads/issues.jsonl",
+            "jsonl_path": str(REPO_ROOT / ".beads" / "issues.jsonl"),
             "witness": {
                 "byte_count": 0,
                 "chunk_size_lines": 2,
@@ -34508,16 +34946,22 @@ def v2_execute_source_cases(
         }
         normalized_empty_witness = v2_normalize_br_export_witness(
             empty_released_witness,
+            input_kind="released_live",
+            workspace_root=REPO_ROOT,
             error_type=EvidenceFailed,
         )
         partial_base_witness = {
             **empty_released_witness,
-            "base_jsonl_path": ".beads/beads.base.jsonl",
+            "base_jsonl_path": str(
+                REPO_ROOT / ".beads" / "beads.base.jsonl"
+            ),
         }
         partial_base_error = expect_error(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 partial_base_witness,
+                input_kind="released_live",
+                workspace_root=REPO_ROOT,
                 error_type=EvidenceFailed,
             ),
             contains="partial or non-closed base-evidence schema",
@@ -34532,6 +34976,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 forged_witness_root,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="root differs from its retained metadata",
@@ -34546,6 +34991,7 @@ def v2_execute_source_cases(
             )
             and v2_normalize_br_export_witness(
                 normalized_empty_witness,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             )
             == normalized_empty_witness
@@ -34568,6 +35014,157 @@ def v2_execute_source_cases(
                 "forged_root_terminal": forged_witness_root_error.terminal,
             },
         )
+        relative_live_witness = strict_json_loads(
+            canonical_bytes(empty_released_witness),
+            label="relative live witness seed",
+            require_canonical=True,
+        )
+        relative_live_witness["jsonl_path"] = ".beads/issues.jsonl"
+        relative_live_witness_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                relative_live_witness,
+                input_kind="released_live",
+                workspace_root=REPO_ROOT,
+                error_type=EvidenceFailed,
+            ),
+            contains="outside its fixed path",
+        )
+        raw_witness_as_retained_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                empty_released_witness,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            ),
+            contains="partial or non-closed base-evidence schema",
+        )
+        retained_witness_as_live_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                normalized_empty_witness,
+                input_kind="released_live",
+                workspace_root=REPO_ROOT,
+                error_type=EvidenceFailed,
+            ),
+            contains="partial or non-closed base-evidence schema",
+        )
+        present_live_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="present live witness seed",
+            require_canonical=True,
+        )
+        present_live_witness.pop("base_evidence_state")
+        present_live_witness["jsonl_path"] = str(
+            REPO_ROOT / ".beads" / "issues.jsonl"
+        )
+        present_live_witness["base_jsonl_path"] = str(
+            REPO_ROOT / ".beads" / "beads.base.jsonl"
+        )
+        normalized_present_live_witness = v2_normalize_br_export_witness(
+            present_live_witness,
+            input_kind="released_live",
+            workspace_root=REPO_ROOT,
+            error_type=EvidenceFailed,
+        )
+        relative_live_base_witness = strict_json_loads(
+            canonical_bytes(present_live_witness),
+            label="relative live base witness seed",
+            require_canonical=True,
+        )
+        relative_live_base_witness["base_jsonl_path"] = (
+            ".beads/beads.base.jsonl"
+        )
+        relative_live_base_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                relative_live_base_witness,
+                input_kind="released_live",
+                workspace_root=REPO_ROOT,
+                error_type=EvidenceFailed,
+            ),
+            contains="outside its fixed path",
+        )
+        absolute_retained_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="absolute retained witness seed",
+            require_canonical=True,
+        )
+        absolute_retained_witness["jsonl_path"] = str(
+            REPO_ROOT / ".beads" / "issues.jsonl"
+        )
+        absolute_retained_candidate_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                absolute_retained_witness,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            ),
+            contains="outside its fixed path",
+        )
+        absolute_retained_witness["jsonl_path"] = ".beads/issues.jsonl"
+        absolute_retained_witness["base_jsonl_path"] = str(
+            REPO_ROOT / ".beads" / "beads.base.jsonl"
+        )
+        absolute_retained_base_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                absolute_retained_witness,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            ),
+            contains="outside its fixed path",
+        )
+        checks.check(
+            "export-witness-live-paths-and-retained-paths-are-distinct",
+            normalized_empty_witness["jsonl_path"]
+            == ".beads/issues.jsonl"
+            and relative_live_witness_error.terminal == "EvidenceFailed"
+            and raw_witness_as_retained_error.terminal == "EvidenceFailed"
+            and retained_witness_as_live_error.terminal == "EvidenceFailed"
+            and normalized_present_live_witness == exported_witness
+            and relative_live_base_error.terminal == "EvidenceFailed"
+            and absolute_retained_candidate_error.terminal == "EvidenceFailed"
+            and absolute_retained_base_error.terminal == "EvidenceFailed"
+            and v2_normalize_br_export_witness(
+                normalized_empty_witness,
+                input_kind="retained",
+                error_type=EvidenceFailed,
+            )
+            == normalized_empty_witness,
+            expected={
+                "live_path_form": "absolute workspace path",
+                "retained_path_form": ".beads/issues.jsonl",
+                "relative_live": "EvidenceFailed",
+                "raw_as_retained": "EvidenceFailed",
+                "retained_as_live": "EvidenceFailed",
+                "present_live_round_trip": True,
+                "relative_live_base": "EvidenceFailed",
+                "absolute_retained_candidate": "EvidenceFailed",
+                "absolute_retained_base": "EvidenceFailed",
+                "retained_round_trip": True,
+            },
+            observed={
+                "normalized_path": normalized_empty_witness["jsonl_path"],
+                "relative_live": relative_live_witness_error.terminal,
+                "raw_as_retained": raw_witness_as_retained_error.terminal,
+                "retained_as_live": retained_witness_as_live_error.terminal,
+                "present_live_round_trip": (
+                    normalized_present_live_witness == exported_witness
+                ),
+                "relative_live_base": relative_live_base_error.terminal,
+                "absolute_retained_candidate": (
+                    absolute_retained_candidate_error.terminal
+                ),
+                "absolute_retained_base": absolute_retained_base_error.terminal,
+                "retained_round_trip": v2_normalize_br_export_witness(
+                    normalized_empty_witness,
+                    input_kind="retained",
+                    error_type=EvidenceFailed,
+                )
+                == normalized_empty_witness,
+            },
+        )
         incoherent_changed_base_witness = strict_json_loads(
             canonical_bytes(exported_witness),
             label="fixture export witness incoherent changed-base seed",
@@ -34588,6 +35185,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 incoherent_changed_base_witness,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="changed base bytes cannot contain",
@@ -34607,6 +35205,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 false_root_drift_witness,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="root-match evidence differs",
@@ -34628,6 +35227,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 phantom_changed_base_witness,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="byte and chunk emptiness differs",
@@ -34673,6 +35273,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 zero_byte_nonempty_witness,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="chunk membership or byte count",
@@ -34788,7 +35389,9 @@ def v2_execute_source_cases(
             }
             raw = {
                 "base_comparison": comparison,
-                "base_jsonl_path": ".beads/beads.base.jsonl",
+                "base_jsonl_path": str(
+                    REPO_ROOT / ".beads" / "beads.base.jsonl"
+                ),
                 "base_parallel_work_plan": {
                     "batches": [batch],
                     "candidate_output_batches": 0 if drops else 1,
@@ -34828,7 +35431,9 @@ def v2_execute_source_cases(
                         "total_actions": 2,
                     },
                 },
-                "jsonl_path": ".beads/issues.jsonl",
+                "jsonl_path": str(
+                    REPO_ROOT / ".beads" / "issues.jsonl"
+                ),
                 "witness": {
                     "byte_count": candidate_count,
                     "chunk_size_lines": 1,
@@ -34846,6 +35451,8 @@ def v2_execute_source_cases(
             }
             return v2_normalize_br_export_witness(
                 raw,
+                input_kind="released_live",
+                workspace_root=REPO_ROOT,
                 error_type=EvidenceFailed,
             )
 
@@ -34895,6 +35502,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 split_released_batches(two_candidate_witness),
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="greedy batching",
@@ -34903,6 +35511,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 split_released_batches(two_drop_witness),
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="greedy batching",
@@ -34928,6 +35537,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 zero_removed,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="impossible line or byte counts",
@@ -34946,6 +35556,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 impossible_base_geometry,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="byte and chunk emptiness differs",
@@ -34969,6 +35580,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 unequal_boundary_hash,
+                input_kind="retained",
                 error_type=EvidenceFailed,
             ),
             contains="one-line chunk boundary hashes differ",
@@ -35045,6 +35657,7 @@ def v2_execute_source_cases(
                 lambda candidate=candidate: (
                     v2_normalize_br_export_witness(
                         candidate,
+                        input_kind="retained",
                         expected_chunk_size_lines=(
                             V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
                         ),
@@ -35191,6 +35804,7 @@ def v2_execute_source_cases(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
                 impossible_changed_base_bytes,
+                input_kind="retained",
                 expected_chunk_size_lines=1_024,
                 expected_max_parallelism=64,
                 error_type=EvidenceFailed,
@@ -38389,6 +39003,320 @@ def v2_execute_authority_cases(
                 decision["deferred_apply_prohibition"],
                 deferred_plan["children"][0]["desired_status"],
             ),
+        )
+        ready_context = v2_active_work_context(
+            v2_bind_tracker_actionability(
+                {"id": "fixture-actionability-ready", "status": "open"},
+                tracker_ready=True,
+            )
+        )
+        checks.check(
+            "tracker-ready-open-target-remains-open-review-work",
+            ready_context["tracker_ready"] is True
+            and ready_context["non_actionable_reasons"] == []
+            and ready_context["actionability_review_required"] is False
+            and ready_context["generated_child_desired_status"] == "open",
+            expected={
+                "tracker_ready": True,
+                "reasons": [],
+                "review_required": False,
+                "desired_status": "open",
+            },
+            observed=ready_context,
+        )
+        actionability_cases = (
+            (
+                "open-policy",
+                {"id": "fixture-actionability-open", "status": "open"},
+                "tracker-ready-policy-exclusion",
+            ),
+            (
+                "in-progress",
+                {
+                    "id": "fixture-actionability-in-progress",
+                    "status": "in_progress",
+                },
+                "tracker-status-not-ready:in_progress",
+            ),
+            (
+                "blocked",
+                {"id": "fixture-actionability-blocked", "status": "blocked"},
+                "tracker-status-not-ready:blocked",
+            ),
+            (
+                "deferred",
+                {
+                    "id": "fixture-actionability-deferred",
+                    "status": "deferred",
+                },
+                "tracker-status-not-ready:deferred",
+            ),
+            (
+                "draft",
+                {"id": "fixture-actionability-draft", "status": "draft"},
+                "tracker-status-not-ready:draft",
+            ),
+            (
+                "pinned-status",
+                {"id": "fixture-actionability-pinned", "status": "pinned"},
+                "pinned",
+            ),
+            (
+                "custom-status",
+                {
+                    "id": "fixture-actionability-custom",
+                    "status": "quality_hold",
+                },
+                "tracker-status-not-ready:quality_hold",
+            ),
+            (
+                "closed",
+                {"id": "fixture-actionability-closed", "status": "closed"},
+                "terminal-status:closed",
+            ),
+            (
+                "tombstone",
+                {
+                    "id": "fixture-actionability-tombstone",
+                    "status": "tombstone",
+                },
+                "terminal-status:tombstone",
+            ),
+            (
+                "pinned-flag",
+                {
+                    "id": "fixture-actionability-pinned-flag",
+                    "status": "open",
+                    "pinned": True,
+                },
+                "pinned",
+            ),
+            (
+                "template",
+                {
+                    "id": "fixture-actionability-template",
+                    "status": "open",
+                    "is_template": True,
+                },
+                "template",
+            ),
+            (
+                "ephemeral",
+                {
+                    "id": "fixture-actionability-ephemeral",
+                    "status": "open",
+                    "ephemeral": True,
+                },
+                "ephemeral",
+            ),
+            (
+                "wisp",
+                {"id": "fixture-wisp-actionability", "status": "open"},
+                "wisp",
+            ),
+            (
+                "defer-metadata",
+                {
+                    "id": "fixture-actionability-defer-metadata",
+                    "status": "open",
+                    "defer_until": "2099-01-01T00:00:00Z",
+                },
+                "defer-metadata-present",
+            ),
+            (
+                "blocking-dependency",
+                {
+                    "id": "fixture-actionability-dependency",
+                    "status": "open",
+                    "dependencies": [
+                        {
+                            "id": "external:fixture:blocker",
+                            "type": "blocks",
+                            "status": "open",
+                        }
+                    ],
+                },
+                "nonterminal-blocking-dependency-present",
+            ),
+        )
+        for name, issue, expected_reason in actionability_cases:
+            context = v2_active_work_context(
+                v2_bind_tracker_actionability(
+                    issue,
+                    tracker_ready=False,
+                )
+            )
+            checks.check(
+                f"nonactionable-{name}-is-explicitly-deferred",
+                context["tracker_ready"] is False
+                and expected_reason in context["non_actionable_reasons"]
+                and context["actionability_review_required"] is True
+                and context["generated_child_desired_status"] == "deferred",
+                expected={
+                    "tracker_ready": False,
+                    "required_reason": expected_reason,
+                    "review_required": True,
+                    "desired_status": "deferred",
+                },
+                observed=context,
+            )
+        absolute_nonactionable_cases = (
+            (
+                "closed",
+                {"id": "fixture-ready-closed", "status": "closed"},
+            ),
+            (
+                "tombstone",
+                {"id": "fixture-ready-tombstone", "status": "tombstone"},
+            ),
+            (
+                "pinned-status",
+                {"id": "fixture-ready-pinned", "status": "pinned"},
+            ),
+            (
+                "pinned-flag",
+                {
+                    "id": "fixture-ready-pinned-flag",
+                    "status": "open",
+                    "pinned": True,
+                },
+            ),
+            (
+                "template",
+                {
+                    "id": "fixture-ready-template",
+                    "status": "open",
+                    "is_template": True,
+                },
+            ),
+            (
+                "ephemeral",
+                {
+                    "id": "fixture-ready-ephemeral",
+                    "status": "open",
+                    "ephemeral": True,
+                },
+            ),
+            (
+                "wisp",
+                {"id": "fixture-wisp-ready", "status": "open"},
+            ),
+        )
+        for name, issue in absolute_nonactionable_cases:
+            checks.refuses(
+                f"ready-membership-{name}-refused",
+                EvidenceFailed,
+                lambda issue=issue: v2_validate_tracker_ready_membership(
+                    [issue],
+                    [issue["id"]],
+                    error_type=EvidenceFailed,
+                ),
+                contains="absolute non-actionable issue",
+            )
+        nonready_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    20,
+                    issue_id="synthetic-nonready-authority-cap",
+                    tracker_ready=False,
+                )
+            ]
+        )
+        nonready_authority = v2_synthetic_authority(
+            nonready_inventory,
+            declared=True,
+            manual=True,
+            external_verdict="VALID",
+            conditional_verdict="VALID",
+            gate_verdict="VALID",
+            version="0.3.0",
+            allow_mechanical_fixture=True,
+        )
+        nonready_plan, _ = v2_build_review_plan(
+            nonready_inventory,
+            nonready_authority,
+            max_targets=10,
+        )
+        nonready_decision = nonready_authority["decisions"][0]
+        checks.check(
+            "nonready-target-caps-authority-and-defers-review-child",
+            nonready_decision["readiness"] == "REVIEW_ONLY"
+            and nonready_decision["remediation_route"] == "ANALYSIS_ONLY"
+            and nonready_decision["deferred_apply_prohibition"] is True
+            and nonready_plan["children"][0]["desired_status"] == "deferred",
+            expected={
+                "readiness": "REVIEW_ONLY",
+                "route": "ANALYSIS_ONLY",
+                "apply_prohibition": True,
+                "desired_status": "deferred",
+            },
+            observed={
+                "readiness": nonready_decision["readiness"],
+                "route": nonready_decision["remediation_route"],
+                "apply_prohibition": nonready_decision[
+                    "deferred_apply_prohibition"
+                ],
+                "desired_status": nonready_plan["children"][0][
+                    "desired_status"
+                ],
+            },
+        )
+        mixed_actionability_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    21,
+                    issue_id="synthetic-actionable-shard",
+                    tracker_ready=True,
+                ),
+                v2_synthetic_target(
+                    22,
+                    issue_id="synthetic-nonactionable-shard",
+                    tracker_ready=False,
+                ),
+            ]
+        )
+        mixed_actionability_receipts = v2_synthetic_receipts(
+            mixed_actionability_inventory,
+            compatible=True,
+        )
+        mixed_actionability_authority = v2_derive_authority(
+            mixed_actionability_inventory,
+            mixed_actionability_receipts,
+            current_br_version="0.2.19",
+        )
+        mixed_actionability_plan, _ = v2_build_review_plan(
+            mixed_actionability_inventory,
+            mixed_actionability_authority,
+            max_targets=10,
+        )
+        checks.check(
+            "ready-and-nonready-targets-never-co-pack",
+            len(mixed_actionability_plan["children"]) == 2
+            and sorted(
+                child["desired_status"]
+                for child in mixed_actionability_plan["children"]
+            )
+            == ["deferred", "open"]
+            and all(
+                len(child["target_ids"]) == 1
+                for child in mixed_actionability_plan["children"]
+            ),
+            expected={
+                "children": 2,
+                "desired_statuses": ["deferred", "open"],
+                "targets_per_child": [1, 1],
+            },
+            observed={
+                "children": len(mixed_actionability_plan["children"]),
+                "desired_statuses": sorted(
+                    child["desired_status"]
+                    for child in mixed_actionability_plan["children"]
+                ),
+                "targets_per_child": sorted(
+                    len(child["target_ids"])
+                    for child in mixed_actionability_plan["children"]
+                ),
+            },
         )
         reactivated_inventory = v2_synthetic_inventory(
             [v2_synthetic_target(0, status="open")]
@@ -44446,6 +45374,14 @@ def v2_execute_artifact_cases(
             candidate.pop("semantic_root", None)
             issue = dict(candidate["captured"]["all_issues"][0])
             mutation(issue)
+            issue["source_issue_projection_root"] = semantic_root(
+                {
+                    key: value
+                    for key, value in issue.items()
+                    if key
+                    not in {"no_claim", "source_issue_projection_root"}
+                }
+            )
             candidate["captured"]["all_issues"] = [issue]
             candidate["capture_roots"]["all_issues"] = semantic_root(
                 candidate["captured"]["all_issues"]
@@ -44597,12 +45533,14 @@ def v2_execute_artifact_cases(
                 [
                     {
                         "id": "duplicate-neighbor",
+                        "title": "Duplicate neighbor",
                         "type": "blocks",
                         "status": "open",
                         "priority": 1,
                     },
                     {
                         "id": "duplicate-neighbor",
+                        "title": "Duplicate neighbor",
                         "type": "blocks",
                         "status": "blocked",
                         "priority": 2,
@@ -44636,6 +45574,7 @@ def v2_execute_artifact_cases(
                     [
                         {
                             "id": "external:evil\n--json",
+                            "title": "Malformed external relation identity",
                             "type": "blocks",
                             "status": "open",
                             "priority": 1,
