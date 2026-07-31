@@ -677,6 +677,7 @@ V2_SOURCE_ALL_ISSUE_FIELDS = frozenset(
         "source_repo",
         "source_repo_path",
         "released_fields_present",
+        "released_field_value_roots",
         "source_issue_projection_root",
         "no_claim",
     }
@@ -1126,8 +1127,10 @@ V2_SOURCE_NO_CLAIM = (
     "implementation, or authorize release"
 )
 V2_SOURCE_ISSUE_NO_CLAIM = (
-    "this complete tracker projection is source evidence only; source "
-    "repository paths are root-only and no ownership or authority is inferred"
+    "this released-field-complete tracker projection retains exact field "
+    "presence and raw-value roots as source evidence only; normalized fields "
+    "support bounded planning, source repository paths are root-only, and no "
+    "ownership or authority is inferred"
 )
 V2_SOURCE_OBSERVATION_NO_CLAIM = (
     "double-captured br projections are tracker-read-only source evidence; "
@@ -3058,6 +3061,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "source_audit_bracket_required_fields",
         "source_all_issue_required_fields",
         "source_relation_required_fields",
+        "source_comment_required_fields",
+        "source_rollup_required_fields",
+        "raw_br_show_allowed_fields",
         "source_command_receipt_required_fields",
         "source_stream_receipt_required_fields",
         "audit_capture_required_fields",
@@ -4266,9 +4272,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or source_contract["malformed_falsey_collections"] != "REFUSE"
         or source_contract["relation_row_validation"]
         != (
-            "EXACT_INTERNAL_NEIGHBOR_STATUS_PRIORITY_RECIPROCAL_PARENT_"
-            "BOUND_EXTERNAL_DEPENDENCY_NO_RECIPROCAL_SELF_DUPLICATE_"
-            "NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
+            "EXACT_INTERNAL_NEIGHBOR_TITLE_STATUS_PRIORITY_RECIPROCAL_"
+            "PARENT_BOUND_EXTERNAL_DEPENDENCY_NON_PARENT_AND_DEPENDENT_"
+            "PARENT_ONLY_NO_RECIPROCAL_SELF_DUPLICATE_NEIGHBOR_AND_"
+            "BLOCKING_CYCLES_REFUSED"
         )
         or source_contract["audit_capture_uses_bounded_runner"] is not True
         or source_contract["export_witness_capture_chunk_size_lines"]
@@ -4345,6 +4352,18 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or not v2_manifest_closed_field_list(
             source_contract["source_relation_required_fields"],
             V2_SOURCE_RELATION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["source_comment_required_fields"],
+            V2_SOURCE_COMMENT_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["source_rollup_required_fields"],
+            V2_SOURCE_ROLLUP_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["raw_br_show_allowed_fields"],
+            V2_RAW_BR_SHOW_FIELDS,
         )
         or not v2_manifest_closed_field_list(
             source_contract["source_command_receipt_required_fields"],
@@ -5217,6 +5236,9 @@ def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "events": [],
         "rollup": normalized_rollup,
         "released_fields_present": sorted(issue),
+        "released_field_value_roots": {
+            field: semantic_root(issue[field]) for field in sorted(issue)
+        },
         "field_roots": {
             field: text_root(value) for field, value in sorted(fields.items())
         },
@@ -13757,6 +13779,8 @@ V2_AUDIT_EVENT_KEYS = {
     "harness",
     "model",
 }
+V2_AUDIT_EVENT_BASE_KEYS = {"id", "event_type", "actor", "timestamp"}
+V2_AUDIT_EVENT_AGENT_KEYS = {"agent_name", "harness", "model"}
 V2_CANONICAL_TIMESTAMP_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
@@ -13904,7 +13928,7 @@ def v2_normalize_audit_document(
             raise EvidenceFailed(
                 f"audit event {issue_id}/{index} has unknown fields {sorted(unknown)}"
             )
-        required = {"id", "event_type", "actor", "timestamp"}
+        required = V2_AUDIT_EVENT_BASE_KEYS
         if not required.issubset(event):
             raise EvidenceFailed(
                 f"audit event {issue_id}/{index} lacks required fields"
@@ -13966,6 +13990,47 @@ def v2_normalize_audit_document(
             ):
                 raise EvidenceFailed(
                     f"audit event {optional_field} is malformed for {issue_id}"
+                )
+        event_keys = set(event)
+        if normalized["event_type"] == "status_changed":
+            allowed = (
+                V2_AUDIT_EVENT_BASE_KEYS
+                | V2_AUDIT_EVENT_AGENT_KEYS
+                | {"old_value", "new_value"}
+            )
+            old_value = normalized.get("old_value")
+            new_value = normalized.get("new_value")
+            if (
+                not {"old_value", "new_value"}.issubset(event_keys)
+                or not event_keys.issubset(allowed)
+                or not isinstance(old_value, str)
+                or not old_value
+                or not isinstance(new_value, str)
+                or not new_value
+                or (
+                    new_value == "closed"
+                    and old_value == "closed"
+                )
+            ):
+                raise EvidenceFailed(
+                    f"status_changed audit event has a malformed released "
+                    f"transition for {issue_id}"
+                )
+        elif normalized["event_type"] == "closed":
+            allowed = (
+                V2_AUDIT_EVENT_BASE_KEYS
+                | V2_AUDIT_EVENT_AGENT_KEYS
+                | {"comment"}
+            )
+            if (
+                "comment" not in event_keys
+                or not event_keys.issubset(allowed)
+                or not isinstance(normalized.get("comment"), str)
+                or not normalized["comment"]
+            ):
+                raise EvidenceFailed(
+                    f"closed audit event has a malformed released shape "
+                    f"for {issue_id}"
                 )
         utc_timestamp = event_timestamp.astimezone(timezone.utc)
         normalized["timestamp"] = utc_timestamp.isoformat(
@@ -23908,6 +23973,20 @@ def v2_validate_source_full_issue(
         raise InputRefused(
             f"v2 source all-issue row {index} released field-presence "
             "projection is malformed"
+        )
+    released_field_value_roots = issue["released_field_value_roots"]
+    if (
+        not isinstance(released_field_value_roots, dict)
+        or list(released_field_value_roots) != released_fields_present
+        or any(
+            not isinstance(root, str)
+            or re.fullmatch(r"sha256-v1:[0-9a-f]{64}", root) is None
+            for root in released_field_value_roots.values()
+        )
+    ):
+        raise InputRefused(
+            f"v2 source all-issue row {index} released raw-value roots "
+            "are malformed"
         )
     expected_source_issue_projection_root = semantic_root(
         {
@@ -35004,6 +35083,9 @@ def v2_execute_source_cases(
                 lambda row: row.__setitem__("external_ref", "")
             ),
             complete_projection_variant(
+                lambda row: row.__setitem__("external_ref", None)
+            ),
+            complete_projection_variant(
                 lambda row: row.pop("external_ref")
             ),
         ]
@@ -35028,6 +35110,11 @@ def v2_execute_source_cases(
             == {"closed": 1, "open": 1}
             and complete_projection["released_fields_present"]
             == sorted(complete_raw_issue)
+            and complete_projection["released_field_value_roots"]
+            == {
+                field: semantic_root(complete_raw_issue[field])
+                for field in sorted(complete_raw_issue)
+            }
             and len(
                 {
                     complete_target_root,
@@ -35035,10 +35122,17 @@ def v2_execute_source_cases(
                 }
             )
             == len(complete_variants) + 1
+            and complete_variants[-3]["external_ref"] == ""
             and complete_variants[-2]["external_ref"] == ""
             and complete_variants[-1]["external_ref"] == ""
-            and complete_variants[-2]["source_issue_projection_root"]
-            != complete_variants[-1]["source_issue_projection_root"]
+            and complete_variants[-3]["released_field_value_roots"][
+                "external_ref"
+            ]
+            != complete_variants[-2]["released_field_value_roots"][
+                "external_ref"
+            ]
+            and "external_ref"
+            not in complete_variants[-1]["released_field_value_roots"]
             and unknown_show_error.terminal == "InfrastructureFailed",
             expected={
                 "retained_dimensions": [
@@ -35047,6 +35141,7 @@ def v2_execute_source_cases(
                     "governance",
                     "closure_provenance",
                     "field_presence",
+                    "raw_value_roots",
                     "rollup",
                 ],
                 "distinct_target_roots": len(complete_variants) + 1,
@@ -39372,6 +39467,64 @@ def v2_execute_history_cases(
             },
         )
 
+        def malformed_authority_event_error(
+            mutation: Callable[[list[dict[str, Any]]], None],
+        ) -> TerminalObservation:
+            events = strict_json_loads(
+                canonical_bytes(audit["documents"][0]["events"]),
+                label="history authority-event mutation seed",
+                require_canonical=True,
+            )
+            mutation(events)
+            return expect_error(
+                EvidenceFailed,
+                lambda: v2_normalize_audit_document(
+                    {"issue_id": issues[0]["id"], "events": events},
+                    issue_id=issues[0]["id"],
+                ),
+                contains="malformed released",
+            )
+
+        missing_old_value_error = malformed_authority_event_error(
+            lambda events: next(
+                event
+                for event in events
+                if event["event_type"] == "status_changed"
+            ).pop("old_value")
+        )
+        checks.check(
+            "close-transition-missing-old-value-refused",
+            missing_old_value_error.terminal == "EvidenceFailed",
+            expected="EvidenceFailed",
+            observed=missing_old_value_error.terminal,
+        )
+        closed_to_closed_error = malformed_authority_event_error(
+            lambda events: next(
+                event
+                for event in events
+                if event["event_type"] == "status_changed"
+            ).__setitem__("old_value", "closed")
+        )
+        checks.check(
+            "close-transition-closed-to-closed-refused",
+            closed_to_closed_error.terminal == "EvidenceFailed",
+            expected="EvidenceFailed",
+            observed=closed_to_closed_error.terminal,
+        )
+        close_shape_error = malformed_authority_event_error(
+            lambda events: next(
+                event
+                for event in events
+                if event["event_type"] == "closed"
+            ).__setitem__("new_value", "closed")
+        )
+        checks.check(
+            "close-event-unexpected-transition-field-refused",
+            close_shape_error.terminal == "EvidenceFailed",
+            expected="EvidenceFailed",
+            observed=close_shape_error.terminal,
+        )
+
         def history_audit_with_events(
             events: Sequence[Mapping[str, Any]],
         ) -> dict[str, Any]:
@@ -43202,6 +43355,167 @@ def v2_execute_artifact_cases(
             EvidenceFailed,
             forbidden_replay_subprocess,
             contains="forbids run_command-routed subprocesses",
+        )
+
+        original_unscoped_runner = _run_command_unscoped
+        command_entered = threading.Event()
+        release_command = threading.Event()
+        command_thread_errors: list[BaseException] = []
+
+        def blocking_unscoped_runner(
+            argv: Sequence[str],
+            **_kwargs: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            command_entered.set()
+            if not release_command.wait(5.0):
+                raise EvidenceFailed(
+                    "cross-thread subprocess fixture timed out"
+                )
+            return subprocess.CompletedProcess(
+                args=list(argv),
+                returncode=0,
+                stdout="held-command-finished\n",
+                stderr="",
+            )
+
+        def run_held_command() -> None:
+            try:
+                run_command(
+                    (sys.executable, "-c", "print('fixture')"),
+                    record_global_receipt=False,
+                )
+            except BaseException as error:
+                command_thread_errors.append(error)
+
+        def enter_replay_once() -> None:
+            with v2_offline_replay_scope():
+                pass
+
+        command_thread = threading.Thread(
+            target=run_held_command,
+            name="v2-active-command-guard-fixture",
+            daemon=True,
+        )
+        try:
+            globals()["_run_command_unscoped"] = blocking_unscoped_runner
+            command_thread.start()
+            if not command_entered.wait(5.0):
+                raise EvidenceFailed(
+                    "cross-thread subprocess fixture did not enter"
+                )
+            replay_while_command_error = expect_error(
+                EvidenceFailed,
+                enter_replay_once,
+                contains="cannot overlap an active subprocess",
+            )
+        finally:
+            release_command.set()
+            command_thread.join(5.0)
+            globals()["_run_command_unscoped"] = original_unscoped_runner
+        checks.check(
+            "offline-replay-refuses-while-subprocess-active-cross-thread",
+            replay_while_command_error.terminal == "EvidenceFailed"
+            and not command_thread.is_alive()
+            and command_thread_errors == []
+            and _v2_offline_replay_depth == 0
+            and _v2_active_subprocesses == 0,
+            expected={
+                "terminal": "EvidenceFailed",
+                "thread_retired": True,
+                "thread_errors": [],
+                "scope_depth": 0,
+                "active_subprocesses": 0,
+            },
+            observed={
+                "terminal": replay_while_command_error.terminal,
+                "thread_retired": not command_thread.is_alive(),
+                "thread_errors": [
+                    type(error).__name__ for error in command_thread_errors
+                ],
+                "scope_depth": _v2_offline_replay_depth,
+                "active_subprocesses": _v2_active_subprocesses,
+            },
+        )
+
+        replay_entered = threading.Event()
+        release_replay = threading.Event()
+        replay_thread_errors: list[BaseException] = []
+        forbidden_launcher_calls = 0
+
+        def hold_replay_scope() -> None:
+            try:
+                with v2_offline_replay_scope():
+                    replay_entered.set()
+                    if not release_replay.wait(5.0):
+                        raise EvidenceFailed(
+                            "cross-thread replay fixture timed out"
+                        )
+            except BaseException as error:
+                replay_thread_errors.append(error)
+
+        def counting_forbidden_launcher(
+            argv: Sequence[str],
+            **_kwargs: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal forbidden_launcher_calls
+            forbidden_launcher_calls += 1
+            return subprocess.CompletedProcess(
+                args=list(argv),
+                returncode=0,
+                stdout="must-not-launch\n",
+                stderr="",
+            )
+
+        replay_thread = threading.Thread(
+            target=hold_replay_scope,
+            name="v2-active-replay-guard-fixture",
+            daemon=True,
+        )
+        try:
+            globals()["_run_command_unscoped"] = counting_forbidden_launcher
+            replay_thread.start()
+            if not replay_entered.wait(5.0):
+                raise EvidenceFailed(
+                    "cross-thread replay fixture did not enter"
+                )
+            command_while_replay_error = expect_error(
+                EvidenceFailed,
+                lambda: run_command(
+                    (sys.executable, "-c", "print('must-not-launch')"),
+                    record_global_receipt=False,
+                ),
+                contains="forbids run_command-routed subprocesses",
+            )
+        finally:
+            release_replay.set()
+            replay_thread.join(5.0)
+            globals()["_run_command_unscoped"] = original_unscoped_runner
+        checks.check(
+            "subprocess-refuses-before-launch-while-replay-active-cross-thread",
+            command_while_replay_error.terminal == "EvidenceFailed"
+            and forbidden_launcher_calls == 0
+            and not replay_thread.is_alive()
+            and replay_thread_errors == []
+            and _v2_offline_replay_depth == 0
+            and _v2_active_subprocesses == 0,
+            expected={
+                "terminal": "EvidenceFailed",
+                "launcher_calls": 0,
+                "thread_retired": True,
+                "thread_errors": [],
+                "scope_depth": 0,
+                "active_subprocesses": 0,
+            },
+            observed={
+                "terminal": command_while_replay_error.terminal,
+                "launcher_calls": forbidden_launcher_calls,
+                "thread_retired": not replay_thread.is_alive(),
+                "thread_errors": [
+                    type(error).__name__ for error in replay_thread_errors
+                ],
+                "scope_depth": _v2_offline_replay_depth,
+                "active_subprocesses": _v2_active_subprocesses,
+            },
         )
         post_guard = run_command(
             (sys.executable, "-c", "print('guard-restored')"),

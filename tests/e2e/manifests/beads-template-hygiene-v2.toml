@@ -440,7 +440,7 @@ corrective_materialization = "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
 raw_enum_product_coverage = "ALL_DECLARED_TYPES_X_ALL_STATUSES_X_P0_P4"
 missing_collections_normalize_empty = true
 malformed_falsey_collections = "REFUSE"
-relation_row_validation = "EXACT_INTERNAL_NEIGHBOR_STATUS_PRIORITY_RECIPROCAL_PARENT_BOUND_EXTERNAL_DEPENDENCY_NO_RECIPROCAL_SELF_DUPLICATE_NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
+relation_row_validation = "EXACT_INTERNAL_NEIGHBOR_TITLE_STATUS_PRIORITY_RECIPROCAL_PARENT_BOUND_EXTERNAL_DEPENDENCY_NON_PARENT_AND_DEPENDENT_PARENT_ONLY_NO_RECIPROCAL_SELF_DUPLICATE_NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
 audit_capture_uses_bounded_runner = true
 source_closure_states = ["NOT_REQUIRED_BY_V1_CLASSIFICATION", "REVIEW_REQUIRED", "ROOT_BOUND_REVIEWED_COMPLETE", "ROOT_BOUND_REVIEW_BLOCKED", "ROOT_BOUND_NOT_APPLICABLE"]
 source_closure_transition = "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_DETERMINES_CLOSED_STATE"
@@ -459,8 +459,11 @@ br_version_required_fields = ["branch", "build", "commit", "features", "rust_ver
 br_capabilities_required_fields = ["commands", "contract_version", "env_vars", "exit_codes", "features", "global_flags", "output_formats", "recommended_entrypoints", "safety", "tool", "version"]
 source_capture_contract_required_fields = ["audit_bracket", "coherent", "count", "direct_tracker_file_access", "network_access", "tracker_cli"]
 source_audit_bracket_required_fields = ["audit_capture_ordinals", "audit_capture_root", "no_claim", "position", "semantic_root", "source_after_ordinal", "source_after_root", "source_before_ordinal", "source_before_root", "state"]
-source_all_issue_required_fields = ["id", "title", "type", "status", "priority", "assignee", "owner", "parent", "labels", "description", "acceptance_criteria", "design", "notes", "estimated_minutes", "ephemeral", "updated_at", "dependencies", "dependents", "created_at", "created_by", "closed_at", "close_reason", "field_roots", "source_repo", "source_repo_path", "no_claim"]
-source_relation_required_fields = ["id", "type", "status", "priority"]
+source_all_issue_required_fields = ["id", "title", "type", "status", "priority", "assignee", "owner", "parent", "labels", "description", "acceptance_criteria", "design", "notes", "estimated_minutes", "ephemeral", "pinned", "is_template", "due_at", "defer_until", "updated_at", "dependencies", "dependents", "created_at", "created_by", "closed_at", "close_reason", "closed_by_session", "external_ref", "source_system", "agent_context", "deleted_at", "deleted_by", "delete_reason", "original_type", "compaction_level", "compacted_at", "compacted_at_commit", "original_size", "sender", "comments", "events", "rollup", "field_roots", "source_repo", "source_repo_path", "released_fields_present", "released_field_value_roots", "source_issue_projection_root", "no_claim"]
+source_relation_required_fields = ["id", "title", "type", "status", "priority"]
+source_comment_required_fields = ["id", "issue_id", "author", "text", "created_at"]
+source_rollup_required_fields = ["status", "descendants"]
+raw_br_show_allowed_fields = ["id", "title", "description", "design", "acceptance_criteria", "notes", "status", "priority", "issue_type", "type", "assignee", "owner", "estimated_minutes", "created_at", "created_by", "updated_at", "closed_at", "close_reason", "closed_by_session", "due_at", "defer_until", "external_ref", "source_system", "source_repo", "source_repo_path", "agent_context", "deleted_at", "deleted_by", "delete_reason", "original_type", "compaction_level", "compacted_at", "compacted_at_commit", "original_size", "sender", "ephemeral", "pinned", "is_template", "labels", "dependencies", "dependents", "comments", "events", "parent", "rollup"]
 source_command_receipt_required_fields = ["capture_sequence", "capture_ordinal", "projection_kind", "normalized_projection_root", "argv", "exit_code", "category", "stdout", "stderr", "cleanup_error_count", "cleanup_error_kinds", "redaction_verdict"]
 source_stream_receipt_required_fields = ["bytes", "root", "body_retained"]
 audit_capture_required_fields = ["capture_count", "worker_bound", "issue_ids", "documents", "command_receipts", "raw_stream_bodies_retained", "no_claim", "semantic_root"]
@@ -729,6 +732,7 @@ required_fields = [
   "audit_stream_root",
   "ownership",
   "comments",
+  "tracker_comments",
   "notes",
   "notes_root",
   "parent",
