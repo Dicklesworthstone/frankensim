@@ -414,6 +414,7 @@ fn spine_sources(root: &Path) -> SpineMetricsSource {
         beads_actionable: snapshot.map(|snapshot| snapshot.actionable),
         spine_on_critical_path: spine_on_path,
         spine_tracked,
+        e2e_stages_green: snapshot.and_then(|snapshot| snapshot.e2e_stages_green),
     }
 }
 
@@ -628,8 +629,8 @@ mod tests {
         // The validated snapshot feeds measured beads rows.
         assert_eq!(cell("beads-blocked-ratio"), "ratio");
         assert_eq!(cell("beads-actionable"), "count");
-        // The e2e lane has no retained receipt: NO-DATA, never a zero.
-        assert_eq!(cell("spine-e2e-lane-green"), "no-data");
+        // The e2e lane's retained receipt feeds a measured count (iakds).
+        assert_eq!(cell("spine-e2e-lane-green"), "count");
         // The tropical critical path landed (kx95s): a measured ratio whose
         // numerator is a REAL ZERO (no spine bead is on the path today).
         assert_eq!(cell("spine-critical-path-positions"), "ratio");

@@ -1,14 +1,16 @@
 {
-  "schema": "frankensim-spine-metrics-v1",
+  "schema": "frankensim-spine-metrics-v2",
   "bead": "frankensim-o5et9",
   "beads": {
-    "issues_fnv1a64": "05b0e485482e332b",
-    "open": 1744,
-    "blocked": 1456,
-    "actionable": 288
+    "issues_fnv1a64": "37bb33f474187d83",
+    "open": 2012,
+    "blocked": 1657,
+    "actionable": 355
   },
   "e2e": {
-    "status": "no-retained-receipt"
+    "status": "measured",
+    "stages_green": 3,
+    "receipt_fnv1a64": "eb31f19f9050236d"
   },
-  "no_claim": "counts a deliberately regenerated tracker snapshot; the live tracker moves on every br op, so this trails it by design. e2e is no-retained-receipt: the lane runs green out-of-band (frankensim-ustax) but retains no tracked checked receipt (frankensim-iakds owns one)"
+  "no_claim": "counts a deliberately regenerated tracker snapshot; the live tracker moves on every br op, so this trails it by design. e2e measured means the retained spine-e2e-summary.json receipt attests the executing prefix; no-retained-receipt means the lane runs green out-of-band but no tracked receipt exists yet"
 }

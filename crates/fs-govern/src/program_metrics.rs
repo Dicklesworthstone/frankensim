@@ -1467,6 +1467,8 @@ pub struct SpineMetricsSource {
     pub spine_on_critical_path: Option<usize>,
     /// Reality-check spine beads tracked by the tropical-path artifact.
     pub spine_tracked: Option<usize>,
+    /// Solve stages proven green by the retained e2e receipt.
+    pub e2e_stages_green: Option<usize>,
 }
 
 /// Registry values the FrankenSim projection reads.
@@ -1634,6 +1636,8 @@ const SPINE_RATCHET_SOURCE: &str =
 const SPINE_METRICS_SOURCE: &str = "spine-metrics.json (xtask spine-metrics beads snapshot)";
 const TROPICAL_PATH_SOURCE: &str =
     "tropical-critical-path.json (fs-tropical over the bead graph, xtask tropical-path)";
+const SPINE_E2E_SOURCE: &str =
+    "spine-e2e-summary.json (solve_stage_producers_e2e.sh full-profile receipt)";
 const IMPORT_SOURCE: &str =
     "fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json}";
 
@@ -2012,17 +2016,23 @@ pub fn frankensim_rows(sources: ProgramSources) -> Result<Vec<MetricRow>, Dashbo
             "Staged-producer e2e lane stages proven green by a retained checked receipt",
             MetricFamily::Governance,
             MetricDirection::HigherIsBetter,
-            no_data(
-                "the staged-producer e2e lane runs green out-of-band (34/34 full profile, \
-                 2026-07-29, RCH) but retains no tracked checked receipt for this dashboard \
-                 to read; 'lane not built', 'lane run with zero passing stages', and 'lane \
-                 green with no retained receipt' are three different facts and only the \
-                 last is true",
-                Some("frankensim-iakds"),
-            ),
-            &[],
-            "an out-of-band green run is not a measurement this artifact can cite: the \
-             dashboard reads checked inputs, so the honest row today is the gap itself",
+            match sources.spine.e2e_stages_green {
+                Some(green) => MetricCell::Measured(MetricObservation::count(
+                    u64::try_from(green).unwrap_or(u64::MAX),
+                )),
+                None => no_data(
+                    "the staged-producer e2e lane runs green out-of-band (34/34 full profile, \
+                     2026-07-29, RCH) but retains no tracked checked receipt for this dashboard \
+                     to read; 'lane not built', 'lane run with zero passing stages', and 'lane \
+                     green with no retained receipt' are three different facts and only the \
+                     last is true",
+                    Some("frankensim-iakds"),
+                ),
+            },
+            &[SPINE_E2E_SOURCE],
+            "counts stages the retained receipt proves green on one host at one HEAD; it does \
+             not prove the stages' answers correct, and a stale receipt is refused by the \
+             spine-metrics gate when the product's stage boundary moves",
         )?,
         MetricRow::try_new(
             "beads-blocked-ratio",

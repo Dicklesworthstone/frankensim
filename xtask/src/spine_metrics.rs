@@ -33,8 +33,11 @@ use crate::{PolicyNote, Violation, fnv1a64};
 pub(crate) const CHECK: &str = "spine-metrics";
 const SNAPSHOT_PATH: &str = "spine-metrics.json";
 const ISSUES_PATH: &str = ".beads/issues.jsonl";
-const SCHEMA: &str = "frankensim-spine-metrics-v1";
+const E2E_RECEIPT_PATH: &str = "spine-e2e-summary.json";
+const E2E_RECEIPT_SCHEMA: &str = "frankensim-spine-e2e-receipt-v1";
+const SCHEMA: &str = "frankensim-spine-metrics-v2";
 const E2E_STATUS_NO_RECEIPT: &str = "no-retained-receipt";
+const E2E_STATUS_MEASURED: &str = "measured";
 /// issues.jsonl is tens of MB today; the bound refuses a runaway file rather
 /// than reading unbounded tracker state into a policy gate.
 const MAX_ISSUES_BYTES: u64 = 128 * 1024 * 1024;
@@ -51,6 +54,10 @@ pub(crate) struct Snapshot {
     pub blocked: usize,
     /// Open issues with no non-closed blocker.
     pub actionable: usize,
+    /// Stages proven green by the retained e2e receipt, when one exists.
+    pub e2e_stages_green: Option<usize>,
+    /// FNV-1a64 of the retained e2e receipt bytes, when one exists.
+    pub e2e_receipt_fnv: Option<u64>,
 }
 
 fn violation(detail: impl Into<String>) -> Violation {
@@ -164,19 +171,84 @@ fn count_issues(text: &str) -> Result<Snapshot, String> {
         open,
         blocked,
         actionable,
+        e2e_stages_green: None,
+        e2e_receipt_fnv: None,
     })
+}
+
+/// The retained e2e receipt, validated structurally. The stage/gap
+/// cross-check against the live product source happens in [`check`], where a
+/// mismatch is a violation; absence here is NO-DATA, never an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct E2eReceipt {
+    pub stages_green: usize,
+    pub failures: usize,
+    pub first_gap: String,
+    pub first_gap_owner: String,
+    pub fnv: u64,
+}
+
+fn load_e2e_receipt(root: &Path) -> Result<Option<E2eReceipt>, String> {
+    let text = match std::fs::read_to_string(root.join(E2E_RECEIPT_PATH)) {
+        Ok(text) => text,
+        Err(_) => return Ok(None),
+    };
+    let parsed = JsonParser::with_string_limit(&text, MAX_TRACKER_STRING_BYTES)
+        .finish()
+        .map_err(|error| format!("{E2E_RECEIPT_PATH} is not valid JSON: {error}"))?;
+    let JsonValue::Object(map) = &parsed else {
+        return Err(format!("{E2E_RECEIPT_PATH} is not a JSON object"));
+    };
+    match map.get("schema") {
+        Some(JsonValue::String(schema)) if schema == E2E_RECEIPT_SCHEMA => {}
+        Some(JsonValue::String(schema)) => {
+            return Err(format!(
+                "{E2E_RECEIPT_PATH} schema is `{schema}`, expected `{E2E_RECEIPT_SCHEMA}`"
+            ));
+        }
+        _ => return Err(format!("{E2E_RECEIPT_PATH} has no schema string")),
+    }
+    let summary = match map.get("summary") {
+        Some(JsonValue::Object(summary)) => summary,
+        _ => return Err(format!("{E2E_RECEIPT_PATH} has no summary object")),
+    };
+    let number = |key: &str| match summary.get(key) {
+        Some(JsonValue::Number(raw)) => raw
+            .parse::<usize>()
+            .map_err(|error| format!("receipt `{key}` is not a count: {error}")),
+        _ => Err(format!("receipt has no count `{key}`")),
+    };
+    let text_field = |key: &str| match summary.get(key) {
+        Some(JsonValue::String(value)) => Ok(value.clone()),
+        _ => Err(format!("receipt has no string `{key}`")),
+    };
+    Ok(Some(E2eReceipt {
+        stages_green: number("stages_executing")?,
+        failures: number("failures")?,
+        first_gap: text_field("first_gap")?,
+        first_gap_owner: text_field("first_gap_owner")?,
+        fnv: fnv1a64(text.as_bytes()),
+    }))
 }
 
 /// Render the canonical snapshot bytes.
 fn render(snapshot: &Snapshot) -> String {
+    let (e2e_status, e2e_detail) = match (snapshot.e2e_stages_green, snapshot.e2e_receipt_fnv) {
+        (Some(green), Some(fnv)) => (
+            E2E_STATUS_MEASURED,
+            format!(",\n    \"stages_green\": {green},\n    \"receipt_fnv1a64\": \"{fnv:016x}\""),
+        ),
+        _ => (E2E_STATUS_NO_RECEIPT, String::new()),
+    };
     format!(
         "{{\n  \"schema\": \"{SCHEMA}\",\n  \"bead\": \"frankensim-o5et9\",\n  \"beads\": {{\n    \
          \"issues_fnv1a64\": \"{:016x}\",\n    \"open\": {},\n    \"blocked\": {},\n    \
-         \"actionable\": {}\n  }},\n  \"e2e\": {{\n    \"status\": \"{E2E_STATUS_NO_RECEIPT}\"\n  \
+         \"actionable\": {}\n  }},\n  \"e2e\": {{\n    \"status\": \"{e2e_status}\"{e2e_detail}\n  \
          }},\n  \"no_claim\": \"counts a deliberately regenerated tracker snapshot; the live \
-         tracker moves on every br op, so this trails it by design. e2e is no-retained-receipt: \
-         the lane runs green out-of-band (frankensim-ustax) but retains no tracked checked \
-         receipt (frankensim-iakds owns one)\"\n}}\n",
+         tracker moves on every br op, so this trails it by design. e2e measured means the \
+         retained spine-e2e-summary.json receipt attests the executing prefix; \
+         no-retained-receipt means the lane runs green out-of-band but no tracked receipt \
+         exists yet\"\n}}\n",
         snapshot.issues_fnv, snapshot.open, snapshot.blocked, snapshot.actionable
     )
 }
@@ -231,25 +303,40 @@ fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
              ({actionable}) != open ({open})"
         ));
     }
-    match map.get("e2e") {
+    let (e2e_stages_green, e2e_receipt_fnv) = match map.get("e2e") {
         Some(JsonValue::Object(e2e)) => match e2e.get("status") {
-            Some(JsonValue::String(status)) if status == E2E_STATUS_NO_RECEIPT => {}
+            Some(JsonValue::String(status)) if status == E2E_STATUS_NO_RECEIPT => (None, None),
+            Some(JsonValue::String(status)) if status == E2E_STATUS_MEASURED => {
+                let green = number_field(e2e, "stages_green")?;
+                let fnv = match e2e.get("receipt_fnv1a64") {
+                    Some(JsonValue::String(hex)) => {
+                        u64::from_str_radix(hex, 16).map_err(|error| {
+                            format!("snapshot `receipt_fnv1a64` is not hex: {error}")
+                        })?
+                    }
+                    _ => {
+                        return Err("measured snapshot has no `receipt_fnv1a64` string".to_string());
+                    }
+                };
+                (Some(green), Some(fnv))
+            }
             Some(JsonValue::String(status)) => {
                 return Err(format!(
-                    "snapshot e2e status is `{status}`; v1 admits only \
-                     `{E2E_STATUS_NO_RECEIPT}` — a retained receipt lands through bead \
-                     frankensim-iakds with a deliberate schema bump"
+                    "snapshot e2e status is `{status}`; v2 admits `{E2E_STATUS_NO_RECEIPT}` \
+                     and `{E2E_STATUS_MEASURED}`"
                 ));
             }
             _ => return Err("snapshot `e2e` has no status string".to_string()),
         },
         _ => return Err(format!("{SNAPSHOT_PATH} has no `e2e` object")),
-    }
+    };
     Ok(Snapshot {
         issues_fnv,
         open,
         blocked,
         actionable,
+        e2e_stages_green,
+        e2e_receipt_fnv,
     })
 }
 
@@ -271,10 +358,15 @@ pub(crate) fn load(root: &Path) -> Option<Snapshot> {
     parse_snapshot(&text).ok()
 }
 
-/// Regenerate the snapshot from the live tracker.
+/// Regenerate the snapshot from the live tracker, picking up the retained
+/// e2e receipt when one exists.
 pub(crate) fn generate(root: &Path) -> Result<(), String> {
     let issues = read_bounded(root, ISSUES_PATH, MAX_ISSUES_BYTES)?;
-    let snapshot = count_issues(&issues)?;
+    let mut snapshot = count_issues(&issues)?;
+    if let Some(receipt) = load_e2e_receipt(root)? {
+        snapshot.e2e_stages_green = Some(receipt.stages_green);
+        snapshot.e2e_receipt_fnv = Some(receipt.fnv);
+    }
     std::fs::write(root.join(SNAPSHOT_PATH), render(&snapshot))
         .map_err(|error| format!("cannot write {SNAPSHOT_PATH}: {error}"))
 }
@@ -298,7 +390,87 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
         Ok(snapshot) => snapshot,
         Err(error) => return (vec![violation(error)], Vec::new()),
     };
+    let mut violations = Vec::new();
     let mut notes = Vec::new();
+    // The retained e2e receipt must prove the same stage boundary the live
+    // product source admits: a receipt claiming a stage the product gaps
+    // (or missing one the product executes) is a stale proof, not evidence.
+    if let (Some(green), Some(fnv)) = (snapshot.e2e_stages_green, snapshot.e2e_receipt_fnv) {
+        match load_e2e_receipt(root) {
+            Ok(Some(receipt)) => {
+                if receipt.fnv != fnv {
+                    violations.push(violation(format!(
+                        "the e2e receipt moved since the snapshot (recorded {fnv:016x}, live \
+                         {:016x}); regenerate the snapshot deliberately",
+                        receipt.fnv
+                    )));
+                }
+                if receipt.failures != 0 {
+                    violations.push(violation(format!(
+                        "the retained e2e receipt records {} failing check(s); a failing \
+                         receipt is not a green prefix",
+                        receipt.failures
+                    )));
+                }
+                if receipt.stages_green != green {
+                    violations.push(violation(format!(
+                        "snapshot records {green} e2e stages green but the receipt says {}; \
+                         reconcile deliberately",
+                        receipt.stages_green
+                    )));
+                }
+                match std::fs::read_to_string(root.join(crate::spine_ratchet::SOLVE_SOURCE))
+                    .map_err(|error| error.to_string())
+                    .and_then(|source| crate::spine_ratchet::derive_stages(&source))
+                {
+                    Ok(stages) => {
+                        let live_prefix = crate::spine_ratchet::executing_prefix(&stages);
+                        if receipt.stages_green != live_prefix.len() {
+                            violations.push(violation(format!(
+                                "the retained e2e receipt proves {} stages green but the \
+                                 product now executes {}: the proof is stale, not the \
+                                 product's current boundary",
+                                receipt.stages_green,
+                                live_prefix.len()
+                            )));
+                        }
+                        if let Some(first_gap) =
+                            stages.iter().find(|stage| stage.gap_owner.is_some())
+                        {
+                            if receipt.first_gap != first_gap.name {
+                                violations.push(violation(format!(
+                                    "the retained e2e receipt names first gap `{}` but the \
+                                     product gaps `{}`",
+                                    receipt.first_gap, first_gap.name
+                                )));
+                            }
+                            let owner = first_gap.gap_owner.as_deref().unwrap_or("");
+                            if receipt.first_gap_owner != owner {
+                                violations.push(violation(format!(
+                                    "the retained e2e receipt names gap owner `{}` but the \
+                                     product names `{owner}`",
+                                    receipt.first_gap_owner
+                                )));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        violations.push(violation(format!(
+                            "cannot cross-check the e2e receipt against the live stage \
+                             table: {error}"
+                        )));
+                    }
+                }
+            }
+            Ok(None) => {
+                violations.push(violation(
+                    "the snapshot records a measured e2e state but spine-e2e-summary.json is \
+                     absent; a measured claim without its receipt is not evidence",
+                ));
+            }
+            Err(error) => violations.push(violation(error)),
+        }
+    }
     match read_bounded(root, ISSUES_PATH, MAX_ISSUES_BYTES) {
         Ok(issues) => {
             let live_fnv = fnv1a64(issues.as_bytes());
@@ -338,7 +510,7 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
             );
         }
     }
-    (Vec::new(), notes)
+    (violations, notes)
 }
 
 #[cfg(test)]
@@ -409,7 +581,7 @@ mod tests {
         assert!(parse_snapshot("").is_err());
         assert!(parse_snapshot("{\"schema\":\"something-else\"}").is_err());
         let swapped = "{
-  \"schema\": \"frankensim-spine-metrics-v1\",
+  \"schema\": \"frankensim-spine-metrics-v2\",
   \"beads\": { \"issues_fnv1a64\": \"0000000000000000\", \"open\": 2, \"blocked\": 3, \"actionable\": 0 },
   \"e2e\": { \"status\": \"no-retained-receipt\" }
 }\n";
@@ -421,12 +593,20 @@ mod tests {
         let error = parse_snapshot(&bad_sum).expect_err("sum mismatch must refuse");
         assert!(error.contains("inconsistent"), "{error}");
         let green = "{
-  \"schema\": \"frankensim-spine-metrics-v1\",
+  \"schema\": \"frankensim-spine-metrics-v2\",
   \"beads\": { \"issues_fnv1a64\": \"0000000000000000\", \"open\": 2, \"blocked\": 1, \"actionable\": 1 },
   \"e2e\": { \"status\": \"green\" }
 }\n";
         let error = parse_snapshot(green).expect_err("unknown e2e status must refuse");
-        assert!(error.contains("frankensim-iakds"), "{error}");
+        assert!(error.contains("v2 admits"), "{error}");
+        // A measured e2e state without its fnv is structurally incomplete.
+        let measured_no_fnv = "{
+  \"schema\": \"frankensim-spine-metrics-v2\",
+  \"beads\": { \"issues_fnv1a64\": \"0000000000000000\", \"open\": 2, \"blocked\": 1, \"actionable\": 1 },
+  \"e2e\": { \"status\": \"measured\", \"stages_green\": 3 }
+}\n";
+        let error = parse_snapshot(measured_no_fnv).expect_err("measured without fnv must refuse");
+        assert!(error.contains("receipt_fnv1a64"), "{error}");
     }
 
     #[test]

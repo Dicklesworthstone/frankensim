@@ -1,0 +1,26 @@
+{
+  "schema": "frankensim-spine-e2e-receipt-v1",
+  "bead": "frankensim-iakds",
+  "run": {
+    "script": "scripts/ci/solve_stage_producers_e2e.sh",
+    "profile": "full",
+    "through": "material-resolve",
+    "executed_at": "2026-07-30T22:19:08Z",
+    "host_fingerprint": "Linux 6.17.0-8-generic x86_64, 16 cpus",
+    "binary_md5_16": "33db98d29a607279",
+    "head_sha": "3aae2feb80166d5138107ab00d484ce385894f80",
+    "checkout_note": "run executed on a mirrored checkout of main (no .git on the worker); the binary was built from tree content matching the recorded HEAD modulo an unrelated xtask-only delta"
+  },
+  "summary": {
+    "schema": "frankensim.ci.solve-e2e-summary.v1",
+    "profile": "full",
+    "through": "material-resolve",
+    "checks": 34,
+    "failures": 0,
+    "stages_executing": 3,
+    "stages_total": 6,
+    "first_gap": "flow-network",
+    "first_gap_owner": "frankensim-frn2i",
+    "no_claim": "proves the executing producer prefix and its refusal boundary only; no physics stage runs, so this is NOT an end-to-end simulation result"
+  }
+}
