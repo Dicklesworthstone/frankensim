@@ -179,12 +179,19 @@ v1_manifest_content_root = "sha256-v1:f5f76e0518007e7da971992c4782b35513fd185608
 v1_harness_content_root = "sha256-v1:5ba72ab813f965d1599155239a8789e8833ca40998801f76544ec6aa55013a77"
 v1_manifest_adopted_git_blob = "c8929908e0670f518564304803e493f612fb6ef6"
 v1_harness_adopted_git_blob = "91cc9326e090fcbfa6ec9a4a2cae66692da6a700"
+v1_manifest_adopted_git_commit = "103655ddabc262921c72bfe946dba66351f377fa"
+v1_manifest_blob_retention = "REACHABLE_COMMIT_PATH_IDENTITY"
+v1_harness_blob_retention = "UNREACHABLE_LOCAL_OBJECT_NODATA"
 adoption_head = "ffa8867fd2a5d84ac4e87dee370d162bc1f9f4fc"
+adoption_head_binding = "CAMPAIGN_METADATA_ONLY_NOT_V1_PATH_IDENTITY"
 adoption_source_root = "sha256-v1:66b7a2c6bad25e24475cd3ec8d5bbc0295ba93997573071deabfb3b75f066a95"
 adoption_inventory_root = "sha256-v1:3123b628f11a3dabdf9d45b71ef13400c719065d12080e952adf0a7524bf6a5b"
 adoption_issue_count = 1812
 adoption_warning_count = 2212
 adoption_artifact_dir = "target/beads-template-hygiene/adoption-pre-961yr-1-1-20260730T2018Z"
+adoption_artifact_retention = "IGNORED_LOCAL_ONLY_NODATA"
+portable_adoption_evidence = false
+compatibility_proof_authority = "CURRENT_V1_MANIFEST_AND_RUNTIME_REGRESSION_ONLY"
 v1_bytes_must_match_adopted_content_root = true
 v1_modes_load_v2_manifest = false
 v1_replay_loads_v2_manifest = false
@@ -239,6 +246,21 @@ missing_collections_normalize_empty = true
 malformed_falsey_collections = "REFUSE"
 relation_row_validation = "NONEMPTY_ID_TYPE_VALID_OPTIONAL_STATUS_PRIORITY"
 audit_capture_uses_bounded_runner = true
+source_closure_states = ["NOT_REQUIRED_BY_V1_CLASSIFICATION", "REVIEW_REQUIRED", "ROOT_BOUND_REVIEWED_COMPLETE", "ROOT_BOUND_REVIEW_BLOCKED", "ROOT_BOUND_NOT_APPLICABLE"]
+source_closure_transition = "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_DETERMINES_CLOSED_STATE"
+source_document_required_fields = ["schema", "manifest", "v1_baseline", "contracts", "campaign_epoch_root", "captured", "capture_roots", "tracker_authority", "direct_tracker_file_access", "network_access", "no_claim", "semantic_root"]
+source_manifest_required_fields = ["path", "semantic_root", "content_identity", "case_count", "assertion_count", "criterion_count"]
+source_capture_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "campaign", "filters", "review_receipts", "prior_campaign", "audit_capture"]
+source_capture_root_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "review_receipts", "prior_campaign", "audit_capture"]
+source_contract_required_fields = ["source", "row", "authority", "packing", "history", "artifact", "logging", "replay", "caps"]
+source_observation_required_fields = ["schema", "capture_contract", "br_version", "br_capabilities", "tracker_status", "sync_status", "export_witness", "case_manifest_root", "case_manifest_content_identity", "coherent_capture_root", "source_files", "rule_contract_root", "live_issue_count", "live_issue_projection_root", "lint_issue_ids_root", "independent_finding_issue_ids_root", "nonclosed_issue_ids_root", "selected_review_issue_ids_root", "selected_review_issue_count", "nonclosed_issue_count", "closed_finding_issue_count", "status_cut", "command_receipts", "no_claim", "semantic_root"]
+source_all_issue_required_fields = ["id", "title", "type", "status", "priority", "assignee", "owner", "parent", "labels", "description", "acceptance_criteria", "design", "notes", "estimated_minutes", "updated_at", "dependencies", "dependents", "created_at", "created_by", "closed_at", "close_reason", "field_roots", "source_repo", "source_repo_path", "no_claim"]
+source_relation_required_fields = ["id", "type", "status", "priority"]
+source_command_receipt_required_fields = ["capture_sequence", "argv", "exit_code", "category", "stdout", "stderr", "cleanup_error_count", "cleanup_error_kinds", "redaction_verdict"]
+source_stream_receipt_required_fields = ["bytes", "root", "body_retained"]
+audit_capture_required_fields = ["capture_count", "worker_bound", "issue_ids", "documents", "command_receipts", "raw_stream_bodies_retained", "no_claim", "semantic_root"]
+audit_capture_not_requested_required_fields = ["state", "capture_count", "issue_ids", "documents", "command_receipts", "raw_stream_bodies_retained", "no_claim", "semantic_root"]
+audit_command_receipt_required_fields = ["capture_ordinal", "issue_id", "argv", "exit_code", "result_category", "stdout_byte_length", "stdout_root", "stderr_byte_length", "stderr_root", "raw_stream_bodies_retained"]
 
 [row_contract]
 required_fields = [
@@ -315,6 +337,7 @@ planned_child_required_fields = [
   "target_implementation_estimates",
   "target_implementation_estimated_minutes",
   "target_implementation_estimate_states",
+  "responsibility_assignments",
   "target_ids",
   "target_roots",
   "disposition_workflow",
@@ -342,6 +365,8 @@ missing_payload_field = "REFUSE_PUBLICATION"
 target_fields_and_relations_remain_unchanged = true
 estimate_units = "nullable integer minutes with explicit DECLARED or NODATA state"
 review_estimate_does_not_replace_target_estimate = true
+responsibility_assignment_required_fields = ["target_id", "implementation_owner", "evidence_owner", "terminal_consumer"]
+responsibility_assignments_are_target_indexed = true
 
 [authority_contract]
 current_br_version = "0.2.19"
@@ -362,6 +387,9 @@ manual_route_grants_conditional_write = false
 manual_route_claims_no_clobber = false
 manual_route_claims_exactly_once = false
 undeclared_responsibility_assignments_remain_unresolved = true
+authority_identity_fields = ["reviewer", "reviewer_kind", "coordination_assignee", "declared_domain_owner", "declared_acceptance_owner", "implementation_owner", "evidence_owner", "terminal_consumer", "manual_authorization_source", "external_authority_adapter", "conditional_capability_identity"]
+authority_identity_canonicalization = "EMPTY_OR_NFC_STRIPPED_NONBLANK_MAX_1024_UTF8_NO_CC_CF_CS_AND_RESERVED_PRESENCE_SENTINELS_REFUSED"
+manual_authorization_source_contract = "NONBLANK_IFF_TRUE_WITH_REVIEWER_AND_ACCEPTANCE_OWNER"
 deferred_route = "ANALYSIS_ONLY"
 deferred_authorization_override = "FORBIDDEN"
 deferred_requires_owner_reviewed_reactivation_and_fresh_replan = true
@@ -371,6 +399,12 @@ bare_issue_type_is_grouping_authority = false
 
 [packing_contract]
 hard_keys = ["priority", "status", "disposition", "issue_type", "missing_sections", "semantic_review_disposition", "semantic_review_receipt_state", "semantic_review_action", "readiness", "remediation_route"]
+retained_payload_measure = "SUM_SOURCE_FULL_ISSUE_CANONICAL_BYTES"
+generated_child_payload_measure = "PLANNED_CHILD_CANONICAL_BYTES_WITH_DISTINCT_CAP"
+generated_child_payload_exceeded = "EVIDENCE_FAILED_NO_PARTIAL_PLAN"
+review_plan_required_fields = ["schema", "state", "inventory_root", "authority_root", "campaign_epoch_root", "max_targets_per_child", "hard_max_targets_per_child", "review_minutes_cap", "retained_child_bytes_cap", "children", "semantic_adjudications", "retained_without_direct_child", "remediation_candidates", "packing_witnesses", "oversize_content", "counts", "work", "no_claim", "semantic_root"]
+review_plan_count_fields = ["targets", "scheduled_targets", "retained_without_direct_child", "semantic_adjudications", "remediation_candidates", "children", "oversize_targets", "readiness", "routes"]
+review_plan_work_fields = ["total_review_minutes", "total_bounded_child_review_minutes", "total_underlying_target_review_minutes", "total_completed_adjudication_minutes", "minimum_child_review_minutes", "maximum_child_review_minutes"]
 compatibility_receipt_fields = [
   "coordination",
   "declared_domain",
@@ -400,16 +434,23 @@ merge_requires_rationale_and_falsifier = true
 semantic_truncation = "FORBIDDEN"
 oversize_disposition = "OVERSIZE_REVIEW_REQUIRED"
 oversize_required_fields = [
+  "schema",
   "source_roots",
   "field_roots",
   "clause_roots",
+  "exceeded_caps",
   "bounded_incomplete_index",
   "canonical_br_show_argv",
   "retained_full_plan_path",
   "retained_full_plan_root",
+  "complete_plan",
   "owner_questions",
   "no_claim",
+  "semantic_root",
 ]
+oversize_exceeded_cap_required_fields = ["cap", "source_path", "observed", "limit", "violation_count", "violating_membership_root"]
+oversize_witness_required_fields = ["algorithm", "group_key_root", "ordered_load_rows_root", "target_id", "exceeded_caps", "reason", "full_artifact_root", "exact_optimality_claim", "semantic_root"]
+oversize_clause_diagnostic = "BOUNDED_MAX_COUNT_AND_MEMBERSHIP_ROOT"
 
 [history_contract]
 capture_command = "br audit log ID --json"
@@ -551,6 +592,7 @@ oversize_inventory_required_fields = [
   "target_roots",
   "field_roots",
   "clause_roots",
+  "exceeded_caps",
   "aggregate_cap_accounting",
 ]
 unlisted_file = "REFUSE"
@@ -581,6 +623,8 @@ reserved_prefix_membership = "EMPTY_TERMINAL_ONLY"
 terminal_assignment_state_machine = ["RESERVED_EMPTY", "ASSIGNMENT_STARTED", "DURABLY_COMMITTED", "VERIFIED_SEALED"]
 terminal_readback = "SAME_DESCRIPTOR_AND_PATH_IDENTITY"
 persistent_incomplete_prefix_retry = "BOUNDED_FRESH_ATTEMPT_AFTER_INCOMPLETE_PREFIX"
+publication_root_creation = "OPENAT_MKDIRAT_O_NOFOLLOW_FROM_REPOSITORY_DESCRIPTOR"
+publication_parent_durability = "FSYNC_EACH_PARENT_AFTER_CHILD_CREATION"
 
 [logging_contract]
 format = "JSONL"
@@ -628,6 +672,10 @@ subprocess_process_group = "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
 subprocess_failure_receipts = ["START_FAILED", "CAPTURE_FAILED", "TIMEOUT", "CANCELLED", "CANCELLED_AFTER_EXIT", "STDOUT_LIMIT", "STDERR_LIMIT", "NON_UTF8", "UNEXPECTED_EXIT"]
 subprocess_stream_cap_accounting = "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
 subprocess_argv_redaction = "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
+assertion_result_required_fields = ["schema", "case_id", "assertion_id", "executor_id", "parameters", "parameter_root", "ordered_checks", "ordered_check_roots", "check_count", "terminal", "no_claim", "semantic_root"]
+assertion_check_required_fields = ["check_id", "expected", "observed", "passed", "semantic_root"]
+self_test_log_line_cap = "EVERY_EMITTED_JSONL_DOCUMENT"
+split_form_sensitive_argv_redaction = "OPTION_NAME_RETAINED_VALUE_HASH_REDACTED"
 forbidden_content = [
   "raw stdout body",
   "raw stderr body",
@@ -672,6 +720,7 @@ max_warnings_per_issue = 16
 default_targets_per_child = 10
 hard_max_targets_per_child = 25
 max_retained_child_payload_bytes = 262144
+max_generated_child_payload_bytes = 524288
 max_description_bytes = 131072
 max_acceptance_bytes = 32768
 max_design_bytes = 16384
@@ -685,8 +734,10 @@ max_path_depth = 32
 max_path_component_bytes = 128
 max_command_arguments = 64
 max_command_argument_bytes = 4096
+max_authority_identity_bytes = 1024
 max_log_events = 262144
-max_log_line_bytes = 16384
+max_log_line_bytes = 65536
+max_assertion_checks = 256
 max_diagnostic_summary_bytes = 512
 max_artifact_bytes = 67108864
 max_synopsis_bytes = 8192
@@ -696,6 +747,9 @@ max_subprocess_stdout_bytes = 268435456
 max_subprocess_stderr_bytes = 268435456
 subprocess_timeout_seconds = 180
 max_persistent_attempts = 32
+max_bundle_files = 4105
+max_bundle_directories = 32
+max_bundle_enumerated_path_bytes = 2118144
 cap_exceeded_terminal = "EXPECTED_REFUSAL_OR_OVERSIZE_REVIEW_REQUIRED_AS_SPECIFIED"
 cap_exceeded_live_target_mutation = false
 
@@ -937,7 +991,7 @@ assertion_id = "v2.case.compat-v1-immutable"
 criterion_ids = ["AC14", "AC15", "AC23"]
 kinds = ["compatibility", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "adopted v1 byte, Git blob, semantic-root, 21-case, 148-assertion, artifact, replay, and no-v2-dependency invariants"
+subject = "current v1 byte, semantic-root, 21-case, 148-assertion, replay, and no-v2-dependency invariants plus explicit NODATA boundaries for nonportable historical harness and ignored adoption-artifact provenance"
 
 [[case]]
 ordinal = 13
