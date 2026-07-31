@@ -19319,56 +19319,83 @@ def v2_redact_contextual_text(value: str) -> str:
 
     text = authorization_header.sub(redact_authorization, text)
 
-    quoted_assignment = re.compile(
+    def redact_quoted_values(
+        source: str,
+        start_pattern: re.Pattern[str],
+        *,
+        sensitive_key: Callable[[str], bool],
+    ) -> str:
+        replacements: list[tuple[int, int, str]] = []
+        consumed_until = -1
+        for match in start_pattern.finditer(source):
+            if match.start() < consumed_until:
+                continue
+            if not sensitive_key(match.group("key")):
+                continue
+            value_start = match.end()
+            if (
+                value_start >= len(source)
+                or source[value_start] not in {'"', "'"}
+            ):
+                continue
+            quote = source[value_start]
+            cursor = value_start + 1
+            closing_quote: int | None = None
+            while cursor < len(source):
+                if source[cursor] == "\\":
+                    cursor = min(cursor + 2, len(source))
+                    continue
+                if source[cursor] == quote:
+                    closing_quote = cursor
+                    break
+                cursor += 1
+            value_end = (
+                closing_quote + 1
+                if closing_quote is not None
+                else len(source)
+            )
+            replacement = (
+                quote
+                + "<redacted>"
+                + (quote if closing_quote is not None else "")
+            )
+            replacements.append((value_start, value_end, replacement))
+            consumed_until = value_end
+        for start, end, replacement in reversed(replacements):
+            source = source[:start] + replacement + source[end:]
+        return source
+
+    assignment_start = re.compile(
         r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
         r"(?P<sep>\s*[:=]\s*)"
-        r"(?P<quote>[\"'])(?P<body>.*?)(?P=quote)"
-        ,
-        flags=re.DOTALL,
     )
-
-    def redact_quoted(match: re.Match[str]) -> str:
-        if not v2_is_sensitive_key(match.group("key")):
-            return match.group(0)
-        body = match.group("body")
-        replacement = body if body == "<redacted>" else "<redacted>"
-        return (
-            match.group("key")
-            + match.group("sep")
-            + match.group("quote")
-            + replacement
-            + match.group("quote")
-        )
-
-    text = quoted_assignment.sub(redact_quoted, text)
-    for quote in ('"', "'"):
-        unclosed_quote = re.compile(
-            r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
-            r"(?P<sep>\s*[:=]\s*)"
-            + re.escape(quote)
-            + r"(?P<body>[^" + re.escape(quote) + r"]*)\Z",
-            flags=re.DOTALL,
-        )
-
-        def redact_unclosed(
-            match: re.Match[str],
-            *,
-            quote_character: str = quote,
-        ) -> str:
-            if not v2_is_sensitive_key(match.group("key")):
-                return match.group(0)
-            return (
-                match.group("key")
-                + match.group("sep")
-                + quote_character
-                + "<redacted>"
-            )
-
-        text = unclosed_quote.sub(redact_unclosed, text)
+    text = redact_quoted_values(
+        text,
+        assignment_start,
+        sensitive_key=v2_is_sensitive_key,
+    )
+    split_option_start = re.compile(
+        r"(?<![A-Za-z0-9_-])"
+        r"(?P<key>--?[A-Za-z][A-Za-z0-9_-]{0,127})"
+        r"(?P<sep>\s+)"
+    )
+    text = redact_quoted_values(
+        text,
+        split_option_start,
+        sensitive_key=lambda key: v2_is_sensitive_key(key.lstrip("-")),
+    )
+    bearer_start = re.compile(
+        r"(?i)\b(?P<key>Bearer)(?P<sep>\s+)"
+    )
+    text = redact_quoted_values(
+        text,
+        bearer_start,
+        sensitive_key=lambda _key: True,
+    )
     unquoted_assignment = re.compile(
         r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
         r"(?P<sep>\s*[:=]\s*)"
-        r"(?P<body>[^\s,;]+)"
+        r"(?P<body>(?![\"'])[^\s,;]+)"
     )
 
     def redact_unquoted(match: re.Match[str]) -> str:
@@ -19382,7 +19409,7 @@ def v2_redact_contextual_text(value: str) -> str:
     split_option = re.compile(
         r"(?P<key>--?[A-Za-z][A-Za-z0-9_-]{0,127})"
         r"(?P<sep>\s+)"
-        r"(?P<body>\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+        r"(?P<body>(?![\"'])[^\s,;]+)"
     )
 
     def redact_split(match: re.Match[str]) -> str:
@@ -19392,7 +19419,7 @@ def v2_redact_contextual_text(value: str) -> str:
 
     text = split_option.sub(redact_split, text)
     text = re.sub(
-        r"(?i)\b(Bearer)(\s+)(?!<redacted>)[^\s,;]+",
+        r"(?i)\b(Bearer)(\s+)(?![\"']|<redacted>)[^\s,;]+",
         r"\1\2<redacted>",
         text,
     )
@@ -23525,9 +23552,14 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         for field in root_fields
     ):
         raise InputRefused("v2 source observation contains a malformed root")
+    audit_capture = captured["audit_capture"]
+    audit_receipts = v2_validate_audit_capture(
+        audit_capture,
+        allowed_issue_ids={row["id"] for row in all_issues},
+    )
     v2_validate_source_capture_contract(
         capture_contract,
-        audit_capture=captured["audit_capture"],
+        audit_capture=audit_capture,
         coherent_capture_root=observation["coherent_capture_root"],
     )
     observed_source_paths: list[str] = []
@@ -23751,11 +23783,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             "v2 source v1 inventory cannot be reconstructed from captured "
             f"inputs at {divergence or '$'}"
         )
-    audit_capture = captured["audit_capture"]
-    audit_receipts = v2_validate_audit_capture(
-        audit_capture,
-        allowed_issue_ids={row["id"] for row in all_issues},
-    )
     if len(observation_receipts) + len(audit_receipts) > (
         V2_LOG_EVENTS_CAP - 8
     ):
@@ -25064,6 +25091,9 @@ def v2_synthetic_source_issue(
         "owner": str(target.get("tracker_owner") or ""),
         "parent": str(target.get("parent") or ""),
         "labels": list(target.get("labels") or []),
+        "estimated_minutes": target.get(
+            "target_implementation_estimated_minutes"
+        ),
         "field_roots": dict(target.get("field_roots") or {}),
         "missing_sections": list(target.get("missing_sections") or []),
         "disposition": str(target.get("disposition") or ""),
@@ -30769,7 +30799,17 @@ def v2_execute_source_cases(
         empty_capture = capture_state([])
         checks.check(
             "empty-source-capture-is-first-class",
-            v2_list_issue_ids([], label="empty issue list") == []
+            v2_list_issue_ids(
+                {
+                    "issues": [],
+                    "has_more": False,
+                    "limit": 0,
+                    "offset": 0,
+                    "total": 0,
+                },
+                label="empty issue list",
+            )
+            == []
             and empty_capture["issue_ids"] == []
             and empty_capture["issue_count"] == 0
             and empty_capture["full_issue_projection_root"]
@@ -30833,6 +30873,7 @@ def v2_execute_source_cases(
             and fidelity_projection["assignee"] == "fixture-owner"
             and fidelity_projection["owner"] == ""
             and fidelity_projection["type"] == "bug"
+            and fidelity_projection["estimated_minutes"] == 60
             and fidelity_projection["missing_sections"]
             == [
                 "## Acceptance Criteria",
@@ -30845,6 +30886,7 @@ def v2_execute_source_cases(
                 "dependency_root": v2_dependency_neighborhood_root(
                     fidelity_source_issue
                 ),
+                "estimated_minutes": 60,
                 "source_projection": fidelity_projection,
             },
             observed={
@@ -33202,7 +33244,7 @@ def v2_execute_authority_cases(
                 valid_receipts,
                 stale_inventory,
             ),
-            contains="different source or schema",
+            contains="target root drifted",
         )
     elif slug == "capability-valid-missing-failed":
         for verdict in ("NODATA", "FAILED"):
@@ -33549,7 +33591,7 @@ def v2_execute_authority_cases(
                 current_br_version="0.3.0",
                 allow_mechanical_fixture=True,
             ),
-            contains="different source or schema",
+            contains="target root drifted",
         )
         reactivated_receipts = v2_synthetic_receipts(
             reactivated_inventory,
@@ -33705,9 +33747,11 @@ def v2_execute_authority_cases(
             label="no-target-mutation stale receipt seed",
             require_canonical=True,
         )
+        stale_receipts.pop("semantic_root", None)
         stale_receipts["inventory_root"] = semantic_root(
             {"stale": "inventory"}
         )
+        stale_receipts = v2_rooted(stale_receipts)
         checks.refuses(
             "receipt-failure-target-unchanged",
             InputRefused,
@@ -33715,7 +33759,7 @@ def v2_execute_authority_cases(
                 stale_receipts,
                 mutation_inventory,
             ),
-            contains="different source or schema",
+            contains="inventory_root differs from its provenance envelope",
             projection=target_projection,
             projection_label="EXACT_TARGET_ROWS_BYTES",
         )
@@ -35258,15 +35302,46 @@ def v2_history_fixture(
         all_issues.append(legacy_issue)
         audit_documents.append(legacy_audit)
         target_id = legacy_id
+    issue_by_id = {row["id"]: row for row in all_issues}
+    selected_issue = issue_by_id[target_id]
     target = v2_synthetic_target(
         0,
         issue_id=target_id,
+        priority=selected_issue["priority"],
         status="closed",
         disposition="HISTORICAL_IMMUTABLE_REVIEW",
+        issue_type=selected_issue["type"],
+        assignee=selected_issue["assignee"],
     )
-    issue_by_id = {row["id"]: row for row in all_issues}
     target = dict(target)
-    target["field_roots"] = issue_by_id[target_id]["field_roots"]
+    target.update(
+        {
+            "title": selected_issue["title"],
+            "tracker_assignee": selected_issue["assignee"],
+            "coordination_assignee": selected_issue["assignee"],
+            "tracker_owner": selected_issue["owner"],
+            "parent": selected_issue["parent"],
+            "labels": list(selected_issue["labels"]),
+            "field_roots": dict(selected_issue["field_roots"]),
+            "dependencies": list(selected_issue["dependencies"]),
+            "dependents": list(selected_issue["dependents"]),
+            "target_implementation_estimated_minutes": selected_issue[
+                "estimated_minutes"
+            ],
+            "target_implementation_estimate_minutes": selected_issue[
+                "estimated_minutes"
+            ],
+            "target_implementation_estimate_state": (
+                "DECLARED"
+                if type(selected_issue["estimated_minutes"]) is int
+                and selected_issue["estimated_minutes"] >= 0
+                else "NODATA"
+            ),
+            "active_work_context": v2_active_work_context(
+                selected_issue
+            ),
+        }
+    )
     target_source_issue = v2_synthetic_source_issue(target)
     target["dependency_neighborhood_root"] = (
         v2_dependency_neighborhood_root(target_source_issue)
@@ -35987,7 +36062,9 @@ def v2_execute_history_cases(
             issue_ids: Sequence[str],
             *,
             capture_ordinal: int,
+            br_cwd: Path = REPO_ROOT,
         ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+            del br_cwd
             expected_ids = sorted(issue_ids)
             source = first_round if capture_ordinal == 1 else second_round
             return (
@@ -38250,7 +38327,14 @@ def v2_execute_artifact_cases(
             "Authorization: Basic diagnostic-basic\n"
             "Proxy-Authorization: Bearer diagnostic-proxy\n"
             'client_secret="diagnostic-line-one\ndiagnostic-line-two"\n'
+            'client_secret="diagnostic-alpha\\\" diagnostic-escaped-tail"\n'
+            '--token "diagnostic-split-alpha\\\" diagnostic-split-tail"\n'
+            'Bearer "diagnostic-bearer-one diagnostic-bearer-two"\n'
             "token='diagnostic-unterminated\ndiagnostic-tail"
+        )
+        unclosed_bearer_summary = v2_redact_contextual_text(
+            "Bearer 'diagnostic-bearer-unclosed "
+            "diagnostic-bearer-unclosed-tail"
         )
         checks.check(
             "diagnostic-summary-redacted-bounded",
@@ -38264,11 +38348,22 @@ def v2_execute_artifact_cases(
                     "diagnostic-proxy",
                     "diagnostic-line-one",
                     "diagnostic-line-two",
+                    "diagnostic-alpha",
+                    "diagnostic-escaped-tail",
+                    "diagnostic-split-alpha",
+                    "diagnostic-split-tail",
+                    "diagnostic-bearer-one",
+                    "diagnostic-bearer-two",
                     "diagnostic-unterminated",
                     "diagnostic-tail",
                 )
             )
-            and boundary_summary.count("<redacted>") == 4
+            and boundary_summary.count("<redacted>") == 7
+            and "diagnostic-bearer-unclosed"
+            not in unclosed_bearer_summary
+            and "diagnostic-bearer-unclosed-tail"
+            not in unclosed_bearer_summary
+            and unclosed_bearer_summary == "Bearer '<redacted>"
             and str(REPO_ROOT) not in summary
             and "<redacted>" in summary
             and "<truncated:sha256-v1:" in summary
@@ -38282,6 +38377,7 @@ def v2_execute_artifact_cases(
             observed={
                 "summary": summary,
                 "boundary_summary": boundary_summary,
+                "unclosed_bearer_summary": unclosed_bearer_summary,
                 "bytes": len(summary.encode("utf-8")),
             },
         )
