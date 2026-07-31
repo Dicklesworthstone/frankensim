@@ -92,6 +92,57 @@ V2_ZERO_RECEIPT_SCHEMA = (
 V2_MOVEMENT_RECEIPT_SCHEMA = (
     "frankensim.beads-template-hygiene.movement-receipt.v2"
 )
+V2_SCOPE_SUCCESSOR_FIELDS = frozenset(
+    {
+        "issue_id",
+        "status",
+        "priority",
+        "destination_root",
+        "current_universe_root",
+        "finding_state",
+        "reason",
+        "no_claim",
+        "semantic_root",
+    }
+)
+V2_MOVEMENT_SUCCESSOR_LINEAGE_FIELDS = (
+    "issue_id",
+    "source_root",
+    "destination_root",
+    "destination_root_kind",
+    "destination_finding_state",
+    "destination_reason",
+    "current_universe_root",
+    "current_finding_issue_ids_root",
+    "before_status",
+    "after_status",
+    "before_priority",
+    "after_priority",
+)
+V2_MOVEMENT_RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "issue_id",
+        "class",
+        "before_status",
+        "after_status",
+        "before_priority",
+        "after_priority",
+        "source_root",
+        "destination_root",
+        "destination_root_kind",
+        "destination_finding_state",
+        "destination_reason",
+        "current_universe_root",
+        "current_finding_issue_ids_root",
+        "prior_campaign_root",
+        "prior_campaign_epoch_root",
+        "current_campaign_root",
+        "immutable_prior_evidence",
+        "successor_lineage_root",
+        "semantic_root",
+    }
+)
 V2_ZERO_SET_NO_CLAIM = (
     "zero and movement receipts are exact campaign accounting; they do not "
     "mutate targets or adjudicate closed semantics"
@@ -2069,6 +2120,48 @@ def _run_command_unscoped(
             "raw diagnostic body withheld, inspect its retained stream root"
         )
     return completed
+
+
+def run_command(
+    argv: Sequence[str],
+    *,
+    input_text: str | None = None,
+    expected: Iterable[int] = (0,),
+    command_cwd: Path | None = None,
+    environment_overrides: Mapping[str, str] | None = None,
+    honor_cancel: bool = True,
+    record_global_receipt: bool = True,
+    receipt_sink: Callable[[dict[str, Any]], None] | None = None,
+    stdin_bytes_cap: int | None = None,
+    stdout_bytes_cap: int | None = None,
+    stderr_bytes_cap: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    global _v2_active_subprocesses
+    with _v2_offline_replay_scope_lock:
+        if _v2_offline_replay_depth > 0:
+            raise EvidenceFailed(
+                "offline v2 replay forbids every subprocess invocation"
+            )
+        _v2_active_subprocesses += 1
+    try:
+        return _run_command_unscoped(
+            argv,
+            input_text=input_text,
+            expected=expected,
+            command_cwd=command_cwd,
+            environment_overrides=environment_overrides,
+            honor_cancel=honor_cancel,
+            record_global_receipt=record_global_receipt,
+            receipt_sink=receipt_sink,
+            stdin_bytes_cap=stdin_bytes_cap,
+            stdout_bytes_cap=stdout_bytes_cap,
+            stderr_bytes_cap=stderr_bytes_cap,
+        )
+    finally:
+        with _v2_offline_replay_scope_lock:
+            if _v2_active_subprocesses <= 0:
+                raise EvidenceFailed("subprocess guard depth underflow")
+            _v2_active_subprocesses -= 1
 
 
 def br_json(
