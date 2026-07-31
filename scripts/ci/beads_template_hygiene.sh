@@ -17,6 +17,7 @@ exec python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import errno
 import hashlib
 import json
@@ -32,7 +33,7 @@ import threading
 import time
 import unicodedata
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -109,9 +110,14 @@ V2_SEMANTIC_REFUSAL_TERMINALS = (
     "EvidenceFailed",
 )
 V2_PLANNED_CHILD_NO_CLAIM = (
-    "this complete planned payload is not a published Bead and grants no "
-    "target, review, conditional-write, implementation, or release authority"
+    "this schema-complete planned payload may be a bounded index into retained "
+    "source evidence; it is not a published Bead and grants no target, review, "
+    "conditional-write, implementation, or release authority"
 )
+V2_GENERATION_GATE_ID = (
+    "frankensim-semantic-bead-template-hygiene-961yr.5"
+)
+V2_PACKING_PREFLIGHT_WITNESS_ROOT = "sha256-v1:" + ("0" * 64)
 V2_SINGLETON_NO_COMPATIBILITY_RATIONALE = (
     "singleton retained because no target-complete compatibility receipt "
     "authorizes a semantic merge"
@@ -320,7 +326,7 @@ V2_CHILD_DESCRIPTION_CAP = 131_072
 V2_CHILD_ACCEPTANCE_CAP = 32_768
 V2_CHILD_DESIGN_CAP = 16_384
 V2_CHILD_NOTES_CAP = 16_384
-V2_CHILD_ARGV_AGGREGATE_CAP = 65_536
+V2_CHILD_ARGV_AGGREGATE_CAP = 61_440
 V2_EXACT_OPTIMALITY_MAX_TARGETS = 13
 V2_SYNOPSIS_BYTES_CAP = 8_192
 V2_SYNOPSIS_ID_PREVIEW_CAP = 12
@@ -329,6 +335,12 @@ V2_INVENTORY_ROWS_CAP = 4_096
 V2_WARNING_ROWS_CAP = 8_192
 V2_WARNINGS_PER_ISSUE_CAP = 16
 V2_CLAUSE_BYTES_CAP = 65_536
+V2_CLAUSE_ROWS_CAP = 4_096
+V2_LABELS_PER_ISSUE_CAP = 4_096
+V2_RELATIONS_PER_DIRECTION_CAP = 4_096
+V2_AUDIT_EVENTS_PER_ISSUE_CAP = 8_192
+V2_HISTORY_CITATIONS_PER_ISSUE_CAP = 4_096
+V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP = 4_096
 V2_COMMAND_ARGUMENTS_CAP = 64
 V2_COMMAND_ARGUMENT_BYTES_CAP = 4_096
 V2_AUTHORITY_IDENTITY_BYTES_CAP = 1_024
@@ -343,6 +355,37 @@ V2_AUTHORITY_IDENTITY_CANONICALIZATION = (
 V2_LOG_EVENTS_CAP = 262_144
 V2_LOG_LINE_BYTES_CAP = 65_536
 V2_ASSERTION_CHECKS_CAP = 256
+V2_CLAUSE_INDEX_SCHEMA = (
+    "frankensim.beads-template-hygiene.clause-index.v2"
+)
+V2_CLAUSE_INDEX_NO_CLAIM = (
+    "the bounded rows are an index preview; total count and membership roots "
+    "bind the complete derived clause set without replacing retained source"
+)
+V2_CLAUSE_INDEX_FIELDS = frozenset(
+    {
+        "schema",
+        "rows",
+        "row_count",
+        "rows_complete",
+        "membership_root",
+        "maximum_clause_bytes",
+        "over_row_cap_count",
+        "over_row_cap_membership_root",
+        "over_byte_cap_count",
+        "over_byte_cap_membership_root",
+        "no_claim",
+    }
+)
+V2_CLAUSE_ROW_FIELDS = frozenset(
+    {
+        "field",
+        "line_index",
+        "byte_length",
+        "text_root",
+        "truncated",
+    }
+)
 V2_OVERSIZE_EXCEEDED_CAP_FIELDS = frozenset(
     {
         "cap",
@@ -744,6 +787,7 @@ V2_HISTORY_NO_CLAIM = (
 )
 V2_DIAGNOSTIC_SUMMARY_BYTES_CAP = 512
 V2_PERSISTENT_ATTEMPTS_CAP = 32
+V2_PERSISTENT_TERMINAL_STABILITY_SECONDS = 5.0
 V2_BUNDLE_FILES_CAP = len(V2_RUN_ARTIFACTS) + V2_INVENTORY_ROWS_CAP
 V2_BUNDLE_DIRECTORIES_CAP = 32
 V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP = (
@@ -845,6 +889,9 @@ EVENT_REQUIRED_FIELDS = (
     "reproduction",
 )
 RUN_ARTIFACT_CAP = 67_108_864
+V2_AUDIT_STREAM_BYTES_CAP = RUN_ARTIFACT_CAP
+V2_AUDIT_CAPTURE_BYTES_CAP = RUN_ARTIFACT_CAP
+V2_SOURCE_PROJECTION_BYTES_CAP = RUN_ARTIFACT_CAP
 EVENT_COUNT_CAP = 262_144
 EVENT_LINE_CAP = 16_384
 
@@ -1239,6 +1286,9 @@ def run_command(
     honor_cancel: bool = True,
     record_global_receipt: bool = True,
     receipt_sink: Callable[[dict[str, Any]], None] | None = None,
+    stdin_bytes_cap: int | None = None,
+    stdout_bytes_cap: int | None = None,
+    stderr_bytes_cap: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if honor_cancel:
         check_cancel()
@@ -1260,9 +1310,34 @@ def run_command(
     input_bytes = (
         input_text.encode("utf-8") if input_text is not None else None
     )
+    default_stream_cap = CAPS["subprocess_stdout_bytes"]
+    effective_stream_caps = {
+        "stdin": (
+            default_stream_cap if stdin_bytes_cap is None else stdin_bytes_cap
+        ),
+        "stdout": (
+            default_stream_cap
+            if stdout_bytes_cap is None
+            else stdout_bytes_cap
+        ),
+        "stderr": (
+            default_stream_cap
+            if stderr_bytes_cap is None
+            else stderr_bytes_cap
+        ),
+    }
+    if any(
+        type(value) is not int
+        or value < 0
+        or value > default_stream_cap
+        for value in effective_stream_caps.values()
+    ):
+        raise EvidenceFailed(
+            "command stream override exceeds the global bounded byte cap"
+        )
     if (
         input_bytes is not None
-        and len(input_bytes) > CAPS["subprocess_stdout_bytes"]
+        and len(input_bytes) > effective_stream_caps["stdin"]
     ):
         raise EvidenceFailed("command stdin exceeds the bounded byte cap")
     expected_codes = set(expected)
@@ -1341,10 +1416,15 @@ def run_command(
             # process before the second signal.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                # A successful TERM followed by ESRCH/EPERM means the original
-                # group retired before escalation; do not chase a reused ID.
+            except ProcessLookupError:
+                # ESRCH proves that no process group remains at this identity.
                 pass
+            except PermissionError as error:
+                # EPERM does not prove retirement. Retain the cleanup failure
+                # so no caller can report a successfully drained group.
+                cleanup_errors.append(
+                    f"SIGKILL_PROCESS_GROUP_ERRNO_{error.errno}"
+                )
             except OSError as error:
                 cleanup_errors.append(
                     f"SIGKILL_PROCESS_GROUP_ERRNO_{error.errno}"
@@ -1452,7 +1532,7 @@ def run_command(
                     if key.data == "stdout"
                     else stderr_buffer
                 )
-                cap = CAPS["subprocess_stdout_bytes"]
+                cap = effective_stream_caps[key.data]
                 available = max(0, cap - len(target))
                 target.extend(chunk[:available])
                 if len(chunk) > available:
@@ -1465,7 +1545,7 @@ def run_command(
                         f"{command_name} {key.data} exceeded the bounded cap"
                     )
         return_code = process.wait(timeout=1)
-    except HarnessError:
+    except HarnessError as harness_error:
         drain_process()
         close_selector()
         append_receipt(
@@ -1476,6 +1556,11 @@ def run_command(
                 else -1
             ),
         )
+        if cleanup_errors:
+            raise InfrastructureFailed(
+                "subprocess cleanup could not prove process-group retirement; "
+                "inspect the retained cleanup error kinds"
+            ) from harness_error
         raise
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         drain_process()
@@ -1514,6 +1599,11 @@ def run_command(
     if honor_cancel and _cancel_requested:
         drain_process()
         append_receipt(category="CANCELLED_AFTER_EXIT", exit_code=return_code)
+        if cleanup_errors:
+            raise InfrastructureFailed(
+                "post-exit cancellation could not prove process-group "
+                "retirement; inspect the retained cleanup error kinds"
+            )
         raise CancelledDrained(
             "cancellation requested after subprocess exit; capture was drained"
         )
@@ -1939,6 +2029,10 @@ V2_MANIFEST_TABLE_KEYS = {
     "row_contract": {
         "required_fields",
         "planned_child_required_fields",
+        "clause_index_required_fields",
+        "clause_row_required_fields",
+        "clause_membership_root_algorithm",
+        "clause_overflow_policy",
         "planned_child_issue_type",
         "missing_payload_field",
         "target_fields_and_relations_remain_unchanged",
@@ -2055,6 +2149,16 @@ V2_MANIFEST_TABLE_KEYS = {
         "duplicate_options",
         "review_receipts_option",
         "review_receipts_paths",
+        "priority_filter_option",
+        "status_filter_option",
+        "target_filter_option",
+        "readiness_filter_option",
+        "route_filter_option",
+        "filter_membership",
+        "duplicate_filter_members",
+        "unknown_filter_members",
+        "authority_filters_apply_to",
+        "history_authority_filters",
         "existing_output",
         "unsafe_or_aliased_path",
         "symlinks",
@@ -2190,6 +2294,15 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_notes_bytes",
         "max_aggregate_non_description_argv_bytes",
         "max_clause_bytes",
+        "max_clause_rows_per_issue",
+        "max_labels_per_issue",
+        "max_relations_per_direction",
+        "max_audit_events_per_issue",
+        "max_audit_stream_bytes",
+        "max_audit_capture_bytes",
+        "max_source_projection_bytes",
+        "max_history_citations_per_issue",
+        "max_compatibility_targets_per_receipt",
         "max_command_arguments",
         "max_command_argument_bytes",
         "max_authority_identity_bytes",
@@ -2495,6 +2608,19 @@ def load_case_manifest_v2() -> dict[str, Any]:
             V2_CHILD_ARGV_AGGREGATE_CAP
         ),
         "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
+        "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
+        "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
+        "max_relations_per_direction": V2_RELATIONS_PER_DIRECTION_CAP,
+        "max_audit_events_per_issue": V2_AUDIT_EVENTS_PER_ISSUE_CAP,
+        "max_audit_stream_bytes": V2_AUDIT_STREAM_BYTES_CAP,
+        "max_audit_capture_bytes": V2_AUDIT_CAPTURE_BYTES_CAP,
+        "max_source_projection_bytes": V2_SOURCE_PROJECTION_BYTES_CAP,
+        "max_history_citations_per_issue": (
+            V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+        ),
+        "max_compatibility_targets_per_receipt": (
+            V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
+        ),
         "max_command_arguments": V2_COMMAND_ARGUMENTS_CAP,
         "max_command_argument_bytes": V2_COMMAND_ARGUMENT_BYTES_CAP,
         "max_authority_identity_bytes": V2_AUTHORITY_IDENTITY_BYTES_CAP,
@@ -2682,7 +2808,11 @@ def load_case_manifest_v2() -> dict[str, Any]:
         is not True
         or source_contract["malformed_falsey_collections"] != "REFUSE"
         or source_contract["relation_row_validation"]
-        != "NONEMPTY_ID_TYPE_VALID_OPTIONAL_STATUS_PRIORITY"
+        != (
+            "EXACT_INTERNAL_NEIGHBOR_STATUS_PRIORITY_RECIPROCAL_PARENT_"
+            "BOUND_EXTERNAL_DEPENDENCY_NO_RECIPROCAL_SELF_DUPLICATE_"
+            "NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
+        )
         or source_contract["audit_capture_uses_bounded_runner"] is not True
         or not v2_manifest_ordered_string_list(
             source_contract["source_closure_states"],
@@ -2753,6 +2883,12 @@ def load_case_manifest_v2() -> dict[str, Any]:
     child_fields = document["row_contract"][
         "planned_child_required_fields"
     ]
+    clause_index_fields = document["row_contract"][
+        "clause_index_required_fields"
+    ]
+    clause_row_fields = document["row_contract"][
+        "clause_row_required_fields"
+    ]
     if (
         not v2_manifest_closed_field_list(
             row_fields,
@@ -2762,8 +2898,26 @@ def load_case_manifest_v2() -> dict[str, Any]:
             child_fields,
             V2_PLANNED_CHILD_FIELDS,
         )
+        or not v2_manifest_closed_field_list(
+            clause_index_fields,
+            V2_CLAUSE_INDEX_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            clause_row_fields,
+            V2_CLAUSE_ROW_FIELDS,
+        )
+        or document["row_contract"]["clause_membership_root_algorithm"]
+        != "SHA256_CANONICAL_JSON_LIST_STREAM_WITH_TERMINAL_NEWLINE"
+        or document["row_contract"]["clause_overflow_policy"]
+        != (
+            "BOUNDED_PREFIX_PLUS_EXACT_TOTAL_AND_OVERFLOW_"
+            "MEMBERSHIP_ROOTS"
+        )
     ):
-        raise InputRefused("v2 normalized row or planned-child contract differs")
+        raise InputRefused(
+            "v2 normalized row, planned-child, or clause-index contract "
+            "differs"
+        )
     if (
         document["row_contract"][
             "responsibility_assignment_required_fields"
@@ -3124,7 +3278,13 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
     labels = issue.get("labels")
     if labels is None:
         labels = []
-    if not isinstance(labels, list) or any(
+    if not isinstance(labels, list):
+        raise InfrastructureFailed(f"v2 br issue {issue_id} has invalid labels")
+    if len(labels) > V2_LABELS_PER_ISSUE_CAP:
+        raise InfrastructureFailed(
+            f"v2 br issue {issue_id} exceeds the label-count cap"
+        )
+    if any(
         not isinstance(value, str) or not value for value in labels
     ) or len(labels) != len(set(labels)):
         raise InfrastructureFailed(f"v2 br issue {issue_id} has invalid labels")
@@ -3143,7 +3303,11 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             raise InfrastructureFailed(
                 f"v2 br issue {issue_id} has invalid {relation_field}"
             )
-        relation_identities: list[tuple[str, str]] = []
+        if len(relations) > V2_RELATIONS_PER_DIRECTION_CAP:
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} exceeds the {relation_field} cap"
+            )
+        relation_neighbors: list[str] = []
         for relation in relations:
             relation_type = (
                 relation.get(
@@ -3167,11 +3331,19 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 not isinstance(relation, dict)
                 or not isinstance(relation.get("id"), str)
                 or not relation["id"]
+                or relation["id"] == issue_id
+                or (
+                    relation["id"].startswith("external:")
+                    and (
+                        relation_field != "dependencies"
+                        or not relation["id"].removeprefix("external:")
+                        or relation_type == "parent-child"
+                    )
+                )
                 or not isinstance(relation_type, str)
                 or not relation_type
                 or (
-                    relation_status is not None
-                    and relation_status
+                    relation_status
                     not in {
                         "open",
                         "in_progress",
@@ -3181,23 +3353,18 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                     }
                 )
                 or (
-                    relation_priority is not None
-                    and (
-                        type(relation_priority) is not int
-                        or relation_priority not in range(5)
-                    )
+                    type(relation_priority) is not int
+                    or relation_priority not in range(5)
                 )
             ):
                 raise InfrastructureFailed(
                     f"v2 br issue {issue_id} has an invalid relation row"
                 )
-            relation_identities.append(
-                (str(relation_type), relation["id"])
-            )
-        if len(relation_identities) != len(set(relation_identities)):
+            relation_neighbors.append(relation["id"])
+        if len(relation_neighbors) != len(set(relation_neighbors)):
             raise InfrastructureFailed(
                 f"v2 br issue {issue_id} duplicates a "
-                f"{relation_field} identity"
+                f"{relation_field} neighbor"
             )
 
 
@@ -3232,6 +3399,7 @@ def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
             f"v2 source has more than {V2_INVENTORY_ROWS_CAP} issue rows"
         )
     rows: list[dict[str, Any]] = []
+    retained_projection_bytes = len(canonical_bytes([]))
     batch_size = min(CAPS["show_batch"], 56)
     for offset in range(0, len(issue_ids), batch_size):
         check_cancel()
@@ -3248,7 +3416,20 @@ def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
                 raise InfrastructureFailed(
                     f"v2 br show batch row {index} is not an object"
                 )
-            rows.append(v2_full_issue_projection(issue))
+            projected = v2_full_issue_projection(issue)
+            projected_bytes = len(canonical_bytes(projected))
+            retained_projection_bytes = (
+                projected_bytes + 2
+                if not rows
+                else retained_projection_bytes + projected_bytes
+            )
+            v2_validate_aggregate_byte_count(
+                retained_projection_bytes,
+                cap=V2_SOURCE_PROJECTION_BYTES_CAP,
+                label="v2 source projections",
+                error_type=InfrastructureFailed,
+            )
+            rows.append(projected)
     rows.sort(key=lambda issue: issue["id"])
     if [row["id"] for row in rows] != sorted(issue_ids):
         raise InfrastructureFailed("v2 br show membership differs from br list")
@@ -4499,6 +4680,7 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         label="v2 br list before",
     )
     full_before = v2_show_all_issues(issue_ids_before)
+    v2_validate_source_graph(full_before)
     lint_before = lint_scopes()
     capture_before = v2_capture_state(
         issue_ids=issue_ids_before,
@@ -4525,6 +4707,7 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         label="v2 br list after",
     )
     full_after = v2_show_all_issues(issue_ids_after)
+    v2_validate_source_graph(full_after)
     lint_after = lint_scopes()
     source_files_after = v2_source_file_identities()
     capture_after = v2_capture_state(
@@ -7025,6 +7208,20 @@ def fixture_br_show(issue_id: str) -> dict[str, Any]:
 
 
 def fixture_br_semantic_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
+    def relation_projection(
+        values: Any,
+    ) -> list[tuple[str, str, str, Any]]:
+        return sorted(
+            (
+                str(edge.get("dependency_type") or edge.get("type") or ""),
+                str(edge.get("id") or ""),
+                str(edge.get("status") or ""),
+                edge.get("priority"),
+            )
+            for edge in (values or [])
+            if isinstance(edge, dict)
+        )
+
     return {
         "id": str(issue.get("id") or ""),
         "title": str(issue.get("title") or ""),
@@ -7039,14 +7236,8 @@ def fixture_br_semantic_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "owner": str(issue.get("owner") or ""),
         "parent": str(issue.get("parent") or ""),
         "labels": sorted(str(label) for label in (issue.get("labels") or [])),
-        "dependencies": sorted(
-            (
-                str(edge.get("dependency_type") or edge.get("type") or ""),
-                str(edge.get("id") or ""),
-            )
-            for edge in (issue.get("dependencies") or [])
-            if isinstance(edge, dict)
-        ),
+        "dependencies": relation_projection(issue.get("dependencies")),
+        "dependents": relation_projection(issue.get("dependents")),
     }
 
 
@@ -8585,13 +8776,43 @@ def v2_parse_csv_set(
         return None
     if not value or any(part != part.strip() for part in value.split(",")):
         raise UsageRefused(f"{label} must be a non-empty comma-separated set")
-    selected = set(value.split(","))
+    members = value.split(",")
+    if len(members) != len(set(members)):
+        raise UsageRefused(f"{label} contains duplicate values")
+    selected = set(members)
     if "" in selected:
         raise UsageRefused(f"{label} contains an empty member")
     unknown = sorted(selected - set(allowed))
     if unknown:
         raise UsageRefused(f"{label} contains unknown values {unknown}")
     return selected
+
+
+def v2_parse_target_set(
+    value: str | None,
+    *,
+    label: str,
+) -> set[str] | None:
+    if value is None:
+        return None
+    members = value.split(",")
+    if (
+        not value
+        or len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP
+        or len(members) > V2_INVENTORY_ROWS_CAP
+        or any(member != member.strip() for member in members)
+        or any(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", member)
+            is None
+            for member in members
+        )
+    ):
+        raise UsageRefused(
+            f"{label} must be a bounded comma-separated set of exact Bead IDs"
+        )
+    if len(members) != len(set(members)):
+        raise UsageRefused(f"{label} contains duplicate values")
+    return set(members)
 
 
 def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
@@ -8646,12 +8867,148 @@ def v2_dependency_neighborhood_root(issue: Mapping[str, Any]) -> str:
     )
 
 
-def v2_complete_clause_roots(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
+    if not isinstance(index, dict):
+        raise InputRefused("v2 clause index is not an object")
+    v2_exact_keys(index, V2_CLAUSE_INDEX_FIELDS, label="v2 clause index")
+    rows = index["rows"]
+    row_count = index["row_count"]
+    over_count = index["over_byte_cap_count"]
+    over_row_count = index["over_row_cap_count"]
+    maximum = index["maximum_clause_bytes"]
+    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
+    if (
+        index["schema"] != V2_CLAUSE_INDEX_SCHEMA
+        or not isinstance(rows, list)
+        or len(rows) > V2_CLAUSE_ROWS_CAP
+        or type(row_count) is not int
+        or row_count < 0
+        or len(rows) != min(row_count, V2_CLAUSE_ROWS_CAP)
+        or type(index["rows_complete"]) is not bool
+        or index["rows_complete"] is not (row_count <= V2_CLAUSE_ROWS_CAP)
+        or not isinstance(index["membership_root"], str)
+        or root_pattern.fullmatch(index["membership_root"]) is None
+        or type(maximum) is not int
+        or maximum < 0
+        or type(over_count) is not int
+        or not 0 <= over_count <= row_count
+        or type(over_row_count) is not int
+        or over_row_count != max(0, row_count - V2_CLAUSE_ROWS_CAP)
+        or not isinstance(index["over_row_cap_membership_root"], str)
+        or root_pattern.fullmatch(index["over_row_cap_membership_root"]) is None
+        or not isinstance(index["over_byte_cap_membership_root"], str)
+        or root_pattern.fullmatch(index["over_byte_cap_membership_root"]) is None
+        or index["no_claim"] != V2_CLAUSE_INDEX_NO_CLAIM
+    ):
+        raise InputRefused("v2 clause index scalar or cap contract differs")
+    prior_position: tuple[int, int] | None = None
+    preview_over_byte_rows: list[dict[str, Any]] = []
+    preview_maximum = 0
+    field_ordinals = {
+        "description": 0,
+        "acceptance_criteria": 1,
+        "design": 2,
+        "notes": 3,
+    }
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise InputRefused(
+                f"v2 clause index row {row_index} is not an object"
+            )
+        v2_exact_keys(
+            row,
+            V2_CLAUSE_ROW_FIELDS,
+            label=f"v2 clause index row {row_index}",
+        )
+        field_name = row["field"]
+        position = (
+            field_ordinals.get(field_name, -1)
+            if isinstance(field_name, str)
+            else -1,
+            row["line_index"] if type(row["line_index"]) is int else -1,
+        )
+        if (
+            field_name not in field_ordinals
+            or type(row["line_index"]) is not int
+            or row["line_index"] < 0
+            or type(row["byte_length"]) is not int
+            or row["byte_length"] < 0
+            or not isinstance(row["text_root"], str)
+            or root_pattern.fullmatch(row["text_root"]) is None
+            or row["truncated"] is not False
+            or (prior_position is not None and position <= prior_position)
+        ):
+            raise InputRefused(
+                f"v2 clause index row {row_index} is malformed or noncanonical"
+            )
+        prior_position = position
+        preview_maximum = max(preview_maximum, row["byte_length"])
+        if row["byte_length"] > V2_CLAUSE_BYTES_CAP:
+            preview_over_byte_rows.append(row)
+    if (
+        (row_count == 0 and maximum != 0)
+        or maximum < preview_maximum
+        or over_count < len(preview_over_byte_rows)
+        or (over_count == 0 and maximum > V2_CLAUSE_BYTES_CAP)
+        or (over_count > 0 and maximum <= V2_CLAUSE_BYTES_CAP)
+        or (
+            over_count == 0
+            and index["over_byte_cap_membership_root"]
+            != semantic_root([])
+        )
+        or (
+            over_row_count == 0
+            and index["over_row_cap_membership_root"] != semantic_root([])
+        )
+    ):
+        raise EvidenceFailed("v2 clause index overflow accounting disagrees")
+    if index["rows_complete"] and (
+        index["membership_root"] != semantic_root(rows)
+        or maximum != preview_maximum
+        or over_count != len(preview_over_byte_rows)
+        or index["over_byte_cap_membership_root"]
+        != semantic_root(preview_over_byte_rows)
+        or over_row_count != 0
+        or index["over_row_cap_membership_root"] != semantic_root([])
+    ):
+        raise EvidenceFailed(
+            "complete v2 clause index roots or extrema disagree with rows"
+        )
+
+
+def v2_iter_splitlines(text: str) -> Iterable[tuple[int, str]]:
+    """Yield Python splitlines()-equivalent rows without allocating a list."""
+
+    start = 0
+    line_index = 0
+    for match in re.finditer(
+        r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]",
+        text,
+    ):
+        yield line_index, text[start : match.start()]
+        line_index += 1
+        start = match.end()
+    if start < len(text):
+        yield line_index, text[start:]
+
+
+def v2_complete_clause_roots(issue: Mapping[str, Any]) -> dict[str, Any]:
+    retained_rows: list[dict[str, Any]] = []
+    membership_hasher = hashlib.sha256()
+    membership_hasher.update(b"[")
+    over_hasher = hashlib.sha256()
+    over_hasher.update(b"[")
+    over_row_hasher = hashlib.sha256()
+    over_row_hasher.update(b"[")
+    row_count = 0
+    over_count = 0
+    maximum_clause_bytes = 0
     for field in ("description", "acceptance_criteria", "design", "notes"):
         text = str(issue.get(field) or "")
-        for line_index, line in enumerate(text.splitlines()):
-            normalized = " ".join(line.split())
+        for line_index, line in v2_iter_splitlines(text):
+            if line_index % 256 == 0:
+                check_cancel()
+            normalized = re.sub(r"\s+", " ", line).strip()
             if not normalized:
                 continue
             lowered = normalized.casefold()
@@ -8659,16 +9016,55 @@ def v2_complete_clause_roots(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
                 term in lowered for term in CLAUSE_TERMS
             ):
                 encoded = normalized.encode("utf-8")
-                rows.append(
-                    {
-                        "field": field,
-                        "line_index": line_index,
-                        "byte_length": len(encoded),
-                        "text_root": text_root(normalized),
-                        "truncated": False,
-                    }
+                row = {
+                    "field": field,
+                    "line_index": line_index,
+                    "byte_length": len(encoded),
+                    "text_root": text_root(normalized),
+                    "truncated": False,
+                }
+                row_bytes = canonical_bytes(row)[:-1]
+                if row_count:
+                    membership_hasher.update(b",")
+                membership_hasher.update(row_bytes)
+                row_count += 1
+                maximum_clause_bytes = max(
+                    maximum_clause_bytes,
+                    len(encoded),
                 )
-    return rows
+                if len(retained_rows) < V2_CLAUSE_ROWS_CAP:
+                    retained_rows.append(row)
+                else:
+                    if row_count > V2_CLAUSE_ROWS_CAP + 1:
+                        over_row_hasher.update(b",")
+                    over_row_hasher.update(row_bytes)
+                if len(encoded) > V2_CLAUSE_BYTES_CAP:
+                    if over_count:
+                        over_hasher.update(b",")
+                    over_hasher.update(row_bytes)
+                    over_count += 1
+    membership_hasher.update(b"]\n")
+    over_hasher.update(b"]\n")
+    over_row_hasher.update(b"]\n")
+    result = {
+        "schema": V2_CLAUSE_INDEX_SCHEMA,
+        "rows": retained_rows,
+        "row_count": row_count,
+        "rows_complete": row_count <= V2_CLAUSE_ROWS_CAP,
+        "membership_root": "sha256-v1:" + membership_hasher.hexdigest(),
+        "maximum_clause_bytes": maximum_clause_bytes,
+        "over_row_cap_count": max(0, row_count - V2_CLAUSE_ROWS_CAP),
+        "over_row_cap_membership_root": (
+            "sha256-v1:" + over_row_hasher.hexdigest()
+        ),
+        "over_byte_cap_count": over_count,
+        "over_byte_cap_membership_root": (
+            "sha256-v1:" + over_hasher.hexdigest()
+        ),
+        "no_claim": V2_CLAUSE_INDEX_NO_CLAIM,
+    }
+    v2_validate_clause_index(result)
+    return result
 
 
 def v2_domain_candidates(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -8770,6 +9166,9 @@ def v2_build_inventory(
     campaign_epoch_root: str,
     priority_filter: set[str] | None,
     status_filter: set[str] | None,
+    target_filter: set[str] | None = None,
+    readiness_filter: set[str] | None = None,
+    route_filter: set[str] | None = None,
 ) -> dict[str, Any]:
     v2_validate_source_limits(
         row_count=len(snapshot.inventory["rows"]),
@@ -8786,6 +9185,16 @@ def v2_build_inventory(
         ),
     )
     full_by_id = {row["id"]: row for row in snapshot.all_issues}
+    source_inventory_ids = {
+        str(row["id"]) for row in snapshot.inventory["rows"]
+    }
+    if target_filter is not None:
+        unknown_targets = sorted(target_filter - source_inventory_ids)
+        if unknown_targets:
+            raise UsageRefused(
+                "--targets contains IDs outside the exact planner inventory: "
+                + ", ".join(unknown_targets)
+            )
     rows: list[dict[str, Any]] = []
     for source_row in snapshot.inventory["rows"]:
         full_issue = full_by_id.get(source_row["id"])
@@ -8804,6 +9213,8 @@ def v2_build_inventory(
         if priority_filter is not None and priority_name not in priority_filter:
             continue
         if status_filter is not None and status not in status_filter:
+            continue
+        if target_filter is not None and source_row["id"] not in target_filter:
             continue
         missing_sections = sorted(source_row["missing_sections"])
         if len(missing_sections) > V2_WARNINGS_PER_ISSUE_CAP:
@@ -8966,7 +9377,11 @@ def v2_build_inventory(
         "filters": {
             "priorities": sorted(priority_filter) if priority_filter else [],
             "statuses": sorted(status_filter) if status_filter else [],
+            "targets": sorted(target_filter) if target_filter else [],
+            "readiness": sorted(readiness_filter) if readiness_filter else [],
+            "routes": sorted(route_filter) if route_filter else [],
             "empty_means_all": True,
+            "authority_filters_apply_to_selected_projection": True,
         },
         "rows": rows,
         "counts": {
@@ -9155,6 +9570,10 @@ def v2_normalize_audit_document(
         document["events"], list
     ):
         raise InfrastructureFailed(f"audit log identity differs for {issue_id}")
+    if len(document["events"]) > V2_AUDIT_EVENTS_PER_ISSUE_CAP:
+        raise InfrastructureFailed(
+            f"audit log for {issue_id} exceeds the event-count cap"
+        )
     normalized_events: list[dict[str, Any]] = []
     previous_id: int | None = None
     previous_timestamp: datetime | None = None
@@ -9230,6 +9649,8 @@ def v2_capture_one_audit(
         argv,
         record_global_receipt=False,
         receipt_sink=receipts.append,
+        stdout_bytes_cap=V2_AUDIT_STREAM_BYTES_CAP,
+        stderr_bytes_cap=V2_AUDIT_STREAM_BYTES_CAP,
     )
     if len(receipts) != 1:
         raise InfrastructureFailed(
@@ -9258,17 +9679,79 @@ def v2_capture_audit_round(
     *,
     capture_ordinal: int,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    if (
+        not isinstance(issue_ids, Sequence)
+        or isinstance(issue_ids, (str, bytes, bytearray))
+    ):
+        raise InputRefused("v2 audit capture issue IDs are not a sequence")
+    if len(issue_ids) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "v2 audit capture issue IDs exceed the inventory row cap"
+        )
+    if any(
+        not isinstance(issue_id, str) or not issue_id
+        for issue_id in issue_ids
+    ):
+        raise InputRefused(
+            "v2 audit capture issue IDs contain an empty or non-string value"
+        )
+    if len(issue_ids) != len(set(issue_ids)):
+        raise InputRefused("v2 audit capture issue IDs are not unique")
     ordered_ids = sorted(issue_ids)
+    results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    retained_bytes = 0
+    issue_iterator = iter(ordered_ids)
     with ThreadPoolExecutor(max_workers=V2_AUDIT_WORKERS) as executor:
-        results = list(
-            executor.map(
-                lambda issue_id: v2_capture_one_audit(
+        pending: dict[Any, str] = {}
+        for issue_id in issue_iterator:
+            pending[
+                executor.submit(
+                    v2_capture_one_audit,
                     issue_id,
                     capture_ordinal=capture_ordinal,
-                ),
-                ordered_ids,
+                )
+            ] = issue_id
+            if len(pending) == V2_AUDIT_WORKERS:
+                break
+        while pending:
+            check_cancel()
+            completed, _ = wait(
+                tuple(pending),
+                return_when=FIRST_COMPLETED,
             )
-        )
+            for future in completed:
+                pending.pop(future)
+                result = future.result()
+                retained_bytes += v2_validate_canonical_byte_size(
+                    result[1],
+                    cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+                    label="v2 normalized audit document",
+                    error_type=InfrastructureFailed,
+                )
+                retained_bytes += v2_validate_canonical_byte_size(
+                    result[2],
+                    cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+                    label="v2 normalized audit command receipt",
+                    error_type=InfrastructureFailed,
+                )
+                v2_validate_aggregate_byte_count(
+                    retained_bytes,
+                    cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+                    label="v2 normalized audit round",
+                    error_type=InfrastructureFailed,
+                )
+                results.append(result)
+                try:
+                    next_issue_id = next(issue_iterator)
+                except StopIteration:
+                    continue
+                pending[
+                    executor.submit(
+                        v2_capture_one_audit,
+                        next_issue_id,
+                        capture_ordinal=capture_ordinal,
+                    )
+                ] = next_issue_id
     results.sort(key=lambda row: row[0])
     documents = {issue_id: document for issue_id, document, _ in results}
     receipts = [receipt for _, _, receipt in results]
@@ -9308,7 +9791,7 @@ def v2_capture_histories(
             tuple(row["argv"]),
         ),
     )
-    return v2_rooted(
+    result = v2_rooted(
         {
             "capture_count": 2,
             "worker_bound": V2_AUDIT_WORKERS,
@@ -9319,16 +9802,35 @@ def v2_capture_histories(
             "no_claim": V2_AUDIT_CAPTURE_NO_CLAIM,
         }
     )
+    v2_validate_aggregate_byte_count(
+        len(canonical_bytes(result)),
+        cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+        label="v2 normalized audit capture",
+        error_type=InfrastructureFailed,
+    )
+    return result
 
 
 def v2_extract_citations(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
     values: dict[str, dict[str, Any]] = {}
     pattern = re.compile(r"\bfrankensim-[A-Za-z0-9][A-Za-z0-9._-]*\b")
+    match_count = 0
     for field in ("description", "acceptance_criteria", "design", "notes"):
         text = str(issue.get(field) or "")
         for match in pattern.finditer(text):
+            match_count += 1
+            if match_count % 256 == 0:
+                check_cancel()
             cited = match.group(0).rstrip(".,;:)")
-            values[f"{field}:{cited}"] = {
+            key = f"{field}:{cited}"
+            if (
+                key not in values
+                and len(values) >= V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+            ):
+                raise InputRefused(
+                    "v2 history citation index exceeds its per-issue cap"
+                )
+            values[key] = {
                 "field": field,
                 "candidate_issue_id": cited,
                 "citation_root": text_root(cited),
@@ -9353,7 +9855,12 @@ def v2_validate_history_projection(
         V2_HISTORY_FIELDS,
         label="v2 populated history",
     )
-    verify_semantic_root(history, label="v2 populated history")
+    rows = history.get("rows")
+    if (
+        not isinstance(rows, list)
+        or len(rows) > V2_INVENTORY_ROWS_CAP
+    ):
+        raise InputRefused("v2 populated history rows are malformed or over cap")
     if (
         history["schema"] != V2_HISTORY_SCHEMA
         or history["state"] != "POPULATED"
@@ -9383,12 +9890,6 @@ def v2_validate_history_projection(
         != history_contract["legacy_coverage_rows_root"]
     ):
         raise EvidenceFailed("v2 history legacy coverage bindings differ")
-    rows = history["rows"]
-    if (
-        not isinstance(rows, list)
-        or len(rows) > V2_INVENTORY_ROWS_CAP
-    ):
-        raise InputRefused("v2 populated history rows are malformed or over cap")
     inventory_rows = inventory.get("rows")
     if (
         not isinstance(inventory_rows, list)
@@ -9406,20 +9907,18 @@ def v2_validate_history_projection(
         raise InputRefused("v2 history inventory membership is duplicated")
     if not isinstance(audit_capture, dict):
         raise InputRefused("v2 history audit capture is not an object")
-    verify_semantic_root(
-        audit_capture,
-        label="v2 history audit capture",
-    )
     audit_issue_ids = audit_capture.get("issue_ids")
     audit_documents = audit_capture.get("documents")
     if (
         not isinstance(audit_issue_ids, list)
+        or len(audit_issue_ids) > V2_INVENTORY_ROWS_CAP
         or any(
             not isinstance(issue_id, str) or not issue_id
             for issue_id in audit_issue_ids
         )
         or audit_issue_ids != sorted(set(audit_issue_ids))
         or not isinstance(audit_documents, list)
+        or len(audit_documents) > V2_INVENTORY_ROWS_CAP
         or len(audit_documents) != len(audit_issue_ids)
         or any(
             not isinstance(document, dict)
@@ -9436,6 +9935,20 @@ def v2_validate_history_projection(
         raise InputRefused(
             "v2 history audit document membership is noncanonical"
         )
+    for index, document in enumerate(audit_documents):
+        events = document.get("events")
+        if (
+            not isinstance(events, list)
+            or len(events) > V2_AUDIT_EVENTS_PER_ISSUE_CAP
+        ):
+            raise InputRefused(
+                f"v2 history audit document {index} events are malformed "
+                "or over cap"
+            )
+    verify_semantic_root(
+        audit_capture,
+        label="v2 history audit capture",
+    )
     for index, document in enumerate(audit_documents):
         verify_semantic_root(
             document,
@@ -9455,7 +9968,6 @@ def v2_validate_history_projection(
             V2_HISTORY_ROW_FIELDS,
             label=f"v2 history row {index}",
         )
-        verify_semantic_root(row, label=f"v2 history row {index}")
         issue_id = row["issue_id"]
         closer_state = row["closer_state"]
         if (
@@ -9492,6 +10004,22 @@ def v2_validate_history_projection(
             or row["notes_root"] != text_root(row["notes"])
             or row["notes_root"]
             != row["field_roots"].get("notes")
+            or not isinstance(row["comments"], list)
+            or len(row["comments"]) > V2_AUDIT_EVENTS_PER_ISSUE_CAP
+            or not isinstance(row["citations"], list)
+            or len(row["citations"])
+            > V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+            or not isinstance(row["dependencies"], list)
+            or len(row["dependencies"])
+            > V2_RELATIONS_PER_DIRECTION_CAP
+            or not isinstance(row["candidate_consumers"], list)
+            or len(row["candidate_consumers"])
+            > (
+                V2_RELATIONS_PER_DIRECTION_CAP
+                + V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+            )
+            or not isinstance(row["reviewed_consumers"], list)
+            or len(row["reviewed_consumers"]) > 1
             or not isinstance(row["source_roots"], list)
             or len(row["source_roots"]) != 3
             or any(
@@ -9507,25 +10035,76 @@ def v2_validate_history_projection(
             raise EvidenceFailed(
                 f"v2 history row {index} scalar or source bindings differ"
             )
+        verify_semantic_root(row, label=f"v2 history row {index}")
         if closer_state == "CONFLICTED":
             raise EvidenceFailed(
                 "v2 populated green history cannot retain a conflicted closer"
             )
         if closer_state == "KNOWN":
+            audit_events = audit_by_id[issue_id].get("events")
+            if not isinstance(audit_events, list):
+                raise EvidenceFailed(
+                    f"v2 history row {index} audit events are malformed"
+                )
+            close_events = [
+                event
+                for event in audit_events
+                if isinstance(event, dict)
+                and event.get("event_type") == "closed"
+            ]
+            transition_events = [
+                event
+                for event in audit_events
+                if isinstance(event, dict)
+                and event.get("event_type") == "status_changed"
+                and event.get("new_value") == "closed"
+            ]
+            if len(close_events) != 1 or len(transition_events) != 1:
+                raise EvidenceFailed(
+                    f"v2 history row {index} lacks known-closer evidence"
+                )
+            close_event = close_events[0]
+            transition = transition_events[0]
+            show_timestamp = v2_parse_timestamp(
+                row["closed_at"],
+                label=f"v2 history row {index} closed source",
+            )
+            close_timestamp = v2_parse_timestamp(
+                close_event.get("timestamp"),
+                label=f"v2 history row {index} close audit",
+            )
+            transition_timestamp = v2_parse_timestamp(
+                transition.get("timestamp"),
+                label=f"v2 history row {index} close transition",
+            )
+            close_actor = str(close_event.get("actor") or "").strip()
+            transition_actor = str(transition.get("actor") or "").strip()
+            skew_ms = int(
+                (close_timestamp - show_timestamp).total_seconds() * 1000
+            )
             if (
                 not isinstance(row["close_actor"], str)
                 or not row["close_actor"].strip()
+                or row["close_actor"] != close_actor
+                or close_actor != transition_actor
                 or row["close_actor_source"]
                 != "br.audit.log.closed.actor"
-                or not isinstance(row["audit_event_root"], str)
-                or re.fullmatch(
-                    r"sha256-v1:[0-9a-f]{64}",
-                    row["audit_event_root"],
+                or row["audit_event_root"] != semantic_root(close_event)
+                or close_event.get("comment") != row["close_reason"]
+                or type(close_event.get("id")) is not int
+                or type(transition.get("id")) is not int
+                or int(close_event["id"]) <= int(transition["id"])
+                or not (
+                    show_timestamp
+                    <= transition_timestamp
+                    <= close_timestamp
                 )
-                is None
+                or skew_ms < 0
+                or skew_ms
+                > int(history_contract["known_pair_max_skew_ms"])
             ):
                 raise EvidenceFailed(
-                    f"v2 history row {index} lacks known-closer evidence"
+                    f"v2 history row {index} known-closer audit binding differs"
                 )
         elif closer_state == "LEGACY_UNAVAILABLE":
             if (
@@ -9541,6 +10120,7 @@ def v2_validate_history_projection(
         closer_states.append(closer_state)
     if issue_ids != sorted(issue_ids) or len(issue_ids) != len(set(issue_ids)):
         raise InputRefused("v2 populated history membership is noncanonical")
+    verify_semantic_root(history, label="v2 populated history")
     counts = history["counts"]
     if not isinstance(counts, dict):
         raise InputRefused("v2 populated history counts are not an object")
@@ -9827,6 +10407,32 @@ def v2_build_history(
     return history
 
 
+def v2_preflight_zero_array(
+    value: Any,
+    *,
+    label: str,
+    exact_count: int | None = None,
+    allow_sequence: bool = False,
+) -> Sequence[Any]:
+    valid_container = (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        if allow_sequence
+        else isinstance(value, list)
+    )
+    if not valid_container:
+        raise EvidenceFailed(f"{label} is not an array")
+    if exact_count is not None and len(value) != exact_count:
+        raise EvidenceFailed(
+            f"{label} is not the exact {exact_count}-row array"
+        )
+    if len(value) > V2_INVENTORY_ROWS_CAP:
+        raise EvidenceFailed(
+            f"{label} exceeds the {V2_INVENTORY_ROWS_CAP}-row cap"
+        )
+    return value
+
+
 def v2_build_zero_sets(
     *,
     source_root: str,
@@ -9834,15 +10440,28 @@ def v2_build_zero_sets(
     prior_campaign: Mapping[str, Any],
     current_universe: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    inventory_rows = v2_preflight_zero_array(
+        inventory.get("rows"),
+        label="zero-set inventory rows",
+    )
+    prior_rows_input = v2_preflight_zero_array(
+        prior_campaign.get("rows", []),
+        label="zero-set prior-campaign rows",
+    )
+    universe_rows_input = v2_preflight_zero_array(
+        current_universe if current_universe is not None else inventory_rows,
+        label="zero-set current universe rows",
+        allow_sequence=True,
+    )
     cells: list[dict[str, Any]] = []
     all_ids: list[str] = []
-    expected_ids = sorted(row["id"] for row in inventory["rows"])
+    expected_ids = sorted(row["id"] for row in inventory_rows)
     partition_issue_ids_root = semantic_root(expected_ids)
     for priority in range(5):
         for status in STATUS_SCOPES:
             issue_ids = sorted(
                 row["id"]
-                for row in inventory["rows"]
+                for row in inventory_rows
                 if row["priority"] == priority and row["status"] == status
             )
             all_ids.extend(issue_ids)
@@ -9879,16 +10498,17 @@ def v2_build_zero_sets(
                     else None
                 ),
             }
-            cells.append(v2_rooted(cell))
+            cells.append(cell)
+    v2_preflight_zero_array(
+        cells,
+        label="zero-set cells",
+        exact_count=25,
+    )
+    cells = [v2_rooted(cell) for cell in cells]
     if sorted(all_ids) != expected_ids or len(all_ids) != len(set(all_ids)):
         raise EvidenceFailed("all-status priority cells do not partition inventory")
-    universe_rows = (
-        list(current_universe)
-        if current_universe is not None
-        else list(inventory["rows"])
-    )
     current_universe_by_id: dict[str, dict[str, Any]] = {}
-    for index, row in enumerate(universe_rows):
+    for index, row in enumerate(universe_rows_input):
         issue_id = row.get("id")
         status = row.get("status")
         priority = row.get("priority")
@@ -9922,9 +10542,7 @@ def v2_build_zero_sets(
         for issue_id in sorted(current_universe_by_id)
     ]
     current_universe_root = semantic_root(current_universe_projection)
-    prior_rows = {
-        row["id"]: row for row in prior_campaign.get("rows", [])
-    }
+    prior_rows = {row["id"]: row for row in prior_rows_input}
     prior_only_ids = sorted(set(prior_rows) - set(expected_ids))
     scope_successors: list[dict[str, Any]] = []
     for issue_id in prior_only_ids:
@@ -9940,27 +10558,30 @@ def v2_build_zero_sets(
                 f"clean closed successor; first={issue_id}"
             )
         scope_successors.append(
-            v2_rooted(
-                {
-                    "issue_id": issue_id,
-                    "status": current["status"],
-                    "priority": current["priority"],
-                    "destination_root": current["target_root"],
-                    "current_universe_root": current_universe_root,
-                    "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
-                    "no_claim": (
-                        "the successor accounts for scope movement only and "
-                        "does not re-adjudicate closure or prove implementation"
-                    ),
-                }
-            )
+            {
+                "issue_id": issue_id,
+                "status": current["status"],
+                "priority": current["priority"],
+                "destination_root": current["target_root"],
+                "current_universe_root": current_universe_root,
+                "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
+                "no_claim": (
+                    "the successor accounts for scope movement only and "
+                    "does not re-adjudicate closure or prove implementation"
+                ),
+            }
         )
+    v2_preflight_zero_array(
+        scope_successors,
+        label="zero-set scope-successor rows",
+    )
+    scope_successors = [v2_rooted(row) for row in scope_successors]
     scope_successors.sort(key=lambda row: row["issue_id"])
     current_for_movement: dict[str, Mapping[str, Any]] = {
-        row["id"]: row for row in inventory["rows"]
+        row["id"]: row for row in inventory_rows
     }
     destination_root_kind = {
-        row["id"]: "INVENTORY_TARGET" for row in inventory["rows"]
+        row["id"]: "INVENTORY_TARGET" for row in inventory_rows
     }
     current_for_movement.update(
         {
@@ -10032,33 +10653,42 @@ def v2_build_zero_sets(
                 }
             ),
         }
-        movements.append(v2_rooted(movement))
-    movements.sort(key=lambda row: row["issue_id"])
-    result = v2_rooted(
-        {
-            "schema": V2_ZERO_SETS_SCHEMA,
-            "source_root": source_root,
-            "inventory_root": inventory["semantic_root"],
-            "campaign_epoch_root": inventory["campaign_epoch_root"],
-            "cells": cells,
-            "partition_issue_ids_root": partition_issue_ids_root,
-            "current_universe_root": current_universe_root,
-            "current_universe_count": len(current_universe_projection),
-            "scope_successors": scope_successors,
-            "movements": movements,
-            "prior_campaign_root": prior_campaign["semantic_root"],
-            "counts": {
-                "cells": len(cells),
-                "zero_receipts": sum(
-                    cell["zero_receipt"] is not None for cell in cells
-                ),
-                "issues": len(expected_ids),
-                "scope_successors": len(scope_successors),
-                "movements": len(movements),
-            },
-            "no_claim": V2_ZERO_SET_NO_CLAIM,
-        }
+        movements.append(movement)
+    v2_preflight_zero_array(
+        movements,
+        label="zero-set movement rows",
     )
+    movements = [v2_rooted(row) for row in movements]
+    movements.sort(key=lambda row: row["issue_id"])
+    document = {
+        "schema": V2_ZERO_SETS_SCHEMA,
+        "source_root": source_root,
+        "inventory_root": inventory["semantic_root"],
+        "campaign_epoch_root": inventory["campaign_epoch_root"],
+        "cells": cells,
+        "partition_issue_ids_root": partition_issue_ids_root,
+        "current_universe_root": current_universe_root,
+        "current_universe_count": len(current_universe_projection),
+        "scope_successors": scope_successors,
+        "movements": movements,
+        "prior_campaign_root": prior_campaign["semantic_root"],
+        "counts": {
+            "cells": len(cells),
+            "zero_receipts": sum(
+                cell["zero_receipt"] is not None for cell in cells
+            ),
+            "issues": len(expected_ids),
+            "scope_successors": len(scope_successors),
+            "movements": len(movements),
+        },
+        "no_claim": V2_ZERO_SET_NO_CLAIM,
+    }
+    v2_validate_canonical_byte_size(
+        document,
+        cap=RUN_ARTIFACT_CAP,
+        label="zero-set document",
+    )
+    result = v2_rooted(document)
     v2_validate_zero_sets(
         result,
         source_root=source_root,
@@ -10092,8 +10722,6 @@ def v2_validate_zero_sets(
         raise EvidenceFailed(
             "zero-set inventory or prior campaign is not an object"
         )
-    verify_semantic_root(inventory, label="zero-set inventory")
-    verify_semantic_root(prior_campaign, label="zero-set prior campaign")
     v2_exact_keys(
         zero_sets,
         {
@@ -10114,6 +10742,39 @@ def v2_validate_zero_sets(
         },
         label="zero-set document",
     )
+    inventory_rows = v2_preflight_zero_array(
+        inventory.get("rows"),
+        label="zero-set inventory rows",
+    )
+    prior_rows = v2_preflight_zero_array(
+        prior_campaign.get("rows"),
+        label="zero-set prior-campaign rows",
+    )
+    universe_rows = v2_preflight_zero_array(
+        current_universe if current_universe is not None else inventory_rows,
+        label="zero-set current universe rows",
+        allow_sequence=True,
+    )
+    cells = v2_preflight_zero_array(
+        zero_sets.get("cells"),
+        label="zero-set cells",
+        exact_count=25,
+    )
+    scope_successors = v2_preflight_zero_array(
+        zero_sets.get("scope_successors"),
+        label="zero-set scope-successor rows",
+    )
+    movements = v2_preflight_zero_array(
+        zero_sets.get("movements"),
+        label="zero-set movement rows",
+    )
+    v2_validate_canonical_byte_size(
+        zero_sets,
+        cap=RUN_ARTIFACT_CAP,
+        label="zero-set document",
+    )
+    verify_semantic_root(inventory, label="zero-set inventory")
+    verify_semantic_root(prior_campaign, label="zero-set prior campaign")
     verify_semantic_root(zero_sets, label="zero-sets-v2.json")
     if (
         zero_sets["schema"] != V2_ZERO_SETS_SCHEMA
@@ -10140,9 +10801,6 @@ def v2_validate_zero_sets(
     ):
         require_root(value, label=label)
 
-    inventory_rows = inventory.get("rows")
-    if not isinstance(inventory_rows, list):
-        raise EvidenceFailed("zero-set inventory rows are not a list")
     inventory_by_id: dict[str, Mapping[str, Any]] = {}
     for index, row in enumerate(inventory_rows):
         if not isinstance(row, Mapping):
@@ -10174,11 +10832,6 @@ def v2_validate_zero_sets(
     expected_partition_root = semantic_root(expected_ids)
     if zero_sets["partition_issue_ids_root"] != expected_partition_root:
         raise EvidenceFailed("zero-set partition membership root differs")
-    universe_rows = (
-        list(current_universe)
-        if current_universe is not None
-        else list(inventory_rows)
-    )
     current_universe_by_id: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(universe_rows):
         if not isinstance(row, Mapping):
@@ -10231,9 +10884,6 @@ def v2_validate_zero_sets(
     ):
         raise EvidenceFailed("zero-set current universe binding differs")
 
-    cells = zero_sets["cells"]
-    if not isinstance(cells, list) or len(cells) != 25:
-        raise EvidenceFailed("zero-set cells are not the exact 25-cell grid")
     expected_coordinates = [
         (priority, status)
         for priority in range(5)
@@ -10419,9 +11069,6 @@ def v2_validate_zero_sets(
     else:
         raise EvidenceFailed("zero-set prior campaign has an unknown state")
 
-    prior_rows = prior_campaign.get("rows")
-    if not isinstance(prior_rows, list):
-        raise EvidenceFailed("zero-set prior-campaign rows are not a list")
     prior_by_id: dict[str, Mapping[str, Any]] = {}
     for index, row in enumerate(prior_rows):
         if not isinstance(row, Mapping):
@@ -10497,11 +11144,7 @@ def v2_validate_zero_sets(
             )
         )
     expected_scope_successors.sort(key=lambda row: row["issue_id"])
-    scope_successors = zero_sets["scope_successors"]
-    if (
-        not isinstance(scope_successors, list)
-        or scope_successors != expected_scope_successors
-    ):
+    if scope_successors != expected_scope_successors:
         raise EvidenceFailed("zero-set clean-closure successors differ")
     current_for_movement: dict[str, Mapping[str, Any]] = dict(
         inventory_by_id
@@ -10590,9 +11233,6 @@ def v2_validate_zero_sets(
         )
         expected_movements.append(movement)
     expected_movements.sort(key=lambda row: row["issue_id"])
-    movements = zero_sets["movements"]
-    if not isinstance(movements, list):
-        raise EvidenceFailed("zero-set movements are not a list")
     for index, movement in enumerate(movements):
         if not isinstance(movement, Mapping):
             raise EvidenceFailed(
@@ -10721,6 +11361,9 @@ def v2_build_source_document(
     audit_capture: Mapping[str, Any],
     priority_filter: set[str] | None,
     status_filter: set[str] | None,
+    target_filter: set[str] | None = None,
+    readiness_filter: set[str] | None = None,
+    route_filter: set[str] | None = None,
 ) -> dict[str, Any]:
     campaign_root, campaign_receipt = v2_campaign_epoch(snapshot)
     if campaign_root != inventory["campaign_epoch_root"]:
@@ -10734,7 +11377,11 @@ def v2_build_source_document(
         "filters": {
             "priorities": sorted(priority_filter) if priority_filter else [],
             "statuses": sorted(status_filter) if status_filter else [],
+            "targets": sorted(target_filter) if target_filter else [],
+            "readiness": sorted(readiness_filter) if readiness_filter else [],
+            "routes": sorted(route_filter) if route_filter else [],
             "empty_means_all": True,
+            "authority_filters_apply_to_selected_projection": True,
         },
         "review_receipts": review_receipts,
         "prior_campaign": prior_campaign,
@@ -11099,6 +11746,8 @@ def v2_load_review_receipts(
     receipts = document["receipts"]
     if not isinstance(receipts, list):
         raise InputRefused("review receipts must contain an array")
+    if len(receipts) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused("review receipts exceed the inventory-row cap")
     inventory_by_id = {row["id"]: row for row in inventory["rows"]}
     normalized: list[dict[str, Any]] = []
     for index, receipt in enumerate(receipts):
@@ -11155,18 +11804,10 @@ def v2_load_review_receipts(
             raise InputRefused(
                 f"review receipt gate-admission verdict is unknown for {target_id}"
             )
-        targets = receipt["compatibility_target_ids"]
-        if not isinstance(targets, list) or any(
-            not isinstance(value, str) for value in targets
-        ):
-            raise InputRefused(
-                f"compatibility target IDs are malformed for {target_id}"
-            )
-        v2_assert_unique(targets, label=f"compatibility targets for {target_id}")
-        if targets != sorted(targets):
-            raise InputRefused(
-                f"compatibility target IDs are not canonical for {target_id}"
-            )
+        targets = v2_validate_compatibility_target_ids(
+            receipt["compatibility_target_ids"],
+            label=f"compatibility target IDs for {target_id}",
+        )
         if targets and target_id not in targets:
             raise InputRefused(
                 f"compatibility set does not include its target {target_id}"
@@ -11380,11 +12021,112 @@ def v2_validate_compatibility_receipts(
             )
 
 
+def v2_reconstructed_review_receipt_source_payload(
+    receipt_document: Mapping[str, Any],
+) -> bytes:
+    source_document = {
+        key: value
+        for key, value in receipt_document.items()
+        if key not in {"semantic_root", "source_identity"}
+    }
+    rows = source_document.get("receipts")
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) for row in rows
+    ):
+        raise InputRefused(
+            "review receipt source payload cannot be reconstructed"
+        )
+    if len(rows) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "review receipt source payload exceeds the inventory-row cap"
+        )
+    source_document["receipts"] = [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "semantic_root"
+        }
+        for row in rows
+    ]
+    return canonical_bytes(source_document)
+
+
+def v2_validate_review_receipt_source_identity(
+    receipt_document: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    source = receipt_document.get("source")
+    source_identity = receipt_document.get("source_identity")
+    generated_sources = {"NOT_PROVIDED", "SYNTHETIC_FIXTURE"}
+    if source in generated_sources:
+        if source_identity is not None:
+            raise InputRefused(
+                f"{label} generated source must not carry a file identity"
+            )
+        return
+    if source_identity is None:
+        raise InputRefused(f"{label} lacks its required file identity")
+    if not isinstance(source_identity, dict):
+        raise InputRefused(f"{label} source identity is not an object")
+    v2_exact_keys(
+        source_identity,
+        {"path", "bytes", "root"},
+        label=f"{label} source identity",
+    )
+    try:
+        normalized_path = str(
+            safe_relative(
+                source_identity["path"],
+                label=f"{label} source identity path",
+            )
+        )
+    except (KeyError, TypeError, UsageRefused) as error:
+        raise InputRefused(f"{label} source identity path is malformed") from error
+    reconstructed = v2_reconstructed_review_receipt_source_payload(
+        receipt_document
+    )
+    expected_root = (
+        "sha256-v1:" + hashlib.sha256(reconstructed).hexdigest()
+    )
+    if (
+        normalized_path != source_identity["path"]
+        or type(source_identity["bytes"]) is not int
+        or source_identity["bytes"] != len(reconstructed)
+        or not isinstance(source_identity["root"], str)
+        or source_identity["root"] != expected_root
+    ):
+        raise InputRefused(
+            f"{label} source identity does not bind reconstructed canonical bytes"
+        )
+
+
+def v2_validate_compatibility_target_ids(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError] = InputRefused,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise error_type(f"{label} must be an array")
+    if len(value) > V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP:
+        raise error_type(f"{label} exceed their cap")
+    if any(
+        not isinstance(target_id, str)
+        or not target_id
+        or target_id != target_id.strip()
+        for target_id in value
+    ):
+        raise error_type(f"{label} are malformed")
+    if value != sorted(set(value)):
+        raise error_type(f"{label} are noncanonical")
+    return value
+
+
 def v2_validate_receipt_bindings(
     receipt_document: Mapping[str, Any],
     inventory: Mapping[str, Any],
 ) -> None:
-    verify_semantic_root(receipt_document, label="v2 review receipts")
     allowed_document_keys = {
         "schema",
         "inventory_root",
@@ -11409,35 +12151,17 @@ def v2_validate_receipt_bindings(
         != V2_REVIEW_RECEIPTS_NO_CLAIM
     ):
         raise InputRefused("review receipts bind a different source or schema")
-    source_identity = receipt_document.get("source_identity")
-    if source_identity is not None:
-        if not isinstance(source_identity, dict):
-            raise InputRefused("review receipt source identity is not an object")
-        v2_exact_keys(
-            source_identity,
-            {"path", "bytes", "root"},
-            label="review receipt source identity",
-        )
-        if (
-            not isinstance(source_identity["path"], str)
-            or not source_identity["path"]
-            or type(source_identity["bytes"]) is not int
-            or source_identity["bytes"] < 0
-            or not isinstance(source_identity["root"], str)
-            or re.fullmatch(
-                r"sha256-v1:[0-9a-f]{64}",
-                source_identity["root"],
-            )
-            is None
-        ):
-            raise InputRefused("review receipt source identity scalars are invalid")
-        safe_relative(
-            source_identity["path"],
-            label="review receipt source identity path",
-        )
     rows = receipt_document.get("receipts")
-    if not isinstance(rows, list):
+    if (
+        not isinstance(rows, list)
+        or len(rows) > V2_INVENTORY_ROWS_CAP
+    ):
         raise InputRefused("review receipts must contain an array")
+    verify_semantic_root(receipt_document, label="v2 review receipts")
+    v2_validate_review_receipt_source_identity(
+        receipt_document,
+        label="review receipts",
+    )
     inventory_by_id = {row["id"]: row for row in inventory["rows"]}
     observed_ids: list[str] = []
     for index, receipt in enumerate(rows):
@@ -11521,18 +12245,10 @@ def v2_validate_receipt_bindings(
             raise InputRefused(
                 f"review receipt gate-admission verdict is unknown for {target_id}"
             )
-        targets = receipt["compatibility_target_ids"]
-        if not isinstance(targets, list) or any(
-            not isinstance(value, str) or not value for value in targets
-        ):
-            raise InputRefused(
-                f"compatibility target IDs are malformed for {target_id}"
-            )
-        v2_assert_unique(targets, label=f"compatibility targets for {target_id}")
-        if targets != sorted(targets):
-            raise InputRefused(
-                f"compatibility target IDs are not canonical for {target_id}"
-            )
+        targets = v2_validate_compatibility_target_ids(
+            receipt["compatibility_target_ids"],
+            label=f"compatibility target IDs for {target_id}",
+        )
         if targets and target_id not in targets:
             raise InputRefused(
                 f"compatibility set does not include its target {target_id}"
@@ -12240,6 +12956,7 @@ def v2_bin_feasible(
         targets <= max_targets
         and minutes <= V2_REVIEW_MINUTES_CAP
         and retained_bytes <= V2_CHILD_PAYLOAD_CAP
+        and not v2_child_transport_violations(rows)
     )
 
 
@@ -12395,6 +13112,9 @@ def v2_large_partition(
                         total_bytes / V2_CHILD_PAYLOAD_CAP
                     ),
                 },
+                "transport_constraint_root": (
+                    v2_partition_transport_constraint_root(bins)
+                ),
                 "achieved_objective": achieved,
                 "gap_witness": {
                     "child_count": bin_count - lower_bound,
@@ -12438,6 +13158,7 @@ def v2_pack_group(
     if any(
         int(authority["review_minutes"]) > V2_REVIEW_MINUTES_CAP
         or int(target["retained_payload_bytes"]) > V2_CHILD_PAYLOAD_CAP
+        or bool(v2_child_transport_violations([(target, authority)]))
         for target, authority in rows
     ):
         raise EvidenceFailed("oversize rows must be removed before standard packing")
@@ -12452,6 +13173,9 @@ def v2_pack_group(
                 "exact_optimality_max_targets": V2_EXACT_OPTIMALITY_MAX_TARGETS,
                 "exact_optimality_claim": True,
                 "objective": v2_objective_document(bins),
+                "transport_constraint_root": (
+                    v2_partition_transport_constraint_root(bins)
+                ),
                 "max_targets_per_child": max_targets,
                 "rationale": (
                     "the exact subset search minimizes the frozen objective "
@@ -12589,13 +13313,99 @@ def v2_child_text(
 
 
 def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
-    verify_semantic_root(child, label="planned child")
+    if not isinstance(child, dict):
+        raise EvidenceFailed("planned child is not an object")
     root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
     v2_exact_keys(
         child,
         V2_PLANNED_CHILD_FIELDS,
         label=f"planned child {child.get('child_key')}",
     )
+    target_ids = child["target_ids"]
+    if (
+        not isinstance(target_ids, list)
+        or not 1 <= len(target_ids) <= V2_REVIEW_TARGET_HARD_MAX
+        or not all(isinstance(value, str) and value for value in target_ids)
+        or target_ids != sorted(target_ids)
+        or len(target_ids) != len(set(target_ids))
+    ):
+        raise EvidenceFailed(
+            "planned child target membership exceeds its hard cap or is "
+            "malformed"
+        )
+    target_count = len(target_ids)
+    target_indexed_fields = (
+        "target_roots",
+        "source_dependency_snapshot",
+        "target_implementation_estimates",
+        "target_implementation_estimated_minutes",
+        "target_implementation_estimate_states",
+        "responsibility_assignments",
+        "semantic_review_receipt_roots",
+        "reviewed_no_change_receipt_roots",
+        "external_authority",
+        "external_authority_receipt_root",
+        "external_authority_verdict",
+        "conditional_write_capability",
+        "conditional_write_receipt_root",
+        "conditional_write_verdict",
+    )
+    if any(
+        not isinstance(child[field], list)
+        or len(child[field]) != target_count
+        for field in target_indexed_fields
+    ):
+        raise EvidenceFailed(
+            "planned child target-indexed collection cardinality differs"
+        )
+    if (
+        not isinstance(child["labels"], list)
+        or len(child["labels"]) > V2_LABELS_PER_ISSUE_CAP
+        or not isinstance(child["intended_generated_edges"], list)
+        or len(child["intended_generated_edges"]) != 2
+    ):
+        raise EvidenceFailed(
+            "planned child label or generated-edge cardinality differs"
+        )
+    key_inputs_preflight = child["external_ref_key_inputs"]
+    key_input_target_fields = (
+        "target_ids",
+        "target_roots",
+        "semantic_review_receipt_roots",
+        "responsibility_assignments",
+        "authority_decision_roots",
+    )
+    if (
+        not isinstance(key_inputs_preflight, dict)
+        or any(
+            not isinstance(key_inputs_preflight.get(field), list)
+            or len(key_inputs_preflight[field]) != target_count
+            for field in key_input_target_fields
+        )
+    ):
+        raise EvidenceFailed(
+            "planned child external identity collection cardinality differs"
+        )
+    compatibility_preflight = child["compatibility"]
+    if (
+        not isinstance(compatibility_preflight, dict)
+        or not isinstance(
+            compatibility_preflight.get("target_ids"),
+            list,
+        )
+        or len(compatibility_preflight["target_ids"])
+        > V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
+    ):
+        raise EvidenceFailed(
+            "planned child compatibility collection exceeds its cap or is "
+            "malformed"
+        )
+    v2_validate_canonical_byte_size(
+        child,
+        cap=V2_GENERATED_CHILD_PAYLOAD_CAP,
+        label="planned child generated payload",
+    )
+    verify_semantic_root(child, label="planned child")
     if (
         child["schema"]
         != "frankensim.beads-template-hygiene.planned-child.v2"
@@ -12693,8 +13503,6 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
     )
     if argv_bytes > V2_CHILD_ARGV_AGGREGATE_CAP:
         raise EvidenceFailed("planned child aggregate non-description argv exceeds cap")
-    if len(canonical_bytes(child)) > V2_GENERATED_CHILD_PAYLOAD_CAP:
-        raise EvidenceFailed("planned child generated payload exceeds cap")
     if (
         type(child["review_minutes"]) is not int
         or child["review_minutes"] < 0
@@ -12706,15 +13514,9 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         != child["review_minutes"]
     ):
         raise EvidenceFailed("planned child review-minute aliases disagree")
-    target_ids = child["target_ids"]
     target_roots = child["target_roots"]
     if (
-        not isinstance(target_ids, list)
-        or not target_ids
-        or not all(isinstance(value, str) and value for value in target_ids)
-        or target_ids != sorted(target_ids)
-        or len(target_ids) != len(set(target_ids))
-        or not isinstance(target_roots, list)
+        not isinstance(target_roots, list)
         or len(target_roots) != len(target_ids)
         or not all(
             isinstance(value, str)
@@ -13016,10 +13818,6 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
                 "falsifier",
             )
         )
-        or not isinstance(compatibility["target_ids"], list)
-        or not all(
-            isinstance(value, str) for value in compatibility["target_ids"]
-        )
         or type(compatibility["target_complete"]) is not bool
         or (
             compatibility["receipt_root"] != ""
@@ -13030,19 +13828,11 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         )
     ):
         raise EvidenceFailed("planned child compatibility scalars are malformed")
-    compatibility_target_ids = compatibility["target_ids"]
-    if (
-        any(
-            not value or value != value.strip()
-            for value in compatibility_target_ids
-        )
-        or
-        compatibility_target_ids
-        != sorted(set(compatibility_target_ids))
-    ):
-        raise EvidenceFailed(
-            "planned child compatibility target IDs are noncanonical"
-        )
+    compatibility_target_ids = v2_validate_compatibility_target_ids(
+        compatibility["target_ids"],
+        label="planned child compatibility target IDs",
+        error_type=EvidenceFailed,
+    )
     if compatibility["target_complete"]:
         if (
             any(
@@ -13091,7 +13881,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             "type": "parent-child",
         },
         {
-            "from": "frankensim-semantic-bead-template-hygiene-961yr.5",
+            "from": V2_GENERATION_GATE_ID,
             "to": generated,
             "type": "blocks",
         },
@@ -13108,6 +13898,8 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         {
             "schema",
             "priority",
+            "lane_parent",
+            "generation_gate_id",
             "status",
             "disposition",
             "type",
@@ -13122,7 +13914,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             "target_ids",
             "target_roots",
             "authority_decision_roots",
-            "compatibility_receipt_root",
+            "compatibility",
         },
         label="planned child external identity inputs",
     )
@@ -13131,19 +13923,22 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         not isinstance(decision_roots, list)
         or len(decision_roots) != len(target_ids)
         or not all(isinstance(row, dict) for row in decision_roots)
-        or [row["target_id"] for row in decision_roots] != target_ids
         or any(
             set(row) != {"target_id", "decision_root"}
+            or not isinstance(row["target_id"], str)
             or not isinstance(row["decision_root"], str)
             or root_pattern.fullmatch(row["decision_root"]) is None
             for row in decision_roots
         )
+        or [row["target_id"] for row in decision_roots] != target_ids
     ):
         raise EvidenceFailed(
             "planned child authority-decision identity roots are malformed"
         )
     if (
         child["external_ref"] != f"fs-template-hygiene:v2:{child_key}"
+        or key_inputs["lane_parent"] != child["lane_parent"]
+        or key_inputs["generation_gate_id"] != V2_GENERATION_GATE_ID
         or key_inputs["target_ids"] != target_ids
         or key_inputs["target_roots"] != target_roots
         or key_inputs["semantic_review_disposition"]
@@ -13156,15 +13951,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         != child["semantic_review_receipt_roots"]
         or key_inputs["responsibility_assignments"]
         != child["responsibility_assignments"]
-        or key_inputs["compatibility_receipt_root"]
-        != compatibility["receipt_root"]
-        or (
-            key_inputs["compatibility_receipt_root"] != ""
-            and root_pattern.fullmatch(
-                key_inputs["compatibility_receipt_root"]
-            )
-            is None
-        )
+        or key_inputs["compatibility"] != compatibility
         or semantic_root(key_inputs).split(":", 1)[1] != child_key
     ):
         raise EvidenceFailed("planned child external identity inputs disagree")
@@ -13176,6 +13963,7 @@ def v2_make_child(
     packing_witness: Mapping[str, Any],
     oversize: bool = False,
     oversize_artifact: Mapping[str, Any] | None = None,
+    _validate_payload: bool = True,
 ) -> dict[str, Any]:
     targets = [pair[0] for pair in rows]
     authorities = [pair[1] for pair in rows]
@@ -13200,6 +13988,15 @@ def v2_make_child(
         }
         if "" in compatibility_roots or len(compatibility_roots) != 1:
             raise EvidenceFailed("multi-target child lacks one compatibility receipt")
+    compatibility = dict(ordered_authorities[0]["compatibility"])
+    if len(ordered_targets) == 1 and not compatibility["key"]:
+        compatibility["rationale"] = (
+            V2_SINGLETON_NO_COMPATIBILITY_RATIONALE
+        )
+        compatibility["falsifier"] = (
+            V2_SINGLETON_NO_COMPATIBILITY_FALSIFIER
+        )
+    lane_parent = v2_lane_parent(priority)
     description, acceptance, design, notes = v2_child_text(
         ordered_targets,
         ordered_authorities,
@@ -13217,6 +14014,8 @@ def v2_make_child(
     stable_key_inputs = {
         "schema": V2_REVIEW_PLAN_SCHEMA,
         "priority": priority,
+        "lane_parent": lane_parent,
+        "generation_gate_id": V2_GENERATION_GATE_ID,
         "status": ordered_targets[0]["status"],
         "disposition": ordered_targets[0]["disposition"],
         "type": ordered_targets[0]["type"],
@@ -13251,9 +14050,7 @@ def v2_make_child(
             }
             for authority in ordered_authorities
         ],
-        "compatibility_receipt_root": (
-            ordered_authorities[0]["compatibility"]["receipt_root"]
-        ),
+        "compatibility": compatibility,
     }
     child_key = semantic_root(stable_key_inputs).split(":", 1)[1]
     actual_review_minutes = sum(
@@ -13301,14 +14098,6 @@ def v2_make_child(
         "content": description,
         "transport": "br create --description-file -",
     }
-    compatibility = dict(ordered_authorities[0]["compatibility"])
-    if len(ordered_targets) == 1 and not compatibility["key"]:
-        compatibility["rationale"] = (
-            V2_SINGLETON_NO_COMPATIBILITY_RATIONALE
-        )
-        compatibility["falsifier"] = (
-            V2_SINGLETON_NO_COMPATIBILITY_FALSIFIER
-        )
     child = {
         "schema": "frankensim.beads-template-hygiene.planned-child.v2",
         "child_key": child_key,
@@ -13334,7 +14123,7 @@ def v2_make_child(
                 ),
             }
         ),
-        "lane_parent": v2_lane_parent(priority),
+        "lane_parent": lane_parent,
         "external_ref": f"fs-template-hygiene:v2:{child_key}",
         "external_ref_key_inputs": stable_key_inputs,
         "source_dependency_snapshot": [
@@ -13349,11 +14138,11 @@ def v2_make_child(
         "intended_generated_edges": [
             {
                 "from": f"generated:{child_key}",
-                "to": v2_lane_parent(priority),
+                "to": lane_parent,
                 "type": "parent-child",
             },
             {
-                "from": "frankensim-semantic-bead-template-hygiene-961yr.5",
+                "from": V2_GENERATION_GATE_ID,
                 "to": f"generated:{child_key}",
                 "type": "blocks",
             },
@@ -13487,8 +14276,170 @@ def v2_make_child(
             f"root {oversize_artifact['semantic_root']}."
         )
     rooted = v2_rooted(child)
-    v2_validate_child_payload(rooted)
+    if _validate_payload:
+        v2_validate_child_payload(rooted)
     return rooted
+
+
+_v2_child_transport_cache: dict[
+    tuple[Any, ...],
+    dict[str, int],
+] = {}
+
+
+def v2_child_transport_observations(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    *,
+    oversize: bool = False,
+    oversize_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
+    cache_key = (
+        tuple(
+            sorted(
+                (
+                    str(target["id"]),
+                    str(target["target_root"]),
+                    str(authority["semantic_root"]),
+                )
+                for target, authority in rows
+            )
+        ),
+        oversize,
+        (
+            str(oversize_artifact.get("relative_path")),
+            str(oversize_artifact.get("semantic_root")),
+        )
+        if oversize_artifact is not None
+        else None,
+    )
+    cached = _v2_child_transport_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    candidate = v2_make_child(
+        rows,
+        packing_witness={
+            "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
+        },
+        oversize=oversize,
+        oversize_artifact=oversize_artifact,
+        _validate_payload=False,
+    )
+    description = candidate["description_file_artifact"]["content"].encode(
+        "utf-8"
+    )
+    acceptance = candidate["acceptance_criteria"].encode("utf-8")
+    design = candidate["design"].encode("utf-8")
+    notes = candidate["notes"].encode("utf-8")
+    observations = {
+        "description_bytes": len(description),
+        "acceptance_bytes": len(acceptance),
+        "design_bytes": len(design),
+        "notes_bytes": len(notes),
+        "aggregate_non_description_argv_bytes": (
+            len(acceptance) + len(design) + len(notes)
+        ),
+        "generated_child_payload_bytes": len(canonical_bytes(candidate)),
+    }
+    _v2_child_transport_cache[cache_key] = dict(observations)
+    return observations
+
+
+def v2_child_transport_violations(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    *,
+    oversize: bool = False,
+    oversize_artifact: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    observations = v2_child_transport_observations(
+        rows,
+        oversize=oversize,
+        oversize_artifact=oversize_artifact,
+    )
+    contracts = (
+        (
+            "max_description_bytes",
+            "rendered_child.description_bytes",
+            "description_bytes",
+            V2_CHILD_DESCRIPTION_CAP,
+        ),
+        (
+            "max_acceptance_bytes",
+            "rendered_child.acceptance_bytes",
+            "acceptance_bytes",
+            V2_CHILD_ACCEPTANCE_CAP,
+        ),
+        (
+            "max_design_bytes",
+            "rendered_child.design_bytes",
+            "design_bytes",
+            V2_CHILD_DESIGN_CAP,
+        ),
+        (
+            "max_notes_bytes",
+            "rendered_child.notes_bytes",
+            "notes_bytes",
+            V2_CHILD_NOTES_CAP,
+        ),
+        (
+            "max_aggregate_non_description_argv_bytes",
+            "rendered_child.aggregate_non_description_argv_bytes",
+            "aggregate_non_description_argv_bytes",
+            V2_CHILD_ARGV_AGGREGATE_CAP,
+        ),
+        (
+            "max_generated_child_payload_bytes",
+            "rendered_child.generated_child_payload_bytes",
+            "generated_child_payload_bytes",
+            V2_GENERATED_CHILD_PAYLOAD_CAP,
+        ),
+    )
+    target_ids = sorted(str(target["id"]) for target, _ in rows)
+    return [
+        {
+            "cap": cap_name,
+            "source_path": source_path,
+            "observed": observations[observation_name],
+            "limit": limit,
+            "violation_count": 1,
+            "violating_membership_root": semantic_root(target_ids),
+        }
+        for cap_name, source_path, observation_name, limit in contracts
+        if observations[observation_name] > limit
+    ]
+
+
+def v2_partition_transport_constraint_root(
+    bins: Sequence[
+        Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]]
+    ],
+) -> str:
+    rows = [
+        {
+            "target_ids": sorted(
+                str(target["id"]) for target, _ in batch
+            ),
+            "observations": v2_child_transport_observations(batch),
+        }
+        for batch in bins
+    ]
+    rows.sort(key=lambda row: row["target_ids"])
+    return semantic_root(
+        {
+            "caps": {
+                "description_bytes": V2_CHILD_DESCRIPTION_CAP,
+                "acceptance_bytes": V2_CHILD_ACCEPTANCE_CAP,
+                "design_bytes": V2_CHILD_DESIGN_CAP,
+                "notes_bytes": V2_CHILD_NOTES_CAP,
+                "aggregate_non_description_argv_bytes": (
+                    V2_CHILD_ARGV_AGGREGATE_CAP
+                ),
+                "generated_child_payload_bytes": (
+                    V2_GENERATED_CHILD_PAYLOAD_CAP
+                ),
+            },
+            "bins": rows,
+        }
+    )
 
 
 def v2_verify_packing_witness_independent(
@@ -13512,6 +14463,10 @@ def v2_verify_packing_witness_independent(
             int(target["retained_payload_bytes"]),
             1,
         )
+        for target, authority in rows
+    }
+    row_by_id = {
+        str(target["id"]): (target, authority)
         for target, authority in rows
     }
     expected_ids = sorted(load_by_id)
@@ -13575,6 +14530,10 @@ def v2_verify_packing_witness_independent(
             or target_count > max_targets
             or minutes > V2_REVIEW_MINUTES_CAP
             or retained_bytes > V2_CHILD_PAYLOAD_CAP
+            or not v2_bin_feasible(
+                [row_by_id[target_id] for target_id in membership],
+                max_targets=max_targets,
+            )
         ):
             raise EvidenceFailed("packing witness contains an infeasible child")
     observed_objective = objective_document(memberships)
@@ -13589,6 +14548,7 @@ def v2_verify_packing_witness_independent(
                 "exact_optimality_max_targets",
                 "exact_optimality_claim",
                 "objective",
+                "transport_constraint_root",
                 "max_targets_per_child",
                 "rationale",
                 "falsifier",
@@ -13601,6 +14561,16 @@ def v2_verify_packing_witness_independent(
             or witness["exact_optimality_max_targets"]
             != V2_EXACT_OPTIMALITY_MAX_TARGETS
             or witness["exact_optimality_claim"] is not True
+            or witness["transport_constraint_root"]
+            != v2_partition_transport_constraint_root(
+                [
+                    [
+                        row_by_id[target_id]
+                        for target_id in membership
+                    ]
+                    for membership in memberships
+                ]
+            )
             or witness["max_targets_per_child"] != max_targets
             or not isinstance(witness["rationale"], str)
             or not witness["rationale"]
@@ -13621,6 +14591,10 @@ def v2_verify_packing_witness_independent(
                 target_count <= max_targets
                 and minutes <= V2_REVIEW_MINUTES_CAP
                 and retained_bytes <= V2_CHILD_PAYLOAD_CAP
+                and v2_bin_feasible(
+                    [row_by_id[target_id] for target_id in membership],
+                    max_targets=max_targets,
+                )
             ):
                 pivot = (mask & -mask).bit_length() - 1
                 feasible_masks[pivot].append(mask)
@@ -13674,6 +14648,7 @@ def v2_verify_packing_witness_independent(
                 "observed_children",
                 "child_count_gap",
                 "lower_bound_vector",
+                "transport_constraint_root",
                 "achieved_objective",
                 "gap_witness",
                 "exact_optimality_claim",
@@ -13712,6 +14687,16 @@ def v2_verify_packing_witness_independent(
         if (
             len(expected_ids) <= V2_EXACT_OPTIMALITY_MAX_TARGETS
             or witness["lower_bound_vector"] != lower_bound_vector
+            or witness["transport_constraint_root"]
+            != v2_partition_transport_constraint_root(
+                [
+                    [
+                        row_by_id[target_id]
+                        for target_id in membership
+                    ]
+                    for membership in memberships
+                ]
+            )
             or witness["lower_bound_children"] != lower_bound
             or witness["observed_children"] != observed_children
             or witness["child_count_gap"] != gap
@@ -13731,6 +14716,92 @@ def v2_verify_packing_witness_independent(
     raise EvidenceFailed("independent packing verifier received an unknown algorithm")
 
 
+def v2_review_plan_universe(
+    inventory: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, Mapping[str, Any]]]:
+    upstream_targets = {
+        row["id"]: row
+        for row in inventory["rows"]
+        if row["status"] != "closed"
+    }
+    upstream_authority = {
+        row["target_id"]: row
+        for row in authority["decisions"]
+        if row["target_id"] in upstream_targets
+    }
+    if set(upstream_authority) != set(upstream_targets):
+        raise EvidenceFailed(
+            "v2 review-plan lacks an authority decision for its upstream universe"
+        )
+    filters = inventory.get("filters")
+    if not isinstance(filters, dict):
+        raise EvidenceFailed("v2 review-plan inventory filters are malformed")
+    readiness = set(filters.get("readiness") or [])
+    routes = set(filters.get("routes") or [])
+    selected_ids = sorted(
+        target_id
+        for target_id, decision in upstream_authority.items()
+        if (not readiness or decision["readiness"] in readiness)
+        and (
+            not routes
+            or decision["remediation_route"] in routes
+        )
+    )
+    return (
+        {
+            target_id: upstream_targets[target_id]
+            for target_id in selected_ids
+        },
+        {
+            target_id: upstream_authority[target_id]
+            for target_id in selected_ids
+        },
+    )
+
+
+def v2_preflight_review_plan_collections(
+    review_plan: Mapping[str, Any],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    bounded_fields = (
+        ("children", "children"),
+        ("packing_witnesses", "packing witnesses"),
+        ("semantic_adjudications", "semantic adjudications"),
+        (
+            "retained_without_direct_child",
+            "retained-without-direct-child rows",
+        ),
+        ("remediation_candidates", "remediation candidates"),
+        ("oversize_content", "oversize registry"),
+    )
+    collections: list[list[dict[str, Any]]] = []
+    for field, label in bounded_fields:
+        rows = review_plan.get(field)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
+        ):
+            raise EvidenceFailed(f"v2 review-plan {label} are malformed")
+        if len(rows) > V2_INVENTORY_ROWS_CAP:
+            raise EvidenceFailed(
+                f"v2 review-plan {label} exceed the "
+                f"{V2_INVENTORY_ROWS_CAP}-row cap"
+            )
+        collections.append(rows)
+    v2_validate_canonical_byte_size(
+        review_plan,
+        cap=RUN_ARTIFACT_CAP,
+        label="v2 review plan",
+    )
+    return tuple(collections)  # type: ignore[return-value]
+
+
 def v2_validate_review_plan(
     review_plan: Mapping[str, Any],
     inventory: Mapping[str, Any],
@@ -13743,6 +14814,14 @@ def v2_validate_review_plan(
         V2_REVIEW_PLAN_FIELDS,
         label="v2 review plan",
     )
+    (
+        children,
+        witnesses,
+        adjudications,
+        retained_without_direct_child,
+        remediation_candidates,
+        oversize_content,
+    ) = v2_preflight_review_plan_collections(review_plan)
     verify_semantic_root(review_plan, label="v2 review plan")
     counts = review_plan["counts"]
     work = review_plan["work"]
@@ -13774,14 +14853,6 @@ def v2_validate_review_plan(
         raise EvidenceFailed(
             "v2 review-plan identity, cap, or source bindings disagree"
         )
-    children = review_plan.get("children")
-    if not isinstance(children, list):
-        raise EvidenceFailed("v2 review-plan children are malformed")
-    witnesses = review_plan.get("packing_witnesses")
-    if not isinstance(witnesses, list) or any(
-        not isinstance(witness, dict) for witness in witnesses
-    ):
-        raise EvidenceFailed("v2 review-plan packing witnesses are malformed")
     witness_by_root: dict[str, Mapping[str, Any]] = {}
     for witness in witnesses:
         verify_semantic_root(witness, label="v2 packing witness")
@@ -13789,43 +14860,16 @@ def v2_validate_review_plan(
         if witness_root in witness_by_root:
             raise EvidenceFailed("v2 review-plan duplicates a packing witness")
         witness_by_root[witness_root] = witness
-    target_by_id = {
-        row["id"]: row
-        for row in inventory["rows"]
-        if row["status"] != "closed"
-    }
-    authority_by_id = {
-        row["target_id"]: row
-        for row in authority["decisions"]
-        if row["target_id"] in target_by_id
-    }
-    if set(authority_by_id) != set(target_by_id):
-        raise EvidenceFailed(
-            "v2 review-plan lacks an authority decision for its exact universe"
-        )
+    target_by_id, authority_by_id = v2_review_plan_universe(
+        inventory,
+        authority,
+    )
     expected_scheduled_ids = sorted(
         target_id
         for target_id, decision in authority_by_id.items()
         if decision["semantic_review_action"]
         != "RETAINED_ADJUDICATION"
     )
-    adjudications = review_plan.get("semantic_adjudications")
-    retained_without_direct_child = review_plan.get(
-        "retained_without_direct_child"
-    )
-    remediation_candidates = review_plan.get("remediation_candidates")
-    if not all(
-        isinstance(rows, list)
-        and all(isinstance(row, dict) for row in rows)
-        for rows in (
-            adjudications,
-            retained_without_direct_child,
-            remediation_candidates,
-        )
-    ):
-        raise EvidenceFailed(
-            "v2 review-plan semantic adjudication arrays are malformed"
-        )
     expected_adjudications: list[dict[str, Any]] = []
     for target_id, decision in sorted(authority_by_id.items()):
         if (
@@ -13885,9 +14929,6 @@ def v2_validate_review_plan(
         )
     observed_ids: list[str] = []
     for child in children:
-        if not isinstance(child, dict):
-            raise EvidenceFailed("v2 review-plan child is malformed")
-        verify_semantic_root(child, label="v2 review-plan child")
         v2_validate_child_payload(child)
         ids = child["target_ids"]
         roots = child["target_roots"]
@@ -13972,9 +15013,6 @@ def v2_validate_review_plan(
         or not 1 <= max_targets <= V2_REVIEW_TARGET_HARD_MAX
     ):
         raise EvidenceFailed("v2 review-plan target cap is malformed")
-    oversize_content = review_plan.get("oversize_content")
-    if not isinstance(oversize_content, list):
-        raise EvidenceFailed("v2 review-plan oversize registry is malformed")
     oversize_by_target: dict[str, Mapping[str, Any]] = {}
     oversize_paths: set[str] = set()
     for index, entry in enumerate(oversize_content):
@@ -14298,35 +15336,38 @@ def v2_oversize_exceeded_caps(
         for cap_name, source_path, observed, limit in candidates
         if observed > limit
     ]
-    violating_clauses = sorted(
-        (
-            {
-                "field": str(clause["field"]),
-                "line_index": int(clause["line_index"]),
-                "byte_length": int(clause["byte_length"]),
-                "text_root": str(clause["text_root"]),
-            }
-            for clause in target["clause_roots"]
-            if int(clause["byte_length"]) > V2_CLAUSE_BYTES_CAP
-        ),
-        key=lambda row: (
-            row["field"].encode("utf-8"),
-            row["line_index"],
-            row["text_root"].encode("utf-8"),
-        ),
+    exceeded.extend(
+        v2_child_transport_violations([(target, authority)])
     )
-    if violating_clauses:
+    clause_index = target["clause_roots"]
+    v2_validate_clause_index(clause_index)
+    if clause_index["row_count"] > V2_CLAUSE_ROWS_CAP:
+        exceeded.append(
+            {
+                "cap": "max_clause_rows_per_issue",
+                "source_path": "target.clause_roots.row_count",
+                "observed": int(clause_index["row_count"]),
+                "limit": V2_CLAUSE_ROWS_CAP,
+                "violation_count": (
+                    int(clause_index["row_count"]) - V2_CLAUSE_ROWS_CAP
+                ),
+                "violating_membership_root": str(
+                    clause_index["over_row_cap_membership_root"]
+                ),
+            }
+        )
+    if clause_index["over_byte_cap_count"]:
         exceeded.append(
             {
                 "cap": "max_clause_bytes",
-                "source_path": "target.clause_roots[*].byte_length",
-                "observed": max(
-                    row["byte_length"] for row in violating_clauses
-                ),
+                "source_path": "target.clause_roots.maximum_clause_bytes",
+                "observed": int(clause_index["maximum_clause_bytes"]),
                 "limit": V2_CLAUSE_BYTES_CAP,
-                "violation_count": len(violating_clauses),
-                "violating_membership_root": semantic_root(
-                    violating_clauses
+                "violation_count": int(
+                    clause_index["over_byte_cap_count"]
+                ),
+                "violating_membership_root": str(
+                    clause_index["over_byte_cap_membership_root"]
                 ),
             }
         )
@@ -14347,18 +15388,10 @@ def v2_build_review_plan(
     *,
     max_targets: int,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
-    all_target_by_id = {
-        row["id"]: row for row in inventory["rows"] if row["status"] != "closed"
-    }
-    all_authority_by_id = {
-        row["target_id"]: row
-        for row in authority["decisions"]
-        if row["target_id"] in all_target_by_id
-    }
-    if set(all_authority_by_id) != set(all_target_by_id):
-        raise EvidenceFailed(
-            "v2 review plan lacks an authority decision for its exact universe"
-        )
+    all_target_by_id, all_authority_by_id = v2_review_plan_universe(
+        inventory,
+        authority,
+    )
     scheduled_ids = sorted(
         target_id
         for target_id, decision in all_authority_by_id.items()
@@ -14507,6 +15540,19 @@ def v2_build_review_plan(
             "exceeded_caps": exceeded_caps,
             "aggregate_cap_accounting": len(payload),
         }
+        oversize_transport_violations = v2_child_transport_violations(
+            [(target, decision)],
+            oversize=True,
+            oversize_artifact=entry,
+        )
+        if oversize_transport_violations:
+            raise InputRefused(
+                "UNREPRESENTABLE_CHILD_TRANSPORT: even the bounded oversize "
+                "handoff exceeds "
+                + ", ".join(
+                    row["cap"] for row in oversize_transport_violations
+                )
+            )
         oversize_inventory.append(entry)
         group_key_root, ordered_load_rows_root = v2_packing_input_bindings(
             [(target, decision)]
@@ -14623,6 +15669,7 @@ def v2_build_review_plan(
         },
         "no_claim": V2_REVIEW_PLAN_NO_CLAIM,
     }
+    v2_preflight_review_plan_collections(document)
     rooted = v2_rooted(document)
     v2_validate_review_plan(rooted, inventory, authority)
     return rooted, oversize_payloads
@@ -14637,6 +15684,9 @@ def v2_reproduction_argv(
     prior_campaign: str | None = None,
     priorities: str | None = None,
     statuses: str | None = None,
+    targets: str | None = None,
+    readiness: str | None = None,
+    routes: str | None = None,
     max_targets: int = V2_REVIEW_TARGET_DEFAULT,
     explain_target: str | None = None,
     replay_input: str | None = None,
@@ -14672,6 +15722,9 @@ def v2_reproduction_argv(
         ("--prior-campaign", prior_campaign),
         ("--priorities", priorities),
         ("--statuses", statuses),
+        ("--targets", targets),
+        ("--readiness", readiness),
+        ("--routes", routes),
         ("--explain-target", explain_target),
     ):
         if value is not None:
@@ -16023,6 +17076,55 @@ def v2_validate_artifact_size(
         raise error_type(f"{label} exceeds its artifact cap")
 
 
+def v2_validate_aggregate_byte_count(
+    byte_length: int,
+    *,
+    cap: int,
+    label: str,
+    error_type: type[HarnessError] = EvidenceFailed,
+) -> None:
+    if (
+        type(byte_length) is not int
+        or byte_length < 0
+        or type(cap) is not int
+        or cap < 0
+    ):
+        raise error_type(f"{label} uses an invalid aggregate byte count")
+    if byte_length > cap:
+        raise error_type(f"{label} exceeds its aggregate byte cap")
+
+
+def v2_validate_canonical_byte_size(
+    value: Any,
+    *,
+    cap: int,
+    label: str,
+    error_type: type[HarnessError] = EvidenceFailed,
+) -> int:
+    if type(cap) is not int or cap < 0:
+        raise error_type(f"{label} uses an invalid canonical byte cap")
+    byte_length = 1  # canonical_bytes appends one terminal newline.
+    encoder = json.JSONEncoder(
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    try:
+        for chunk in encoder.iterencode(value):
+            byte_length += len(chunk.encode("utf-8"))
+            if byte_length > cap:
+                raise error_type(
+                    f"{label} exceeds its aggregate byte cap"
+                )
+    except error_type:
+        raise
+    except (TypeError, ValueError) as error:
+        raise error_type(
+            f"{label} is not canonically JSON serializable"
+        ) from error
+    return byte_length
+
+
 def v2_preflight_publication_topology(
     payloads: Mapping[str, bytes],
 ) -> tuple[list[str], list[str]]:
@@ -16522,6 +17624,11 @@ def v2_synopsis(
         and isinstance(row.get("target_id"), str)
         and row["target_id"]
     }
+    selected_decisions = [
+        decision_by_target[target_id]
+        for target_id in selected_ids
+        if target_id in decision_by_target
+    ]
     if (
         explain_target is not None
         and explain_target not in decision_by_target
@@ -16536,12 +17643,25 @@ def v2_synopsis(
         "counts": {
             "targets": len(selected_ids),
             "children": len(children),
-            "readiness": authority.get("counts", {}).get("readiness", {}),
-            "routes": authority.get("counts", {}).get("routes", {}),
+            "readiness": dict(
+                sorted(
+                    Counter(
+                        row["readiness"] for row in selected_decisions
+                    ).items()
+                )
+            ),
+            "routes": dict(
+                sorted(
+                    Counter(
+                        row["remediation_route"]
+                        for row in selected_decisions
+                    ).items()
+                )
+            ),
             "owners": len(
                 {
                     row["coordination_assignee"]
-                    for row in decisions
+                    for row in selected_decisions
                     if row["coordination_assignee"]
                 }
             ),
@@ -16569,12 +17689,12 @@ def v2_synopsis(
         },
         "active_conflicts": [
             row["target_id"]
-            for row in decisions
+            for row in selected_decisions
             if row["active_work_context"]["conflict"]
         ][:V2_SYNOPSIS_ID_PREVIEW_CAP],
         "top_blockers": [
             row["target_id"]
-            for row in decisions
+            for row in selected_decisions
             if row["readiness"] != "MECHANICALLY_APPLY_ELIGIBLE"
         ][:V2_SYNOPSIS_ID_PREVIEW_CAP],
         "selected_ids": {
@@ -16690,14 +17810,58 @@ def v2_execute_live_plan(
         allowed={"open", "in_progress", "blocked", "deferred", "closed"},
         label="--statuses",
     )
+    target_filter = v2_parse_target_set(
+        parsed.targets,
+        label="--targets",
+    )
+    readiness_filter = v2_parse_csv_set(
+        parsed.readiness,
+        allowed=V2_READINESS_STATES,
+        label="--readiness",
+    )
+    route_filter = v2_parse_csv_set(
+        parsed.routes,
+        allowed=V2_REMEDIATION_ROUTES,
+        label="--routes",
+    )
+    if mode == "history-plan" and (
+        readiness_filter is not None or route_filter is not None
+    ):
+        raise UsageRefused(
+            "--readiness and --routes select review-plan authority decisions; "
+            "history-plan accepts status, priority, and exact target filters"
+        )
     reproduction = v2_reproduction_argv(
         mode=mode,
         artifact_root=parsed.artifact_root,
         artifact_dir=artifact_dir,
         review_receipts=parsed.review_receipts,
         prior_campaign=parsed.prior_campaign,
-        priorities=parsed.priorities,
-        statuses=parsed.statuses,
+        priorities=(
+            ",".join(sorted(priority_filter))
+            if priority_filter is not None
+            else None
+        ),
+        statuses=(
+            ",".join(sorted(status_filter))
+            if status_filter is not None
+            else None
+        ),
+        targets=(
+            ",".join(sorted(target_filter))
+            if target_filter is not None
+            else None
+        ),
+        readiness=(
+            ",".join(sorted(readiness_filter))
+            if readiness_filter is not None
+            else None
+        ),
+        routes=(
+            ",".join(sorted(route_filter))
+            if route_filter is not None
+            else None
+        ),
         max_targets=parsed.max_targets_per_child,
         explain_target=parsed.explain_target,
     )
@@ -16725,6 +17889,9 @@ def v2_execute_live_plan(
             campaign_epoch_root=campaign_root,
             priority_filter=priority_filter,
             status_filter=status_filter,
+            target_filter=target_filter,
+            readiness_filter=readiness_filter,
+            route_filter=route_filter,
         )
         available_roots["inventory"] = inventory["semantic_root"]
         stage = "review_receipt_admission"
@@ -16781,6 +17948,9 @@ def v2_execute_live_plan(
             audit_capture=audit_capture,
             priority_filter=priority_filter,
             status_filter=status_filter,
+            target_filter=target_filter,
+            readiness_filter=readiness_filter,
+            route_filter=route_filter,
         )
         available_roots["source"] = source["semantic_root"]
         stage = "selected_projection"
@@ -17272,6 +18442,7 @@ def v2_validate_source_full_issue(
     labels = issue["labels"]
     if (
         not isinstance(labels, list)
+        or len(labels) > V2_LABELS_PER_ISSUE_CAP
         or any(not isinstance(value, str) or not value for value in labels)
         or labels != sorted(set(labels))
     ):
@@ -17280,7 +18451,10 @@ def v2_validate_source_full_issue(
         )
     for relation_field in ("dependencies", "dependents"):
         relations = issue[relation_field]
-        if not isinstance(relations, list):
+        if (
+            not isinstance(relations, list)
+            or len(relations) > V2_RELATIONS_PER_DIRECTION_CAP
+        ):
             raise InputRefused(
                 f"v2 source all-issue row {index} has malformed "
                 f"{relation_field}"
@@ -17302,32 +18476,36 @@ def v2_validate_source_full_issue(
             if (
                 not isinstance(relation["id"], str)
                 or not relation["id"]
+                or relation["id"] == issue["id"]
+                or (
+                    relation["id"].startswith("external:")
+                    and (
+                        relation_field != "dependencies"
+                        or not relation["id"].removeprefix("external:")
+                        or relation["type"] == "parent-child"
+                    )
+                )
                 or not isinstance(relation["type"], str)
                 or not relation["type"]
                 or (
-                    relation["status"] != ""
-                    and relation["status"] not in STATUS_SCOPES
+                    relation["status"] not in STATUS_SCOPES
                 )
                 or (
-                    relation["priority"] is not None
-                    and (
-                        type(relation["priority"]) is not int
-                        or relation["priority"] not in range(5)
-                    )
+                    type(relation["priority"]) is not int
+                    or relation["priority"] not in range(5)
                 )
             ):
                 raise InputRefused(
                     f"v2 source all-issue row {index} has an invalid "
                     f"{relation_field} row"
                 )
-        relation_identities = [
-            (relation["type"], relation["id"])
-            for relation in relations
+        relation_neighbors = [
+            relation["id"] for relation in relations
         ]
-        if len(relation_identities) != len(set(relation_identities)):
+        if len(relation_neighbors) != len(set(relation_neighbors)):
             raise InputRefused(
                 f"v2 source all-issue row {index} duplicates a "
-                f"{relation_field} identity"
+                f"{relation_field} neighbor"
             )
         if relations != sorted(
             relations,
@@ -17371,6 +18549,148 @@ def v2_validate_source_full_issue(
         raise InputRefused(
             f"v2 source all-issue row {index} source path receipt is malformed"
         )
+
+
+def v2_validate_source_graph(
+    all_issues: Sequence[Mapping[str, Any]],
+) -> None:
+    issue_by_id = {
+        str(issue["id"]): issue
+        for issue in all_issues
+        if isinstance(issue, Mapping) and isinstance(issue.get("id"), str)
+    }
+    if len(issue_by_id) != len(all_issues):
+        raise InputRefused("v2 source graph issue membership is malformed")
+    reverse_field = {
+        "dependencies": "dependents",
+        "dependents": "dependencies",
+    }
+    def has_relation(
+        relations: Sequence[Mapping[str, Any]],
+        identity: tuple[str, str],
+    ) -> bool:
+        index = bisect_left(
+            relations,
+            identity,
+            key=lambda row: (row["type"], row["id"]),
+        )
+        return (
+            index < len(relations)
+            and (
+                relations[index]["type"],
+                relations[index]["id"],
+            )
+            == identity
+        )
+
+    for issue_id, issue in sorted(issue_by_id.items()):
+        for relation_field in reverse_field:
+            neighbors = [
+                relation["id"] for relation in issue[relation_field]
+            ]
+            if (
+                issue_id in neighbors
+                or len(neighbors) != len(set(neighbors))
+            ):
+                raise EvidenceFailed(
+                    "v2 source graph contains a self edge or duplicate "
+                    f"neighbor for {issue_id}.{relation_field}"
+                )
+        parent_edges = sorted(
+            relation["id"]
+            for relation in issue["dependencies"]
+            if relation["type"] == "parent-child"
+        )
+        expected_parent_edges = [issue["parent"]] if issue["parent"] else []
+        if parent_edges != expected_parent_edges:
+            raise EvidenceFailed(
+                "v2 source graph parent scalar and parent-child dependency "
+                f"differ for {issue_id}"
+            )
+        for relation_field, reciprocal_field in reverse_field.items():
+            for relation in issue[relation_field]:
+                neighbor_id = relation["id"]
+                if neighbor_id.startswith("external:"):
+                    if (
+                        relation_field != "dependencies"
+                        or not neighbor_id.removeprefix("external:")
+                        or relation["type"] == "parent-child"
+                    ):
+                        raise EvidenceFailed(
+                            "v2 source graph external relation has an invalid "
+                            "direction, type, or empty identity"
+                        )
+                    continue
+                neighbor = issue_by_id.get(neighbor_id)
+                if neighbor is None:
+                    raise EvidenceFailed(
+                        "v2 source graph relation names an absent neighbor: "
+                        f"{issue_id}.{relation_field}->{neighbor_id}"
+                    )
+                if (
+                    relation["status"] != neighbor["status"]
+                    or relation["priority"] != neighbor["priority"]
+                ):
+                    raise EvidenceFailed(
+                        "v2 source graph relation status or priority disagrees "
+                        f"with neighbor {neighbor_id}"
+                    )
+                reciprocal_identity = (
+                    relation["type"],
+                    issue_id,
+                )
+                if not has_relation(
+                    neighbor[reciprocal_field],
+                    reciprocal_identity,
+                ):
+                    raise EvidenceFailed(
+                        "v2 source graph relation lacks exact reciprocal edge: "
+                        f"{issue_id}.{relation_field}->{neighbor_id}"
+                    )
+    blocking_types = {
+        "blocks",
+        "parent-child",
+        "conditional-blocks",
+        "waits-for",
+    }
+    visit_state: dict[str, int] = {}
+
+    def blocking_neighbors(issue_id: str) -> Iterable[str]:
+        for relation in issue_by_id[issue_id]["dependencies"]:
+            if (
+                relation["type"] in blocking_types
+                and not relation["id"].startswith("external:")
+            ):
+                yield relation["id"]
+
+    for start in sorted(issue_by_id):
+        if visit_state.get(start, 0) != 0:
+            continue
+        visit_state[start] = 1
+        stack: list[tuple[str, Any]] = [
+            (start, iter(blocking_neighbors(start)))
+        ]
+        while stack:
+            current, neighbors = stack[-1]
+            try:
+                neighbor_id = next(neighbors)
+            except StopIteration:
+                visit_state[current] = 2
+                stack.pop()
+                continue
+            neighbor_state = visit_state.get(neighbor_id, 0)
+            if neighbor_state == 1:
+                raise EvidenceFailed(
+                    "v2 source graph contains a blocking dependency cycle"
+                )
+            if neighbor_state == 0:
+                visit_state[neighbor_id] = 1
+                stack.append(
+                    (
+                        neighbor_id,
+                        iter(blocking_neighbors(neighbor_id)),
+                    )
+                )
 
 
 def v2_validate_retained_argv(value: Any, *, label: str) -> list[str]:
@@ -17519,6 +18839,12 @@ def v2_validate_audit_capture(
             V2_AUDIT_CAPTURE_NOT_REQUESTED_FIELDS,
             label="v2 source audit capture not-requested envelope",
         )
+        v2_validate_canonical_byte_size(
+            audit_capture,
+            cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+            label="v2 source audit capture",
+            error_type=InputRefused,
+        )
         expected = v2_rooted(
             {
                 "state": "NOT_REQUESTED",
@@ -17550,23 +18876,33 @@ def v2_validate_audit_capture(
         audit_capture["capture_count"] != 2
         or audit_capture["worker_bound"] != V2_AUDIT_WORKERS
         or not isinstance(issue_ids, list)
-        or any(
+        or not isinstance(documents, list)
+        or not isinstance(receipts, list)
+        or len(issue_ids) > V2_INVENTORY_ROWS_CAP
+        or len(documents) != len(issue_ids)
+        or len(receipts) != 2 * len(issue_ids)
+        or audit_capture["raw_stream_bodies_retained"] is not False
+        or audit_capture["no_claim"] != V2_AUDIT_CAPTURE_NO_CLAIM
+    ):
+        raise InputRefused(
+            "v2 source audit capture cardinality or scalar contract differs"
+        )
+    v2_validate_canonical_byte_size(
+        audit_capture,
+        cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+        label="v2 source audit capture",
+        error_type=InputRefused,
+    )
+    if (
+        any(
             not isinstance(issue_id, str) or not issue_id
             for issue_id in issue_ids
         )
         or issue_ids != sorted(set(issue_ids))
         or not set(issue_ids).issubset(allowed_issue_ids)
-        or not isinstance(documents, list)
-        or not isinstance(receipts, list)
-        or audit_capture["raw_stream_bodies_retained"] is not False
-        or audit_capture["no_claim"] != V2_AUDIT_CAPTURE_NO_CLAIM
     ):
         raise InputRefused(
-            "v2 source audit capture membership or scalar contract differs"
-        )
-    if len(receipts) != 2 * len(issue_ids):
-        raise InputRefused(
-            "v2 source audit capture lacks two receipts per issue"
+            "v2 source audit capture membership contract differs"
         )
     document_ids = [
         document.get("issue_id")
@@ -17577,6 +18913,28 @@ def v2_validate_audit_capture(
         raise InputRefused(
             "v2 source audit document membership differs from issue IDs"
         )
+    for index, document in enumerate(documents):
+        try:
+            expected_document = v2_normalize_audit_document(
+                {
+                    "issue_id": document["issue_id"],
+                    "events": document.get("events"),
+                },
+                issue_id=document["issue_id"],
+            )
+        except (InfrastructureFailed, EvidenceFailed, KeyError) as error:
+            raise InputRefused(
+                f"v2 source audit document {index} is malformed or over cap"
+            ) from error
+        if document != expected_document:
+            divergence = first_projection_divergence(
+                expected_document,
+                document,
+            )
+            raise InputRefused(
+                "v2 source audit document differs from its normalized "
+                f"projection at {divergence or '$'}"
+            )
     expected_order = [
         (capture_ordinal, issue_id)
         for capture_ordinal in (1, 2)
@@ -17607,11 +18965,11 @@ def v2_validate_audit_capture(
             or type(receipt["stdout_byte_length"]) is not int
             or not 0
             < receipt["stdout_byte_length"]
-            <= CAPS["subprocess_stdout_bytes"]
+            <= V2_AUDIT_STREAM_BYTES_CAP
             or type(receipt["stderr_byte_length"]) is not int
             or not 0
             <= receipt["stderr_byte_length"]
-            <= CAPS["subprocess_stdout_bytes"]
+            <= V2_AUDIT_STREAM_BYTES_CAP
             or (
                 receipt["stderr_byte_length"] == 0
                 and receipt["stderr_root"]
@@ -17635,6 +18993,10 @@ def v2_validate_audit_capture(
         raise InputRefused(
             "v2 source audit command receipt order is noncanonical"
         )
+    verify_semantic_root(
+        audit_capture,
+        label="v2 source audit capture envelope",
+    )
     return receipts
 
 
@@ -17661,11 +19023,7 @@ def v2_validate_source_review_receipt_envelope(
         raise InputRefused(
             "v2 source review receipt envelope has a non-closed schema"
         )
-    verify_semantic_root(
-        receipt_document,
-        label="v2 source review receipt envelope",
-    )
-    receipts = receipt_document["receipts"]
+    receipts = receipt_document.get("receipts")
     if (
         receipt_document["schema"] != V2_REVIEW_RECEIPTS_SCHEMA
         or any(
@@ -17686,42 +19044,14 @@ def v2_validate_source_review_receipt_envelope(
         raise InputRefused(
             "v2 source review receipt envelope identity or no-claim differs"
         )
-    source_identity = receipt_document.get("source_identity")
-    if source_identity is not None:
-        if not isinstance(source_identity, dict):
-            raise InputRefused(
-                "v2 source review receipt source identity is malformed"
-            )
-        v2_exact_keys(
-            source_identity,
-            {"path", "bytes", "root"},
-            label="v2 source review receipt source identity",
-        )
-        try:
-            normalized_path = str(
-                safe_relative(
-                    source_identity["path"],
-                    label="v2 source review receipt source identity path",
-                )
-            )
-        except (KeyError, TypeError, UsageRefused) as error:
-            raise InputRefused(
-                "v2 source review receipt source identity path is malformed"
-            ) from error
-        if (
-            normalized_path != source_identity["path"]
-            or type(source_identity["bytes"]) is not int
-            or source_identity["bytes"] < 0
-            or not isinstance(source_identity["root"], str)
-            or re.fullmatch(
-                r"sha256-v1:[0-9a-f]{64}",
-                source_identity["root"],
-            )
-            is None
-        ):
-            raise InputRefused(
-                "v2 source review receipt source identity scalars differ"
-            )
+    verify_semantic_root(
+        receipt_document,
+        label="v2 source review receipt envelope",
+    )
+    v2_validate_review_receipt_source_identity(
+        receipt_document,
+        label="v2 source review receipts",
+    )
     target_ids: list[str] = []
     for index, receipt in enumerate(receipts):
         if not isinstance(receipt, dict):
@@ -17760,10 +19090,6 @@ def v2_validate_source_prior_campaign_envelope(
 ) -> None:
     if not isinstance(prior_campaign, dict):
         raise InputRefused("v2 source prior campaign is not an object")
-    verify_semantic_root(
-        prior_campaign,
-        label="v2 source prior campaign",
-    )
     state = prior_campaign.get("state")
     if state == "NOT_PROVIDED":
         v2_exact_keys(
@@ -17790,6 +19116,10 @@ def v2_validate_source_prior_campaign_envelope(
             raise InputRefused(
                 "v2 source absent prior campaign carries evidence or authority"
             )
+        verify_semantic_root(
+            prior_campaign,
+            label="v2 source prior campaign",
+        )
         return
     if state != "PROVIDED":
         raise InputRefused("v2 source prior campaign has an unknown state")
@@ -17841,6 +19171,192 @@ def v2_validate_source_prior_campaign_envelope(
         raise InputRefused(
             "v2 source prior campaign identity or no-claim differs"
         )
+    verify_semantic_root(
+        prior_campaign,
+        label="v2 source prior campaign",
+    )
+
+
+def v2_preflight_source_v1_inventory_nested_lists(
+    inventory: Mapping[str, Any],
+) -> None:
+    rows = inventory.get("rows")
+    warning_rows = inventory.get("warning_rows")
+    if not isinstance(rows, list):
+        raise InputRefused("v2 source v1 inventory rows are not an array")
+    if not isinstance(warning_rows, list):
+        raise InputRefused(
+            "v2 source v1 inventory warning rows are not an array"
+        )
+    if len(rows) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "v2 source v1 inventory rows exceed the inventory row cap"
+        )
+    if len(warning_rows) > V2_WARNING_ROWS_CAP:
+        raise InputRefused(
+            "v2 source v1 inventory warning rows exceed the warning row cap"
+        )
+    warning_count = 0
+    maximum_warnings_per_issue = 0
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise InputRefused(
+                f"v2 source v1 inventory row {index} is not an object"
+            )
+        missing_sections = row.get("missing_sections")
+        if not isinstance(missing_sections, list):
+            raise InputRefused(
+                "v2 source v1 inventory row "
+                f"{index} missing sections are not an array"
+            )
+        row_warning_count = len(missing_sections)
+        maximum_warnings_per_issue = max(
+            maximum_warnings_per_issue,
+            row_warning_count,
+        )
+        warning_count += row_warning_count
+        if warning_count > V2_WARNING_ROWS_CAP:
+            raise InputRefused(
+                "v2 source v1 inventory row warnings exceed the warning row cap"
+            )
+    v2_validate_source_limits(
+        row_count=len(rows),
+        warning_count=max(warning_count, len(warning_rows)),
+        maximum_warnings_per_issue=maximum_warnings_per_issue,
+    )
+
+
+def v2_preflight_source_v1_lint_nested_lists(
+    lint: Mapping[str, Any],
+) -> None:
+    for scope in LINT_SCOPES:
+        projection = lint.get(scope)
+        if not isinstance(projection, dict):
+            raise InputRefused(
+                f"v2 source v1 lint scope {scope} is not an object"
+            )
+        results = projection.get("results")
+        declared_issues = projection.get("issues")
+        declared_warnings = projection.get("total")
+        if not isinstance(results, list):
+            raise InputRefused(
+                f"v2 source v1 lint scope {scope} results are not an array"
+            )
+        if (
+            type(declared_issues) is not int
+            or declared_issues < 0
+            or type(declared_warnings) is not int
+            or declared_warnings < 0
+        ):
+            raise InputRefused(
+                f"v2 source v1 lint scope {scope} counts are malformed"
+            )
+        warning_count = 0
+        maximum_warnings_per_issue = 0
+        for index, row in enumerate(results):
+            if not isinstance(row, dict):
+                raise InputRefused(
+                    "v2 source v1 lint scope "
+                    f"{scope} row {index} is not an object"
+                )
+            missing_sections = row.get("missing")
+            suggestions = row.get("suggestions")
+            if not isinstance(missing_sections, list):
+                raise InputRefused(
+                    "v2 source v1 lint scope "
+                    f"{scope} row {index} missing sections are not an array"
+                )
+            if suggestions is not None and not isinstance(suggestions, list):
+                raise InputRefused(
+                    "v2 source v1 lint scope "
+                    f"{scope} row {index} suggestions are not an array"
+                )
+            if (
+                isinstance(suggestions, list)
+                and len(suggestions) > V2_WARNINGS_PER_ISSUE_CAP
+            ):
+                raise InputRefused(
+                    "v2 source v1 lint scope "
+                    f"{scope} row {index} suggestions exceed the per-issue cap"
+                )
+            row_warning_count = len(missing_sections)
+            maximum_warnings_per_issue = max(
+                maximum_warnings_per_issue,
+                row_warning_count,
+            )
+            warning_count += row_warning_count
+            if warning_count > V2_WARNING_ROWS_CAP:
+                raise InputRefused(
+                    f"v2 source v1 lint scope {scope} warnings exceed the cap"
+                )
+        v2_validate_source_limits(
+            row_count=max(len(results), declared_issues),
+            warning_count=max(warning_count, declared_warnings),
+            maximum_warnings_per_issue=maximum_warnings_per_issue,
+        )
+
+
+def v2_preflight_source_observation_nested_lists(
+    observation: Mapping[str, Any],
+) -> None:
+    source_files = observation.get("source_files")
+    status_cut = observation.get("status_cut")
+    command_receipts = observation.get("command_receipts")
+    br_version = observation.get("br_version")
+    features = (
+        br_version.get("features")
+        if isinstance(br_version, dict)
+        else None
+    )
+    if not isinstance(source_files, list):
+        raise InputRefused(
+            "v2 source observation source files are not an array"
+        )
+    if len(source_files) > V2_BUNDLE_FILES_CAP:
+        raise InputRefused(
+            "v2 source observation source files exceed the bundle file cap"
+        )
+    if not isinstance(status_cut, list):
+        raise InputRefused(
+            "v2 source observation status cut is not an array"
+        )
+    if len(status_cut) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "v2 source observation status cut exceeds the inventory row cap"
+        )
+    if not isinstance(command_receipts, list):
+        raise InputRefused(
+            "v2 source observation command receipts are not an array"
+        )
+    if len(command_receipts) > V2_LOG_EVENTS_CAP - 8:
+        raise InputRefused(
+            "v2 source observation command receipts exceed the event budget"
+        )
+    if not isinstance(features, list):
+        raise InputRefused(
+            "v2 source observation br features are not an array"
+        )
+    if len(features) > V2_LOG_EVENTS_CAP:
+        raise InputRefused(
+            "v2 source observation br features exceed the event budget"
+        )
+    for index, receipt in enumerate(command_receipts):
+        if not isinstance(receipt, dict):
+            raise InputRefused(
+                f"v2 source observation command receipt {index} is not an object"
+            )
+        for field in ("argv", "cleanup_error_kinds"):
+            values = receipt.get(field)
+            if not isinstance(values, list):
+                raise InputRefused(
+                    "v2 source observation command receipt "
+                    f"{index} {field} is not an array"
+                )
+            if len(values) > V2_LOG_EVENTS_CAP:
+                raise InputRefused(
+                    "v2 source observation command receipt "
+                    f"{index} {field} exceeds the event budget"
+                )
 
 
 def v2_validate_source_document(source: Mapping[str, Any]) -> None:
@@ -17931,6 +19447,46 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         )
     ):
         raise InputRefused("v2 source captured input types are malformed")
+    v2_preflight_source_v1_lint_nested_lists(
+        captured["v1_lint_projection"]
+    )
+    v2_preflight_source_v1_inventory_nested_lists(
+        captured["v1_inventory_projection"]
+    )
+    v2_preflight_source_observation_nested_lists(
+        captured["observation"]
+    )
+    all_issues = captured["all_issues"]
+    if len(all_issues) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "v2 source all-issue projection exceeds its row cap"
+        )
+    retained_projection_bytes = len(canonical_bytes([]))
+    for index, row in enumerate(all_issues):
+        v2_validate_source_full_issue(row, index=index)
+        row_bytes = len(canonical_bytes(row))
+        retained_projection_bytes = (
+            row_bytes + 2
+            if index == 0
+            else retained_projection_bytes + row_bytes
+        )
+        v2_validate_aggregate_byte_count(
+            retained_projection_bytes,
+            cap=V2_SOURCE_PROJECTION_BYTES_CAP,
+            label="v2 source all-issue projections",
+            error_type=InputRefused,
+        )
+    v2_assert_unique(
+        [row["id"] for row in all_issues],
+        label="v2 source all-issue IDs",
+    )
+    if [row["id"] for row in all_issues] != sorted(
+        row["id"] for row in all_issues
+    ):
+        raise InputRefused(
+            "v2 source all-issue membership is noncanonical"
+        )
+    v2_validate_source_graph(all_issues)
     campaign = captured["campaign"]
     v2_exact_keys(
         campaign,
@@ -17955,9 +19511,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     for label, document in (
         ("v1 inventory", captured["v1_inventory_projection"]),
         ("observation", captured["observation"]),
-        ("review receipts", captured["review_receipts"]),
-        ("prior campaign", captured["prior_campaign"]),
-        ("audit capture", captured["audit_capture"]),
     ):
         if "semantic_root" not in document:
             raise InputRefused(f"v2 source {label} lacks a semantic root")
@@ -17968,7 +19521,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     v2_validate_source_prior_campaign_envelope(
         captured["prior_campaign"]
     )
-    verify_semantic_root(source, label="source-v2.json")
     expected = {
         "all_issues": semantic_root(captured["all_issues"]),
         "v1_lint_projection": semantic_root(captured["v1_lint_projection"]),
@@ -17982,23 +19534,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     }
     if roots != expected:
         raise EvidenceFailed("v2 source captured-input roots disagree")
-    all_issues = captured["all_issues"]
-    if len(all_issues) > V2_INVENTORY_ROWS_CAP:
-        raise InputRefused(
-            "v2 source all-issue projection exceeds its row cap"
-        )
-    for index, row in enumerate(all_issues):
-        v2_validate_source_full_issue(row, index=index)
-    v2_assert_unique(
-        [row["id"] for row in all_issues],
-        label="v2 source all-issue IDs",
-    )
-    if [row["id"] for row in all_issues] != sorted(
-        row["id"] for row in all_issues
-    ):
-        raise InputRefused(
-            "v2 source all-issue membership is noncanonical"
-        )
     if (
         campaign["issue_count"] != len(all_issues)
         or campaign["issue_ids_root"]
@@ -18081,9 +19616,21 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     filters = captured["filters"]
     if (
         not isinstance(filters, dict)
-        or set(filters) != {"priorities", "statuses", "empty_means_all"}
+        or set(filters)
+        != {
+            "priorities",
+            "statuses",
+            "targets",
+            "readiness",
+            "routes",
+            "empty_means_all",
+            "authority_filters_apply_to_selected_projection",
+        }
         or not isinstance(filters["priorities"], list)
         or not isinstance(filters["statuses"], list)
+        or not isinstance(filters["targets"], list)
+        or not isinstance(filters["readiness"], list)
+        or not isinstance(filters["routes"], list)
         or any(
             not isinstance(value, str)
             or value not in {f"P{priority}" for priority in range(5)}
@@ -18093,9 +19640,32 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             not isinstance(value, str) or value not in STATUS_SCOPES
             for value in filters["statuses"]
         )
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}",
+                value,
+            )
+            is None
+            for value in filters["targets"]
+        )
+        or any(
+            not isinstance(value, str)
+            or value not in V2_READINESS_STATES
+            for value in filters["readiness"]
+        )
+        or any(
+            not isinstance(value, str)
+            or value not in V2_REMEDIATION_ROUTES
+            for value in filters["routes"]
+        )
         or filters["priorities"] != sorted(set(filters["priorities"]))
         or filters["statuses"] != sorted(set(filters["statuses"]))
+        or filters["targets"] != sorted(set(filters["targets"]))
+        or filters["readiness"] != sorted(set(filters["readiness"]))
+        or filters["routes"] != sorted(set(filters["routes"]))
         or filters["empty_means_all"] is not True
+        or filters["authority_filters_apply_to_selected_projection"] is not True
     ):
         raise EvidenceFailed("v2 source filter projection is malformed")
     observation = captured["observation"]
@@ -18388,6 +19958,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         all_issue_by_id = {row["id"]: row for row in all_issues}
         priority_filter = set(filters["priorities"])
         status_filter = set(filters["statuses"])
+        target_filter = set(filters["targets"])
         expected_audit_ids = {
             issue_id
             for issue_id in v1_inventory_ids
@@ -18401,6 +19972,10 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             and (
                 not status_filter
                 or all_issue_by_id[issue_id]["status"] in status_filter
+            )
+            and (
+                not target_filter
+                or issue_id in target_filter
             )
         }
         expected_audit_ids.add(
@@ -18438,6 +20013,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             )
         audit_ids.append(issue_id)
     v2_assert_unique(audit_ids, label="v2 source audit IDs")
+    verify_semantic_root(source, label="source-v2.json")
 
 
 def v2_validate_source_manifest_anchor(
@@ -19103,11 +20679,17 @@ def v2_reconstruct_retained(
     filters = source["captured"]["filters"]
     priority_filter = set(filters["priorities"]) or None
     status_filter = set(filters["statuses"]) or None
+    target_filter = set(filters["targets"]) or None
+    readiness_filter = set(filters["readiness"]) or None
+    route_filter = set(filters["routes"]) or None
     inventory = v2_build_inventory(
         snapshot,
         campaign_epoch_root=campaign_root,
         priority_filter=priority_filter,
         status_filter=status_filter,
+        target_filter=target_filter,
+        readiness_filter=readiness_filter,
+        route_filter=route_filter,
     )
     authority = v2_derive_authority(
         inventory,
@@ -19670,15 +21252,16 @@ def v2_synthetic_target(
                 "design": 32,
                 "notes": 32,
             },
-            "clause_roots": [
+            "clause_roots": v2_complete_clause_roots(
                 {
-                    "field": "description",
-                    "line_index": 0,
-                    "byte_length": 32,
-                    "text_root": text_root(f"{issue_id}:clause"),
-                    "truncated": False,
+                    "description": (
+                        f"Acceptance clause for synthetic target {issue_id}"
+                    ),
+                    "acceptance_criteria": "",
+                    "design": "",
+                    "notes": "",
                 }
-            ],
+            ),
             "target_root": target_root,
             "v1_row_root": semantic_root({"id": issue_id, "v1": True}),
             "dependency_neighborhood_root": dependency_root,
@@ -19744,7 +21327,15 @@ def v2_synthetic_inventory(
             "schema": V2_INVENTORY_SCHEMA,
             "v1_inventory_root": semantic_root({"synthetic": True}),
             "campaign_epoch_root": campaign_root,
-            "filters": {"priorities": [], "statuses": [], "empty_means_all": True},
+            "filters": {
+                "priorities": [],
+                "statuses": [],
+                "targets": [],
+                "readiness": [],
+                "routes": [],
+                "empty_means_all": True,
+                "authority_filters_apply_to_selected_projection": True,
+            },
             "rows": rows,
             "counts": {
                 "targets": len(rows),
@@ -20903,6 +22494,9 @@ def v2_execute_schema_cli_ux(
             "--prior-campaign",
             "--priorities",
             "--statuses",
+            "--targets",
+            "--readiness",
+            "--routes",
             "--max-targets-per-child",
             "--explain-target",
             "--artifact-root",
@@ -20923,6 +22517,16 @@ def v2_execute_schema_cli_ux(
                 "stdout_bytes": len(completed.stdout.encode("utf-8")),
             },
         )
+        checks.check(
+            "help-stream-contract",
+            completed.stderr == ""
+            and "\x1b[" not in completed.stdout,
+            expected={"stderr": "", "ansi": False},
+            observed={
+                "stderr_root": text_root(completed.stderr),
+                "ansi": "\x1b[" in completed.stdout,
+            },
+        )
     elif slug == "cli-exclusive-mode":
         checks.refuses(
             "mode-required",
@@ -20939,6 +22543,14 @@ def v2_execute_schema_cli_ux(
             UsageRefused,
             lambda: parse_arguments(["--review-plan", "--review-plan"]),
             contains="duplicate",
+        )
+        checks.refuses(
+            "unknown-mode",
+            UsageRefused,
+            lambda: parse_arguments(
+                ["--self-test-v2", "--unknown-v2-mode"]
+            ),
+            contains="unrecognized arguments",
         )
         parsed = parse_arguments(["--self-test-v2"])
         checks.check(
@@ -20971,6 +22583,20 @@ def v2_execute_schema_cli_ux(
             UsageRefused,
             lambda: parse_arguments(["--review-plan", "--output", "x"]),
             contains="unsupported",
+        )
+        checks.refuses(
+            "duplicate-artifact-root",
+            UsageRefused,
+            lambda: parse_arguments(
+                [
+                    "--review-plan",
+                    "--artifact-root",
+                    "target/a",
+                    "--artifact-root",
+                    "target/b",
+                ]
+            ),
+            contains="duplicate",
         )
         valid = parse_arguments(
             [
@@ -21013,6 +22639,15 @@ def v2_execute_schema_cli_ux(
                 UsageRefused,
                 lambda value=value: safe_relative(value, label="fixture"),
             )
+        checks.refuses(
+            "path-bounded-byte-cap",
+            UsageRefused,
+            lambda: safe_relative(
+                "a" * (CAPS["relative_path_bytes"] + 1),
+                label="fixture",
+            ),
+            contains="path",
+        )
     elif slug == "cli-review-receipts":
         inventory = v2_synthetic_inventory([v2_synthetic_target(0)])
         empty = v2_load_review_receipts(None, inventory=inventory)
@@ -21310,9 +22945,95 @@ def v2_execute_schema_cli_ux(
             ),
             contains="canonical target order",
         )
+        external_source = strict_json_loads(
+            canonical_bytes(base_reviewed),
+            label="external review-receipt source seed",
+            require_canonical=True,
+        )
+        external_source.pop("semantic_root", None)
+        external_source["source"] = "fixtures/review-receipts.json"
+        source_payload = v2_reconstructed_review_receipt_source_payload(
+            external_source
+        )
+        external_source["source_identity"] = {
+            "path": "fixtures/review-receipts.json",
+            "bytes": len(source_payload),
+            "root": (
+                "sha256-v1:" + hashlib.sha256(source_payload).hexdigest()
+            ),
+        }
+        external_source = v2_rooted(external_source)
+        v2_validate_receipt_bindings(external_source, inventory)
+        checks.check(
+            "external-receipt-source-identity-binds-canonical-input",
+            True,
+            expected={
+                "bytes": len(source_payload),
+                "root": (
+                    "sha256-v1:"
+                    + hashlib.sha256(source_payload).hexdigest()
+                ),
+            },
+            observed=external_source["source_identity"],
+        )
+
+        def reroot_external_source(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(external_source),
+                label="external receipt identity mutation seed",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            mutation(candidate)
+            return v2_rooted(candidate)
+
+        missing_source_identity = reroot_external_source(
+            lambda value: value.pop("source_identity")
+        )
+        checks.refuses(
+            "external-receipt-missing-source-identity-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                missing_source_identity,
+                inventory,
+            ),
+            contains="lacks its required file identity",
+        )
+        forged_source_identity = reroot_external_source(
+            lambda value: value["source_identity"].__setitem__(
+                "root",
+                semantic_root({"forged": "source bytes"}),
+            )
+        )
+        checks.refuses(
+            "external-receipt-forged-source-identity-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                forged_source_identity,
+                inventory,
+            ),
+            contains="does not bind reconstructed canonical bytes",
+        )
     elif slug == "cli-filters-explain":
+        parsed_filters = parse_arguments(
+            [
+                "--review-plan",
+                "--priorities",
+                "P2,P0",
+                "--statuses",
+                "blocked,open",
+                "--targets",
+                "synthetic-0001,synthetic-0000",
+                "--readiness",
+                "REVIEW_ONLY,DECLARED_READY",
+                "--routes",
+                "MANUAL_BR_REVIEW,ANALYSIS_ONLY",
+            ]
+        )
         first = v2_parse_csv_set(
-            "P2,P0",
+            parsed_filters.priorities,
             allowed={f"P{priority}" for priority in range(5)},
             label="priorities",
         )
@@ -21321,11 +23042,80 @@ def v2_execute_schema_cli_ux(
             allowed={f"P{priority}" for priority in range(5)},
             label="priorities",
         )
+        parsed_statuses = v2_parse_csv_set(
+            parsed_filters.statuses,
+            allowed=STATUS_SCOPES,
+            label="statuses",
+        )
+        parsed_targets = v2_parse_target_set(
+            parsed_filters.targets,
+            label="targets",
+        )
+        parsed_readiness = v2_parse_csv_set(
+            parsed_filters.readiness,
+            allowed=V2_READINESS_STATES,
+            label="readiness",
+        )
+        parsed_routes = v2_parse_csv_set(
+            parsed_filters.routes,
+            allowed=V2_REMEDIATION_ROUTES,
+            label="routes",
+        )
         checks.check(
-            "filter-order-invariant",
-            first == second == {"P0", "P2"},
-            expected=["P0", "P2"],
-            observed=sorted(first or []),
+            "all-filter-grammars-order-invariant",
+            first == second == {"P0", "P2"}
+            and parsed_statuses == {"blocked", "open"}
+            and parsed_targets == {"synthetic-0000", "synthetic-0001"}
+            and parsed_readiness == {"REVIEW_ONLY", "DECLARED_READY"}
+            and parsed_routes == {"ANALYSIS_ONLY", "MANUAL_BR_REVIEW"},
+            expected={
+                "priorities": ["P0", "P2"],
+                "statuses": ["blocked", "open"],
+                "targets": ["synthetic-0000", "synthetic-0001"],
+                "readiness": ["DECLARED_READY", "REVIEW_ONLY"],
+                "routes": ["ANALYSIS_ONLY", "MANUAL_BR_REVIEW"],
+            },
+            observed={
+                "priorities": sorted(first or []),
+                "statuses": sorted(parsed_statuses or []),
+                "targets": sorted(parsed_targets or []),
+                "readiness": sorted(parsed_readiness or []),
+                "routes": sorted(parsed_routes or []),
+            },
+        )
+        canonical_reproduction = v2_reproduction_argv(
+            mode="review-plan",
+            artifact_root="target/v2",
+            artifact_dir="filtered-run",
+            priorities=",".join(sorted(first or [])),
+            statuses=",".join(sorted(parsed_statuses or [])),
+            targets=",".join(sorted(parsed_targets or [])),
+            readiness=",".join(sorted(parsed_readiness or [])),
+            routes=",".join(sorted(parsed_routes or [])),
+        )
+        checks.check(
+            "canonical-filter-reproduction-argv",
+            canonical_reproduction
+            == [
+                str(SCRIPT_REL),
+                "--review-plan",
+                "--artifact-root",
+                "target/v2",
+                "--artifact-dir",
+                "filtered-run",
+                "--priorities",
+                "P0,P2",
+                "--statuses",
+                "blocked,open",
+                "--targets",
+                "synthetic-0000,synthetic-0001",
+                "--readiness",
+                "DECLARED_READY,REVIEW_ONLY",
+                "--routes",
+                "ANALYSIS_ONLY,MANUAL_BR_REVIEW",
+            ],
+            expected="canonical option and sorted-set order",
+            observed=canonical_reproduction,
         )
         checks.refuses(
             "unknown-filter-refused",
@@ -21336,6 +23126,161 @@ def v2_execute_schema_cli_ux(
                 label="priorities",
             ),
             contains="unknown",
+        )
+        checks.refuses(
+            "unknown-status-filter-refused",
+            UsageRefused,
+            lambda: v2_parse_csv_set(
+                "retired",
+                allowed=STATUS_SCOPES,
+                label="statuses",
+            ),
+            contains="unknown",
+        )
+        checks.refuses(
+            "unknown-route-filter-refused",
+            UsageRefused,
+            lambda: v2_parse_csv_set(
+                "MAGIC",
+                allowed=V2_REMEDIATION_ROUTES,
+                label="routes",
+            ),
+            contains="unknown",
+        )
+        checks.refuses(
+            "unknown-readiness-filter-refused",
+            UsageRefused,
+            lambda: v2_parse_csv_set(
+                "READY_ENOUGH",
+                allowed=V2_READINESS_STATES,
+                label="readiness",
+            ),
+            contains="unknown",
+        )
+        checks.refuses(
+            "duplicate-filter-member-refused",
+            UsageRefused,
+            lambda: v2_parse_csv_set(
+                "P0,P0",
+                allowed={"P0"},
+                label="priorities",
+            ),
+            contains="duplicate",
+        )
+        raw_filter_issues = [
+            fixture_issue(
+                issue_id="filter-p0-open",
+                priority=0,
+                status="open",
+            ),
+            fixture_issue(
+                issue_id="filter-p2-blocked",
+                priority=2,
+                status="blocked",
+            ),
+            fixture_issue(
+                issue_id="filter-p2-open",
+                priority=2,
+                status="open",
+            ),
+        ]
+        _, _, filter_snapshot, _ = v2_authentic_projection_fixture(
+            raw_filter_issues
+        )
+        filter_campaign_root, _ = v2_campaign_epoch(filter_snapshot)
+        filtered_inventory = v2_build_inventory(
+            filter_snapshot,
+            campaign_epoch_root=filter_campaign_root,
+            priority_filter={"P2"},
+            status_filter={"open"},
+            target_filter={"filter-p2-open"},
+            readiness_filter={"REVIEW_ONLY"},
+            route_filter={"ANALYSIS_ONLY"},
+        )
+        checks.check(
+            "priority-status-target-filter-exact-membership",
+            [row["id"] for row in filtered_inventory["rows"]]
+            == ["filter-p2-open"]
+            and filtered_inventory["filters"]
+            == {
+                "priorities": ["P2"],
+                "statuses": ["open"],
+                "targets": ["filter-p2-open"],
+                "readiness": ["REVIEW_ONLY"],
+                "routes": ["ANALYSIS_ONLY"],
+                "empty_means_all": True,
+                "authority_filters_apply_to_selected_projection": True,
+            },
+            expected=["filter-p2-open"],
+            observed={
+                "ids": [row["id"] for row in filtered_inventory["rows"]],
+                "filters": filtered_inventory["filters"],
+            },
+        )
+        checks.refuses(
+            "unknown-target-filter-refused",
+            UsageRefused,
+            lambda: v2_build_inventory(
+                filter_snapshot,
+                campaign_epoch_root=filter_campaign_root,
+                priority_filter=None,
+                status_filter=None,
+                target_filter={"filter-absent"},
+            ),
+            contains="outside the exact planner inventory",
+        )
+        filtered_authority = v2_derive_authority(
+            filtered_inventory,
+            v2_load_review_receipts(
+                None,
+                inventory=filtered_inventory,
+            ),
+            current_br_version="0.2.19",
+        )
+        filtered_plan, _ = v2_build_review_plan(
+            filtered_inventory,
+            filtered_authority,
+            max_targets=V2_REVIEW_TARGET_DEFAULT,
+        )
+        checks.check(
+            "route-readiness-filters-select-authority-projection",
+            filtered_plan["counts"]["targets"] == 1
+            and filtered_plan["children"][0]["target_ids"]
+            == ["filter-p2-open"],
+            expected=["filter-p2-open"],
+            observed=[
+                target_id
+                for child in filtered_plan["children"]
+                for target_id in child["target_ids"]
+            ],
+        )
+        mismatched_inventory = dict(filtered_inventory)
+        mismatched_inventory.pop("semantic_root", None)
+        mismatched_inventory["filters"] = {
+            **filtered_inventory["filters"],
+            "readiness": ["MECHANICALLY_APPLY_ELIGIBLE"],
+        }
+        mismatched_inventory = v2_rooted(mismatched_inventory)
+        mismatched_authority = dict(filtered_authority)
+        mismatched_authority.pop("semantic_root", None)
+        mismatched_authority["inventory_root"] = mismatched_inventory[
+            "semantic_root"
+        ]
+        mismatched_authority = v2_rooted(mismatched_authority)
+        empty_filtered_plan, _ = v2_build_review_plan(
+            mismatched_inventory,
+            mismatched_authority,
+            max_targets=V2_REVIEW_TARGET_DEFAULT,
+        )
+        checks.check(
+            "nonmatching-authority-filter-is-explicit-empty-selection",
+            empty_filtered_plan["counts"]["targets"] == 0
+            and empty_filtered_plan["children"] == [],
+            expected={"targets": 0, "children": []},
+            observed={
+                "targets": empty_filtered_plan["counts"]["targets"],
+                "children": empty_filtered_plan["children"],
+            },
         )
         review, authority, _ = v2_plan_for_count(
             2,
@@ -21441,86 +23386,355 @@ def v2_execute_schema_cli_ux(
             contains="lacks an authority decision",
         )
     elif slug in {"ux-empty-synopsis", "ux-large-synopsis"}:
-        count = 0 if slug == "ux-empty-synopsis" else 13
-        inventory = v2_synthetic_inventory(
-            [v2_synthetic_target(index) for index in range(count)]
-        )
-        authority = v2_synthetic_authority(inventory)
-        review = v2_rooted(
-            {
-                "schema": V2_REVIEW_PLAN_SCHEMA,
-                "children": [
-                    {"priority": 2, "target_ids": [row["id"]]}
-                    for row in inventory["rows"]
-                ],
-                "oversize_content": [],
-                "work": {
-                    "total_review_minutes": count,
-                    "minimum_child_review_minutes": 0 if not count else 1,
-                    "maximum_child_review_minutes": 0 if not count else 1,
-                },
+        def fixture_synopsis(count: int) -> dict[str, Any]:
+            inventory = v2_synthetic_inventory(
+                [v2_synthetic_target(index) for index in range(count)]
+            )
+            authority = v2_synthetic_authority(inventory)
+            review = v2_rooted(
+                {
+                    "schema": V2_REVIEW_PLAN_SCHEMA,
+                    "children": [
+                        {"priority": 2, "target_ids": [row["id"]]}
+                        for row in inventory["rows"]
+                    ],
+                    "oversize_content": [],
+                    "work": {
+                        "total_review_minutes": count,
+                        "minimum_child_review_minutes": (
+                            0 if not count else 1
+                        ),
+                        "maximum_child_review_minutes": (
+                            0 if not count else 1
+                        ),
+                    },
+                }
+            )
+            history = v2_rooted(
+                {"schema": V2_HISTORY_SCHEMA, "rows": []}
+            )
+            zero = v2_rooted(
+                {
+                    "schema": V2_ZERO_SETS_SCHEMA,
+                    "counts": {
+                        "zero_receipts": 25 if not count else 24
+                    },
+                }
+            )
+            return v2_synopsis(
+                subject_mode="review-plan",
+                review_plan=review,
+                history=history,
+                authority=authority,
+                zero_sets=zero,
+                artifact_dir="target/v2/fixture",
+                reproduction=["script", "--review-plan"],
+                explain_target=None,
+            )
+
+        if slug == "ux-empty-synopsis":
+            synopsis = fixture_synopsis(0)
+            required_top_level = {
+                "schema",
+                "mode",
+                "counts",
+                "work",
+                "capacity_wave_forecast",
+                "active_conflicts",
+                "top_blockers",
+                "selected_ids",
+                "why_grouped",
+                "explanation",
+                "safe_next_action",
+                "artifacts",
+                "reproduction",
+                "no_claim",
             }
-        )
-        history = v2_rooted(
-            {"schema": V2_HISTORY_SCHEMA, "rows": []}
-        )
-        zero = v2_rooted(
-            {
-                "schema": V2_ZERO_SETS_SCHEMA,
-                "counts": {"zero_receipts": 25 if not count else 24},
-            }
-        )
-        synopsis = v2_synopsis(
-            subject_mode="review-plan",
-            review_plan=review,
-            history=history,
-            authority=authority,
-            zero_sets=zero,
-            artifact_dir="target/v2/fixture",
-            reproduction=["script", "--review-plan"],
-            explain_target=None,
-        )
-        checks.check(
-            "synopsis-bounded-utf8",
-            len(canonical_bytes(synopsis)) <= V2_SYNOPSIS_BYTES_CAP,
-            expected=f"<= {V2_SYNOPSIS_BYTES_CAP}",
-            observed=len(canonical_bytes(synopsis)),
-        )
-        checks.check(
-            "synopsis-id-preview",
-            synopsis["selected_ids"]["shown"] == min(count, 12)
-            and synopsis["selected_ids"]["total"] == count,
-            expected={"shown": min(count, 12), "total": count},
-            observed=synopsis["selected_ids"],
-        )
-        if count:
             checks.check(
-                "synopsis-truncation-explicit",
-                synopsis["selected_ids"]["truncated"] is True
-                and synopsis["selected_ids"]["notice"] is not None,
-                expected=True,
-                observed=synopsis["selected_ids"],
+                "empty-synopsis-exact-sections",
+                set(synopsis) == required_top_level
+                and set(synopsis["counts"])
+                == set(manifest["synopsis_contract"]["required_counts"])
+                and set(synopsis["work"])
+                == set(manifest["synopsis_contract"]["required_work"]),
+                expected={
+                    "top_level": sorted(required_top_level),
+                    "counts": sorted(
+                        manifest["synopsis_contract"]["required_counts"]
+                    ),
+                    "work": sorted(
+                        manifest["synopsis_contract"]["required_work"]
+                    ),
+                },
+                observed={
+                    "top_level": sorted(synopsis),
+                    "counts": sorted(synopsis["counts"]),
+                    "work": sorted(synopsis["work"]),
+                },
+            )
+            checks.check(
+                "empty-synopsis-exact-zero-values",
+                synopsis["counts"]
+                == {
+                    "targets": 0,
+                    "children": 0,
+                    "readiness": {},
+                    "routes": {},
+                    "owners": 0,
+                    "oversize": 0,
+                    "zero_receipts": 25,
+                }
+                and synopsis["work"]
+                == {
+                    "total_review_minutes": 0,
+                    "minimum_review_minutes": 0,
+                    "maximum_review_minutes": 0,
+                }
+                and synopsis["capacity_wave_forecast"]
+                == {f"P{priority}": 0 for priority in range(5)}
+                and synopsis["active_conflicts"] == []
+                and synopsis["top_blockers"] == []
+                and synopsis["selected_ids"]
+                == {
+                    "total": 0,
+                    "shown": 0,
+                    "ids": [],
+                    "truncated": False,
+                    "notice": None,
+                }
+                and synopsis["explanation"] is None,
+                expected="all empty-campaign numeric and membership values exact",
+                observed=synopsis,
+            )
+            checks.check(
+                "empty-synopsis-operator-fields-exact",
+                synopsis["artifacts"] == "target/v2/fixture"
+                and synopsis["reproduction"]
+                == ["script", "--review-plan"]
+                and "do not mutate" in synopsis["safe_next_action"]
+                and "no authority is minted" in synopsis["no_claim"],
+                expected={
+                    "artifacts": "target/v2/fixture",
+                    "reproduction": ["script", "--review-plan"],
+                    "safe": "do not mutate",
+                    "no_claim": "no authority is minted",
+                },
+                observed={
+                    "artifacts": synopsis["artifacts"],
+                    "reproduction": synopsis["reproduction"],
+                    "safe_next_action": synopsis["safe_next_action"],
+                    "no_claim": synopsis["no_claim"],
+                },
+            )
+            checks.check(
+                "empty-synopsis-bounded-utf8",
+                len(canonical_bytes(synopsis)) <= V2_SYNOPSIS_BYTES_CAP,
+                expected=f"<= {V2_SYNOPSIS_BYTES_CAP}",
+                observed=len(canonical_bytes(synopsis)),
+            )
+        else:
+            boundary_synopses = {
+                count: fixture_synopsis(count)
+                for count in (
+                    V2_SYNOPSIS_ID_PREVIEW_CAP - 1,
+                    V2_SYNOPSIS_ID_PREVIEW_CAP,
+                    V2_SYNOPSIS_ID_PREVIEW_CAP + 1,
+                )
+            }
+            for count, synopsis in boundary_synopses.items():
+                expected_ids = [
+                    f"synthetic-{index:04d}"
+                    for index in range(
+                        min(count, V2_SYNOPSIS_ID_PREVIEW_CAP)
+                    )
+                ]
+                checks.check(
+                    f"selected-id-preview-boundary-{count}",
+                    synopsis["selected_ids"]["total"] == count
+                    and synopsis["selected_ids"]["shown"]
+                    == min(count, V2_SYNOPSIS_ID_PREVIEW_CAP)
+                    and synopsis["selected_ids"]["ids"] == expected_ids
+                    and synopsis["selected_ids"]["truncated"]
+                    == (count > V2_SYNOPSIS_ID_PREVIEW_CAP)
+                    and (
+                        synopsis["selected_ids"]["notice"] is not None
+                    )
+                    == (count > V2_SYNOPSIS_ID_PREVIEW_CAP),
+                    expected={
+                        "total": count,
+                        "shown": min(
+                            count,
+                            V2_SYNOPSIS_ID_PREVIEW_CAP,
+                        ),
+                        "ids": expected_ids,
+                        "truncated": (
+                            count > V2_SYNOPSIS_ID_PREVIEW_CAP
+                        ),
+                    },
+                    observed=synopsis["selected_ids"],
+                )
+            synopsis = boundary_synopses[
+                V2_SYNOPSIS_ID_PREVIEW_CAP + 1
+            ]
+            exact_bytes = len(canonical_bytes(synopsis))
+            original_synopsis_cap = V2_SYNOPSIS_BYTES_CAP
+            injected_results: dict[str, Any] = {}
+            try:
+                globals()["V2_SYNOPSIS_BYTES_CAP"] = exact_bytes + 1
+                injected_results["n_plus_one"] = fixture_synopsis(
+                    V2_SYNOPSIS_ID_PREVIEW_CAP + 1
+                )
+                globals()["V2_SYNOPSIS_BYTES_CAP"] = exact_bytes
+                injected_results["n"] = fixture_synopsis(
+                    V2_SYNOPSIS_ID_PREVIEW_CAP + 1
+                )
+                globals()["V2_SYNOPSIS_BYTES_CAP"] = exact_bytes - 1
+                try:
+                    fixture_synopsis(V2_SYNOPSIS_ID_PREVIEW_CAP + 1)
+                except EvidenceFailed as error:
+                    injected_results["n_minus_one"] = error
+            finally:
+                globals()["V2_SYNOPSIS_BYTES_CAP"] = original_synopsis_cap
+            checks.check(
+                "synopsis-byte-cap-injected-n-minus-one-n-n-plus-one",
+                len(
+                    canonical_bytes(injected_results["n_plus_one"])
+                )
+                == exact_bytes
+                and len(canonical_bytes(injected_results["n"]))
+                == exact_bytes
+                and isinstance(
+                    injected_results.get("n_minus_one"),
+                    EvidenceFailed,
+                )
+                and "UTF-8 byte cap"
+                in str(injected_results["n_minus_one"]),
+                expected={
+                    "n_minus_one": "EvidenceFailed",
+                    "n": exact_bytes,
+                    "n_plus_one": exact_bytes,
+                },
+                observed={
+                    "n_minus_one": type(
+                        injected_results.get("n_minus_one")
+                    ).__name__,
+                    "n": len(canonical_bytes(injected_results["n"])),
+                    "n_plus_one": len(
+                        canonical_bytes(
+                            injected_results["n_plus_one"]
+                        )
+                    ),
+                },
+            )
+            checks.check(
+                "large-synopsis-retains-complete-artifact-no-claim",
+                synopsis["selected_ids"]["total"]
+                == V2_SYNOPSIS_ID_PREVIEW_CAP + 1
+                and synopsis["selected_ids"]["shown"]
+                == V2_SYNOPSIS_ID_PREVIEW_CAP
+                and "machine artifacts are complete"
+                in str(synopsis["selected_ids"]["notice"])
+                and "complete machine artifacts remain untruncated"
+                in synopsis["no_claim"],
+                expected={
+                    "total": V2_SYNOPSIS_ID_PREVIEW_CAP + 1,
+                    "shown": V2_SYNOPSIS_ID_PREVIEW_CAP,
+                    "artifacts": "untruncated",
+                },
+                observed={
+                    "selected_ids": synopsis["selected_ids"],
+                    "no_claim": synopsis["no_claim"],
+                },
             )
     elif slug == "ux-streams-color-tty":
-        document = {
-            "terminal": "Pass",
-            "no_color": True,
-            "tty_independent": True,
-        }
-        encoded = canonical_bytes(document)
-        checks.check(
-            "no-ansi",
-            b"\x1b[" not in encoded,
-            expected="no ANSI escape",
-            observed="absent" if b"\x1b[" not in encoded else "present",
+        help_result = run_command(
+            [str(REPO_ROOT / SCRIPT_REL), "--help"],
+            environment_overrides={
+                "NO_COLOR": "1",
+                "TERM": "dumb",
+            },
+            record_global_receipt=False,
+        )
+        invalid_result = run_command(
+            [str(REPO_ROOT / SCRIPT_REL), "--unknown-v2-mode"],
+            expected=(TERMINAL_EXIT["UsageRefused"],),
+            environment_overrides={
+                "NO_COLOR": "1",
+                "TERM": "dumb",
+            },
+            record_global_receipt=False,
+        )
+        invalid_document = strict_json_loads(
+            invalid_result.stdout,
+            label="v2 invalid CLI terminal",
+            require_canonical=True,
         )
         checks.check(
-            "semantic-stream-determinism",
-            encoded == canonical_bytes(dict(reversed(list(document.items())))),
-            expected=text_root(encoded.decode("utf-8")),
-            observed=text_root(
-                canonical_bytes(dict(reversed(list(document.items())))).decode("utf-8")
-            ),
+            "actual-help-stdout-stderr-no-color",
+            help_result.returncode == 0
+            and "--review-plan" in help_result.stdout
+            and help_result.stderr == ""
+            and "\x1b[" not in help_result.stdout
+            and "\x1b[" not in help_result.stderr,
+            expected={
+                "exit": 0,
+                "stdout": "help",
+                "stderr": "",
+                "ansi": False,
+            },
+            observed={
+                "exit": help_result.returncode,
+                "stdout_root": text_root(help_result.stdout),
+                "stderr_root": text_root(help_result.stderr),
+                "ansi": "\x1b["
+                in (help_result.stdout + help_result.stderr),
+            },
+        )
+        checks.check(
+            "actual-invalid-cli-typed-exit-and-streams",
+            invalid_result.returncode == TERMINAL_EXIT["UsageRefused"]
+            and invalid_result.stderr == ""
+            and invalid_document["terminal"] == "UsageRefused"
+            and invalid_document["exit_code"]
+            == TERMINAL_EXIT["UsageRefused"]
+            and "\x1b[" not in invalid_result.stdout
+            and "\x1b[" not in invalid_result.stderr,
+            expected={
+                "exit": TERMINAL_EXIT["UsageRefused"],
+                "terminal": "UsageRefused",
+                "stderr": "",
+                "ansi": False,
+            },
+            observed={
+                "exit": invalid_result.returncode,
+                "terminal": invalid_document.get("terminal"),
+                "typed_exit": invalid_document.get("exit_code"),
+                "stderr_root": text_root(invalid_result.stderr),
+                "ansi": "\x1b["
+                in (invalid_result.stdout + invalid_result.stderr),
+            },
+        )
+        repeated_invalid = run_command(
+            [str(REPO_ROOT / SCRIPT_REL), "--unknown-v2-mode"],
+            expected=(TERMINAL_EXIT["UsageRefused"],),
+            environment_overrides={"TERM": "dumb"},
+            record_global_receipt=False,
+        )
+        checks.check(
+            "pipe-execution-no-tty-dependency-and-no-color-determinism",
+            invalid_result.stdout == repeated_invalid.stdout
+            and invalid_result.stderr == repeated_invalid.stderr
+            and invalid_result.returncode == repeated_invalid.returncode,
+            expected={
+                "stdout_root": text_root(invalid_result.stdout),
+                "stderr_root": text_root(invalid_result.stderr),
+                "exit": invalid_result.returncode,
+            },
+            observed={
+                "stdout_root": text_root(repeated_invalid.stdout),
+                "stderr_root": text_root(repeated_invalid.stderr),
+                "exit": repeated_invalid.returncode,
+            },
         )
     elif slug == "compat-v1-immutable":
         v1 = load_case_manifest()
@@ -21620,7 +23834,6 @@ def v2_execute_source_cases(
     case: Mapping[str, Any],
     manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
-    del manifest
     slug = str(case["id"]).removeprefix("template-lint-v2.")
     checks = V2CheckCollector(case["id"], case["assertion_id"])
     parameters = {"family": "source", "slug": slug}
@@ -22256,6 +24469,139 @@ def v2_execute_source_cases(
             ),
             contains="duplicate issue",
         )
+        source_payloads, _, _ = v2_replayable_fixture_bundle(
+            manifest,
+            subject_mode="review-plan",
+        )
+        retained_source_seed = strict_json_loads(
+            source_payloads["source-v2.json"],
+            label="source nested preflight seed",
+            require_canonical=True,
+        )
+        v2_validate_source_document(retained_source_seed)
+
+        def unrooted_source_capture_mutation(
+            capture_name: str,
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(retained_source_seed),
+                label=f"source {capture_name} preflight mutation",
+                require_canonical=True,
+            )
+            mutation(candidate["captured"][capture_name])
+            return candidate
+
+        for label, capture_name, mutation, diagnostic in (
+            (
+                "retained-inventory-rows-non-array-preflight",
+                "v1_inventory_projection",
+                lambda document: document.__setitem__(
+                    "rows",
+                    "not-an-array",
+                ),
+                "inventory rows are not an array",
+            ),
+            (
+                "retained-inventory-warning-cap-preflight",
+                "v1_inventory_projection",
+                lambda document: document.__setitem__(
+                    "warning_rows",
+                    [{}] * (V2_WARNING_ROWS_CAP + 1),
+                ),
+                "warning rows exceed the warning row cap",
+            ),
+            (
+                "retained-inventory-per-issue-warning-cap-preflight",
+                "v1_inventory_projection",
+                lambda document: document.__setitem__(
+                    "rows",
+                    [
+                        {
+                            "missing_sections": [
+                                "warning"
+                            ]
+                            * (V2_WARNINGS_PER_ISSUE_CAP + 1)
+                        }
+                    ],
+                ),
+                "per-issue warning count",
+            ),
+            (
+                "retained-lint-results-non-array-preflight",
+                "v1_lint_projection",
+                lambda document: document["all"].__setitem__(
+                    "results",
+                    "not-an-array",
+                ),
+                "lint scope all results are not an array",
+            ),
+            (
+                "retained-lint-row-cap-preflight",
+                "v1_lint_projection",
+                lambda document: document["all"].__setitem__(
+                    "results",
+                    [{"missing": []}]
+                    * (V2_INVENTORY_ROWS_CAP + 1),
+                ),
+                "inventory row count",
+            ),
+            (
+                "retained-lint-per-issue-warning-cap-preflight",
+                "v1_lint_projection",
+                lambda document: document["all"].__setitem__(
+                    "results",
+                    [
+                        {
+                            "missing": [
+                                "warning"
+                            ]
+                            * (V2_WARNINGS_PER_ISSUE_CAP + 1)
+                        }
+                    ],
+                ),
+                "per-issue warning count",
+            ),
+            (
+                "retained-observation-receipts-non-array-preflight",
+                "observation",
+                lambda document: document.__setitem__(
+                    "command_receipts",
+                    "not-an-array",
+                ),
+                "command receipts are not an array",
+            ),
+            (
+                "retained-observation-receipt-cap-preflight",
+                "observation",
+                lambda document: document.__setitem__(
+                    "command_receipts",
+                    [{}] * (V2_LOG_EVENTS_CAP - 7),
+                ),
+                "command receipts exceed the event budget",
+            ),
+            (
+                "retained-observation-source-file-cap-preflight",
+                "observation",
+                lambda document: document.__setitem__(
+                    "source_files",
+                    [{}] * (V2_BUNDLE_FILES_CAP + 1),
+                ),
+                "source files exceed the bundle file cap",
+            ),
+        ):
+            candidate = unrooted_source_capture_mutation(
+                capture_name,
+                mutation,
+            )
+            checks.refuses(
+                label,
+                InputRefused,
+                lambda candidate=candidate: v2_validate_source_document(
+                    candidate
+                ),
+                contains=diagnostic,
+            )
     elif slug == "source-double-capture-coherent":
         raw_rows = [
             fixture_issue(
@@ -22837,6 +25183,40 @@ def v2_execute_authority_cases(
             lambda: v2_validate_child_payload(wrong_lane_parent),
             contains="scalar or enum contract",
         )
+        for label, mutation in (
+            (
+                "identity-lane-parent",
+                lambda value: value["external_ref_key_inputs"].__setitem__(
+                    "lane_parent",
+                    "frankensim-unrelated-parent",
+                ),
+            ),
+            (
+                "identity-generation-gate",
+                lambda value: value["external_ref_key_inputs"].__setitem__(
+                    "generation_gate_id",
+                    "frankensim-unrelated-gate",
+                ),
+            ),
+            (
+                "identity-compatibility",
+                lambda value: value["external_ref_key_inputs"][
+                    "compatibility"
+                ].__setitem__(
+                    "rationale",
+                    "forged standalone compatibility rationale",
+                ),
+            ),
+        ):
+            candidate = reroot_planned_child(child, mutation)
+            checks.refuses(
+                f"planned-child-{label}-refused",
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_child_payload(
+                    candidate
+                ),
+                contains="external identity inputs disagree",
+            )
 
         def forge_uncovered_complete_compatibility(
             value: dict[str, Any],
@@ -22852,9 +25232,9 @@ def v2_execute_authority_cases(
                 "falsifier": "forged falsifier",
                 "target_complete": True,
             }
-            value["external_ref_key_inputs"][
-                "compatibility_receipt_root"
-            ] = compatibility_root
+            value["external_ref_key_inputs"]["compatibility"] = dict(
+                value["compatibility"]
+            )
 
         uncovered_compatibility = reroot_planned_child(
             child,
@@ -23092,9 +25472,9 @@ def v2_execute_authority_cases(
                 "falsifier": V2_SINGLETON_NO_COMPATIBILITY_FALSIFIER,
                 "target_complete": False,
             }
-            value["external_ref_key_inputs"][
-                "compatibility_receipt_root"
-            ] = ""
+            value["external_ref_key_inputs"]["compatibility"] = dict(
+                value["compatibility"]
+            )
             rebound_key = semantic_root(
                 value["external_ref_key_inputs"]
             ).split(":", 1)[1]
@@ -23158,7 +25538,7 @@ def v2_execute_authority_cases(
             lambda: v2_validate_child_payload(
                 empty_compatibility_target
             ),
-            contains="compatibility target IDs are noncanonical",
+            contains="compatibility target IDs are malformed",
         )
         checks.check(
             "responsibilities-are-distinct-target-indexed-rows",
@@ -24027,6 +26407,207 @@ def v2_execute_packing_cases(
             expected="valid",
             observed=child["semantic_root"],
         )
+        baseline_row = (
+            inventory["rows"][0],
+            authority["decisions"][0],
+        )
+        preflight_child = v2_make_child(
+            [baseline_row],
+            packing_witness={
+                "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
+            },
+            _validate_payload=False,
+        )
+        preflight_observations = v2_child_transport_observations(
+            [baseline_row]
+        )
+        checks.check(
+            "generated-child-preflight-size-equals-final-canonical-size",
+            preflight_observations["generated_child_payload_bytes"]
+            == len(canonical_bytes(preflight_child))
+            == len(canonical_bytes(child)),
+            expected={
+                "preflight": len(canonical_bytes(preflight_child)),
+                "final": len(canonical_bytes(child)),
+            },
+            observed={
+                "observation": preflight_observations[
+                    "generated_child_payload_bytes"
+                ],
+                "preflight": len(canonical_bytes(preflight_child)),
+                "final": len(canonical_bytes(child)),
+            },
+        )
+
+        compatible_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    index,
+                    issue_id=f"generated-cap-{index}",
+                )
+                for index in range(2)
+            ]
+        )
+        compatible_authority = v2_synthetic_authority(
+            compatible_inventory,
+            compatible=True,
+        )
+        compatible_decisions = {
+            row["target_id"]: row
+            for row in compatible_authority["decisions"]
+        }
+        compatible_rows = [
+            (target, compatible_decisions[target["id"]])
+            for target in compatible_inventory["rows"]
+        ]
+        prior_generated_cap = V2_GENERATED_CHILD_PAYLOAD_CAP
+        prior_transport_cache = dict(_v2_child_transport_cache)
+        try:
+            _v2_child_transport_cache.clear()
+            single_generated_sizes = [
+                v2_child_transport_observations([row])[
+                    "generated_child_payload_bytes"
+                ]
+                for row in compatible_rows
+            ]
+            merged_generated_size = v2_child_transport_observations(
+                compatible_rows
+            )["generated_child_payload_bytes"]
+            globals()["V2_GENERATED_CHILD_PAYLOAD_CAP"] = (
+                merged_generated_size
+            )
+            generated_at_cap = [
+                violation
+                for violation in v2_child_transport_violations(
+                    compatible_rows
+                )
+                if violation["cap"]
+                == "max_generated_child_payload_bytes"
+            ]
+            globals()["V2_GENERATED_CHILD_PAYLOAD_CAP"] = (
+                merged_generated_size - 1
+            )
+            generated_at_cap_plus_one = [
+                violation
+                for violation in v2_child_transport_violations(
+                    compatible_rows
+                )
+                if violation["cap"]
+                == "max_generated_child_payload_bytes"
+            ]
+            split_cap = max(single_generated_sizes)
+            globals()["V2_GENERATED_CHILD_PAYLOAD_CAP"] = split_cap
+            split_bins, split_witness = v2_pack_group(
+                compatible_rows,
+                max_targets=10,
+            )
+        finally:
+            globals()["V2_GENERATED_CHILD_PAYLOAD_CAP"] = (
+                prior_generated_cap
+            )
+            _v2_child_transport_cache.clear()
+            _v2_child_transport_cache.update(prior_transport_cache)
+        checks.check(
+            "generated-child-payload-cap-exact-and-plus-one",
+            merged_generated_size > max(single_generated_sizes)
+            and generated_at_cap == []
+            and len(generated_at_cap_plus_one) == 1
+            and generated_at_cap_plus_one[0]["observed"]
+            == merged_generated_size
+            and generated_at_cap_plus_one[0]["limit"]
+            == merged_generated_size - 1,
+            expected={
+                "exact": "admitted",
+                "plus_one": "one generated-payload violation",
+            },
+            observed={
+                "single_sizes": single_generated_sizes,
+                "merged_size": merged_generated_size,
+                "exact_violations": generated_at_cap,
+                "plus_one_violations": generated_at_cap_plus_one,
+            },
+        )
+        checks.check(
+            "generated-child-payload-cap-forces-compatible-split",
+            len(split_bins) == 2
+            and all(len(batch) == 1 for batch in split_bins)
+            and split_witness["algorithm"] == "EXACT_SUBSET_PARTITION",
+            expected={
+                "children": 2,
+                "members_per_child": [1, 1],
+                "algorithm": "EXACT_SUBSET_PARTITION",
+            },
+            observed={
+                "children": len(split_bins),
+                "members_per_child": [
+                    len(batch) for batch in split_bins
+                ],
+                "algorithm": split_witness["algorithm"],
+            },
+        )
+        cardinality_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    index,
+                    issue_id=f"child-cardinality-{index:02d}",
+                )
+                for index in range(
+                    V2_REVIEW_TARGET_HARD_MAX + 1
+                )
+            ]
+        )
+        cardinality_authority = v2_synthetic_authority(
+            cardinality_inventory,
+            compatible=True,
+        )
+        cardinality_decisions = {
+            row["target_id"]: row
+            for row in cardinality_authority["decisions"]
+        }
+        cardinality_rows = [
+            (target, cardinality_decisions[target["id"]])
+            for target in cardinality_inventory["rows"]
+        ]
+        admitted_cardinalities: list[int] = []
+        for target_count in (
+            V2_REVIEW_TARGET_HARD_MAX - 1,
+            V2_REVIEW_TARGET_HARD_MAX,
+        ):
+            cardinality_child = v2_make_child(
+                cardinality_rows[:target_count],
+                packing_witness={
+                    "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
+                },
+                _validate_payload=False,
+            )
+            v2_validate_child_payload(cardinality_child)
+            admitted_cardinalities.append(target_count)
+        checks.check(
+            "planned-child-hard-cap-n-minus-one-and-n",
+            admitted_cardinalities
+            == [
+                V2_REVIEW_TARGET_HARD_MAX - 1,
+                V2_REVIEW_TARGET_HARD_MAX,
+            ],
+            expected=[
+                V2_REVIEW_TARGET_HARD_MAX - 1,
+                V2_REVIEW_TARGET_HARD_MAX,
+            ],
+            observed=admitted_cardinalities,
+        )
+        over_cardinality_child = v2_make_child(
+            cardinality_rows,
+            packing_witness={
+                "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
+            },
+            _validate_payload=False,
+        )
+        checks.refuses(
+            "planned-child-hard-cap-plus-one",
+            EvidenceFailed,
+            lambda: v2_validate_child_payload(over_cardinality_child),
+            contains="hard cap",
+        )
 
         def child_with_text(
             **values: str,
@@ -24094,7 +26675,12 @@ def v2_execute_packing_cases(
         aggregate_exact = child_with_text(
             acceptance="a" * V2_CHILD_ACCEPTANCE_CAP,
             design="d" * V2_CHILD_DESIGN_CAP,
-            notes="n" * V2_CHILD_NOTES_CAP,
+            notes="n"
+            * (
+                V2_CHILD_ARGV_AGGREGATE_CAP
+                - V2_CHILD_ACCEPTANCE_CAP
+                - V2_CHILD_DESIGN_CAP
+            ),
         )
         v2_validate_child_payload(aggregate_exact)
         checks.check(
@@ -24119,15 +26705,21 @@ def v2_execute_packing_cases(
             ),
         )
         aggregate_plus_one = child_with_text(
-            acceptance="a" * (V2_CHILD_ACCEPTANCE_CAP + 1),
+            acceptance="a" * V2_CHILD_ACCEPTANCE_CAP,
             design="d" * V2_CHILD_DESIGN_CAP,
-            notes="n" * V2_CHILD_NOTES_CAP,
+            notes="n"
+            * (
+                V2_CHILD_ARGV_AGGREGATE_CAP
+                - V2_CHILD_ACCEPTANCE_CAP
+                - V2_CHILD_DESIGN_CAP
+                + 1
+            ),
         )
         checks.refuses(
             "aggregate-nondescription-cap-plus-one-refused",
             EvidenceFailed,
             lambda: v2_validate_child_payload(aggregate_plus_one),
-            contains="acceptance",
+            contains="aggregate non-description argv",
         )
         retained_boundary_states: list[tuple[int, int]] = []
         for retained_bytes in (
@@ -24190,6 +26782,69 @@ def v2_execute_packing_cases(
                 "optional": len(oversize_optional),
             },
         )
+        bounded_review_fields = (
+            "children",
+            "packing_witnesses",
+            "semantic_adjudications",
+            "retained_without_direct_child",
+            "remediation_candidates",
+            "oversize_content",
+        )
+        prior_inventory_rows_cap = V2_INVENTORY_ROWS_CAP
+        try:
+            globals()["V2_INVENTORY_ROWS_CAP"] = 0
+            for field in bounded_review_fields:
+                stale_plan = strict_json_loads(
+                    canonical_bytes(plan),
+                    label="review-plan collection cap mutation seed",
+                    require_canonical=True,
+                )
+                for bounded_field in bounded_review_fields:
+                    stale_plan[bounded_field] = []
+                stale_plan[field] = [{}]
+                checks.refuses(
+                    f"review-plan-{field}-cap-precedes-stale-root",
+                    EvidenceFailed,
+                    lambda stale_plan=stale_plan: v2_validate_review_plan(
+                        stale_plan,
+                        inventory,
+                        authority,
+                    ),
+                    contains="row cap",
+                )
+            checks.refuses(
+                "review-plan-builder-cap-precedes-rooting",
+                EvidenceFailed,
+                lambda: v2_build_review_plan(
+                    inventory,
+                    authority,
+                    max_targets=10,
+                ),
+                contains="children exceed",
+            )
+        finally:
+            globals()["V2_INVENTORY_ROWS_CAP"] = prior_inventory_rows_cap
+        prior_run_artifact_cap = RUN_ARTIFACT_CAP
+        stale_plan = strict_json_loads(
+            canonical_bytes(plan),
+            label="review-plan artifact cap mutation seed",
+            require_canonical=True,
+        )
+        stale_plan["no_claim"] += " stale"
+        try:
+            globals()["RUN_ARTIFACT_CAP"] = 1
+            checks.refuses(
+                "review-plan-byte-cap-precedes-stale-root",
+                EvidenceFailed,
+                lambda: v2_validate_review_plan(
+                    stale_plan,
+                    inventory,
+                    authority,
+                ),
+                contains="aggregate byte cap",
+            )
+        finally:
+            globals()["RUN_ARTIFACT_CAP"] = prior_run_artifact_cap
     elif slug == "packing-exact-small-optimum":
         for count in range(1, 14):
             plan, _, _ = v2_plan_for_count(count, max_targets=3)
@@ -24763,8 +27418,51 @@ def v2_execute_history_cases(
                 audit_capture=audit,
                 history_contract=contract,
             ),
-            contains="known-closer evidence",
+            contains="known-closer audit binding differs",
         )
+        for label, mutation in (
+            (
+                "actor",
+                lambda value: value.__setitem__(
+                    "close_actor",
+                    "forged-closer",
+                ),
+            ),
+            (
+                "audit-event-root",
+                lambda value: value.__setitem__(
+                    "audit_event_root",
+                    semantic_root({"forged": "close event"}),
+                ),
+            ),
+            (
+                "close-reason",
+                lambda value: (
+                    value.__setitem__(
+                        "close_reason",
+                        "Forged close reason.",
+                    ),
+                    value.__setitem__(
+                        "close_reason_root",
+                        text_root("Forged close reason."),
+                    ),
+                ),
+            ),
+        ):
+            candidate = reroot_history_row(mutation)
+            checks.refuses(
+                f"rerooted-known-closer-{label}-refused",
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_history_projection(
+                    candidate,
+                    source_root=source_root,
+                    inventory=inventory,
+                    authority=authority,
+                    audit_capture=audit,
+                    history_contract=contract,
+                ),
+                contains="known-closer audit binding differs",
+            )
         forged_notes = reroot_history_row(
             lambda value: value.__setitem__(
                 "notes",
@@ -25306,6 +28004,173 @@ def v2_execute_history_cases(
                 projection=lambda malformed=malformed: malformed,
                 projection_label="ZERO_SET_ARTIFACT",
             )
+        stale_cell_count = strict_json_loads(
+            canonical_bytes(sparse),
+            label="zero-set cell-count mutation seed",
+            require_canonical=True,
+        )
+        stale_cell_count["cells"].append(
+            stale_cell_count["cells"][-1]
+        )
+        checks.refuses(
+            "zero-cell-count-precedes-stale-root",
+            EvidenceFailed,
+            lambda: v2_validate_zero_sets(
+                stale_cell_count,
+                source_root=sparse_source_root,
+                inventory=sparse_inventory,
+                prior_campaign=v2_empty_prior_campaign(),
+            ),
+            contains="exact 25-row array",
+        )
+
+        second_target = v2_synthetic_target(
+            101,
+            issue_id="zero-cap-second-target",
+            priority=3,
+            status="blocked",
+        )
+        two_row_inventory = v2_synthetic_inventory(
+            [sparse_inventory["rows"][0], second_target]
+        )
+        stale_prior = strict_json_loads(
+            canonical_bytes(v2_empty_prior_campaign()),
+            label="zero-set prior cap mutation seed",
+            require_canonical=True,
+        )
+        stale_prior["rows"] = [{}, {}]
+        stale_scope = strict_json_loads(
+            canonical_bytes(sparse),
+            label="zero-set successor cap mutation seed",
+            require_canonical=True,
+        )
+        stale_scope["scope_successors"] = [{}, {}]
+        stale_movements = strict_json_loads(
+            canonical_bytes(sparse),
+            label="zero-set movement cap mutation seed",
+            require_canonical=True,
+        )
+        stale_movements["movements"] = [{}, {}]
+        current_universe_over_cap = [
+            sparse_inventory["rows"][0],
+            second_target,
+        ]
+        prior_inventory_rows_cap = V2_INVENTORY_ROWS_CAP
+        try:
+            globals()["V2_INVENTORY_ROWS_CAP"] = 1
+            zero_cap_callbacks = (
+                (
+                    "zero-inventory-cap-precedes-root",
+                    lambda: v2_validate_zero_sets(
+                        sparse,
+                        source_root=sparse_source_root,
+                        inventory=two_row_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                    ),
+                    "inventory rows",
+                ),
+                (
+                    "zero-current-universe-cap-precedes-root",
+                    lambda: v2_validate_zero_sets(
+                        sparse,
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                        current_universe=current_universe_over_cap,
+                    ),
+                    "current universe rows",
+                ),
+                (
+                    "zero-prior-cap-precedes-root",
+                    lambda: v2_validate_zero_sets(
+                        sparse,
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=stale_prior,
+                    ),
+                    "prior-campaign rows",
+                ),
+                (
+                    "zero-scope-successor-cap-precedes-root",
+                    lambda: v2_validate_zero_sets(
+                        stale_scope,
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                    ),
+                    "scope-successor rows",
+                ),
+                (
+                    "zero-movement-cap-precedes-root",
+                    lambda: v2_validate_zero_sets(
+                        stale_movements,
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                    ),
+                    "movement rows",
+                ),
+                (
+                    "zero-builder-inventory-cap-before-sorting",
+                    lambda: v2_build_zero_sets(
+                        source_root=sparse_source_root,
+                        inventory=two_row_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                    ),
+                    "inventory rows",
+                ),
+                (
+                    "zero-builder-current-cap-before-copying",
+                    lambda: v2_build_zero_sets(
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=v2_empty_prior_campaign(),
+                        current_universe=current_universe_over_cap,
+                    ),
+                    "current universe rows",
+                ),
+                (
+                    "zero-builder-prior-cap-before-indexing",
+                    lambda: v2_build_zero_sets(
+                        source_root=sparse_source_root,
+                        inventory=sparse_inventory,
+                        prior_campaign=stale_prior,
+                    ),
+                    "prior-campaign rows",
+                ),
+            )
+            for check_id, callback, diagnostic in zero_cap_callbacks:
+                checks.refuses(
+                    check_id,
+                    EvidenceFailed,
+                    callback,
+                    contains=diagnostic,
+                )
+        finally:
+            globals()["V2_INVENTORY_ROWS_CAP"] = prior_inventory_rows_cap
+
+        stale_byte_cap = strict_json_loads(
+            canonical_bytes(sparse),
+            label="zero-set byte cap mutation seed",
+            require_canonical=True,
+        )
+        stale_byte_cap["no_claim"] += " stale"
+        prior_run_artifact_cap = RUN_ARTIFACT_CAP
+        try:
+            globals()["RUN_ARTIFACT_CAP"] = 1
+            checks.refuses(
+                "zero-byte-cap-precedes-stale-root",
+                EvidenceFailed,
+                lambda: v2_validate_zero_sets(
+                    stale_byte_cap,
+                    source_root=sparse_source_root,
+                    inventory=sparse_inventory,
+                    prior_campaign=v2_empty_prior_campaign(),
+                ),
+                contains="aggregate byte cap",
+            )
+        finally:
+            globals()["RUN_ARTIFACT_CAP"] = prior_run_artifact_cap
     elif slug in {
         "movement-cross-lane",
         "movement-live-to-history",
@@ -27376,6 +30241,236 @@ def v2_execute_fault_resource_cases(
             expected={"affected": "changed", "unrelated": "stable"},
             observed={"before": before_keys, "after": after_keys},
         )
+        raw_left = fixture_issue(
+            issue_id="graph-left",
+            status="open",
+            priority=1,
+            dependencies=(
+                {
+                    "id": "graph-right",
+                    "dependency_type": "blocks",
+                    "status": "blocked",
+                    "priority": 2,
+                },
+            ),
+        )
+        raw_right = fixture_issue(
+            issue_id="graph-right",
+            status="blocked",
+            priority=2,
+        )
+        raw_right["dependents"] = [
+            {
+                "id": "graph-left",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        valid_graph = [
+            v2_full_issue_projection(raw_left),
+            v2_full_issue_projection(raw_right),
+        ]
+        v2_validate_source_graph(valid_graph)
+        raw_parent = fixture_issue(
+            issue_id="graph-parent",
+            status="open",
+            priority=1,
+            children=("graph-child",),
+        )
+        raw_child = fixture_issue(
+            issue_id="graph-child",
+            status="open",
+            priority=1,
+            parent="graph-parent",
+            dependencies=(
+                {
+                    "id": "graph-parent",
+                    "dependency_type": "parent-child",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        valid_parent_graph = [
+            v2_full_issue_projection(raw_child),
+            v2_full_issue_projection(raw_parent),
+        ]
+        v2_validate_source_graph(valid_parent_graph)
+        raw_external = fixture_issue(
+            issue_id="graph-external-source",
+            dependencies=(
+                {
+                    "id": "external:vendor-ticket-42",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        external_graph = [v2_full_issue_projection(raw_external)]
+        v2_validate_source_graph(external_graph)
+        checks.check(
+            "source-graph-valid-reciprocal-and-parent-pairs",
+            True,
+            expected="internal, parent, and external graph forms admitted",
+            observed={
+                "relation_rows": 2,
+                "parent_rows": 2,
+                "external_rows": 1,
+            },
+        )
+
+        def graph_mutation(
+            source: Sequence[Mapping[str, Any]],
+            mutation: Callable[[list[dict[str, Any]]], None],
+        ) -> list[dict[str, Any]]:
+            candidate = strict_json_loads(
+                canonical_bytes(source),
+                label="source graph mutation seed",
+                require_canonical=True,
+            )
+            mutation(candidate)
+            return candidate
+
+        graph_failures = (
+            (
+                "absent-neighbor",
+                valid_graph,
+                lambda rows: rows[0]["dependencies"][0].__setitem__(
+                    "id",
+                    "graph-absent",
+                ),
+                "absent neighbor",
+            ),
+            (
+                "neighbor-status",
+                valid_graph,
+                lambda rows: rows[0]["dependencies"][0].__setitem__(
+                    "status",
+                    "open",
+                ),
+                "status or priority",
+            ),
+            (
+                "neighbor-priority",
+                valid_graph,
+                lambda rows: rows[0]["dependencies"][0].__setitem__(
+                    "priority",
+                    3,
+                ),
+                "status or priority",
+            ),
+            (
+                "missing-reciprocal",
+                valid_graph,
+                lambda rows: rows[1].__setitem__("dependents", []),
+                "lacks exact reciprocal edge",
+            ),
+            (
+                "parent-scalar",
+                valid_parent_graph,
+                lambda rows: rows[0].__setitem__("parent", ""),
+                "parent scalar and parent-child dependency",
+            ),
+            (
+                "self-edge",
+                valid_graph,
+                lambda rows: rows[0]["dependencies"][0].__setitem__(
+                    "id",
+                    "graph-left",
+                ),
+                "self edge or duplicate neighbor",
+            ),
+            (
+                "duplicate-neighbor",
+                valid_graph,
+                lambda rows: rows[0]["dependencies"].append(
+                    {
+                        **rows[0]["dependencies"][0],
+                        "type": "waits-for",
+                    }
+                ),
+                "self edge or duplicate neighbor",
+            ),
+        )
+        for label, source, mutation, diagnostic in graph_failures:
+            candidate = graph_mutation(source, mutation)
+            checks.refuses(
+                f"source-graph-{label}-refused",
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_source_graph(
+                    candidate
+                ),
+                contains=diagnostic,
+            )
+        external_parent_graph = graph_mutation(
+            external_graph,
+            lambda rows: (
+                rows[0].__setitem__(
+                    "parent",
+                    "external:vendor-ticket-42",
+                ),
+                rows[0]["dependencies"][0].__setitem__(
+                    "type",
+                    "parent-child",
+                ),
+            ),
+        )
+        checks.refuses(
+            "source-graph-external-parent-child-refused",
+            EvidenceFailed,
+            lambda: v2_validate_source_graph(external_parent_graph),
+            contains="invalid direction, type, or empty identity",
+        )
+        cycle_left = fixture_issue(
+            issue_id="cycle-left",
+            dependencies=(
+                {
+                    "id": "cycle-right",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        cycle_left["dependents"] = [
+            {
+                "id": "cycle-right",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        cycle_right = fixture_issue(
+            issue_id="cycle-right",
+            dependencies=(
+                {
+                    "id": "cycle-left",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        cycle_right["dependents"] = [
+            {
+                "id": "cycle-left",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        cycle_graph = [
+            v2_full_issue_projection(cycle_left),
+            v2_full_issue_projection(cycle_right),
+        ]
+        checks.refuses(
+            "source-graph-blocking-cycle-refused",
+            EvidenceFailed,
+            lambda: v2_validate_source_graph(cycle_graph),
+            contains="blocking dependency cycle",
+        )
 
     elif slug == "mutation-dropped-duplicate-target":
         targets = [v2_synthetic_target(0), v2_synthetic_target(1)]
@@ -27908,6 +31003,71 @@ def v2_execute_fault_resource_cases(
                 },
             )
 
+            original_killpg = os.killpg
+
+            def synthetic_sigkill_permission_error(
+                process_group: int,
+                signum: int,
+            ) -> None:
+                if signum != signal.SIGKILL:
+                    original_killpg(process_group, signum)
+                    return
+                try:
+                    original_killpg(process_group, signum)
+                except ProcessLookupError:
+                    pass
+                raise PermissionError(
+                    errno.EPERM,
+                    "synthetic SIGKILL process-group refusal",
+                )
+
+            os.killpg = synthetic_sigkill_permission_error
+            try:
+                sigkill_permission_error = expect_error(
+                    InfrastructureFailed,
+                    lambda: run_command(
+                        (
+                            sys.executable,
+                            "-c",
+                            (
+                                "import signal,time; "
+                                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "time.sleep(10)"
+                            ),
+                        )
+                    ),
+                    contains="could not prove process-group retirement",
+                )
+            finally:
+                os.killpg = original_killpg
+            sigkill_permission_receipt = _command_receipts[-1]
+            checks.check(
+                "sigkill-permission-error-refuses-drained-claim",
+                sigkill_permission_error.terminal
+                == "InfrastructureFailed"
+                and sigkill_permission_receipt["category"] == "TIMEOUT"
+                and sigkill_permission_receipt["cleanup_error_count"] == 1
+                and sigkill_permission_receipt["cleanup_error_kinds"]
+                == ["SIGKILL_PROCESS_GROUP_ERRNO_1"],
+                expected={
+                    "terminal": "InfrastructureFailed",
+                    "category": "TIMEOUT",
+                    "cleanup_error_kinds": [
+                        "SIGKILL_PROCESS_GROUP_ERRNO_1"
+                    ],
+                },
+                observed={
+                    "terminal": sigkill_permission_error.terminal,
+                    "category": sigkill_permission_receipt["category"],
+                    "cleanup_error_count": sigkill_permission_receipt[
+                        "cleanup_error_count"
+                    ],
+                    "cleanup_error_kinds": sigkill_permission_receipt[
+                        "cleanup_error_kinds"
+                    ],
+                },
+            )
+
             def cancellation_reservation(
                 *,
                 nonterminal_members: Sequence[str] = (),
@@ -28264,6 +31424,10 @@ def v2_execute_fault_resource_cases(
             def __init__(self, *, mode: int, size: int = 0) -> None:
                 self.st_mode = mode
                 self.st_size = size
+                self.st_dev = 1
+                self.st_ino = 2
+                self.st_mtime_ns = 3
+                self.st_ctime_ns = 4
 
         prefix_fixture = {
             "output_exists": False,
@@ -28358,29 +31522,80 @@ def v2_execute_fault_resource_cases(
 
             original_resolve_run_dir = resolve_run_dir
             original_read_retained_bundle = v2_read_retained_bundle
+            original_stability_seconds = (
+                V2_PERSISTENT_TERMINAL_STABILITY_SECONDS
+            )
             globals()["resolve_run_dir"] = (
                 lambda *_args, **_kwargs: synthetic_output
             )
-            globals()["v2_read_retained_bundle"] = (
-                lambda **_kwargs: (_ for _ in ()).throw(
-                    InputRefused("synthetic malformed retained bundle")
-                )
-            )
+            globals()["V2_PERSISTENT_TERMINAL_STABILITY_SECONDS"] = 0.02
             try:
+                partial_reads = 0
+
+                def partial_then_complete(
+                    **_kwargs: Any,
+                ) -> tuple[
+                    Path,
+                    dict[str, bytes],
+                    dict[str, Any],
+                    list[dict[str, Any]],
+                ]:
+                    nonlocal partial_reads
+                    partial_reads += 1
+                    if partial_reads == 1:
+                        raise InputRefused(
+                            "synthetic partial terminal publication"
+                        )
+                    return synthetic_output, {}, {}, []
+
+                globals()["v2_read_retained_bundle"] = (
+                    partial_then_complete
+                )
+                _, completed_candidate = v2_persistent_e2e_location(
+                    manifest,
+                    label="synthetic-partial-terminal",
+                )
+                checks.check(
+                    "persistent-partial-terminal-can-complete-during-grace",
+                    partial_reads == 2
+                    and completed_candidate.startswith(
+                        "synthetic-partial-terminal-"
+                    )
+                    and "-attempt-" not in completed_candidate,
+                    expected={
+                        "reads": 2,
+                        "candidate": "original stable identity",
+                    },
+                    observed={
+                        "reads": partial_reads,
+                        "candidate": completed_candidate,
+                    },
+                )
+
+                globals()["v2_read_retained_bundle"] = (
+                    lambda **_kwargs: (_ for _ in ()).throw(
+                        InputRefused(
+                            "synthetic malformed retained bundle"
+                        )
+                    )
+                )
                 checks.refuses(
-                    "persistent-nonempty-invalid-terminal-refused-immediately",
+                    "persistent-stable-nonempty-invalid-terminal-refused",
                     EvidenceFailed,
                     lambda: v2_persistent_e2e_location(
                         manifest,
                         label="synthetic-invalid-terminal",
                     ),
-                    contains="nonempty invalid terminal",
+                    contains="stable nonempty invalid terminal",
                 )
             finally:
                 globals()["resolve_run_dir"] = original_resolve_run_dir
                 globals()["v2_read_retained_bundle"] = (
                     original_read_retained_bundle
                 )
+                globals()[
+                    "V2_PERSISTENT_TERMINAL_STABILITY_SECONDS"
+                ] = original_stability_seconds
         finally:
             os.lstat = original_lstat
 
@@ -28398,6 +31613,26 @@ def v2_execute_fault_resource_cases(
                 "max_retained_child_payload_bytes": V2_CHILD_PAYLOAD_CAP,
                 "max_generated_child_payload_bytes": (
                     V2_GENERATED_CHILD_PAYLOAD_CAP
+                ),
+                "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
+                "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
+                "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
+                "max_relations_per_direction": (
+                    V2_RELATIONS_PER_DIRECTION_CAP
+                ),
+                "max_audit_events_per_issue": (
+                    V2_AUDIT_EVENTS_PER_ISSUE_CAP
+                ),
+                "max_audit_stream_bytes": V2_AUDIT_STREAM_BYTES_CAP,
+                "max_audit_capture_bytes": V2_AUDIT_CAPTURE_BYTES_CAP,
+                "max_source_projection_bytes": (
+                    V2_SOURCE_PROJECTION_BYTES_CAP
+                ),
+                "max_history_citations_per_issue": (
+                    V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+                ),
+                "max_compatibility_targets_per_receipt": (
+                    V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
                 ),
                 "max_command_arguments": V2_COMMAND_ARGUMENTS_CAP,
                 "max_command_argument_bytes": V2_COMMAND_ARGUMENT_BYTES_CAP,
@@ -28592,6 +31827,644 @@ def v2_execute_fault_resource_cases(
                 ),
                 contains=diagnostic,
             )
+        splitline_fixture = (
+            "a\r\nb\nc\rd\ve\ff\x1cg\x1dh\x1ei\x85j\u2028k\u2029"
+        )
+        streamed_lines = [
+            line for _, line in v2_iter_splitlines(splitline_fixture)
+        ]
+        checks.check(
+            "clause-streaming-line-boundaries-match-python",
+            streamed_lines == splitline_fixture.splitlines(),
+            expected=splitline_fixture.splitlines(),
+            observed=streamed_lines,
+        )
+        small_clause_index = v2_complete_clause_roots(
+            {
+                "description": (
+                    "## Acceptance\r\nMust preserve behavior.\u2028"
+                    "No matching prose."
+                ),
+                "acceptance_criteria": "",
+                "design": "",
+                "notes": "",
+            }
+        )
+        checks.check(
+            "complete-clause-membership-root-is-exact",
+            small_clause_index["rows_complete"] is True
+            and small_clause_index["membership_root"]
+            == semantic_root(small_clause_index["rows"]),
+            expected=semantic_root(small_clause_index["rows"]),
+            observed=small_clause_index["membership_root"],
+        )
+        for label, field, value in (
+            (
+                "membership-root",
+                "membership_root",
+                semantic_root({"forged": "clause membership"}),
+            ),
+            (
+                "maximum",
+                "maximum_clause_bytes",
+                int(small_clause_index["maximum_clause_bytes"]) + 1,
+            ),
+            (
+                "overflow-root",
+                "over_byte_cap_membership_root",
+                semantic_root({"forged": "clause overflow"}),
+            ),
+        ):
+            candidate = strict_json_loads(
+                canonical_bytes(small_clause_index),
+                label="clause-index mutation seed",
+                require_canonical=True,
+            )
+            candidate[field] = value
+            checks.refuses(
+                f"complete-clause-forged-{label}-refused",
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_clause_index(
+                    candidate
+                ),
+            )
+        under_clause_rows = v2_complete_clause_roots(
+            {
+                "description": "\n".join(
+                    f"## Clause {index:04d}"
+                    for index in range(V2_CLAUSE_ROWS_CAP - 1)
+                )
+            }
+        )
+        exact_clause_rows = v2_complete_clause_roots(
+            {
+                "description": "\n".join(
+                    f"## Clause {index:04d}"
+                    for index in range(V2_CLAUSE_ROWS_CAP)
+                )
+            }
+        )
+        over_clause_rows = v2_complete_clause_roots(
+            {
+                "description": "\n".join(
+                    f"## Clause {index:04d}"
+                    for index in range(V2_CLAUSE_ROWS_CAP + 1)
+                )
+            }
+        )
+        checks.check(
+            "clause-row-cap-exact-and-plus-one",
+            under_clause_rows["row_count"] == V2_CLAUSE_ROWS_CAP - 1
+            and under_clause_rows["rows_complete"] is True
+            and exact_clause_rows["row_count"] == V2_CLAUSE_ROWS_CAP
+            and exact_clause_rows["rows_complete"] is True
+            and over_clause_rows["row_count"] == V2_CLAUSE_ROWS_CAP + 1
+            and over_clause_rows["rows_complete"] is False
+            and over_clause_rows["over_row_cap_count"] == 1,
+            expected={
+                "n_minus_one": (V2_CLAUSE_ROWS_CAP - 1, True),
+                "exact": (V2_CLAUSE_ROWS_CAP, True),
+                "plus_one": (V2_CLAUSE_ROWS_CAP + 1, False, 1),
+            },
+            observed={
+                "n_minus_one": (
+                    under_clause_rows["row_count"],
+                    under_clause_rows["rows_complete"],
+                ),
+                "exact": (
+                    exact_clause_rows["row_count"],
+                    exact_clause_rows["rows_complete"],
+                ),
+                "plus_one": (
+                    over_clause_rows["row_count"],
+                    over_clause_rows["rows_complete"],
+                    over_clause_rows["over_row_cap_count"],
+                ),
+            },
+        )
+        under_clause_bytes = v2_complete_clause_roots(
+            {"description": "#" + "x" * (V2_CLAUSE_BYTES_CAP - 2)}
+        )
+        exact_clause_bytes = v2_complete_clause_roots(
+            {"description": "#" + "x" * (V2_CLAUSE_BYTES_CAP - 1)}
+        )
+        over_clause_bytes = v2_complete_clause_roots(
+            {"description": "#" + "x" * V2_CLAUSE_BYTES_CAP}
+        )
+        checks.check(
+            "clause-byte-cap-exact-and-plus-one",
+            under_clause_bytes["maximum_clause_bytes"]
+            == V2_CLAUSE_BYTES_CAP - 1
+            and under_clause_bytes["over_byte_cap_count"] == 0
+            and exact_clause_bytes["maximum_clause_bytes"]
+            == V2_CLAUSE_BYTES_CAP
+            and exact_clause_bytes["over_byte_cap_count"] == 0
+            and over_clause_bytes["maximum_clause_bytes"]
+            == V2_CLAUSE_BYTES_CAP + 1
+            and over_clause_bytes["over_byte_cap_count"] == 1,
+            expected={
+                "n_minus_one": (V2_CLAUSE_BYTES_CAP - 1, 0),
+                "exact": (V2_CLAUSE_BYTES_CAP, 0),
+                "plus_one": (V2_CLAUSE_BYTES_CAP + 1, 1),
+            },
+            observed={
+                "n_minus_one": (
+                    under_clause_bytes["maximum_clause_bytes"],
+                    under_clause_bytes["over_byte_cap_count"],
+                ),
+                "exact": (
+                    exact_clause_bytes["maximum_clause_bytes"],
+                    exact_clause_bytes["over_byte_cap_count"],
+                ),
+                "plus_one": (
+                    over_clause_bytes["maximum_clause_bytes"],
+                    over_clause_bytes["over_byte_cap_count"],
+                ),
+            },
+        )
+        exact_label_issue = fixture_issue(
+            issue_id="label-cap",
+            labels=[
+                f"label-{index:04d}"
+                for index in range(V2_LABELS_PER_ISSUE_CAP)
+            ],
+        )
+        v2_validate_raw_br_issue(
+            {
+                **exact_label_issue,
+                "labels": exact_label_issue["labels"][:-1],
+            }
+        )
+        v2_validate_raw_br_issue(exact_label_issue)
+        exact_label_projection = v2_full_issue_projection(
+            exact_label_issue
+        )
+        v2_validate_source_full_issue(
+            exact_label_projection,
+            index=0,
+        )
+        over_label_issue = {
+            **exact_label_issue,
+            "labels": [
+                *exact_label_issue["labels"],
+                "label-cap-plus-one",
+            ],
+        }
+        checks.refuses(
+            "label-cap-plus-one",
+            InfrastructureFailed,
+            lambda: v2_validate_raw_br_issue(over_label_issue),
+            contains="label-count cap",
+        )
+        exact_relations = [
+            {
+                "id": f"external:cap-{index:04d}",
+                "dependency_type": "relates-to",
+                "status": "open",
+                "priority": 1,
+            }
+            for index in range(V2_RELATIONS_PER_DIRECTION_CAP)
+        ]
+        exact_relation_issue = fixture_issue(
+            issue_id="relation-cap",
+            dependencies=exact_relations,
+        )
+        v2_validate_raw_br_issue(
+            {
+                **exact_relation_issue,
+                "dependencies": exact_relations[:-1],
+            }
+        )
+        v2_validate_raw_br_issue(exact_relation_issue)
+        exact_relation_projection = v2_full_issue_projection(
+            exact_relation_issue
+        )
+        v2_validate_source_full_issue(
+            exact_relation_projection,
+            index=0,
+        )
+        over_relation_issue = {
+            **exact_relation_issue,
+            "dependencies": [
+                *exact_relations,
+                {
+                    "id": "external:cap-plus-one",
+                    "dependency_type": "relates-to",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ],
+        }
+        checks.refuses(
+            "relation-cap-plus-one",
+            InfrastructureFailed,
+            lambda: v2_validate_raw_br_issue(over_relation_issue),
+            contains="dependencies cap",
+        )
+        exact_dependent_relations = [
+            {
+                "id": f"dependent-cap-{index:04d}",
+                "dependency_type": "relates-to",
+                "status": "open",
+                "priority": 1,
+            }
+            for index in range(V2_RELATIONS_PER_DIRECTION_CAP)
+        ]
+        exact_dependent_issue = fixture_issue(
+            issue_id="dependent-relation-cap",
+        )
+        exact_dependent_issue["dependents"] = exact_dependent_relations
+        v2_validate_raw_br_issue(
+            {
+                **exact_dependent_issue,
+                "dependents": exact_dependent_relations[:-1],
+            }
+        )
+        v2_validate_raw_br_issue(exact_dependent_issue)
+        v2_validate_source_full_issue(
+            v2_full_issue_projection(exact_dependent_issue),
+            index=0,
+        )
+        checks.refuses(
+            "dependent-relation-cap-plus-one",
+            InfrastructureFailed,
+            lambda: v2_validate_raw_br_issue(
+                {
+                    **exact_dependent_issue,
+                    "dependents": [
+                        *exact_dependent_relations,
+                        {
+                            "id": "dependent-cap-plus-one",
+                            "dependency_type": "relates-to",
+                            "status": "open",
+                            "priority": 1,
+                        },
+                    ],
+                }
+            ),
+            contains="dependents cap",
+        )
+        exact_audit_events = [
+            {
+                "id": V2_AUDIT_EVENTS_PER_ISSUE_CAP - index,
+                "event_type": "comment",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "comment": "",
+            }
+            for index in range(V2_AUDIT_EVENTS_PER_ISSUE_CAP)
+        ]
+        v2_normalize_audit_document(
+            {
+                "issue_id": "audit-cap",
+                "events": exact_audit_events[:-1],
+            },
+            issue_id="audit-cap",
+        )
+        v2_normalize_audit_document(
+            {
+                "issue_id": "audit-cap",
+                "events": exact_audit_events,
+            },
+            issue_id="audit-cap",
+        )
+        checks.refuses(
+            "audit-event-cap-plus-one",
+            InfrastructureFailed,
+            lambda: v2_normalize_audit_document(
+                {
+                    "issue_id": "audit-cap",
+                    "events": [
+                        *exact_audit_events,
+                        {
+                            "id": 0,
+                            "event_type": "comment",
+                            "timestamp": "2026-01-01T00:00:00+00:00",
+                        },
+                    ],
+                },
+                issue_id="audit-cap",
+            ),
+            contains="event-count cap",
+        )
+        exact_citation_issue = {
+            "description": " ".join(
+                f"frankensim-cap-{index:04d}"
+                for index in range(
+                    V2_HISTORY_CITATIONS_PER_ISSUE_CAP
+                )
+            )
+        }
+        exact_citations = v2_extract_citations(exact_citation_issue)
+        under_citations = v2_extract_citations(
+            {
+                "description": " ".join(
+                    f"frankensim-cap-{index:04d}"
+                    for index in range(
+                        V2_HISTORY_CITATIONS_PER_ISSUE_CAP - 1
+                    )
+                )
+            }
+        )
+        checks.check(
+            "history-citation-cap-exact",
+            len(under_citations)
+            == V2_HISTORY_CITATIONS_PER_ISSUE_CAP - 1
+            and len(exact_citations)
+            == V2_HISTORY_CITATIONS_PER_ISSUE_CAP,
+            expected=[
+                V2_HISTORY_CITATIONS_PER_ISSUE_CAP - 1,
+                V2_HISTORY_CITATIONS_PER_ISSUE_CAP,
+            ],
+            observed=[len(under_citations), len(exact_citations)],
+        )
+        checks.refuses(
+            "history-citation-cap-plus-one",
+            InputRefused,
+            lambda: v2_extract_citations(
+                {
+                    "description": (
+                        exact_citation_issue["description"]
+                        + " frankensim-cap-plus-one"
+                    )
+                }
+            ),
+            contains="citation index exceeds",
+        )
+        exact_compatibility_ids = [
+            f"compatibility-{index:04d}"
+            for index in range(
+                V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
+            )
+        ]
+        v2_validate_compatibility_target_ids(
+            exact_compatibility_ids[:-1],
+            label="fixture compatibility IDs",
+        )
+        v2_validate_compatibility_target_ids(
+            exact_compatibility_ids,
+            label="fixture compatibility IDs",
+        )
+        checks.refuses(
+            "compatibility-target-cap-plus-one",
+            InputRefused,
+            lambda: v2_validate_compatibility_target_ids(
+                [
+                    *exact_compatibility_ids,
+                    "compatibility-plus-one",
+                ],
+                label="fixture compatibility IDs",
+            ),
+            contains="exceed their cap",
+        )
+        for label, cap in (
+            ("audit-capture", V2_AUDIT_CAPTURE_BYTES_CAP),
+            ("source-projection", V2_SOURCE_PROJECTION_BYTES_CAP),
+        ):
+            v2_validate_aggregate_byte_count(
+                cap,
+                cap=cap,
+                label=label,
+            )
+            checks.refuses(
+                f"{label}-aggregate-cap-plus-one",
+                EvidenceFailed,
+                lambda cap=cap, label=label: (
+                    v2_validate_aggregate_byte_count(
+                        cap + 1,
+                        cap=cap,
+                        label=label,
+                    )
+                ),
+                contains="aggregate byte cap",
+            )
+        original_capture_one_audit = v2_capture_one_audit
+        rejected_audit_capture_calls: list[str] = []
+
+        def rejected_audit_capture_probe(
+            issue_id: str,
+            *,
+            capture_ordinal: int,
+        ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+            del capture_ordinal
+            rejected_audit_capture_calls.append(issue_id)
+            raise EvidenceFailed(
+                "audit capture was invoked before issue-ID preflight"
+            )
+
+        globals()["v2_capture_one_audit"] = rejected_audit_capture_probe
+        try:
+            for label, issue_ids, diagnostic in (
+                (
+                    "audit-round-string-sequence-refused",
+                    "not-an-issue-array",
+                    "not a sequence",
+                ),
+                (
+                    "audit-round-empty-id-refused",
+                    ["audit-valid", ""],
+                    "empty or non-string",
+                ),
+                (
+                    "audit-round-non-string-id-refused",
+                    ["audit-valid", 7],
+                    "empty or non-string",
+                ),
+                (
+                    "audit-round-duplicate-id-refused",
+                    ["audit-duplicate", "audit-duplicate"],
+                    "not unique",
+                ),
+                (
+                    "audit-round-row-cap-plus-one-refused",
+                    [
+                        f"audit-over-cap-{index:04d}"
+                        for index in range(V2_INVENTORY_ROWS_CAP + 1)
+                    ],
+                    "inventory row cap",
+                ),
+            ):
+                checks.refuses(
+                    label,
+                    InputRefused,
+                    lambda issue_ids=issue_ids: v2_capture_audit_round(
+                        issue_ids,
+                        capture_ordinal=1,
+                    ),
+                    contains=diagnostic,
+                )
+        finally:
+            globals()["v2_capture_one_audit"] = original_capture_one_audit
+        checks.check(
+            "audit-round-invalid-membership-makes-zero-capture-calls",
+            rejected_audit_capture_calls == [],
+            expected=[],
+            observed=rejected_audit_capture_calls,
+        )
+        original_run_command = run_command
+        observed_audit_stream_overrides: list[tuple[int | None, int | None]] = []
+
+        def synthetic_audit_run(
+            argv: Sequence[str],
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            issue_id = str(argv[3])
+            stdout_payload = canonical_bytes(
+                {"issue_id": issue_id, "events": []}
+            )
+            observed_audit_stream_overrides.append(
+                (
+                    kwargs.get("stdout_bytes_cap"),
+                    kwargs.get("stderr_bytes_cap"),
+                )
+            )
+            receipt_sink = kwargs.get("receipt_sink")
+            if not callable(receipt_sink):
+                raise EvidenceFailed(
+                    "synthetic audit capture lacks its receipt sink"
+                )
+            receipt_sink(
+                {
+                    "argv": [str(value) for value in argv],
+                    "exit_code": 0,
+                    "category": "SUCCESS",
+                    "stdout": {
+                        "bytes": len(stdout_payload),
+                        "root": (
+                            "sha256-v1:"
+                            + hashlib.sha256(stdout_payload).hexdigest()
+                        ),
+                        "body_retained": False,
+                    },
+                    "stderr": {
+                        "bytes": 0,
+                        "root": (
+                            "sha256-v1:"
+                            + hashlib.sha256(b"").hexdigest()
+                        ),
+                        "body_retained": False,
+                    },
+                    "cleanup_error_count": 0,
+                    "cleanup_error_kinds": [],
+                    "redaction_verdict": (
+                        "RAW_STREAM_BODIES_NOT_RETAINED"
+                    ),
+                }
+            )
+            return subprocess.CompletedProcess(
+                [str(value) for value in argv],
+                0,
+                stdout_payload.decode("utf-8"),
+                "",
+            )
+
+        globals()["run_command"] = synthetic_audit_run
+        try:
+            bounded_audit_capture = v2_capture_histories(
+                ["audit-stream-cap"]
+            )
+        finally:
+            globals()["run_command"] = original_run_command
+        v2_validate_audit_capture(
+            bounded_audit_capture,
+            allowed_issue_ids={"audit-stream-cap"},
+        )
+        bounded_audit_bytes = v2_validate_canonical_byte_size(
+            bounded_audit_capture,
+            cap=V2_AUDIT_CAPTURE_BYTES_CAP,
+            label="fixture audit capture",
+        )
+        prior_audit_capture_cap = V2_AUDIT_CAPTURE_BYTES_CAP
+        admitted_audit_caps: list[int] = []
+        try:
+            for audit_cap in (
+                bounded_audit_bytes + 1,
+                bounded_audit_bytes,
+            ):
+                globals()["V2_AUDIT_CAPTURE_BYTES_CAP"] = audit_cap
+                v2_validate_audit_capture(
+                    bounded_audit_capture,
+                    allowed_issue_ids={"audit-stream-cap"},
+                )
+                admitted_audit_caps.append(audit_cap)
+            globals()["V2_AUDIT_CAPTURE_BYTES_CAP"] = (
+                bounded_audit_bytes - 1
+            )
+            audit_aggregate_error = expect_error(
+                InputRefused,
+                lambda: v2_validate_audit_capture(
+                    bounded_audit_capture,
+                    allowed_issue_ids={"audit-stream-cap"},
+                ),
+                contains="aggregate byte cap",
+            )
+        finally:
+            globals()["V2_AUDIT_CAPTURE_BYTES_CAP"] = (
+                prior_audit_capture_cap
+            )
+        checks.check(
+            "retained-audit-capture-aggregate-n-minus-one-n-plus-one",
+            admitted_audit_caps
+            == [bounded_audit_bytes + 1, bounded_audit_bytes]
+            and audit_aggregate_error.terminal == "InputRefused",
+            expected={
+                "cap_plus_one_headroom": "admitted",
+                "exact_cap": "admitted",
+                "one_byte_over_cap": "InputRefused",
+            },
+            observed={
+                "canonical_bytes": bounded_audit_bytes,
+                "admitted_caps": admitted_audit_caps,
+                "one_byte_over_terminal": (
+                    audit_aggregate_error.terminal
+                ),
+            },
+        )
+        checks.check(
+            "audit-capture-wires-distinct-stream-cap",
+            observed_audit_stream_overrides
+            == [
+                (
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                ),
+                (
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                ),
+            ],
+            expected=[
+                (
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                ),
+                (
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                    V2_AUDIT_STREAM_BYTES_CAP,
+                ),
+            ],
+            observed=observed_audit_stream_overrides,
+        )
+        over_audit_stream_receipt = strict_json_loads(
+            canonical_bytes(bounded_audit_capture),
+            label="audit stream cap mutation seed",
+            require_canonical=True,
+        )
+        over_audit_stream_receipt.pop("semantic_root", None)
+        over_audit_stream_receipt["command_receipts"][0][
+            "stdout_byte_length"
+        ] = V2_AUDIT_STREAM_BYTES_CAP + 1
+        over_audit_stream_receipt = v2_rooted(
+            over_audit_stream_receipt
+        )
+        checks.refuses(
+            "retained-audit-stream-cap-plus-one",
+            InputRefused,
+            lambda: v2_validate_audit_capture(
+                over_audit_stream_receipt,
+                allowed_issue_ids={"audit-stream-cap"},
+            ),
+            contains="identity or terminal contract differs",
+        )
         v2_validate_log_event_count(
             V2_LOG_EVENTS_CAP,
             error_type=EvidenceFailed,
@@ -29225,17 +33098,58 @@ def v2_persistent_e2e_location(
             return "AVAILABLE"
         if prefix_state == "EMPTY_PREFIX":
             return "INCOMPLETE"
-        try:
-            v2_read_retained_bundle(
-                artifact_root=artifact_root,
-                input_dir=candidate,
+        deadline = (
+            time.monotonic()
+            + V2_PERSISTENT_TERMINAL_STABILITY_SECONDS
+        )
+        prior_signature: tuple[int, int, int, int, int] | None = None
+        stable_observations = 0
+        last_error: HarnessError | None = None
+        while True:
+            check_cancel()
+            try:
+                v2_read_retained_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=candidate,
+                )
+                return "COMPLETE"
+            except (InputRefused, EvidenceFailed) as error:
+                last_error = error
+            current_state = v2_persistent_terminal_prefix_state(output)
+            if current_state != "NONEMPTY_TERMINAL":
+                return "INCOMPLETE"
+            try:
+                terminal_stat = os.lstat(output / "terminal.json")
+            except OSError as error:
+                raise EvidenceFailed(
+                    "persistent fixture terminal changed during bounded "
+                    "stability observation"
+                ) from error
+            signature = (
+                int(terminal_stat.st_dev),
+                int(terminal_stat.st_ino),
+                int(terminal_stat.st_size),
+                int(terminal_stat.st_mtime_ns),
+                int(terminal_stat.st_ctime_ns),
             )
-        except (InputRefused, EvidenceFailed) as error:
-            raise EvidenceFailed(
-                "persistent fixture has a nonempty invalid terminal; manual "
-                "recovery is required"
-            ) from error
-        return "COMPLETE"
+            (
+                prior_signature,
+                stable_observations,
+                stable_invalid,
+            ) = v2_observe_stable_invalid_terminal(
+                prior_signature,
+                stable_observations,
+                signature,
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and stable_invalid:
+                raise EvidenceFailed(
+                    "persistent fixture has a stable nonempty invalid "
+                    "terminal; manual recovery is required"
+                ) from last_error
+            if remaining <= 0:
+                return "INCOMPLETE"
+            time.sleep(min(0.05, max(0.0, remaining)))
 
     return (
         artifact_root,
@@ -30657,6 +34571,21 @@ def parse_arguments(arguments: Sequence[str]) -> argparse.Namespace:
         help="exact comma-separated v2 status filter",
     )
     parser.add_argument(
+        "--targets",
+        metavar="ID,ID,...",
+        help="exact comma-separated v2 target-ID filter",
+    )
+    parser.add_argument(
+        "--readiness",
+        metavar="STATE,STATE,...",
+        help="exact comma-separated review-plan readiness filter",
+    )
+    parser.add_argument(
+        "--routes",
+        metavar="ROUTE,ROUTE,...",
+        help="exact comma-separated review-plan remediation-route filter",
+    )
+    parser.add_argument(
         "--max-targets-per-child",
         type=int,
         default=V2_REVIEW_TARGET_DEFAULT,
@@ -30699,6 +34628,9 @@ def main(arguments: Sequence[str]) -> int:
         "--prior-campaign",
         "--priorities",
         "--statuses",
+        "--targets",
+        "--readiness",
+        "--routes",
         "--max-targets-per-child",
         "--explain-target",
     }

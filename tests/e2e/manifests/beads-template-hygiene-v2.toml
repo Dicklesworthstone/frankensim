@@ -244,7 +244,7 @@ corrective_materialization = "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
 raw_enum_product_coverage = "ALL_DECLARED_TYPES_X_ALL_STATUSES_X_P0_P4"
 missing_collections_normalize_empty = true
 malformed_falsey_collections = "REFUSE"
-relation_row_validation = "NONEMPTY_ID_TYPE_VALID_OPTIONAL_STATUS_PRIORITY"
+relation_row_validation = "EXACT_INTERNAL_NEIGHBOR_STATUS_PRIORITY_RECIPROCAL_PARENT_BOUND_EXTERNAL_DEPENDENCY_NO_RECIPROCAL_SELF_DUPLICATE_NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
 audit_capture_uses_bounded_runner = true
 source_closure_states = ["NOT_REQUIRED_BY_V1_CLASSIFICATION", "REVIEW_REQUIRED", "ROOT_BOUND_REVIEWED_COMPLETE", "ROOT_BOUND_REVIEW_BLOCKED", "ROOT_BOUND_NOT_APPLICABLE"]
 source_closure_transition = "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_DETERMINES_CLOSED_STATE"
@@ -360,6 +360,28 @@ planned_child_required_fields = [
   "no_claim",
   "semantic_root",
 ]
+clause_index_required_fields = [
+  "schema",
+  "rows",
+  "row_count",
+  "rows_complete",
+  "membership_root",
+  "maximum_clause_bytes",
+  "over_row_cap_count",
+  "over_row_cap_membership_root",
+  "over_byte_cap_count",
+  "over_byte_cap_membership_root",
+  "no_claim",
+]
+clause_row_required_fields = [
+  "field",
+  "line_index",
+  "byte_length",
+  "text_root",
+  "truncated",
+]
+clause_membership_root_algorithm = "SHA256_CANONICAL_JSON_LIST_STREAM_WITH_TERMINAL_NEWLINE"
+clause_overflow_policy = "BOUNDED_PREFIX_PLUS_EXACT_TOTAL_AND_OVERFLOW_MEMBERSHIP_ROOTS"
 planned_child_issue_type = "task"
 missing_payload_field = "REFUSE_PUBLICATION"
 target_fields_and_relations_remain_unchanged = true
@@ -532,6 +554,16 @@ output_option = "UNSUPPORTED_REFUSE"
 duplicate_options = "REFUSE"
 review_receipts_option = "--review-receipts REL"
 review_receipts_paths = "SAFE_RELATIVE_ONLY"
+priority_filter_option = "--priorities P0,P1,..."
+status_filter_option = "--statuses open,closed,..."
+target_filter_option = "--targets ID,ID,..."
+readiness_filter_option = "--readiness STATE,STATE,..."
+route_filter_option = "--routes ROUTE,ROUTE,..."
+filter_membership = "EXACT_SORTED_SET"
+duplicate_filter_members = "REFUSE"
+unknown_filter_members = "REFUSE"
+authority_filters_apply_to = "REVIEW_PLAN_SELECTED_PROJECTION"
+history_authority_filters = "REFUSE"
 existing_output = "REFUSE"
 unsafe_or_aliased_path = "REFUSE"
 symlinks = "REFUSE"
@@ -556,6 +588,7 @@ required_sections = [
   "top_blockers",
   "selected_ids",
   "why_grouped",
+  "explanation",
   "safe_next_action",
   "artifacts",
   "reproduction",
@@ -731,10 +764,19 @@ max_description_bytes = 131072
 max_acceptance_bytes = 32768
 max_design_bytes = 16384
 max_notes_bytes = 16384
-max_aggregate_non_description_argv_bytes = 65536
+max_aggregate_non_description_argv_bytes = 61440
 max_review_minutes_per_child = 480
 exact_optimality_max_targets = 13
 max_clause_bytes = 65536
+max_clause_rows_per_issue = 4096
+max_labels_per_issue = 4096
+max_relations_per_direction = 4096
+max_audit_events_per_issue = 8192
+max_audit_stream_bytes = 67108864
+max_audit_capture_bytes = 67108864
+max_source_projection_bytes = 67108864
+max_history_citations_per_issue = 4096
+max_compatibility_targets_per_receipt = 4096
 max_relative_path_bytes = 512
 max_path_depth = 32
 max_path_component_bytes = 128
@@ -916,7 +958,7 @@ assertion_id = "v2.case.cli-help-modes"
 criterion_ids = ["AC09", "AC21"]
 kinds = ["unit", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "help for review-plan, history-plan, filters, explanation, review receipts, artifact grammar, and versioned test runner"
+subject = "actual subprocess help for review-plan, history-plan, deterministic priority/status/target/readiness/route filters, explanation, review receipts, artifact grammar, and versioned test runner, with zero exit, stdout-only text, and no ANSI"
 
 [[case]]
 ordinal = 4
@@ -925,7 +967,7 @@ assertion_id = "v2.case.cli-exclusive-mode"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "zero or multiple modes, unknown mode, and duplicate mode refusal"
+subject = "zero or multiple modes, unknown mode, and duplicate mode refusal through the non-abbreviating parser"
 
 [[case]]
 ordinal = 5
@@ -934,7 +976,7 @@ assertion_id = "v2.case.cli-artifact-grammar"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "exact artifact-root and fresh artifact-dir grammar; output alias and duplicate output options refuse"
+subject = "exact artifact-root and fresh artifact-dir grammar; output alias, duplicate artifact roots, and duplicate output options refuse"
 
 [[case]]
 ordinal = 6
@@ -943,7 +985,7 @@ assertion_id = "v2.case.cli-path-admission"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "mutation", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "relative NFC bounded disjoint no-overwrite paths; dot, parent, backslash, drive, tilde, control, alias, and symlink paths refuse"
+subject = "relative NFC and UTF-8-byte-bounded disjoint no-overwrite paths; dot, parent, backslash, drive, tilde, control, alias, and symlink paths refuse"
 
 [[case]]
 ordinal = 7
@@ -961,7 +1003,7 @@ assertion_id = "v2.case.cli-filters-explain"
 criterion_ids = ["AC21"]
 kinds = ["unit", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "deterministic status, priority, route, readiness, target filters and one-target explanation"
+subject = "actual deterministic status, priority, exact-target, remediation-route, and readiness filters are CLI-parsed, source-bound, replayable, exact-membership selecting, duplicate/unknown refusing, and compose with one-target root-bound explanation"
 
 [[case]]
 ordinal = 9
@@ -970,7 +1012,7 @@ assertion_id = "v2.case.ux-empty-synopsis"
 criterion_ids = ["AC21"]
 kinds = ["boundary", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "empty campaign synopsis with exact zero counts, work, blockers, next action, artifacts, reproduction, and no-claim"
+subject = "empty campaign synopsis has the exact closed top-level, count, work, preview, forecast, conflict, blocker, explanation, next-action, artifact, reproduction, and no-claim sections with exact zero values"
 
 [[case]]
 ordinal = 10
@@ -979,7 +1021,7 @@ assertion_id = "v2.case.ux-large-synopsis"
 criterion_ids = ["AC21"]
 kinds = ["boundary", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "8192-byte and 12-selected-ID synopsis caps, deterministic previews, totals, shown counts, and truncation notices without artifact truncation"
+subject = "11/12/13 selected-ID boundaries and injected exact n-1/n/n+1 UTF-8 byte-cap boundaries retain deterministic previews, totals, shown counts, and truncation notices without artifact truncation"
 
 [[case]]
 ordinal = 11
@@ -988,7 +1030,7 @@ assertion_id = "v2.case.ux-streams-color-tty"
 criterion_ids = ["AC21"]
 kinds = ["unit", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "stdout and stderr separation, typed exits, no TTY dependency, and NO_COLOR behavior"
+subject = "actual piped subprocess help and invalid invocation prove stdout/stderr separation, canonical typed exits, operation without a TTY, deterministic NO_COLOR behavior, and no ANSI"
 
 [[case]]
 ordinal = 12
@@ -1114,7 +1156,7 @@ assertion_id = "v2.case.row-complete-planned-child"
 criterion_ids = ["AC02", "AC06", "AC11", "AC19"]
 kinds = ["schema", "unit"]
 fixture_engine = "PURE_PROJECTION"
-subject = "the exact closed source-row and planned-child schemas include every semantic-review state, action, rationale, falsifier, receipt and no-change root alongside roots, edges, payloads, estimates, readiness, route, and exact adjudication, remediation, and retention partitions; standalone children exact-bind the priority lane, disposition workflow, no-claim, target-complete compatibility scope, and false-state singleton boundary"
+subject = "the exact closed source-row and planned-child schemas include every semantic-review state, action, rationale, falsifier, receipt and no-change root alongside roots, edges, payloads, estimates, readiness, route, and exact adjudication, remediation, and retention partitions; standalone children bind the complete declared compatibility object, priority lane, generation gate, disposition workflow, no-claim, subset coverage, and false-state singleton boundary, while retained source-plan reconstruction remains required to authenticate compatibility scope"
 
 [[case]]
 ordinal = 26
