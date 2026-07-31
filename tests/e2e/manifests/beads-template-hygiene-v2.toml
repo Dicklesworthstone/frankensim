@@ -388,7 +388,7 @@ manual_route_claims_no_clobber = false
 manual_route_claims_exactly_once = false
 undeclared_responsibility_assignments_remain_unresolved = true
 authority_identity_fields = ["reviewer", "reviewer_kind", "coordination_assignee", "declared_domain_owner", "declared_acceptance_owner", "implementation_owner", "evidence_owner", "terminal_consumer", "manual_authorization_source", "external_authority_adapter", "conditional_capability_identity"]
-authority_identity_canonicalization = "EMPTY_OR_NFC_STRIPPED_NONBLANK_MAX_1024_UTF8_NO_CC_CF_CS_AND_RESERVED_PRESENCE_SENTINELS_REFUSED"
+authority_identity_canonicalization = "EMPTY_OR_NFC_STRIPPED_NONBLANK_MAX_1024_UTF8_NO_CC_CF_CS_AND_NONEMPTY_HAS_UNICODE_ALPHANUMERIC_AND_NFKC_ALPHANUMERIC_NORMALIZED_RESERVED_PRESENCE_SENTINELS_REFUSED"
 manual_authorization_source_contract = "NONBLANK_IFF_TRUE_WITH_REVIEWER_AND_ACCEPTANCE_OWNER"
 deferred_route = "ANALYSIS_ONLY"
 deferred_authorization_override = "FORBIDDEN"
@@ -472,15 +472,20 @@ malformed_timestamp = "REFUSE"
 missing_reason = "REFUSE"
 event_order_violation = "REFUSE"
 required_fields = [
+  "issue_id",
+  "target_root",
   "closed_at",
   "close_reason",
+  "close_reason_root",
   "closer_state",
   "close_actor",
   "close_actor_source",
   "audit_event_root",
+  "audit_stream_root",
   "ownership",
   "comments",
   "notes",
+  "notes_root",
   "parent",
   "dependencies",
   "source_roots",
@@ -490,6 +495,7 @@ required_fields = [
   "reviewed_consumers",
   "proof",
   "no_claim",
+  "semantic_root",
 ]
 infer_closer_from_creator = false
 infer_closer_from_assignee = false
@@ -580,7 +586,7 @@ review_plan_selected = "review-plan-v2.json"
 review_plan_not_requested = "history-v2.json"
 history_plan_selected = "history-v2.json"
 history_plan_not_requested = "review-plan-v2.json"
-not_requested_required_fields = ["schema", "mode", "state", "source_root", "inventory_root", "semantic_root", "no_claim"]
+not_requested_required_fields = ["schema", "state", "mode", "projection", "source_root", "inventory_root", "rows", "no_claim", "semantic_root"]
 not_requested_state = "NOT_REQUESTED"
 optional_content_registry = "oversize_content"
 oversize_inventory_required_fields = [
@@ -1054,7 +1060,7 @@ assertion_id = "v2.case.source-all-types-statuses-priorities"
 criterion_ids = ["AC01", "AC10", "AC11"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "the raw-source Cartesian product covers every declared issue type, all five statuses, and P0-P4; absent or null labels and relations normalize empty, while falsey collection aliases and malformed relation IDs, types, statuses, booleans, and priorities refuse"
+subject = "the raw-source Cartesian product covers every declared issue type, all five statuses, and P0-P4; absent or null labels and relations normalize empty, while falsey collection aliases, duplicate labels or relation identities, and malformed relation IDs, types, statuses, booleans, and priorities refuse"
 
 [[case]]
 ordinal = 20
@@ -1108,7 +1114,7 @@ assertion_id = "v2.case.row-complete-planned-child"
 criterion_ids = ["AC02", "AC06", "AC11", "AC19"]
 kinds = ["schema", "unit"]
 fixture_engine = "PURE_PROJECTION"
-subject = "the exact closed source-row and planned-child schemas include every semantic-review state, action, rationale, falsifier, receipt and no-change root alongside roots, edges, payloads, estimates, readiness, route, and exact adjudication, remediation, and retention partitions"
+subject = "the exact closed source-row and planned-child schemas include every semantic-review state, action, rationale, falsifier, receipt and no-change root alongside roots, edges, payloads, estimates, readiness, route, and exact adjudication, remediation, and retention partitions; standalone children exact-bind the priority lane, disposition workflow, no-claim, target-complete compatibility scope, and false-state singleton boundary"
 
 [[case]]
 ordinal = 26
@@ -1135,7 +1141,7 @@ assertion_id = "v2.case.authority-self-report-declared"
 criterion_ids = ["AC02", "AC03", "AC11"]
 kinds = ["unit", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "self-reported coordination and reviewer declaration reach at most DECLARED_READY and never external or mechanical authority"
+subject = "self-reported coordination and reviewer declaration reach at most DECLARED_READY and never external or mechanical authority; NFC storage identities and NFKC alphanumeric presence keys refuse punctuated, fullwidth, compatibility-equivalent, or symbol-only no-data sentinels"
 
 [[case]]
 ordinal = 29
@@ -1324,7 +1330,7 @@ assertion_id = "v2.case.history-known-closer"
 criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
 kinds = ["unit", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "unique well-formed close audit event yields KNOWN actor and exact source, timestamp, reason, and event root"
+subject = "unique well-formed close audit event yields KNOWN actor and exact source, timestamp, reason, and event root; each history audit-stream root is bound to the unique canonical retained audit document and substituted or duplicated membership refuses"
 
 [[case]]
 ordinal = 50
@@ -1531,7 +1537,7 @@ assertion_id = "v2.case.replay-tamper-live-denied"
 criterion_ids = ["AC09", "AC12", "AC15"]
 kinds = ["replay", "mutation"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "live tracker and network are denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse, including exact event bytes, sequence, roots, terminal location, terminal recovery, and empty replay-equivalence bindings"
+subject = "live tracker and network are denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse, including exact event bytes, sequence, roots, terminal location, terminal recovery, empty replay-equivalence bindings, malformed source-file envelopes, duplicate source labels or relation identities, nested no-claim substitutions, and source/audit command-receipt drift"
 
 [[case]]
 ordinal = 73
@@ -1594,7 +1600,7 @@ assertion_id = "v2.case.cancel-signals-drained"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["cancellation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "SIGINT and SIGTERM at source, audit, packing, publication, and replay boundaries drain and never leave a green prefix; live subprocess cancellation and a leader-exit descendant-pipe timeout kill and drain the whole new-session process group with typed bounded receipts"
+subject = "SIGINT and SIGTERM at source, audit, packing, publication, and replay boundaries drain and never leave a green prefix; publication cancellation distinguishes terminal-only, partial-prefix, assignment-started, committed, post-seal, and reservation-identity-loss states; live subprocess cancellation and a leader-exit descendant-pipe timeout kill and drain the whole new-session process group with typed bounded receipts"
 
 [[case]]
 ordinal = 80
@@ -1603,7 +1609,7 @@ assertion_id = "v2.case.restart-deterministic"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["restart", "property"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "fresh-run restart after cancellation or fault reconstructs the same logical keys and deterministic errors without overwrite; incomplete persistent prefixes are skipped for a bounded fresh attempt and the first complete attempt is reused"
+subject = "fresh-run restart after cancellation or fault reconstructs the same logical keys and deterministic errors without overwrite; available, empty-prefix, empty-terminal, nonempty-terminal, and wrong-filesystem-kind states are classified distinctly; incomplete persistent prefixes are skipped for a bounded fresh attempt, the first complete attempt is reused, and a stable nonempty invalid terminal requires manual recovery"
 
 [[case]]
 ordinal = 81
