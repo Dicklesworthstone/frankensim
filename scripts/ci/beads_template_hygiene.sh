@@ -7932,6 +7932,14 @@ def v2_normalize_br_export_witness(
     return normalized
 
 
+def v2_issue_is_exportable(issue: Mapping[str, Any]) -> bool:
+    issue_id = str(issue.get("id") or "")
+    return (
+        issue.get("ephemeral") is not True
+        and "-wisp-" not in issue_id
+    )
+
+
 def v2_validate_live_envelope_consistency(
     *,
     tracker_status: Mapping[str, Any],
@@ -7970,7 +7978,7 @@ def v2_validate_live_envelope_consistency(
     witness = export_witness["witness"]
     comparison = export_witness["base_comparison"]
     exported_issue_count = sum(
-        issue.get("ephemeral") is not True for issue in full_issues
+        v2_issue_is_exportable(issue) for issue in full_issues
     )
     if (
         sync_status["jsonl_exists"] is not True
@@ -27779,7 +27787,7 @@ def v2_fixture_br_envelopes(
     full_issue: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     status = str(full_issue["status"])
-    exported_count = int(full_issue.get("ephemeral") is not True)
+    exported_count = int(v2_issue_is_exportable(full_issue))
     tracker_status = v2_normalize_br_status(
         {
             "summary": {
@@ -33797,6 +33805,48 @@ def v2_execute_source_cases(
                 },
             },
         )
+        wisp_source_issue = v2_full_issue_projection(
+            fixture_issue(
+                issue_id="fixture-wisp-source",
+                status="open",
+                priority=2,
+                issue_type="task",
+            )
+        )
+        wisp_witness = v2_fixture_br_envelopes(
+            wisp_source_issue
+        )[2]
+        checks.check(
+            "export-witness-excludes-non-ephemeral-wisps",
+            wisp_source_issue["ephemeral"] is False
+            and v2_issue_is_exportable(wisp_source_issue) is False
+            and wisp_witness["witness"]["line_count"] == 0
+            and wisp_witness["witness"]["chunks"] == []
+            and wisp_witness["base_reuse_plan"]["actions"] == []
+            and wisp_witness["base_parallel_work_plan"]["batches"] == [],
+            expected={
+                "ephemeral": False,
+                "exportable": False,
+                "lines": 0,
+                "chunks": 0,
+                "actions": 0,
+                "batches": 0,
+            },
+            observed={
+                "ephemeral": wisp_source_issue["ephemeral"],
+                "exportable": v2_issue_is_exportable(
+                    wisp_source_issue
+                ),
+                "lines": wisp_witness["witness"]["line_count"],
+                "chunks": len(wisp_witness["witness"]["chunks"]),
+                "actions": len(
+                    wisp_witness["base_reuse_plan"]["actions"]
+                ),
+                "batches": len(
+                    wisp_witness["base_parallel_work_plan"]["batches"]
+                ),
+            },
+        )
         empty_released_witness = {
             "jsonl_path": ".beads/issues.jsonl",
             "witness": {
@@ -34946,6 +34996,135 @@ def v2_execute_source_cases(
                 duplicate_relation_issue
             ),
             contains="duplicates a dependencies neighbor",
+        )
+        external_relation_issue = fixture_issue(
+            issue_id="fixture-external-relation-directions",
+            status="open",
+        )
+        external_relation_issue["dependencies"] = [
+            {
+                "id": "external:project:blocker",
+                "title": "External blocking capability",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        external_relation_issue["dependents"] = [
+            {
+                "id": "external:project:child",
+                "title": "External child capability",
+                "dependency_type": "parent-child",
+                "status": "open",
+                "priority": 2,
+            }
+        ]
+        external_relation_projection = v2_full_issue_projection(
+            external_relation_issue
+        )
+        v2_validate_source_full_issue(
+            external_relation_projection,
+            index=0,
+        )
+        v2_validate_source_graph([external_relation_projection])
+
+        def invalid_external_relation_error(
+            field: str,
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(external_relation_issue),
+                label=f"invalid external {field} relation seed",
+                require_canonical=True,
+            )
+            mutation(candidate[field][0])
+            return expect_error(
+                InfrastructureFailed,
+                lambda: v2_full_issue_projection(candidate),
+                contains="invalid relation row",
+            )
+
+        invalid_external_errors = [
+            invalid_external_relation_error(
+                "dependencies",
+                lambda relation: relation.__setitem__(
+                    "dependency_type", "parent-child"
+                ),
+            ),
+            invalid_external_relation_error(
+                "dependents",
+                lambda relation: relation.__setitem__(
+                    "dependency_type", "blocks"
+                ),
+            ),
+            invalid_external_relation_error(
+                "dependencies",
+                lambda relation: relation.__setitem__("title", ""),
+            ),
+        ]
+        checks.check(
+            "external-relation-directions-and-titles-exact",
+            all(
+                error.terminal == "InfrastructureFailed"
+                for error in invalid_external_errors
+            ),
+            expected={
+                "dependency_non_parent": "admitted",
+                "dependent_parent_child": "admitted",
+                "invalid_mutations": ["InfrastructureFailed"] * 3,
+            },
+            observed={
+                "dependencies": external_relation_projection[
+                    "dependencies"
+                ],
+                "dependents": external_relation_projection["dependents"],
+                "invalid_mutations": [
+                    error.terminal for error in invalid_external_errors
+                ],
+            },
+        )
+
+        parent_id = "fixture-relation-title-parent"
+        child_id = "fixture-relation-title-child"
+        parent_raw = fixture_issue(issue_id=parent_id, status="open")
+        child_raw = fixture_issue(issue_id=child_id, status="open")
+        parent_raw["dependents"] = [
+            {
+                "id": child_id,
+                "title": child_raw["title"],
+                "dependency_type": "parent-child",
+                "status": child_raw["status"],
+                "priority": child_raw["priority"],
+            }
+        ]
+        child_raw["parent"] = parent_id
+        child_raw["dependencies"] = [
+            {
+                "id": parent_id,
+                "title": parent_raw["title"],
+                "dependency_type": "parent-child",
+                "status": parent_raw["status"],
+                "priority": parent_raw["priority"],
+            }
+        ]
+        relation_pair = [
+            v2_full_issue_projection(parent_raw),
+            v2_full_issue_projection(child_raw),
+        ]
+        v2_validate_source_graph(relation_pair)
+        drifted_relation_pair = strict_json_loads(
+            canonical_bytes(relation_pair),
+            label="relation title drift seed",
+            require_canonical=True,
+        )
+        drifted_relation_pair[0]["dependents"][0]["title"] = (
+            "Incorrect same-status neighbor title"
+        )
+        checks.refuses(
+            "internal-relation-title-drift-refused",
+            EvidenceFailed,
+            lambda: v2_validate_source_graph(drifted_relation_pair),
+            contains="relation title, status, or priority disagrees",
         )
         blocked_source_issue = v2_full_issue_projection(
             fixture_issue(
