@@ -28190,8 +28190,9 @@ def v2_code_access_analysis(
             and instruction.argval in V2_REFLECTIVE_NAMESPACE_ATTRIBUTES
         ):
             raise EvidenceFailed(
-                "refusal callback uses reflective namespace access; provide an "
-                "explicit bounded external-state projection"
+                "refusal callback uses reflective namespace access in "
+                f"{code.co_qualname}; provide an explicit bounded "
+                "external-state projection"
             )
         if (
             instruction.opname in V2_GLOBAL_ACCESS_OPS
