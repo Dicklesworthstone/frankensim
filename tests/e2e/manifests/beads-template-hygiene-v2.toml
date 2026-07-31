@@ -217,6 +217,23 @@ selected_receipt_drift_invalidates_affected_keys = true
 agent_mail_hints_are_replay_critical = false
 campaign_epoch_root_before_lane_projection = true
 all_status_partition_receipt_required = true
+inventory_scope = "ALL_NONCLOSED_PLUS_CLOSED_FINDINGS"
+zero_warning_rows_require_review_receipt = true
+semantic_review_dispositions = ["REMEDIATION_REQUIRED", "REVIEWED_NO_CHANGE", "ROLLUP_ONLY", "CONTRIBUTION_ONLY", "BLOCKED_AUTHORITY", "TYPED_INAPPLICABLE"]
+semantic_review_dimensions = ["user_value", "dependencies", "priority", "estimate", "ownership", "authority", "no_claim_boundaries", "unit_and_property_tests", "release_built_no_mock_e2e", "bounded_deterministic_logging", "offline_replay", "source_and_terminal_closure"]
+semantic_dimension_verdicts = ["NODATA", "SATISFIED", "FINDING", "ROUTED", "BLOCKED", "NOT_APPLICABLE"]
+semantic_review_receipt_states = ["UNREVIEWED", "ROOT_BOUND_REVIEWED"]
+semantic_review_actions = ["SEMANTIC_REVIEW_REQUIRED", "REMEDIATION_CANDIDATE", "AUTHORITY_RESOLUTION_REQUIRED", "RETAINED_ADJUDICATION"]
+semantic_dimension_required_fields = ["dimension", "verdict", "reason", "falsifier", "evidence_root"]
+unreviewed_dimension_contract = "ALL_NODATA_EMPTY_REASON_EMPTY_FALSIFIER_NULL_ROOT"
+reviewed_dimension_root_fields = ["target_root", "dimension", "verdict", "reason", "falsifier"]
+root_bound_review_requires_all_dimensions = true
+semantic_disposition_required_signals = { REMEDIATION_REQUIRED = "FINDING", REVIEWED_NO_CHANGE = "SATISFIED", ROLLUP_ONLY = "ROUTED", CONTRIBUTION_ONLY = "ROUTED", BLOCKED_AUTHORITY = "BLOCKED", TYPED_INAPPLICABLE = "NOT_APPLICABLE" }
+reviewed_no_change_requires_all_dimensions_satisfied = true
+non_remediation_dispositions_forbid_findings = true
+unreviewed_action = "SEMANTIC_REVIEW_REQUIRED"
+reviewed_no_change_requires_root_bound_receipt = true
+corrective_materialization = "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
 
 [row_contract]
 required_fields = [
@@ -227,6 +244,15 @@ required_fields = [
   "status",
   "missing_sections",
   "disposition",
+  "template_warning_state",
+  "semantic_review_disposition",
+  "semantic_review_receipt_state",
+  "semantic_review_dimensions",
+  "semantic_review_receipt_root",
+  "reviewed_no_change_receipt_root",
+  "semantic_review_action",
+  "semantic_review_rationale",
+  "semantic_review_falsifier",
   "coordination_assignee",
   "tracker_owner",
   "domain_candidate",
@@ -256,8 +282,11 @@ required_fields = [
   "campaign_epoch_root",
   "lane",
   "movement_destination",
+  "semantic_root",
 ]
 planned_child_required_fields = [
+  "schema",
+  "child_key",
   "title",
   "issue_type",
   "priority",
@@ -265,15 +294,18 @@ planned_child_required_fields = [
   "coordination_assignee",
   "labels",
   "lane_parent",
+  "external_ref",
   "external_ref_key_inputs",
   "source_dependency_snapshot",
   "intended_generated_edges",
   "description_file_artifact",
+  "acceptance_criteria",
   "description_root",
   "design",
   "acceptance",
   "notes",
   "review_minutes",
+  "estimated_minutes",
   "generated_child_estimated_minutes",
   "target_implementation_estimates",
   "target_implementation_estimated_minutes",
@@ -281,13 +313,24 @@ planned_child_required_fields = [
   "target_ids",
   "target_roots",
   "disposition_workflow",
+  "semantic_review_disposition",
+  "semantic_review_receipt_state",
+  "semantic_review_action",
+  "semantic_review_receipt_roots",
+  "reviewed_no_change_receipt_roots",
+  "external_authority",
   "external_authority_receipt_root",
   "external_authority_verdict",
+  "conditional_write_capability",
   "conditional_write_receipt_root",
   "conditional_write_verdict",
   "readiness",
   "remediation_route",
+  "packing_witness_root",
+  "compatibility",
   "falsifier",
+  "no_claim",
+  "semantic_root",
 ]
 planned_child_issue_type = "task"
 missing_payload_field = "REFUSE_PUBLICATION"
@@ -321,7 +364,7 @@ active_conflict_acknowledgement_grants_semantic_authority = false
 bare_issue_type_is_grouping_authority = false
 
 [packing_contract]
-hard_keys = ["priority", "status", "disposition", "issue_type", "missing_sections", "readiness", "remediation_route"]
+hard_keys = ["priority", "status", "disposition", "issue_type", "missing_sections", "semantic_review_disposition", "semantic_review_receipt_state", "semantic_review_action", "readiness", "remediation_route"]
 compatibility_receipt_fields = [
   "coordination",
   "declared_domain",
@@ -411,6 +454,16 @@ movement_requires_before_and_after_status = true
 movement_requires_source_and_destination_roots = true
 movement_requires_immutable_prior_evidence = true
 movement_requires_exact_successor_lineage = true
+movement_current_universe = "FULL_ALL_STATUS_CAPTURE"
+movement_requires_current_universe_root = true
+movement_requires_current_universe_count = true
+movement_destination_root_kinds = ["INVENTORY_TARGET", "FULL_UNIVERSE_SUCCESSOR"]
+movement_requires_destination_root_kind = true
+prior_target_absent_from_current_universe = "REFUSE"
+prior_target_outside_selected_inventory = "REQUIRE_CLOSED_WITHOUT_CURRENT_FINDING_SUCCESSOR"
+clean_closure_successor_reason = "CLOSED_WITHOUT_CURRENT_FINDING"
+clean_closure_successor_required_fields = ["issue_id", "status", "priority", "destination_root", "current_universe_root", "reason", "no_claim", "semantic_root"]
+movement_successor_lineage_fields = ["issue_id", "source_root", "destination_root", "destination_root_kind", "current_universe_root", "before_status", "after_status", "before_priority", "after_priority"]
 
 [cli_contract]
 planner_modes = ["--review-plan", "--history-plan"]
@@ -507,6 +560,15 @@ terminal_json_final_seal = true
 artifact_order = "UTF-8 bytewise relative path"
 successful_or_semantic_refusal_run_requires_complete_base_set = true
 output_reservation_failure_may_claim_complete_bundle = false
+bundle_states = ["COMPLETE_GREEN", "COMPLETE_NON_GREEN"]
+semantic_refusal_terminals = ["InputRefused", "NoData", "EvidenceFailed"]
+semantic_refusal_projection_schema = "frankensim.beads-template-hygiene.refusal-projection.v2"
+semantic_refusal_optional_content = "FORBIDDEN"
+semantic_refusal_requires_reserved_run = true
+terminal_slot_reservation = "EMPTY_O_EXCL_AND_DIRECTORY_FSYNC"
+terminal_content_assignment = "SINGLE_LOGICAL_ASSIGNMENT_LAST"
+partial_terminal = "ABSENT_EMPTY_OR_INVALID_NEVER_COMPLETE"
+retry_requires_fresh_run_dir = true
 
 [logging_contract]
 format = "JSONL"
@@ -546,6 +608,9 @@ assertion_start_event_required = true
 assertion_terminal_event_required = true
 case_terminal_binds_ordered_assertion_roots = true
 suite_terminal_binds_ordered_case_roots = true
+semantic_refusal_first_divergence_required = true
+semantic_refusal_recovery_required = true
+semantic_refusal_terminal_fields_must_agree = true
 forbidden_content = [
   "raw stdout body",
   "raw stderr body",
@@ -579,6 +644,8 @@ missing_unlisted_duplicate_changed_unsafe_extra = "REFUSE"
 first_divergence_required = true
 replay_mints_authority = false
 replay_proves_current_tracker_state = false
+semantic_refusal_behavior = "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
+semantic_refusal_replay_mints_pass = false
 
 [caps]
 max_cases = 96
@@ -603,6 +670,7 @@ max_command_arguments = 64
 max_command_argument_bytes = 4096
 max_log_events = 262144
 max_log_line_bytes = 16384
+max_diagnostic_summary_bytes = 512
 max_artifact_bytes = 67108864
 max_synopsis_bytes = 8192
 max_synopsis_selected_ids = 12
@@ -856,7 +924,7 @@ assertion_id = "v2.case.source-zero-one"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "exact zero and one row source, inventory, partitions, zero receipts, and terminal evidence"
+subject = "exact zero and one row source, inventory, partitions, zero receipts, and terminal evidence; every nonclosed zero-warning row remains explicitly UNREVIEWED and BLOCKED_AUTHORITY until a root-bound semantic receipt, while closed zero-finding rows stay outside the active remediation scope"
 
 [[case]]
 ordinal = 14
@@ -928,7 +996,7 @@ assertion_id = "v2.case.source-double-capture-coherent"
 criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "two equal bounded observations bind coherent tool, rule, DB, export, source, field, status, priority, and dependency identities"
+subject = "two order-varied raw br-shaped observations pass through full issue projection, v1 inventory, v2 inventory, and coherent capture while binding tool, rule, tracker status, export, source, field, lane, and dependency identities"
 
 [[case]]
 ordinal = 22
@@ -937,7 +1005,7 @@ assertion_id = "v2.case.source-within-run-drift"
 criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "any between-observation issue, relation, closure, lane, authority, or capability drift refuses the entire incoherent run"
+subject = "raw br-shaped field, relation, selected membership, closure, lane, owner, assignee, lint-status-cut, tracker-status, capability, source-file, or rule drift passes through production projections and refuses the entire incoherent run"
 
 [[case]]
 ordinal = 23
@@ -946,7 +1014,7 @@ assertion_id = "v2.case.source-count-preserving-swap"
 criterion_ids = ["AC01", "AC12", "AC16", "AC25"]
 kinds = ["mutation", "metamorphic"]
 fixture_engine = "PURE_PROJECTION"
-subject = "equal-count replacement, drop-plus-add, duplicate, warning, and status swaps refuse by exact membership"
+subject = "raw br-shaped equal-count field replacement, drop-plus-add, duplicate, and warning-membership swaps pass through production projections and refuse by exact membership"
 
 [[case]]
 ordinal = 24
@@ -955,7 +1023,7 @@ assertion_id = "v2.case.source-cross-run-drift-scope"
 criterion_ids = ["AC01", "AC12", "AC16", "AC17", "AC25"]
 kinds = ["property", "metamorphic", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "unrelated cross-run drift changes observation roots but preserves selected keys; relevant fields, receipts, membership, owners, consumers, and lanes invalidate affected keys"
+subject = "raw br-shaped unrelated cross-run drift changes observation and campaign roots while preserving selected target, decision, and child keys; selected fields, lint membership, dependency neighbors, receipt owners, receipt consumers, and lanes invalidate affected keys through inventory, authority, and plan construction"
 
 [[case]]
 ordinal = 25
@@ -1250,18 +1318,18 @@ ordinal = 57
 id = "template-lint-v2.zero-all-priority-status-cells"
 assertion_id = "v2.case.zero-all-priority-status-cells"
 criterion_ids = ["AC10", "AC12", "AC25"]
-kinds = ["property", "boundary"]
+kinds = ["property", "boundary", "mutation", "schema"]
 fixture_engine = "PURE_PROJECTION"
-subject = "every P0-P4 by open, in-progress, blocked, deferred, and closed cell has exact membership or root-bound zero receipt"
+subject = "every P0-P4 by open, in-progress, blocked, deferred, and closed cell has closed-schema exact membership or a source, inventory, campaign, partition, and membership-bound zero receipt; rerooted coordinates, receipts, order, and counts are refused"
 
 [[case]]
 ordinal = 58
 id = "template-lint-v2.movement-cross-lane"
 assertion_id = "v2.case.movement-cross-lane"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
-kinds = ["property", "state"]
+kinds = ["property", "state", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "priority or status movement invalidates source and destination, emits MOVED_TO_LANE, and retains one current mapping plus reviewed successor lineage"
+subject = "priority or status movement invalidates source and destination, emits independently reconstructed MOVED_TO_LANE evidence, refuses rerooted movement classes, and retains one current mapping plus reviewed successor lineage"
 
 [[case]]
 ordinal = 59
@@ -1324,7 +1392,7 @@ assertion_id = "v2.case.artifact-no-overwrite-partial"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["mutation", "fault", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "existing output and partial prefix refuse; semantic refusal after reservation retains complete non-green base set; reservation failure claims no bundle"
+subject = "existing output and partial prefix refuse; each typed semantic refusal is reserved and terminal-sealed last as an exact persistent nine-file complete-non-green bundle, passes strict filesystem reading, replays with its original nonzero terminal and no output, while reservation failure claims no bundle"
 
 [[case]]
 ordinal = 66
@@ -1351,7 +1419,7 @@ assertion_id = "v2.case.log-raw-result-redaction"
 criterion_ids = ["AC09", "AC22"]
 kinds = ["logging", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "credential, environment, source path, absolute path, PID, timing, bulk body, and raw-stream injection retains only allowlisted projection, lengths, and full bounded stream roots"
+subject = "credential, environment, source path, absolute path, PID, timing, bulk body, and raw-stream injection retains only allowlisted bounded projections, exact roots, redacted diagnostic summaries, and automatic refusal-callback closure-state mutation detection"
 
 [[case]]
 ordinal = 69
@@ -1504,7 +1572,7 @@ assertion_id = "v2.case.nomock-br-robot-cells"
 criterion_ids = ["AC10", "AC13", "AC20"]
 kinds = ["no_mock_e2e", "state"]
 fixture_engine = "RELEASED_BR_ROBOT"
-subject = "released br and robot-only bv fixture covers active, deferred, P4, ownerless, authority, consumer, and exact zero cells"
+subject = "released br and robot-only bv evidence covers active, deferred, P4, ownerless, authority, consumer, and exact zero cells; the production double-capture and zero-set entry points exact-cover every live nonclosed ID including zero-warning rows, retain typed UNREVIEWED dispositions, and bind successful command receipts"
 
 [[case]]
 ordinal = 86
@@ -1585,7 +1653,7 @@ assertion_id = "v2.case.nomock-offline-replay"
 criterion_ids = ["AC09", "AC13"]
 kinds = ["no_mock_e2e", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "retained released-tool review and history bundles replay with live tracker and network denied and reproduce exact selected and NOT_REQUESTED projections"
+subject = "persistent retained review and history bundles are terminal-sealed last, pass strict filesystem identity reading, and reconstruct exact selected and NOT_REQUESTED projections; a released-br-derived review bundle replays into a disjoint persistent directory with live tracker writes, live tracker reads, and network denied"
 
 [[case]]
 ordinal = 95

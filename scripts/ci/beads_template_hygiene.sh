@@ -22,10 +22,12 @@ import json
 import math
 import os
 import re
+import selectors
 import signal
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -65,6 +67,20 @@ V2_AUTHORITY_SCHEMA = "frankensim.beads-template-hygiene.authority.v2"
 V2_REVIEW_PLAN_SCHEMA = "frankensim.beads-template-hygiene.review-plan.v2"
 V2_HISTORY_SCHEMA = "frankensim.beads-template-hygiene.history.v2"
 V2_ZERO_SETS_SCHEMA = "frankensim.beads-template-hygiene.zero-sets.v2"
+V2_ZERO_CELL_SCHEMA = "frankensim.beads-template-hygiene.zero-cell.v2"
+V2_ZERO_RECEIPT_SCHEMA = (
+    "frankensim.beads-template-hygiene.zero-receipt.v2"
+)
+V2_MOVEMENT_RECEIPT_SCHEMA = (
+    "frankensim.beads-template-hygiene.movement-receipt.v2"
+)
+V2_ZERO_SET_NO_CLAIM = (
+    "zero and movement receipts are exact campaign accounting; they do not "
+    "mutate targets or adjudicate closed semantics"
+)
+V2_ZERO_RECEIPT_NO_CLAIM = (
+    "zero is exact only for this rooted campaign cell"
+)
 V2_EVENT_SCHEMA = "frankensim.beads-template-hygiene.event.v2"
 V2_TERMINAL_SCHEMA = "frankensim.beads-template-hygiene.terminal.v2"
 V2_REVIEW_RECEIPTS_SCHEMA = (
@@ -75,6 +91,180 @@ V2_ASSERTION_RESULT_SCHEMA = (
 )
 V2_TEST_TERMINAL_SCHEMA = (
     "frankensim.beads-template-hygiene.test-terminal.v2"
+)
+V2_REFUSAL_PROJECTION_SCHEMA = (
+    "frankensim.beads-template-hygiene.refusal-projection.v2"
+)
+V2_FAILURE_EVIDENCE_SCHEMA = (
+    "frankensim.beads-template-hygiene.failure-evidence.v2"
+)
+V2_REFUSAL_RESULT_SCHEMA = (
+    "frankensim.beads-template-hygiene.refusal-result.v2"
+)
+V2_SEMANTIC_REFUSAL_TERMINALS = (
+    "InputRefused",
+    "NoData",
+    "EvidenceFailed",
+)
+V2_SEMANTIC_REVIEW_DISPOSITIONS = (
+    "REMEDIATION_REQUIRED",
+    "REVIEWED_NO_CHANGE",
+    "ROLLUP_ONLY",
+    "CONTRIBUTION_ONLY",
+    "BLOCKED_AUTHORITY",
+    "TYPED_INAPPLICABLE",
+)
+V2_SEMANTIC_REVIEW_DIMENSIONS = (
+    "user_value",
+    "dependencies",
+    "priority",
+    "estimate",
+    "ownership",
+    "authority",
+    "no_claim_boundaries",
+    "unit_and_property_tests",
+    "release_built_no_mock_e2e",
+    "bounded_deterministic_logging",
+    "offline_replay",
+    "source_and_terminal_closure",
+)
+V2_SEMANTIC_DIMENSION_VERDICTS = (
+    "NODATA",
+    "SATISFIED",
+    "FINDING",
+    "ROUTED",
+    "BLOCKED",
+    "NOT_APPLICABLE",
+)
+V2_SEMANTIC_REVIEW_RECEIPT_STATES = (
+    "UNREVIEWED",
+    "ROOT_BOUND_REVIEWED",
+)
+V2_SEMANTIC_REVIEW_ACTIONS = (
+    "SEMANTIC_REVIEW_REQUIRED",
+    "REMEDIATION_CANDIDATE",
+    "AUTHORITY_RESOLUTION_REQUIRED",
+    "RETAINED_ADJUDICATION",
+)
+V2_SEMANTIC_SIGNAL_BY_DISPOSITION = {
+    "REMEDIATION_REQUIRED": "FINDING",
+    "REVIEWED_NO_CHANGE": "SATISFIED",
+    "ROLLUP_ONLY": "ROUTED",
+    "CONTRIBUTION_ONLY": "ROUTED",
+    "BLOCKED_AUTHORITY": "BLOCKED",
+    "TYPED_INAPPLICABLE": "NOT_APPLICABLE",
+}
+V2_PACKING_HARD_KEYS = (
+    "priority",
+    "status",
+    "disposition",
+    "issue_type",
+    "missing_sections",
+    "semantic_review_disposition",
+    "semantic_review_receipt_state",
+    "semantic_review_action",
+    "readiness",
+    "remediation_route",
+)
+V2_NORMALIZED_ROW_FIELDS = frozenset(
+    {
+        "issue_id",
+        "title",
+        "issue_type",
+        "priority",
+        "status",
+        "missing_sections",
+        "disposition",
+        "template_warning_state",
+        "semantic_review_disposition",
+        "semantic_review_receipt_state",
+        "semantic_review_dimensions",
+        "semantic_review_receipt_root",
+        "reviewed_no_change_receipt_root",
+        "semantic_review_action",
+        "semantic_review_rationale",
+        "semantic_review_falsifier",
+        "coordination_assignee",
+        "tracker_owner",
+        "domain_candidate",
+        "declared_domain_owner",
+        "declared_acceptance_owner",
+        "implementation_owner",
+        "evidence_owner",
+        "terminal_consumer",
+        "reviewer_provenance",
+        "source_closure",
+        "user_effect",
+        "field_roots",
+        "target_implementation_estimated_minutes",
+        "target_implementation_estimate_state",
+        "review_minutes",
+        "generated_child_estimated_minutes",
+        "external_authority_adapter_identity",
+        "external_authority_receipt_root",
+        "external_authority_verdict",
+        "conditional_write_capability_identity",
+        "conditional_write_receipt_root",
+        "conditional_write_verdict",
+        "readiness",
+        "remediation_route",
+        "active_work_context",
+        "campaign_epoch_root",
+        "lane",
+        "movement_destination",
+        "no_claim",
+        "semantic_root",
+    }
+)
+V2_PLANNED_CHILD_FIELDS = frozenset(
+    {
+        "schema",
+        "child_key",
+        "title",
+        "issue_type",
+        "priority",
+        "desired_status",
+        "coordination_assignee",
+        "labels",
+        "lane_parent",
+        "external_ref",
+        "external_ref_key_inputs",
+        "source_dependency_snapshot",
+        "intended_generated_edges",
+        "description_file_artifact",
+        "acceptance_criteria",
+        "acceptance",
+        "design",
+        "notes",
+        "review_minutes",
+        "estimated_minutes",
+        "generated_child_estimated_minutes",
+        "target_implementation_estimates",
+        "target_implementation_estimated_minutes",
+        "target_implementation_estimate_states",
+        "target_ids",
+        "target_roots",
+        "disposition_workflow",
+        "semantic_review_disposition",
+        "semantic_review_receipt_state",
+        "semantic_review_action",
+        "semantic_review_receipt_roots",
+        "reviewed_no_change_receipt_roots",
+        "external_authority",
+        "external_authority_receipt_root",
+        "external_authority_verdict",
+        "conditional_write_capability",
+        "conditional_write_receipt_root",
+        "conditional_write_verdict",
+        "readiness",
+        "remediation_route",
+        "packing_witness_root",
+        "compatibility",
+        "falsifier",
+        "description_root",
+        "no_claim",
+        "semantic_root",
+    }
 )
 
 V2_RUN_ARTIFACTS = (
@@ -120,6 +310,7 @@ V2_COMMAND_ARGUMENTS_CAP = 64
 V2_COMMAND_ARGUMENT_BYTES_CAP = 4_096
 V2_LOG_EVENTS_CAP = 262_144
 V2_LOG_LINE_BYTES_CAP = 16_384
+V2_DIAGNOSTIC_SUMMARY_BYTES_CAP = 512
 
 RUN_ARTIFACTS = (
     "source.json",
@@ -350,6 +541,18 @@ class InfrastructureFailed(HarnessError):
     terminal = "InfrastructureFailed"
 
 
+class PublishedV2Refusal(HarnessError):
+    def __init__(
+        self,
+        *,
+        terminal: str,
+        document: Mapping[str, Any],
+    ) -> None:
+        super().__init__(terminal)
+        self.terminal = terminal
+        self.document = dict(document)
+
+
 def check_cancel() -> None:
     if _cancel_requested:
         raise CancelledDrained("cancellation requested; no mutation is in flight")
@@ -538,36 +741,145 @@ def run_command(
     environment = os.environ.copy()
     for name in SANITIZED_ENV_NAMES:
         environment.pop(name, None)
+    input_bytes = (
+        input_text.encode("utf-8") if input_text is not None else None
+    )
+    expected_codes = set(expected)
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(argv),
             cwd=REPO_ROOT,
-            input=input_text,
-            text=True,
-            capture_output=True,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=environment,
-            timeout=CAPS["subprocess_timeout_seconds"],
-            check=False,
+            start_new_session=True,
         )
     except FileNotFoundError as error:
         raise InfrastructureFailed(f"required tool not found: {argv[0]}") from error
-    except subprocess.TimeoutExpired as error:
+    except OSError as error:
         raise InfrastructureFailed(
-            f"command exceeded {CAPS['subprocess_timeout_seconds']}s: {argv[0]}"
+            f"required tool could not be started: {argv[0]}"
         ) from error
-    stdout_bytes = completed.stdout.encode("utf-8")
-    stderr_bytes = completed.stderr.encode("utf-8")
-    if len(stdout_bytes) > CAPS["subprocess_stdout_bytes"]:
-        raise InfrastructureFailed(f"{argv[0]} stdout exceeded the bounded cap")
-    if len(stderr_bytes) > CAPS["subprocess_stdout_bytes"]:
-        raise InfrastructureFailed(f"{argv[0]} stderr exceeded the bounded cap")
+
+    def drain_process() -> None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=1)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+
+    streams = selectors.DefaultSelector()
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    input_offset = 0
+    assert process.stdout is not None
+    assert process.stderr is not None
+    for stream, name in (
+        (process.stdout, "stdout"),
+        (process.stderr, "stderr"),
+    ):
+        os.set_blocking(stream.fileno(), False)
+        streams.register(stream, selectors.EVENT_READ, name)
+    if input_bytes is not None:
+        assert process.stdin is not None
+        os.set_blocking(process.stdin.fileno(), False)
+        streams.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    deadline = time.monotonic() + CAPS["subprocess_timeout_seconds"]
+    try:
+        while streams.get_map() or process.poll() is None:
+            if _cancel_requested:
+                drain_process()
+                raise CancelledDrained(
+                    "cancellation requested; subprocess group was drained"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                drain_process()
+                raise InfrastructureFailed(
+                    f"command exceeded "
+                    f"{CAPS['subprocess_timeout_seconds']}s: {argv[0]}"
+                )
+            for key, _ in streams.select(timeout=min(0.05, remaining)):
+                stream = key.fileobj
+                if key.data == "stdin":
+                    assert input_bytes is not None
+                    try:
+                        written = os.write(
+                            stream.fileno(),
+                            input_bytes[input_offset : input_offset + 65_536],
+                        )
+                    except BrokenPipeError:
+                        written = 0
+                    input_offset += written
+                    if written == 0 or input_offset == len(input_bytes):
+                        streams.unregister(stream)
+                        stream.close()
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), 65_536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    streams.unregister(stream)
+                    stream.close()
+                    continue
+                target = (
+                    stdout_buffer
+                    if key.data == "stdout"
+                    else stderr_buffer
+                )
+                target.extend(chunk)
+                if len(target) > CAPS["subprocess_stdout_bytes"]:
+                    drain_process()
+                    raise InfrastructureFailed(
+                        f"{argv[0]} {key.data} exceeded the bounded cap"
+                    )
+        return_code = process.wait(timeout=1)
+    except HarnessError:
+        raise
+    except OSError as error:
+        drain_process()
+        raise InfrastructureFailed(
+            f"{argv[0]} failed during bounded command capture"
+        ) from error
+    finally:
+        streams.close()
+        if process.poll() is None:
+            drain_process()
+    stdout_bytes = bytes(stdout_buffer)
+    stderr_bytes = bytes(stderr_buffer)
+    try:
+        stdout = stdout_bytes.decode("utf-8")
+        stderr = stderr_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InfrastructureFailed(
+            f"{argv[0]} emitted non-UTF-8 command output"
+        ) from error
+    completed = subprocess.CompletedProcess(
+        list(argv),
+        return_code,
+        stdout,
+        stderr,
+    )
     _command_receipts.append(
         {
             "argv": [str(value) for value in argv],
             "exit_code": completed.returncode,
             "category": (
                 "SUCCESS"
-                if completed.returncode in set(expected)
+                if completed.returncode in expected_codes
                 else "UNEXPECTED_EXIT"
             ),
             "stdout": {
@@ -583,7 +895,7 @@ def run_command(
             "redaction_verdict": "RAW_STREAM_BODIES_NOT_RETAINED",
         }
     )
-    if completed.returncode not in set(expected):
+    if completed.returncode not in expected_codes:
         raise InfrastructureFailed(
             f"{argv[0]} returned {completed.returncode}; "
             "raw diagnostic body withheld, inspect its retained stream root"
@@ -679,6 +991,29 @@ def normalize_document(document: Any, *, label: str) -> list[dict[str, Any]]:
     if len(issues) > CAPS["issues"]:
         raise InfrastructureFailed(f"{label} exceeds {CAPS['issues']} issue cap")
     return issues
+
+
+def v2_list_issue_ids(
+    document: Any,
+    *,
+    label: str,
+) -> list[str]:
+    rows = normalize_document(document, label=label)
+    issue_ids: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise InfrastructureFailed(
+                f"{label} row {index} is not an object"
+            )
+        issue_id = row.get("id")
+        if not isinstance(issue_id, str) or not issue_id:
+            raise InfrastructureFailed(
+                f"{label} row {index} has an invalid issue ID"
+            )
+        issue_ids.append(issue_id)
+    issue_ids.sort()
+    v2_assert_unique(issue_ids, label=f"{label} issue IDs")
+    return issue_ids
 
 
 def load_case_manifest() -> dict[str, Any]:
@@ -893,6 +1228,23 @@ V2_MANIFEST_TABLE_KEYS = {
         "agent_mail_hints_are_replay_critical",
         "campaign_epoch_root_before_lane_projection",
         "all_status_partition_receipt_required",
+        "inventory_scope",
+        "zero_warning_rows_require_review_receipt",
+        "semantic_review_dispositions",
+        "semantic_review_dimensions",
+        "semantic_dimension_verdicts",
+        "semantic_review_receipt_states",
+        "semantic_review_actions",
+        "semantic_dimension_required_fields",
+        "unreviewed_dimension_contract",
+        "reviewed_dimension_root_fields",
+        "root_bound_review_requires_all_dimensions",
+        "semantic_disposition_required_signals",
+        "reviewed_no_change_requires_all_dimensions_satisfied",
+        "non_remediation_dispositions_forbid_findings",
+        "unreviewed_action",
+        "reviewed_no_change_requires_root_bound_receipt",
+        "corrective_materialization",
     },
     "row_contract": {
         "required_fields",
@@ -973,6 +1325,16 @@ V2_MANIFEST_TABLE_KEYS = {
         "movement_requires_source_and_destination_roots",
         "movement_requires_immutable_prior_evidence",
         "movement_requires_exact_successor_lineage",
+        "movement_current_universe",
+        "movement_requires_current_universe_root",
+        "movement_requires_current_universe_count",
+        "movement_destination_root_kinds",
+        "movement_requires_destination_root_kind",
+        "prior_target_absent_from_current_universe",
+        "prior_target_outside_selected_inventory",
+        "clean_closure_successor_reason",
+        "clean_closure_successor_required_fields",
+        "movement_successor_lineage_fields",
     },
     "cli_contract": {
         "planner_modes",
@@ -1039,6 +1401,15 @@ V2_MANIFEST_TABLE_KEYS = {
         "artifact_order",
         "successful_or_semantic_refusal_run_requires_complete_base_set",
         "output_reservation_failure_may_claim_complete_bundle",
+        "bundle_states",
+        "semantic_refusal_terminals",
+        "semantic_refusal_projection_schema",
+        "semantic_refusal_optional_content",
+        "semantic_refusal_requires_reserved_run",
+        "terminal_slot_reservation",
+        "terminal_content_assignment",
+        "partial_terminal",
+        "retry_requires_fresh_run_dir",
     },
     "logging_contract": {
         "format",
@@ -1058,6 +1429,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "case_terminal_binds_ordered_assertion_roots",
         "suite_terminal_binds_ordered_case_roots",
         "forbidden_content",
+        "semantic_refusal_first_divergence_required",
+        "semantic_refusal_recovery_required",
+        "semantic_refusal_terminal_fields_must_agree",
     },
     "replay_contract": {
         "artifact_only",
@@ -1076,6 +1450,8 @@ V2_MANIFEST_TABLE_KEYS = {
         "v1_manifest_root_required",
         "replay_mints_authority",
         "replay_proves_current_tracker_state",
+        "semantic_refusal_behavior",
+        "semantic_refusal_replay_mints_pass",
     },
     "caps": {
         "max_inventory_rows",
@@ -1099,6 +1475,7 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_artifact_bytes",
         "max_log_events",
         "max_log_line_bytes",
+        "max_diagnostic_summary_bytes",
         "max_synopsis_bytes",
         "max_synopsis_selected_ids",
         "max_cases",
@@ -1142,9 +1519,34 @@ def load_case_manifest_v2() -> dict[str, Any]:
     if not isinstance(document, dict):
         raise InputRefused("v2 case manifest root must be a table")
     v2_exact_keys(document, V2_MANIFEST_TOP_LEVEL_KEYS, label="v2 case manifest")
-    if document["schema"] != V2_MANIFEST_SCHEMA or document["schema_version"] != 2:
+    if (
+        not isinstance(document["schema"], str)
+        or type(document["schema_version"]) is not int
+        or document["schema"] != V2_MANIFEST_SCHEMA
+        or document["schema_version"] != 2
+    ):
         raise InputRefused("v2 case manifest has an unknown schema or version")
     if (
+        not isinstance(document["manifest_id"], str)
+        or not isinstance(document["suite_id"], str)
+        or not isinstance(document["bead_id"], str)
+        or not isinstance(document["manifest_path"], str)
+        or not isinstance(document["harness_path"], str)
+        or type(document["immutable_after_acceptance"]) is not bool
+        or not isinstance(document["tracker_authority"], str)
+        or not isinstance(document["authority"], str)
+        or not isinstance(document["no_claim"], str)
+        or type(document["criterion_count"]) is not int
+        or type(document["case_count"]) is not int
+        or type(document["assertion_count"]) is not int
+        or not isinstance(document["suite_status"], str)
+        or not isinstance(document["case_order"], list)
+        or not all(
+            isinstance(value, str) and value
+            for value in document["case_order"]
+        )
+        or len(document["case_order"]) != len(set(document["case_order"]))
+        or
         document["manifest_path"] != str(CASE_MANIFEST_V2_REL)
         or document["harness_path"] != str(SCRIPT_REL)
         or document["immutable_after_acceptance"] is not True
@@ -1187,9 +1589,17 @@ def load_case_manifest_v2() -> dict[str, Any]:
         if not isinstance(row, dict):
             raise InputRefused(f"v2 case row {index} is not a table")
         v2_exact_keys(row, required_case_fields, label=f"v2 case row {index}")
-        case_id = str(row["id"])
-        assertion_id = str(row["assertion_id"])
-        if int(row["ordinal"]) != index + 1:
+        if (
+            type(row["ordinal"]) is not int
+            or not isinstance(row["id"], str)
+            or not isinstance(row["assertion_id"], str)
+            or not isinstance(row["fixture_engine"], str)
+            or not isinstance(row["subject"], str)
+        ):
+            raise InputRefused(f"v2 case row {index} has invalid scalar types")
+        case_id = row["id"]
+        assertion_id = row["assertion_id"]
+        if row["ordinal"] != index + 1:
             raise InputRefused(f"{case_id} has a non-dense v2 ordinal")
         if not case_pattern.fullmatch(case_id):
             raise InputRefused(f"{case_id} has an invalid v2 case ID")
@@ -1206,6 +1616,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
         if (
             not isinstance(row_kinds, list)
             or not row_kinds
+            or any(not isinstance(value, str) for value in row_kinds)
             or not set(row_kinds).issubset(allowed_kinds)
             or len(row_kinds) != len(set(row_kinds))
         ):
@@ -1239,6 +1650,18 @@ def load_case_manifest_v2() -> dict[str, Any]:
             label=f"v2 criterion row {index}",
         )
         criterion_id = str(row["id"])
+        if (
+            not isinstance(row["id"], str)
+            or not isinstance(row["assertion_ids"], list)
+            or any(
+                not isinstance(value, str)
+                for value in row["assertion_ids"]
+            )
+        ):
+            raise InputRefused(
+                f"v2 criterion row {index} has invalid scalar types"
+            )
+        criterion_id = row["id"]
         actual_criterion_ids.append(criterion_id)
         expected_assertions = calculated_criteria.get(criterion_id, [])
         if row["assertion_ids"] != expected_assertions:
@@ -1276,14 +1699,21 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_artifact_bytes": RUN_ARTIFACT_CAP,
         "max_log_events": V2_LOG_EVENTS_CAP,
         "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
+        "max_diagnostic_summary_bytes": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
         "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
         "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
         "max_cases": 96,
         "exact_optimality_max_targets": V2_EXACT_OPTIMALITY_MAX_TARGETS,
     }
     for name, expected in expected_caps.items():
-        if caps[name] != expected:
+        if type(caps[name]) is not int or caps[name] != expected:
             raise InputRefused(f"v2 manifest cap {name} differs from the harness")
+    if (
+        not isinstance(caps["cap_exceeded_terminal"], str)
+        or type(caps["cap_exceeded_live_target_mutation"]) is not bool
+        or caps["cap_exceeded_live_target_mutation"] is not False
+    ):
+        raise InputRefused("v2 manifest cap terminal contract is malformed")
     if tuple(document["artifact_contract"]["base_set"]) != V2_RUN_ARTIFACTS:
         raise InputRefused("v2 manifest base artifact set differs from the harness")
     if tuple(document["authority_contract"]["readiness_states"]) != (
@@ -1294,6 +1724,142 @@ def load_case_manifest_v2() -> dict[str, Any]:
         V2_REMEDIATION_ROUTES
     ):
         raise InputRefused("v2 remediation routes differ from the harness")
+    source_contract = document["source_contract"]
+    expected_semantic_signals = dict(V2_SEMANTIC_SIGNAL_BY_DISPOSITION)
+    if (
+        source_contract["inventory_scope"]
+        != "ALL_NONCLOSED_PLUS_CLOSED_FINDINGS"
+        or source_contract["zero_warning_rows_require_review_receipt"]
+        is not True
+        or tuple(source_contract["semantic_review_dispositions"])
+        != V2_SEMANTIC_REVIEW_DISPOSITIONS
+        or tuple(source_contract["semantic_review_dimensions"])
+        != V2_SEMANTIC_REVIEW_DIMENSIONS
+        or tuple(source_contract["semantic_dimension_verdicts"])
+        != V2_SEMANTIC_DIMENSION_VERDICTS
+        or tuple(source_contract["semantic_review_receipt_states"])
+        != V2_SEMANTIC_REVIEW_RECEIPT_STATES
+        or tuple(source_contract["semantic_review_actions"])
+        != V2_SEMANTIC_REVIEW_ACTIONS
+        or source_contract["semantic_dimension_required_fields"]
+        != [
+            "dimension",
+            "verdict",
+            "reason",
+            "falsifier",
+            "evidence_root",
+        ]
+        or source_contract["unreviewed_dimension_contract"]
+        != "ALL_NODATA_EMPTY_REASON_EMPTY_FALSIFIER_NULL_ROOT"
+        or source_contract["reviewed_dimension_root_fields"]
+        != [
+            "target_root",
+            "dimension",
+            "verdict",
+            "reason",
+            "falsifier",
+        ]
+        or source_contract["root_bound_review_requires_all_dimensions"]
+        is not True
+        or source_contract["semantic_disposition_required_signals"]
+        != expected_semantic_signals
+        or source_contract[
+            "reviewed_no_change_requires_all_dimensions_satisfied"
+        ]
+        is not True
+        or source_contract["non_remediation_dispositions_forbid_findings"]
+        is not True
+        or source_contract["unreviewed_action"]
+        != "SEMANTIC_REVIEW_REQUIRED"
+        or source_contract[
+            "reviewed_no_change_requires_root_bound_receipt"
+        ]
+        is not True
+        or source_contract["corrective_materialization"]
+        != "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
+    ):
+        raise InputRefused("v2 semantic-review source contract differs")
+    row_fields = document["row_contract"]["required_fields"]
+    child_fields = document["row_contract"][
+        "planned_child_required_fields"
+    ]
+    if (
+        not isinstance(row_fields, list)
+        or len(row_fields) != len(set(row_fields))
+        or set(row_fields) != V2_NORMALIZED_ROW_FIELDS
+        or not isinstance(child_fields, list)
+        or len(child_fields) != len(set(child_fields))
+        or set(child_fields) != V2_PLANNED_CHILD_FIELDS
+    ):
+        raise InputRefused("v2 normalized row or planned-child contract differs")
+    if tuple(document["packing_contract"]["hard_keys"]) != V2_PACKING_HARD_KEYS:
+        raise InputRefused("v2 packing hard-key contract differs")
+    history_contract = document["history_contract"]
+    if (
+        history_contract["movement_current_universe"]
+        != "FULL_ALL_STATUS_CAPTURE"
+        or history_contract["movement_requires_current_universe_root"]
+        is not True
+        or history_contract["movement_requires_current_universe_count"]
+        is not True
+        or history_contract["movement_destination_root_kinds"]
+        != ["INVENTORY_TARGET", "FULL_UNIVERSE_SUCCESSOR"]
+        or history_contract["movement_requires_destination_root_kind"]
+        is not True
+        or history_contract["prior_target_absent_from_current_universe"]
+        != "REFUSE"
+        or history_contract["prior_target_outside_selected_inventory"]
+        != "REQUIRE_CLOSED_WITHOUT_CURRENT_FINDING_SUCCESSOR"
+        or history_contract["clean_closure_successor_reason"]
+        != "CLOSED_WITHOUT_CURRENT_FINDING"
+        or history_contract["clean_closure_successor_required_fields"]
+        != [
+            "issue_id",
+            "status",
+            "priority",
+            "destination_root",
+            "current_universe_root",
+            "reason",
+            "no_claim",
+            "semantic_root",
+        ]
+        or history_contract["movement_successor_lineage_fields"]
+        != [
+            "issue_id",
+            "source_root",
+            "destination_root",
+            "destination_root_kind",
+            "current_universe_root",
+            "before_status",
+            "after_status",
+            "before_priority",
+            "after_priority",
+        ]
+    ):
+        raise InputRefused("v2 clean-closure movement contract differs")
+    artifact_contract = document["artifact_contract"]
+    if (
+        artifact_contract["bundle_states"]
+        != ["COMPLETE_GREEN", "COMPLETE_NON_GREEN"]
+        or tuple(artifact_contract["semantic_refusal_terminals"])
+        != V2_SEMANTIC_REFUSAL_TERMINALS
+        or artifact_contract["semantic_refusal_projection_schema"]
+        != V2_REFUSAL_PROJECTION_SCHEMA
+        or artifact_contract["semantic_refusal_optional_content"]
+        != "FORBIDDEN"
+        or artifact_contract["semantic_refusal_requires_reserved_run"] is not True
+        or artifact_contract["retry_requires_fresh_run_dir"] is not True
+    ):
+        raise InputRefused("v2 semantic-refusal artifact contract differs")
+    if (
+        document["replay_contract"]["semantic_refusal_behavior"]
+        != "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
+        or document["replay_contract"][
+            "semantic_refusal_replay_mints_pass"
+        ]
+        is not False
+    ):
+        raise InputRefused("v2 semantic-refusal replay contract differs")
 
     v1_path = resolve_safe(
         str(CASE_MANIFEST_REL),
@@ -1396,7 +1962,89 @@ def show_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
+    issue_id = issue.get("id")
+    issue_type = issue.get("issue_type", issue.get("type"))
+    if (
+        not isinstance(issue_id, str)
+        or not issue_id
+        or not isinstance(issue.get("title"), str)
+        or not isinstance(issue_type, str)
+        or not issue_type
+        or issue.get("status")
+        not in {"open", "in_progress", "blocked", "deferred", "closed"}
+        or type(issue.get("priority")) is not int
+        or issue["priority"] not in range(5)
+    ):
+        raise InfrastructureFailed("v2 br issue contains invalid core scalars")
+    for field in (
+        "assignee",
+        "owner",
+        "parent",
+        "description",
+        "acceptance_criteria",
+        "design",
+        "notes",
+        "created_at",
+        "created_by",
+        "closed_at",
+        "close_reason",
+        "source_repo",
+        "source_repo_path",
+        "updated_at",
+    ):
+        value = issue.get(field)
+        if value is not None and not isinstance(value, str):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has a non-string {field}"
+            )
+    labels = issue.get("labels")
+    if labels is None:
+        labels = []
+    if not isinstance(labels, list) or any(
+        not isinstance(value, str) or not value for value in labels
+    ):
+        raise InfrastructureFailed(f"v2 br issue {issue_id} has invalid labels")
+    estimate = issue.get("estimated_minutes")
+    if estimate is not None and (
+        type(estimate) is not int or estimate < 0
+    ):
+        raise InfrastructureFailed(
+            f"v2 br issue {issue_id} has invalid estimated minutes"
+        )
+    for relation_field in ("dependencies", "dependents"):
+        relations = issue.get(relation_field)
+        if relations is None:
+            relations = []
+        if not isinstance(relations, list):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid {relation_field}"
+            )
+        for relation in relations:
+            if (
+                not isinstance(relation, dict)
+                or not isinstance(relation.get("id"), str)
+                or not relation["id"]
+                or not isinstance(
+                    relation.get("dependency_type", relation.get("type")),
+                    str,
+                )
+                or (
+                    relation.get("status") is not None
+                    and not isinstance(relation.get("status"), str)
+                )
+                or (
+                    relation.get("priority") is not None
+                    and type(relation.get("priority")) is not int
+                )
+            ):
+                raise InfrastructureFailed(
+                    f"v2 br issue {issue_id} has an invalid relation row"
+                )
+
+
 def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
+    v2_validate_raw_br_issue(issue)
     stable = canonical_issue_projection(issue)
     fields = {
         field: str(issue.get(field) or "")
@@ -1436,11 +2084,16 @@ def v2_show_all_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
         document = br_read_json("show", *batch, "--json")
         if not isinstance(document, list):
             raise InfrastructureFailed("v2 br show batch did not return an array")
-        rows.extend(
-            v2_full_issue_projection(issue)
-            for issue in document
-            if isinstance(issue, dict)
-        )
+        if len(document) != len(batch):
+            raise InfrastructureFailed(
+                "v2 br show batch cardinality differs from its request"
+            )
+        for index, issue in enumerate(document):
+            if not isinstance(issue, dict):
+                raise InfrastructureFailed(
+                    f"v2 br show batch row {index} is not an object"
+                )
+            rows.append(v2_full_issue_projection(issue))
     rows.sort(key=lambda issue: issue["id"])
     if [row["id"] for row in rows] != sorted(issue_ids):
         raise InfrastructureFailed("v2 br show membership differs from br list")
@@ -1453,18 +2106,55 @@ def lint_scopes() -> dict[str, Any]:
         document = br_read_json("lint", "--status", scope, "--json")
         if not isinstance(document, dict) or not isinstance(document.get("results"), list):
             raise InfrastructureFailed(f"br lint {scope} has no results array")
-        total = int(document.get("total", -1))
-        issues = int(document.get("issues", -1))
+        total = document.get("total")
+        issues = document.get("issues")
+        if type(total) is not int or type(issues) is not int:
+            raise InfrastructureFailed(
+                f"br lint {scope} counts are not exact integers"
+            )
         if total < 0 or issues < 0:
             raise InfrastructureFailed(f"br lint {scope} has negative counts")
         if total > CAPS["warnings"]:
             raise InfrastructureFailed(f"br lint {scope} exceeds warning cap")
+        normalized_rows: list[dict[str, Any]] = []
+        for index, row in enumerate(document["results"]):
+            if not isinstance(row, dict):
+                raise InfrastructureFailed(
+                    f"br lint {scope} row {index} is not an object"
+                )
+            issue_id = row.get("id")
+            missing = row.get("missing")
+            warnings = row.get("warnings")
+            if (
+                not isinstance(issue_id, str)
+                or not issue_id
+                or not isinstance(missing, list)
+                or not missing
+                or any(
+                    not isinstance(section, str) or not section
+                    for section in missing
+                )
+                or len(missing) != len(set(missing))
+                or type(warnings) is not int
+                or warnings != len(missing)
+            ):
+                raise InfrastructureFailed(
+                    f"br lint {scope} row {index} has invalid scalars"
+                )
+            normalized_rows.append(dict(row))
+        normalized_rows.sort(key=lambda row: row["id"])
+        if len(normalized_rows) != issues:
+            raise InfrastructureFailed(
+                f"br lint {scope} issue count differs from rows"
+            )
+        if sum(row["warnings"] for row in normalized_rows) != total:
+            raise InfrastructureFailed(
+                f"br lint {scope} warning count differs from rows"
+            )
         result[scope] = {
             "total": total,
             "issues": issues,
-            "results": sorted(
-                document["results"], key=lambda row: str(row.get("id", ""))
-            ),
+            "results": normalized_rows,
         }
     return result
 
@@ -1884,6 +2574,8 @@ def assemble_inventory(
     issue_rows: Sequence[Mapping[str, Any]],
     source: Mapping[str, Any],
     independent_findings_by_id: Mapping[str, Mapping[str, str]] | None = None,
+    *,
+    include_issue_rows_without_findings: bool = False,
 ) -> dict[str, Any]:
     validate_scope_partitions(lint)
     br_missing_by_id = lint_result_map(lint)
@@ -1894,6 +2586,10 @@ def assemble_inventory(
         for issue_id, findings in (independent_findings_by_id or {}).items()
         if findings
     }
+    finding_ids = set(br_missing_by_id) | set(independent)
+    selected_ids = set(finding_ids)
+    if include_issue_rows_without_findings:
+        selected_ids.update(str(issue["id"]) for issue in issue_rows)
     missing_by_id = {
         issue_id: tuple(
             sorted(
@@ -1901,9 +2597,11 @@ def assemble_inventory(
                 | set(independent.get(issue_id, ()))
             )
         )
-        for issue_id in sorted(set(br_missing_by_id) | set(independent))
+        for issue_id in sorted(selected_ids)
     }
     issue_map = {str(issue["id"]): issue for issue in issue_rows}
+    if len(issue_map) != len(issue_rows):
+        raise EvidenceFailed("show issue set contains duplicate IDs")
     if set(issue_map) != set(missing_by_id):
         raise EvidenceFailed(
             "show issue set differs from the combined br and independent issue set"
@@ -1934,12 +2632,31 @@ def assemble_inventory(
         duplicate_acceptance = bool(acceptance_text) and (
             acceptance_counts[text_root(acceptance_text)] > 1
         )
-        disposition, rationale, falsifier = classify_issue(
-            issue,
-            missing,
-            finding_reasons,
-            duplicate_acceptance=duplicate_acceptance,
-        )
+        if missing:
+            disposition, rationale, falsifier = classify_issue(
+                issue,
+                missing,
+                finding_reasons,
+                duplicate_acceptance=duplicate_acceptance,
+            )
+        elif include_issue_rows_without_findings:
+            disposition = "OWNER_REVIEW_REQUIRED"
+            rationale = (
+                "absence of a template-lint warning is not a semantic review "
+                "receipt; user value, graph position, priority, estimate, "
+                "ownership, authority, tests, E2E, logging, replay, and source "
+                "closure remain to be reviewed against the exact target root"
+            )
+            falsifier = (
+                "a root-bound independent semantic-review receipt assigns "
+                "REVIEWED_NO_CHANGE, ROLLUP_ONLY, CONTRIBUTION_ONLY, "
+                "TYPED_INAPPLICABLE, BLOCKED_AUTHORITY, or a concrete "
+                "REMEDIATION_REQUIRED finding"
+            )
+        else:
+            raise EvidenceFailed(
+                f"{issue_id} has no warning or independent finding"
+            )
         if disposition not in DISPOSITIONS:
             raise EvidenceFailed(f"unknown disposition for {issue_id}")
         fields = {
@@ -2005,6 +2722,30 @@ def assemble_inventory(
             "estimated_minutes": issue["estimated_minutes"],
             "updated_at": issue["updated_at"],
         }
+        if include_issue_rows_without_findings:
+            review_disposition = (
+                "CONTRIBUTION_ONLY"
+                if issue["status"] == "closed"
+                else (
+                    "BLOCKED_AUTHORITY"
+                    if disposition == "OWNER_REVIEW_REQUIRED"
+                    else "REMEDIATION_REQUIRED"
+                )
+            )
+            row.update(
+                {
+                    "template_warning_state": (
+                        "PRESENT" if missing else "NONE"
+                    ),
+                    "semantic_review_disposition": review_disposition,
+                    "semantic_review_receipt_state": "UNREVIEWED",
+                    "semantic_review_dimensions": (
+                        v2_unreviewed_semantic_dimensions()
+                    ),
+                    "semantic_review_receipt_root": None,
+                    "reviewed_no_change_receipt_root": None,
+                }
+            )
         rows.append(row)
         for section in missing:
             warning_rows.append(
@@ -2027,10 +2768,23 @@ def assemble_inventory(
     type_counts = Counter(row["type"] for row in rows)
     disposition_counts = Counter(row["disposition"] for row in rows)
     overlap_counts = Counter(
-        "+".join(row["missing_sections"]) if row["overlap"] else row["missing_sections"][0]
+        (
+            "NO_TEMPLATE_WARNING"
+            if not row["missing_sections"]
+            else (
+                "+".join(row["missing_sections"])
+                if row["overlap"]
+                else row["missing_sections"][0]
+            )
+        )
         for row in rows
     )
-    partitions = {key: [] for key in PARTITION_KEYS}
+    partition_keys = (
+        (*PARTITION_KEYS, "NO_TEMPLATE_WARNING")
+        if include_issue_rows_without_findings
+        else PARTITION_KEYS
+    )
+    partitions = {key: [] for key in partition_keys}
     partition_name_by_codes = {
         ("A",): "A_only",
         ("S",): "S_only",
@@ -2050,7 +2804,11 @@ def assemble_inventory(
             )
         except KeyError as error:
             raise EvidenceFailed(f"unknown missing section {error.args[0]}") from error
-        partition_name = partition_name_by_codes.get(codes)
+        partition_name = (
+            "NO_TEMPLATE_WARNING"
+            if not codes and include_issue_rows_without_findings
+            else partition_name_by_codes.get(codes)
+        )
         if partition_name is None:
             raise EvidenceFailed(f"unpartitioned warning overlap for {row['id']}")
         partitions[partition_name].append(row["id"])
@@ -2118,7 +2876,7 @@ def assemble_inventory(
                     for issue_id in partitions[key]
                 ),
             }
-            for key in PARTITION_KEYS
+            for key in partition_keys
         },
         "rows": rows,
         "warning_rows": warning_rows,
@@ -2127,6 +2885,41 @@ def assemble_inventory(
             "substantive text, close target Beads, or confer product authority"
         ),
     }
+    if include_issue_rows_without_findings:
+        inventory["counts"].update(
+            {
+                "complete_review_scope_issues": len(rows),
+                "template_warning_issues": sum(
+                    bool(row["missing_sections"]) for row in rows
+                ),
+                "no_template_warning_issues": sum(
+                    not row["missing_sections"] for row in rows
+                ),
+                "unreviewed_semantic_receipts": sum(
+                    row["semantic_review_receipt_state"] == "UNREVIEWED"
+                    for row in rows
+                ),
+            }
+        )
+        inventory["review_scope"] = {
+            "nonclosed_complete": True,
+            "closed_rows": "WARNING_OR_INDEPENDENT_FINDING_ONLY",
+            "issue_ids": [row["id"] for row in rows],
+            "issue_ids_root": semantic_root([row["id"] for row in rows]),
+            "allowed_semantic_review_dispositions": list(
+                V2_SEMANTIC_REVIEW_DISPOSITIONS
+            ),
+            "reviewed_no_change_requires_root_bound_receipt": True,
+            "no_claim": (
+                "complete inventory membership is not completed semantic "
+                "review and does not make unreviewed rows actionable"
+            ),
+        }
+        inventory["no_claim"] = (
+            "the inventory exact-covers every selected nonclosed row plus "
+            "closed finding rows, but UNREVIEWED is not REVIEWED_NO_CHANGE "
+            "and no row is authorized for mutation or closure"
+        )
     inventory["semantic_root"] = semantic_root(inventory)
     return inventory
 
@@ -2298,8 +3091,33 @@ V2_CAPTURE_STATE_KEYS = {
     "export_witness_root",
     "br_version_root",
     "br_capabilities_root",
+    "source_files_root",
+    "rule_contract_root",
     "semantic_root",
 }
+
+
+def v2_source_file_identities() -> list[dict[str, Any]]:
+    identities: list[dict[str, Any]] = []
+    for relative in (
+        str(SCRIPT_REL),
+        str(CASE_MANIFEST_REL),
+        str(CASE_MANIFEST_V2_REL),
+    ):
+        payload = v2_read_file_strict(
+            REPO_ROOT / relative,
+            label=f"v2 source identity {relative}",
+        )
+        identities.append(
+            {
+                "path": relative,
+                "bytes": len(payload),
+                "content_identity": (
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest()
+                ),
+            }
+        )
+    return identities
 
 
 def v2_capture_state(
@@ -2312,10 +3130,12 @@ def v2_capture_state(
     export_witness: Mapping[str, Any],
     version: Mapping[str, Any],
     capabilities: Mapping[str, Any],
+    source_files: Sequence[Mapping[str, Any]],
+    rule_contract: Mapping[str, Any],
 ) -> dict[str, Any]:
     normalized_ids = [str(value) for value in issue_ids]
-    if not normalized_ids or normalized_ids != sorted(normalized_ids):
-        raise EvidenceFailed("v2 capture issue IDs must be nonempty and sorted")
+    if normalized_ids != sorted(normalized_ids):
+        raise EvidenceFailed("v2 capture issue IDs must be sorted")
     v2_assert_unique(normalized_ids, label="v2 capture issue IDs")
     normalized_issues = [dict(value) for value in full_issues]
     full_ids = [str(value.get("id") or "") for value in normalized_issues]
@@ -2340,6 +3160,10 @@ def v2_capture_state(
         "export_witness_root": semantic_root(dict(export_witness)),
         "br_version_root": semantic_root(dict(version)),
         "br_capabilities_root": semantic_root(dict(capabilities)),
+        "source_files_root": semantic_root(
+            [dict(value) for value in source_files]
+        ),
+        "rule_contract_root": semantic_root(dict(rule_contract)),
     }
     return v2_rooted(document)
 
@@ -2372,7 +3196,14 @@ def collect_live(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     version = br_version()
     capabilities = br_capabilities()
     files_before = source_file_identities()
-    list_before_document = br_read_json("list", "--all", "--json", "--limit", "0")
+    list_before_document = br_read_json(
+        "list",
+        "--all",
+        "--deferred",
+        "--json",
+        "--limit",
+        "0",
+    )
     list_before = normalize_document(list_before_document, label="br list before")
     list_projection_before = [
         canonical_issue_projection(issue) for issue in list_before
@@ -2396,7 +3227,14 @@ def collect_live(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     }
     issue_root_before = semantic_root(issues_before)
 
-    list_after_document = br_read_json("list", "--all", "--json", "--limit", "0")
+    list_after_document = br_read_json(
+        "list",
+        "--all",
+        "--deferred",
+        "--json",
+        "--limit",
+        "0",
+    )
     list_after = normalize_document(list_after_document, label="br list after")
     list_projection_after = [
         canonical_issue_projection(issue) for issue in list_after
@@ -2489,21 +3327,22 @@ def collect_live(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
 
 def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     _command_receipts.clear()
+    rule_contract = {
+        "required_sections_by_type": REQUIRED_SECTIONS_BY_TYPE,
+        "clause_terms": list(CLAUSE_TERMS),
+        "classifier": "independent-template-findings-v2",
+    }
+    source_files_before = v2_source_file_identities()
     status_before = br_read_json("status", "--json", "--no-activity")
     sync_before = br_read_json("sync", "--status", "--json")
     witness_before = br_read_json("sync", "--witness", "--json")
     version_before = br_version()
     capabilities_before = br_capabilities()
     list_before_document = br_read_json("list", "--all", "--json", "--limit", "0")
-    list_before = normalize_document(list_before_document, label="v2 br list before")
-    issue_ids_before = sorted(
-        str(issue.get("id") or "")
-        for issue in list_before
-        if isinstance(issue, dict)
+    issue_ids_before = v2_list_issue_ids(
+        list_before_document,
+        label="v2 br list before",
     )
-    if not issue_ids_before or "" in issue_ids_before:
-        raise InfrastructureFailed("v2 br list contains an empty issue ID")
-    v2_assert_unique(issue_ids_before, label="v2 br list issue IDs")
     full_before = v2_show_all_issues(issue_ids_before)
     lint_before = lint_scopes()
     capture_before = v2_capture_state(
@@ -2515,6 +3354,8 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         export_witness=witness_before,
         version=version_before,
         capabilities=capabilities_before,
+        source_files=source_files_before,
+        rule_contract=rule_contract,
     )
 
     check_cancel()
@@ -2524,14 +3365,13 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
     version_after = br_version()
     capabilities_after = br_capabilities()
     list_after_document = br_read_json("list", "--all", "--json", "--limit", "0")
-    list_after = normalize_document(list_after_document, label="v2 br list after")
-    issue_ids_after = sorted(
-        str(issue.get("id") or "")
-        for issue in list_after
-        if isinstance(issue, dict)
+    issue_ids_after = v2_list_issue_ids(
+        list_after_document,
+        label="v2 br list after",
     )
     full_after = v2_show_all_issues(issue_ids_after)
     lint_after = lint_scopes()
+    source_files_after = v2_source_file_identities()
     capture_after = v2_capture_state(
         issue_ids=issue_ids_after,
         full_issues=full_after,
@@ -2541,6 +3381,8 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         export_witness=witness_after,
         version=version_after,
         capabilities=capabilities_after,
+        source_files=source_files_after,
+        rule_contract=rule_contract,
     )
     coherent_capture_root = v2_validate_capture_pair(
         capture_before,
@@ -2566,7 +3408,13 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         if (findings := independent_template_findings(issue))
     }
     lint_ids = set(lint_result_map(lint_after))
-    target_ids = sorted(lint_ids | set(independent))
+    nonclosed_ids = {
+        str(issue["id"])
+        for issue in full_after
+        if issue["status"] != "closed"
+    }
+    finding_ids = lint_ids | set(independent)
+    target_ids = sorted(nonclosed_ids | finding_ids)
     full_by_id = {issue["id"]: issue for issue in full_after}
     target_issues = [full_by_id[issue_id] for issue_id in target_ids]
     source: dict[str, Any] = {
@@ -2586,14 +3434,19 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         "case_manifest_root": case_manifest["semantic_root"],
         "case_manifest_content_identity": case_manifest["content_identity"],
         "coherent_capture_root": coherent_capture_root,
-        "source_files": [
-            file_identity(str(SCRIPT_REL)),
-            file_identity(str(CASE_MANIFEST_REL)),
-            file_identity(str(CASE_MANIFEST_V2_REL)),
-        ],
+        "source_files": source_files_after,
+        "rule_contract_root": semantic_root(rule_contract),
         "live_issue_count": len(full_after),
         "live_issue_projection_root": semantic_root(full_after),
-        "lint_issue_ids_root": semantic_root(target_ids),
+        "lint_issue_ids_root": semantic_root(sorted(lint_ids)),
+        "independent_finding_issue_ids_root": semantic_root(
+            sorted(independent)
+        ),
+        "nonclosed_issue_ids_root": semantic_root(sorted(nonclosed_ids)),
+        "selected_review_issue_ids_root": semantic_root(target_ids),
+        "selected_review_issue_count": len(target_ids),
+        "nonclosed_issue_count": len(nonclosed_ids),
+        "closed_finding_issue_count": len(finding_ids - nonclosed_ids),
         "status_cut": ["open", "in_progress", "blocked", "deferred", "closed"],
         "command_receipts": [
             {"capture_sequence": index, **receipt}
@@ -2610,6 +3463,7 @@ def collect_live_v2(case_manifest: Mapping[str, Any]) -> LiveSnapshot:
         target_issues,
         source,
         independent,
+        include_issue_rows_without_findings=True,
     )
     plan = build_plan(inventory, target_issues)
     return LiveSnapshot(
@@ -6445,6 +7299,149 @@ def v2_rooted(document: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def v2_unreviewed_semantic_dimensions() -> list[dict[str, Any]]:
+    return [
+        {
+            "dimension": dimension,
+            "verdict": "NODATA",
+            "reason": "",
+            "falsifier": "",
+            "evidence_root": None,
+        }
+        for dimension in V2_SEMANTIC_REVIEW_DIMENSIONS
+    ]
+
+
+def v2_validate_unreviewed_semantic_contract(
+    row: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if (
+        row.get("semantic_review_disposition")
+        not in V2_SEMANTIC_REVIEW_DISPOSITIONS
+        or row.get("semantic_review_receipt_state") != "UNREVIEWED"
+        or row.get("semantic_review_receipt_root") is not None
+        or row.get("reviewed_no_change_receipt_root") is not None
+        or row.get("semantic_review_dimensions")
+        != v2_unreviewed_semantic_dimensions()
+    ):
+        raise InputRefused(
+            f"{label} differs from the exact unreviewed semantic contract"
+        )
+
+
+def v2_semantic_dimension_receipt(
+    *,
+    target_root: str,
+    dimension: str,
+    verdict: str,
+    reason: str,
+    falsifier: str,
+) -> dict[str, Any]:
+    return {
+        "dimension": dimension,
+        "verdict": verdict,
+        "reason": reason,
+        "falsifier": falsifier,
+        "evidence_root": semantic_root(
+            {
+                "target_root": target_root,
+                "dimension": dimension,
+                "verdict": verdict,
+                "reason": reason,
+                "falsifier": falsifier,
+            }
+        ),
+    }
+
+
+def v2_validate_semantic_dimension_receipts(
+    rows: Any,
+    *,
+    target_root: str,
+    disposition: str,
+    allow_empty: bool,
+    label: str,
+) -> bool:
+    if not isinstance(rows, list):
+        raise InputRefused(f"{label} must be an array")
+    if not rows:
+        if allow_empty:
+            return False
+        raise InputRefused(f"{label} must cover every semantic dimension")
+    if len(rows) != len(V2_SEMANTIC_REVIEW_DIMENSIONS):
+        raise InputRefused(f"{label} does not cover every semantic dimension")
+    observed_dimensions: list[str] = []
+    observed_verdicts: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise InputRefused(f"{label} row {index} is not an object")
+        v2_exact_keys(
+            row,
+            {
+                "dimension",
+                "verdict",
+                "reason",
+                "falsifier",
+                "evidence_root",
+            },
+            label=f"{label} row {index}",
+        )
+        dimension = row["dimension"]
+        verdict = row["verdict"]
+        reason = row["reason"]
+        falsifier = row["falsifier"]
+        if (
+            not isinstance(dimension, str)
+            or not isinstance(verdict, str)
+            or verdict not in V2_SEMANTIC_DIMENSION_VERDICTS
+            or verdict == "NODATA"
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or not isinstance(falsifier, str)
+            or not falsifier.strip()
+        ):
+            raise InputRefused(
+                f"{label} row {index} lacks a reviewed verdict, reason, or falsifier"
+            )
+        expected_root = semantic_root(
+            {
+                "target_root": target_root,
+                "dimension": dimension,
+                "verdict": verdict,
+                "reason": reason,
+                "falsifier": falsifier,
+            }
+        )
+        if row["evidence_root"] != expected_root:
+            raise InputRefused(
+                f"{label} row {index} evidence root differs from its exact scope"
+            )
+        observed_dimensions.append(dimension)
+        observed_verdicts.append(verdict)
+    if tuple(observed_dimensions) != V2_SEMANTIC_REVIEW_DIMENSIONS:
+        raise InputRefused(
+            f"{label} dimensions are missing, duplicated, or noncanonical"
+        )
+    expected_signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[disposition]
+    if expected_signal not in observed_verdicts:
+        raise InputRefused(
+            f"{label} has no {expected_signal} verdict for {disposition}"
+        )
+    if disposition == "REVIEWED_NO_CHANGE" and any(
+        verdict != "SATISFIED" for verdict in observed_verdicts
+    ):
+        raise InputRefused(
+            f"{label} REVIEWED_NO_CHANGE requires every dimension SATISFIED"
+        )
+    if disposition != "REMEDIATION_REQUIRED" and "FINDING" in observed_verdicts:
+        raise InputRefused(
+            f"{label} contains a finding without REMEDIATION_REQUIRED"
+        )
+    return True
+
+
 def v2_exact_keys(
     value: Mapping[str, Any],
     expected: Iterable[str],
@@ -6740,6 +7737,32 @@ def v2_build_inventory(
             "labels": sorted(joined.get("labels") or []),
             "missing_sections": missing_sections,
             "disposition": source_row["disposition"],
+            "template_warning_state": source_row.get(
+                "template_warning_state",
+                "PRESENT" if missing_sections else "NONE",
+            ),
+            "semantic_review_disposition": source_row.get(
+                "semantic_review_disposition",
+                (
+                    "BLOCKED_AUTHORITY"
+                    if source_row["disposition"] == "OWNER_REVIEW_REQUIRED"
+                    else "REMEDIATION_REQUIRED"
+                ),
+            ),
+            "semantic_review_receipt_state": source_row.get(
+                "semantic_review_receipt_state",
+                "UNREVIEWED",
+            ),
+            "semantic_review_dimensions": list(
+                source_row.get("semantic_review_dimensions")
+                or v2_unreviewed_semantic_dimensions()
+            ),
+            "semantic_review_receipt_root": source_row.get(
+                "semantic_review_receipt_root"
+            ),
+            "reviewed_no_change_receipt_root": source_row.get(
+                "reviewed_no_change_receipt_root"
+            ),
             "disposition_rationale": source_row["rationale"],
             "disposition_falsifier": source_row["falsifier"],
             "field_roots": dict(sorted(source_row["field_roots"].items())),
@@ -6807,6 +7830,10 @@ def v2_build_inventory(
                 "approve semantics, mutate the target, or prove implementation"
             ),
         }
+        v2_validate_unreviewed_semantic_contract(
+            row,
+            label=f"inventory target {row['id']}",
+        )
         rows.append(v2_rooted(row))
     rows.sort(key=lambda row: row["id"])
     nonclosed_ids = sorted(row["id"] for row in rows if row["status"] != "closed")
@@ -6852,6 +7879,15 @@ def v2_validate_source_limits(
     warning_count: int,
     maximum_warnings_per_issue: int,
 ) -> None:
+    if any(
+        type(value) is not int
+        for value in (
+            row_count,
+            warning_count,
+            maximum_warnings_per_issue,
+        )
+    ):
+        raise InputRefused("v2 source limits must be exact integers")
     if row_count < 0 or row_count > V2_INVENTORY_ROWS_CAP:
         raise InputRefused(
             f"v2 inventory row count exceeds {V2_INVENTORY_ROWS_CAP}"
@@ -7446,12 +8482,14 @@ def v2_build_zero_sets(
     source_root: str,
     inventory: Mapping[str, Any],
     prior_campaign: Mapping[str, Any],
+    current_universe: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cells: list[dict[str, Any]] = []
     all_ids: list[str] = []
-    statuses = ("open", "in_progress", "blocked", "deferred", "closed")
+    expected_ids = sorted(row["id"] for row in inventory["rows"])
+    partition_issue_ids_root = semantic_root(expected_ids)
     for priority in range(5):
-        for status in statuses:
+        for status in STATUS_SCOPES:
             issue_ids = sorted(
                 row["id"]
                 for row in inventory["rows"]
@@ -7464,22 +8502,27 @@ def v2_build_zero_sets(
                 "issue_ids": issue_ids,
             }
             cell = {
+                "schema": V2_ZERO_CELL_SCHEMA,
                 **membership,
                 "membership_root": semantic_root(membership),
                 "zero_receipt": (
                     v2_rooted(
                         {
+                            "schema": V2_ZERO_RECEIPT_SCHEMA,
                             "priority": priority,
                             "status": status,
+                            "membership_root": semantic_root(membership),
+                            "issue_ids_root": semantic_root([]),
                             "source_root": source_root,
                             "inventory_root": inventory["semantic_root"],
                             "campaign_epoch_root": inventory[
                                 "campaign_epoch_root"
                             ],
-                            "count": 0,
-                            "no_claim": (
-                                "zero is exact only for this rooted campaign cell"
+                            "partition_issue_ids_root": (
+                                partition_issue_ids_root
                             ),
+                            "count": 0,
+                            "no_claim": V2_ZERO_RECEIPT_NO_CLAIM,
                         }
                     )
                     if not issue_ids
@@ -7487,21 +8530,109 @@ def v2_build_zero_sets(
                 ),
             }
             cells.append(v2_rooted(cell))
-    expected_ids = sorted(row["id"] for row in inventory["rows"])
     if sorted(all_ids) != expected_ids or len(all_ids) != len(set(all_ids)):
         raise EvidenceFailed("all-status priority cells do not partition inventory")
+    universe_rows = (
+        list(current_universe)
+        if current_universe is not None
+        else list(inventory["rows"])
+    )
+    current_universe_by_id: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(universe_rows):
+        issue_id = row.get("id")
+        status = row.get("status")
+        priority = row.get("priority")
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id
+            or issue_id in current_universe_by_id
+            or status not in STATUS_SCOPES
+            or type(priority) is not int
+            or priority not in range(5)
+        ):
+            raise EvidenceFailed(
+                f"current movement universe row {index} is malformed"
+            )
+        current_universe_by_id[issue_id] = {
+            "id": issue_id,
+            "status": status,
+            "priority": priority,
+            "target_root": (
+                v2_target_root(row)
+                if current_universe is not None
+                else row["target_root"]
+            ),
+        }
+    if not set(expected_ids).issubset(current_universe_by_id):
+        raise EvidenceFailed(
+            "current movement universe omits selected inventory targets"
+        )
+    current_universe_projection = [
+        current_universe_by_id[issue_id]
+        for issue_id in sorted(current_universe_by_id)
+    ]
+    current_universe_root = semantic_root(current_universe_projection)
     prior_rows = {
         row["id"]: row for row in prior_campaign.get("rows", [])
     }
     prior_only_ids = sorted(set(prior_rows) - set(expected_ids))
-    if prior_only_ids:
-        raise InputRefused(
-            "prior campaign contains targets outside the current rooted scope; "
-            f"first={prior_only_ids[0]}"
+    scope_successors: list[dict[str, Any]] = []
+    for issue_id in prior_only_ids:
+        current = current_universe_by_id.get(issue_id)
+        if current is None:
+            raise InputRefused(
+                "prior campaign target is absent from the current source "
+                f"universe; first={issue_id}"
+            )
+        if current["status"] != "closed":
+            raise InputRefused(
+                "prior campaign target left the selected scope without a "
+                f"clean closed successor; first={issue_id}"
+            )
+        scope_successors.append(
+            v2_rooted(
+                {
+                    "issue_id": issue_id,
+                    "status": current["status"],
+                    "priority": current["priority"],
+                    "destination_root": current["target_root"],
+                    "current_universe_root": current_universe_root,
+                    "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
+                    "no_claim": (
+                        "the successor accounts for scope movement only and "
+                        "does not re-adjudicate closure or prove implementation"
+                    ),
+                }
+            )
         )
+    scope_successors.sort(key=lambda row: row["issue_id"])
+    current_for_movement: dict[str, Mapping[str, Any]] = {
+        row["id"]: row for row in inventory["rows"]
+    }
+    destination_root_kind = {
+        row["id"]: "INVENTORY_TARGET" for row in inventory["rows"]
+    }
+    current_for_movement.update(
+        {
+            row["issue_id"]: {
+                "id": row["issue_id"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "target_root": row["destination_root"],
+            }
+            for row in scope_successors
+        }
+    )
+    destination_root_kind.update(
+        {
+            row["issue_id"]: "FULL_UNIVERSE_SUCCESSOR"
+            for row in scope_successors
+        }
+    )
     movements: list[dict[str, Any]] = []
-    for current in inventory["rows"]:
-        prior = prior_rows.get(current["id"])
+    for issue_id in sorted(set(prior_rows) & set(current_for_movement)):
+        current = current_for_movement[issue_id]
+        prior = prior_rows.get(issue_id)
         if not prior:
             continue
         before_status = str(prior["status"])
@@ -7520,7 +8651,8 @@ def v2_build_zero_sets(
         else:
             movement_class = "MOVED_TO_LANE"
         movement = {
-            "issue_id": current["id"],
+            "schema": V2_MOVEMENT_RECEIPT_SCHEMA,
+            "issue_id": issue_id,
             "class": movement_class,
             "before_status": before_status,
             "after_status": after_status,
@@ -7528,14 +8660,21 @@ def v2_build_zero_sets(
             "after_priority": after_priority,
             "source_root": prior["target_root"],
             "destination_root": current["target_root"],
+            "destination_root_kind": destination_root_kind[issue_id],
+            "current_universe_root": current_universe_root,
             "prior_campaign_root": prior_campaign["semantic_root"],
+            "prior_campaign_epoch_root": prior_campaign[
+                "campaign_epoch_root"
+            ],
             "current_campaign_root": inventory["campaign_epoch_root"],
             "immutable_prior_evidence": prior_campaign["terminal_root"],
             "successor_lineage_root": semantic_root(
                 {
-                    "issue_id": current["id"],
+                    "issue_id": issue_id,
                     "source_root": prior["target_root"],
                     "destination_root": current["target_root"],
+                    "destination_root_kind": destination_root_kind[issue_id],
+                    "current_universe_root": current_universe_root,
                     "before_status": before_status,
                     "after_status": after_status,
                     "before_priority": before_priority,
@@ -7545,14 +8684,17 @@ def v2_build_zero_sets(
         }
         movements.append(v2_rooted(movement))
     movements.sort(key=lambda row: row["issue_id"])
-    return v2_rooted(
+    result = v2_rooted(
         {
             "schema": V2_ZERO_SETS_SCHEMA,
             "source_root": source_root,
             "inventory_root": inventory["semantic_root"],
             "campaign_epoch_root": inventory["campaign_epoch_root"],
             "cells": cells,
-            "partition_issue_ids_root": semantic_root(expected_ids),
+            "partition_issue_ids_root": partition_issue_ids_root,
+            "current_universe_root": current_universe_root,
+            "current_universe_count": len(current_universe_projection),
+            "scope_successors": scope_successors,
             "movements": movements,
             "prior_campaign_root": prior_campaign["semantic_root"],
             "counts": {
@@ -7561,14 +8703,600 @@ def v2_build_zero_sets(
                     cell["zero_receipt"] is not None for cell in cells
                 ),
                 "issues": len(expected_ids),
+                "scope_successors": len(scope_successors),
                 "movements": len(movements),
             },
-            "no_claim": (
-                "zero and movement receipts are exact campaign accounting; "
-                "they do not mutate targets or adjudicate closed semantics"
-            ),
+            "no_claim": V2_ZERO_SET_NO_CLAIM,
         }
     )
+    v2_validate_zero_sets(
+        result,
+        source_root=source_root,
+        inventory=inventory,
+        prior_campaign=prior_campaign,
+        current_universe=current_universe,
+    )
+    return result
+
+
+def v2_validate_zero_sets(
+    zero_sets: Mapping[str, Any],
+    *,
+    source_root: str,
+    inventory: Mapping[str, Any],
+    prior_campaign: Mapping[str, Any],
+    current_universe: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
+
+    def require_root(value: Any, *, label: str) -> str:
+        if not isinstance(value, str) or root_pattern.fullmatch(value) is None:
+            raise EvidenceFailed(f"{label} is not a canonical semantic root")
+        return value
+
+    if not isinstance(zero_sets, Mapping):
+        raise EvidenceFailed("zero-set document is not an object")
+    if not isinstance(inventory, Mapping) or not isinstance(
+        prior_campaign, Mapping
+    ):
+        raise EvidenceFailed(
+            "zero-set inventory or prior campaign is not an object"
+        )
+    verify_semantic_root(inventory, label="zero-set inventory")
+    verify_semantic_root(prior_campaign, label="zero-set prior campaign")
+    v2_exact_keys(
+        zero_sets,
+        {
+            "schema",
+            "source_root",
+            "inventory_root",
+            "campaign_epoch_root",
+            "cells",
+            "partition_issue_ids_root",
+            "current_universe_root",
+            "current_universe_count",
+            "scope_successors",
+            "movements",
+            "prior_campaign_root",
+            "counts",
+            "no_claim",
+            "semantic_root",
+        },
+        label="zero-set document",
+    )
+    verify_semantic_root(zero_sets, label="zero-sets-v2.json")
+    if (
+        zero_sets["schema"] != V2_ZERO_SETS_SCHEMA
+        or zero_sets["source_root"] != source_root
+        or zero_sets["inventory_root"] != inventory.get("semantic_root")
+        or zero_sets["campaign_epoch_root"]
+        != inventory.get("campaign_epoch_root")
+        or zero_sets["prior_campaign_root"]
+        != prior_campaign.get("semantic_root")
+        or zero_sets["no_claim"] != V2_ZERO_SET_NO_CLAIM
+    ):
+        raise EvidenceFailed("zero-set document bindings differ")
+    for label, value in (
+        ("zero-set source root", source_root),
+        ("zero-set inventory root", inventory.get("semantic_root")),
+        (
+            "zero-set campaign root",
+            inventory.get("campaign_epoch_root"),
+        ),
+        (
+            "zero-set prior-campaign root",
+            prior_campaign.get("semantic_root"),
+        ),
+    ):
+        require_root(value, label=label)
+
+    inventory_rows = inventory.get("rows")
+    if not isinstance(inventory_rows, list):
+        raise EvidenceFailed("zero-set inventory rows are not a list")
+    inventory_by_id: dict[str, Mapping[str, Any]] = {}
+    for index, row in enumerate(inventory_rows):
+        if not isinstance(row, Mapping):
+            raise EvidenceFailed(
+                f"zero-set inventory row {index} is not an object"
+            )
+        issue_id = row.get("id")
+        priority = row.get("priority")
+        status = row.get("status")
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id
+            or type(priority) is not int
+            or priority not in range(5)
+            or not isinstance(status, str)
+            or status not in STATUS_SCOPES
+        ):
+            raise EvidenceFailed(
+                f"zero-set inventory row {index} has invalid coordinates"
+            )
+        if issue_id in inventory_by_id:
+            raise EvidenceFailed("zero-set inventory IDs are not unique")
+        require_root(
+            row.get("target_root"),
+            label=f"zero-set target root for {issue_id}",
+        )
+        inventory_by_id[issue_id] = row
+    expected_ids = sorted(inventory_by_id)
+    expected_partition_root = semantic_root(expected_ids)
+    if zero_sets["partition_issue_ids_root"] != expected_partition_root:
+        raise EvidenceFailed("zero-set partition membership root differs")
+    universe_rows = (
+        list(current_universe)
+        if current_universe is not None
+        else list(inventory_rows)
+    )
+    current_universe_by_id: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(universe_rows):
+        if not isinstance(row, Mapping):
+            raise EvidenceFailed(
+                f"zero-set current universe row {index} is not an object"
+            )
+        issue_id = row.get("id")
+        status = row.get("status")
+        priority = row.get("priority")
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id
+            or issue_id in current_universe_by_id
+            or status not in STATUS_SCOPES
+            or type(priority) is not int
+            or priority not in range(5)
+        ):
+            raise EvidenceFailed(
+                f"zero-set current universe row {index} is malformed"
+            )
+        target_root = (
+            v2_target_root(row)
+            if current_universe is not None
+            else row.get("target_root")
+        )
+        require_root(
+            target_root,
+            label=f"zero-set current universe target root for {issue_id}",
+        )
+        current_universe_by_id[issue_id] = {
+            "id": issue_id,
+            "status": status,
+            "priority": priority,
+            "target_root": target_root,
+        }
+    if not set(expected_ids).issubset(current_universe_by_id):
+        raise EvidenceFailed(
+            "zero-set current universe omits selected inventory targets"
+        )
+    current_universe_projection = [
+        current_universe_by_id[issue_id]
+        for issue_id in sorted(current_universe_by_id)
+    ]
+    expected_universe_root = semantic_root(current_universe_projection)
+    if (
+        zero_sets["current_universe_root"] != expected_universe_root
+        or type(zero_sets["current_universe_count"]) is not int
+        or zero_sets["current_universe_count"]
+        != len(current_universe_projection)
+    ):
+        raise EvidenceFailed("zero-set current universe binding differs")
+
+    cells = zero_sets["cells"]
+    if not isinstance(cells, list) or len(cells) != 25:
+        raise EvidenceFailed("zero-set cells are not the exact 25-cell grid")
+    expected_coordinates = [
+        (priority, status)
+        for priority in range(5)
+        for status in STATUS_SCOPES
+    ]
+    observed_ids: list[str] = []
+    zero_receipt_count = 0
+    for index, (cell, coordinate) in enumerate(
+        zip(cells, expected_coordinates, strict=True)
+    ):
+        if not isinstance(cell, Mapping):
+            raise EvidenceFailed(f"zero-set cell {index} is not an object")
+        v2_exact_keys(
+            cell,
+            {
+                "schema",
+                "priority",
+                "status",
+                "issue_ids",
+                "membership_root",
+                "zero_receipt",
+                "semantic_root",
+            },
+            label=f"zero-set cell {index}",
+        )
+        verify_semantic_root(cell, label=f"zero-set cell {index}")
+        priority, status = coordinate
+        expected_cell_ids = sorted(
+            issue_id
+            for issue_id, row in inventory_by_id.items()
+            if row["priority"] == priority and row["status"] == status
+        )
+        expected_membership_root = semantic_root(
+            {
+                "priority": priority,
+                "status": status,
+                "issue_ids": expected_cell_ids,
+            }
+        )
+        if (
+            cell["schema"] != V2_ZERO_CELL_SCHEMA
+            or type(cell["priority"]) is not int
+            or cell["priority"] != priority
+            or not isinstance(cell["status"], str)
+            or cell["status"] != status
+            or not isinstance(cell["issue_ids"], list)
+            or any(
+                not isinstance(issue_id, str)
+                for issue_id in cell["issue_ids"]
+            )
+            or cell["issue_ids"] != expected_cell_ids
+            or cell["membership_root"] != expected_membership_root
+        ):
+            raise EvidenceFailed(
+                f"zero-set cell {index} membership differs"
+            )
+        observed_ids.extend(cell["issue_ids"])
+        receipt = cell["zero_receipt"]
+        if expected_cell_ids:
+            if receipt is not None:
+                raise EvidenceFailed(
+                    f"populated zero-set cell {index} carries a zero receipt"
+                )
+            continue
+        if not isinstance(receipt, Mapping):
+            raise EvidenceFailed(
+                f"empty zero-set cell {index} lacks a zero receipt"
+            )
+        zero_receipt_count += 1
+        v2_exact_keys(
+            receipt,
+            {
+                "schema",
+                "priority",
+                "status",
+                "membership_root",
+                "issue_ids_root",
+                "source_root",
+                "inventory_root",
+                "campaign_epoch_root",
+                "partition_issue_ids_root",
+                "count",
+                "no_claim",
+                "semantic_root",
+            },
+            label=f"zero-set receipt {index}",
+        )
+        verify_semantic_root(receipt, label=f"zero-set receipt {index}")
+        if (
+            receipt["schema"] != V2_ZERO_RECEIPT_SCHEMA
+            or type(receipt["priority"]) is not int
+            or receipt["priority"] != priority
+            or not isinstance(receipt["status"], str)
+            or receipt["status"] != status
+            or receipt["membership_root"] != expected_membership_root
+            or receipt["issue_ids_root"] != semantic_root([])
+            or receipt["source_root"] != source_root
+            or receipt["inventory_root"] != inventory["semantic_root"]
+            or receipt["campaign_epoch_root"]
+            != inventory["campaign_epoch_root"]
+            or receipt["partition_issue_ids_root"]
+            != expected_partition_root
+            or type(receipt["count"]) is not int
+            or receipt["count"] != 0
+            or receipt["no_claim"] != V2_ZERO_RECEIPT_NO_CLAIM
+        ):
+            raise EvidenceFailed(
+                f"zero-set receipt {index} bindings differ"
+            )
+    if sorted(observed_ids) != expected_ids or len(observed_ids) != len(
+        set(observed_ids)
+    ):
+        raise EvidenceFailed("zero-set cells do not exactly partition inventory")
+
+    prior_state = prior_campaign.get("state")
+    if prior_state == "NOT_PROVIDED":
+        v2_exact_keys(
+            prior_campaign,
+            {
+                "state",
+                "bundle_path",
+                "terminal_root",
+                "inventory_root",
+                "rows",
+                "no_claim",
+                "semantic_root",
+            },
+            label="zero-set prior campaign",
+        )
+        if (
+            prior_campaign["bundle_path"] is not None
+            or prior_campaign["terminal_root"] is not None
+            or prior_campaign["inventory_root"] is not None
+            or prior_campaign["rows"] != []
+            or not isinstance(prior_campaign["no_claim"], str)
+            or not prior_campaign["no_claim"]
+        ):
+            raise EvidenceFailed(
+                "zero-set NOT_PROVIDED prior campaign carries evidence"
+            )
+    elif prior_state == "PROVIDED":
+        v2_exact_keys(
+            prior_campaign,
+            {
+                "state",
+                "bundle_path",
+                "terminal_root",
+                "inventory_root",
+                "campaign_epoch_root",
+                "rows",
+                "no_claim",
+                "semantic_root",
+            },
+            label="zero-set prior campaign",
+        )
+        bundle_path = prior_campaign["bundle_path"]
+        if not isinstance(bundle_path, str) or not bundle_path:
+            raise EvidenceFailed(
+                "zero-set PROVIDED prior campaign lacks a bundle path"
+            )
+        try:
+            safe_relative(bundle_path, label="zero-set prior bundle")
+        except UsageRefused as error:
+            raise EvidenceFailed(
+                "zero-set PROVIDED prior campaign bundle path is unsafe"
+            ) from error
+        for label, value in (
+            ("zero-set prior terminal root", prior_campaign["terminal_root"]),
+            ("zero-set prior inventory root", prior_campaign["inventory_root"]),
+            (
+                "zero-set prior campaign epoch root",
+                prior_campaign["campaign_epoch_root"],
+            ),
+        ):
+            require_root(value, label=label)
+        if (
+            not isinstance(prior_campaign["no_claim"], str)
+            or not prior_campaign["no_claim"]
+        ):
+            raise EvidenceFailed(
+                "zero-set PROVIDED prior campaign lacks a no-claim boundary"
+            )
+    else:
+        raise EvidenceFailed("zero-set prior campaign has an unknown state")
+
+    prior_rows = prior_campaign.get("rows")
+    if not isinstance(prior_rows, list):
+        raise EvidenceFailed("zero-set prior-campaign rows are not a list")
+    prior_by_id: dict[str, Mapping[str, Any]] = {}
+    for index, row in enumerate(prior_rows):
+        if not isinstance(row, Mapping):
+            raise EvidenceFailed(
+                f"zero-set prior row {index} is not an object"
+            )
+        v2_exact_keys(
+            row,
+            {
+                "id",
+                "status",
+                "priority",
+                "target_root",
+                "destination",
+            },
+            label=f"zero-set prior row {index}",
+        )
+        issue_id = row.get("id")
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id
+            or issue_id in prior_by_id
+            or not isinstance(row.get("status"), str)
+            or row["status"] not in STATUS_SCOPES
+            or type(row.get("priority")) is not int
+            or row["priority"] not in range(5)
+        ):
+            raise EvidenceFailed(
+                f"zero-set prior row {index} has invalid coordinates"
+            )
+        expected_destination = (
+            "history-v2.json"
+            if row["status"] == "closed"
+            else "review-plan-v2.json"
+        )
+        if row["destination"] != expected_destination:
+            raise EvidenceFailed(
+                f"zero-set prior row {index} has an invalid destination"
+            )
+        require_root(
+            row.get("target_root"),
+            label=f"zero-set prior target root for {issue_id}",
+        )
+        prior_by_id[issue_id] = row
+    prior_only_ids = sorted(set(prior_by_id) - set(inventory_by_id))
+    expected_scope_successors: list[dict[str, Any]] = []
+    for issue_id in prior_only_ids:
+        current = current_universe_by_id.get(issue_id)
+        if current is None:
+            raise InputRefused(
+                "prior campaign target is absent from the current source "
+                f"universe; first={issue_id}"
+            )
+        if current["status"] != "closed":
+            raise InputRefused(
+                "prior campaign target left the selected scope without a "
+                f"clean closed successor; first={issue_id}"
+            )
+        expected_scope_successors.append(
+            v2_rooted(
+                {
+                    "issue_id": issue_id,
+                    "status": current["status"],
+                    "priority": current["priority"],
+                    "destination_root": current["target_root"],
+                    "current_universe_root": expected_universe_root,
+                    "reason": "CLOSED_WITHOUT_CURRENT_FINDING",
+                    "no_claim": (
+                        "the successor accounts for scope movement only and "
+                        "does not re-adjudicate closure or prove implementation"
+                    ),
+                }
+            )
+        )
+    expected_scope_successors.sort(key=lambda row: row["issue_id"])
+    scope_successors = zero_sets["scope_successors"]
+    if (
+        not isinstance(scope_successors, list)
+        or scope_successors != expected_scope_successors
+    ):
+        raise EvidenceFailed("zero-set clean-closure successors differ")
+    current_for_movement: dict[str, Mapping[str, Any]] = dict(
+        inventory_by_id
+    )
+    destination_root_kind = {
+        issue_id: "INVENTORY_TARGET" for issue_id in inventory_by_id
+    }
+    current_for_movement.update(
+        {
+            row["issue_id"]: {
+                "id": row["issue_id"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "target_root": row["destination_root"],
+            }
+            for row in expected_scope_successors
+        }
+    )
+    destination_root_kind.update(
+        {
+            row["issue_id"]: "FULL_UNIVERSE_SUCCESSOR"
+            for row in expected_scope_successors
+        }
+    )
+
+    expected_movements: list[dict[str, Any]] = []
+    for issue_id in sorted(set(prior_by_id) & set(current_for_movement)):
+        current = current_for_movement[issue_id]
+        prior = prior_by_id.get(issue_id)
+        if prior is None:
+            continue
+        before_status = prior["status"]
+        after_status = current["status"]
+        before_priority = prior["priority"]
+        after_priority = current["priority"]
+        if (
+            before_status == after_status
+            and before_priority == after_priority
+        ):
+            continue
+        prior_terminal_root = require_root(
+            prior_campaign.get("terminal_root"),
+            label="zero-set prior terminal root",
+        )
+        if before_status != "closed" and after_status == "closed":
+            movement_class = "MOVED_TO_HISTORY"
+        elif before_status == "closed" and after_status != "closed":
+            movement_class = "MOVED_FROM_HISTORY"
+        else:
+            movement_class = "MOVED_TO_LANE"
+        movement = v2_rooted(
+            {
+                "schema": V2_MOVEMENT_RECEIPT_SCHEMA,
+                "issue_id": issue_id,
+                "class": movement_class,
+                "before_status": before_status,
+                "after_status": after_status,
+                "before_priority": before_priority,
+                "after_priority": after_priority,
+                "source_root": prior["target_root"],
+                "destination_root": current["target_root"],
+                "destination_root_kind": destination_root_kind[issue_id],
+                "current_universe_root": expected_universe_root,
+                "prior_campaign_root": prior_campaign["semantic_root"],
+                "prior_campaign_epoch_root": prior_campaign[
+                    "campaign_epoch_root"
+                ],
+                "current_campaign_root": inventory["campaign_epoch_root"],
+                "immutable_prior_evidence": prior_terminal_root,
+                "successor_lineage_root": semantic_root(
+                    {
+                        "issue_id": issue_id,
+                        "source_root": prior["target_root"],
+                        "destination_root": current["target_root"],
+                        "destination_root_kind": (
+                            destination_root_kind[issue_id]
+                        ),
+                        "current_universe_root": expected_universe_root,
+                        "before_status": before_status,
+                        "after_status": after_status,
+                        "before_priority": before_priority,
+                        "after_priority": after_priority,
+                    }
+                ),
+            }
+        )
+        expected_movements.append(movement)
+    expected_movements.sort(key=lambda row: row["issue_id"])
+    movements = zero_sets["movements"]
+    if not isinstance(movements, list):
+        raise EvidenceFailed("zero-set movements are not a list")
+    for index, movement in enumerate(movements):
+        if not isinstance(movement, Mapping):
+            raise EvidenceFailed(
+                f"zero-set movement {index} is not an object"
+            )
+        v2_exact_keys(
+            movement,
+            {
+                "schema",
+                "issue_id",
+                "class",
+                "before_status",
+                "after_status",
+                "before_priority",
+                "after_priority",
+                "source_root",
+                "destination_root",
+                "destination_root_kind",
+                "current_universe_root",
+                "prior_campaign_root",
+                "prior_campaign_epoch_root",
+                "current_campaign_root",
+                "immutable_prior_evidence",
+                "successor_lineage_root",
+                "semantic_root",
+            },
+            label=f"zero-set movement {index}",
+        )
+        verify_semantic_root(movement, label=f"zero-set movement {index}")
+    if movements != expected_movements:
+        divergence = first_projection_divergence(
+            expected_movements,
+            movements,
+        )
+        raise EvidenceFailed(
+            "zero-set movements differ from independently reconstructed "
+            f"receipts at {divergence or '$'}"
+        )
+
+    counts = zero_sets["counts"]
+    expected_counts = {
+        "cells": 25,
+        "zero_receipts": zero_receipt_count,
+        "issues": len(expected_ids),
+        "scope_successors": len(expected_scope_successors),
+        "movements": len(expected_movements),
+    }
+    if (
+        not isinstance(counts, Mapping)
+        or set(counts) != set(expected_counts)
+        or any(type(value) is not int for value in counts.values())
+        or dict(counts) != expected_counts
+    ):
+        raise EvidenceFailed("zero-set counts differ")
 
 
 def v2_load_prior_campaign(relative: str | None) -> dict[str, Any]:
@@ -7772,6 +9500,10 @@ V2_REVIEW_RECEIPT_FIELDS = {
     "source_closure",
     "user_effect",
     "review_minutes",
+    "semantic_review_disposition",
+    "semantic_review_dimensions",
+    "semantic_review_rationale",
+    "semantic_review_falsifier",
     "compatibility_key",
     "compatibility_target_ids",
     "compatibility_receipt_root",
@@ -7844,6 +9576,15 @@ def v2_load_review_receipts(
     )
     if document["schema"] != V2_REVIEW_RECEIPTS_SCHEMA:
         raise InputRefused("unknown review-receipts schema")
+    if (
+        not isinstance(document["inventory_root"], str)
+        or not isinstance(document["campaign_epoch_root"], str)
+        or not isinstance(document["source"], str)
+        or not document["source"].strip()
+        or not isinstance(document["no_claim"], str)
+        or not document["no_claim"].strip()
+    ):
+        raise InputRefused("review receipts contain invalid document scalars")
     if document["inventory_root"] != inventory["semantic_root"]:
         raise InputRefused("review receipts bind a different inventory root")
     if document["campaign_epoch_root"] != inventory["campaign_epoch_root"]:
@@ -7861,7 +9602,9 @@ def v2_load_review_receipts(
             V2_REVIEW_RECEIPT_FIELDS,
             label=f"review receipt {index}",
         )
-        target_id = str(receipt["target_id"])
+        if not isinstance(receipt["target_id"], str) or not receipt["target_id"]:
+            raise InputRefused(f"review receipt {index} has an invalid target ID")
+        target_id = receipt["target_id"]
         if target_id not in inventory_by_id:
             raise InputRefused(f"review receipt targets unknown {target_id}")
         if receipt["target_root"] != inventory_by_id[target_id]["target_root"]:
@@ -7871,7 +9614,7 @@ def v2_load_review_receipts(
         if receipt["campaign_epoch_root"] != inventory["campaign_epoch_root"]:
             raise InputRefused(f"review receipt campaign root drifted for {target_id}")
         review_minutes = receipt["review_minutes"]
-        if not isinstance(review_minutes, int) or review_minutes < 0:
+        if type(review_minutes) is not int or review_minutes < 0:
             raise InputRefused(f"review receipt minutes are invalid for {target_id}")
         if receipt["external_authority_verdict"] not in {
             "NODATA",
@@ -7913,6 +9656,10 @@ def v2_load_review_receipts(
                 f"compatibility target IDs are malformed for {target_id}"
             )
         v2_assert_unique(targets, label=f"compatibility targets for {target_id}")
+        if targets != sorted(targets):
+            raise InputRefused(
+                f"compatibility target IDs are not canonical for {target_id}"
+            )
         if targets and target_id not in targets:
             raise InputRefused(
                 f"compatibility set does not include its target {target_id}"
@@ -7926,18 +9673,32 @@ def v2_load_review_receipts(
             "review_minutes",
             "manual_authorization",
             "source_closure",
+            "semantic_review_dimensions",
         }
         if any(not isinstance(receipt[field], str) for field in string_fields):
             raise InputRefused(
                 f"review receipt contains a non-string scalar for {target_id}"
             )
-        if not isinstance(receipt["manual_authorization"], bool):
+        if type(receipt["manual_authorization"]) is not bool:
             raise InputRefused(
                 f"review receipt manual authorization is not boolean for {target_id}"
             )
         if not isinstance(receipt["source_closure"], dict):
             raise InputRefused(
                 f"review receipt source closure is not an object for {target_id}"
+            )
+        v2_exact_keys(
+            receipt["source_closure"],
+            {"required", "state"},
+            label=f"review receipt source closure for {target_id}",
+        )
+        if (
+            type(receipt["source_closure"]["required"]) is not bool
+            or not isinstance(receipt["source_closure"]["state"], str)
+            or not receipt["source_closure"]["state"]
+        ):
+            raise InputRefused(
+                f"review receipt source closure scalars are invalid for {target_id}"
             )
         for root_field in (
             "compatibility_receipt_root",
@@ -7953,12 +9714,46 @@ def v2_load_review_receipts(
                 raise InputRefused(
                     f"review receipt {root_field} is malformed for {target_id}"
                 )
+        semantic_disposition = receipt["semantic_review_disposition"]
+        if semantic_disposition not in V2_SEMANTIC_REVIEW_DISPOSITIONS:
+            raise InputRefused(
+                f"review receipt semantic disposition is unknown for {target_id}"
+            )
+        semantic_complete = v2_validate_semantic_dimension_receipts(
+            receipt["semantic_review_dimensions"],
+            target_root=str(receipt["target_root"]),
+            disposition=semantic_disposition,
+            allow_empty=True,
+            label=f"review receipt semantic dimensions for {target_id}",
+        )
+        if semantic_complete:
+            if (
+                not receipt["reviewer"].strip()
+                or not receipt["reviewer_kind"].strip()
+                or not receipt["semantic_review_rationale"].strip()
+                or not receipt["semantic_review_falsifier"].strip()
+            ):
+                raise InputRefused(
+                    f"review receipt semantic adjudication is incomplete for {target_id}"
+                )
+        elif (
+            receipt["semantic_review_rationale"]
+            or receipt["semantic_review_falsifier"]
+            or semantic_disposition
+            != inventory_by_id[target_id]["semantic_review_disposition"]
+        ):
+            raise InputRefused(
+                f"review receipt claims semantic adjudication without dimensions for {target_id}"
+            )
         normalized.append(v2_rooted(receipt))
-    normalized.sort(key=lambda row: row["target_id"])
+    original_target_ids = [row["target_id"] for row in normalized]
     v2_assert_unique(
-        [row["target_id"] for row in normalized],
+        original_target_ids,
         label="review receipt target IDs",
     )
+    if original_target_ids != sorted(original_target_ids):
+        raise InputRefused("review receipt rows are not in canonical target order")
+    normalized.sort(key=lambda row: row["target_id"])
     result = dict(document)
     result["receipts"] = normalized
     result["source_identity"] = {
@@ -7966,7 +9761,9 @@ def v2_load_review_receipts(
         "bytes": len(payload),
         "root": "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
     }
-    return v2_rooted(result)
+    rooted = v2_rooted(result)
+    v2_validate_receipt_bindings(rooted, inventory)
+    return rooted
 
 
 def v2_validate_compatibility_receipts(
@@ -8086,8 +9883,38 @@ def v2_validate_receipt_bindings(
         or receipt_document.get("inventory_root") != inventory.get("semantic_root")
         or receipt_document.get("campaign_epoch_root")
         != inventory.get("campaign_epoch_root")
+        or not isinstance(receipt_document.get("source"), str)
+        or not str(receipt_document.get("source")).strip()
+        or not isinstance(receipt_document.get("no_claim"), str)
+        or not str(receipt_document.get("no_claim")).strip()
     ):
         raise InputRefused("review receipts bind a different source or schema")
+    source_identity = receipt_document.get("source_identity")
+    if source_identity is not None:
+        if not isinstance(source_identity, dict):
+            raise InputRefused("review receipt source identity is not an object")
+        v2_exact_keys(
+            source_identity,
+            {"path", "bytes", "root"},
+            label="review receipt source identity",
+        )
+        if (
+            not isinstance(source_identity["path"], str)
+            or not source_identity["path"]
+            or type(source_identity["bytes"]) is not int
+            or source_identity["bytes"] < 0
+            or not isinstance(source_identity["root"], str)
+            or re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                source_identity["root"],
+            )
+            is None
+        ):
+            raise InputRefused("review receipt source identity scalars are invalid")
+        safe_relative(
+            source_identity["path"],
+            label="review receipt source identity path",
+        )
     rows = receipt_document.get("receipts")
     if not isinstance(rows, list):
         raise InputRefused("review receipts must contain an array")
@@ -8102,7 +9929,9 @@ def v2_validate_receipt_bindings(
             label=f"review receipt {index}",
         )
         verify_semantic_root(receipt, label=f"review receipt {index}")
-        target_id = str(receipt["target_id"])
+        target_id = receipt["target_id"]
+        if not isinstance(target_id, str) or not target_id:
+            raise InputRefused(f"review receipt {index} has an invalid target ID")
         if target_id not in inventory_by_id:
             raise InputRefused(f"review receipt targets unknown {target_id}")
         target = inventory_by_id[target_id]
@@ -8114,8 +9943,143 @@ def v2_validate_receipt_bindings(
             raise InputRefused(
                 f"review receipt exact source roots drifted for {target_id}"
             )
+        review_minutes = receipt["review_minutes"]
+        if type(review_minutes) is not int or review_minutes < 0:
+            raise InputRefused(f"review receipt minutes are invalid for {target_id}")
+        string_fields = V2_REVIEW_RECEIPT_FIELDS - {
+            "compatibility_target_ids",
+            "review_minutes",
+            "manual_authorization",
+            "source_closure",
+            "semantic_review_dimensions",
+        }
+        if any(not isinstance(receipt[field], str) for field in string_fields):
+            raise InputRefused(
+                f"review receipt contains a non-string scalar for {target_id}"
+            )
+        if type(receipt["manual_authorization"]) is not bool:
+            raise InputRefused(
+                f"review receipt manual authorization is not boolean for {target_id}"
+            )
+        if receipt["external_authority_verdict"] not in {
+            "NODATA",
+            "VALID",
+            "INVALID",
+            "REVOKED",
+            "EXPIRED",
+            "CONFLICTED",
+        }:
+            raise InputRefused(
+                f"review receipt external-authority verdict is unknown for {target_id}"
+            )
+        if receipt["conditional_capability_verdict"] not in {
+            "NODATA",
+            "VALID",
+            "FAILED",
+            "LYING",
+            "NON_ATOMIC",
+            "VERSION_MISMATCHED",
+            "CONFLICTED",
+        }:
+            raise InputRefused(
+                f"review receipt conditional-capability verdict is unknown for {target_id}"
+            )
+        if receipt["gate_admission_verdict"] not in {
+            "NODATA",
+            "VALID",
+            "FAILED",
+            "CONFLICTED",
+        }:
+            raise InputRefused(
+                f"review receipt gate-admission verdict is unknown for {target_id}"
+            )
+        targets = receipt["compatibility_target_ids"]
+        if not isinstance(targets, list) or any(
+            not isinstance(value, str) or not value for value in targets
+        ):
+            raise InputRefused(
+                f"compatibility target IDs are malformed for {target_id}"
+            )
+        v2_assert_unique(targets, label=f"compatibility targets for {target_id}")
+        if targets != sorted(targets):
+            raise InputRefused(
+                f"compatibility target IDs are not canonical for {target_id}"
+            )
+        if targets and target_id not in targets:
+            raise InputRefused(
+                f"compatibility set does not include its target {target_id}"
+            )
+        if any(value not in inventory_by_id for value in targets):
+            raise InputRefused(
+                f"compatibility set includes an unknown target for {target_id}"
+            )
+        source_closure = receipt["source_closure"]
+        if not isinstance(source_closure, dict):
+            raise InputRefused(
+                f"review receipt source closure is not an object for {target_id}"
+            )
+        v2_exact_keys(
+            source_closure,
+            {"required", "state"},
+            label=f"review receipt source closure for {target_id}",
+        )
+        if (
+            type(source_closure["required"]) is not bool
+            or not isinstance(source_closure["state"], str)
+            or not source_closure["state"]
+        ):
+            raise InputRefused(
+                f"review receipt source closure scalars are invalid for {target_id}"
+            )
+        for root_field in (
+            "compatibility_receipt_root",
+            "external_authority_receipt_root",
+            "conditional_capability_receipt_root",
+            "gate_admission_receipt_root",
+        ):
+            root_value = receipt[root_field]
+            if root_value and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                root_value,
+            ) is None:
+                raise InputRefused(
+                    f"review receipt {root_field} is malformed for {target_id}"
+                )
+        semantic_disposition = receipt["semantic_review_disposition"]
+        if semantic_disposition not in V2_SEMANTIC_REVIEW_DISPOSITIONS:
+            raise InputRefused(
+                f"review receipt semantic disposition is unknown for {target_id}"
+            )
+        semantic_complete = v2_validate_semantic_dimension_receipts(
+            receipt["semantic_review_dimensions"],
+            target_root=str(receipt["target_root"]),
+            disposition=semantic_disposition,
+            allow_empty=True,
+            label=f"review receipt semantic dimensions for {target_id}",
+        )
+        if semantic_complete:
+            if (
+                not receipt["reviewer"].strip()
+                or not receipt["reviewer_kind"].strip()
+                or not receipt["semantic_review_rationale"].strip()
+                or not receipt["semantic_review_falsifier"].strip()
+            ):
+                raise InputRefused(
+                    f"review receipt semantic adjudication is incomplete for {target_id}"
+                )
+        elif (
+            receipt["semantic_review_rationale"]
+            or receipt["semantic_review_falsifier"]
+            or semantic_disposition
+            != inventory_by_id[target_id]["semantic_review_disposition"]
+        ):
+            raise InputRefused(
+                f"review receipt claims semantic adjudication without dimensions for {target_id}"
+            )
         observed_ids.append(target_id)
     v2_assert_unique(observed_ids, label="review receipt target IDs")
+    if observed_ids != sorted(observed_ids):
+        raise InputRefused("review receipt rows are not in canonical target order")
 
 
 def v2_derive_authority(
@@ -8132,11 +10096,51 @@ def v2_derive_authority(
     v2_validate_compatibility_receipts(receipts, inventory)
     decisions: list[dict[str, Any]] = []
     for target in inventory["rows"]:
+        v2_validate_unreviewed_semantic_contract(
+            target,
+            label=f"authority inventory target {target['id']}",
+        )
         receipt = receipts.get(target["id"])
-        declared = bool(
+        semantic_review_complete = bool(
+            receipt and receipt["semantic_review_dimensions"]
+        )
+        semantic_review_disposition = (
+            receipt["semantic_review_disposition"]
+            if semantic_review_complete and receipt
+            else target["semantic_review_disposition"]
+        )
+        semantic_review_receipt_state = (
+            "ROOT_BOUND_REVIEWED"
+            if semantic_review_complete
+            else "UNREVIEWED"
+        )
+        semantic_review_receipt_root = (
+            receipt["semantic_root"]
+            if semantic_review_complete and receipt
+            else None
+        )
+        reviewed_no_change_receipt_root = (
+            semantic_review_receipt_root
+            if semantic_review_disposition == "REVIEWED_NO_CHANGE"
+            and semantic_review_complete
+            else None
+        )
+        if not semantic_review_complete:
+            semantic_review_action = "SEMANTIC_REVIEW_REQUIRED"
+        elif semantic_review_disposition == "REMEDIATION_REQUIRED":
+            semantic_review_action = "REMEDIATION_CANDIDATE"
+        elif semantic_review_disposition == "BLOCKED_AUTHORITY":
+            semantic_review_action = "AUTHORITY_RESOLUTION_REQUIRED"
+        else:
+            semantic_review_action = "RETAINED_ADJUDICATION"
+        review_declared = bool(
             receipt
             and receipt["reviewer"]
             and receipt["reviewer_kind"]
+        )
+        authority_declared = bool(
+            review_declared
+            and receipt
             and receipt["declared_acceptance_owner"]
         )
         external_receipt_valid = bool(
@@ -8179,7 +10183,7 @@ def v2_derive_authority(
         )
         if mechanically_eligible:
             readiness = "MECHANICALLY_APPLY_ELIGIBLE"
-        elif declared or external_verified or conditional_verified:
+        elif authority_declared or external_verified or conditional_verified:
             readiness = "DECLARED_READY"
         else:
             readiness = "REVIEW_ONLY"
@@ -8190,7 +10194,11 @@ def v2_derive_authority(
         elif mechanically_eligible:
             route = "AUTOMATED_CONDITIONAL"
             deferred_prohibition = False
-        elif declared and receipt and receipt["manual_authorization"]:
+        elif (
+            authority_declared
+            and receipt
+            and receipt["manual_authorization"]
+        ):
             route = "MANUAL_BR_REVIEW"
             deferred_prohibition = False
         else:
@@ -8203,52 +10211,85 @@ def v2_derive_authority(
             "tracker_owner": target["tracker_owner"],
             "coordination_assignee": (
                 receipt["coordination_assignee"]
-                if declared and receipt
+                if receipt and receipt["coordination_assignee"]
                 else target["tracker_assignee"]
             ),
             "domain_candidates": target["domain_candidates"],
             "declared_domain_owner": (
-                receipt["declared_domain_owner"] if declared and receipt else ""
+                receipt["declared_domain_owner"] if receipt else ""
             ),
             "declared_acceptance_owner": (
-                receipt["declared_acceptance_owner"] if declared and receipt else ""
+                receipt["declared_acceptance_owner"] if receipt else ""
             ),
             "implementation_owner": (
                 receipt["implementation_owner"]
-                if declared and receipt
+                if receipt and receipt["implementation_owner"]
                 else "UNRESOLVED"
             ),
             "evidence_owner": (
                 receipt["evidence_owner"]
-                if declared and receipt
+                if receipt and receipt["evidence_owner"]
                 else "UNRESOLVED"
             ),
             "terminal_consumer": (
                 receipt["terminal_consumer"]
-                if declared and receipt
+                if receipt and receipt["terminal_consumer"]
                 else "UNRESOLVED"
             ),
             "reviewer_provenance": {
-                "reviewer": receipt["reviewer"] if declared and receipt else "",
+                "reviewer": (
+                    receipt["reviewer"]
+                    if review_declared and receipt
+                    else ""
+                ),
                 "reviewer_kind": (
                     receipt["reviewer_kind"]
-                    if declared and receipt
+                    if review_declared and receipt
                     else "NODATA"
                 ),
                 "receipt_root": (
-                    receipt["semantic_root"] if declared and receipt else None
+                    receipt["semantic_root"]
+                    if review_declared and receipt
+                    else None
                 ),
                 "self_report_ceiling": "DECLARED_READY",
             },
             "source_closure": (
                 receipt["source_closure"]
-                if declared and receipt
+                if receipt
                 else target["source_closure"]
             ),
             "user_effect": (
                 receipt["user_effect"]
-                if declared and receipt
+                if receipt
                 else target["user_effect"]
+            ),
+            "template_warning_state": target["template_warning_state"],
+            "semantic_review_disposition": semantic_review_disposition,
+            "semantic_review_receipt_state": (
+                semantic_review_receipt_state
+            ),
+            "semantic_review_dimensions": (
+                receipt["semantic_review_dimensions"]
+                if semantic_review_complete and receipt
+                else target["semantic_review_dimensions"]
+            ),
+            "semantic_review_receipt_root": (
+                semantic_review_receipt_root
+            ),
+            "reviewed_no_change_receipt_root": (
+                reviewed_no_change_receipt_root
+            ),
+            "semantic_review_action": semantic_review_action,
+            "semantic_review_rationale": (
+                receipt["semantic_review_rationale"]
+                if semantic_review_complete and receipt
+                else ""
+            ),
+            "semantic_review_falsifier": (
+                receipt["semantic_review_falsifier"]
+                if semantic_review_complete and receipt
+                else target["disposition_falsifier"]
             ),
             "field_roots": target["field_roots"],
             "target_implementation_estimated_minutes": target[
@@ -8259,7 +10300,7 @@ def v2_derive_authority(
             ],
             "review_minutes": (
                 receipt["review_minutes"]
-                if declared and receipt
+                if receipt
                 else target["review_minutes"]
             ),
             "external_authority": {
@@ -8316,7 +10357,9 @@ def v2_derive_authority(
             "remediation_route": route,
             "manual_authorization": {
                 "declared": bool(
-                    declared and receipt and receipt["manual_authorization"]
+                    authority_declared
+                    and receipt
+                    and receipt["manual_authorization"]
                 ),
                 "source": (
                     receipt["manual_authorization_source"] if receipt else ""
@@ -8327,31 +10370,31 @@ def v2_derive_authority(
             "compatibility": {
                 "key": (
                     receipt["compatibility_key"]
-                    if declared and receipt
+                    if receipt
                     else ""
                 ),
                 "target_ids": (
                     receipt["compatibility_target_ids"]
-                    if declared and receipt
+                    if receipt
                     else []
                 ),
                 "receipt_root": (
                     receipt["compatibility_receipt_root"]
-                    if declared and receipt
+                    if receipt
                     else ""
                 ),
                 "rationale": (
                     receipt["compatibility_rationale"]
-                    if declared and receipt
+                    if receipt
                     else ""
                 ),
                 "falsifier": (
                     receipt["compatibility_falsifier"]
-                    if declared and receipt
+                    if receipt
                     else ""
                 ),
                 "target_complete": bool(
-                    declared and receipt and receipt["compatibility_key"]
+                    receipt and receipt["compatibility_key"]
                 ),
             },
             "active_work_context": active_context,
@@ -8365,6 +10408,15 @@ def v2_derive_authority(
             raise EvidenceFailed("v2 readiness escaped its closed state set")
         if decision["remediation_route"] not in V2_REMEDIATION_ROUTES:
             raise EvidenceFailed("v2 remediation route escaped its closed state set")
+        if (
+            decision["semantic_review_disposition"]
+            not in V2_SEMANTIC_REVIEW_DISPOSITIONS
+            or decision["semantic_review_receipt_state"]
+            not in V2_SEMANTIC_REVIEW_RECEIPT_STATES
+            or decision["semantic_review_action"]
+            not in V2_SEMANTIC_REVIEW_ACTIONS
+        ):
+            raise EvidenceFailed("v2 semantic review escaped its closed state sets")
         decisions.append(v2_rooted(decision))
     decisions.sort(key=lambda row: row["target_id"])
     target_by_id = {row["id"]: row for row in inventory["rows"]}
@@ -8381,6 +10433,33 @@ def v2_derive_authority(
                     "status": target["status"],
                     "missing_sections": target["missing_sections"],
                     "disposition": target["disposition"],
+                    "template_warning_state": decision[
+                        "template_warning_state"
+                    ],
+                    "semantic_review_disposition": decision[
+                        "semantic_review_disposition"
+                    ],
+                    "semantic_review_receipt_state": decision[
+                        "semantic_review_receipt_state"
+                    ],
+                    "semantic_review_dimensions": decision[
+                        "semantic_review_dimensions"
+                    ],
+                    "semantic_review_receipt_root": decision[
+                        "semantic_review_receipt_root"
+                    ],
+                    "reviewed_no_change_receipt_root": decision[
+                        "reviewed_no_change_receipt_root"
+                    ],
+                    "semantic_review_action": decision[
+                        "semantic_review_action"
+                    ],
+                    "semantic_review_rationale": decision[
+                        "semantic_review_rationale"
+                    ],
+                    "semantic_review_falsifier": decision[
+                        "semantic_review_falsifier"
+                    ],
                     "coordination_assignee": decision[
                         "coordination_assignee"
                     ],
@@ -8441,6 +10520,12 @@ def v2_derive_authority(
                 }
             )
         )
+    for index, normalized_row in enumerate(normalized_rows):
+        v2_exact_keys(
+            normalized_row,
+            V2_NORMALIZED_ROW_FIELDS,
+            label=f"normalized authority row {index}",
+        )
     document = {
         "schema": V2_AUTHORITY_SCHEMA,
         "inventory_root": inventory["semantic_root"],
@@ -8464,6 +10549,30 @@ def v2_derive_authority(
             ),
             "active_conflicts": sum(
                 bool(row["active_work_context"]["conflict"]) for row in decisions
+            ),
+            "semantic_review_states": dict(
+                sorted(
+                    Counter(
+                        row["semantic_review_receipt_state"]
+                        for row in decisions
+                    ).items()
+                )
+            ),
+            "semantic_review_dispositions": dict(
+                sorted(
+                    Counter(
+                        row["semantic_review_disposition"]
+                        for row in decisions
+                    ).items()
+                )
+            ),
+            "semantic_review_actions": dict(
+                sorted(
+                    Counter(
+                        row["semantic_review_action"]
+                        for row in decisions
+                    ).items()
+                )
             ),
         },
         "no_claim": (
@@ -8493,8 +10602,60 @@ def v2_hard_vector(
         str(target["disposition"]),
         str(target["type"]),
         tuple(sorted(str(value) for value in target["missing_sections"])),
+        str(authority["semantic_review_disposition"]),
+        str(authority["semantic_review_receipt_state"]),
+        str(authority["semantic_review_action"]),
         str(authority["readiness"]),
         str(authority["remediation_route"]),
+    )
+
+
+def v2_packing_group_key(
+    target: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    compatibility_key = str(authority["compatibility"]["key"] or "")
+    grouping_identity = compatibility_key or f"singleton:{target['id']}"
+    coordination_vector = (
+        str(authority["coordination_assignee"]),
+        str(authority["declared_domain_owner"]),
+        str(authority["declared_acceptance_owner"]),
+        str(target["user_effect"]),
+    )
+    return (
+        *v2_hard_vector(target, authority),
+        grouping_identity,
+        coordination_vector,
+    )
+
+
+def v2_packing_input_bindings(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+) -> tuple[str, str]:
+    group_keys = {
+        v2_packing_group_key(target, authority)
+        for target, authority in rows
+    }
+    if len(group_keys) != 1:
+        raise EvidenceFailed(
+            "packing input crosses a hard, compatibility, or coordination group"
+        )
+    load_rows = [
+        {
+            "target_id": target["id"],
+            "target_root": target["target_root"],
+            "authority_decision_root": authority["semantic_root"],
+            "review_minutes": authority["review_minutes"],
+            "retained_payload_bytes": target["retained_payload_bytes"],
+        }
+        for target, authority in sorted(
+            rows,
+            key=lambda pair: pair[0]["id"],
+        )
+    ]
+    return (
+        semantic_root({"group_key": next(iter(group_keys))}),
+        semantic_root(load_rows),
     )
 
 
@@ -8622,6 +10783,9 @@ def v2_large_partition(
             pair[0]["id"],
         ),
     )
+    group_key_root, ordered_load_rows_root = v2_packing_input_bindings(
+        ordered
+    )
     total_minutes = sum(int(pair[1]["review_minutes"]) for pair in ordered)
     total_bytes = sum(int(pair[0]["retained_payload_bytes"]) for pair in ordered)
     lower_bound = max(
@@ -8664,6 +10828,8 @@ def v2_large_partition(
             achieved = v2_objective_document(bins)
             witness = {
                 "algorithm": "DETERMINISTIC_LPT_VECTOR_PACKING",
+                "group_key_root": group_key_root,
+                "ordered_load_rows_root": ordered_load_rows_root,
                 "lower_bound_children": lower_bound,
                 "observed_children": bin_count,
                 "child_count_gap": bin_count - lower_bound,
@@ -8722,11 +10888,14 @@ def v2_pack_group(
         for target, authority in rows
     ):
         raise EvidenceFailed("oversize rows must be removed before standard packing")
+    group_key_root, ordered_load_rows_root = v2_packing_input_bindings(rows)
     if len(rows) <= V2_EXACT_OPTIMALITY_MAX_TARGETS:
         bins = v2_exact_partition(rows, max_targets=max_targets)
         witness = v2_rooted(
             {
                 "algorithm": "EXACT_SUBSET_PARTITION",
+                "group_key_root": group_key_root,
+                "ordered_load_rows_root": ordered_load_rows_root,
                 "exact_optimality_max_targets": V2_EXACT_OPTIMALITY_MAX_TARGETS,
                 "exact_optimality_claim": True,
                 "objective": v2_objective_document(bins),
@@ -8786,11 +10955,22 @@ def v2_child_text(
     )
     target_lines = "\n".join(
         f"- `{target['id']}` target_root `{target['target_root']}` "
-        f"missing {', '.join(target['missing_sections'])}"
-        for target in targets
+        + (
+            f"template findings {', '.join(target['missing_sections'])}"
+            if target["missing_sections"]
+            else (
+                "template findings NONE; comprehensive semantic review "
+                "remains UNREVIEWED"
+            )
+        )
+        + (
+            f"; semantic action `{authority['semantic_review_action']}` "
+            f"with disposition `{authority['semantic_review_disposition']}`"
+        )
+        for target, authority in zip(targets, authorities, strict=True)
     )
     description = (
-        "Review the exact semantic Bead-template debt for the targets below. "
+        "Review the exact semantic Bead plan quality for the targets below. "
         "Use each retained target and field root; do not replace issue-specific "
         "meaning with generic boilerplate.\n\n"
         f"{target_lines}\n\n"
@@ -8812,14 +10992,18 @@ def v2_child_text(
         "unit/property tests, authentic E2E, deterministic logging, and replay.\n"
         "3. Preserve target implementation estimates separately from review "
         "effort and keep authority/readiness/route boundaries explicit.\n"
-        "4. Refuse stale roots, active conflicts, deferred apply, semantic "
+        "4. Retain the exact semantic-review disposition, dimension receipts, "
+        "and root-bound adjudication; only REMEDIATION_REQUIRED may become a "
+        "future corrective-materialization candidate.\n"
+        "5. Refuse stale roots, active conflicts, deferred apply, semantic "
         "truncation, generic merges, and unverified evidence.\n"
-        "5. Close only through the canonical generated-leaf terminal protocol."
-        f"\n6. Disposition-specific acceptance: {workflow_obligations}"
+        "6. Close only through the canonical generated-leaf terminal protocol."
+        f"\n7. Disposition-specific acceptance: {workflow_obligations}"
     )
     design = (
         "Hard partition vector: priority/status/disposition/type/missing-set/"
-        "readiness. Compatibility is valid only through the retained "
+        "semantic-disposition/semantic-receipt-state/semantic-action/readiness/"
+        "remediation-route. Compatibility is valid only through the retained "
         "target-complete receipt. "
         f"Workflow `{disposition}`: {workflow_obligations}"
     )
@@ -8834,62 +11018,55 @@ def v2_child_text(
 
 def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
     verify_semantic_root(child, label="planned child")
-    required = {
-        "schema",
-        "child_key",
-        "title",
-        "issue_type",
-        "priority",
-        "desired_status",
-        "coordination_assignee",
-        "labels",
-        "lane_parent",
-        "external_ref",
-        "external_ref_key_inputs",
-        "source_dependency_snapshot",
-        "intended_generated_edges",
-        "description_file_artifact",
-        "acceptance_criteria",
-        "acceptance",
-        "design",
-        "notes",
-        "review_minutes",
-        "estimated_minutes",
-        "generated_child_estimated_minutes",
-        "target_implementation_estimates",
-        "target_implementation_estimated_minutes",
-        "target_implementation_estimate_states",
-        "target_ids",
-        "target_roots",
-        "disposition_workflow",
-        "external_authority",
-        "external_authority_receipt_root",
-        "external_authority_verdict",
-        "conditional_write_capability",
-        "conditional_write_receipt_root",
-        "conditional_write_verdict",
-        "readiness",
-        "remediation_route",
-        "packing_witness_root",
-        "compatibility",
-        "falsifier",
-        "description_root",
-        "no_claim",
-        "semantic_root",
-    }
-    v2_exact_keys(child, required, label=f"planned child {child.get('child_key')}")
+    v2_exact_keys(
+        child,
+        V2_PLANNED_CHILD_FIELDS,
+        label=f"planned child {child.get('child_key')}",
+    )
     if (
         child["schema"]
         != "frankensim.beads-template-hygiene.planned-child.v2"
+        or not all(
+            isinstance(child[field], str) and child[field]
+            for field in (
+                "child_key",
+                "title",
+                "issue_type",
+                "desired_status",
+                "lane_parent",
+                "external_ref",
+                "acceptance_criteria",
+                "acceptance",
+                "design",
+                "notes",
+                "disposition_workflow",
+                "semantic_review_disposition",
+                "semantic_review_receipt_state",
+                "semantic_review_action",
+                "readiness",
+                "remediation_route",
+                "packing_witness_root",
+                "falsifier",
+                "description_root",
+                "no_claim",
+                "semantic_root",
+            )
+        )
+        or not isinstance(child["coordination_assignee"], str)
         or type(child["priority"]) is not int
         or child["priority"] not in range(5)
         or child["issue_type"] != "task"
         or not isinstance(child["labels"], list)
-        or child["labels"] != sorted(set(child["labels"]))
         or not all(isinstance(value, str) and value for value in child["labels"])
+        or child["labels"] != sorted(set(child["labels"]))
         or child["desired_status"] not in {"open", "deferred"}
         or child["readiness"] not in V2_READINESS_STATES
         or child["remediation_route"] not in V2_REMEDIATION_ROUTES
+        or child["semantic_review_disposition"]
+        not in V2_SEMANTIC_REVIEW_DISPOSITIONS
+        or child["semantic_review_receipt_state"]
+        not in V2_SEMANTIC_REVIEW_RECEIPT_STATES
+        or child["semantic_review_action"] not in V2_SEMANTIC_REVIEW_ACTIONS
     ):
         raise EvidenceFailed("planned child scalar or enum contract differs")
     description = child["description_file_artifact"]
@@ -8900,11 +11077,22 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         {"media_type", "bytes", "root", "content", "transport"},
         label="planned child description artifact",
     )
+    if (
+        description["media_type"] != "text/markdown; charset=utf-8"
+        or type(description["bytes"]) is not int
+        or description["bytes"] < 0
+        or not isinstance(description["root"], str)
+        or not isinstance(description["content"], str)
+        or description["transport"] != "br create --description-file -"
+    ):
+        raise EvidenceFailed(
+            "planned child description transport scalar contract differs"
+        )
     payloads = {
         "description": description["content"].encode("utf-8"),
-        "acceptance": str(child["acceptance_criteria"]).encode("utf-8"),
-        "design": str(child["design"]).encode("utf-8"),
-        "notes": str(child["notes"]).encode("utf-8"),
+        "acceptance": child["acceptance_criteria"].encode("utf-8"),
+        "design": child["design"].encode("utf-8"),
+        "notes": child["notes"].encode("utf-8"),
     }
     limits = {
         "description": V2_CHILD_DESCRIPTION_CAP,
@@ -8933,8 +11121,13 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         type(child["review_minutes"]) is not int
         or child["review_minutes"] < 0
         or child["review_minutes"] > V2_REVIEW_MINUTES_CAP
+        or type(child["estimated_minutes"]) is not int
+        or type(child["generated_child_estimated_minutes"]) is not int
+        or child["estimated_minutes"] != child["review_minutes"]
+        or child["generated_child_estimated_minutes"]
+        != child["review_minutes"]
     ):
-        raise EvidenceFailed("planned child review minutes exceed cap")
+        raise EvidenceFailed("planned child review-minute aliases disagree")
     target_ids = child["target_ids"]
     target_roots = child["target_roots"]
     if (
@@ -8949,8 +11142,27 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             isinstance(value, str) and value.startswith("sha256-v1:")
             for value in target_roots
         )
+        or len(target_roots) != len(set(target_roots))
     ):
         raise EvidenceFailed("planned child target membership or roots are malformed")
+    dependency_snapshot = child["source_dependency_snapshot"]
+    if (
+        not isinstance(dependency_snapshot, list)
+        or len(dependency_snapshot) != len(target_ids)
+        or not all(isinstance(row, dict) for row in dependency_snapshot)
+        or any(
+            set(row)
+            != {"target_id", "dependency_neighborhood_root"}
+            or not isinstance(row["target_id"], str)
+            or not isinstance(row["dependency_neighborhood_root"], str)
+            or not row["dependency_neighborhood_root"].startswith("sha256-v1:")
+            for row in dependency_snapshot
+        )
+        or [row["target_id"] for row in dependency_snapshot] != target_ids
+    ):
+        raise EvidenceFailed(
+            "planned child dependency snapshot is malformed or misordered"
+        )
     estimate_rows = child["target_implementation_estimates"]
     estimate_aliases = child["target_implementation_estimated_minutes"]
     estimate_states = child["target_implementation_estimate_states"]
@@ -8993,6 +11205,208 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             raise EvidenceFailed(
                 "planned child implementation estimate state/value disagrees"
             )
+
+    def target_indexed_rows(
+        field: str,
+        expected_fields: set[str],
+    ) -> list[Mapping[str, Any]]:
+        rows = child[field]
+        if (
+            not isinstance(rows, list)
+            or len(rows) != len(target_ids)
+            or not all(isinstance(row, dict) for row in rows)
+            or any(set(row) != expected_fields for row in rows)
+            or [row["target_id"] for row in rows] != target_ids
+        ):
+            raise EvidenceFailed(
+                f"planned child {field} target-indexed rows are malformed"
+            )
+        return rows
+
+    semantic_root_rows = target_indexed_rows(
+        "semantic_review_receipt_roots",
+        {"target_id", "receipt_root"},
+    )
+    reviewed_no_change_rows = target_indexed_rows(
+        "reviewed_no_change_receipt_roots",
+        {"target_id", "receipt_root"},
+    )
+    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
+    for semantic_row, no_change_row in zip(
+        semantic_root_rows,
+        reviewed_no_change_rows,
+        strict=True,
+    ):
+        semantic_receipt_root = semantic_row["receipt_root"]
+        no_change_root = no_change_row["receipt_root"]
+        if (
+            semantic_receipt_root is not None
+            and (
+                not isinstance(semantic_receipt_root, str)
+                or root_pattern.fullmatch(semantic_receipt_root) is None
+            )
+        ):
+            raise EvidenceFailed(
+                "planned child semantic-review receipt root is malformed"
+            )
+        if (
+            no_change_root is not None
+            and (
+                not isinstance(no_change_root, str)
+                or root_pattern.fullmatch(no_change_root) is None
+            )
+        ):
+            raise EvidenceFailed(
+                "planned child reviewed-no-change root is malformed"
+            )
+        if (
+            child["semantic_review_receipt_state"] == "UNREVIEWED"
+            and semantic_receipt_root is not None
+        ):
+            raise EvidenceFailed(
+                "unreviewed planned child carries a semantic receipt root"
+            )
+        if (
+            child["semantic_review_disposition"] == "REVIEWED_NO_CHANGE"
+            and no_change_root != semantic_receipt_root
+        ) or (
+            child["semantic_review_disposition"] != "REVIEWED_NO_CHANGE"
+            and no_change_root is not None
+        ):
+            raise EvidenceFailed(
+                "planned child reviewed-no-change root disagrees with disposition"
+            )
+
+    external_rows = target_indexed_rows(
+        "external_authority",
+        {
+            "target_id",
+            "adapter",
+            "receipt_root",
+            "verdict",
+            "verified",
+            "structurally_valid",
+            "trust_registry",
+        },
+    )
+    external_root_rows = target_indexed_rows(
+        "external_authority_receipt_root",
+        {"target_id", "receipt_root"},
+    )
+    external_verdict_rows = target_indexed_rows(
+        "external_authority_verdict",
+        {"target_id", "verdict"},
+    )
+    conditional_rows = target_indexed_rows(
+        "conditional_write_capability",
+        {
+            "target_id",
+            "identity",
+            "receipt_root",
+            "verdict",
+            "verified",
+            "structurally_valid",
+            "current_tool_verdict",
+        },
+    )
+    conditional_root_rows = target_indexed_rows(
+        "conditional_write_receipt_root",
+        {"target_id", "receipt_root"},
+    )
+    conditional_verdict_rows = target_indexed_rows(
+        "conditional_write_verdict",
+        {"target_id", "verdict"},
+    )
+    for index, target_id in enumerate(target_ids):
+        external = external_rows[index]
+        conditional = conditional_rows[index]
+        if (
+            external["receipt_root"]
+            != external_root_rows[index]["receipt_root"]
+            or external["verdict"]
+            != external_verdict_rows[index]["verdict"]
+            or external["verdict"]
+            not in {
+                "NODATA",
+                "VALID",
+                "INVALID",
+                "REVOKED",
+                "EXPIRED",
+                "CONFLICTED",
+            }
+            or type(external["verified"]) is not bool
+            or type(external["structurally_valid"]) is not bool
+            or conditional["receipt_root"]
+            != conditional_root_rows[index]["receipt_root"]
+            or conditional["verdict"]
+            != conditional_verdict_rows[index]["verdict"]
+            or conditional["verdict"]
+            not in {
+                "NODATA",
+                "VALID",
+                "FAILED",
+                "LYING",
+                "NON_ATOMIC",
+                "VERSION_MISMATCHED",
+                "CONFLICTED",
+            }
+            or type(conditional["verified"]) is not bool
+            or type(conditional["structurally_valid"]) is not bool
+            or not all(
+                isinstance(external[field], str)
+                for field in (
+                    "adapter",
+                    "receipt_root",
+                    "verdict",
+                    "trust_registry",
+                )
+            )
+            or not all(
+                isinstance(conditional[field], str)
+                for field in (
+                    "identity",
+                    "receipt_root",
+                    "verdict",
+                    "current_tool_verdict",
+                )
+            )
+        ):
+            raise EvidenceFailed(
+                "planned child authority/capability aliases disagree for "
+                f"{target_id}"
+            )
+    compatibility = child["compatibility"]
+    if not isinstance(compatibility, dict):
+        raise EvidenceFailed("planned child compatibility receipt is malformed")
+    v2_exact_keys(
+        compatibility,
+        {
+            "key",
+            "target_ids",
+            "receipt_root",
+            "rationale",
+            "falsifier",
+            "target_complete",
+        },
+        label="planned child compatibility receipt",
+    )
+    if (
+        not all(
+            isinstance(compatibility[field], str)
+            for field in (
+                "key",
+                "receipt_root",
+                "rationale",
+                "falsifier",
+            )
+        )
+        or not isinstance(compatibility["target_ids"], list)
+        or not all(
+            isinstance(value, str) for value in compatibility["target_ids"]
+        )
+        or type(compatibility["target_complete"]) is not bool
+    ):
+        raise EvidenceFailed("planned child compatibility scalars are malformed")
     child_key = str(child["child_key"])
     generated = f"generated:{child_key}"
     expected_edges = [
@@ -9023,6 +11437,10 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             "disposition",
             "type",
             "missing_sections",
+            "semantic_review_disposition",
+            "semantic_review_receipt_state",
+            "semantic_review_action",
+            "semantic_review_receipt_roots",
             "readiness",
             "remediation_route",
             "target_ids",
@@ -9052,6 +11470,14 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         child["external_ref"] != f"fs-template-hygiene:v2:{child_key}"
         or key_inputs["target_ids"] != target_ids
         or key_inputs["target_roots"] != target_roots
+        or key_inputs["semantic_review_disposition"]
+        != child["semantic_review_disposition"]
+        or key_inputs["semantic_review_receipt_state"]
+        != child["semantic_review_receipt_state"]
+        or key_inputs["semantic_review_action"]
+        != child["semantic_review_action"]
+        or key_inputs["semantic_review_receipt_roots"]
+        != child["semantic_review_receipt_roots"]
         or semantic_root(key_inputs).split(":", 1)[1] != child_key
     ):
         raise EvidenceFailed("planned child external identity inputs disagree")
@@ -9099,6 +11525,24 @@ def v2_make_child(
         "disposition": ordered_targets[0]["disposition"],
         "type": ordered_targets[0]["type"],
         "missing_sections": ordered_targets[0]["missing_sections"],
+        "semantic_review_disposition": ordered_authorities[0][
+            "semantic_review_disposition"
+        ],
+        "semantic_review_receipt_state": ordered_authorities[0][
+            "semantic_review_receipt_state"
+        ],
+        "semantic_review_action": ordered_authorities[0][
+            "semantic_review_action"
+        ],
+        "semantic_review_receipt_roots": [
+            {
+                "target_id": authority["target_id"],
+                "receipt_root": authority[
+                    "semantic_review_receipt_root"
+                ],
+            }
+            for authority in ordered_authorities
+        ],
         "readiness": ordered_authorities[0]["readiness"],
         "remediation_route": ordered_authorities[0]["remediation_route"],
         "target_ids": target_ids,
@@ -9259,6 +11703,33 @@ def v2_make_child(
             target_by_id[target_id]["target_root"] for target_id in target_ids
         ],
         "disposition_workflow": disposition,
+        "semantic_review_disposition": ordered_authorities[0][
+            "semantic_review_disposition"
+        ],
+        "semantic_review_receipt_state": ordered_authorities[0][
+            "semantic_review_receipt_state"
+        ],
+        "semantic_review_action": ordered_authorities[0][
+            "semantic_review_action"
+        ],
+        "semantic_review_receipt_roots": [
+            {
+                "target_id": authority["target_id"],
+                "receipt_root": authority[
+                    "semantic_review_receipt_root"
+                ],
+            }
+            for authority in ordered_authorities
+        ],
+        "reviewed_no_change_receipt_roots": [
+            {
+                "target_id": authority["target_id"],
+                "receipt_root": authority[
+                    "reviewed_no_change_receipt_root"
+                ],
+            }
+            for authority in ordered_authorities
+        ],
         "external_authority": [
             {
                 "target_id": authority["target_id"],
@@ -9304,11 +11775,7 @@ def v2_make_child(
             for authority in ordered_authorities
         ],
         "readiness": ordered_authorities[0]["readiness"],
-        "remediation_route": (
-            "ANALYSIS_ONLY"
-            if oversize
-            else ordered_authorities[0]["remediation_route"]
-        ),
+        "remediation_route": ordered_authorities[0]["remediation_route"],
         "packing_witness_root": packing_witness["semantic_root"],
         "compatibility": compatibility,
         "falsifier": (
@@ -9331,6 +11798,246 @@ def v2_make_child(
     return rooted
 
 
+def v2_verify_packing_witness_independent(
+    *,
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    grouped_children: Sequence[Mapping[str, Any]],
+    witness: Mapping[str, Any],
+    max_targets: int,
+) -> None:
+    if not rows:
+        raise EvidenceFailed("packing witness has no input rows")
+    group_key_root, ordered_load_rows_root = v2_packing_input_bindings(rows)
+    if (
+        witness.get("group_key_root") != group_key_root
+        or witness.get("ordered_load_rows_root") != ordered_load_rows_root
+    ):
+        raise EvidenceFailed("packing witness input bindings differ")
+    load_by_id = {
+        str(target["id"]): (
+            int(authority["review_minutes"]),
+            int(target["retained_payload_bytes"]),
+            1,
+        )
+        for target, authority in rows
+    }
+    expected_ids = sorted(load_by_id)
+    memberships = sorted(
+        sorted(str(value) for value in child["target_ids"])
+        for child in grouped_children
+    )
+    flattened = [target_id for group in memberships for target_id in group]
+    if (
+        sorted(flattened) != expected_ids
+        or len(flattened) != len(set(flattened))
+    ):
+        raise EvidenceFailed(
+            "packing witness membership is not an exact partition: "
+            f"expected={expected_ids!r} observed={memberships!r}"
+        )
+
+    def load(membership: Sequence[str]) -> tuple[int, int, int]:
+        return (
+            sum(load_by_id[target_id][0] for target_id in membership),
+            sum(load_by_id[target_id][1] for target_id in membership),
+            len(membership),
+        )
+
+    def objective_key(
+        partition: Sequence[Sequence[str]],
+    ) -> tuple[Any, ...]:
+        loads = [load(membership) for membership in partition]
+        return (
+            len(partition),
+            max((value[0] for value in loads), default=0),
+            max((value[1] for value in loads), default=0),
+            max((value[2] for value in loads), default=0),
+            tuple(sorted(loads, reverse=True)),
+            tuple(
+                sorted(tuple(sorted(membership)) for membership in partition)
+            ),
+        )
+
+    def objective_document(
+        partition: Sequence[Sequence[str]],
+    ) -> dict[str, Any]:
+        key = objective_key(partition)
+        return {
+            "child_count": key[0],
+            "maximum_review_minutes": key[1],
+            "maximum_retained_payload_bytes": key[2],
+            "maximum_target_count": key[3],
+            "descending_load_vectors": [
+                list(value) for value in key[4]
+            ],
+            "lexicographic_memberships": [
+                list(value) for value in key[5]
+            ],
+        }
+
+    for membership in memberships:
+        minutes, retained_bytes, target_count = load(membership)
+        if (
+            not membership
+            or target_count > max_targets
+            or minutes > V2_REVIEW_MINUTES_CAP
+            or retained_bytes > V2_CHILD_PAYLOAD_CAP
+        ):
+            raise EvidenceFailed("packing witness contains an infeasible child")
+    observed_objective = objective_document(memberships)
+    algorithm = witness.get("algorithm")
+    if algorithm == "EXACT_SUBSET_PARTITION":
+        v2_exact_keys(
+            witness,
+            {
+                "algorithm",
+                "group_key_root",
+                "ordered_load_rows_root",
+                "exact_optimality_max_targets",
+                "exact_optimality_claim",
+                "objective",
+                "max_targets_per_child",
+                "rationale",
+                "falsifier",
+                "semantic_root",
+            },
+            label="exact packing witness",
+        )
+        if (
+            len(expected_ids) > V2_EXACT_OPTIMALITY_MAX_TARGETS
+            or witness["exact_optimality_max_targets"]
+            != V2_EXACT_OPTIMALITY_MAX_TARGETS
+            or witness["exact_optimality_claim"] is not True
+            or witness["max_targets_per_child"] != max_targets
+            or not isinstance(witness["rationale"], str)
+            or not witness["rationale"]
+            or not isinstance(witness["falsifier"], str)
+            or not witness["falsifier"]
+        ):
+            raise EvidenceFailed("exact packing witness scalar contract differs")
+        count = len(expected_ids)
+        feasible_masks: dict[int, list[int]] = defaultdict(list)
+        for mask in range(1, 1 << count):
+            membership = [
+                expected_ids[index]
+                for index in range(count)
+                if mask & (1 << index)
+            ]
+            minutes, retained_bytes, target_count = load(membership)
+            if (
+                target_count <= max_targets
+                and minutes <= V2_REVIEW_MINUTES_CAP
+                and retained_bytes <= V2_CHILD_PAYLOAD_CAP
+            ):
+                pivot = (mask & -mask).bit_length() - 1
+                feasible_masks[pivot].append(mask)
+        memo: dict[int, tuple[tuple[str, ...], ...]] = {0: ()}
+
+        def solve(mask: int) -> tuple[tuple[str, ...], ...]:
+            if mask in memo:
+                return memo[mask]
+            pivot = (mask & -mask).bit_length() - 1
+            best: tuple[tuple[str, ...], ...] | None = None
+            best_key: tuple[Any, ...] | None = None
+            for subset in feasible_masks[pivot]:
+                if subset & mask != subset:
+                    continue
+                membership = tuple(
+                    expected_ids[index]
+                    for index in range(count)
+                    if subset & (1 << index)
+                )
+                candidate = tuple(
+                    sorted((membership, *solve(mask ^ subset)))
+                )
+                candidate_key = objective_key(candidate)
+                if best_key is None or candidate_key < best_key:
+                    best = candidate
+                    best_key = candidate_key
+            if best is None:
+                raise EvidenceFailed(
+                    "independent exact verifier found no feasible partition"
+                )
+            memo[mask] = best
+            return best
+
+        optimum = solve((1 << count) - 1)
+        if (
+            objective_key(memberships) != objective_key(optimum)
+            or witness["objective"] != observed_objective
+        ):
+            raise EvidenceFailed(
+                "exact packing witness is not independently optimal"
+            )
+        return
+    if algorithm == "DETERMINISTIC_LPT_VECTOR_PACKING":
+        v2_exact_keys(
+            witness,
+            {
+                "algorithm",
+                "group_key_root",
+                "ordered_load_rows_root",
+                "lower_bound_children",
+                "observed_children",
+                "child_count_gap",
+                "lower_bound_vector",
+                "achieved_objective",
+                "gap_witness",
+                "exact_optimality_claim",
+                "max_targets_per_child",
+                "rationale",
+                "falsifier",
+                "semantic_root",
+            },
+            label="large packing witness",
+        )
+        total_minutes = sum(value[0] for value in load_by_id.values())
+        total_bytes = sum(value[1] for value in load_by_id.values())
+        lower_bound_vector = {
+            "targets": math.ceil(len(expected_ids) / max_targets),
+            "review_minutes": math.ceil(
+                total_minutes / V2_REVIEW_MINUTES_CAP
+            ),
+            "retained_payload_bytes": math.ceil(
+                total_bytes / V2_CHILD_PAYLOAD_CAP
+            ),
+        }
+        lower_bound = max(*lower_bound_vector.values(), 1)
+        observed_children = len(memberships)
+        gap = observed_children - lower_bound
+        expected_gap = {
+            "child_count": gap,
+            "maximum_review_minutes_above_average": (
+                observed_objective["maximum_review_minutes"]
+                - math.ceil(total_minutes / observed_children)
+            ),
+            "maximum_retained_bytes_above_average": (
+                observed_objective["maximum_retained_payload_bytes"]
+                - math.ceil(total_bytes / observed_children)
+            ),
+        }
+        if (
+            len(expected_ids) <= V2_EXACT_OPTIMALITY_MAX_TARGETS
+            or witness["lower_bound_vector"] != lower_bound_vector
+            or witness["lower_bound_children"] != lower_bound
+            or witness["observed_children"] != observed_children
+            or witness["child_count_gap"] != gap
+            or witness["achieved_objective"] != observed_objective
+            or witness["gap_witness"] != expected_gap
+            or witness["exact_optimality_claim"] is not False
+            or witness["max_targets_per_child"] != max_targets
+            or gap < 0
+            or any(value < 0 for value in expected_gap.values())
+            or not isinstance(witness["rationale"], str)
+            or not witness["rationale"]
+            or not isinstance(witness["falsifier"], str)
+            or not witness["falsifier"]
+        ):
+            raise EvidenceFailed("large packing witness arithmetic differs")
+        return
+    raise EvidenceFailed("independent packing verifier received an unknown algorithm")
+
+
 def v2_validate_review_plan(
     review_plan: Mapping[str, Any],
     inventory: Mapping[str, Any],
@@ -9348,6 +12055,18 @@ def v2_validate_review_plan(
     children = review_plan.get("children")
     if not isinstance(children, list):
         raise EvidenceFailed("v2 review-plan children are malformed")
+    witnesses = review_plan.get("packing_witnesses")
+    if not isinstance(witnesses, list) or any(
+        not isinstance(witness, dict) for witness in witnesses
+    ):
+        raise EvidenceFailed("v2 review-plan packing witnesses are malformed")
+    witness_by_root: dict[str, Mapping[str, Any]] = {}
+    for witness in witnesses:
+        verify_semantic_root(witness, label="v2 packing witness")
+        witness_root = str(witness["semantic_root"])
+        if witness_root in witness_by_root:
+            raise EvidenceFailed("v2 review-plan duplicates a packing witness")
+        witness_by_root[witness_root] = witness
     target_by_id = {
         row["id"]: row
         for row in inventory["rows"]
@@ -9358,6 +12077,86 @@ def v2_validate_review_plan(
         for row in authority["decisions"]
         if row["target_id"] in target_by_id
     }
+    expected_scheduled_ids = sorted(
+        target_id
+        for target_id, decision in authority_by_id.items()
+        if decision["semantic_review_action"]
+        != "RETAINED_ADJUDICATION"
+    )
+    adjudications = review_plan.get("semantic_adjudications")
+    retained_without_direct_child = review_plan.get(
+        "retained_without_direct_child"
+    )
+    remediation_candidates = review_plan.get("remediation_candidates")
+    if not all(
+        isinstance(rows, list)
+        and all(isinstance(row, dict) for row in rows)
+        for rows in (
+            adjudications,
+            retained_without_direct_child,
+            remediation_candidates,
+        )
+    ):
+        raise EvidenceFailed(
+            "v2 review-plan semantic adjudication arrays are malformed"
+        )
+    expected_adjudications: list[dict[str, Any]] = []
+    for target_id, decision in sorted(authority_by_id.items()):
+        if (
+            decision["semantic_review_receipt_state"]
+            != "ROOT_BOUND_REVIEWED"
+        ):
+            continue
+        expected_adjudications.append(
+            v2_rooted(
+                {
+                    "target_id": target_id,
+                    "target_root": target_by_id[target_id]["target_root"],
+                    "authority_decision_root": decision["semantic_root"],
+                    "semantic_review_disposition": decision[
+                        "semantic_review_disposition"
+                    ],
+                    "semantic_review_receipt_state": decision[
+                        "semantic_review_receipt_state"
+                    ],
+                    "semantic_review_action": decision[
+                        "semantic_review_action"
+                    ],
+                    "semantic_review_receipt_root": decision[
+                        "semantic_review_receipt_root"
+                    ],
+                    "reviewed_no_change_receipt_root": decision[
+                        "reviewed_no_change_receipt_root"
+                    ],
+                    "future_corrective_materialization_eligible": (
+                        decision["semantic_review_disposition"]
+                        == "REMEDIATION_REQUIRED"
+                    ),
+                    "no_claim": (
+                        "root-bound semantic adjudication is retained planning "
+                        "evidence and does not itself mutate or complete a target"
+                    ),
+                }
+            )
+        )
+    expected_retained = [
+        row
+        for row in expected_adjudications
+        if row["semantic_review_action"] == "RETAINED_ADJUDICATION"
+    ]
+    expected_remediation = [
+        row
+        for row in expected_adjudications
+        if row["future_corrective_materialization_eligible"]
+    ]
+    if (
+        adjudications != expected_adjudications
+        or retained_without_direct_child != expected_retained
+        or remediation_candidates != expected_remediation
+    ):
+        raise EvidenceFailed(
+            "v2 review-plan semantic adjudication projection differs"
+        )
     observed_ids: list[str] = []
     for child in children:
         if not isinstance(child, dict):
@@ -9381,6 +12180,9 @@ def v2_validate_review_plan(
                 child["disposition_workflow"],
                 target["type"],
                 tuple(target["missing_sections"]),
+                child["semantic_review_disposition"],
+                child["semantic_review_receipt_state"],
+                child["semantic_review_action"],
                 child["readiness"],
                 child["remediation_route"],
             )
@@ -9391,6 +12193,9 @@ def v2_validate_review_plan(
                     target["disposition"],
                     target["type"],
                     tuple(target["missing_sections"]),
+                    child["semantic_review_disposition"],
+                    child["semantic_review_receipt_state"],
+                    child["semantic_review_action"],
                     child["readiness"],
                     child["remediation_route"],
                 )
@@ -9399,7 +12204,7 @@ def v2_validate_review_plan(
                     "v2 review-plan child crosses a hard partition vector"
                 )
         observed_ids.extend(ids)
-    expected_ids = sorted(target_by_id)
+    expected_ids = expected_scheduled_ids
     if (
         sorted(observed_ids) != expected_ids
         or len(observed_ids) != len(set(observed_ids))
@@ -9407,8 +12212,122 @@ def v2_validate_review_plan(
         raise EvidenceFailed(
             "v2 review-plan target mapping is dropped, duplicated, or substituted"
         )
-    if review_plan.get("counts", {}).get("targets") != len(expected_ids):
-        raise EvidenceFailed("v2 review-plan target count disagrees with membership")
+    retained_ids = sorted(
+        row["target_id"] for row in expected_retained
+    )
+    if sorted([*observed_ids, *retained_ids]) != sorted(target_by_id):
+        raise EvidenceFailed(
+            "v2 review-plan scheduled and retained target universe differs"
+        )
+    counts = review_plan.get("counts", {})
+    if (
+        counts.get("targets") != len(target_by_id)
+        or counts.get("scheduled_targets") != len(expected_ids)
+        or counts.get("retained_without_direct_child")
+        != len(expected_retained)
+        or counts.get("semantic_adjudications")
+        != len(expected_adjudications)
+        or counts.get("remediation_candidates")
+        != len(expected_remediation)
+    ):
+        raise EvidenceFailed("v2 review-plan target counts disagree with membership")
+    children_by_witness: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for child in children:
+        witness_root = str(child["packing_witness_root"])
+        if witness_root not in witness_by_root:
+            raise EvidenceFailed(
+                "v2 review-plan child references an unknown packing witness"
+            )
+        children_by_witness[witness_root].append(child)
+    if set(children_by_witness) != set(witness_by_root):
+        raise EvidenceFailed("v2 review-plan retains an unused packing witness")
+    max_targets = review_plan.get("max_targets_per_child")
+    if (
+        type(max_targets) is not int
+        or not 1 <= max_targets <= V2_REVIEW_TARGET_HARD_MAX
+    ):
+        raise EvidenceFailed("v2 review-plan target cap is malformed")
+    oversize_by_target = {
+        str(entry["target_roots"][0]): entry
+        for entry in review_plan.get("oversize_content", [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("target_roots"), list)
+        and len(entry["target_roots"]) == 1
+    }
+    for witness_root, grouped_children in children_by_witness.items():
+        witness = witness_by_root[witness_root]
+        algorithm = witness.get("algorithm")
+        grouped_ids = sorted(
+            target_id
+            for child in grouped_children
+            for target_id in child["target_ids"]
+        )
+        if algorithm == "OVERSIZE_ESCALATION":
+            v2_exact_keys(
+                witness,
+                {
+                    "algorithm",
+                    "group_key_root",
+                    "ordered_load_rows_root",
+                    "target_id",
+                    "reason",
+                    "full_artifact_root",
+                    "exact_optimality_claim",
+                    "semantic_root",
+                },
+                label="oversize packing witness",
+            )
+            if (
+                len(grouped_children) != 1
+                or len(grouped_ids) != 1
+                or witness.get("target_id") != grouped_ids[0]
+                or grouped_children[0]["disposition_workflow"]
+                != "OVERSIZE_REVIEW_REQUIRED"
+                or witness.get("exact_optimality_claim") is not False
+                or not isinstance(witness.get("reason"), str)
+                or not witness["reason"]
+            ):
+                raise EvidenceFailed(
+                    "v2 oversize witness membership or disposition disagrees"
+                )
+            target_root = target_by_id[grouped_ids[0]]["target_root"]
+            entry = oversize_by_target.get(target_root)
+            oversize_rows = [
+                (
+                    target_by_id[grouped_ids[0]],
+                    authority_by_id[grouped_ids[0]],
+                )
+            ]
+            group_key_root, ordered_load_rows_root = (
+                v2_packing_input_bindings(oversize_rows)
+            )
+            if (
+                entry is None
+                or witness.get("full_artifact_root")
+                != entry.get("semantic_root")
+                or witness.get("group_key_root") != group_key_root
+                or witness.get("ordered_load_rows_root")
+                != ordered_load_rows_root
+            ):
+                raise EvidenceFailed(
+                    "v2 oversize witness is not bound to its registered artifact"
+                )
+            continue
+        if algorithm not in {
+            "EXACT_SUBSET_PARTITION",
+            "DETERMINISTIC_LPT_VECTOR_PACKING",
+        }:
+            raise EvidenceFailed("v2 packing witness uses an unknown algorithm")
+        grouped_rows = [
+            (target_by_id[target_id], authority_by_id[target_id])
+            for target_id in grouped_ids
+        ]
+        v2_verify_packing_witness_independent(
+            rows=grouped_rows,
+            grouped_children=grouped_children,
+            witness=witness,
+            max_targets=max_targets,
+        )
 
 
 def v2_build_review_plan(
@@ -9417,19 +12336,83 @@ def v2_build_review_plan(
     *,
     max_targets: int,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
-    target_by_id = {
+    all_target_by_id = {
         row["id"]: row for row in inventory["rows"] if row["status"] != "closed"
     }
-    authority_by_id = {
+    all_authority_by_id = {
         row["target_id"]: row
         for row in authority["decisions"]
-        if row["target_id"] in target_by_id
+        if row["target_id"] in all_target_by_id
     }
+    if set(all_authority_by_id) != set(all_target_by_id):
+        raise EvidenceFailed(
+            "v2 review plan lacks an authority decision for its exact universe"
+        )
+    scheduled_ids = sorted(
+        target_id
+        for target_id, decision in all_authority_by_id.items()
+        if decision["semantic_review_action"]
+        != "RETAINED_ADJUDICATION"
+    )
+    target_by_id = {
+        target_id: all_target_by_id[target_id] for target_id in scheduled_ids
+    }
+    authority_by_id = {
+        target_id: all_authority_by_id[target_id]
+        for target_id in scheduled_ids
+    }
+    semantic_adjudications = [
+        v2_rooted(
+            {
+                "target_id": target_id,
+                "target_root": all_target_by_id[target_id]["target_root"],
+                "authority_decision_root": decision["semantic_root"],
+                "semantic_review_disposition": decision[
+                    "semantic_review_disposition"
+                ],
+                "semantic_review_receipt_state": decision[
+                    "semantic_review_receipt_state"
+                ],
+                "semantic_review_action": decision[
+                    "semantic_review_action"
+                ],
+                "semantic_review_receipt_root": decision[
+                    "semantic_review_receipt_root"
+                ],
+                "reviewed_no_change_receipt_root": decision[
+                    "reviewed_no_change_receipt_root"
+                ],
+                "future_corrective_materialization_eligible": (
+                    decision["semantic_review_receipt_state"]
+                    == "ROOT_BOUND_REVIEWED"
+                    and decision["semantic_review_disposition"]
+                    == "REMEDIATION_REQUIRED"
+                ),
+                "no_claim": (
+                    "root-bound semantic adjudication is retained planning "
+                    "evidence and does not itself mutate or complete a target"
+                ),
+            }
+        )
+        for target_id, decision in sorted(all_authority_by_id.items())
+        if decision["semantic_review_receipt_state"]
+        == "ROOT_BOUND_REVIEWED"
+    ]
+    retained_without_direct_child = [
+        row
+        for row in semantic_adjudications
+        if row["semantic_review_action"] == "RETAINED_ADJUDICATION"
+    ]
+    remediation_candidates = [
+        row
+        for row in semantic_adjudications
+        if row["future_corrective_materialization_eligible"]
+    ]
     groups: dict[tuple[Any, ...], list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = (
         defaultdict(list)
     )
     oversize_rows: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
-    for target_id in sorted(target_by_id):
+    for target_id in scheduled_ids:
         target = target_by_id[target_id]
         decision = authority_by_id[target_id]
         if (
@@ -9448,19 +12431,7 @@ def v2_build_review_plan(
         ):
             oversize_rows.append((target, decision))
             continue
-        compatibility_key = str(decision["compatibility"]["key"] or "")
-        grouping_identity = compatibility_key or f"singleton:{target_id}"
-        coordination_vector = (
-            decision["coordination_assignee"],
-            decision["declared_domain_owner"],
-            decision["declared_acceptance_owner"],
-            target["user_effect"],
-        )
-        key = (
-            *v2_hard_vector(target, decision),
-            grouping_identity,
-            coordination_vector,
-        )
+        key = v2_packing_group_key(target, decision)
         groups[key].append((target, decision))
 
     children: list[dict[str, Any]] = []
@@ -9539,9 +12510,14 @@ def v2_build_review_plan(
             "aggregate_cap_accounting": len(payload),
         }
         oversize_inventory.append(entry)
+        group_key_root, ordered_load_rows_root = v2_packing_input_bindings(
+            [(target, decision)]
+        )
         witness = v2_rooted(
             {
                 "algorithm": "OVERSIZE_ESCALATION",
+                "group_key_root": group_key_root,
+                "ordered_load_rows_root": ordered_load_rows_root,
                 "target_id": target["id"],
                 "reason": (
                     "single target exceeds review-minute or retained-payload cap"
@@ -9562,9 +12538,25 @@ def v2_build_review_plan(
 
     children.sort(key=lambda child: (child["priority"], child["child_key"]))
     mapped_ids = [target_id for child in children for target_id in child["target_ids"]]
-    expected_ids = sorted(target_by_id)
-    if sorted(mapped_ids) != expected_ids or len(mapped_ids) != len(set(mapped_ids)):
-        raise EvidenceFailed("v2 plan does not exact-map every nonclosed target once")
+    expected_scheduled_ids = scheduled_ids
+    if (
+        sorted(mapped_ids) != expected_scheduled_ids
+        or len(mapped_ids) != len(set(mapped_ids))
+    ):
+        raise EvidenceFailed(
+            "v2 plan does not exact-map every scheduled target once"
+        )
+    retained_ids = sorted(
+        row["target_id"] for row in retained_without_direct_child
+    )
+    if (
+        sorted([*mapped_ids, *retained_ids])
+        != sorted(all_target_by_id)
+        or set(mapped_ids) & set(retained_ids)
+    ):
+        raise EvidenceFailed(
+            "v2 plan does not exactly partition scheduled and retained targets"
+        )
     document = {
         "schema": V2_REVIEW_PLAN_SCHEMA,
         "state": "POPULATED",
@@ -9576,6 +12568,9 @@ def v2_build_review_plan(
         "review_minutes_cap": V2_REVIEW_MINUTES_CAP,
         "retained_child_bytes_cap": V2_CHILD_PAYLOAD_CAP,
         "children": children,
+        "semantic_adjudications": semantic_adjudications,
+        "retained_without_direct_child": retained_without_direct_child,
+        "remediation_candidates": remediation_candidates,
         "packing_witnesses": sorted(
             packing_witnesses, key=lambda row: row["semantic_root"]
         ),
@@ -9583,7 +12578,13 @@ def v2_build_review_plan(
             oversize_inventory, key=lambda row: row["relative_path"]
         ),
         "counts": {
-            "targets": len(expected_ids),
+            "targets": len(all_target_by_id),
+            "scheduled_targets": len(expected_scheduled_ids),
+            "retained_without_direct_child": len(
+                retained_without_direct_child
+            ),
+            "semantic_adjudications": len(semantic_adjudications),
+            "remediation_candidates": len(remediation_candidates),
             "children": len(children),
             "oversize_targets": len(oversize_rows),
             "readiness": dict(
@@ -9605,7 +12606,11 @@ def v2_build_review_plan(
             ),
             "total_underlying_target_review_minutes": sum(
                 int(decision["review_minutes"])
-                for decision in authority_by_id.values()
+                for decision in all_authority_by_id.values()
+            ),
+            "total_completed_adjudication_minutes": sum(
+                int(all_authority_by_id[row["target_id"]]["review_minutes"])
+                for row in retained_without_direct_child
             ),
             "minimum_child_review_minutes": min(
                 (int(child["review_minutes"]) for child in children),
@@ -9703,6 +12708,31 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
         else:
             result.append(value)
     return result
+
+
+def v2_bounded_diagnostic_summary(value: Any) -> str:
+    text = str(value).replace(str(REPO_ROOT), "<repo>")
+    text = re.sub(
+        r"(?i)(password|secret|credential|access[_-]?token)"
+        r"(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"(?<![A-Za-z0-9_.-])/(?:[^\s/:]+/)*[^\s,;:]*",
+        "<absolute-path>",
+        text,
+    )
+    text = " ".join(text.split())
+    encoded = text.encode("utf-8")
+    if len(encoded) <= V2_DIAGNOSTIC_SUMMARY_BYTES_CAP:
+        return text
+    suffix = "...<truncated:" + text_root(text) + ">"
+    prefix_budget = (
+        V2_DIAGNOSTIC_SUMMARY_BYTES_CAP - len(suffix.encode("utf-8"))
+    )
+    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    return prefix + suffix
 
 
 def v2_source_command_receipts(
@@ -10058,6 +13088,7 @@ def v2_bundle_payloads(
             "schema": V2_TERMINAL_SCHEMA,
             "mode": mode,
             "subject_mode": subject_mode,
+            "bundle_state": "COMPLETE_GREEN",
             "terminal": "Pass",
             "exit_code": 0,
             "artifact_root": str(
@@ -10088,6 +13119,10 @@ def v2_bundle_payloads(
             "reproduction": list(reproduction),
             "replay_equivalence": dict(replay_equivalence or {}),
             "first_divergence": None,
+            "recovery": "NOT_REQUIRED",
+            "complete_evidence_bundle": True,
+            "complete_green_prefix": True,
+            "retry_requires_fresh_run_dir": False,
             "no_claim": (
                 "the final seal proves deterministic bundle construction only; "
                 "it does not prove current state on replay or mint any authority"
@@ -10101,6 +13136,266 @@ def v2_bundle_payloads(
         if len(payload) > RUN_ARTIFACT_CAP:
             raise EvidenceFailed(f"v2 artifact {name} exceeds its 64 MiB cap")
     return payloads
+
+
+def v2_refusal_event_rows(
+    *,
+    mode: str,
+    terminal_name: str,
+    failure: Mapping[str, Any],
+    reproduction: Sequence[str],
+) -> list[dict[str, Any]]:
+    if mode not in {"review-plan", "history-plan"}:
+        raise EvidenceFailed("v2 refusal event mode is unknown")
+    if terminal_name not in V2_SEMANTIC_REFUSAL_TERMINALS:
+        raise EvidenceFailed("v2 refusal event terminal is not semantic")
+    if (
+        len(reproduction) > V2_COMMAND_ARGUMENTS_CAP
+        or any(
+            not isinstance(value, str)
+            or len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP
+            for value in reproduction
+        )
+        or v2_sanitized_argv(reproduction) != list(reproduction)
+    ):
+        raise EvidenceFailed("v2 refusal reproduction is not bounded and sanitized")
+    case_id = (
+        "template-lint-v2.nomock-review-plan"
+        if mode == "review-plan"
+        else "template-lint-v2.nomock-history-plan"
+    )
+    assertion_id = (
+        "v2.case.nomock-review-plan"
+        if mode == "review-plan"
+        else "v2.case.nomock-history-plan"
+    )
+    safe_artifact_projection = {
+        "base": list(V2_RUN_ARTIFACTS),
+        "optional_count": 0,
+        "optional_paths_root": semantic_root([]),
+    }
+    empty_root = "sha256-v1:" + hashlib.sha256(b"").hexdigest()
+    stages = (
+        "assertion-start",
+        "assertion-terminal",
+        "suite-terminal",
+    )
+    events: list[dict[str, Any]] = []
+    for sequence, event_stage in enumerate(stages):
+        is_failure_event = event_stage != "assertion-start"
+        is_terminal_event = event_stage == "suite-terminal"
+        parameter = {
+            "mode": mode,
+            "subject_mode": mode,
+            "stage": event_stage,
+            "sequence": sequence,
+        }
+        event = {
+            "schema": V2_EVENT_SCHEMA,
+            "case_id": case_id,
+            "assertion_id": assertion_id,
+            "executor_id": assertion_id,
+            "parameter_root": semantic_root(parameter),
+            "stage": event_stage,
+            "sequence": sequence,
+            "argv": list(reproduction) if sequence == 0 else [],
+            "exit_code": (
+                TERMINAL_EXIT[terminal_name] if is_failure_event else 0
+            ),
+            "result_category": (
+                "SEMANTIC_REFUSAL" if is_failure_event else "STARTED"
+            ),
+            "semantic_projection": {
+                "failure_root": failure["semantic_root"],
+                "available_roots": failure["available_roots"],
+                "prior_event_roots": (
+                    [semantic_root(row) for row in events]
+                    if is_terminal_event
+                    else []
+                ),
+            },
+            "stdout_byte_length": 0,
+            "stdout_root": empty_root,
+            "stderr_byte_length": 0,
+            "stderr_root": empty_root,
+            "first_divergence": (
+                failure["first_divergence"]
+                if is_failure_event
+                else None
+            ),
+            "recovery": (
+                failure["recovery"]
+                if is_failure_event
+                else "NOT_REQUIRED"
+            ),
+            "terminal": terminal_name if is_terminal_event else None,
+            "safe_relative_artifacts": safe_artifact_projection,
+            "no_claim": (
+                "the event retains only rooted refusal evidence and no raw "
+                "streams, tracker bodies, credentials, or authority"
+            ),
+        }
+        if len(canonical_bytes(event)) > V2_LOG_LINE_BYTES_CAP:
+            raise EvidenceFailed("v2 refusal event exceeds its line cap")
+        events.append(event)
+    return events
+
+
+def v2_refusal_bundle_payloads(
+    *,
+    mode: str,
+    artifact_root: str,
+    artifact_dir: str,
+    manifest: Mapping[str, Any],
+    error: HarnessError,
+    stage: str,
+    available_roots: Mapping[str, str | None],
+    argv: Sequence[Any],
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    terminal_name = error.terminal
+    if terminal_name not in V2_SEMANTIC_REFUSAL_TERMINALS:
+        raise EvidenceFailed("non-semantic failure cannot mint a refusal bundle")
+    bounded_argv: list[str] = []
+    for raw in list(argv)[:V2_COMMAND_ARGUMENTS_CAP]:
+        value = str(raw)
+        if len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP:
+            bounded_argv.append(
+                "<redacted:"
+                + hashlib.sha256(value.encode("utf-8")).hexdigest()
+                + ">"
+            )
+        else:
+            bounded_argv.extend(v2_sanitized_argv([value]))
+    failure = v2_failure_evidence(
+        stage=stage,
+        detail=str(error),
+        terminal=terminal_name,
+        manifest_root=str(manifest["semantic_root"]),
+        available_roots=available_roots,
+    )
+    projection_names = {
+        "source-v2.json": ("source", V2_SOURCE_SCHEMA),
+        "inventory-v2.json": ("inventory", V2_INVENTORY_SCHEMA),
+        "authority-v2.json": ("authority", V2_AUTHORITY_SCHEMA),
+        "review-plan-v2.json": ("review-plan", V2_REVIEW_PLAN_SCHEMA),
+        "history-v2.json": ("history", V2_HISTORY_SCHEMA),
+        "zero-sets-v2.json": ("zero-sets", V2_ZERO_SETS_SCHEMA),
+    }
+    documents: dict[str, dict[str, Any]] = {}
+    available_key_by_projection = {
+        "source": "source",
+        "inventory": "inventory",
+        "authority": "authority",
+        "review-plan": "review_plan",
+        "history": "history",
+        "zero-sets": "zero_sets",
+    }
+    for artifact_name, (projection, expected_schema) in projection_names.items():
+        available_key = available_key_by_projection[projection]
+        documents[artifact_name] = v2_rooted(
+            {
+                "schema": V2_REFUSAL_PROJECTION_SCHEMA,
+                "artifact_name": artifact_name,
+                "projection": projection,
+                "expected_success_schema": expected_schema,
+                "mode": mode,
+                "state": "REFUSED",
+                "manifest_root": manifest["semantic_root"],
+                "failure_root": failure["semantic_root"],
+                "available_projection_root": available_roots.get(available_key),
+                "complete_green_prefix": False,
+                "no_claim": (
+                    "this closed refusal envelope is complete failure evidence "
+                    "and is not a successful planner projection"
+                ),
+            }
+        )
+    events = v2_refusal_event_rows(
+        mode=mode,
+        terminal_name=terminal_name,
+        failure=failure,
+        reproduction=bounded_argv,
+    )
+    payloads: dict[str, bytes] = {
+        **{
+            name: canonical_bytes(document)
+            for name, document in documents.items()
+        },
+        "events.jsonl": b"".join(canonical_bytes(row) for row in events),
+        "reproduce.txt": canonical_bytes(bounded_argv),
+    }
+    schema_by_name = {
+        **{
+            name: V2_REFUSAL_PROJECTION_SCHEMA for name in projection_names
+        },
+        "events.jsonl": V2_EVENT_SCHEMA,
+        "reproduce.txt": "frankensim.argv-json.v2",
+    }
+    identities = {
+        name: v2_artifact_identity(
+            relative_path=name,
+            schema_kind=schema_by_name[name],
+            payload=payloads[name],
+        )
+        for name in sorted(payloads, key=lambda value: value.encode("utf-8"))
+    }
+    terminal = v2_rooted(
+        {
+            "schema": V2_TERMINAL_SCHEMA,
+            "mode": mode,
+            "subject_mode": mode,
+            "bundle_state": "COMPLETE_NON_GREEN",
+            "terminal": terminal_name,
+            "exit_code": TERMINAL_EXIT[terminal_name],
+            "artifact_root": str(
+                safe_relative(artifact_root, label="artifact root")
+            ),
+            "artifact_dir": str(
+                safe_relative(artifact_dir, label="artifact dir")
+            ),
+            "base_artifacts": list(V2_RUN_ARTIFACTS),
+            "safe_relative_artifacts": list(V2_RUN_ARTIFACTS),
+            "artifact_identities": identities,
+            "optional_content_registry": [],
+            "manifest_root": manifest["semantic_root"],
+            "manifest_content_identity": manifest["content_identity"],
+            "source_root": documents["source-v2.json"]["semantic_root"],
+            "inventory_root": documents["inventory-v2.json"]["semantic_root"],
+            "authority_root": documents["authority-v2.json"]["semantic_root"],
+            "review_plan_root": documents["review-plan-v2.json"][
+                "semantic_root"
+            ],
+            "history_root": documents["history-v2.json"]["semantic_root"],
+            "zero_sets_root": documents["zero-sets-v2.json"]["semantic_root"],
+            "events_content_root": (
+                "sha256-v1:"
+                + hashlib.sha256(payloads["events.jsonl"]).hexdigest()
+            ),
+            "event_count": len(events),
+            "event_sequence": list(range(len(events))),
+            "event_roots": [semantic_root(row) for row in events],
+            "terminal_event_root": semantic_root(events[-1]),
+            "reproduction": bounded_argv,
+            "replay_equivalence": {},
+            "failure_evidence": failure,
+            "failure_root": failure["semantic_root"],
+            "first_divergence": failure["first_divergence"],
+            "recovery": failure["recovery"],
+            "complete_evidence_bundle": True,
+            "complete_green_prefix": False,
+            "retry_requires_fresh_run_dir": True,
+            "no_claim": (
+                "the complete non-green seal proves only a typed semantic "
+                "refusal and can never be promoted or replayed as Pass"
+            ),
+        }
+    )
+    payloads["terminal.json"] = canonical_bytes(terminal)
+    if set(payloads) != set(V2_RUN_ARTIFACTS):
+        raise EvidenceFailed("v2 refusal payload membership is not exactly nine")
+    if any(len(payload) > RUN_ARTIFACT_CAP for payload in payloads.values()):
+        raise EvidenceFailed("v2 refusal payload exceeds an artifact cap")
+    return payloads, failure
 
 
 def v2_write_exclusive(path: Path, payload: bytes) -> None:
@@ -10126,19 +13421,97 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
 
 
 def v2_fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
 
-def v2_publish_bundle(
+@dataclass
+class V2BundleReservation:
+    output: Path
+    artifact_root: str
+    artifact_dir: str
+    terminal_descriptor: int | None
+    path_anchors: tuple[tuple[Path, int, int, int], ...]
+    sealed: bool = False
+
+
+def v2_capture_path_anchor(
+    path: Path,
+    *,
+    expect_directory: bool,
+) -> tuple[Path, int, int, int]:
+    value = os.lstat(path)
+    expected = stat.S_ISDIR(value.st_mode) if expect_directory else stat.S_ISREG(
+        value.st_mode
+    )
+    if not expected:
+        raise EvidenceFailed("v2 reservation path has the wrong filesystem kind")
+    return (
+        path,
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+    )
+
+
+def v2_assert_reservation_anchors(
+    reservation: V2BundleReservation,
+) -> None:
+    for path, device, inode, file_type in reservation.path_anchors:
+        try:
+            value = os.lstat(path)
+        except OSError as error:
+            raise InfrastructureFailed(
+                "v2 reserved publication path disappeared"
+            ) from error
+        if (
+            value.st_dev != device
+            or value.st_ino != inode
+            or stat.S_IFMT(value.st_mode) != file_type
+        ):
+            raise InfrastructureFailed(
+                "v2 reserved publication path changed identity"
+            )
+    descriptor = reservation.terminal_descriptor
+    if descriptor is None:
+        raise EvidenceFailed("v2 terminal reservation is not open")
+    terminal_path, device, inode, file_type = reservation.path_anchors[-1]
+    descriptor_stat = os.fstat(descriptor)
+    if (
+        terminal_path != reservation.output / "terminal.json"
+        or descriptor_stat.st_dev != device
+        or descriptor_stat.st_ino != inode
+        or stat.S_IFMT(descriptor_stat.st_mode) != file_type
+        or not stat.S_ISREG(descriptor_stat.st_mode)
+        or descriptor_stat.st_nlink != 1
+    ):
+        raise InfrastructureFailed(
+            "v2 reserved terminal descriptor lost its path identity"
+        )
+
+
+def v2_close_reservation(reservation: V2BundleReservation) -> None:
+    descriptor = reservation.terminal_descriptor
+    reservation.terminal_descriptor = None
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            # Closing an already-fsynced final-seal descriptor is best-effort.
+            # It must not turn a durable terminal into a contradictory result.
+            pass
+
+
+def _v2_reserve_bundle(
     *,
     artifact_root: str,
     artifact_dir: str,
-    payloads: Mapping[str, bytes],
-) -> dict[str, Any]:
+) -> V2BundleReservation:
     output = resolve_run_dir(
         artifact_root,
         artifact_dir,
@@ -10166,6 +13539,137 @@ def v2_publish_bundle(
     except FileExistsError as error:
         raise EvidenceFailed("v2 artifact run directory already exists") from error
     v2_fsync_directory(output.parent)
+    terminal_path = output / "terminal.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        terminal_descriptor = os.open(terminal_path, flags, 0o644)
+    except OSError as error:
+        raise EvidenceFailed(
+            "v2 terminal reservation could not be created exclusively"
+        ) from error
+    try:
+        os.fsync(terminal_descriptor)
+        v2_fsync_directory(output)
+    except BaseException:
+        try:
+            os.close(terminal_descriptor)
+        except OSError:
+            pass
+        raise
+    anchor_paths: list[Path] = [root]
+    cursor = root
+    for part in output.relative_to(root).parts:
+        cursor = cursor / part
+        anchor_paths.append(cursor)
+    path_anchors = tuple(
+        [
+            *(
+                v2_capture_path_anchor(path, expect_directory=True)
+                for path in anchor_paths
+            ),
+            v2_capture_path_anchor(
+                terminal_path,
+                expect_directory=False,
+            ),
+        ]
+    )
+    reservation = V2BundleReservation(
+        output=output,
+        artifact_root=artifact_root,
+        artifact_dir=artifact_dir,
+        terminal_descriptor=terminal_descriptor,
+        path_anchors=path_anchors,
+    )
+    v2_assert_reservation_anchors(reservation)
+    return reservation
+
+
+def v2_reserve_bundle(
+    *,
+    artifact_root: str,
+    artifact_dir: str,
+) -> V2BundleReservation:
+    try:
+        return _v2_reserve_bundle(
+            artifact_root=artifact_root,
+            artifact_dir=artifact_dir,
+        )
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InfrastructureFailed(
+            "v2 bundle reservation failed at the filesystem boundary"
+        ) from error
+
+
+def v2_expected_bundle_directories(
+    names: Iterable[str],
+) -> list[str]:
+    expected: set[str] = set()
+    for name in names:
+        parent = PurePosixPath(name).parent
+        while str(parent) != ".":
+            expected.add(str(parent))
+            parent = parent.parent
+    return sorted(expected, key=lambda value: value.encode("utf-8"))
+
+
+def v2_verify_reserved_publication(
+    reservation: V2BundleReservation,
+    *,
+    payloads: Mapping[str, bytes],
+    terminal_sealed: bool,
+) -> None:
+    v2_assert_reservation_anchors(reservation)
+    expected_files = sorted(
+        payloads,
+        key=lambda value: value.encode("utf-8"),
+    )
+    expected_directories = v2_expected_bundle_directories(expected_files)
+    try:
+        observed_files, observed_directories, identities = v2_enumerate_bundle(
+            reservation.output
+        )
+        if (
+            observed_files != expected_files
+            or observed_directories != expected_directories
+        ):
+            raise InfrastructureFailed(
+                "v2 publication tree differs from its exact file/directory contract"
+            )
+        for name in expected_files:
+            observed = v2_read_file_strict(
+                reservation.output.joinpath(*PurePosixPath(name).parts),
+                label=f"v2 published artifact {name}",
+                expected_identity=identities[name],
+            )
+            expected = (
+                payloads[name]
+                if name != "terminal.json" or terminal_sealed
+                else b""
+            )
+            if observed != expected:
+                raise InfrastructureFailed(
+                    f"v2 published bytes differ for {name}"
+                )
+    except InputRefused as error:
+        raise InfrastructureFailed(
+            "v2 publication could not be verified safely"
+        ) from error
+    v2_assert_reservation_anchors(reservation)
+
+
+def _v2_publish_reserved_bundle(
+    reservation: V2BundleReservation,
+    *,
+    payloads: Mapping[str, bytes],
+) -> dict[str, Any]:
+    if reservation.sealed or reservation.terminal_descriptor is None:
+        raise EvidenceFailed("v2 artifact reservation is already consumed")
+    if "terminal.json" not in payloads:
+        raise EvidenceFailed("v2 artifact payload lacks a terminal seal")
+    output = reservation.output
 
     nonterminal = sorted(
         (name for name in payloads if name != "terminal.json"),
@@ -10174,6 +13678,7 @@ def v2_publish_bundle(
     writes: list[str] = []
     touched_directories: set[Path] = {output}
     for name in nonterminal:
+        v2_assert_reservation_anchors(reservation)
         check_cancel()
         relative = safe_relative(name, label="v2 artifact member")
         destination = output.joinpath(*relative.parts)
@@ -10188,23 +13693,91 @@ def v2_publish_bundle(
             touched_directories.add(cursor)
         v2_write_exclusive(destination, payloads[name])
         writes.append(name)
+        v2_assert_reservation_anchors(reservation)
     for directory in sorted(
         touched_directories,
         key=lambda value: len(value.parts),
         reverse=True,
     ):
         v2_fsync_directory(directory)
+    v2_verify_reserved_publication(
+        reservation,
+        payloads=payloads,
+        terminal_sealed=False,
+    )
+    descriptor = reservation.terminal_descriptor
+    terminal_payload = payloads["terminal.json"]
+    if len(terminal_payload) > RUN_ARTIFACT_CAP:
+        raise EvidenceFailed("v2 terminal payload exceeds its artifact cap")
     check_cancel()
-    v2_write_exclusive(output / "terminal.json", payloads["terminal.json"])
+    v2_assert_reservation_anchors(reservation)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        written = 0
+        while written < len(terminal_payload):
+            count = os.write(descriptor, terminal_payload[written:])
+            if count <= 0:
+                raise OSError("short write to reserved v2 terminal")
+            written += count
+        os.ftruncate(descriptor, len(terminal_payload))
+        os.fsync(descriptor)
+        v2_fsync_directory(output)
+    except OSError as error:
+        raise InfrastructureFailed(
+            "v2 reserved terminal seal could not be finalized"
+        ) from error
+    v2_verify_reserved_publication(
+        reservation,
+        payloads=payloads,
+        terminal_sealed=True,
+    )
+    reservation.sealed = True
     writes.append("terminal.json")
     return {
         "artifact_dir": str(
-            safe_relative(artifact_root, label="artifact root")
-            / safe_relative(artifact_dir, label="artifact dir")
+            safe_relative(reservation.artifact_root, label="artifact root")
+            / safe_relative(reservation.artifact_dir, label="artifact dir")
         ),
         "publication_order": writes,
-        "terminal_written_last": True,
+        "terminal_content_sealed_last": True,
     }
+
+
+def v2_publish_reserved_bundle(
+    reservation: V2BundleReservation,
+    *,
+    payloads: Mapping[str, bytes],
+) -> dict[str, Any]:
+    try:
+        return _v2_publish_reserved_bundle(
+            reservation,
+            payloads=payloads,
+        )
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InfrastructureFailed(
+            "v2 publication failed at the filesystem boundary"
+        ) from error
+
+
+def v2_publish_bundle(
+    *,
+    artifact_root: str,
+    artifact_dir: str,
+    payloads: Mapping[str, bytes],
+) -> dict[str, Any]:
+    reservation = v2_reserve_bundle(
+        artifact_root=artifact_root,
+        artifact_dir=artifact_dir,
+    )
+    try:
+        return v2_publish_reserved_bundle(
+            reservation,
+            payloads=payloads,
+        )
+    finally:
+        v2_close_reservation(reservation)
 
 
 def v2_synopsis(
@@ -10297,8 +13870,10 @@ def v2_synopsis(
             ),
         },
         "why_grouped": (
-            "hard priority/status/disposition/type/missing-set/readiness "
-            "partitions plus target-complete compatibility receipts"
+            "hard priority/status/disposition/type/missing-set/semantic-"
+            "disposition/semantic-receipt-state/semantic-action/readiness/"
+            "remediation-route partitions plus target-complete compatibility "
+            "receipts"
         ),
         "explanation": (
             {
@@ -10341,8 +13916,6 @@ def v2_execute_live_plan(
         label="v2 artifact dir",
     )
     require_fresh_run_dir(output, label="v2 artifact run directory")
-    snapshot = collect_live_v2(manifest)
-    campaign_root, _ = v2_campaign_epoch(snapshot)
     priority_filter = v2_parse_csv_set(
         parsed.priorities,
         allowed={f"P{priority}" for priority in range(5)},
@@ -10352,96 +13925,6 @@ def v2_execute_live_plan(
         parsed.statuses,
         allowed={"open", "in_progress", "blocked", "deferred", "closed"},
         label="--statuses",
-    )
-    inventory = v2_build_inventory(
-        snapshot,
-        campaign_epoch_root=campaign_root,
-        priority_filter=priority_filter,
-        status_filter=status_filter,
-    )
-    review_receipts = v2_load_review_receipts(
-        parsed.review_receipts,
-        inventory=inventory,
-    )
-    version = str(snapshot.source["br_version"]["version"])
-    authority = v2_derive_authority(
-        inventory,
-        review_receipts,
-        current_br_version=version,
-    )
-    prior_campaign = v2_load_prior_campaign(parsed.prior_campaign)
-    if mode == "history-plan":
-        audit_ids = sorted(
-            {
-                row["id"]
-                for row in inventory["rows"]
-                if row["status"] == "closed"
-            }
-            | {
-                str(
-                    manifest["history_contract"][
-                        "legacy_coverage_anchor_issue"
-                    ]
-                )
-            }
-        )
-        audit_capture = v2_capture_histories(audit_ids)
-    else:
-        audit_capture = v2_rooted(
-            {
-                "state": "NOT_REQUESTED",
-                "capture_count": 0,
-                "issue_ids": [],
-                "documents": [],
-                "command_receipts": [],
-                "raw_stream_bodies_retained": False,
-                "no_claim": "history audit capture was not requested",
-            }
-        )
-    source = v2_build_source_document(
-        snapshot=snapshot,
-        manifest=manifest,
-        inventory=inventory,
-        review_receipts=review_receipts,
-        prior_campaign=prior_campaign,
-        audit_capture=audit_capture,
-        priority_filter=priority_filter,
-        status_filter=status_filter,
-    )
-    if mode == "review-plan":
-        review_plan, optional_payloads = v2_build_review_plan(
-            inventory,
-            authority,
-            max_targets=parsed.max_targets_per_child,
-        )
-        history = v2_not_requested(
-            schema=V2_HISTORY_SCHEMA,
-            mode=mode,
-            source_root=source["semantic_root"],
-            inventory_root=inventory["semantic_root"],
-            projection="history",
-        )
-    else:
-        review_plan = v2_not_requested(
-            schema=V2_REVIEW_PLAN_SCHEMA,
-            mode=mode,
-            source_root=source["semantic_root"],
-            inventory_root=inventory["semantic_root"],
-            projection="review-plan",
-        )
-        optional_payloads = {}
-        history = v2_build_history(
-            source_root=source["semantic_root"],
-            inventory=inventory,
-            authority=authority,
-            all_issues=snapshot.all_issues,
-            audit_capture=audit_capture,
-            history_contract=manifest["history_contract"],
-        )
-    zero_sets = v2_build_zero_sets(
-        source_root=source["semantic_root"],
-        inventory=inventory,
-        prior_campaign=prior_campaign,
     )
     reproduction = v2_reproduction_argv(
         mode=mode,
@@ -10454,42 +13937,250 @@ def v2_execute_live_plan(
         max_targets=parsed.max_targets_per_child,
         explain_target=parsed.explain_target,
     )
-    payloads = v2_bundle_payloads(
-        mode=mode,
-        subject_mode=mode,
+    reservation = v2_reserve_bundle(
         artifact_root=parsed.artifact_root,
         artifact_dir=artifact_dir,
-        source=source,
-        inventory=inventory,
-        authority=authority,
-        review_plan=review_plan,
-        history=history,
-        zero_sets=zero_sets,
-        optional_payloads=optional_payloads,
-        reproduction=reproduction,
     )
-    synopsis = v2_synopsis(
-        subject_mode=mode,
-        review_plan=review_plan,
-        history=history,
-        authority=authority,
-        zero_sets=zero_sets,
-        artifact_dir=str(
-            safe_relative(parsed.artifact_root, label="artifact root")
-            / safe_relative(artifact_dir, label="artifact dir")
-        ),
-        reproduction=reproduction,
-        explain_target=parsed.explain_target,
-    )
-    v2_publish_bundle(
-        artifact_root=parsed.artifact_root,
-        artifact_dir=artifact_dir,
-        payloads=payloads,
-    )
-    return synopsis
+    stage = "source_capture"
+    publication_started = False
+    available_roots: dict[str, str | None] = {
+        "source": None,
+        "inventory": None,
+        "authority": None,
+        "review_plan": None,
+        "history": None,
+        "zero_sets": None,
+    }
+    try:
+        snapshot = collect_live_v2(manifest)
+        stage = "campaign_epoch"
+        campaign_root, _ = v2_campaign_epoch(snapshot)
+        stage = "inventory"
+        inventory = v2_build_inventory(
+            snapshot,
+            campaign_epoch_root=campaign_root,
+            priority_filter=priority_filter,
+            status_filter=status_filter,
+        )
+        available_roots["inventory"] = inventory["semantic_root"]
+        stage = "review_receipt_admission"
+        review_receipts = v2_load_review_receipts(
+            parsed.review_receipts,
+            inventory=inventory,
+        )
+        stage = "authority"
+        version = str(snapshot.source["br_version"]["version"])
+        authority = v2_derive_authority(
+            inventory,
+            review_receipts,
+            current_br_version=version,
+        )
+        available_roots["authority"] = authority["semantic_root"]
+        stage = "prior_campaign"
+        prior_campaign = v2_load_prior_campaign(parsed.prior_campaign)
+        stage = "history_audit"
+        if mode == "history-plan":
+            audit_ids = sorted(
+                {
+                    row["id"]
+                    for row in inventory["rows"]
+                    if row["status"] == "closed"
+                }
+                | {
+                    str(
+                        manifest["history_contract"][
+                            "legacy_coverage_anchor_issue"
+                        ]
+                    )
+                }
+            )
+            audit_capture = v2_capture_histories(audit_ids)
+        else:
+            audit_capture = v2_rooted(
+                {
+                    "state": "NOT_REQUESTED",
+                    "capture_count": 0,
+                    "issue_ids": [],
+                    "documents": [],
+                    "command_receipts": [],
+                    "raw_stream_bodies_retained": False,
+                    "no_claim": "history audit capture was not requested",
+                }
+            )
+        stage = "source_assembly"
+        source = v2_build_source_document(
+            snapshot=snapshot,
+            manifest=manifest,
+            inventory=inventory,
+            review_receipts=review_receipts,
+            prior_campaign=prior_campaign,
+            audit_capture=audit_capture,
+            priority_filter=priority_filter,
+            status_filter=status_filter,
+        )
+        available_roots["source"] = source["semantic_root"]
+        stage = "selected_projection"
+        if mode == "review-plan":
+            review_plan, optional_payloads = v2_build_review_plan(
+                inventory,
+                authority,
+                max_targets=parsed.max_targets_per_child,
+            )
+            history = v2_not_requested(
+                schema=V2_HISTORY_SCHEMA,
+                mode=mode,
+                source_root=source["semantic_root"],
+                inventory_root=inventory["semantic_root"],
+                projection="history",
+            )
+        else:
+            review_plan = v2_not_requested(
+                schema=V2_REVIEW_PLAN_SCHEMA,
+                mode=mode,
+                source_root=source["semantic_root"],
+                inventory_root=inventory["semantic_root"],
+                projection="review-plan",
+            )
+            optional_payloads = {}
+            history = v2_build_history(
+                source_root=source["semantic_root"],
+                inventory=inventory,
+                authority=authority,
+                all_issues=snapshot.all_issues,
+                audit_capture=audit_capture,
+                history_contract=manifest["history_contract"],
+            )
+        available_roots["review_plan"] = review_plan["semantic_root"]
+        available_roots["history"] = history["semantic_root"]
+        stage = "zero_sets"
+        zero_sets = v2_build_zero_sets(
+            source_root=source["semantic_root"],
+            inventory=inventory,
+            prior_campaign=prior_campaign,
+            current_universe=snapshot.all_issues,
+        )
+        available_roots["zero_sets"] = zero_sets["semantic_root"]
+        stage = "bundle_assembly"
+        payloads = v2_bundle_payloads(
+            mode=mode,
+            subject_mode=mode,
+            artifact_root=parsed.artifact_root,
+            artifact_dir=artifact_dir,
+            source=source,
+            inventory=inventory,
+            authority=authority,
+            review_plan=review_plan,
+            history=history,
+            zero_sets=zero_sets,
+            optional_payloads=optional_payloads,
+            reproduction=reproduction,
+        )
+        stage = "synopsis"
+        synopsis = v2_synopsis(
+            subject_mode=mode,
+            review_plan=review_plan,
+            history=history,
+            authority=authority,
+            zero_sets=zero_sets,
+            artifact_dir=str(
+                safe_relative(parsed.artifact_root, label="artifact root")
+                / safe_relative(artifact_dir, label="artifact dir")
+            ),
+            reproduction=reproduction,
+            explain_target=parsed.explain_target,
+        )
+        check_cancel()
+        stage = "publication"
+        publication_started = True
+        v2_publish_reserved_bundle(
+            reservation,
+            payloads=payloads,
+        )
+        return synopsis
+    except HarnessError as error:
+        if isinstance(error, CancelledDrained):
+            raise
+        if (
+            error.terminal in V2_SEMANTIC_REFUSAL_TERMINALS
+            and not publication_started
+            and not reservation.sealed
+        ):
+            refusal_payloads, failure = v2_refusal_bundle_payloads(
+                mode=mode,
+                artifact_root=parsed.artifact_root,
+                artifact_dir=artifact_dir,
+                manifest=manifest,
+                error=error,
+                stage=stage,
+                available_roots=available_roots,
+                argv=[str(SCRIPT_REL), *sys.argv[1:]],
+            )
+            v2_publish_reserved_bundle(
+                reservation,
+                payloads=refusal_payloads,
+            )
+            terminal = strict_json_loads(
+                refusal_payloads["terminal.json"],
+                label="v2 refusal terminal",
+                require_canonical=True,
+            )
+            result = v2_rooted(
+                {
+                    "schema": V2_REFUSAL_RESULT_SCHEMA,
+                    "terminal": error.terminal,
+                    "exit_code": TERMINAL_EXIT[error.terminal],
+                    "subject_mode": mode,
+                    "artifact_dir": str(
+                        safe_relative(
+                            parsed.artifact_root,
+                            label="artifact root",
+                        )
+                        / safe_relative(artifact_dir, label="artifact dir")
+                    ),
+                    "terminal_root": terminal["semantic_root"],
+                    "failure_root": failure["semantic_root"],
+                    "first_divergence": failure["first_divergence"],
+                    "recovery": failure["recovery"],
+                    "complete_evidence_bundle": True,
+                    "complete_green_prefix": False,
+                    "no_claim": (
+                        "the planner produced a complete typed refusal bundle "
+                        "and did not mutate any Bead"
+                    ),
+                }
+            )
+            raise PublishedV2Refusal(
+                terminal=error.terminal,
+                document=result,
+            ) from error
+        if publication_started:
+            raise InfrastructureFailed(
+                "v2 publication failed; the reserved terminal remains "
+                "empty or invalid and manual recovery is required"
+            ) from error
+        raise
+    finally:
+        v2_close_reservation(reservation)
 
 
-def v2_read_file_strict(path: Path, *, label: str) -> bytes:
+def v2_stat_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "mode": value.st_mode,
+        "link_count": value.st_nlink,
+        "size": value.st_size,
+        "mtime_ns": value.st_mtime_ns,
+        "ctime_ns": value.st_ctime_ns,
+    }
+
+
+def v2_read_file_strict(
+    path: Path,
+    *,
+    label: str,
+    expected_identity: Mapping[str, int] | None = None,
+) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -10499,6 +14190,14 @@ def v2_read_file_strict(path: Path, *, label: str) -> bytes:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise InputRefused(f"{label} is not a regular file")
+        before_identity = v2_stat_identity(before)
+        if before.st_nlink != 1:
+            raise InputRefused(f"{label} has a hard-link alias")
+        if (
+            expected_identity is not None
+            and before_identity != dict(expected_identity)
+        ):
+            raise InputRefused(f"{label} changed identity after enumeration")
         if before.st_size > RUN_ARTIFACT_CAP:
             raise InputRefused(f"{label} exceeds the v2 artifact cap")
         chunks: list[bytes] = []
@@ -10512,17 +14211,7 @@ def v2_read_file_strict(path: Path, *, label: str) -> bytes:
         if os.read(descriptor, 1):
             raise InputRefused(f"{label} grew while being read")
         after = os.fstat(descriptor)
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
+        if after.st_nlink != 1 or v2_stat_identity(after) != before_identity:
             raise InputRefused(f"{label} changed while being read")
         return b"".join(chunks)
     finally:
@@ -10560,9 +14249,12 @@ def v2_register_member_identity(
     seen[identity] = relative
 
 
-def v2_enumerate_bundle(directory: Path) -> tuple[list[str], list[str]]:
+def v2_enumerate_bundle(
+    directory: Path,
+) -> tuple[list[str], list[str], dict[str, dict[str, int]]]:
     files: list[str] = []
     directories: list[str] = []
+    file_identities: dict[str, dict[str, int]] = {}
     identities: dict[tuple[int, int], str] = {}
     try:
         root_stat = os.lstat(directory)
@@ -10624,6 +14316,7 @@ def v2_enumerate_bundle(directory: Path) -> tuple[list[str], list[str]]:
                 kind="file",
             )
             files.append(relative)
+            file_identities[relative] = v2_stat_identity(member_stat)
     files.sort(key=lambda value: value.encode("utf-8"))
     directories.sort(key=lambda value: value.encode("utf-8"))
     v2_assert_unique(files, label="v2 bundle files")
@@ -10633,10 +14326,14 @@ def v2_enumerate_bundle(directory: Path) -> tuple[list[str], list[str]]:
         if alias in aliases and aliases[alias] != relative:
             raise InputRefused("v2 bundle contains a Unicode/case path alias")
         aliases[alias] = relative
-    return files, directories
+    return files, directories, file_identities
 
 
-def v2_read_event_stream(payload: bytes) -> list[dict[str, Any]]:
+def v2_read_event_stream(
+    payload: bytes,
+    *,
+    expected_terminal: str = "Pass",
+) -> list[dict[str, Any]]:
     if not payload or not payload.endswith(b"\n"):
         raise InputRefused("v2 events.jsonl lacks a terminal newline")
     lines = payload.splitlines(keepends=True)
@@ -10682,7 +14379,24 @@ def v2_read_event_stream(payload: bytes) -> list[dict[str, Any]]:
     if (
         sum(event["terminal"] is not None for event in events) != 1
         or not events
-        or events[-1]["terminal"] != "Pass"
+        or events[-1]["terminal"] != expected_terminal
+        or events[-1]["exit_code"] != TERMINAL_EXIT[expected_terminal]
+        or (
+            expected_terminal == "Pass"
+            and (
+                events[-1]["first_divergence"] is not None
+                or events[-1]["recovery"] != "NOT_REQUIRED"
+            )
+        )
+        or (
+            expected_terminal != "Pass"
+            and (
+                not isinstance(events[-1]["first_divergence"], str)
+                or not events[-1]["first_divergence"]
+                or not isinstance(events[-1]["recovery"], str)
+                or events[-1]["recovery"] == "NOT_REQUIRED"
+            )
+        )
     ):
         raise EvidenceFailed("v2 retained terminal event is not unique and last")
     return events
@@ -10821,9 +14535,15 @@ def v2_read_retained_bundle(
     )
     if directory.is_symlink() or not directory.is_dir():
         raise InputRefused("v2 replay input is not a safe directory")
+    observed_files, observed_directories, file_identities = v2_enumerate_bundle(
+        directory
+    )
+    if "terminal.json" not in file_identities:
+        raise InputRefused("v2 replay input lacks terminal.json")
     terminal_payload = v2_read_file_strict(
         directory / "terminal.json",
         label="v2 terminal.json",
+        expected_identity=file_identities["terminal.json"],
     )
     terminal = strict_json_loads(
         terminal_payload,
@@ -10851,7 +14571,6 @@ def v2_read_retained_bundle(
         [*V2_RUN_ARTIFACTS, *optional_paths],
         key=lambda value: value.encode("utf-8"),
     )
-    observed_files, observed_directories = v2_enumerate_bundle(directory)
     if observed_files != expected_files:
         missing = sorted(set(expected_files) - set(observed_files))
         extra = sorted(set(observed_files) - set(expected_files))
@@ -10875,12 +14594,339 @@ def v2_read_retained_bundle(
         name: v2_read_file_strict(
             directory.joinpath(*PurePosixPath(name).parts),
             label=f"v2 artifact {name}",
+            expected_identity=file_identities[name],
         )
         for name in observed_files
     }
-    payloads["terminal.json"] = terminal_payload
-    events = v2_read_event_stream(payloads["events.jsonl"])
+    if payloads["terminal.json"] != terminal_payload:
+        raise InputRefused("v2 terminal changed between strict reads")
+    expected_terminal = terminal.get("terminal")
+    if not isinstance(expected_terminal, str) or expected_terminal not in TERMINAL_EXIT:
+        raise EvidenceFailed("v2 terminal names an unknown terminal state")
+    events = v2_read_event_stream(
+        payloads["events.jsonl"],
+        expected_terminal=expected_terminal,
+    )
     return directory, payloads, terminal, events
+
+
+def v2_validate_refusal_bundle(
+    *,
+    artifact_root: str,
+    input_dir: str,
+    payloads: Mapping[str, bytes],
+    terminal: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    accepted_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    terminal_fields = {
+        "schema",
+        "mode",
+        "subject_mode",
+        "bundle_state",
+        "terminal",
+        "exit_code",
+        "artifact_root",
+        "artifact_dir",
+        "base_artifacts",
+        "safe_relative_artifacts",
+        "artifact_identities",
+        "optional_content_registry",
+        "manifest_root",
+        "manifest_content_identity",
+        "source_root",
+        "inventory_root",
+        "authority_root",
+        "review_plan_root",
+        "history_root",
+        "zero_sets_root",
+        "events_content_root",
+        "event_count",
+        "event_sequence",
+        "event_roots",
+        "terminal_event_root",
+        "reproduction",
+        "replay_equivalence",
+        "failure_evidence",
+        "failure_root",
+        "first_divergence",
+        "recovery",
+        "complete_evidence_bundle",
+        "complete_green_prefix",
+        "retry_requires_fresh_run_dir",
+        "no_claim",
+        "semantic_root",
+    }
+    v2_exact_keys(
+        terminal,
+        terminal_fields,
+        label="v2 refusal terminal",
+    )
+    verify_semantic_root(terminal, label="v2 refusal terminal")
+    terminal_name = terminal["terminal"]
+    expected_recovery = {
+        "InputRefused": "CORRECT_INPUT_AND_RETRY_IN_FRESH_RUN_DIR",
+        "NoData": "PROVIDE_REQUIRED_DATA_AND_RETRY_IN_FRESH_RUN_DIR",
+        "EvidenceFailed": "MANUAL_RECOVERY_REQUIRED",
+    }.get(terminal_name)
+    expected_terminal_no_claim = (
+        "the complete non-green seal proves only a typed semantic "
+        "refusal and can never be promoted or replayed as Pass"
+    )
+    if (
+        terminal["schema"] != V2_TERMINAL_SCHEMA
+        or terminal["bundle_state"] != "COMPLETE_NON_GREEN"
+        or terminal_name not in V2_SEMANTIC_REFUSAL_TERMINALS
+        or terminal["exit_code"] != TERMINAL_EXIT[terminal_name]
+        or terminal["mode"] not in {"review-plan", "history-plan"}
+        or terminal["subject_mode"] != terminal["mode"]
+        or terminal["artifact_root"]
+        != str(safe_relative(artifact_root, label="artifact root"))
+        or terminal["artifact_dir"]
+        != str(safe_relative(input_dir, label="artifact dir"))
+        or terminal["base_artifacts"] != list(V2_RUN_ARTIFACTS)
+        or terminal["safe_relative_artifacts"] != list(V2_RUN_ARTIFACTS)
+        or terminal["optional_content_registry"] != []
+        or terminal["manifest_root"] != accepted_manifest["semantic_root"]
+        or terminal["manifest_content_identity"]
+        != accepted_manifest["content_identity"]
+        or terminal["complete_evidence_bundle"] is not True
+        or terminal["complete_green_prefix"] is not False
+        or terminal["retry_requires_fresh_run_dir"] is not True
+        or terminal["replay_equivalence"] != {}
+        or not isinstance(terminal["first_divergence"], str)
+        or not terminal["first_divergence"]
+        or terminal["recovery"] != expected_recovery
+        or terminal["no_claim"] != expected_terminal_no_claim
+    ):
+        raise EvidenceFailed("v2 refusal terminal contract differs")
+    if set(payloads) != set(V2_RUN_ARTIFACTS):
+        raise EvidenceFailed("v2 refusal artifact membership is not exactly nine")
+    if payloads["terminal.json"] != canonical_bytes(terminal):
+        raise EvidenceFailed("v2 refusal terminal payload differs from its document")
+    failure = terminal["failure_evidence"]
+    if not isinstance(failure, dict):
+        raise EvidenceFailed("v2 refusal terminal lacks failure evidence")
+    failure_fields = {
+        "schema",
+        "result_category",
+        "stage",
+        "terminal",
+        "exit_code",
+        "diagnostic_code",
+        "detail_root",
+        "first_divergence",
+        "recovery",
+        "manifest_root",
+        "available_roots",
+        "output_reserved",
+        "complete_evidence_bundle",
+        "complete_green_prefix",
+        "retry_requires_fresh_run_dir",
+        "no_claim",
+        "semantic_root",
+    }
+    v2_exact_keys(failure, failure_fields, label="v2 failure evidence")
+    verify_semantic_root(failure, label="v2 failure evidence")
+    expected_failure_no_claim = (
+        "failure evidence identifies recovery work and never seals a "
+        "partial or ambiguous publication as green"
+    )
+    available_roots = failure["available_roots"]
+    expected_available_root_keys = {
+        "source",
+        "inventory",
+        "authority",
+        "review_plan",
+        "history",
+        "zero_sets",
+    }
+    if (
+        failure["schema"] != V2_FAILURE_EVIDENCE_SCHEMA
+        or failure["result_category"] != "SEMANTIC_REFUSAL"
+        or failure["terminal"] != terminal_name
+        or failure["exit_code"] != terminal["exit_code"]
+        or failure["diagnostic_code"]
+        != f"{terminal_name}:{failure['stage']}"
+        or failure["manifest_root"] != accepted_manifest["semantic_root"]
+        or failure["semantic_root"] != terminal["failure_root"]
+        or failure["first_divergence"] != terminal["first_divergence"]
+        or failure["recovery"] != expected_recovery
+        or not isinstance(available_roots, dict)
+        or set(available_roots) != expected_available_root_keys
+        or any(
+            value is not None
+            and (
+                not isinstance(value, str)
+                or not value.startswith("sha256-v1:")
+            )
+            for value in available_roots.values()
+        )
+        or failure["output_reserved"] is not True
+        or failure["complete_evidence_bundle"] is not True
+        or failure["complete_green_prefix"] is not False
+        or failure["retry_requires_fresh_run_dir"] is not True
+        or failure["no_claim"] != expected_failure_no_claim
+    ):
+        raise EvidenceFailed("v2 refusal failure bindings disagree")
+    projection_names = {
+        "source-v2.json": ("source", V2_SOURCE_SCHEMA, "source_root"),
+        "inventory-v2.json": (
+            "inventory",
+            V2_INVENTORY_SCHEMA,
+            "inventory_root",
+        ),
+        "authority-v2.json": (
+            "authority",
+            V2_AUTHORITY_SCHEMA,
+            "authority_root",
+        ),
+        "review-plan-v2.json": (
+            "review-plan",
+            V2_REVIEW_PLAN_SCHEMA,
+            "review_plan_root",
+        ),
+        "history-v2.json": (
+            "history",
+            V2_HISTORY_SCHEMA,
+            "history_root",
+        ),
+        "zero-sets-v2.json": (
+            "zero-sets",
+            V2_ZERO_SETS_SCHEMA,
+            "zero_sets_root",
+        ),
+    }
+    envelope_fields = {
+        "schema",
+        "artifact_name",
+        "projection",
+        "expected_success_schema",
+        "mode",
+        "state",
+        "manifest_root",
+        "failure_root",
+        "available_projection_root",
+        "complete_green_prefix",
+        "no_claim",
+        "semantic_root",
+    }
+    schema_by_name: dict[str, str] = {
+        "events.jsonl": V2_EVENT_SCHEMA,
+        "reproduce.txt": "frankensim.argv-json.v2",
+    }
+    for name, (projection, success_schema, terminal_root_field) in (
+        projection_names.items()
+    ):
+        document = strict_json_loads(
+            payloads[name],
+            label=f"v2 refusal artifact {name}",
+            require_canonical=True,
+        )
+        if not isinstance(document, dict):
+            raise EvidenceFailed(f"v2 refusal artifact {name} is not an object")
+        v2_exact_keys(
+            document,
+            envelope_fields,
+            label=f"v2 refusal artifact {name}",
+        )
+        verify_semantic_root(document, label=f"v2 refusal artifact {name}")
+        expected_envelope_no_claim = (
+            "this closed refusal envelope is complete failure evidence "
+            "and is not a successful planner projection"
+        )
+        available_key = {
+            "source": "source",
+            "inventory": "inventory",
+            "authority": "authority",
+            "review-plan": "review_plan",
+            "history": "history",
+            "zero-sets": "zero_sets",
+        }[projection]
+        if (
+            document["schema"] != V2_REFUSAL_PROJECTION_SCHEMA
+            or document["artifact_name"] != name
+            or document["projection"] != projection
+            or document["expected_success_schema"] != success_schema
+            or document["mode"] != terminal["subject_mode"]
+            or document["state"] != "REFUSED"
+            or document["manifest_root"] != accepted_manifest["semantic_root"]
+            or document["failure_root"] != failure["semantic_root"]
+            or document["available_projection_root"]
+            != available_roots[available_key]
+            or document["complete_green_prefix"] is not False
+            or document["no_claim"] != expected_envelope_no_claim
+            or terminal[terminal_root_field] != document["semantic_root"]
+        ):
+            raise EvidenceFailed(
+                f"v2 refusal envelope bindings disagree for {name}"
+            )
+        schema_by_name[name] = V2_REFUSAL_PROJECTION_SCHEMA
+    reproduction = strict_json_loads(
+        payloads["reproduce.txt"],
+        label="v2 refusal reproduce.txt",
+        require_canonical=True,
+    )
+    if (
+        not isinstance(reproduction, list)
+        or not all(isinstance(value, str) for value in reproduction)
+        or reproduction != terminal["reproduction"]
+    ):
+        raise EvidenceFailed("v2 refusal reproduction binding differs")
+    expected_identity_names = set(payloads) - {"terminal.json"}
+    if set(terminal["artifact_identities"]) != expected_identity_names:
+        raise EvidenceFailed("v2 refusal artifact identity membership differs")
+    for name in sorted(expected_identity_names):
+        expected_identity = v2_artifact_identity(
+            relative_path=name,
+            schema_kind=schema_by_name[name],
+            payload=payloads[name],
+        )
+        if terminal["artifact_identities"][name] != expected_identity:
+            raise EvidenceFailed(
+                f"v2 refusal artifact identity differs for {name}"
+            )
+    expected_events = v2_refusal_event_rows(
+        mode=terminal["mode"],
+        terminal_name=terminal_name,
+        failure=failure,
+        reproduction=reproduction,
+    )
+    if list(events) != expected_events:
+        raise EvidenceFailed("v2 refusal events differ from exact reconstruction")
+    expected_event_payload = b"".join(
+        canonical_bytes(row) for row in expected_events
+    )
+    if (
+        payloads["events.jsonl"] != expected_event_payload
+        or terminal["event_count"] != len(expected_events)
+        or terminal["event_sequence"] != list(range(len(expected_events)))
+        or terminal["event_roots"]
+        != [semantic_root(row) for row in expected_events]
+        or terminal["terminal_event_root"] != semantic_root(expected_events[-1])
+        or terminal["events_content_root"]
+        != "sha256-v1:" + hashlib.sha256(expected_event_payload).hexdigest()
+    ):
+        raise EvidenceFailed("v2 refusal event seal differs")
+    return v2_rooted(
+        {
+            "schema": V2_REFUSAL_RESULT_SCHEMA,
+            "terminal": terminal_name,
+            "exit_code": terminal["exit_code"],
+            "subject_mode": terminal["subject_mode"],
+            "terminal_root": terminal["semantic_root"],
+            "failure_root": failure["semantic_root"],
+            "first_divergence": terminal["first_divergence"],
+            "recovery": terminal["recovery"],
+            "complete_evidence_bundle": True,
+            "complete_green_prefix": False,
+            "replay_validated_without_output": True,
+            "no_claim": (
+                "offline validation preserves the retained non-green result "
+                "and cannot mint Pass or current tracker authority"
+            ),
+        }
+    )
 
 
 def v2_reconstruct_retained(
@@ -10900,6 +14946,105 @@ def v2_reconstruct_retained(
     dict[str, Any],
     dict[str, bytes],
 ]:
+    terminal_fields = {
+        "schema",
+        "mode",
+        "subject_mode",
+        "bundle_state",
+        "terminal",
+        "exit_code",
+        "artifact_root",
+        "artifact_dir",
+        "base_artifacts",
+        "safe_relative_artifacts",
+        "artifact_identities",
+        "optional_content_registry",
+        "manifest_root",
+        "source_root",
+        "inventory_root",
+        "authority_root",
+        "review_plan_root",
+        "history_root",
+        "zero_sets_root",
+        "events_content_root",
+        "event_count",
+        "event_sequence",
+        "event_roots",
+        "terminal_event_root",
+        "reproduction",
+        "replay_equivalence",
+        "first_divergence",
+        "recovery",
+        "complete_evidence_bundle",
+        "complete_green_prefix",
+        "retry_requires_fresh_run_dir",
+        "no_claim",
+        "semantic_root",
+    }
+    v2_exact_keys(
+        terminal,
+        terminal_fields,
+        label="v2 retained green terminal",
+    )
+    verify_semantic_root(terminal, label="v2 retained green terminal")
+    registry = terminal.get("optional_content_registry")
+    if not isinstance(registry, list):
+        raise EvidenceFailed("v2 retained optional registry is malformed")
+    optional_paths: list[str] = []
+    for index, entry in enumerate(registry):
+        if not isinstance(entry, dict):
+            raise EvidenceFailed(
+                f"v2 retained optional registry row {index} is malformed"
+            )
+        optional_paths.append(
+            v2_safe_member(
+                str(entry.get("relative_path") or ""),
+                label=f"v2 retained optional registry row {index}",
+            )
+        )
+    v2_assert_unique(
+        optional_paths,
+        label="v2 retained optional registry paths",
+    )
+    if any(path in V2_RUN_ARTIFACTS for path in optional_paths):
+        raise EvidenceFailed("v2 retained optional registry shadows a base artifact")
+    expected_payload_names = set(V2_RUN_ARTIFACTS) | set(optional_paths)
+    if set(payloads) != expected_payload_names:
+        raise EvidenceFailed("v2 reconstructed artifact membership differs")
+    expected_safe_artifacts = sorted(
+        expected_payload_names,
+        key=lambda value: value.encode("utf-8"),
+    )
+    expected_terminal_no_claim = (
+        "the final seal proves deterministic bundle construction only; "
+        "it does not prove current state on replay or mint any authority"
+    )
+    if (
+        terminal.get("schema") != V2_TERMINAL_SCHEMA
+        or terminal.get("bundle_state") != "COMPLETE_GREEN"
+        or terminal.get("terminal") != "Pass"
+        or terminal.get("exit_code") != 0
+        or terminal.get("mode")
+        not in {terminal.get("subject_mode"), "replay"}
+        or terminal.get("subject_mode")
+        not in {"review-plan", "history-plan"}
+        or terminal.get("artifact_root")
+        != str(safe_relative(artifact_root, label="artifact root"))
+        or terminal.get("artifact_dir")
+        != str(safe_relative(input_dir, label="artifact dir"))
+        or terminal.get("base_artifacts") != list(V2_RUN_ARTIFACTS)
+        or terminal.get("safe_relative_artifacts")
+        != expected_safe_artifacts
+        or terminal.get("complete_evidence_bundle") is not True
+        or terminal.get("complete_green_prefix") is not True
+        or terminal.get("first_divergence") is not None
+        or terminal.get("recovery") != "NOT_REQUIRED"
+        or terminal.get("retry_requires_fresh_run_dir") is not False
+        or terminal.get("no_claim") != expected_terminal_no_claim
+    ):
+        raise EvidenceFailed(
+            "v2 retained reconstruction requires an explicit complete-green seal"
+        )
     documents: dict[str, dict[str, Any]] = {}
     schemas = {
         "source-v2.json": V2_SOURCE_SCHEMA,
@@ -10966,7 +15111,7 @@ def v2_reconstruct_retained(
     ):
         raise EvidenceFailed("v2 terminal event/reproduction seal differs")
 
-    registry = {
+    registry_by_path = {
         row["relative_path"]: row
         for row in terminal["optional_content_registry"]
     }
@@ -10975,7 +15120,7 @@ def v2_reconstruct_retained(
         "events.jsonl": V2_EVENT_SCHEMA,
         "reproduce.txt": "frankensim.argv-json.v2",
         **{
-            path: row["schema_kind"] for path, row in registry.items()
+            path: row["schema_kind"] for path, row in registry_by_path.items()
         },
     }
     expected_identity_names = set(payloads) - {"terminal.json"}
@@ -11009,6 +15154,13 @@ def v2_reconstruct_retained(
         current_br_version=str(
             source["captured"]["observation"]["br_version"]["version"]
         ),
+    )
+    v2_validate_zero_sets(
+        retained_zero,
+        source_root=source["semantic_root"],
+        inventory=inventory,
+        prior_campaign=source["captured"]["prior_campaign"],
+        current_universe=snapshot.all_issues,
     )
     subject_mode = str(terminal.get("subject_mode") or terminal.get("mode") or "")
     if subject_mode == "review-plan":
@@ -11047,6 +15199,7 @@ def v2_reconstruct_retained(
         source_root=source["semantic_root"],
         inventory=inventory,
         prior_campaign=source["captured"]["prior_campaign"],
+        current_universe=snapshot.all_issues,
     )
     reconstructed = v2_bundle_payloads(
         mode=str(terminal["mode"]),
@@ -11091,6 +15244,22 @@ def v2_replay_bundle(
             input_dir=input_dir,
         )
     )
+    accepted_manifest = load_case_manifest_v2()
+    if terminal.get("bundle_state") == "COMPLETE_NON_GREEN":
+        result = v2_validate_refusal_bundle(
+            artifact_root=artifact_root,
+            input_dir=input_dir,
+            payloads=retained_payloads,
+            terminal=terminal,
+            events=events,
+            accepted_manifest=accepted_manifest,
+        )
+        raise PublishedV2Refusal(
+            terminal=str(result["terminal"]),
+            document=result,
+        )
+    if terminal.get("bundle_state") != "COMPLETE_GREEN":
+        raise EvidenceFailed("v2 replay bundle state is unknown")
     output_directory = resolve_run_dir(
         artifact_root,
         output_dir,
@@ -11118,7 +15287,7 @@ def v2_replay_bundle(
         payloads=retained_payloads,
         terminal=terminal,
         events=events,
-        accepted_manifest=load_case_manifest_v2(),
+        accepted_manifest=accepted_manifest,
     )
     reproduction = v2_reproduction_argv(
         mode="replay",
@@ -11197,6 +15366,149 @@ def peek_replay_schema(artifact_root: str, input_dir: str) -> str:
     return document["schema"]
 
 
+def v2_state_projection_value(
+    value: Any,
+    *,
+    seen: set[int] | None = None,
+    depth: int = 0,
+) -> Any:
+    if depth > 32:
+        raise EvidenceFailed("refusal-state projection exceeds its depth cap")
+    if value is None or type(value) in {bool, int, float, str}:
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        payload = (
+            value.tobytes()
+            if isinstance(value, memoryview)
+            else bytes(value)
+        )
+        return {
+            "kind": type(value).__name__,
+            "byte_length": len(payload),
+            "content_root": "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
+        }
+    if isinstance(value, Path):
+        return {
+            "kind": "path",
+            "path_root": text_root(str(value)),
+        }
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return {"kind": "cycle"}
+    seen.add(identity)
+    try:
+        if isinstance(value, Mapping):
+            entries = [
+                {
+                    "key": v2_state_projection_value(
+                        key,
+                        seen=seen,
+                        depth=depth + 1,
+                    ),
+                    "value": v2_state_projection_value(
+                        item,
+                        seen=seen,
+                        depth=depth + 1,
+                    ),
+                }
+                for key, item in value.items()
+            ]
+            entries.sort(key=lambda entry: canonical_bytes(entry["key"]))
+            return {"kind": "mapping", "entries": entries}
+        if isinstance(value, (list, tuple)):
+            return {
+                "kind": type(value).__name__,
+                "items": [
+                    v2_state_projection_value(
+                        item,
+                        seen=seen,
+                        depth=depth + 1,
+                    )
+                    for item in value
+                ],
+            }
+        if isinstance(value, (set, frozenset)):
+            items = [
+                v2_state_projection_value(
+                    item,
+                    seen=seen,
+                    depth=depth + 1,
+                )
+                for item in value
+            ]
+            items.sort(key=canonical_bytes)
+            return {"kind": type(value).__name__, "items": items}
+        if isinstance(value, argparse.Namespace):
+            return {
+                "kind": "argparse.Namespace",
+                "attributes": v2_state_projection_value(
+                    vars(value),
+                    seen=seen,
+                    depth=depth + 1,
+                ),
+            }
+        return {
+            "kind": "opaque",
+            "type": (
+                f"{type(value).__module__}.{type(value).__qualname__}"
+            ),
+        }
+    finally:
+        seen.remove(identity)
+
+
+def v2_callback_refusal_projection(
+    callback: Callable[[], Any],
+    *,
+    collector_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    closure_rows: list[dict[str, Any]] = []
+    closure = callback.__closure__ or ()
+    freevars = callback.__code__.co_freevars
+    if len(closure) != len(freevars):
+        raise EvidenceFailed("refusal callback closure metadata differs")
+    for name, cell in sorted(
+        zip(freevars, closure),
+        key=lambda pair: pair[0].encode("utf-8"),
+    ):
+        try:
+            value = cell.cell_contents
+        except ValueError as error:
+            raise EvidenceFailed(
+                "refusal callback contains an empty closure cell"
+            ) from error
+        closure_rows.append(
+            {
+                "name": name,
+                "state": v2_state_projection_value(value),
+            }
+        )
+    global_rows: list[dict[str, Any]] = []
+    for name in sorted(
+        set(callback.__code__.co_names),
+        key=lambda value: value.encode("utf-8"),
+    ):
+        value = callback.__globals__.get(name)
+        if isinstance(value, (dict, list, set, bytearray)):
+            global_rows.append(
+                {
+                    "name": name,
+                    "state": v2_state_projection_value(value),
+                }
+            )
+    return {
+        "callback_closure": closure_rows,
+        "mutable_callback_globals": global_rows,
+        "collector_check_roots": [
+            row["semantic_root"] for row in collector_rows
+        ],
+        "command_receipts": list(_command_receipts),
+        "cancel_requested": _cancel_requested,
+    }
+
+
 class V2CheckCollector:
     def __init__(self, case_id: str, assertion_id: str) -> None:
         self.case_id = case_id
@@ -11247,14 +15559,11 @@ class V2CheckCollector:
         projection_label: str | None = None,
     ) -> None:
         if projection is None:
-            projection = lambda: {
-                "collector_check_roots": [
-                    row["semantic_root"] for row in self.rows
-                ],
-                "command_receipts": list(_command_receipts),
-                "signal_name": _signal_name,
-            }
-            projection_label = "HARNESS_PROCESS_STATE"
+            projection = lambda: v2_callback_refusal_projection(
+                callback,
+                collector_rows=self.rows,
+            )
+            projection_label = "CALLBACK_CLOSURE_AND_HARNESS_STATE"
         elif not projection_label:
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} stateful refusal lacks a projection label"
@@ -11277,6 +15586,7 @@ class V2CheckCollector:
                 "unchanged_projection_root": after,
                 "projection_label": projection_label,
                 "diagnostic_root": text_root(str(error)),
+                "diagnostic_summary": v2_bounded_diagnostic_summary(error),
             },
         )
 
@@ -11366,6 +15676,20 @@ def v2_synthetic_target(
             "labels": [],
             "missing_sections": sorted(missing_sections),
             "disposition": disposition,
+            "template_warning_state": (
+                "PRESENT" if missing_sections else "NONE"
+            ),
+            "semantic_review_disposition": (
+                "BLOCKED_AUTHORITY"
+                if not missing_sections
+                else "REMEDIATION_REQUIRED"
+            ),
+            "semantic_review_receipt_state": "UNREVIEWED",
+            "semantic_review_dimensions": (
+                v2_unreviewed_semantic_dimensions()
+            ),
+            "semantic_review_receipt_root": None,
+            "reviewed_no_change_receipt_root": None,
             "disposition_rationale": "synthetic exact disposition",
             "disposition_falsifier": "a contrary rooted fixture invalidates it",
             "field_roots": field_roots,
@@ -11436,6 +15760,10 @@ def v2_synthetic_inventory(
         normalized = dict(row)
         normalized.pop("semantic_root", None)
         normalized["campaign_epoch_root"] = campaign_root
+        v2_validate_unreviewed_semantic_contract(
+            normalized,
+            label=f"synthetic inventory target {normalized['id']}",
+        )
         rows.append(v2_rooted(normalized))
     return v2_rooted(
         {
@@ -11467,6 +15795,8 @@ def v2_synthetic_receipts(
     compatible: bool = False,
     declared: bool = False,
     manual: bool = False,
+    semantic_reviewed: bool = False,
+    semantic_disposition: str | None = None,
     external_verdict: str = "NODATA",
     conditional_verdict: str = "NODATA",
     gate_verdict: str = "NODATA",
@@ -11499,22 +15829,61 @@ def v2_synthetic_receipts(
         )
     receipts: list[dict[str, Any]] = []
     for target in rows:
+        target_semantic_disposition = (
+            semantic_disposition
+            or str(target["semantic_review_disposition"])
+        )
+        signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[
+            target_semantic_disposition
+        ]
+        semantic_dimensions = (
+            [
+                v2_semantic_dimension_receipt(
+                    target_root=target["target_root"],
+                    dimension=dimension,
+                    verdict=(
+                        signal
+                        if index == 0
+                        else "SATISFIED"
+                    ),
+                    reason=(
+                        f"synthetic reviewed reason for {dimension}"
+                    ),
+                    falsifier=(
+                        f"synthetic reviewed falsifier for {dimension}"
+                    ),
+                )
+                for index, dimension in enumerate(
+                    V2_SEMANTIC_REVIEW_DIMENSIONS
+                )
+            ]
+            if semantic_reviewed
+            else []
+        )
         receipt = {
             "target_id": target["id"],
             "target_root": target["target_root"],
             "inventory_root": inventory["semantic_root"],
             "campaign_epoch_root": inventory["campaign_epoch_root"],
             "reviewer": (
-                "synthetic-reviewer" if declared or compatible else ""
+                "synthetic-reviewer"
+                if declared or compatible or semantic_reviewed
+                else ""
             ),
-            "reviewer_kind": "fixture" if declared or compatible else "",
+            "reviewer_kind": (
+                "fixture"
+                if declared or compatible or semantic_reviewed
+                else ""
+            ),
             "coordination_assignee": "",
             "declared_domain_owner": (
-                "synthetic-domain" if compatible or declared else ""
+                "synthetic-domain"
+                if compatible or declared or semantic_reviewed
+                else ""
             ),
             "declared_acceptance_owner": (
                 "synthetic-acceptance-owner"
-                if declared or compatible
+                if declared or compatible or semantic_reviewed
                 else ""
             ),
             "implementation_owner": "synthetic-implementer",
@@ -11523,6 +15892,18 @@ def v2_synthetic_receipts(
             "source_closure": {"required": False, "state": "NOT_REQUIRED"},
             "user_effect": target["user_effect"],
             "review_minutes": target["review_minutes"],
+            "semantic_review_disposition": target_semantic_disposition,
+            "semantic_review_dimensions": semantic_dimensions,
+            "semantic_review_rationale": (
+                "synthetic root-bound semantic adjudication"
+                if semantic_reviewed
+                else ""
+            ),
+            "semantic_review_falsifier": (
+                "any target or dimension root drift invalidates adjudication"
+                if semantic_reviewed
+                else ""
+            ),
             "compatibility_key": compatibility_key,
             "compatibility_target_ids": target_ids if compatible else [],
             "compatibility_receipt_root": compatibility_root,
@@ -11591,6 +15972,8 @@ def v2_synthetic_authority(
     compatible: bool = False,
     declared: bool = False,
     manual: bool = False,
+    semantic_reviewed: bool = False,
+    semantic_disposition: str | None = None,
     external_verdict: str = "NODATA",
     conditional_verdict: str = "NODATA",
     gate_verdict: str = "NODATA",
@@ -11602,6 +15985,8 @@ def v2_synthetic_authority(
         compatible=compatible,
         declared=declared,
         manual=manual,
+        semantic_reviewed=semantic_reviewed,
+        semantic_disposition=semantic_disposition,
         external_verdict=external_verdict,
         conditional_verdict=conditional_verdict,
         gate_verdict=gate_verdict,
@@ -11738,6 +16123,8 @@ def v2_replayable_fixture_bundle(
     subject_mode: str,
     issue: Mapping[str, Any] | None = None,
     oversize: bool = False,
+    artifact_root: str = "target/v2-fixture",
+    artifact_dir: str | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -11753,6 +16140,7 @@ def v2_replayable_fixture_bundle(
 ]:
     if subject_mode not in {"review-plan", "history-plan"}:
         raise EvidenceFailed("replayable fixture subject mode is unknown")
+    resolved_artifact_dir = artifact_dir or f"{subject_mode}-run"
     history_mode = subject_mode == "history-plan"
     raw_issue = dict(
         issue
@@ -11814,7 +16202,13 @@ def v2_replayable_fixture_bundle(
             "export_witness": {"fixture": True},
             "case_manifest_root": manifest["semantic_root"],
             "case_manifest_content_identity": manifest["content_identity"],
+            "coherent_capture_root": semantic_root(
+                {"fixture": "coherent-double-capture"}
+            ),
             "source_files": [],
+            "rule_contract_root": semantic_root(
+                {"fixture": "independent-template-findings"}
+            ),
             "live_issue_count": 1,
             "live_issue_projection_root": semantic_root([full_issue]),
             "lint_issue_ids_root": semantic_root([full_issue["id"]]),
@@ -11964,20 +16358,21 @@ def v2_replayable_fixture_bundle(
         source_root=source["semantic_root"],
         inventory=inventory,
         prior_campaign=prior,
+        current_universe=snapshot.all_issues,
     )
     reproduction = [
         str(SCRIPT_REL),
         f"--{subject_mode}",
         "--artifact-root",
-        "target/v2-fixture",
+        artifact_root,
         "--artifact-dir",
-        f"{subject_mode}-run",
+        resolved_artifact_dir,
     ]
     payloads = v2_bundle_payloads(
         mode=subject_mode,
         subject_mode=subject_mode,
-        artifact_root="target/v2-fixture",
-        artifact_dir=f"{subject_mode}-run",
+        artifact_root=artifact_root,
+        artifact_dir=resolved_artifact_dir,
         source=source,
         inventory=inventory,
         authority=authority,
@@ -12021,6 +16416,70 @@ def v2_plan_for_count(
         max_targets=max_targets,
     )
     return plan, authority, optional
+
+
+def v2_authentic_projection_fixture(
+    raw_issues: Sequence[Mapping[str, Any]],
+    *,
+    missing_by_id: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, Any],
+    LiveSnapshot,
+    dict[str, Any],
+]:
+    full_issues = sorted(
+        (v2_full_issue_projection(issue) for issue in raw_issues),
+        key=lambda row: row["id"],
+    )
+    v2_assert_unique(
+        [row["id"] for row in full_issues],
+        label="authentic fixture issue IDs",
+    )
+    normalized_missing = {
+        row["id"]: tuple(
+            sorted(
+                (
+                    missing_by_id.get(
+                        row["id"],
+                        fixture_expected_missing(row["type"]),
+                    )
+                    if missing_by_id is not None
+                    else fixture_expected_missing(row["type"])
+                )
+            )
+        )
+        for row in full_issues
+    }
+    lint = fixture_lint(full_issues, normalized_missing)
+    selected = [
+        row
+        for row in full_issues
+        if row["status"] != "closed" or normalized_missing[row["id"]]
+    ]
+    source = fixture_source(full_issues)
+    v1_inventory = assemble_inventory(
+        lint,
+        selected,
+        source,
+        include_issue_rows_without_findings=True,
+    )
+    snapshot = LiveSnapshot(
+        lint,
+        selected,
+        source,
+        v1_inventory,
+        {},
+        tuple(full_issues),
+    )
+    campaign_root, _ = v2_campaign_epoch(snapshot)
+    inventory = v2_build_inventory(
+        snapshot,
+        campaign_epoch_root=campaign_root,
+        priority_filter=None,
+        status_filter=None,
+    )
+    return full_issues, lint, snapshot, inventory
 
 
 def v2_execute_schema_cli_ux(
@@ -12401,12 +16860,25 @@ def v2_execute_source_cases(
         lint: Mapping[str, Any] | None = None,
         tracker_status: Mapping[str, Any] | None = None,
         capabilities: Mapping[str, Any] | None = None,
+        source_files: Sequence[Mapping[str, Any]] | None = None,
+        rule_contract: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         ordered = sorted((dict(row) for row in rows), key=lambda row: row["id"])
+        normalized_lint = (
+            dict(lint)
+            if lint is not None
+            else fixture_lint(
+                ordered,
+                {
+                    str(row["id"]): tuple(row.get("missing_sections") or ())
+                    for row in ordered
+                },
+            )
+        )
         return v2_capture_state(
             issue_ids=[str(row["id"]) for row in ordered],
             full_issues=ordered,
-            lint=dict(lint or {"warnings": []}),
+            lint=normalized_lint,
             tracker_status=dict(tracker_status or {"state": "clean"}),
             sync_status={"state": "synchronized"},
             export_witness={"state": "current"},
@@ -12414,9 +16886,77 @@ def v2_execute_source_cases(
             capabilities=dict(
                 capabilities or {"contract_version": "br.capabilities.v1"}
             ),
+            source_files=list(
+                source_files
+                or [
+                    {
+                        "path": "synthetic-source",
+                        "bytes": 1,
+                        "content_identity": text_root("x"),
+                    }
+                ]
+            ),
+            rule_contract=dict(
+                rule_contract
+                or {
+                    "classifier": (
+                        "synthetic-independent-template-findings"
+                    )
+                }
+            ),
+        )
+
+    def authentic_capture(
+        raw_rows: Sequence[Mapping[str, Any]],
+        *,
+        missing_by_id: Mapping[str, Sequence[str]] | None = None,
+        tracker_status: Mapping[str, Any] | None = None,
+        capabilities: Mapping[str, Any] | None = None,
+        source_files: Sequence[Mapping[str, Any]] | None = None,
+        rule_contract: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], LiveSnapshot, dict[str, Any]]:
+        full_issues, lint, snapshot, inventory = (
+            v2_authentic_projection_fixture(
+                raw_rows,
+                missing_by_id=missing_by_id,
+            )
+        )
+        return (
+            capture_state(
+                full_issues,
+                lint=lint,
+                tracker_status=tracker_status,
+                capabilities=capabilities,
+                source_files=source_files,
+                rule_contract=rule_contract,
+            ),
+            lint,
+            snapshot,
+            inventory,
         )
 
     if slug == "source-zero-one":
+        empty_capture = capture_state([])
+        checks.check(
+            "empty-source-capture-is-first-class",
+            v2_list_issue_ids([], label="empty issue list") == []
+            and empty_capture["issue_ids"] == []
+            and empty_capture["issue_count"] == 0
+            and empty_capture["full_issue_projection_root"]
+            == semantic_root([]),
+            expected={
+                "issue_ids": [],
+                "issue_count": 0,
+                "full_issue_projection_root": semantic_root([]),
+            },
+            observed={
+                "issue_ids": empty_capture["issue_ids"],
+                "issue_count": empty_capture["issue_count"],
+                "full_issue_projection_root": empty_capture[
+                    "full_issue_projection_root"
+                ],
+            },
+        )
         for count in (0, 1):
             inventory = v2_synthetic_inventory(
                 [v2_synthetic_target(0)] if count else []
@@ -12428,6 +16968,98 @@ def v2_execute_source_cases(
                 expected=count,
                 observed=inventory["counts"]["targets"],
             )
+        no_warning_id = "fixture-no-template-warning"
+        _, _, no_warning_snapshot, no_warning_inventory = authentic_capture(
+            [
+                fixture_issue(
+                    issue_id=no_warning_id,
+                    status="open",
+                )
+            ],
+            missing_by_id={no_warning_id: ()},
+        )
+        no_warning_row = no_warning_snapshot.inventory["rows"][0]
+        derived_no_warning = v2_derive_authority(
+            no_warning_inventory,
+            v2_empty_review_receipts(
+                inventory_root=no_warning_inventory["semantic_root"],
+                campaign_epoch_root=no_warning_inventory[
+                    "campaign_epoch_root"
+                ],
+            ),
+            current_br_version="0.2.19",
+        )["decisions"][0]
+        checks.check(
+            "nonclosed-no-warning-still-inventoried-unreviewed",
+            no_warning_snapshot.inventory["counts"][
+                "complete_review_scope_issues"
+            ]
+            == 1
+            and no_warning_snapshot.inventory["counts"][
+                "no_template_warning_issues"
+            ]
+            == 1
+            and no_warning_row["template_warning_state"] == "NONE"
+            and no_warning_row["semantic_review_disposition"]
+            == "BLOCKED_AUTHORITY"
+            and no_warning_row["semantic_review_receipt_state"]
+            == "UNREVIEWED"
+            and no_warning_row["semantic_review_dimensions"]
+            == v2_unreviewed_semantic_dimensions()
+            and no_warning_row["semantic_review_receipt_root"] is None
+            and derived_no_warning["semantic_review_action"]
+            == "SEMANTIC_REVIEW_REQUIRED"
+            and no_warning_inventory["rows"][0]["id"] == no_warning_id,
+            expected={
+                "complete_scope": 1,
+                "warning_state": "NONE",
+                "review_state": "UNREVIEWED",
+                "disposition": "BLOCKED_AUTHORITY",
+            },
+            observed={
+                "counts": no_warning_snapshot.inventory["counts"],
+                "warning_state": no_warning_row["template_warning_state"],
+                "review_state": no_warning_row[
+                    "semantic_review_receipt_state"
+                ],
+                "disposition": no_warning_row[
+                    "semantic_review_disposition"
+                ],
+                "semantic_action": derived_no_warning[
+                    "semantic_review_action"
+                ],
+            },
+        )
+        malformed_unreviewed = dict(no_warning_inventory["rows"][0])
+        malformed_unreviewed["semantic_review_dimensions"] = (
+            v2_unreviewed_semantic_dimensions()[:-1]
+        )
+        checks.refuses(
+            "partial-unreviewed-dimensions-refused",
+            InputRefused,
+            lambda: v2_validate_unreviewed_semantic_contract(
+                malformed_unreviewed,
+                label="malformed unreviewed fixture",
+            ),
+            contains="exact unreviewed semantic contract",
+        )
+        closed_id = "fixture-closed-without-finding"
+        _, _, closed_snapshot, closed_inventory = authentic_capture(
+            [
+                fixture_issue(
+                    issue_id=closed_id,
+                    status="closed",
+                )
+            ],
+            missing_by_id={closed_id: ()},
+        )
+        checks.check(
+            "closed-no-finding-remains-outside-active-review-scope",
+            closed_snapshot.inventory["rows"] == []
+            and closed_inventory["rows"] == [],
+            expected=0,
+            observed=len(closed_inventory["rows"]),
+        )
     elif slug in {
         "source-rows-9-10-11",
         "source-rows-12-13",
@@ -12567,16 +17199,30 @@ def v2_execute_source_cases(
             observed=zero_receipt["semantic_root"],
         )
     elif slug == "source-double-capture-coherent":
-        rows = [
-            v2_synthetic_target(0, priority=0, status="open"),
-            v2_synthetic_target(1, priority=4, status="closed"),
+        raw_rows = [
+            fixture_issue(
+                issue_id="fixture-capture-open",
+                priority=0,
+                status="open",
+            ),
+            fixture_issue(
+                issue_id="fixture-capture-closed",
+                priority=4,
+                status="closed",
+            ),
         ]
-        first = capture_state(rows)
-        second = capture_state(list(reversed(rows)))
+        first, _, first_snapshot, first_inventory = authentic_capture(raw_rows)
+        second, _, second_snapshot, second_inventory = authentic_capture(
+            list(reversed(raw_rows))
+        )
         coherent_root = v2_validate_capture_pair(first, second)
         checks.check(
             "production-coherence-validator-admits-equal-observations",
-            coherent_root == first["semantic_root"] == second["semantic_root"],
+            coherent_root == first["semantic_root"] == second["semantic_root"]
+            and first_snapshot.inventory["semantic_root"]
+            == second_snapshot.inventory["semantic_root"]
+            and first_inventory["semantic_root"]
+            == second_inventory["semantic_root"],
             expected=first["semantic_root"],
             observed=coherent_root,
         )
@@ -12588,46 +17234,111 @@ def v2_execute_source_cases(
         )
     elif slug == "source-within-run-drift":
         baseline_rows = [
-            v2_synthetic_target(0, priority=1, status="open"),
-            v2_synthetic_target(1, priority=2, status="blocked"),
+            fixture_issue(
+                issue_id="fixture-drift-a",
+                priority=1,
+                status="open",
+                owner="owner-a",
+                dependencies=(
+                    {
+                        "id": "fixture-neighbor-a",
+                        "dependency_type": "blocks",
+                        "status": "open",
+                        "priority": 2,
+                    },
+                ),
+            ),
+            fixture_issue(
+                issue_id="fixture-drift-b",
+                priority=2,
+                status="blocked",
+                owner="owner-b",
+            ),
         ]
-        baseline = capture_state(baseline_rows)
+        baseline, baseline_lint, _, _ = authentic_capture(baseline_rows)
         mutations: list[tuple[str, dict[str, Any]]] = []
         for dimension, field, value in (
             ("field", "title", "changed title"),
-            ("relation", "dependencies", [{"id": "other", "type": "blocks"}]),
+            (
+                "relation",
+                "dependencies",
+                [
+                    {
+                        "id": "fixture-neighbor-b",
+                        "dependency_type": "blocks",
+                        "status": "open",
+                        "priority": 3,
+                    }
+                ],
+            ),
             ("status", "status", "closed"),
             ("priority", "priority", 3),
-            ("owner", "tracker_owner", "changed-owner"),
-            ("consumer", "terminal_consumer", "changed-consumer"),
+            ("owner", "owner", "changed-owner"),
+            ("assignee", "assignee", "changed-assignee"),
         ):
             changed_rows = json.loads(json.dumps(baseline_rows))
             changed_rows[0][field] = value
-            mutations.append((dimension, capture_state(changed_rows)))
+            changed, _, _, _ = authentic_capture(changed_rows)
+            mutations.append((dimension, changed))
+        membership_rows = [
+            baseline_rows[0],
+            fixture_issue(
+                issue_id="fixture-drift-c",
+                priority=2,
+                status="blocked",
+            ),
+        ]
+        membership_changed, _, _, _ = authentic_capture(membership_rows)
+        warning_membership = {
+            "fixture-drift-a": ("## Acceptance Criteria",),
+            "fixture-drift-b": (
+                "## Acceptance Criteria",
+                "## Steps to Reproduce",
+            ),
+        }
+        lint_changed, _, _, _ = authentic_capture(
+            baseline_rows,
+            missing_by_id=warning_membership,
+        )
         mutations.extend(
             [
+                ("selected-membership", membership_changed),
                 (
                     "tracker-status",
-                    capture_state(
+                    authentic_capture(
                         baseline_rows,
                         tracker_status={"state": "dirty"},
-                    ),
+                    )[0],
                 ),
                 (
                     "capability",
-                    capture_state(
+                    authentic_capture(
                         baseline_rows,
                         capabilities={
                             "contract_version": "br.capabilities.v2"
                         },
-                    ),
+                    )[0],
+                ),
+                ("lint-status-cut", lint_changed),
+                (
+                    "source-file",
+                    authentic_capture(
+                        baseline_rows,
+                        source_files=[
+                            {
+                                "path": "synthetic-source",
+                                "bytes": 1,
+                                "content_identity": text_root("changed"),
+                            }
+                        ],
+                    )[0],
                 ),
                 (
-                    "lint",
-                    capture_state(
+                    "rule-contract",
+                    authentic_capture(
                         baseline_rows,
-                        lint={"warnings": [{"id": baseline_rows[0]["id"]}]},
-                    ),
+                        rule_contract={"classifier": "changed-rule"},
+                    )[0],
                 ),
             ]
         )
@@ -12643,12 +17354,22 @@ def v2_execute_source_cases(
             )
     elif slug == "source-count-preserving-swap":
         first_rows = [
-            v2_synthetic_target(0),
-            v2_synthetic_target(1),
+            fixture_issue(
+                issue_id="fixture-swap-a",
+                title="First authentic raw tracker row",
+            ),
+            fixture_issue(
+                issue_id="fixture-swap-b",
+                title="Second authentic raw tracker row",
+            ),
         ]
-        first = capture_state(
+        first_missing = {
+            "fixture-swap-a": ("## Acceptance Criteria",),
+            "fixture-swap-b": ("## Steps to Reproduce",),
+        }
+        first, _, _, _ = authentic_capture(
             first_rows,
-            lint={"warnings": [{"id": first_rows[0]["id"], "kind": "A"}]},
+            missing_by_id=first_missing,
         )
         field_swap = json.loads(json.dumps(first_rows))
         field_swap[0]["title"], field_swap[1]["title"] = (
@@ -12657,15 +17378,32 @@ def v2_execute_source_cases(
         )
         membership_swap = [
             first_rows[0],
-            v2_synthetic_target(2),
+            fixture_issue(
+                issue_id="fixture-swap-c",
+                title="Replacement authentic raw tracker row",
+            ),
         ]
-        lint_swap = capture_state(
+        lint_swap, _, _, _ = authentic_capture(
             first_rows,
-            lint={"warnings": [{"id": first_rows[1]["id"], "kind": "A"}]},
+            missing_by_id={
+                "fixture-swap-a": ("## Steps to Reproduce",),
+                "fixture-swap-b": ("## Acceptance Criteria",),
+            },
+        )
+        field_swap_capture, _, _, _ = authentic_capture(
+            field_swap,
+            missing_by_id=first_missing,
+        )
+        membership_capture, _, _, _ = authentic_capture(
+            membership_swap,
+            missing_by_id={
+                "fixture-swap-a": ("## Acceptance Criteria",),
+                "fixture-swap-c": ("## Steps to Reproduce",),
+            },
         )
         for name, changed in (
-            ("field-swap", capture_state(field_swap)),
-            ("drop-add", capture_state(membership_swap)),
+            ("field-swap", field_swap_capture),
+            ("drop-add", membership_capture),
             ("warning-swap", lint_swap),
         ):
             checks.refuses(
@@ -12678,64 +17416,212 @@ def v2_execute_source_cases(
         checks.refuses(
             "duplicate-membership",
             InputRefused,
-            lambda: capture_state(duplicate_rows),
+            lambda: authentic_capture(duplicate_rows),
             contains="duplicate",
         )
     elif slug == "source-cross-run-drift-scope":
-        selected = v2_synthetic_target(1)
-        unrelated_a = v2_synthetic_target(2)
+        selected_raw = fixture_issue(
+            issue_id="fixture-selected",
+            title="Selected authentic tracker target",
+            priority=1,
+            status="open",
+            owner="selected-owner",
+            dependencies=(
+                {
+                    "id": "fixture-selected-neighbor",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 2,
+                },
+            ),
+        )
+        unrelated_a = fixture_issue(
+            issue_id="fixture-unrelated",
+            title="Unrelated authentic tracker target",
+            priority=3,
+            status="blocked",
+        )
         unrelated_b = dict(unrelated_a)
-        unrelated_b["title"] = "unrelated changed title"
-        first_capture = capture_state([selected, unrelated_a])
-        second_capture = capture_state([selected, unrelated_b])
+        unrelated_b["description"] = (
+            "Unrelated changed source clause that must move only the whole "
+            "observation and campaign roots."
+        )
+
+        def planned_fixture(
+            raw_rows: Sequence[Mapping[str, Any]],
+            *,
+            missing_by_id: Mapping[str, Sequence[str]] | None = None,
+        ) -> tuple[
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+        ]:
+            state, _, _, inventory = authentic_capture(
+                raw_rows,
+                missing_by_id=missing_by_id,
+            )
+            receipts = v2_empty_review_receipts(
+                inventory_root=inventory["semantic_root"],
+                campaign_epoch_root=inventory["campaign_epoch_root"],
+            )
+            authority = v2_derive_authority(
+                inventory,
+                receipts,
+                current_br_version="0.2.19",
+            )
+            plan, _ = v2_build_review_plan(
+                inventory,
+                authority,
+                max_targets=1,
+            )
+            return state, inventory, authority, plan
+
+        def child_key_for(
+            plan: Mapping[str, Any],
+            target_id: str,
+        ) -> str:
+            matches = [
+                child["child_key"]
+                for child in plan["children"]
+                if target_id in child["target_ids"]
+            ]
+            if len(matches) != 1:
+                raise EvidenceFailed(
+                    f"authentic fixture does not map {target_id} exactly once"
+                )
+            return str(matches[0])
+
+        first_capture, first_inventory, first_authority, first_plan = (
+            planned_fixture([selected_raw, unrelated_a])
+        )
+        second_capture, second_inventory, second_authority, second_plan = (
+            planned_fixture([selected_raw, unrelated_b])
+        )
+        first_selected_key = child_key_for(first_plan, "fixture-selected")
+        second_selected_key = child_key_for(second_plan, "fixture-selected")
+        first_selected_target = next(
+            row
+            for row in first_inventory["rows"]
+            if row["id"] == "fixture-selected"
+        )
+        second_selected_target = next(
+            row
+            for row in second_inventory["rows"]
+            if row["id"] == "fixture-selected"
+        )
+        first_selected_decision = next(
+            row
+            for row in first_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        second_selected_decision = next(
+            row
+            for row in second_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        checks.check(
+            "unrelated-drift-changes-observation-and-campaign",
+            first_capture["semantic_root"] != second_capture["semantic_root"]
+            and first_inventory["campaign_epoch_root"]
+            != second_inventory["campaign_epoch_root"],
+            expected="different observation and campaign roots",
+            observed={
+                "capture_before": first_capture["semantic_root"],
+                "capture_after": second_capture["semantic_root"],
+                "campaign_before": first_inventory["campaign_epoch_root"],
+                "campaign_after": second_inventory["campaign_epoch_root"],
+            },
+        )
+        checks.check(
+            "unrelated-drift-preserves-selected-target-root",
+            first_selected_target["target_root"]
+            == second_selected_target["target_root"],
+            expected=first_selected_target["target_root"],
+            observed=second_selected_target["target_root"],
+        )
+        checks.check(
+            "unrelated-drift-preserves-selected-decision-root",
+            first_selected_decision["semantic_root"]
+            == second_selected_decision["semantic_root"],
+            expected=first_selected_decision["semantic_root"],
+            observed=second_selected_decision["semantic_root"],
+        )
         checks.check(
             "unrelated-drift-stable-selected-key",
-            first_capture["semantic_root"] != second_capture["semantic_root"]
-            and v2_target_root(selected) == v2_target_root(dict(selected)),
-            expected=v2_target_root(selected),
-            observed=v2_target_root(selected),
+            first_selected_key == second_selected_key,
+            expected=first_selected_key,
+            observed=second_selected_key,
         )
-        selected_mutations = {
-            "field": ("field_roots", {"description": text_root("changed")}),
-            "membership": ("missing_sections", ["## Success Criteria"]),
-            "dependency": (
+
+        selected_mutations: list[
+            tuple[
+                str,
+                list[dict[str, Any]],
+                Mapping[str, Sequence[str]] | None,
+            ]
+        ] = []
+        for name, field, value in (
+            ("field", "description", "Changed selected source clause."),
+            ("owner", "owner", "changed-selected-owner"),
+            ("priority-lane", "priority", 2),
+            ("status-lane", "status", "blocked"),
+            (
+                "dependency-neighbor",
                 "dependencies",
-                [{"id": "changed-neighbor", "type": "blocks"}],
+                [
+                    {
+                        "id": "fixture-changed-neighbor",
+                        "dependency_type": "blocks",
+                        "status": "blocked",
+                        "priority": 3,
+                    }
+                ],
             ),
-        }
-        for name, (field, value) in selected_mutations.items():
-            changed = json.loads(json.dumps(selected))
-            if field == "field_roots":
-                changed[field] = {
-                    **changed[field],
-                    **value,
-                }
-            else:
-                changed[field] = value
-            relevant_root_changed = (
-                v2_dependency_neighborhood_root(changed)
-                != v2_dependency_neighborhood_root(selected)
-                if name == "dependency"
-                else v2_target_root(changed) != v2_target_root(selected)
+        ):
+            changed_selected = json.loads(json.dumps(selected_raw))
+            changed_selected[field] = value
+            selected_mutations.append(
+                (name, [changed_selected, dict(unrelated_a)], None)
             )
-            checks.check(
-                f"selected-{name}-invalidates-affected-key",
-                relevant_root_changed,
-                expected="different selected key",
-                observed={
-                    "before": (
-                        v2_dependency_neighborhood_root(selected)
-                        if name == "dependency"
-                        else v2_target_root(selected)
-                    ),
-                    "after": (
-                        v2_dependency_neighborhood_root(changed)
-                        if name == "dependency"
-                        else v2_target_root(changed)
-                    ),
+        selected_mutations.append(
+            (
+                "lint-membership",
+                [dict(selected_raw), dict(unrelated_a)],
+                {
+                    "fixture-selected": ("## Steps to Reproduce",),
+                    "fixture-unrelated": ("## Acceptance Criteria",),
                 },
             )
-        inventory = v2_synthetic_inventory([selected])
+        )
+        for name, raw_rows, missing in selected_mutations:
+            _, changed_inventory, _, changed_plan = planned_fixture(
+                raw_rows,
+                missing_by_id=missing,
+            )
+            changed_key = child_key_for(changed_plan, "fixture-selected")
+            checks.check(
+                f"selected-{name}-invalidates-affected-key",
+                changed_key != first_selected_key
+                and next(
+                    row
+                    for row in changed_inventory["rows"]
+                    if row["id"] == "fixture-selected"
+                )["target_root"]
+                != next(
+                    row
+                    for row in first_inventory["rows"]
+                    if row["id"] == "fixture-selected"
+                )["target_root"],
+                expected="different selected key",
+                observed={
+                    "before": first_selected_key,
+                    "after": changed_key,
+                },
+            )
+
+        _, _, _, receipt_inventory = authentic_capture([selected_raw])
+        inventory = receipt_inventory
         base_receipts = v2_synthetic_receipts(
             inventory,
             declared=True,
@@ -13376,14 +18262,18 @@ def v2_execute_packing_cases(
         )
     elif slug == "packing-exact-small-optimum":
         for count in range(1, 14):
-            plan, _, _ = v2_plan_for_count(count, max_targets=13)
+            plan, _, _ = v2_plan_for_count(count, max_targets=3)
             witness = plan["packing_witnesses"][0]
+            expected_children = math.ceil(count / 3)
             checks.check(
                 f"exact-count-{count:02d}",
                 witness["algorithm"] == "EXACT_SUBSET_PARTITION"
                 and witness["exact_optimality_claim"] is True
-                and witness["objective"]["child_count"] == 1,
-                expected={"algorithm": "EXACT_SUBSET_PARTITION", "children": 1},
+                and witness["objective"]["child_count"] == expected_children,
+                expected={
+                    "algorithm": "EXACT_SUBSET_PARTITION",
+                    "children": expected_children,
+                },
                 observed={
                     "algorithm": witness["algorithm"],
                     "children": witness["objective"]["child_count"],
@@ -13500,33 +18390,49 @@ def v2_execute_packing_cases(
             observed=witness,
         )
     elif slug == "packing-order-invariant":
-        targets = [v2_synthetic_target(index) for index in range(8)]
-        first_inventory = v2_synthetic_inventory(targets)
-        second_inventory = v2_synthetic_inventory(list(reversed(targets)))
-        first_authority = v2_synthetic_authority(
-            first_inventory,
-            compatible=True,
-        )
-        second_authority = v2_synthetic_authority(
-            second_inventory,
-            compatible=True,
-        )
-        first, _ = v2_build_review_plan(
-            first_inventory,
-            first_authority,
-            max_targets=10,
-        )
-        second, _ = v2_build_review_plan(
-            second_inventory,
-            second_authority,
-            max_targets=10,
-        )
-        checks.check(
-            "input-order-invariant",
-            first["semantic_root"] == second["semantic_root"],
-            expected=first["semantic_root"],
-            observed=second["semantic_root"],
-        )
+        for population, max_targets, expected_algorithm in (
+            (8, 3, "EXACT_SUBSET_PARTITION"),
+            (14, 3, "DETERMINISTIC_LPT_VECTOR_PACKING"),
+        ):
+            targets = [
+                v2_synthetic_target(index) for index in range(population)
+            ]
+            first_inventory = v2_synthetic_inventory(targets)
+            second_inventory = v2_synthetic_inventory(
+                list(reversed(targets))
+            )
+            first_authority = v2_synthetic_authority(
+                first_inventory,
+                compatible=True,
+            )
+            second_authority = v2_synthetic_authority(
+                second_inventory,
+                compatible=True,
+            )
+            first, _ = v2_build_review_plan(
+                first_inventory,
+                first_authority,
+                max_targets=max_targets,
+            )
+            second, _ = v2_build_review_plan(
+                second_inventory,
+                second_authority,
+                max_targets=max_targets,
+            )
+            checks.check(
+                f"input-order-invariant-{population}",
+                first["semantic_root"] == second["semantic_root"]
+                and first["packing_witnesses"][0]["algorithm"]
+                == expected_algorithm,
+                expected={
+                    "root": first["semantic_root"],
+                    "algorithm": expected_algorithm,
+                },
+                observed={
+                    "root": second["semantic_root"],
+                    "algorithm": second["packing_witnesses"][0]["algorithm"],
+                },
+            )
     elif slug == "packing-refinement-imbalance":
         inventory = v2_synthetic_inventory(
             [v2_synthetic_target(index) for index in range(4)]
@@ -14121,12 +19027,134 @@ def v2_execute_history_cases(
                 "cells": 25,
                 "zero_receipts": 25,
                 "issues": 0,
+                "scope_successors": 0,
                 "movements": 0,
             }
             and all(cell["zero_receipt"] is not None for cell in empty["cells"]),
             expected={"cells": 25, "zero_receipts": 25, "issues": 0},
             observed=empty["counts"],
         )
+
+        def reroot_zero_fixture(
+            document: Mapping[str, Any],
+            *,
+            cell_index: int | None = None,
+            receipt_changed: bool = False,
+        ) -> dict[str, Any]:
+            mutated = json.loads(canonical_bytes(document))
+            if cell_index is not None:
+                if receipt_changed:
+                    receipt = mutated["cells"][cell_index]["zero_receipt"]
+                    if isinstance(receipt, dict):
+                        mutated["cells"][cell_index][
+                            "zero_receipt"
+                        ] = v2_rooted(receipt)
+                mutated["cells"][cell_index] = v2_rooted(
+                    mutated["cells"][cell_index]
+                )
+            return v2_rooted(mutated)
+
+        semantic_mutations: list[tuple[str, dict[str, Any], str]] = []
+
+        wrong_coordinate = json.loads(canonical_bytes(sparse))
+        wrong_coordinate["cells"][0]["zero_receipt"]["priority"] = 1
+        wrong_coordinate = reroot_zero_fixture(
+            wrong_coordinate,
+            cell_index=0,
+            receipt_changed=True,
+        )
+        semantic_mutations.append(
+            ("wrong-zero-coordinate", wrong_coordinate, "bindings differ")
+        )
+
+        wrong_source = json.loads(canonical_bytes(sparse))
+        wrong_source["cells"][0]["zero_receipt"]["source_root"] = semantic_root(
+            {"wrong": "source"}
+        )
+        wrong_source = reroot_zero_fixture(
+            wrong_source,
+            cell_index=0,
+            receipt_changed=True,
+        )
+        semantic_mutations.append(
+            ("wrong-zero-source-root", wrong_source, "bindings differ")
+        )
+
+        missing_receipt = json.loads(canonical_bytes(sparse))
+        missing_receipt["cells"][0]["zero_receipt"] = None
+        missing_receipt = reroot_zero_fixture(
+            missing_receipt,
+            cell_index=0,
+        )
+        semantic_mutations.append(
+            ("missing-zero-receipt", missing_receipt, "lacks a zero receipt")
+        )
+
+        populated_receipt = json.loads(canonical_bytes(sparse))
+        populated_index = 2 * len(STATUS_SCOPES)
+        populated_cell = populated_receipt["cells"][populated_index]
+        populated_cell["zero_receipt"] = v2_rooted(
+            {
+                "schema": V2_ZERO_RECEIPT_SCHEMA,
+                "priority": populated_cell["priority"],
+                "status": populated_cell["status"],
+                "membership_root": populated_cell["membership_root"],
+                "issue_ids_root": semantic_root([]),
+                "source_root": sparse_source_root,
+                "inventory_root": sparse_inventory["semantic_root"],
+                "campaign_epoch_root": sparse_inventory[
+                    "campaign_epoch_root"
+                ],
+                "partition_issue_ids_root": sparse[
+                    "partition_issue_ids_root"
+                ],
+                "count": 0,
+                "no_claim": "maliciously rerooted populated-cell fixture",
+            }
+        )
+        populated_receipt = reroot_zero_fixture(
+            populated_receipt,
+            cell_index=populated_index,
+        )
+        semantic_mutations.append(
+            (
+                "receipt-on-populated-cell",
+                populated_receipt,
+                "carries a zero receipt",
+            )
+        )
+
+        reordered_cells = json.loads(canonical_bytes(sparse))
+        reordered_cells["cells"][0], reordered_cells["cells"][1] = (
+            reordered_cells["cells"][1],
+            reordered_cells["cells"][0],
+        )
+        reordered_cells = v2_rooted(reordered_cells)
+        semantic_mutations.append(
+            ("reordered-zero-cells", reordered_cells, "membership differs")
+        )
+
+        wrong_counts = json.loads(canonical_bytes(sparse))
+        wrong_counts["counts"]["zero_receipts"] = 23
+        wrong_counts = v2_rooted(wrong_counts)
+        semantic_mutations.append(
+            ("wrong-zero-count", wrong_counts, "counts differ")
+        )
+
+        for mutation_id, malformed, diagnostic in semantic_mutations:
+            checks.refuses(
+                mutation_id,
+                EvidenceFailed,
+                lambda malformed=malformed: v2_validate_zero_sets(
+                    malformed,
+                    source_root=sparse_source_root,
+                    inventory=sparse_inventory,
+                    prior_campaign=v2_empty_prior_campaign(),
+                ),
+                contains=diagnostic,
+                projection=lambda malformed=malformed: malformed,
+                projection_label="ZERO_SET_ARTIFACT",
+            )
     elif slug in {
         "movement-cross-lane",
         "movement-live-to-history",
@@ -14162,7 +19190,12 @@ def v2_execute_history_cases(
         prior = v2_rooted(
             {
                 "state": "PROVIDED",
+                "bundle_path": "target/v2-fixture/prior-run",
                 "terminal_root": semantic_root({"terminal": "prior"}),
+                "inventory_root": semantic_root({"inventory": "prior"}),
+                "campaign_epoch_root": semantic_root(
+                    {"campaign": "prior"}
+                ),
                 "rows": [
                     {
                         "id": current["id"],
@@ -14176,6 +19209,7 @@ def v2_execute_history_cases(
                         ),
                     }
                 ],
+                "no_claim": "synthetic immutable prior evidence for movement testing",
             }
         )
         zero = v2_build_zero_sets(
@@ -14190,6 +19224,27 @@ def v2_execute_history_cases(
             and movement["successor_lineage_root"].startswith("sha256-v1:"),
             expected=expected_class,
             observed=movement,
+        )
+        malformed = json.loads(canonical_bytes(zero))
+        malformed["movements"][0]["class"] = "MOVED_TO_LANE"
+        if expected_class == "MOVED_TO_LANE":
+            malformed["movements"][0]["class"] = "MOVED_TO_HISTORY"
+        malformed["movements"][0] = v2_rooted(
+            malformed["movements"][0]
+        )
+        malformed = v2_rooted(malformed)
+        checks.refuses(
+            "rerooted-movement-class-refused",
+            EvidenceFailed,
+            lambda: v2_validate_zero_sets(
+                malformed,
+                source_root=zero["source_root"],
+                inventory=inventory,
+                prior_campaign=prior,
+            ),
+            contains="independently reconstructed",
+            projection=lambda: malformed,
+            projection_label="MOVEMENT_ARTIFACT",
         )
     else:
         raise EvidenceFailed(f"no history executor for {slug}")
@@ -14389,6 +19444,109 @@ def v2_execute_artifact_cases(
             expected="terminal absent",
             observed=sorted(prefix),
         )
+        for error_type in (InputRefused, NoData, EvidenceFailed):
+            artifact_root, artifact_dir = v2_persistent_e2e_location(
+                manifest,
+                label=f"refusal-{error_type.terminal.lower()}",
+            )
+            refusal_payloads, failure = v2_refusal_bundle_payloads(
+                mode="review-plan",
+                artifact_root=artifact_root,
+                artifact_dir=artifact_dir,
+                manifest=manifest,
+                error=error_type("bounded semantic refusal fixture"),
+                stage="selected_projection",
+                available_roots={
+                    "source": None,
+                    "inventory": None,
+                    "authority": None,
+                    "review_plan": None,
+                    "history": None,
+                    "zero_sets": None,
+                },
+                argv=[str(SCRIPT_REL), "--review-plan"],
+            )
+            (
+                _,
+                retained_refusal,
+                refusal_terminal,
+                refusal_events,
+            ) = v2_publish_and_read_persistent_fixture(
+                artifact_root=artifact_root,
+                artifact_dir=artifact_dir,
+                payloads=refusal_payloads,
+            )
+            validated = v2_validate_refusal_bundle(
+                artifact_root=artifact_root,
+                input_dir=artifact_dir,
+                payloads=retained_refusal,
+                terminal=refusal_terminal,
+                events=refusal_events,
+                accepted_manifest=manifest,
+            )
+            checks.check(
+                f"complete-non-green-{error_type.terminal}",
+                set(refusal_payloads) == set(V2_RUN_ARTIFACTS)
+                and refusal_terminal["bundle_state"]
+                == "COMPLETE_NON_GREEN"
+                and refusal_terminal["optional_content_registry"] == []
+                and refusal_terminal["failure_root"]
+                == failure["semantic_root"]
+                and validated["terminal"] == error_type.terminal
+                and validated["complete_green_prefix"] is False,
+                expected={
+                    "files": 9,
+                    "terminal": error_type.terminal,
+                    "green": False,
+                },
+                observed={
+                    "files": len(refusal_payloads),
+                    "terminal": validated["terminal"],
+                    "green": validated["complete_green_prefix"],
+                },
+            )
+            replay_output = f"{artifact_dir}-forbidden-replay"
+            replay_output_path = resolve_run_dir(
+                artifact_root,
+                replay_output,
+                label="refusal replay output",
+            )
+            if replay_output_path.exists():
+                raise EvidenceFailed(
+                    "semantic-refusal replay unexpectedly has an output prefix"
+                )
+            try:
+                v2_replay_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=artifact_dir,
+                    output_dir=replay_output,
+                )
+            except PublishedV2Refusal as replay_error:
+                checks.check(
+                    f"filesystem-replay-preserves-{error_type.terminal}",
+                    replay_error.terminal == error_type.terminal
+                    and replay_error.document["exit_code"]
+                    == TERMINAL_EXIT[error_type.terminal]
+                    and replay_error.document[
+                        "replay_validated_without_output"
+                    ]
+                    is True
+                    and not replay_output_path.exists(),
+                    expected={
+                        "terminal": error_type.terminal,
+                        "exit_code": TERMINAL_EXIT[error_type.terminal],
+                        "output_exists": False,
+                    },
+                    observed={
+                        "terminal": replay_error.terminal,
+                        "exit_code": replay_error.document["exit_code"],
+                        "output_exists": replay_output_path.exists(),
+                    },
+                )
+            else:
+                raise EvidenceFailed(
+                    "semantic-refusal replay incorrectly returned Pass"
+                )
     elif slug == "artifact-membership-path-safety":
         for index, value in enumerate(
             ("../escape", "/absolute", "a//b", "a/./b", "a\\b", "e\u0301")
@@ -14501,6 +19659,62 @@ def v2_execute_artifact_cases(
             expected=False,
             observed=receipt,
         )
+        diagnostic = (
+            f"{REPO_ROOT}/private/input "
+            "access_token=diagnostic-secret "
+            + ("bounded-detail-" * 80)
+        )
+        summary = v2_bounded_diagnostic_summary(diagnostic)
+        checks.check(
+            "diagnostic-summary-redacted-bounded",
+            "diagnostic-secret" not in summary
+            and str(REPO_ROOT) not in summary
+            and "<redacted>" in summary
+            and "<truncated:sha256-v1:" in summary
+            and len(summary.encode("utf-8"))
+            <= V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
+            expected={
+                "credential": "redacted",
+                "absolute_repo_path": "redacted",
+                "bounded": True,
+            },
+            observed={
+                "summary": summary,
+                "bytes": len(summary.encode("utf-8")),
+            },
+        )
+        mutated_state = {"phase": "before"}
+
+        def mutate_then_refuse() -> None:
+            mutated_state["phase"] = "after"
+            raise InputRefused("synthetic refusal after forbidden mutation")
+
+        guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-refusal-state",
+                "fixture.refusal-state",
+            ).refuses(
+                "closure-mutated",
+                InputRefused,
+                mutate_then_refuse,
+            ),
+            contains="closure-mutated failed",
+        )
+        checks.check(
+            "refusal-closure-mutation-detected",
+            mutated_state["phase"] == "after"
+            and guard_error.terminal == "EvidenceFailed",
+            expected={
+                "fixture_mutated": True,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "fixture_mutated": mutated_state["phase"] == "after",
+                "collector_terminal": guard_error.terminal,
+                "diagnostic_root": text_root(str(guard_error)),
+            },
+        )
     elif slug == "log-order-terminal":
         payloads, _ = v2_synthetic_payloads(manifest)
         events = v2_read_event_stream(payloads["events.jsonl"])
@@ -14591,11 +19805,356 @@ def v2_execute_artifact_cases(
             observed=after_receipts,
         )
     elif slug == "replay-tamper-live-denied":
-        payloads, _ = v2_synthetic_payloads(manifest)
+        payloads, accepted_manifest, _ = v2_replayable_fixture_bundle(
+            manifest,
+            subject_mode="review-plan",
+        )
         terminal = strict_json_loads(
             payloads["terminal.json"],
-            label="synthetic terminal",
+            label="tamper fixture terminal",
             require_canonical=True,
+        )
+        events = v2_read_event_stream(payloads["events.jsonl"])
+        before_receipts = len(_command_receipts)
+        reconstructed = v2_reconstruct_retained(
+            artifact_root="target/v2-fixture",
+            input_dir="review-plan-run",
+            payloads=payloads,
+            terminal=terminal,
+            events=events,
+            accepted_manifest=accepted_manifest,
+        )
+        checks.check(
+            "offline-baseline-no-live-or-network",
+            len(reconstructed) == 7
+            and len(_command_receipts) == before_receipts
+            and reconstructed[0]["network_access"] is False
+            and reconstructed[0]["direct_tracker_file_access"] is False,
+            expected={
+                "components": 7,
+                "new_command_receipts": 0,
+                "network_access": False,
+                "direct_tracker_file_access": False,
+            },
+            observed={
+                "components": len(reconstructed),
+                "new_command_receipts": len(_command_receipts) - before_receipts,
+                "network_access": reconstructed[0]["network_access"],
+                "direct_tracker_file_access": reconstructed[0][
+                    "direct_tracker_file_access"
+                ],
+            },
+        )
+
+        def reconstruct(
+            candidate_payloads: Mapping[str, bytes],
+            candidate_terminal: Mapping[str, Any] = terminal,
+            candidate_events: Sequence[Mapping[str, Any]] = events,
+        ) -> tuple[Any, ...]:
+            return v2_reconstruct_retained(
+                artifact_root="target/v2-fixture",
+                input_dir="review-plan-run",
+                payloads=candidate_payloads,
+                terminal=candidate_terminal,
+                events=candidate_events,
+                accepted_manifest=accepted_manifest,
+            )
+
+        missing = dict(payloads)
+        missing.pop("authority-v2.json")
+        checks.refuses(
+            "missing-artifact-refused",
+            EvidenceFailed,
+            lambda: reconstruct(missing),
+            contains="membership differs",
+        )
+        extra = dict(payloads)
+        extra["unlisted.json"] = canonical_bytes({"unlisted": True})
+        checks.refuses(
+            "extra-artifact-refused",
+            EvidenceFailed,
+            lambda: reconstruct(extra),
+            contains="membership differs",
+        )
+        truncated = dict(payloads)
+        truncated["inventory-v2.json"] = truncated["inventory-v2.json"][:-7]
+        checks.refuses(
+            "truncated-artifact-refused",
+            InputRefused,
+            lambda: reconstruct(truncated),
+            contains="malformed JSON",
+        )
+        stale_root = strict_json_loads(
+            payloads["inventory-v2.json"],
+            label="tamper fixture inventory",
+            require_canonical=True,
+        )
+        stale_root["no_claim"] = "mutated without replacing the retained root"
+        stale_root_payloads = dict(payloads)
+        stale_root_payloads["inventory-v2.json"] = canonical_bytes(stale_root)
+        checks.refuses(
+            "stale-semantic-root-refused",
+            EvidenceFailed,
+            lambda: reconstruct(stale_root_payloads),
+            contains="semantic_root",
+        )
+        rerooted_inventory = v2_rooted(stale_root)
+        rerooted_payloads = dict(payloads)
+        rerooted_payloads["inventory-v2.json"] = canonical_bytes(
+            rerooted_inventory
+        )
+        checks.refuses(
+            "rerooted-mutated-artifact-refused",
+            EvidenceFailed,
+            lambda: reconstruct(rerooted_payloads),
+            contains="terminal root differs at inventory_root",
+        )
+        v1_source = strict_json_loads(
+            payloads["source-v2.json"],
+            label="tamper fixture source",
+            require_canonical=True,
+        )
+        v1_source["schema"] = SOURCE_SCHEMA
+        v1_source = v2_rooted(v1_source)
+        v1_confused_payloads = dict(payloads)
+        v1_confused_payloads["source-v2.json"] = canonical_bytes(v1_source)
+        checks.refuses(
+            "v1-confused-source-refused",
+            InputRefused,
+            lambda: reconstruct(v1_confused_payloads),
+            contains="unknown schema",
+        )
+        unsafe_terminal = dict(terminal)
+        unsafe_terminal["optional_content_registry"] = [
+            {
+                "relative_path": "../escape.json",
+            }
+        ]
+        unsafe_terminal = v2_rooted(unsafe_terminal)
+        checks.refuses(
+            "unsafe-optional-path-refused",
+            InputRefused,
+            lambda: reconstruct(
+                payloads,
+                candidate_terminal=unsafe_terminal,
+            ),
+            contains="unsafe",
+        )
+        extra_terminal_field = dict(terminal)
+        extra_terminal_field["unexpected"] = "closed-schema violation"
+        extra_terminal_field = v2_rooted(extra_terminal_field)
+        checks.refuses(
+            "terminal-extra-field-refused",
+            InputRefused,
+            lambda: reconstruct(
+                payloads,
+                candidate_terminal=extra_terminal_field,
+            ),
+            contains="non-closed schema",
+        )
+        non_green_terminal = dict(terminal)
+        non_green_terminal.update(
+            {
+                "bundle_state": "COMPLETE_NON_GREEN",
+                "terminal": "InputRefused",
+                "exit_code": TERMINAL_EXIT["InputRefused"],
+            }
+        )
+        non_green_terminal = v2_rooted(non_green_terminal)
+        checks.refuses(
+            "green-path-terminal-confusion-refused",
+            EvidenceFailed,
+            lambda: reconstruct(
+                payloads,
+                candidate_terminal=non_green_terminal,
+            ),
+            contains="complete-green seal",
+        )
+        reordered_event_payload = b"".join(
+            canonical_bytes(row)
+            for row in [events[1], events[0], *events[2:]]
+        )
+        checks.refuses(
+            "reordered-event-stream-refused",
+            EvidenceFailed,
+            lambda: v2_read_event_stream(reordered_event_payload),
+            contains="sequence/schema differs",
+        )
+
+        refusal_payloads, _ = v2_refusal_bundle_payloads(
+            mode="review-plan",
+            artifact_root="target/v2-fixture",
+            artifact_dir="refusal-run",
+            manifest=manifest,
+            error=InputRefused("bounded in-memory replay refusal"),
+            stage="selected_projection",
+            available_roots={
+                "source": None,
+                "inventory": None,
+                "authority": None,
+                "review_plan": None,
+                "history": None,
+                "zero_sets": None,
+            },
+            argv=[str(SCRIPT_REL), "--review-plan"],
+        )
+        refusal_terminal = strict_json_loads(
+            refusal_payloads["terminal.json"],
+            label="tamper refusal terminal",
+            require_canonical=True,
+        )
+        refusal_events = v2_read_event_stream(
+            refusal_payloads["events.jsonl"],
+            expected_terminal="InputRefused",
+        )
+        refusal_result = v2_validate_refusal_bundle(
+            artifact_root="target/v2-fixture",
+            input_dir="refusal-run",
+            payloads=refusal_payloads,
+            terminal=refusal_terminal,
+            events=refusal_events,
+            accepted_manifest=manifest,
+        )
+        checks.check(
+            "non-green-baseline-preserved",
+            refusal_result["terminal"] == "InputRefused"
+            and refusal_result["exit_code"] == TERMINAL_EXIT["InputRefused"]
+            and refusal_result["complete_green_prefix"] is False
+            and refusal_result["replay_validated_without_output"] is True,
+            expected={
+                "terminal": "InputRefused",
+                "green": False,
+                "validated_without_output": True,
+            },
+            observed=refusal_result,
+        )
+
+        def validate_refusal(
+            candidate_payloads: Mapping[str, bytes] = refusal_payloads,
+            candidate_terminal: Mapping[str, Any] = refusal_terminal,
+            candidate_events: Sequence[Mapping[str, Any]] = refusal_events,
+        ) -> dict[str, Any]:
+            return v2_validate_refusal_bundle(
+                artifact_root="target/v2-fixture",
+                input_dir="refusal-run",
+                payloads=candidate_payloads,
+                terminal=candidate_terminal,
+                events=candidate_events,
+                accepted_manifest=manifest,
+            )
+
+        forged_failure = dict(refusal_terminal["failure_evidence"])
+        forged_failure["result_category"] = "PASS"
+        forged_failure = v2_rooted(forged_failure)
+        forged_failure_terminal = dict(refusal_terminal)
+        forged_failure_terminal["failure_evidence"] = forged_failure
+        forged_failure_terminal["failure_root"] = forged_failure[
+            "semantic_root"
+        ]
+        forged_failure_terminal = v2_rooted(forged_failure_terminal)
+        checks.refuses(
+            "rerooted-failure-category-refused",
+            EvidenceFailed,
+            lambda: validate_refusal(
+                candidate_terminal=forged_failure_terminal,
+            ),
+            contains="failure bindings disagree",
+        )
+        forged_terminal = dict(refusal_terminal)
+        forged_terminal["no_claim"] = "this altered terminal claims Pass authority"
+        forged_terminal = v2_rooted(forged_terminal)
+        checks.refuses(
+            "rerooted-refusal-terminal-contract-refused",
+            EvidenceFailed,
+            lambda: validate_refusal(candidate_terminal=forged_terminal),
+            contains="terminal contract differs",
+        )
+        wrong_code_terminal = dict(refusal_terminal)
+        wrong_code_terminal["exit_code"] = 0
+        wrong_code_terminal = v2_rooted(wrong_code_terminal)
+        checks.refuses(
+            "refusal-terminal-exit-code-mismatch-refused",
+            EvidenceFailed,
+            lambda: validate_refusal(
+                candidate_terminal=wrong_code_terminal,
+            ),
+            contains="terminal contract differs",
+        )
+        forged_envelope_payloads = dict(refusal_payloads)
+        forged_source_envelope = strict_json_loads(
+            refusal_payloads["source-v2.json"],
+            label="tamper refusal source envelope",
+            require_canonical=True,
+        )
+        forged_source_envelope["available_projection_root"] = semantic_root(
+            {"forged": "available source"}
+        )
+        forged_source_envelope = v2_rooted(forged_source_envelope)
+        forged_envelope_payloads["source-v2.json"] = canonical_bytes(
+            forged_source_envelope
+        )
+        forged_envelope_terminal = dict(refusal_terminal)
+        forged_envelope_terminal["source_root"] = forged_source_envelope[
+            "semantic_root"
+        ]
+        forged_identities = dict(
+            forged_envelope_terminal["artifact_identities"]
+        )
+        forged_identities["source-v2.json"] = v2_artifact_identity(
+            relative_path="source-v2.json",
+            schema_kind=V2_REFUSAL_PROJECTION_SCHEMA,
+            payload=forged_envelope_payloads["source-v2.json"],
+        )
+        forged_envelope_terminal["artifact_identities"] = forged_identities
+        forged_envelope_terminal = v2_rooted(forged_envelope_terminal)
+        checks.refuses(
+            "rerooted-refusal-envelope-binding-refused",
+            EvidenceFailed,
+            lambda: validate_refusal(
+                candidate_payloads=forged_envelope_payloads,
+                candidate_terminal=forged_envelope_terminal,
+            ),
+            contains="envelope bindings disagree",
+        )
+        forged_event_rows = [dict(row) for row in refusal_events]
+        forged_event_rows[1]["result_category"] = "STARTED"
+        forged_events_payload = b"".join(
+            canonical_bytes(row) for row in forged_event_rows
+        )
+        forged_event_payloads = dict(refusal_payloads)
+        forged_event_payloads["events.jsonl"] = forged_events_payload
+        forged_event_terminal = dict(refusal_terminal)
+        forged_event_terminal["events_content_root"] = (
+            "sha256-v1:"
+            + hashlib.sha256(forged_events_payload).hexdigest()
+        )
+        forged_event_terminal["event_roots"] = [
+            semantic_root(row) for row in forged_event_rows
+        ]
+        forged_event_terminal["terminal_event_root"] = semantic_root(
+            forged_event_rows[-1]
+        )
+        forged_event_identities = dict(
+            forged_event_terminal["artifact_identities"]
+        )
+        forged_event_identities["events.jsonl"] = v2_artifact_identity(
+            relative_path="events.jsonl",
+            schema_kind=V2_EVENT_SCHEMA,
+            payload=forged_events_payload,
+        )
+        forged_event_terminal[
+            "artifact_identities"
+        ] = forged_event_identities
+        forged_event_terminal = v2_rooted(forged_event_terminal)
+        checks.refuses(
+            "rerooted-refusal-event-contract-refused",
+            EvidenceFailed,
+            lambda: validate_refusal(
+                candidate_payloads=forged_event_payloads,
+                candidate_terminal=forged_event_terminal,
+                candidate_events=forged_event_rows,
+            ),
+            contains="event bindings disagree",
         )
         changed = payloads["inventory-v2.json"] + b" "
         observed_identity = v2_artifact_identity(
@@ -14625,19 +20184,52 @@ def v2_failure_evidence(
     *,
     stage: str,
     detail: str,
-    expected: Any,
-    observed: Any,
+    expected: Any = None,
+    observed: Any = None,
+    terminal: str = "EvidenceFailed",
+    manifest_root: str | None = None,
+    available_roots: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    divergence = first_projection_divergence(expected, observed)
+    if terminal not in V2_SEMANTIC_REFUSAL_TERMINALS:
+        raise EvidenceFailed("v2 failure evidence terminal is not semantic")
+    divergence = (
+        first_projection_divergence(expected, observed)
+        if expected is not None or observed is not None
+        else None
+    )
+    recovery = {
+        "InputRefused": "CORRECT_INPUT_AND_RETRY_IN_FRESH_RUN_DIR",
+        "NoData": "PROVIDE_REQUIRED_DATA_AND_RETRY_IN_FRESH_RUN_DIR",
+        "EvidenceFailed": "MANUAL_RECOVERY_REQUIRED",
+    }[terminal]
+    normalized_roots = {
+        key: (available_roots or {}).get(key)
+        for key in (
+            "source",
+            "inventory",
+            "authority",
+            "review_plan",
+            "history",
+            "zero_sets",
+        )
+    }
     return v2_rooted(
         {
-            "schema": "frankensim.beads-template-hygiene.failure-evidence.v2",
+            "schema": V2_FAILURE_EVIDENCE_SCHEMA,
+            "result_category": "SEMANTIC_REFUSAL",
             "stage": stage,
-            "terminal": "EvidenceFailed",
+            "terminal": terminal,
+            "exit_code": TERMINAL_EXIT[terminal],
+            "diagnostic_code": f"{terminal}:{stage}",
             "detail_root": text_root(detail),
-            "first_divergence": divergence or "$",
-            "recovery": "MANUAL_RECOVERY_REQUIRED",
+            "first_divergence": divergence or f"$.pipeline.{stage}",
+            "recovery": recovery,
+            "manifest_root": manifest_root,
+            "available_roots": normalized_roots,
+            "output_reserved": True,
+            "complete_evidence_bundle": True,
             "complete_green_prefix": False,
+            "retry_requires_fresh_run_dir": True,
             "no_claim": (
                 "failure evidence identifies recovery work and never seals a "
                 "partial or ambiguous publication as green"
@@ -15054,6 +20646,7 @@ def v2_execute_fault_resource_cases(
             "artifact": RUN_ARTIFACT_CAP,
             "events": V2_LOG_EVENTS_CAP,
             "log_line": V2_LOG_LINE_BYTES_CAP,
+            "diagnostic_summary": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
             "synopsis": V2_SYNOPSIS_BYTES_CAP,
             "selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
         }
@@ -15076,6 +20669,9 @@ def v2_execute_fault_resource_cases(
                 "max_artifact_bytes": RUN_ARTIFACT_CAP,
                 "max_log_events": V2_LOG_EVENTS_CAP,
                 "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
+                "max_diagnostic_summary_bytes": (
+                    V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+                ),
                 "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
                 "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
             }.items()),
@@ -15452,6 +21048,89 @@ def v2_reconstruct_payload_map(
     )
 
 
+def v2_persistent_e2e_location(
+    manifest: Mapping[str, Any],
+    *,
+    label: str,
+    identity_binding: Any = None,
+) -> tuple[str, str]:
+    script_payload = bounded_read(REPO_ROOT / SCRIPT_REL)
+    identity = hashlib.sha256(
+        canonical_bytes(
+            {
+                "manifest_content_identity": manifest["content_identity"],
+                "script_content_identity": (
+                    "sha256-v1:"
+                    + hashlib.sha256(script_payload).hexdigest()
+                ),
+                "label": label,
+                "identity_binding": identity_binding,
+            }
+        )
+    ).hexdigest()[:24]
+    return (
+        "target/beads-template-hygiene/v2-e2e",
+        f"{label}-{identity}",
+    )
+
+
+def v2_publish_and_read_persistent_fixture(
+    *,
+    artifact_root: str,
+    artifact_dir: str,
+    payloads: Mapping[str, bytes],
+) -> tuple[
+    Path,
+    dict[str, bytes],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    output = resolve_run_dir(
+        artifact_root,
+        artifact_dir,
+        label="persistent v2 fixture",
+    )
+    if not output.exists():
+        publication = v2_publish_bundle(
+            artifact_root=artifact_root,
+            artifact_dir=artifact_dir,
+            payloads=payloads,
+        )
+        if (
+            publication["publication_order"][-1] != "terminal.json"
+            or publication["terminal_content_sealed_last"] is not True
+        ):
+            raise EvidenceFailed(
+                "persistent v2 fixture did not seal terminal content last"
+            )
+    directory, retained, terminal, events = v2_read_retained_bundle(
+        artifact_root=artifact_root,
+        input_dir=artifact_dir,
+    )
+    if dict(retained) != dict(payloads):
+        divergence = first_projection_divergence(
+            {
+                name: (
+                    len(payload),
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
+                )
+                for name, payload in payloads.items()
+            },
+            {
+                name: (
+                    len(payload),
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
+                )
+                for name, payload in retained.items()
+            },
+        )
+        raise EvidenceFailed(
+            "persistent v2 fixture differs from expected payloads at "
+            f"{divergence or '$'}"
+        )
+    return directory, retained, terminal, events
+
+
 def v2_fixture_fingerprint() -> dict[str, Any]:
     context = fixture_br_context()
     issue_ids = sorted(
@@ -15511,6 +21190,27 @@ def v2_execute_nomock_cases(
             label="no-mock all-status list",
         )
         bv_projection = v2_nomock_bv_projection()
+        snapshot = collect_live_v2(manifest)
+        campaign_root, _ = v2_campaign_epoch(snapshot)
+        production_inventory = v2_build_inventory(
+            snapshot,
+            campaign_epoch_root=campaign_root,
+            priority_filter=None,
+            status_filter=None,
+        )
+        production_zero = v2_build_zero_sets(
+            source_root=snapshot.source["semantic_root"],
+            inventory=production_inventory,
+            prior_campaign=v2_empty_prior_campaign(),
+            current_universe=snapshot.all_issues,
+        )
+        v2_validate_zero_sets(
+            production_zero,
+            source_root=snapshot.source["semantic_root"],
+            inventory=production_inventory,
+            prior_campaign=v2_empty_prior_campaign(),
+            current_universe=snapshot.all_issues,
+        )
         statuses = Counter(str(row.get("status") or "") for row in issues)
         priorities = Counter(int(row.get("priority")) for row in issues)
         cells = {
@@ -15576,6 +21276,66 @@ def v2_execute_nomock_cases(
             observed={
                 "cells": len(cells),
                 "zero_receipts": len(zero_receipts),
+            },
+        )
+        live_nonclosed_ids = sorted(
+            str(row.get("id") or "")
+            for row in issues
+            if row.get("status") != "closed"
+        )
+        inventoried_nonclosed_ids = sorted(
+            row["id"]
+            for row in production_inventory["rows"]
+            if row["status"] != "closed"
+        )
+        checks.check(
+            "production-v2-exact-covers-complete-nonclosed-universe",
+            live_nonclosed_ids == inventoried_nonclosed_ids
+            and snapshot.inventory["review_scope"]["nonclosed_complete"]
+            is True
+            and snapshot.inventory["counts"][
+                "complete_review_scope_issues"
+            ]
+            == len(snapshot.inventory["rows"])
+            and all(
+                row["semantic_review_disposition"]
+                in V2_SEMANTIC_REVIEW_DISPOSITIONS
+                for row in production_inventory["rows"]
+            ),
+            expected={
+                "nonclosed_ids_root": semantic_root(live_nonclosed_ids),
+                "complete": True,
+            },
+            observed={
+                "nonclosed_ids_root": semantic_root(
+                    inventoried_nonclosed_ids
+                ),
+                "live_count": len(live_nonclosed_ids),
+                "inventory_count": len(inventoried_nonclosed_ids),
+                "selected_review_count": len(production_inventory["rows"]),
+            },
+        )
+        checks.check(
+            "production-zero-validator-and-command-evidence",
+            len(production_zero["cells"]) == 25
+            and production_zero["counts"]["issues"]
+            == len(production_inventory["rows"])
+            and bool(_command_receipts)
+            and all(
+                isinstance(receipt.get("argv"), list)
+                and receipt.get("exit_code") == 0
+                for receipt in _command_receipts
+            ),
+            expected={
+                "cells": 25,
+                "targets": len(production_inventory["rows"]),
+                "commands": "nonempty successful receipts",
+            },
+            observed={
+                "cells": len(production_zero["cells"]),
+                "targets": production_zero["counts"]["issues"],
+                "command_count": len(_command_receipts),
+                "command_receipts_root": semantic_root(_command_receipts),
             },
         )
 
@@ -15924,24 +21684,142 @@ def v2_execute_nomock_cases(
         )
 
     elif slug == "nomock-offline-replay":
+        context = fixture_br_context()
+        released_issue = fixture_br_show(context["stable_id"])
+        released_issue_root = semantic_root(
+            v2_full_issue_projection(released_issue)
+        )
         before_receipts = len(_command_receipts)
         roots: dict[str, list[str]] = {}
         for subject_mode in ("review-plan", "history-plan"):
+            persistent_binding = {
+                "subject_mode": subject_mode,
+                "released_issue_root": (
+                    released_issue_root
+                    if subject_mode == "review-plan"
+                    else None
+                ),
+            }
+            artifact_root, artifact_dir = v2_persistent_e2e_location(
+                manifest,
+                label=f"green-{subject_mode}-input",
+                identity_binding=persistent_binding,
+            )
             payloads, accepted, retained = v2_replayable_fixture_bundle(
                 manifest,
                 subject_mode=subject_mode,
+                issue=released_issue if subject_mode == "review-plan" else None,
+                artifact_root=artifact_root,
+                artifact_dir=artifact_dir,
             )
-            reconstructed = v2_reconstruct_payload_map(payloads, accepted)
+            (
+                _,
+                retained_payloads,
+                retained_terminal,
+                retained_events,
+            ) = v2_publish_and_read_persistent_fixture(
+                artifact_root=artifact_root,
+                artifact_dir=artifact_dir,
+                payloads=payloads,
+            )
+            reconstructed = v2_reconstruct_retained(
+                artifact_root=artifact_root,
+                input_dir=artifact_dir,
+                payloads=retained_payloads,
+                terminal=retained_terminal,
+                events=retained_events,
+                accepted_manifest=accepted,
+            )
             roots[subject_mode] = [
                 row["semantic_root"] for row in reconstructed[:6]
             ]
             checks.check(
-                f"{subject_mode}-offline-exact",
+                f"{subject_mode}-filesystem-read-reconstruct-exact",
                 roots[subject_mode]
                 == [row["semantic_root"] for row in retained[:6]],
                 expected=[row["semantic_root"] for row in retained[:6]],
                 observed=roots[subject_mode],
             )
+            checks.check(
+                f"{subject_mode}-terminal-content-last-and-complete",
+                retained_terminal["bundle_state"] == "COMPLETE_GREEN"
+                and retained_terminal["terminal"] == "Pass"
+                and retained_terminal["complete_evidence_bundle"] is True
+                and retained_terminal["complete_green_prefix"] is True
+                and retained_events[-1]["terminal"] == "Pass",
+                expected=("COMPLETE_GREEN", "Pass"),
+                observed=(
+                    retained_terminal["bundle_state"],
+                    retained_terminal["terminal"],
+                ),
+            )
+            if subject_mode == "review-plan":
+                _, replay_dir = v2_persistent_e2e_location(
+                    manifest,
+                    label="green-review-plan-replay",
+                    identity_binding=persistent_binding,
+                )
+                replay_path = resolve_run_dir(
+                    artifact_root,
+                    replay_dir,
+                    label="persistent replay fixture",
+                )
+                if not replay_path.exists():
+                    replay_result = v2_replay_bundle(
+                        artifact_root=artifact_root,
+                        input_dir=artifact_dir,
+                        output_dir=replay_dir,
+                    )
+                    if replay_result["terminal"] != "Pass":
+                        raise EvidenceFailed(
+                            "filesystem replay did not return Pass"
+                        )
+                (
+                    _,
+                    replay_payloads,
+                    replay_terminal,
+                    replay_events,
+                ) = v2_read_retained_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=replay_dir,
+                )
+                replay_reconstructed = v2_reconstruct_retained(
+                    artifact_root=artifact_root,
+                    input_dir=replay_dir,
+                    payloads=replay_payloads,
+                    terminal=replay_terminal,
+                    events=replay_events,
+                    accepted_manifest=manifest,
+                )
+                checks.check(
+                    "review-plan-disjoint-filesystem-replay-exact",
+                    [
+                        row["semantic_root"]
+                        for row in replay_reconstructed[:6]
+                    ]
+                    == roots[subject_mode]
+                    and replay_terminal["mode"] == "replay"
+                    and replay_terminal["replay_equivalence"][
+                        "live_tracker_reads"
+                    ]
+                    is False
+                    and replay_terminal["replay_equivalence"][
+                        "live_tracker_writes"
+                    ]
+                    is False
+                    and replay_path
+                    != resolve_run_dir(
+                        artifact_root,
+                        artifact_dir,
+                        label="persistent replay source",
+                        must_exist=True,
+                    ),
+                    expected=roots[subject_mode],
+                    observed=[
+                        row["semantic_root"]
+                        for row in replay_reconstructed[:6]
+                    ],
+                )
         checks.check(
             "offline-denies-live-reads",
             len(_command_receipts) == before_receipts,
@@ -16158,6 +22036,28 @@ def v2_test_log_event(
     )
 
 
+def v2_validate_assertion_result(
+    case: Mapping[str, Any],
+    result: Any,
+) -> Mapping[str, Any]:
+    if (
+        not isinstance(result, Mapping)
+        or result.get("schema") != V2_ASSERTION_RESULT_SCHEMA
+        or result.get("case_id") != case["id"]
+        or result.get("assertion_id") != case["assertion_id"]
+        or result.get("executor_id") != case["assertion_id"]
+        or result.get("terminal") != "Pass"
+        or not isinstance(result.get("ordered_checks"), list)
+        or not result.get("ordered_checks")
+        or type(result.get("check_count")) is not int
+        or result.get("check_count") != len(result["ordered_checks"])
+    ):
+        raise EvidenceFailed(
+            f"{case['assertion_id']} returned malformed assertion evidence"
+        )
+    return result
+
+
 def run_v2_self_tests(
     manifest: Mapping[str, Any],
     *,
@@ -16218,15 +22118,49 @@ def run_v2_self_tests(
             raise SystemExit(TERMINAL_EXIT[terminal])
         try:
             result = executor(case, manifest)
-        except HarnessError as error:
+            result = v2_validate_assertion_result(case, result)
+        except Exception as caught_error:
+            internal_fault = not isinstance(caught_error, HarnessError)
+            error = (
+                caught_error
+                if isinstance(caught_error, HarnessError)
+                else HarnessError(
+                    f"{type(caught_error).__name__}: {caught_error}"
+                )
+            )
+            diagnostic = str(error)
+            diagnostic_summary = v2_bounded_diagnostic_summary(diagnostic)
+            first_divergence = (
+                diagnostic.split(" failed:", 1)[0]
+                if " failed:" in diagnostic
+                else str(case["assertion_id"])
+            )
             failed = v2_test_log_event(
                 case=case,
                 sequence=sequence,
                 stage="assertion-terminal",
                 terminal=error.terminal,
             )
+            failed["first_divergence"] = first_divergence
+            failed["recovery"] = (
+                "FIX_INTERNAL_EXECUTOR_FAULT"
+                if internal_fault
+                else "FIX_ASSERTION_OR_SUBJECT"
+            )
+            failed["result_category"] = (
+                "INTERNAL_EXECUTOR_FAULT"
+                if internal_fault
+                else "ASSERTION_FAILED"
+            )
             failed["semantic_projection"] = {
-                "diagnostic_root": text_root(str(error)),
+                "diagnostic_code": first_divergence,
+                "diagnostic_root": text_root(diagnostic),
+                "diagnostic_summary": diagnostic_summary,
+                "unexpected_exception_type": (
+                    type(caught_error).__name__
+                    if internal_fault
+                    else None
+                ),
                 "subject": case["subject"],
             }
             failed = v2_rooted(failed)
@@ -16243,26 +22177,19 @@ def run_v2_self_tests(
                         row["semantic_root"] for row in results
                     ],
                     "ordered_event_roots": event_roots,
-                    "first_divergence": str(case["assertion_id"]),
-                    "diagnostic_root": text_root(str(error)),
-                    "recovery": "FIX_ASSERTION_OR_SUBJECT",
+                    "first_divergence": first_divergence,
+                    "diagnostic_root": text_root(diagnostic),
+                    "diagnostic_summary": diagnostic_summary,
+                    "recovery": (
+                        "FIX_INTERNAL_EXECUTOR_FAULT"
+                        if internal_fault
+                        else "FIX_ASSERTION_OR_SUBJECT"
+                    ),
                     "no_claim": "the v2 suite did not pass",
                 }
             )
             json_stdout(suite_failure)
             raise SystemExit(TERMINAL_EXIT[error.terminal])
-        if (
-            result.get("schema") != V2_ASSERTION_RESULT_SCHEMA
-            or result.get("case_id") != case["id"]
-            or result.get("assertion_id") != case["assertion_id"]
-            or result.get("executor_id") != case["assertion_id"]
-            or result.get("terminal") != "Pass"
-            or not result.get("ordered_checks")
-            or result.get("check_count") != len(result["ordered_checks"])
-        ):
-            raise EvidenceFailed(
-                f"{case['assertion_id']} returned malformed assertion evidence"
-            )
         json_stdout(result)
         terminal_event = v2_test_log_event(
             case=case,
@@ -16300,7 +22227,8 @@ def run_v2_self_tests(
             "first_divergence": None,
             "recovery": "NOT_REQUIRED",
             "no_claim": (
-                "the suite proves only its 96 bounded executable contracts; "
+                f"the suite proves only its {len(results)} selected bounded "
+                "executable contracts; "
                 "it does not mutate or complete live target Beads"
             ),
         }
@@ -16602,6 +22530,9 @@ def main(arguments: Sequence[str]) -> int:
 
 try:
     main_exit = main(sys.argv[1:])
+except PublishedV2Refusal as error:
+    json_stdout(error.document)
+    raise SystemExit(TERMINAL_EXIT[error.terminal])
 except HarnessError as error:
     mode = next(
         (
