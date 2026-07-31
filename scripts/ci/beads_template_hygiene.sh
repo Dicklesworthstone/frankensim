@@ -33087,6 +33087,137 @@ def v2_execute_source_cases(
                 ],
             },
         )
+        released_version_fixture = {
+            "version": "0.2.19",
+            "build": "release",
+            "commit": "fixture-commit",
+            "branch": "main",
+            "rust_version": "1.99.0",
+            "target": "fixture-target",
+            "features": [],
+        }
+        released_capabilities_fixture = {
+            "tool": "br",
+            "version": "0.2.19",
+            "contract_version": "br.capabilities.v1",
+            "features": [
+                {"name": "local_first", "description": "Local first."}
+            ],
+            "commands": [
+                {
+                    "name": "list",
+                    "summary": "List issues",
+                    "operation": "read",
+                    "workspace": "required",
+                    "machine_output": ["json"],
+                    "examples": ["br list --json"],
+                }
+            ],
+            "global_flags": [
+                {"flag": "--json", "description": "Emit JSON."}
+            ],
+            "output_formats": ["json"],
+            "exit_codes": [
+                {
+                    "code": 0,
+                    "category": "success",
+                    "description": "Success.",
+                }
+            ],
+            "env_vars": [
+                {"name": "BR_OUTPUT_FORMAT", "description": "Format."}
+            ],
+            "safety": [
+                {"name": "local_only", "guarantee": "No network."}
+            ],
+            "recommended_entrypoints": ["br capabilities --format json"],
+        }
+        normalized_released_version = v2_normalize_br_version(
+            released_version_fixture,
+            error_type=EvidenceFailed,
+        )
+        normalized_released_capabilities = v2_normalize_br_capabilities(
+            released_capabilities_fixture,
+            error_type=EvidenceFailed,
+        )
+
+        def malformed_version_error(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(released_version_fixture),
+                label="released version mutation seed",
+                require_canonical=True,
+            )
+            mutation(candidate)
+            return expect_error(
+                EvidenceFailed,
+                lambda: v2_normalize_br_version(
+                    candidate,
+                    error_type=EvidenceFailed,
+                ),
+            )
+
+        def malformed_capabilities_error(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(released_capabilities_fixture),
+                label="released capabilities mutation seed",
+                require_canonical=True,
+            )
+            mutation(candidate)
+            return expect_error(
+                EvidenceFailed,
+                lambda: v2_normalize_br_capabilities(
+                    candidate,
+                    error_type=EvidenceFailed,
+                ),
+            )
+
+        released_wire_errors = [
+            malformed_version_error(
+                lambda row: row.__setitem__("version", " ")
+            ),
+            malformed_version_error(
+                lambda row: row.__setitem__("invented", "hidden")
+            ),
+            malformed_capabilities_error(
+                lambda row: row["commands"][0].__setitem__("name", " ")
+            ),
+            malformed_capabilities_error(
+                lambda row: row["output_formats"].__setitem__(0, " ")
+            ),
+            malformed_capabilities_error(
+                lambda row: row["exit_codes"][0].__setitem__("code", -1)
+            ),
+            malformed_capabilities_error(
+                lambda row: row.pop("safety")
+            ),
+        ]
+        checks.check(
+            "released-br-version-capabilities-complete-canonical",
+            normalized_released_version == released_version_fixture
+            and normalized_released_capabilities
+            == released_capabilities_fixture
+            and all(
+                error.terminal == "EvidenceFailed"
+                for error in released_wire_errors
+            ),
+            expected={
+                "complete_documents_retained": True,
+                "malformed_or_lossy_mutations": ["EvidenceFailed"] * 6,
+            },
+            observed={
+                "version_root": semantic_root(normalized_released_version),
+                "capabilities_root": semantic_root(
+                    normalized_released_capabilities
+                ),
+                "mutation_terminals": [
+                    error.terminal for error in released_wire_errors
+                ],
+            },
+        )
         exported_source_issue = v2_full_issue_projection(
             fixture_issue(
                 issue_id="fixture-exported-source",
