@@ -646,6 +646,10 @@ V2_SOURCE_ALL_ISSUE_FIELDS = frozenset(
         "notes",
         "estimated_minutes",
         "ephemeral",
+        "pinned",
+        "is_template",
+        "due_at",
+        "defer_until",
         "updated_at",
         "dependencies",
         "dependents",
@@ -653,14 +657,85 @@ V2_SOURCE_ALL_ISSUE_FIELDS = frozenset(
         "created_by",
         "closed_at",
         "close_reason",
+        "closed_by_session",
+        "external_ref",
+        "source_system",
+        "agent_context",
+        "deleted_at",
+        "deleted_by",
+        "delete_reason",
+        "original_type",
+        "compaction_level",
+        "compacted_at",
+        "compacted_at_commit",
+        "original_size",
+        "sender",
+        "comments",
+        "events",
+        "rollup",
         "field_roots",
         "source_repo",
         "source_repo_path",
+        "released_fields_present",
+        "source_issue_projection_root",
         "no_claim",
     }
 )
 V2_SOURCE_RELATION_FIELDS = frozenset(
-    {"id", "type", "status", "priority"}
+    {"id", "title", "type", "status", "priority"}
+)
+V2_SOURCE_COMMENT_FIELDS = frozenset(
+    {"id", "issue_id", "author", "text", "created_at"}
+)
+V2_SOURCE_ROLLUP_FIELDS = frozenset({"status", "descendants"})
+V2_RAW_BR_SHOW_FIELDS = frozenset(
+    {
+        "id",
+        "title",
+        "description",
+        "design",
+        "acceptance_criteria",
+        "notes",
+        "status",
+        "priority",
+        "issue_type",
+        "type",
+        "assignee",
+        "owner",
+        "estimated_minutes",
+        "created_at",
+        "created_by",
+        "updated_at",
+        "closed_at",
+        "close_reason",
+        "closed_by_session",
+        "due_at",
+        "defer_until",
+        "external_ref",
+        "source_system",
+        "source_repo",
+        "source_repo_path",
+        "agent_context",
+        "deleted_at",
+        "deleted_by",
+        "delete_reason",
+        "original_type",
+        "compaction_level",
+        "compacted_at",
+        "compacted_at_commit",
+        "original_size",
+        "sender",
+        "ephemeral",
+        "pinned",
+        "is_template",
+        "labels",
+        "dependencies",
+        "dependents",
+        "comments",
+        "events",
+        "parent",
+        "rollup",
+    }
 )
 V2_SOURCE_COMMAND_RECEIPT_FIELDS = frozenset(
     {
@@ -978,6 +1053,7 @@ V2_HISTORY_ROW_FIELDS = frozenset(
         "audit_stream_root",
         "ownership",
         "comments",
+        "tracker_comments",
         "notes",
         "notes_root",
         "parent",
@@ -1028,7 +1104,8 @@ V2_HISTORY_LEGACY_COVERAGE_FIELDS = frozenset(
 V2_HISTORY_COUNT_FIELDS = frozenset({"targets", "closer_states"})
 V2_HISTORY_ROW_NO_CLAIM = (
     "history accounts for immutable closed template debt; it does not "
-    "re-adjudicate closure, infer a missing actor, or prove implementation"
+    "re-adjudicate closure, infer a missing actor, equate tracker comments "
+    "with audit events, or prove implementation"
 )
 V2_HISTORY_NO_CLAIM = (
     "history is immutable source accounting and candidate-consumer routing "
@@ -2267,13 +2344,16 @@ def v2_normalize_br_version(
     }
     normalized["features"] = list(raw_features)
     if any(
-        not isinstance(normalized[field], str) or not normalized[field]
+        not isinstance(normalized[field], str)
+        or not normalized[field]
+        or normalized[field] != normalized[field].strip()
         for field in required
     ) or any(
         normalized[field] is not None
         and (
             not isinstance(normalized[field], str)
             or not normalized[field]
+            or normalized[field] != normalized[field].strip()
         )
         for field in ("commit", "branch", "rust_version", "target")
     ):
@@ -2326,7 +2406,9 @@ def v2_normalize_br_capability_commands(
                 f"br capabilities command {index} has a non-closed schema"
             )
         if any(
-            not isinstance(row[field], str) or not row[field]
+            not isinstance(row[field], str)
+            or not row[field]
+            or row[field] != row[field].strip()
             for field in ("name", "summary", "operation", "workspace")
         ) or row["operation"] not in {"read", "write", "mixed", "unknown"}:
             raise error_type(
@@ -2337,7 +2419,12 @@ def v2_normalize_br_capability_commands(
             if (
                 not isinstance(values, list)
                 or len(values) > V2_COMMAND_ARGUMENTS_CAP
-                or any(not isinstance(item, str) or not item for item in values)
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or item != item.strip()
+                    for item in values
+                )
                 or len(values) != len(set(values))
             ):
                 raise error_type(
@@ -2378,9 +2465,11 @@ def v2_normalize_br_capability_rows(
             )
         if any(
             (
-                type(row[field]) is not int
+                type(row[field]) is not int or row[field] < 0
                 if field == "code"
-                else not isinstance(row[field], str) or not row[field]
+                else not isinstance(row[field], str)
+                or not row[field]
+                or row[field] != row[field].strip()
             )
             for field in fields
         ):
@@ -2456,7 +2545,12 @@ def v2_normalize_br_capabilities(
         if (
             not isinstance(values, list)
             or len(values) > V2_COMMAND_ARGUMENTS_CAP
-            or any(not isinstance(value, str) or not value for value in values)
+            or any(
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                for value in values
+            )
             or len(values) != len(set(values))
         ):
             raise error_type(f"br capabilities {label} are malformed")
@@ -2577,6 +2671,7 @@ def v2_validate_issue_id(
             break
     if (
         not separator
+        or value.startswith("-")
         or not prefix
         or len(encoded) > V2_LOCAL_ISSUE_ID_BYTES_CAP
         or len(prefix.encode("utf-8")) > V2_LOCAL_ISSUE_PREFIX_BYTES_CAP
@@ -4757,6 +4852,12 @@ def show_issues(issue_ids: Sequence[str]) -> list[dict[str, Any]]:
 
 
 def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
+    unknown_issue_fields = set(issue) - V2_RAW_BR_SHOW_FIELDS
+    if unknown_issue_fields:
+        raise InfrastructureFailed(
+            "v2 br issue has unknown released-show fields: "
+            f"{sorted(unknown_issue_fields)}"
+        )
     issue_id = issue.get("id")
     issue_type = issue.get("issue_type", issue.get("type"))
     if (
@@ -4796,6 +4897,19 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         "created_by",
         "closed_at",
         "close_reason",
+        "closed_by_session",
+        "due_at",
+        "defer_until",
+        "external_ref",
+        "source_system",
+        "agent_context",
+        "deleted_at",
+        "deleted_by",
+        "delete_reason",
+        "original_type",
+        "compacted_at",
+        "compacted_at_commit",
+        "sender",
         "source_repo",
         "source_repo_path",
         "updated_at",
@@ -4818,6 +4932,74 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         not isinstance(value, str) or not value for value in labels
     ) or len(labels) != len(set(labels)):
         raise InfrastructureFailed(f"v2 br issue {issue_id} has invalid labels")
+    comments = issue.get("comments")
+    if comments is None:
+        comments = []
+    if (
+        not isinstance(comments, list)
+        or len(comments) > V2_AUDIT_EVENTS_PER_ISSUE_CAP
+    ):
+        raise InfrastructureFailed(
+            f"v2 br issue {issue_id} has invalid comments"
+        )
+    previous_comment_order: tuple[datetime, int] | None = None
+    comment_ids: set[int] = set()
+    for comment_index, comment in enumerate(comments):
+        if (
+            not isinstance(comment, dict)
+            or set(comment) != V2_SOURCE_COMMENT_FIELDS
+            or type(comment.get("id")) is not int
+            or comment["id"] <= 0
+            or comment["id"] in comment_ids
+            or comment.get("issue_id") != issue_id
+            or not isinstance(comment.get("author"), str)
+            or not comment["author"]
+            or not isinstance(comment.get("text"), str)
+            or not isinstance(comment.get("created_at"), str)
+        ):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid comment {comment_index}"
+            )
+        comment_timestamp = v2_parse_timestamp(
+            comment["created_at"],
+            label=f"v2 br issue {issue_id} comment {comment_index}",
+        )
+        comment_order = (comment_timestamp, comment["id"])
+        if (
+            previous_comment_order is not None
+            and comment_order <= previous_comment_order
+        ):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} comments are not ordered by "
+                "created_at then ID ascending"
+            )
+        previous_comment_order = comment_order
+        comment_ids.add(comment["id"])
+    events = issue.get("events")
+    if events is not None and events != []:
+        raise InfrastructureFailed(
+            f"v2 br show unexpectedly returned events for {issue_id}"
+        )
+    rollup = issue.get("rollup")
+    if rollup is not None:
+        if (
+            not isinstance(rollup, dict)
+            or set(rollup) != V2_SOURCE_ROLLUP_FIELDS
+            or not isinstance(rollup.get("status"), str)
+            or not rollup["status"]
+            or not isinstance(rollup.get("descendants"), dict)
+            or len(rollup["descendants"]) > V2_INVENTORY_ROWS_CAP
+            or any(
+                not isinstance(status, str)
+                or not status
+                or type(count) is not int
+                or count < 0
+                for status, count in rollup["descendants"].items()
+            )
+        ):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid rollup"
+            )
     estimate = issue.get("estimated_minutes")
     if estimate is not None and (
         type(estimate) is not int or estimate < 0
@@ -4825,10 +5007,19 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         raise InfrastructureFailed(
             f"v2 br issue {issue_id} has invalid estimated minutes"
         )
-    if "ephemeral" in issue and type(issue["ephemeral"]) is not bool:
-        raise InfrastructureFailed(
-            f"v2 br issue {issue_id} has invalid ephemeral state"
-        )
+    for boolean_field in ("ephemeral", "pinned", "is_template"):
+        if boolean_field in issue and type(issue[boolean_field]) is not bool:
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid {boolean_field} state"
+            )
+    for integer_field in ("compaction_level", "original_size"):
+        value = issue.get(integer_field)
+        if value is not None and (
+            type(value) is not int or value < 0
+        ):
+            raise InfrastructureFailed(
+                f"v2 br issue {issue_id} has invalid {integer_field}"
+            )
     for relation_field in ("dependencies", "dependents"):
         relations = issue.get(relation_field)
         if relations is None:
@@ -4843,6 +5034,26 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             )
         relation_neighbors: list[str] = []
         for relation in relations:
+            if (
+                isinstance(relation, dict)
+                and (
+                    not {"id", "status", "priority"}.issubset(
+                        relation
+                    )
+                    or set(relation)
+                    - {
+                        "id",
+                        "title",
+                        "status",
+                        "priority",
+                        "dependency_type",
+                        "type",
+                    }
+                )
+            ):
+                raise InfrastructureFailed(
+                    f"v2 br issue {issue_id} has a non-closed relation row"
+                )
             if (
                 isinstance(relation, dict)
                 and "dependency_type" in relation
@@ -4878,13 +5089,26 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 or (
                     relation["id"].startswith("external:")
                     and (
-                        relation_field != "dependencies"
-                        or not relation["id"].removeprefix("external:")
-                        or relation_type == "parent-child"
+                        not relation["id"].removeprefix("external:")
+                        or (
+                            relation_field == "dependencies"
+                            and relation_type == "parent-child"
+                        )
+                        or (
+                            relation_field == "dependents"
+                            and relation_type != "parent-child"
+                        )
                     )
                 )
                 or not isinstance(relation_type, str)
                 or not relation_type
+                or (
+                    "title" in relation
+                    and (
+                        not isinstance(relation["title"], str)
+                        or not relation["title"]
+                    )
+                )
                 or (
                     relation_status
                     not in {
@@ -4929,17 +5153,74 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
 def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
     v2_validate_raw_br_issue(issue)
     stable = canonical_issue_projection(issue)
+    for relation_field in ("dependencies", "dependents"):
+        stable[relation_field] = sorted(
+            (
+                {
+                    "id": str(edge.get("id") or ""),
+                    "title": str(edge.get("title") or ""),
+                    "type": str(
+                        edge.get("dependency_type", edge.get("type", ""))
+                    ),
+                    "status": str(edge.get("status") or ""),
+                    "priority": edge.get("priority"),
+                }
+                for edge in (issue.get(relation_field) or [])
+                if isinstance(edge, dict)
+            ),
+            key=lambda edge: (edge["type"], edge["id"]),
+        )
     fields = {
         field: str(issue.get(field) or "")
         for field in ("description", "acceptance_criteria", "design", "notes")
     }
-    return {
+    comments = [
+        {
+            "id": comment["id"],
+            "issue_id": comment["issue_id"],
+            "author": comment["author"],
+            "text": comment["text"],
+            "created_at": comment["created_at"],
+        }
+        for comment in (issue.get("comments") or [])
+    ]
+    rollup = issue.get("rollup")
+    normalized_rollup = (
+        None
+        if rollup is None
+        else {
+            "status": rollup["status"],
+            "descendants": dict(sorted(rollup["descendants"].items())),
+        }
+    )
+    projection = {
         **stable,
         "ephemeral": issue.get("ephemeral") is True,
+        "pinned": issue.get("pinned") is True,
+        "is_template": issue.get("is_template") is True,
+        "due_at": str(issue.get("due_at") or ""),
+        "defer_until": str(issue.get("defer_until") or ""),
         "created_at": str(issue.get("created_at") or ""),
         "created_by": str(issue.get("created_by") or ""),
         "closed_at": str(issue.get("closed_at") or ""),
         "close_reason": str(issue.get("close_reason") or ""),
+        "closed_by_session": str(issue.get("closed_by_session") or ""),
+        "external_ref": str(issue.get("external_ref") or ""),
+        "source_system": str(issue.get("source_system") or ""),
+        "agent_context": str(issue.get("agent_context") or ""),
+        "deleted_at": str(issue.get("deleted_at") or ""),
+        "deleted_by": str(issue.get("deleted_by") or ""),
+        "delete_reason": str(issue.get("delete_reason") or ""),
+        "original_type": str(issue.get("original_type") or ""),
+        "compaction_level": int(issue.get("compaction_level") or 0),
+        "compacted_at": str(issue.get("compacted_at") or ""),
+        "compacted_at_commit": str(issue.get("compacted_at_commit") or ""),
+        "original_size": issue.get("original_size"),
+        "sender": str(issue.get("sender") or ""),
+        "comments": comments,
+        "events": [],
+        "rollup": normalized_rollup,
+        "released_fields_present": sorted(issue),
         "field_roots": {
             field: text_root(value) for field, value in sorted(fields.items())
         },
@@ -4950,6 +5231,14 @@ def v2_full_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         },
         "no_claim": V2_SOURCE_ISSUE_NO_CLAIM,
     }
+    projection["source_issue_projection_root"] = semantic_root(
+        {
+            key: value
+            for key, value in projection.items()
+            if key != "no_claim"
+        }
+    )
+    return projection
 
 
 def v2_show_all_issues(
@@ -5552,26 +5841,20 @@ def lint_result_map(lint: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
     result: dict[str, tuple[str, ...]] = {}
     for row in lint["all"]["results"]:
         issue_id = str(row.get("id", ""))
+        issue_type = str(row.get("type") or "")
         raw_sections = tuple(
             str(section) for section in (row.get("missing") or [])
         )
-        required_order = FIXTURE_REQUIRED_SECTIONS_BY_TYPE.get(
+        if len(raw_sections) != len(set(raw_sections)):
+            raise EvidenceFailed(
+                f"lint all duplicates a section for {issue_id}"
+            )
+        sections = v2_canonical_missing_sections(
             issue_type,
-            (),
-        )
-        raw_section_set = set(raw_sections)
-        sections = (
-            *(
-                section
-                for section in required_order
-                if section in raw_section_set
-            ),
-            *sorted(raw_section_set - set(required_order)),
+            raw_sections,
         )
         if not issue_id or not sections:
             raise InfrastructureFailed("lint result contains an empty ID or missing set")
-        if len(sections) != len(set(sections)):
-            raise EvidenceFailed(f"lint all duplicates a section for {issue_id}")
         if any(section not in SECTION_CODES for section in sections):
             raise EvidenceFailed(f"lint all contains an unknown section for {issue_id}")
         if issue_id in result:
@@ -5587,8 +5870,16 @@ def validate_scope_partitions(lint: Mapping[str, Any]) -> None:
         scope_ids: set[str] = set()
         for row in lint[scope]["results"]:
             issue_id = str(row.get("id", ""))
-            sections = tuple(
-                sorted(str(section) for section in (row.get("missing") or []))
+            raw_sections = tuple(
+                str(section) for section in (row.get("missing") or [])
+            )
+            if len(raw_sections) != len(set(raw_sections)):
+                raise EvidenceFailed(
+                    f"lint scope {scope} duplicates a section for {issue_id}"
+                )
+            sections = v2_canonical_missing_sections(
+                str(row.get("type") or ""),
+                raw_sections,
             )
             if issue_id in scope_ids:
                 raise EvidenceFailed(
@@ -10419,6 +10710,25 @@ FIXTURE_REQUIRED_SECTIONS_BY_TYPE = {
     "question": (),
     "custom": (),
 }
+
+
+def v2_canonical_missing_sections(
+    issue_type: str,
+    sections: Iterable[Any],
+) -> tuple[str, ...]:
+    raw_sections = tuple(str(section) for section in sections)
+    required_order = FIXTURE_REQUIRED_SECTIONS_BY_TYPE.get(issue_type, ())
+    raw_section_set = set(raw_sections)
+    return (
+        *(
+            section
+            for section in required_order
+            if section in raw_section_set
+        ),
+        *sorted(raw_section_set - set(required_order)),
+    )
+
+
 FIXTURE_MAX_WARNINGS_PER_ISSUE = 16
 FIXTURE_BR_ROOT_REL = PurePosixPath(
     "target/beads-template-hygiene/self-test-br-fixture"
@@ -10789,7 +11099,7 @@ def fixture_lint(
             raise EvidenceFailed(
                 f"fixture {issue_id} contains duplicate missing sections"
             )
-        sections = tuple(sorted(raw_sections))
+        sections = v2_canonical_missing_sections(issue_type, raw_sections)
         if len(sections) > FIXTURE_MAX_WARNINGS_PER_ISSUE:
             raise EvidenceFailed(
                 f"fixture {issue_id} exceeds per-issue warning cap"
@@ -12692,6 +13002,9 @@ def v2_parse_target_set(
 
 def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "source_issue_projection_root": str(
+            issue.get("source_issue_projection_root") or ""
+        ),
         "id": str(issue.get("id") or ""),
         "title": str(issue.get("title") or ""),
         "type": str(issue.get("type") or issue.get("issue_type") or ""),
@@ -12702,6 +13015,32 @@ def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "parent": str(issue.get("parent") or ""),
         "labels": sorted(str(value) for value in (issue.get("labels") or [])),
         "estimated_minutes": issue.get("estimated_minutes"),
+        "actionability": {
+            "ephemeral": issue.get("ephemeral") is True,
+            "pinned": issue.get("pinned") is True,
+            "is_template": issue.get("is_template") is True,
+            "due_at": str(issue.get("due_at") or ""),
+            "defer_until": str(issue.get("defer_until") or ""),
+        },
+        "governance": {
+            "external_ref": str(issue.get("external_ref") or ""),
+            "source_system": str(issue.get("source_system") or ""),
+            "agent_context_root": text_root(
+                str(issue.get("agent_context") or "")
+            ),
+            "sender": str(issue.get("sender") or ""),
+            "comments_root": semantic_root(issue.get("comments") or []),
+            "rollup": issue.get("rollup"),
+        },
+        "closure_provenance": {
+            "closed_by_session": str(
+                issue.get("closed_by_session") or ""
+            ),
+            "deleted_at": str(issue.get("deleted_at") or ""),
+            "deleted_by": str(issue.get("deleted_by") or ""),
+            "delete_reason": str(issue.get("delete_reason") or ""),
+            "original_type": str(issue.get("original_type") or ""),
+        },
         "field_roots": dict(sorted((issue.get("field_roots") or {}).items())),
         "missing_sections": sorted(
             str(value) for value in (issue.get("missing_sections") or [])
@@ -12711,6 +13050,7 @@ def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
             (
                 str(edge.get("type") or edge.get("dependency_type") or ""),
                 str(edge.get("id") or ""),
+                str(edge.get("title") or ""),
                 str(edge.get("status") or ""),
                 edge.get("priority"),
             )
@@ -12721,6 +13061,7 @@ def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
             (
                 str(edge.get("type") or edge.get("dependency_type") or ""),
                 str(edge.get("id") or ""),
+                str(edge.get("title") or ""),
                 str(edge.get("status") or ""),
                 edge.get("priority"),
             )
@@ -13084,6 +13425,7 @@ def v2_build_inventory(
                 f"v2 full source lacks target {source_row['id']}"
             )
         joined = {
+            **full_issue,
             **source_row,
             "labels": list(full_issue.get("labels") or []),
             "dependencies": list(full_issue.get("dependencies") or []),
@@ -13181,6 +13523,9 @@ def v2_build_inventory(
             },
             "clause_roots": v2_complete_clause_roots(full_issue),
             "target_root": stable_root,
+            "source_issue_projection_root": full_issue[
+                "source_issue_projection_root"
+            ],
             "v1_row_root": semantic_root(source_row),
             "dependency_neighborhood_root": v2_dependency_neighborhood_root(
                 joined
@@ -13882,6 +14227,7 @@ def v2_validate_history_projection(
     source_root: str,
     inventory: Mapping[str, Any],
     authority: Mapping[str, Any],
+    all_issues: Sequence[Mapping[str, Any]],
     audit_capture: Mapping[str, Any],
     history_contract: Mapping[str, Any],
 ) -> None:
@@ -13942,6 +14288,19 @@ def v2_validate_history_projection(
     }
     if len(inventory_by_id) != len(inventory_rows):
         raise InputRefused("v2 history inventory membership is duplicated")
+    source_issue_by_id = {
+        str(issue.get("id")): issue
+        for issue in all_issues
+        if isinstance(issue, Mapping)
+        and isinstance(issue.get("id"), str)
+    }
+    if (
+        len(source_issue_by_id) != len(all_issues)
+        or not set(inventory_by_id).issubset(source_issue_by_id)
+    ):
+        raise InputRefused(
+            "v2 history source issue membership is duplicated or incomplete"
+        )
     expected_history_ids = sorted(
         issue_id
         for issue_id, row in inventory_by_id.items()
@@ -14070,6 +14429,9 @@ def v2_validate_history_projection(
             != row["field_roots"].get("notes")
             or not isinstance(row["comments"], list)
             or len(row["comments"]) > V2_AUDIT_EVENTS_PER_ISSUE_CAP
+            or not isinstance(row["tracker_comments"], list)
+            or len(row["tracker_comments"])
+            > V2_AUDIT_EVENTS_PER_ISSUE_CAP
             or not isinstance(row["citations"], list)
             or len(row["citations"])
             > V2_HISTORY_CITATIONS_PER_ISSUE_CAP
@@ -14155,6 +14517,25 @@ def v2_validate_history_projection(
         if row["comments"] != expected_comments:
             raise EvidenceFailed(
                 f"v2 history row {index} comment projection differs"
+            )
+        expected_tracker_comments = source_issue_by_id[issue_id]["comments"]
+        for comment_index, comment in enumerate(row["tracker_comments"]):
+            if not isinstance(comment, dict):
+                raise InputRefused(
+                    f"v2 history row {index} tracker comment "
+                    f"{comment_index} is not an object"
+                )
+            v2_exact_keys(
+                comment,
+                V2_SOURCE_COMMENT_FIELDS,
+                label=(
+                    f"v2 history row {index} tracker comment "
+                    f"{comment_index}"
+                ),
+            )
+        if row["tracker_comments"] != expected_tracker_comments:
+            raise EvidenceFailed(
+                f"v2 history row {index} tracker comment projection differs"
             )
 
         citation_order: list[tuple[str, str]] = []
@@ -20431,8 +20812,6 @@ def v2_contains_sensitive_context_start(value: str) -> bool:
 
 
 def v2_is_sensitive_mapping_key(value: str) -> bool:
-    if v2_is_sensitive_key(value):
-        return True
     assignment_name = value.split("=", 1)[0]
     if assignment_name != value and v2_is_sensitive_key(assignment_name):
         return True
@@ -20490,7 +20869,16 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
             and "=" not in value
             and v2_is_sensitive_key(option_name.lstrip("-"))
         )
-        assignment_key = value.split("=", 1)[0] if "=" in value else ""
+        assignment_match = re.match(
+            r"^(?P<key>--?[A-Za-z][-A-Za-z0-9_.:\[\]]{0,127}"
+            r"|[A-Za-z_][-A-Za-z0-9_.:\[\]]{0,127})=",
+            value,
+        )
+        assignment_key = (
+            assignment_match.group("key")
+            if assignment_match is not None
+            else ""
+        )
         sensitive_assignment = bool(
             assignment_key
             and v2_is_sensitive_key(assignment_key.lstrip("-"))
@@ -20753,6 +21141,9 @@ def v2_assertion_evidence_projection(
                 )
             redacted_key = v2_redact_contextual_text(key)
             mapping_key_sensitive = v2_is_sensitive_mapping_key(key)
+            mapping_value_sensitive = (
+                v2_is_sensitive_key(key) or mapping_key_sensitive
+            )
             projected_key = (
                 key
                 if redacted_key == key
@@ -20768,7 +21159,7 @@ def v2_assertion_evidence_projection(
                 )
             projected[projected_key] = v2_assertion_evidence_projection(
                 item,
-                sensitive=mapping_key_sensitive,
+                sensitive=mapping_value_sensitive,
                 depth=depth + 1,
             )
         return projected
@@ -23441,6 +23832,19 @@ def v2_validate_source_full_issue(
         "created_by",
         "closed_at",
         "close_reason",
+        "closed_by_session",
+        "due_at",
+        "defer_until",
+        "external_ref",
+        "source_system",
+        "agent_context",
+        "deleted_at",
+        "deleted_by",
+        "delete_reason",
+        "original_type",
+        "compacted_at",
+        "compacted_at_commit",
+        "sender",
         "source_repo",
         "no_claim",
     )
@@ -23452,6 +23856,18 @@ def v2_validate_source_full_issue(
         or type(issue["priority"]) is not int
         or issue["priority"] not in range(5)
         or type(issue["ephemeral"]) is not bool
+        or type(issue["pinned"]) is not bool
+        or type(issue["is_template"]) is not bool
+        or type(issue["compaction_level"]) is not int
+        or issue["compaction_level"] < 0
+        or (
+            issue["original_size"] is not None
+            and (
+                type(issue["original_size"]) is not int
+                or issue["original_size"] < 0
+            )
+        )
+        or issue["events"] != []
         or issue["no_claim"] != V2_SOURCE_ISSUE_NO_CLAIM
         or (
             issue["estimated_minutes"] is not None
@@ -23463,6 +23879,37 @@ def v2_validate_source_full_issue(
     ):
         raise InputRefused(
             f"v2 source all-issue row {index} has invalid core scalars"
+        )
+    released_fields_present = issue["released_fields_present"]
+    if (
+        not isinstance(released_fields_present, list)
+        or released_fields_present != sorted(set(released_fields_present))
+        or any(
+            not isinstance(field, str)
+            or field not in V2_RAW_BR_SHOW_FIELDS
+            for field in released_fields_present
+        )
+        or not {"id", "title", "status", "priority"}.issubset(
+            released_fields_present
+        )
+    ):
+        raise InputRefused(
+            f"v2 source all-issue row {index} released field-presence "
+            "projection is malformed"
+        )
+    expected_source_issue_projection_root = semantic_root(
+        {
+            key: value
+            for key, value in issue.items()
+            if key not in {"no_claim", "source_issue_projection_root"}
+        }
+    )
+    if (
+        issue["source_issue_projection_root"]
+        != expected_source_issue_projection_root
+    ):
+        raise EvidenceFailed(
+            f"v2 source all-issue row {index} projection root differs"
         )
     v2_validate_issue_id(
         issue["id"],
@@ -23485,6 +23932,87 @@ def v2_validate_source_full_issue(
         raise InputRefused(
             f"v2 source all-issue row {index} has noncanonical labels"
         )
+    comments = issue["comments"]
+    if (
+        not isinstance(comments, list)
+        or len(comments) > V2_AUDIT_EVENTS_PER_ISSUE_CAP
+    ):
+        raise InputRefused(
+            f"v2 source all-issue row {index} has malformed comments"
+        )
+    previous_comment_order: tuple[datetime, int] | None = None
+    comment_ids: set[int] = set()
+    for comment_index, comment in enumerate(comments):
+        if not isinstance(comment, dict):
+            raise InputRefused(
+                f"v2 source comment {comment_index} is not an object"
+            )
+        v2_exact_keys(
+            comment,
+            V2_SOURCE_COMMENT_FIELDS,
+            label=(
+                f"v2 source all-issue row {index} comment {comment_index}"
+            ),
+        )
+        if (
+            type(comment["id"]) is not int
+            or comment["id"] <= 0
+            or comment["id"] in comment_ids
+            or comment["issue_id"] != issue["id"]
+            or not isinstance(comment["author"], str)
+            or not comment["author"]
+            or not isinstance(comment["text"], str)
+            or not isinstance(comment["created_at"], str)
+        ):
+            raise InputRefused(
+                f"v2 source all-issue row {index} has invalid comment "
+                f"{comment_index}"
+            )
+        comment_timestamp = v2_parse_timestamp(
+            comment["created_at"],
+            label=(
+                f"v2 source all-issue row {index} comment {comment_index}"
+            ),
+        )
+        comment_order = (comment_timestamp, comment["id"])
+        if (
+            previous_comment_order is not None
+            and comment_order <= previous_comment_order
+        ):
+            raise InputRefused(
+                f"v2 source all-issue row {index} comments are noncanonical"
+            )
+        previous_comment_order = comment_order
+        comment_ids.add(comment["id"])
+    rollup = issue["rollup"]
+    if rollup is not None:
+        if not isinstance(rollup, dict):
+            raise InputRefused(
+                f"v2 source all-issue row {index} rollup is not an object"
+            )
+        v2_exact_keys(
+            rollup,
+            V2_SOURCE_ROLLUP_FIELDS,
+            label=f"v2 source all-issue row {index} rollup",
+        )
+        descendants = rollup["descendants"]
+        if (
+            not isinstance(rollup["status"], str)
+            or not rollup["status"]
+            or not isinstance(descendants, dict)
+            or len(descendants) > V2_INVENTORY_ROWS_CAP
+            or list(descendants) != sorted(descendants)
+            or any(
+                not isinstance(status, str)
+                or not status
+                or type(count) is not int
+                or count < 0
+                for status, count in descendants.items()
+            )
+        ):
+            raise InputRefused(
+                f"v2 source all-issue row {index} rollup is malformed"
+            )
     for relation_field in ("dependencies", "dependents"):
         relations = issue[relation_field]
         if (
@@ -23516,13 +24044,20 @@ def v2_validate_source_full_issue(
                 or (
                     relation["id"].startswith("external:")
                     and (
-                        relation_field != "dependencies"
-                        or not relation["id"].removeprefix("external:")
-                        or relation["type"] == "parent-child"
+                        not relation["id"].removeprefix("external:")
+                        or (
+                            relation_field == "dependencies"
+                            and relation["type"] == "parent-child"
+                        )
+                        or (
+                            relation_field == "dependents"
+                            and relation["type"] != "parent-child"
+                        )
                     )
                 )
                 or not isinstance(relation["type"], str)
                 or not relation["type"]
+                or not isinstance(relation["title"], str)
                 or (
                     relation["status"] not in STATUS_SCOPES
                 )
@@ -23664,9 +24199,15 @@ def v2_validate_source_graph(
                 neighbor_id = relation["id"]
                 if neighbor_id.startswith("external:"):
                     if (
-                        relation_field != "dependencies"
-                        or not neighbor_id.removeprefix("external:")
-                        or relation["type"] == "parent-child"
+                        not neighbor_id.removeprefix("external:")
+                        or (
+                            relation_field == "dependencies"
+                            and relation["type"] == "parent-child"
+                        )
+                        or (
+                            relation_field == "dependents"
+                            and relation["type"] != "parent-child"
+                        )
                     ):
                         raise EvidenceFailed(
                             "v2 source graph external relation has an invalid "
@@ -23682,9 +24223,11 @@ def v2_validate_source_graph(
                 if (
                     relation["status"] != neighbor["status"]
                     or relation["priority"] != neighbor["priority"]
+                    or relation["title"] != neighbor["title"]
                 ):
                     raise EvidenceFailed(
-                        "v2 source graph relation status or priority disagrees "
+                        "v2 source graph relation title, status, or priority "
+                        "disagrees "
                         f"with neighbor {neighbor_id}"
                     )
                 reciprocal_identity = (
@@ -26611,6 +27154,9 @@ def v2_synthetic_source_issue(
 ) -> dict[str, Any]:
     """Reconstruct the production source shape from a normalized test row."""
     return {
+        "source_issue_projection_root": str(
+            target.get("source_issue_projection_root") or ""
+        ),
         "id": str(target.get("id") or ""),
         "title": str(target.get("title") or ""),
         "type": str(
@@ -33073,29 +33619,29 @@ def v2_execute_source_cases(
                 "forged_root_terminal": forged_witness_root_error.terminal,
             },
         )
-        byte_split_witness = strict_json_loads(
+        incoherent_changed_base_witness = strict_json_loads(
             canonical_bytes(exported_witness),
-            label="fixture export witness byte split",
+            label="fixture export witness incoherent changed-base seed",
             require_canonical=True,
         )
         for comparison in (
-            byte_split_witness["base_comparison"],
-            byte_split_witness["base_reuse_plan"]["comparison"],
+            incoherent_changed_base_witness["base_comparison"],
+            incoherent_changed_base_witness["base_reuse_plan"]["comparison"],
         ):
             comparison["root_hashes_match"] = False
             comparison["drift_detected"] = True
             comparison["safe_reuse_prefix_chunks"] = 0
             comparison["first_changed_chunk_index"] = 0
-        byte_split_witness["base_reuse_plan"]["actions"][0][
+        incoherent_changed_base_witness["base_reuse_plan"]["actions"][0][
             "action"
         ] = "rebuild_candidate"
-        byte_split_error = expect_error(
+        incoherent_changed_base_error = expect_error(
             EvidenceFailed,
             lambda: v2_normalize_br_export_witness(
-                byte_split_witness,
+                incoherent_changed_base_witness,
                 error_type=EvidenceFailed,
             ),
-            contains="action bytes differ",
+            contains="changed base bytes cannot contain",
         )
         false_root_drift_witness = strict_json_loads(
             canonical_bytes(exported_witness),
@@ -33184,18 +33730,20 @@ def v2_execute_source_cases(
         )
         checks.check(
             "export-witness-comparison-actions-and-root-bound",
-            byte_split_error.terminal == "EvidenceFailed"
+            incoherent_changed_base_error.terminal == "EvidenceFailed"
             and root_match_error.terminal == "EvidenceFailed"
             and phantom_changed_base_error.terminal == "EvidenceFailed"
             and zero_byte_nonempty_error.terminal == "EvidenceFailed",
             expected={
-                "byte_split": "EvidenceFailed",
+                "incoherent_changed_base": "EvidenceFailed",
                 "false_root_drift": "EvidenceFailed",
                 "phantom_changed_base": "EvidenceFailed",
                 "zero_byte_nonempty": "EvidenceFailed",
             },
             observed={
-                "byte_split": byte_split_error.terminal,
+                "incoherent_changed_base": (
+                    incoherent_changed_base_error.terminal
+                ),
                 "false_root_drift": root_match_error.terminal,
                 "phantom_changed_base": (
                     phantom_changed_base_error.terminal
@@ -41391,6 +41939,18 @@ def v2_execute_artifact_cases(
         sanitized_embedded_secret_argv = v2_sanitized_argv(
             embedded_secret_argv
         )
+        expected_embedded_secret_argv = [
+            "ordinary=visible token=<redacted>",
+            "--ordinary=visible --token <redacted>",
+            "prefix: visible api_key=<redacted>",
+            "foo=ok, token=<redacted>",
+            *(
+                v2_redacted_value(value)
+                for value in embedded_secret_argv[4:13]
+            ),
+            "credential.value: <redacted>",
+            v2_redacted_value(embedded_secret_argv[14]),
+        ]
         preserved_arguments = {
             2: "--access-token",
             4: "--password",
@@ -41514,23 +42074,7 @@ def v2_execute_artifact_cases(
         checks.check(
             "embedded-argv-sensitive-tail-redacted",
             sanitized_embedded_secret_argv
-            == [
-                "ordinary=visible token=<redacted>",
-                "--ordinary=visible --token <redacted>",
-                "prefix: visible api_key=<redacted>",
-                "foo=ok, token=<redacted>",
-                "token.value=<redacted>",
-                "token[0]=<redacted>",
-                "token_value=<redacted>",
-                "api_key_value=<redacted>",
-                "access_token_value=<redacted>",
-                "refresh_token_value=<redacted>",
-                "client_secret_value=<redacted>",
-                "secret_access_key_value=<redacted>",
-                "secret_key=<redacted>",
-                "credential.value: <redacted>",
-                "x.api_key.value=<redacted>",
-            ]
+            == expected_embedded_secret_argv
             and all(
                 secret
                 not in canonical_bytes(
