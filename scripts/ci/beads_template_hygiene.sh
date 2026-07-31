@@ -1872,7 +1872,7 @@ def br_read_json(*arguments: str) -> Any:
 
 
 def br_version() -> dict[str, Any]:
-    document = br_json("version", "--json")
+    document = br_read_json("version", "--json")
     if not isinstance(document, dict):
         raise InfrastructureFailed("br version --json did not return an object")
     required = {"version", "build", "commit", "target", "features"}
@@ -1881,16 +1881,75 @@ def br_version() -> dict[str, Any]:
     return {key: document[key] for key in sorted(required)}
 
 
+def v2_normalize_br_capability_commands(
+    value: Any,
+    *,
+    error_type: type[HarnessError],
+) -> list[dict[str, Any]]:
+    fields = {
+        "name",
+        "summary",
+        "operation",
+        "workspace",
+        "machine_output",
+        "examples",
+    }
+    if not isinstance(value, list) or len(value) > V2_COMMAND_ARGUMENTS_CAP:
+        raise error_type("br capabilities commands are malformed or over cap")
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(value):
+        if not isinstance(row, dict) or set(row) != fields:
+            raise error_type(
+                f"br capabilities command {index} has a non-closed schema"
+            )
+        if any(
+            not isinstance(row[field], str) or not row[field]
+            for field in ("name", "summary", "operation", "workspace")
+        ) or row["operation"] not in {"read", "write", "mixed", "unknown"}:
+            raise error_type(
+                f"br capabilities command {index} has invalid scalars"
+            )
+        for field in ("machine_output", "examples"):
+            values = row[field]
+            if (
+                not isinstance(values, list)
+                or len(values) > V2_COMMAND_ARGUMENTS_CAP
+                or any(not isinstance(item, str) or not item for item in values)
+                or len(values) != len(set(values))
+            ):
+                raise error_type(
+                    f"br capabilities command {index} has invalid {field}"
+                )
+        normalized.append(
+            {
+                "name": row["name"],
+                "summary": row["summary"],
+                "operation": row["operation"],
+                "workspace": row["workspace"],
+                "machine_output": list(row["machine_output"]),
+                "examples": list(row["examples"]),
+            }
+        )
+    names = [row["name"] for row in normalized]
+    if names != sorted(set(names)):
+        raise error_type("br capabilities command names are noncanonical")
+    return normalized
+
+
 def br_capabilities() -> dict[str, Any]:
-    document = br_json("capabilities", "--json")
+    document = br_read_json("capabilities", "--json")
     if not isinstance(document, dict):
         raise InfrastructureFailed("br capabilities --json did not return an object")
     if document.get("contract_version") != "br.capabilities.v1":
         raise InfrastructureFailed("unknown br capabilities contract")
+    commands = v2_normalize_br_capability_commands(
+        document.get("commands"),
+        error_type=InfrastructureFailed,
+    )
     return {
         "contract_version": document["contract_version"],
-        "commands": document.get("commands", {}),
-        "operation_count": len(document.get("operations", [])),
+        "commands": commands,
+        "operation_count": len(commands),
     }
 
 
@@ -9404,6 +9463,7 @@ def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "owner": str(issue.get("owner") or ""),
         "parent": str(issue.get("parent") or ""),
         "labels": sorted(str(value) for value in (issue.get("labels") or [])),
+        "estimated_minutes": issue.get("estimated_minutes"),
         "field_roots": dict(sorted((issue.get("field_roots") or {}).items())),
         "missing_sections": sorted(
             str(value) for value in (issue.get("missing_sections") or [])
@@ -9722,11 +9782,16 @@ def v2_active_work_context(issue: Mapping[str, Any]) -> dict[str, Any]:
     assignee = str(issue.get("assignee") or "")
     status = str(issue.get("status") or "")
     conflict = status == "in_progress" or bool(assignee)
+    generated_child_desired_status = (
+        "deferred"
+        if conflict or status in {"blocked", "deferred"}
+        else "open"
+    )
     document = {
         "status": status,
         "tracker_assignee": assignee,
         "conflict": conflict,
-        "generated_child_desired_status": "deferred" if conflict else "open",
+        "generated_child_desired_status": generated_child_desired_status,
         "coordination_acknowledgement_required": conflict,
         "agent_mail_hint": None,
         "agent_mail_hint_authoritative": False,
@@ -10012,33 +10077,16 @@ def v2_validate_source_limits(
 
 
 def v2_campaign_epoch(snapshot: LiveSnapshot) -> tuple[str, dict[str, Any]]:
-    all_issues = list(snapshot.all_issues or tuple(snapshot.issues))
-    all_issues.sort(key=lambda row: row["id"])
+    nonclosed_issues = sorted(
+        (
+            row
+            for row in (snapshot.all_issues or tuple(snapshot.issues))
+            if row["status"] != "closed"
+        ),
+        key=lambda row: row["id"],
+    )
     projection = [
-        {
-            "id": row["id"],
-            "status": row["status"],
-            "priority": row["priority"],
-            "assignee": row["assignee"],
-            "owner": row["owner"],
-            "parent": row["parent"],
-            "field_roots": {
-                field: text_root(str(row.get(field) or ""))
-                for field in (
-                    "description",
-                    "acceptance_criteria",
-                    "design",
-                    "notes",
-                )
-            },
-            "dependency_neighborhood_root": semantic_root(
-                {
-                    "dependencies": row.get("dependencies") or [],
-                    "dependents": row.get("dependents") or [],
-                }
-            ),
-        }
-        for row in all_issues
+        v2_stable_issue_projection(row) for row in nonclosed_issues
     ]
     root = semantic_root(projection)
     return root, {
@@ -10258,7 +10306,7 @@ def v2_capture_one_audit(
     *,
     capture_ordinal: int,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    argv = ["br", "audit", "log", issue_id, "--json"]
+    argv = ["br", "audit", "log", issue_id, "--json", *BR_READ_FLAGS]
     receipts: list[dict[str, Any]] = []
     completed = run_command(
         argv,
@@ -13592,16 +13640,9 @@ def v2_packing_group_key(
 ) -> tuple[Any, ...]:
     compatibility_key = str(authority["compatibility"]["key"] or "")
     grouping_identity = compatibility_key or f"singleton:{target['id']}"
-    coordination_vector = (
-        str(authority["coordination_assignee"]),
-        str(authority["declared_domain_owner"]),
-        str(authority["declared_acceptance_owner"]),
-        str(target["user_effect"]),
-    )
     return (
         *v2_hard_vector(target, authority),
         grouping_identity,
-        coordination_vector,
     )
 
 
@@ -13614,7 +13655,7 @@ def v2_packing_input_bindings(
     }
     if len(group_keys) != 1:
         raise EvidenceFailed(
-            "packing input crosses a hard, compatibility, or coordination group"
+            "packing input crosses a hard or compatibility group"
         )
     load_rows = [
         {
@@ -19717,7 +19758,14 @@ def v2_validate_audit_capture(
             or not isinstance(issue_id, str)
             or (ordinal, issue_id) != expected_order[index]
             or receipt["argv"]
-            != ["br", "audit", "log", issue_id, "--json"]
+            != [
+                "br",
+                "audit",
+                "log",
+                issue_id,
+                "--json",
+                *BR_READ_FLAGS,
+            ]
             or receipt["exit_code"] != 0
             or type(receipt["exit_code"]) is not int
             or receipt["result_category"] != "SUCCESS"
