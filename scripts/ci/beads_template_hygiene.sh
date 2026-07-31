@@ -28553,11 +28553,31 @@ def v2_raw_attribute_without_user_code(value: Any, name: str) -> Any:
                 "refusal-state trusted module attribute path is not statically "
                 "inspectable"
             ) from error
-    if not isinstance(attributes, Mapping) or name not in attributes:
-        raise EvidenceFailed(
-            "refusal-state trusted module attribute path is absent"
-        )
-    return attributes[name]
+    if isinstance(attributes, Mapping) and name in attributes:
+        return attributes[name]
+    if not isinstance(value, (types.ModuleType, type)):
+        value_type = type(value)
+        for owner in type.__getattribute__(value_type, "__mro__"):
+            owner_attributes = type.__getattribute__(owner, "__dict__")
+            if name not in owner_attributes:
+                continue
+            descriptor = owner_attributes[name]
+            if isinstance(descriptor, types.FunctionType):
+                return types.MethodType(descriptor, value)
+            if type(descriptor) is staticmethod:
+                return object.__getattribute__(descriptor, "__func__")
+            if type(descriptor) is classmethod:
+                return types.MethodType(
+                    object.__getattribute__(descriptor, "__func__"),
+                    value_type,
+                )
+            raise EvidenceFailed(
+                "refusal-state trusted module inherited attribute requires "
+                "descriptor execution"
+            )
+    raise EvidenceFailed(
+        "refusal-state trusted module attribute path is absent"
+    )
 
 
 def v2_project_module_value(
@@ -28850,7 +28870,8 @@ def v2_state_projection_value(
     try:
         metadata = (
             {}
-            if type(value) in V2_REFUSAL_PATH_TYPES
+            if value is os.environ
+            or type(value) in V2_REFUSAL_PATH_TYPES
             or isinstance(value, (types.FunctionType, types.ModuleType, type))
             else v2_state_object_metadata(
                 value,
@@ -28921,6 +28942,50 @@ def v2_state_projection_value(
                 "flags": value.flags,
                 "groups": value.groups,
                 "groupindex": dict(value.groupindex),
+            })
+        if value is os.environ:
+            environment_state = object.__getattribute__(value, "__dict__")
+            if type(environment_state) is not dict:
+                raise EvidenceFailed(
+                    "refusal-state process environment dictionary is not exact"
+                )
+            raw_data = environment_state.get("_data")
+            if type(raw_data) is not dict:
+                raise EvidenceFailed(
+                    "refusal-state process environment backing data is not exact"
+                )
+            codec_rows: list[dict[str, Any]] = []
+            for codec_name in (
+                "encodekey",
+                "decodekey",
+                "encodevalue",
+                "decodevalue",
+            ):
+                codec = environment_state.get(codec_name)
+                if not isinstance(codec, types.FunctionType):
+                    raise EvidenceFailed(
+                        "refusal-state process environment codec is not an "
+                        "exact Python function"
+                    )
+                codec_rows.append({
+                    "name": codec_name,
+                    "state": v2_trusted_callable_projection(
+                        codec,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    ),
+                })
+            return finish({
+                "kind": "process-environment",
+                "type": v2_type_identity(type(value)),
+                "raw_data": v2_state_projection_value(
+                    raw_data,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "codecs": codec_rows,
             })
         if isinstance(value, Mapping) and not isinstance(value, dict):
             raise EvidenceFailed(
