@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -67,7 +68,7 @@ CASE_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v1"
 
 V2_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v2"
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = (
-    "sha256-v1:91fe894cf73f81fedde91f3c12456b0a7fdcacf1b89b1353ddbaa743c6210cba"
+    "sha256-v1:a70003bbd3b33d1a781078199014c0016a0686e5afa14ffddc376f3b9b3dd8b4"
 )
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY = (
     "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
@@ -2863,6 +2864,40 @@ def v2_ready_issue_ids(document: Any, *, label: str) -> list[str]:
     return issue_ids
 
 
+def v2_validate_issue_universe_membership(
+    *,
+    listed_issue_ids: Sequence[str],
+    tombstone_issue_ids: Sequence[str],
+    tracker_status: Mapping[str, Any],
+    br_version: str,
+) -> list[str]:
+    listed = list(listed_issue_ids)
+    tombstones = list(tombstone_issue_ids)
+    overlap = sorted(set(listed) & set(tombstones))
+    if overlap:
+        raise InfrastructureFailed(
+            "released br list overlaps ordinary and tombstone membership; "
+            f"first={overlap[0]}"
+        )
+    summary = tracker_status.get("summary")
+    if not isinstance(summary, Mapping):
+        raise InfrastructureFailed(
+            "released br status summary is unavailable for issue-universe "
+            "membership validation"
+        )
+    if (
+        len(listed) != summary.get("total_issues")
+        or len(tombstones) != summary.get("tombstone_issues")
+    ):
+        raise NoData(
+            "UnsupportedCapability: released br "
+            f"{br_version} cannot enumerate template rows; list/status "
+            "membership proves a hidden or otherwise unsupported issue "
+            "universe"
+        )
+    return sorted([*listed, *tombstones])
+
+
 def load_case_manifest() -> dict[str, Any]:
     path = resolve_safe(str(CASE_MANIFEST_REL), label="case manifest", must_exist=True)
     try:
@@ -3113,6 +3148,14 @@ V2_MANIFEST_TABLE_KEYS = {
         "capture_drift",
         "count_preserving_relevant_drift",
         "all_status_partition",
+        "observed_custom_status_policy",
+        "terminal_statuses",
+        "legacy_planning_statuses",
+        "zero_set_status_scope_policy",
+        "tombstone_finding_policy",
+        "status_grammar",
+        "rollup_descendant_count_policy",
+        "rollup_status_policy",
         "priorities",
         "issue_types",
         "warning_classes",
@@ -3522,6 +3565,8 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_log_line_bytes",
         "max_assertion_checks",
         "max_check_id_bytes",
+        "max_status_bytes",
+        "max_first_divergence_bytes",
         "max_local_issue_id_bytes",
         "max_external_relation_id_bytes",
         "max_diagnostic_summary_bytes",
@@ -4101,6 +4146,8 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
         "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
         "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
+        "max_status_bytes": V2_STATUS_BYTES_CAP,
+        "max_first_divergence_bytes": V2_FIRST_DIVERGENCE_BYTES_CAP,
         "max_local_issue_id_bytes": V2_LOCAL_ISSUE_ID_BYTES_CAP,
         "max_external_relation_id_bytes": (
             V2_EXTERNAL_RELATION_ID_BYTES_CAP
@@ -4311,7 +4358,43 @@ def load_case_manifest_v2() -> dict[str, Any]:
     }
     if (
         source_contract["inventory_scope"]
-        != "ALL_NONCLOSED_PLUS_CLOSED_FINDINGS"
+        != (
+            "ALL_NONTERMINAL_PLUS_CLOSED_FINDINGS_"
+            "TOMBSTONE_FINDINGS_REFUSED"
+        )
+        or not v2_manifest_ordered_string_list(
+            source_contract["all_status_partition"],
+            V2_RELEASED_KNOWN_STATUSES,
+        )
+        or source_contract["observed_custom_status_policy"]
+        != (
+            "CANONICAL_UTF8_BYTE_ORDER_AFTER_RELEASED_KNOWN_"
+            "STATUSES"
+        )
+        or not v2_manifest_ordered_string_list(
+            source_contract["terminal_statuses"],
+            tuple(sorted(V2_TERMINAL_STATUSES)),
+        )
+        or not v2_manifest_ordered_string_list(
+            source_contract["legacy_planning_statuses"],
+            STATUS_SCOPES,
+        )
+        or source_contract["zero_set_status_scope_policy"]
+        != (
+            "FIVE_PRIORITIES_X_RELEASED_KNOWN_PLUS_OBSERVED_CUSTOM_"
+            "WITH_ZERO_RECEIPTS"
+        )
+        or source_contract["tombstone_finding_policy"]
+        != "REFUSE_UNSUPPORTED_DELETED_RECORD_ADJUDICATION"
+        or source_contract["status_grammar"]
+        != (
+            "NFC_STRIPPED_NONBLANK_MAX_128_UTF8_NO_CC_CF_CS_COMMA_"
+            "OR_RESERVED_ALL"
+        )
+        or source_contract["rollup_descendant_count_policy"]
+        != "EXACT_TRANSITIVE_PARENT_CHILD_GRAPH_STATUS_COUNTS"
+        or source_contract["rollup_status_policy"]
+        != "CANONICAL_RETAINED_WORKFLOW_STATUS_NOT_GRAPH_DERIVED"
         or source_contract["zero_warning_rows_require_review_receipt"]
         is not True
         or not v2_manifest_ordered_string_list(
@@ -4557,7 +4640,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
             V2_BR_WITNESS_BATCH_FIELDS,
         )
         or source_contract["export_witness_issue_count_policy"]
-        != "NON_EPHEMERAL_SOURCE_ISSUE_COUNT"
+        != "NON_EPHEMERAL_NON_WISP_SOURCE_ISSUE_COUNT"
         or source_contract["audit_capture_position"]
         != V2_AUDIT_CAPTURE_POSITION
     ):
@@ -6762,6 +6845,14 @@ V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS = frozenset(
         "worktree_hash",
     }
 )
+V2_BR_GIT_EXPORT_PROBED_REQUIRED_RAW_FIELDS = frozenset(
+    {
+        "available",
+        "tracked",
+        "worktree_clean",
+        "index_clean",
+    }
+)
 V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS = frozenset(
     {"available", "reason", "diagnostic_command"}
 )
@@ -7040,7 +7131,7 @@ def v2_normalize_br_sync_status(
         value = normalized[field]
         if value is not None and not isinstance(value, str):
             raise error_type(f"br sync status {field} is not a string or null")
-        if value:
+        if value is not None:
             try:
                 v2_parse_timestamp(value, label=f"br sync status {field}")
             except HarnessError as error:
@@ -7137,7 +7228,9 @@ def v2_normalize_br_sync_status(
     git_export_fields = set(raw_git_export)
     if (
         input_kind == "released_live"
-        and git_export_fields == V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS
+        and V2_BR_GIT_EXPORT_PROBED_REQUIRED_RAW_FIELDS
+        <= git_export_fields
+        and git_export_fields <= V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS
     ):
         normalized_git_export = {
             "state": "PROBED",
@@ -7145,6 +7238,8 @@ def v2_normalize_br_sync_status(
             "reason": None,
             "diagnostic_command": None,
         }
+        normalized_git_export.setdefault("head_hash", None)
+        normalized_git_export.setdefault("worktree_hash", None)
     elif (
         input_kind == "released_live"
         and git_export_fields == V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS
@@ -7213,13 +7308,6 @@ def v2_normalize_br_sync_status(
         ):
             raise error_type(
                 "br sync git export worktree hash disagrees with file presence"
-            )
-        if normalized_git_export["worktree_clean"] and (
-            not normalized_git_export["tracked"]
-            or normalized_git_export["worktree_hash"] is None
-        ):
-            raise error_type(
-                "clean br sync worktree lacks tracked content evidence"
             )
         if normalized_git_export["index_clean"] and (
             normalized_git_export["tracked"]
@@ -8596,22 +8684,12 @@ def v2_capture_live_round(
         tombstones,
         label=f"v2 br tombstone list capture {ordinal}",
     )
-    if set(listed_issue_ids) & set(tombstone_issue_ids):
-        raise InfrastructureFailed(
-            "released br list overlaps ordinary and tombstone membership"
-        )
-    if (
-        len(listed_issue_ids) != status["summary"]["total_issues"]
-        or len(tombstone_issue_ids)
-        != status["summary"]["tombstone_issues"]
-    ):
-        raise NoData(
-            "UnsupportedCapability: released br "
-            f"{version['version']} cannot enumerate "
-            "template rows; list/status membership proves a hidden or "
-            "otherwise unsupported issue universe"
-        )
-    issue_ids = sorted([*listed_issue_ids, *tombstone_issue_ids])
+    issue_ids = v2_validate_issue_universe_membership(
+        listed_issue_ids=listed_issue_ids,
+        tombstone_issue_ids=tombstone_issue_ids,
+        tracker_status=status,
+        br_version=version["version"],
+    )
     ready_document = br_read_json(
         "ready",
         "--json",
@@ -11099,7 +11177,9 @@ FIXTURE_BR_LOCK_REL = PurePosixPath(
 )
 FIXTURE_BR_LOCK_TIMEOUT_SECONDS = 30.0
 FIXTURE_BR_LOCK_POLL_SECONDS = 0.05
-FIXTURE_BR_STABLE_TITLE = "Template hygiene no-mock stable fixture"
+FIXTURE_BR_STABLE_TITLE = (
+    "Template hygiene no-mock actionable fixture v2"
+)
 FIXTURE_BR_REGRESSION_TITLE = "Template hygiene no-mock regression fixture"
 FIXTURE_BR_STABLE_DESCRIPTION = (
     "Stable no-mock fixture baseline.\n\n"
@@ -11108,6 +11188,7 @@ FIXTURE_BR_STABLE_DESCRIPTION = (
 FIXTURE_BR_REGRESSION_DESCRIPTION = (
     "Intentionally missing an acceptance section."
 )
+FIXTURE_BR_REGRESSION_CLOSE_REASON = "template hygiene fixture baseline"
 
 
 @dataclass(frozen=True)
@@ -11491,9 +11572,12 @@ def fixture_lint(
                     "suggestions": [
                         {
                             "section": section,
-                            "hint": LINT_SECTION_HINTS_BY_TYPE[
-                                str(issue["type"])
-                            ][section],
+                            "hint": LINT_SECTION_HINTS_BY_TYPE.get(
+                                str(issue["type"]), {}
+                            ).get(
+                                section,
+                                "Synthetic fixture-only missing-section hint",
+                            ),
                         }
                         for section in sections
                     ],
@@ -11746,8 +11830,9 @@ def fixture_br_create_seed(
     slug: str,
     status: str,
     description: str,
+    ephemeral: bool,
 ) -> dict[str, Any]:
-    fixture_br_json(
+    arguments = [
         "create",
         "--title",
         title,
@@ -11763,9 +11848,10 @@ def fixture_br_create_seed(
         "-",
         "--labels",
         "template-hygiene-fixture",
-        "--ephemeral",
-        input_text=description,
-    )
+    ]
+    if ephemeral:
+        arguments.append("--ephemeral")
+    fixture_br_json(*arguments, input_text=description)
     created = fixture_br_find_by_title(title)
     if created is None:
         raise InfrastructureFailed(f"fixture br create did not retain {title!r}")
@@ -11790,7 +11876,7 @@ def fixture_br_set_status(issue_id: str, desired: str) -> None:
             "close",
             issue_id,
             "--reason",
-            "template hygiene fixture baseline",
+            FIXTURE_BR_REGRESSION_CLOSE_REASON,
         )
         return
     fixture_br_json("update", issue_id, "--status", desired)
@@ -11830,9 +11916,10 @@ def _fixture_br_context_locked() -> dict[str, str]:
         if stable is None:
             stable = fixture_br_create_seed(
                 title=FIXTURE_BR_STABLE_TITLE,
-                slug="template-hygiene-stable",
+                slug="template-hygiene-actionable-v2",
                 status="open",
                 description=FIXTURE_BR_STABLE_DESCRIPTION,
+                ephemeral=False,
             )
         stable_id = str(stable["id"])
         fixture_br_set_status(stable_id, "open")
@@ -11842,17 +11929,22 @@ def _fixture_br_context_locked() -> dict[str, str]:
                 stable_id,
                 FIXTURE_BR_STABLE_DESCRIPTION,
             )
+        stable = fixture_br_show(stable_id)
+        if stable.get("ephemeral") is True:
+            raise InfrastructureFailed(
+                "no-mock actionable fixture is unexpectedly ephemeral"
+            )
 
         regression = fixture_br_find_by_title(FIXTURE_BR_REGRESSION_TITLE)
         if regression is None:
             regression = fixture_br_create_seed(
                 title=FIXTURE_BR_REGRESSION_TITLE,
                 slug="template-hygiene-regression",
-                status="closed",
+                status="open",
                 description=FIXTURE_BR_REGRESSION_DESCRIPTION,
+                ephemeral=True,
             )
         regression_id = str(regression["id"])
-        fixture_br_set_status(regression_id, "closed")
         regression = fixture_br_show(regression_id)
         if (
             str(regression.get("description") or "")
@@ -11861,6 +11953,43 @@ def _fixture_br_context_locked() -> dict[str, str]:
             fixture_br_set_description(
                 regression_id,
                 FIXTURE_BR_REGRESSION_DESCRIPTION,
+            )
+        regression = fixture_br_show(regression_id)
+        if (
+            regression.get("status") == "closed"
+            and regression.get("close_reason")
+            != FIXTURE_BR_REGRESSION_CLOSE_REASON
+        ):
+            fixture_br_set_status(regression_id, "open")
+        fixture_br_set_status(regression_id, "closed")
+        regression = fixture_br_show(regression_id)
+        if (
+            regression.get("status") != "closed"
+            or regression.get("close_reason")
+            != FIXTURE_BR_REGRESSION_CLOSE_REASON
+            or regression.get("ephemeral") is not True
+        ):
+            raise InfrastructureFailed(
+                "no-mock regression fixture lacks its exact closed ephemeral baseline"
+            )
+
+        fixture_br_json("sync", "--flush-only")
+        fixture_rows = fixture_br_list()
+        expected_exported_rows = sum(
+            row.get("ephemeral") is not True
+            and "-wisp-" not in str(row.get("id") or "")
+            for row in fixture_rows
+        )
+        post_flush_status = fixture_br_json("sync", "--status")
+        post_flush_witness = fixture_br_json("sync", "--witness")
+        witness_body = post_flush_witness.get("witness")
+        if (
+            post_flush_status.get("jsonl_exists") is not True
+            or not isinstance(witness_body, dict)
+            or witness_body.get("line_count") != expected_exported_rows
+        ):
+            raise InfrastructureFailed(
+                "no-mock fixture export does not cover its exportable issue set"
             )
 
         return {
@@ -12063,9 +12192,21 @@ def self_test_case(
             warning_max_missing,
         )
         fixture_equal(
-            warning_max_lint["all"]["total"],
-            CAPS["warnings"],
-            "maximum warning cap",
+            {
+                "total": warning_max_lint["all"]["total"],
+                "hints": sorted(
+                    {
+                        suggestion["hint"]
+                        for row in warning_max_lint["all"]["results"]
+                        for suggestion in row["suggestions"]
+                    }
+                ),
+            },
+            {
+                "total": CAPS["warnings"],
+                "hints": ["Synthetic fixture-only missing-section hint"],
+            },
+            "maximum warning cap and synthetic-only fallback hint",
         )
         over_warning_issue = fixture_issue(issue_id="fixture-warning-over")
         expect_error(
@@ -24687,6 +24828,20 @@ def v2_validate_source_full_issue(
             raise InputRefused(
                 f"v2 source all-issue row {index} rollup is malformed"
             )
+        v2_validate_status(
+            rollup["status"],
+            label=f"v2 source all-issue row {index} rollup status",
+            error_type=InputRefused,
+        )
+        for descendant_status in descendants:
+            v2_validate_status(
+                descendant_status,
+                label=(
+                    f"v2 source all-issue row {index} rollup descendant "
+                    "status"
+                ),
+                error_type=InputRefused,
+            )
     for relation_field in ("dependencies", "dependents"):
         relations = issue[relation_field]
         if (
@@ -27853,6 +28008,54 @@ def v2_state_projection_value(
                     depth=depth + 1,
                 ),
             }
+        if isinstance(value, type):
+            return {
+                "kind": "type",
+                "type": f"{value.__module__}.{value.__qualname__}",
+            }
+        try:
+            attributes = vars(value)
+        except (AttributeError, TypeError):
+            attributes = None
+        if isinstance(attributes, Mapping):
+            return {
+                "kind": "object",
+                "type": (
+                    f"{type(value).__module__}.{type(value).__qualname__}"
+                ),
+                "attributes": v2_state_projection_value(
+                    dict(attributes),
+                    seen=seen,
+                    depth=depth + 1,
+                ),
+            }
+        slot_names: list[str] = []
+        for base in type(value).__mro__:
+            raw_slots = base.__dict__.get("__slots__", ())
+            if isinstance(raw_slots, str):
+                raw_slots = (raw_slots,)
+            slot_names.extend(
+                str(name)
+                for name in raw_slots
+                if name not in {"__dict__", "__weakref__"}
+            )
+        if slot_names:
+            slot_values = {
+                name: getattr(value, name)
+                for name in sorted(set(slot_names))
+                if hasattr(value, name)
+            }
+            return {
+                "kind": "slotted-object",
+                "type": (
+                    f"{type(value).__module__}.{type(value).__qualname__}"
+                ),
+                "slots": v2_state_projection_value(
+                    slot_values,
+                    seen=seen,
+                    depth=depth + 1,
+                ),
+            }
         return {
             "kind": "opaque",
             "type": (
@@ -27861,6 +28064,16 @@ def v2_state_projection_value(
         }
     finally:
         seen.remove(identity)
+
+
+def v2_projection_contains_opaque(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return value.get("kind") == "opaque" or any(
+            v2_projection_contains_opaque(item) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(v2_projection_contains_opaque(item) for item in value)
+    return False
 
 
 def v2_callback_refusal_projection(
@@ -27889,21 +28102,50 @@ def v2_callback_refusal_projection(
                 "state": v2_state_projection_value(value),
             }
         )
+    default_rows = [
+        {
+            "index": index,
+            "state": v2_state_projection_value(value),
+        }
+        for index, value in enumerate(callback.__defaults__ or ())
+    ]
+    keyword_default_rows = [
+        {
+            "name": name,
+            "state": v2_state_projection_value(value),
+        }
+        for name, value in sorted(
+            (callback.__kwdefaults__ or {}).items(),
+            key=lambda pair: pair[0].encode("utf-8"),
+        )
+    ]
     global_rows: list[dict[str, Any]] = []
     for name in sorted(
         set(callback.__code__.co_names),
         key=lambda value: value.encode("utf-8"),
     ):
         value = callback.__globals__.get(name)
-        if isinstance(value, (dict, list, set, bytearray)):
+        if isinstance(
+            value,
+            (
+                dict,
+                list,
+                set,
+                bytearray,
+                memoryview,
+                argparse.Namespace,
+            ),
+        ):
             global_rows.append(
                 {
                     "name": name,
                     "state": v2_state_projection_value(value),
                 }
             )
-    return {
+    projection = {
         "callback_closure": closure_rows,
+        "callback_defaults": default_rows,
+        "callback_keyword_defaults": keyword_default_rows,
         "mutable_callback_globals": global_rows,
         "collector_check_roots": [
             row["semantic_root"] for row in collector_rows
@@ -27911,6 +28153,12 @@ def v2_callback_refusal_projection(
         "command_receipts": list(_command_receipts),
         "cancel_requested": _cancel_requested,
     }
+    if v2_projection_contains_opaque(projection):
+        raise EvidenceFailed(
+            "refusal callback contains unprojectable opaque state; provide "
+            "an explicit bounded projection"
+        )
+    return projection
 
 
 class V2CheckCollector:
@@ -28587,7 +28835,11 @@ def v2_fixture_br_envelopes(
                 "in_progress_issues": int(status == "in_progress"),
                 "open_issues": int(status == "open"),
                 "pinned_issues": int(
-                    full_issue.get("pinned") is True or status == "pinned"
+                    status != "tombstone"
+                    and (
+                        full_issue.get("pinned") is True
+                        or status == "pinned"
+                    )
                 ),
                 "ready_issues": int(fixture_ready),
                 "tombstone_issues": int(status == "tombstone"),
@@ -29064,7 +29316,10 @@ def v2_replayable_fixture_bundle(
         }
         for index, (argv, projection) in enumerate(
             zip(
-                v2_expected_observation_argv([full_issue["id"]]),
+                v2_expected_observation_argv(
+                    [full_issue["id"]],
+                    status_scopes=fixture_status_scopes,
+                ),
                 fixture_projection_entries,
                 strict=True,
             )
@@ -29140,7 +29395,7 @@ def v2_replayable_fixture_bundle(
                 (set(lint_ids) | set(independent_ids))
                 - set(nonclosed_ids)
             ),
-            "status_cut": list(STATUS_SCOPES),
+            "status_cut": list(fixture_status_scopes),
             "command_receipts": fixture_command_receipts,
             "no_claim": V2_SOURCE_OBSERVATION_NO_CLAIM,
         }
@@ -32055,12 +32310,13 @@ def v2_execute_schema_cli_ux(
             expected=0,
             observed=completed.returncode,
         )
+        normalized_help = " ".join(completed.stdout.split())
         checks.check(
             "help-complete-options",
             all(option in completed.stdout for option in expected_options)
             and (
                 "schema-autodetect a retained v2 bundle"
-                in completed.stdout
+                in normalized_help
             ),
             expected={
                 "options": sorted(expected_options),
@@ -34343,6 +34599,24 @@ def v2_execute_source_cases(
             input_kind="released_live",
             error_type=EvidenceFailed,
         )
+        sync_with_untracked_clean_git = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync untracked-clean probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_untracked_clean_git["git_export"].update(
+            {
+                "tracked": False,
+                "worktree_clean": True,
+                "index_clean": True,
+            }
+        )
+        sync_with_untracked_clean_git["git_export"].pop("head_hash")
+        normalized_untracked_clean_git = v2_normalize_br_sync_status(
+            sync_with_untracked_clean_git,
+            input_kind="released_live",
+            error_type=EvidenceFailed,
+        )
         sync_with_sha256_git = strict_json_loads(
             canonical_bytes(sync_with_probed_git),
             label="sync SHA-256 probed-git seed",
@@ -34403,11 +34677,13 @@ def v2_execute_source_cases(
         sync_with_missing_untracked_git["git_export"].update(
             {
                 "tracked": False,
-                "worktree_clean": False,
+                "worktree_clean": True,
                 "index_clean": True,
-                "head_hash": None,
-                "worktree_hash": None,
             }
+        )
+        sync_with_missing_untracked_git["git_export"].pop("head_hash")
+        sync_with_missing_untracked_git["git_export"].pop(
+            "worktree_hash"
         )
         normalized_missing_untracked_git = v2_normalize_br_sync_status(
             sync_with_missing_untracked_git,
@@ -34473,6 +34749,25 @@ def v2_execute_source_cases(
             input_kind="released_live",
             error_type=EvidenceFailed,
         )
+        empty_timestamp_errors: dict[str, str] = {}
+        for timestamp_field in ("last_export_time", "last_import_time"):
+            empty_timestamp_sync = strict_json_loads(
+                canonical_bytes(sync_with_not_probed_git),
+                label=f"sync empty {timestamp_field} seed",
+                require_canonical=True,
+            )
+            empty_timestamp_sync[timestamp_field] = ""
+            empty_timestamp_errors[timestamp_field] = expect_error(
+                EvidenceFailed,
+                lambda candidate=empty_timestamp_sync: (
+                    v2_normalize_br_sync_status(
+                        candidate,
+                        input_kind="released_live",
+                        error_type=EvidenceFailed,
+                    )
+                ),
+                contains=f"{timestamp_field} is malformed",
+            ).terminal
         retained_sync_with_omitted_optional_fields = strict_json_loads(
             canonical_bytes(normalized_not_probed_git),
             label="retained sync omitted optional fields seed",
@@ -34741,6 +35036,12 @@ def v2_execute_source_cases(
             )
             == normalized_omitted_average
             and normalized_probed_git["git_export"]["state"] == "PROBED"
+            and normalized_untracked_clean_git["git_export"]["state"]
+            == "PROBED"
+            and normalized_untracked_clean_git["git_export"]["tracked"]
+            is False
+            and normalized_untracked_clean_git["git_export"]["head_hash"]
+            is None
             and len(normalized_sha256_git["git_export"]["head_hash"]) == 64
             and normalized_newly_staged_git["git_export"]["tracked"] is True
             and normalized_newly_staged_git["git_export"]["head_hash"] is None
@@ -34751,6 +35052,10 @@ def v2_execute_source_cases(
                 "worktree_hash"
             ]
             is None
+            and normalized_missing_untracked_git["git_export"][
+                "worktree_clean"
+            ]
+            is True
             and mixed_git_hash_error.terminal == "EvidenceFailed"
             and normalized_not_probed_git["git_export"]["state"]
             == "NOT_PROBED"
@@ -34774,7 +35079,12 @@ def v2_execute_source_cases(
             and reversed_anomaly_error.terminal == "EvidenceFailed"
             and impossible_database_pair_error.terminal
             == "EvidenceFailed"
-            and impossible_wal_pair_error.terminal == "EvidenceFailed",
+            and impossible_wal_pair_error.terminal == "EvidenceFailed"
+            and empty_timestamp_errors
+            == {
+                "last_export_time": "EvidenceFailed",
+                "last_import_time": "EvidenceFailed",
+            },
             expected={
                 "omitted_average": None,
                 "git_states": [
@@ -34783,11 +35093,16 @@ def v2_execute_source_cases(
                     "LEGACY_UNAVAILABLE",
                 ],
                 "git_object_id_widths": [40, 64],
+                "omitted_absent_git_hashes": "normalized to null",
                 "git_index_head_states": [
                     "newly_staged",
                     "staged_removal",
                     "missing_untracked",
                 ],
+                "empty_optional_timestamps": {
+                    "last_export_time": "EvidenceFailed",
+                    "last_import_time": "EvidenceFailed",
+                },
                 "mixed_object_formats": "EvidenceFailed",
                 "jsonl_hash": "independent optional metadata",
                 "invented_anomaly": "EvidenceFailed",
@@ -34810,11 +35125,17 @@ def v2_execute_source_cases(
                     len(normalized_probed_git["git_export"]["head_hash"]),
                     len(normalized_sha256_git["git_export"]["head_hash"]),
                 ],
+                "omitted_absent_git_hashes": (
+                    normalized_untracked_clean_git["git_export"][
+                        "head_hash"
+                    ]
+                ),
                 "git_index_head_states": [
                     normalized_newly_staged_git["git_export"],
                     normalized_staged_removal_git["git_export"],
                     normalized_missing_untracked_git["git_export"],
                 ],
+                "empty_optional_timestamps": empty_timestamp_errors,
                 "mixed_object_formats": mixed_git_hash_error.terminal,
                 "invented_anomaly": invented_sync_error.terminal,
                 "absent_newer": absent_newer_sync_error.terminal,
@@ -36073,7 +36394,7 @@ def v2_execute_source_cases(
             contains="warning count",
         )
     elif slug == "source-all-types-statuses-priorities":
-        statuses = ["open", "in_progress", "blocked", "deferred", "closed"]
+        statuses = [*V2_RELEASED_KNOWN_STATUSES, "custom:review"]
         types = ["bug", "task", "feature", "epic", "chore", "docs", "question", "custom:x"]
         rows = [
             v2_synthetic_target(
@@ -36114,8 +36435,19 @@ def v2_execute_source_cases(
             for status_index, status in enumerate(statuses)
             for priority in range(5)
         ]
+        raw_missing_by_id = {
+            row["id"]: (
+                ()
+                if row["status"] == "tombstone"
+                else fixture_expected_missing(row["type"])
+            )
+            for row in raw_rows
+        }
         full_issues, _, _, authentic_inventory = (
-            v2_authentic_projection_fixture(raw_rows)
+            v2_authentic_projection_fixture(
+                raw_rows,
+                missing_by_id=raw_missing_by_id,
+            )
         )
         expected_product = {
             (issue_type, status, priority)
@@ -36130,8 +36462,11 @@ def v2_execute_source_cases(
         expected_selected_product = {
             coordinate
             for coordinate in expected_product
-            if coordinate[1] != "closed"
-            or fixture_expected_missing(coordinate[0])
+            if not v2_is_terminal_status(coordinate[1])
+            or (
+                coordinate[1] == "closed"
+                and fixture_expected_missing(coordinate[0])
+            )
         }
         observed_selected_product = {
             (row["type"], row["status"], row["priority"])
@@ -36164,6 +36499,132 @@ def v2_execute_source_cases(
                 ),
             },
         )
+        expected_status_scopes = [
+            *V2_RELEASED_KNOWN_STATUSES,
+            "custom:review",
+        ]
+        checks.check(
+            "released-known-and-observed-custom-status-partition",
+            list(
+                v2_canonical_status_scopes(
+                    row["status"] for row in full_issues
+                )
+            )
+            == expected_status_scopes
+            and {row["status"] for row in authentic_inventory["rows"]}
+            == (
+                set(expected_status_scopes)
+                - {"tombstone"}
+            )
+            and all(
+                row["status"] != "tombstone"
+                for row in authentic_inventory["rows"]
+            ),
+            expected={
+                "status_scopes": expected_status_scopes,
+                "selected_statuses": sorted(
+                    set(expected_status_scopes) - {"tombstone"}
+                ),
+                "tombstone_findings": "refused by explicit deleted-record boundary",
+            },
+            observed={
+                "status_scopes": list(
+                    v2_canonical_status_scopes(
+                        row["status"] for row in full_issues
+                    )
+                ),
+                "selected_statuses": sorted(
+                    {row["status"] for row in authentic_inventory["rows"]}
+                ),
+            },
+        )
+        maximum_status = "s" * V2_STATUS_BYTES_CAP
+        invalid_statuses = (
+            "all",
+            "foo,bar",
+            "Open",
+            " open",
+            "open ",
+            "bad\nstatus",
+            "e\u0301",
+            "s" * (V2_STATUS_BYTES_CAP + 1),
+            "-draft",
+        )
+        invalid_status_errors = [
+            expect_error(
+                EvidenceFailed,
+                lambda value=value: v2_validate_status(
+                    value,
+                    label="status grammar fixture",
+                    error_type=EvidenceFailed,
+                ),
+                contains="canonical released-br status",
+            )
+            for value in invalid_statuses
+        ]
+        parsed_status_filter = v2_parse_status_set(
+            "custom:review,draft",
+            label="status grammar filter",
+        )
+        v2_validate_status_filter_membership(
+            parsed_status_filter,
+            full_issues,
+            label="status grammar filter",
+            error_type=EvidenceFailed,
+        )
+        status_reproduction = v2_reproduction_argv(
+            mode="review-plan",
+            artifact_root="target/v2",
+            artifact_dir="status-roundtrip",
+            statuses=",".join(sorted(parsed_status_filter or [])),
+        )
+        status_option_index = status_reproduction.index("--statuses")
+        checks.check(
+            "canonical-status-grammar-cap-and-filter-roundtrip",
+            v2_validate_status(
+                maximum_status,
+                label="maximum status fixture",
+                error_type=EvidenceFailed,
+            )
+            == maximum_status
+            and all(
+                error.terminal == "EvidenceFailed"
+                for error in invalid_status_errors
+            )
+            and parsed_status_filter == {"custom:review", "draft"}
+            and status_reproduction[status_option_index + 1]
+            == "custom:review,draft",
+            expected={
+                "maximum_status_bytes": V2_STATUS_BYTES_CAP,
+                "invalid_terminals": ["EvidenceFailed"]
+                * len(invalid_statuses),
+                "roundtrip": "custom:review,draft",
+            },
+            observed={
+                "maximum_status_bytes": len(maximum_status.encode("utf-8")),
+                "invalid_terminals": [
+                    error.terminal for error in invalid_status_errors
+                ],
+                "roundtrip": status_reproduction[status_option_index + 1],
+            },
+        )
+        tombstone_finding = fixture_issue(
+            issue_id="fixture-tombstone-finding",
+            issue_type="bug",
+            status="tombstone",
+            description="",
+            acceptance="",
+        )
+        checks.refuses(
+            "tombstone-template-finding-refused",
+            InputRefused,
+            lambda: v2_replayable_fixture_bundle(
+                manifest,
+                subject_mode="review-plan",
+                issue=tombstone_finding,
+            ),
+            contains="unsupported tombstone template findings",
+        )
         nullable_collections = fixture_issue(
             issue_id="fixture-null-collections"
         )
@@ -36173,16 +36634,45 @@ def v2_execute_source_cases(
         nullable_projection = v2_full_issue_projection(
             nullable_collections
         )
+        absent_collections = fixture_issue(
+            issue_id="fixture-absent-collections"
+        )
+        for field in ("labels", "dependencies", "dependents"):
+            absent_collections.pop(field)
+        absent_projection = v2_full_issue_projection(
+            absent_collections
+        )
         checks.check(
             "missing-null-collections-normalize-empty",
             nullable_projection["labels"] == []
             and nullable_projection["dependencies"] == []
-            and nullable_projection["dependents"] == [],
-            expected={"labels": [], "dependencies": [], "dependents": []},
+            and nullable_projection["dependents"] == []
+            and absent_projection["labels"] == []
+            and absent_projection["dependencies"] == []
+            and absent_projection["dependents"] == [],
+            expected={
+                "null": {
+                    "labels": [],
+                    "dependencies": [],
+                    "dependents": [],
+                },
+                "absent": {
+                    "labels": [],
+                    "dependencies": [],
+                    "dependents": [],
+                },
+            },
             observed={
-                "labels": nullable_projection["labels"],
-                "dependencies": nullable_projection["dependencies"],
-                "dependents": nullable_projection["dependents"],
+                "null": {
+                    "labels": nullable_projection["labels"],
+                    "dependencies": nullable_projection["dependencies"],
+                    "dependents": nullable_projection["dependents"],
+                },
+                "absent": {
+                    "labels": absent_projection["labels"],
+                    "dependencies": absent_projection["dependencies"],
+                    "dependents": absent_projection["dependents"],
+                },
             },
         )
         for field in ("labels", "dependencies", "dependents"):
@@ -36462,6 +36952,166 @@ def v2_execute_source_cases(
             ),
             contains="status summary disagrees",
         )
+        enumerated_template_raw = fixture_issue(
+            issue_id="fixture-enumerated-template",
+            status="open",
+        )
+        enumerated_template_raw["is_template"] = True
+        enumerated_template_issue = v2_full_issue_projection(
+            enumerated_template_raw
+        )
+        enumerated_template_status = v2_fixture_br_envelopes(
+            enumerated_template_issue
+        )[0]
+        hidden_template_error = expect_error(
+            NoData,
+            lambda: v2_validate_issue_universe_membership(
+                listed_issue_ids=[],
+                tombstone_issue_ids=[],
+                tracker_status=enumerated_template_status,
+                br_version="0.2.19",
+            ),
+            contains="cannot enumerate template rows",
+        )
+        enumerated_tombstone_issue = v2_full_issue_projection(
+            fixture_issue(
+                issue_id="fixture-enumerated-tombstone",
+                status="tombstone",
+            )
+        )
+        enumerated_tombstone_status = v2_fixture_br_envelopes(
+            enumerated_tombstone_issue
+        )[0]
+        hidden_tombstone_error = expect_error(
+            NoData,
+            lambda: v2_validate_issue_universe_membership(
+                listed_issue_ids=[],
+                tombstone_issue_ids=[],
+                tracker_status=enumerated_tombstone_status,
+                br_version="0.2.19",
+            ),
+            contains="unsupported issue universe",
+        )
+        overlap_error = expect_error(
+            InfrastructureFailed,
+            lambda: v2_validate_issue_universe_membership(
+                listed_issue_ids=[enumerated_template_issue["id"]],
+                tombstone_issue_ids=[enumerated_template_issue["id"]],
+                tracker_status=enumerated_template_status,
+                br_version="0.2.19",
+            ),
+            contains="overlaps ordinary and tombstone membership",
+        )
+        checks.check(
+            "list-status-hidden-template-and-tombstone-universes-refused",
+            hidden_template_error.terminal == "NoData"
+            and hidden_tombstone_error.terminal == "NoData"
+            and overlap_error.terminal == "InfrastructureFailed"
+            and v2_validate_issue_universe_membership(
+                listed_issue_ids=[enumerated_template_issue["id"]],
+                tombstone_issue_ids=[],
+                tracker_status=enumerated_template_status,
+                br_version="0.2.19",
+            )
+            == [enumerated_template_issue["id"]],
+            expected={
+                "hidden_template": "NoData",
+                "hidden_tombstone": "NoData",
+                "overlap": "InfrastructureFailed",
+                "exact_membership": [enumerated_template_issue["id"]],
+            },
+            observed={
+                "hidden_template": hidden_template_error.terminal,
+                "hidden_tombstone": hidden_tombstone_error.terminal,
+                "overlap": overlap_error.terminal,
+            },
+        )
+
+        flag_only_raw = fixture_issue(
+            issue_id="fixture-pin-flag-only",
+            status="open",
+        )
+        flag_only_raw["pinned"] = True
+        status_only_raw = fixture_issue(
+            issue_id="fixture-pin-status-only",
+            status="pinned",
+        )
+        both_raw = fixture_issue(
+            issue_id="fixture-pin-both",
+            status="pinned",
+        )
+        both_raw["pinned"] = True
+        tombstone_pin_raw = fixture_issue(
+            issue_id="fixture-pin-tombstone",
+            status="tombstone",
+        )
+        tombstone_pin_raw["pinned"] = True
+        pin_projections = [
+            v2_full_issue_projection(row)
+            for row in (
+                flag_only_raw,
+                status_only_raw,
+                both_raw,
+                tombstone_pin_raw,
+            )
+        ]
+        pin_envelopes = [
+            v2_fixture_br_envelopes(row) for row in pin_projections
+        ]
+        understated_pin_status = strict_json_loads(
+            canonical_bytes(pin_envelopes[0][0]),
+            label="understated pinned summary seed",
+            require_canonical=True,
+        )
+        understated_pin_status["summary"]["pinned_issues"] = 0
+        overstated_pin_status = strict_json_loads(
+            canonical_bytes(pin_envelopes[0][0]),
+            label="overstated pinned summary seed",
+            require_canonical=True,
+        )
+        overstated_pin_status["summary"]["pinned_issues"] = 2
+        pin_summary_errors = [
+            expect_error(
+                EvidenceFailed,
+                lambda status=status: v2_validate_live_envelope_consistency(
+                    tracker_status=status,
+                    sync_status=pin_envelopes[0][1],
+                    export_witness=pin_envelopes[0][2],
+                    full_issues=[pin_projections[0]],
+                    error_type=EvidenceFailed,
+                ),
+                contains="status summary disagrees",
+            )
+            for status in (understated_pin_status, overstated_pin_status)
+        ]
+        checks.check(
+            "pinned-summary-flag-status-dedup-and-tombstone-contract",
+            [
+                envelope[0]["summary"]["pinned_issues"]
+                for envelope in pin_envelopes
+            ]
+            == [1, 1, 1, 0]
+            and all(
+                error.terminal == "EvidenceFailed"
+                for error in pin_summary_errors
+            ),
+            expected={
+                "flag_only": 1,
+                "status_only": 1,
+                "both_count_once": 1,
+                "tombstone_excluded": 0,
+                "under_over": ["EvidenceFailed", "EvidenceFailed"],
+            },
+            observed={
+                "counts": [
+                    envelope[0]["summary"]["pinned_issues"]
+                    for envelope in pin_envelopes
+                ],
+                "under_over": [
+                    error.terminal for error in pin_summary_errors
+                ],
+            },
+        )
         complete_raw_issue = fixture_issue(
             issue_id="fixture-complete-released-show",
             status="open",
@@ -36501,6 +37151,95 @@ def v2_execute_source_cases(
             complete_raw_issue
         )
         v2_validate_source_full_issue(complete_projection, index=0)
+        malformed_rollup_status = strict_json_loads(
+            canonical_bytes(complete_raw_issue),
+            label="malformed rollup-status seed",
+            require_canonical=True,
+        )
+        malformed_rollup_status["rollup"]["status"] = "BAD STATUS"
+        malformed_rollup_descendant = strict_json_loads(
+            canonical_bytes(complete_raw_issue),
+            label="malformed rollup-descendant seed",
+            require_canonical=True,
+        )
+        malformed_rollup_descendant["rollup"]["descendants"] = {
+            "BAD STATUS": 2
+        }
+        malformed_rollup_errors = [
+            expect_error(
+                InfrastructureFailed,
+                lambda candidate=candidate: v2_full_issue_projection(
+                    candidate
+                ),
+                contains="invalid rollup",
+            )
+            for candidate in (
+                malformed_rollup_status,
+                malformed_rollup_descendant,
+            )
+        ]
+
+        def retained_rollup_status_error(
+            *, descendant: bool
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(complete_projection),
+                label="retained malformed rollup-status seed",
+                require_canonical=True,
+            )
+            if descendant:
+                candidate["rollup"]["descendants"] = {
+                    "BAD STATUS": 2
+                }
+            else:
+                candidate["rollup"]["status"] = "BAD STATUS"
+            candidate["source_issue_projection_root"] = semantic_root(
+                {
+                    key: value
+                    for key, value in candidate.items()
+                    if key
+                    not in {"no_claim", "source_issue_projection_root"}
+                }
+            )
+            return expect_error(
+                InputRefused,
+                lambda: v2_validate_source_full_issue(
+                    candidate,
+                    index=0,
+                ),
+                contains="canonical released-br status",
+            )
+
+        retained_rollup_errors = [
+            retained_rollup_status_error(descendant=False),
+            retained_rollup_status_error(descendant=True),
+        ]
+        checks.check(
+            "rollup-status-and-descendant-status-grammar-refused",
+            all(
+                error.terminal == "InfrastructureFailed"
+                for error in malformed_rollup_errors
+            )
+            and all(
+                error.terminal == "InputRefused"
+                for error in retained_rollup_errors
+            ),
+            expected={
+                "released_live": [
+                    "InfrastructureFailed",
+                    "InfrastructureFailed",
+                ],
+                "retained": ["InputRefused", "InputRefused"],
+            },
+            observed={
+                "released_live": [
+                    error.terminal for error in malformed_rollup_errors
+                ],
+                "retained": [
+                    error.terminal for error in retained_rollup_errors
+                ],
+            },
+        )
 
         def complete_projection_variant(
             mutation: Callable[[dict[str, Any]], None],
@@ -36733,16 +37472,16 @@ def v2_execute_source_cases(
             (sections[1], sections[2]),
             sections,
         )
-        issues = [
+        raw_issues = [
             fixture_issue(
                 issue_id=f"fixture-v2-overlap-{index}",
-                issue_type="bug",
+                issue_type="custom:partition-fixture",
                 status=STATUS_SCOPES[index % len(STATUS_SCOPES)],
                 priority=index % 5,
             )
             for index in range(len(combinations))
         ]
-        issues.append(
+        raw_issues.append(
             fixture_issue(
                 issue_id="fixture-v2-no-warning",
                 issue_type="chore",
@@ -36753,16 +37492,144 @@ def v2_execute_source_cases(
         missing = {
             issue["id"]: combination
             for issue, combination in zip(
-                issues[: len(combinations)],
+                raw_issues[: len(combinations)],
                 combinations,
                 strict=True,
             )
         }
-        _, lint, snapshot, inventory = (
-            v2_authentic_projection_fixture(
-                issues,
-                missing_by_id=missing,
+
+        def partition_projection(
+            source_rows: Sequence[Mapping[str, Any]],
+            missing_rows: Mapping[str, Sequence[str]],
+        ) -> tuple[
+            list[dict[str, Any]],
+            dict[str, Any],
+            LiveSnapshot,
+            dict[str, Any],
+        ]:
+            full_rows = sorted(
+                (v2_full_issue_projection(row) for row in source_rows),
+                key=lambda row: row["id"],
             )
+            status_scopes = v2_canonical_status_scopes(
+                [
+                    *V2_RELEASED_KNOWN_STATUSES,
+                    *(row["status"] for row in full_rows),
+                ]
+            )
+            result_rows = [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "type": row["type"],
+                    "missing": list(missing_rows[row["id"]]),
+                    "warnings": len(missing_rows[row["id"]]),
+                    "suggestions": [
+                        {
+                            "section": section,
+                            "hint": (
+                                "Synthetic partition-classifier fixture; "
+                                "released type-specific lint is tested "
+                                "separately."
+                            ),
+                        }
+                        for section in missing_rows[row["id"]]
+                    ],
+                }
+                for row in full_rows
+                if missing_rows.get(row["id"])
+            ]
+            synthetic_lint = {
+                scope: {
+                    "total": sum(
+                        row["warnings"]
+                        for row in result_rows
+                        if scope == "all"
+                        or next(
+                            issue
+                            for issue in full_rows
+                            if issue["id"] == row["id"]
+                        )["status"]
+                        == scope
+                    ),
+                    "issues": sum(
+                        1
+                        for row in result_rows
+                        if scope == "all"
+                        or next(
+                            issue
+                            for issue in full_rows
+                            if issue["id"] == row["id"]
+                        )["status"]
+                        == scope
+                    ),
+                    "results": [
+                        row
+                        for row in result_rows
+                        if scope == "all"
+                        or next(
+                            issue
+                            for issue in full_rows
+                            if issue["id"] == row["id"]
+                        )["status"]
+                        == scope
+                    ],
+                }
+                for scope in (*status_scopes, "all")
+            }
+            source = fixture_source(
+                full_rows,
+                status_scopes=status_scopes,
+            )
+            source.pop("semantic_root", None)
+            ready_ids = sorted(
+                row["id"]
+                for row in full_rows
+                if v2_fixture_br_envelopes(row)[0]["summary"][
+                    "ready_issues"
+                ]
+                == 1
+            )
+            source["tracker_ready_issue_ids"] = ready_ids
+            source["tracker_ready_issue_ids_root"] = semantic_root(
+                ready_ids
+            )
+            source = v2_rooted(source)
+            v1_inventory = assemble_inventory(
+                synthetic_lint,
+                full_rows,
+                source,
+                include_issue_rows_without_findings=True,
+            )
+            fixture_snapshot = LiveSnapshot(
+                synthetic_lint,
+                full_rows,
+                source,
+                v1_inventory,
+                {},
+                tuple(full_rows),
+            )
+            campaign_root, _ = v2_campaign_epoch(fixture_snapshot)
+            v2_inventory = v2_build_inventory(
+                fixture_snapshot,
+                campaign_epoch_root=campaign_root,
+                priority_filter=None,
+                status_filter=None,
+            )
+            return full_rows, synthetic_lint, fixture_snapshot, v2_inventory
+
+        issues, lint, snapshot, inventory = partition_projection(
+            raw_issues,
+            missing,
+        )
+        synthetic_wire_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_lint_document(
+                lint["all"],
+                scope="all",
+                error_type=EvidenceFailed,
+            ),
+            contains="invalid released scalars",
         )
         expected_memberships = {
             "A_only": ["fixture-v2-overlap-0"],
@@ -36798,13 +37665,15 @@ def v2_execute_source_cases(
             and snapshot.inventory["counts"][
                 "no_template_warning_issues"
             ]
-            == 1,
+            == 1
+            and synthetic_wire_error.terminal == "EvidenceFailed",
             expected={
                 "memberships": expected_memberships,
                 "issues": 8,
                 "warnings": 12,
                 "warning_issues": 7,
                 "no_warning_issues": 1,
+                "synthetic_projection_as_released_wire": "EvidenceFailed",
             },
             observed={
                 "memberships": observed_memberships,
@@ -36822,11 +37691,14 @@ def v2_execute_source_cases(
                 "no_warning_issues": snapshot.inventory["counts"][
                     "no_template_warning_issues"
                 ],
+                "synthetic_projection_as_released_wire": (
+                    synthetic_wire_error.terminal
+                ),
             },
         )
-        reversed_snapshot = v2_authentic_projection_fixture(
-            list(reversed(issues)),
-            missing_by_id=dict(reversed(list(missing.items()))),
+        reversed_snapshot = partition_projection(
+            list(reversed(raw_issues)),
+            dict(reversed(list(missing.items()))),
         )[2]
         checks.check(
             "warning-partitions-input-order-invariant",
@@ -36844,7 +37716,8 @@ def v2_execute_source_cases(
         )
         checks.check(
             "production-zero-cells-rooted",
-            zero_sets["counts"]["cells"] == 25
+            zero_sets["counts"]["cells"]
+            == 5 * len(V2_RELEASED_KNOWN_STATUSES)
             and zero_sets["counts"]["issues"] == 8
             and all(
                 cell["zero_receipt"] is None
@@ -36863,7 +37736,11 @@ def v2_execute_source_cases(
                 )
                 for cell in zero_sets["cells"]
             ),
-            expected={"cells": 25, "issues": 8, "receipts": "rooted"},
+            expected={
+                "cells": 5 * len(V2_RELEASED_KNOWN_STATUSES),
+                "issues": 8,
+                "receipts": "rooted",
+            },
             observed=zero_sets["counts"],
         )
         duplicate_lint = json.loads(canonical_bytes(lint))
@@ -37058,7 +37935,7 @@ def v2_execute_source_cases(
                 owner="owner-a",
                 dependencies=(
                     {
-                        "id": "fixture-neighbor-a",
+                        "id": "external:fixture:neighbor-a",
                         "dependency_type": "blocks",
                         "status": "open",
                         "priority": 2,
@@ -37081,7 +37958,8 @@ def v2_execute_source_cases(
                 "dependencies",
                 [
                     {
-                        "id": "fixture-neighbor-b",
+                        "id": "external:fixture:neighbor-b",
+                        "title": "Replacement neighboring blocker",
                         "dependency_type": "blocks",
                         "status": "open",
                         "priority": 3,
@@ -37107,11 +37985,8 @@ def v2_execute_source_cases(
         ]
         membership_changed, _, _, _ = authentic_capture(membership_rows)
         warning_membership = {
-            "fixture-drift-a": ("## Acceptance Criteria",),
-            "fixture-drift-b": (
-                "## Acceptance Criteria",
-                "## Steps to Reproduce",
-            ),
+            "fixture-drift-a": (),
+            "fixture-drift-b": ("## Acceptance Criteria",),
         }
         lint_changed, _, _, _ = authentic_capture(
             baseline_rows,
@@ -37174,10 +38049,12 @@ def v2_execute_source_cases(
             fixture_issue(
                 issue_id="fixture-swap-a",
                 title="First authentic raw tracker row",
+                issue_type="bug",
             ),
             fixture_issue(
                 issue_id="fixture-swap-b",
                 title="Second authentic raw tracker row",
+                issue_type="bug",
             ),
         ]
         first_missing = {
@@ -37198,6 +38075,7 @@ def v2_execute_source_cases(
             fixture_issue(
                 issue_id="fixture-swap-c",
                 title="Replacement authentic raw tracker row",
+                issue_type="bug",
             ),
         ]
         lint_swap, _, _, _ = authentic_capture(
@@ -37240,12 +38118,13 @@ def v2_execute_source_cases(
         selected_raw = fixture_issue(
             issue_id="fixture-selected",
             title="Selected authentic tracker target",
+            issue_type="bug",
             priority=1,
             status="open",
             owner="selected-owner",
             dependencies=(
                 {
-                    "id": "fixture-selected-neighbor",
+                    "id": "external:fixture:selected-neighbor",
                     "dependency_type": "blocks",
                     "status": "open",
                     "priority": 2,
@@ -37375,6 +38254,7 @@ def v2_execute_source_cases(
             first_inventory,
             semantic_reviewed=True,
             semantic_disposition="REMEDIATION_REQUIRED",
+            external_verdict="VALID",
         )
         historical_receipts = json.loads(
             canonical_bytes(historical_receipts)
@@ -37450,6 +38330,78 @@ def v2_execute_source_cases(
                 ],
             },
         )
+        first_external_authority = v2_derive_authority(
+            first_inventory,
+            historical_receipts,
+            current_br_version="0.3.0",
+            allow_mechanical_fixture=True,
+        )
+        second_external_authority = v2_derive_authority(
+            second_inventory,
+            historical_receipts,
+            current_br_version="0.3.0",
+            allow_mechanical_fixture=True,
+        )
+        first_external_decision = next(
+            row
+            for row in first_external_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        second_external_decision = next(
+            row
+            for row in second_external_authority["decisions"]
+            if row["target_id"] == "fixture-selected"
+        )
+        expected_selected_external_root = v2_fixture_gate_receipt_root(
+            "external",
+            target_root=second_selected_target["target_root"],
+        )
+        checks.check(
+            "external-receipt-admitted-after-unrelated-campaign-drift",
+            historical_receipts["inventory_root"]
+            != second_inventory["semantic_root"]
+            and historical_receipts["campaign_epoch_root"]
+            != second_inventory["campaign_epoch_root"]
+            and reviewed_receipt["external_authority_receipt_root"]
+            == expected_selected_external_root
+            and first_external_decision["external_authority"]["verified"]
+            is True
+            and second_external_decision["external_authority"]["verified"]
+            is True
+            and first_external_decision["external_authority"][
+                "receipt_root"
+            ]
+            == expected_selected_external_root
+            == second_external_decision["external_authority"][
+                "receipt_root"
+            ]
+            and first_external_decision["semantic_root"]
+            == second_external_decision["semantic_root"],
+            expected={
+                "verified": True,
+                "receipt_root": expected_selected_external_root,
+                "selected_decision_stable": True,
+                "authority_claim": "synthetic fixture only",
+            },
+            observed={
+                "first_verified": first_external_decision[
+                    "external_authority"
+                ]["verified"],
+                "second_verified": second_external_decision[
+                    "external_authority"
+                ]["verified"],
+                "first_receipt_root": first_external_decision[
+                    "external_authority"
+                ]["receipt_root"],
+                "second_receipt_root": second_external_decision[
+                    "external_authority"
+                ]["receipt_root"],
+                "selected_decision_stable": (
+                    first_external_decision["semantic_root"]
+                    == second_external_decision["semantic_root"]
+                ),
+            },
+        )
         checks.check(
             "reviewed-receipt-scope-root-stable-after-unrelated-drift",
             first_reviewed_decision["semantic_review_receipt_root"]
@@ -37517,7 +38469,8 @@ def v2_execute_source_cases(
                 "dependencies",
                 [
                     {
-                        "id": "fixture-changed-neighbor",
+                        "id": "external:fixture:changed-neighbor",
+                        "title": "Changed selected dependency neighbor",
                         "dependency_type": "blocks",
                         "status": "blocked",
                         "priority": 3,
@@ -39024,6 +39977,23 @@ def v2_execute_authority_cases(
             },
             observed=ready_context,
         )
+        missing_ready_context = v2_active_work_context(
+            {"id": "fixture-actionability-missing-ready", "status": "open"}
+        )
+        checks.check(
+            "missing-tracker-ready-membership-fails-closed",
+            missing_ready_context["tracker_ready"] is False
+            and missing_ready_context["non_actionable_reasons"]
+            == ["tracker-ready-policy-exclusion"]
+            and missing_ready_context["generated_child_desired_status"]
+            == "deferred",
+            expected={
+                "tracker_ready": False,
+                "reasons": ["tracker-ready-policy-exclusion"],
+                "desired_status": "deferred",
+            },
+            observed=missing_ready_context,
+        )
         actionability_cases = (
             (
                 "open-policy",
@@ -39160,7 +40130,27 @@ def v2_execute_authority_cases(
                 },
                 observed=context,
             )
-        absolute_nonactionable_cases = (
+        nonactionable_ready_membership_cases = (
+            (
+                "in-progress",
+                {"id": "fixture-ready-in-progress", "status": "in_progress"},
+            ),
+            (
+                "blocked",
+                {"id": "fixture-ready-blocked", "status": "blocked"},
+            ),
+            (
+                "deferred",
+                {"id": "fixture-ready-deferred", "status": "deferred"},
+            ),
+            (
+                "draft",
+                {"id": "fixture-ready-draft", "status": "draft"},
+            ),
+            (
+                "custom-status",
+                {"id": "fixture-ready-custom", "status": "quality_hold"},
+            ),
             (
                 "closed",
                 {"id": "fixture-ready-closed", "status": "closed"},
@@ -39201,8 +40191,30 @@ def v2_execute_authority_cases(
                 "wisp",
                 {"id": "fixture-wisp-ready", "status": "open"},
             ),
+            (
+                "defer-metadata",
+                {
+                    "id": "fixture-ready-defer-metadata",
+                    "status": "open",
+                    "defer_until": "2099-01-01T00:00:00Z",
+                },
+            ),
+            (
+                "blocking-dependency",
+                {
+                    "id": "fixture-ready-blocking-dependency",
+                    "status": "open",
+                    "dependencies": [
+                        {
+                            "id": "external:fixture:blocker",
+                            "type": "blocks",
+                            "status": "open",
+                        }
+                    ],
+                },
+            ),
         )
-        for name, issue in absolute_nonactionable_cases:
+        for name, issue in nonactionable_ready_membership_cases:
             checks.refuses(
                 f"ready-membership-{name}-refused",
                 EvidenceFailed,
@@ -39211,7 +40223,7 @@ def v2_execute_authority_cases(
                     [issue["id"]],
                     error_type=EvidenceFailed,
                 ),
-                contains="absolute non-actionable issue",
+                contains="non-actionable issue",
             )
         nonready_inventory = v2_synthetic_inventory(
             [
@@ -39641,6 +40653,16 @@ def v2_execute_packing_cases(
         changed_authority["remediation_route"] = "MANUAL_BR_REVIEW"
         checks.check(
             "hard-key-remediation-route",
+            v2_hard_vector(base, changed_authority) != base_vector,
+            expected="different vector",
+            observed=v2_hard_vector(base, changed_authority),
+        )
+        changed_authority = dict(authority)
+        changed_context = dict(changed_authority["active_work_context"])
+        changed_context["generated_child_desired_status"] = "deferred"
+        changed_authority["active_work_context"] = changed_context
+        checks.check(
+            "hard-key-generated-child-desired-status",
             v2_hard_vector(base, changed_authority) != base_vector,
             expected="different vector",
             observed=v2_hard_vector(base, changed_authority),
@@ -40686,13 +41708,13 @@ def v2_execute_packing_cases(
             permuted = {
                 key: value for key, value in reversed(tuple(issue.items()))
             }
-            permuted["labels"] = list(reversed(issue["labels"]))
+            permuted["labels"] = list(issue["labels"])
             permuted["dependencies"] = [
                 {
                     key: value
                     for key, value in reversed(tuple(edge.items()))
                 }
-                for edge in reversed(issue["dependencies"])
+                for edge in issue["dependencies"]
             ]
             permuted_issues.append(permuted)
         base_missing = {
@@ -40745,7 +41767,7 @@ def v2_execute_packing_cases(
             max_targets=3,
         )
         checks.check(
-            "warning-receipt-dependency-object-field-permutations-invariant",
+            "mapping-field-and-source-row-order-invariant",
             canonical_bytes(base_full) == canonical_bytes(permuted_full)
             and base_inventory["semantic_root"]
             == permuted_inventory["semantic_root"]
@@ -40792,6 +41814,89 @@ def v2_execute_packing_cases(
                 "child_keys": [
                     child["child_key"]
                     for child in permuted_plan["children"]
+                ],
+            },
+        )
+        raw_list_permuted_issues = []
+        for issue in reversed(base_issues):
+            raw_list_permuted = dict(issue)
+            raw_list_permuted["labels"] = list(reversed(issue["labels"]))
+            raw_list_permuted["dependencies"] = list(
+                reversed(issue["dependencies"])
+            )
+            raw_list_permuted_issues.append(raw_list_permuted)
+        (
+            raw_list_full,
+            _,
+            _,
+            raw_list_inventory,
+        ) = v2_authentic_projection_fixture(
+            raw_list_permuted_issues,
+            missing_by_id=permuted_missing,
+        )
+        raw_list_receipts = v2_synthetic_receipts(
+            raw_list_inventory,
+            compatible=True,
+        )
+        raw_list_authority = v2_derive_authority(
+            raw_list_inventory,
+            raw_list_receipts,
+            current_br_version="0.2.19",
+        )
+        raw_list_plan, _ = v2_build_review_plan(
+            raw_list_inventory,
+            raw_list_authority,
+            max_targets=3,
+        )
+        repeated_raw_list_full, _, _, repeated_raw_list_inventory = (
+            v2_authentic_projection_fixture(
+                list(reversed(raw_list_permuted_issues)),
+                missing_by_id=base_missing,
+            )
+        )
+        checks.check(
+            "raw-list-order-provenance-rebinds-work-identity",
+            [row["labels"] for row in base_full]
+            == [row["labels"] for row in raw_list_full]
+            and [row["dependencies"] for row in base_full]
+            == [row["dependencies"] for row in raw_list_full]
+            and all(
+                base_row["released_field_value_roots"]["labels"]
+                != raw_row["released_field_value_roots"]["labels"]
+                and base_row["released_field_value_roots"]["dependencies"]
+                != raw_row["released_field_value_roots"]["dependencies"]
+                and base_row["source_issue_projection_root"]
+                != raw_row["source_issue_projection_root"]
+                for base_row, raw_row in zip(
+                    base_full,
+                    raw_list_full,
+                    strict=True,
+                )
+            )
+            and base_inventory["semantic_root"]
+            != raw_list_inventory["semantic_root"]
+            and base_authority["semantic_root"]
+            != raw_list_authority["semantic_root"]
+            and base_plan["semantic_root"] != raw_list_plan["semantic_root"]
+            and canonical_bytes(raw_list_full)
+            == canonical_bytes(repeated_raw_list_full)
+            and raw_list_inventory["semantic_root"]
+            == repeated_raw_list_inventory["semantic_root"],
+            expected={
+                "canonical_labels_and_relations": "equal",
+                "raw_value_roots": "different",
+                "downstream_work_identity": "different",
+                "same_raw_input_replay": "stable",
+            },
+            observed={
+                "base_inventory_root": base_inventory["semantic_root"],
+                "permuted_inventory_root": raw_list_inventory[
+                    "semantic_root"
+                ],
+                "base_plan_root": base_plan["semantic_root"],
+                "permuted_plan_root": raw_list_plan["semantic_root"],
+                "repeated_inventory_root": repeated_raw_list_inventory[
+                    "semantic_root"
                 ],
             },
         )
@@ -41013,11 +42118,19 @@ def v2_history_fixture(
     if conflicting_close:
         anchor_events = [
             {
-                "id": 3,
+                "id": 5,
                 "event_type": "closed",
                 "actor": "other-closer",
-                "timestamp": "2026-01-02T00:00:00.003000+00:00",
+                "timestamp": "2026-01-02T00:00:00.005000+00:00",
                 "comment": "Fixture anchor completed.",
+            },
+            {
+                "id": 4,
+                "event_type": "status_changed",
+                "actor": "other-closer",
+                "timestamp": "2026-01-02T00:00:00.004000+00:00",
+                "old_value": "open",
+                "new_value": "closed",
             },
             *anchor_events,
         ]
@@ -41037,6 +42150,10 @@ def v2_history_fixture(
             "closed_at": "2026-01-03T00:00:00+00:00",
             "updated_at": "2026-01-03T00:00:00+00:00",
             "close_reason": "Modern fixture completed.",
+            "comments": [
+                {**comment, "issue_id": modern_id}
+                for comment in anchor_raw["comments"]
+            ],
             "dependents": [],
         }
         modern_issue = v2_full_issue_projection(modern_raw)
@@ -41057,6 +42174,10 @@ def v2_history_fixture(
             "close_reason": "Legacy fixture completed.",
             "updated_at": "2026-01-03T00:00:00+00:00",
             "notes": "Later non-close audit metadata.",
+            "comments": [
+                {**comment, "issue_id": legacy_id}
+                for comment in anchor_raw["comments"]
+            ],
             "dependents": [],
         }
         legacy_issue = v2_full_issue_projection(legacy_raw)
@@ -41816,7 +42937,7 @@ def v2_execute_history_cases(
                 audit_capture=args[3],
                 history_contract=args[4],
             ),
-            contains="conflicted",
+            contains="close audit pair conflicts",
         )
         missing_actor = {
             "issue_id": "x",
@@ -41824,13 +42945,16 @@ def v2_execute_history_cases(
                 {
                     "id": 2,
                     "event_type": "closed",
+                    "actor": "",
                     "timestamp": "2026-01-02T00:00:00+00:00",
+                    "comment": "Fixture close with unavailable actor.",
                 },
                 {
                     "id": 1,
                     "event_type": "status_changed",
                     "actor": "creator",
                     "timestamp": "2026-01-01T23:59:59+00:00",
+                    "old_value": "open",
                     "new_value": "closed",
                 },
             ],
@@ -41841,9 +42965,9 @@ def v2_execute_history_cases(
         )
         checks.check(
             "missing-actor-retained-empty",
-            "actor" not in normalized["events"][0],
-            expected="NoData actor",
-            observed=normalized["events"][0],
+            normalized["events"][0].get("actor") == "",
+            expected="",
+            observed=normalized["events"][0].get("actor"),
         )
         valid_args = v2_history_fixture(manifest)
         valid_source_root = semantic_root(
@@ -41970,7 +43094,7 @@ def v2_execute_history_cases(
                 audit_capture=args[3],
                 history_contract=args[4],
             ),
-            contains="conflicted",
+            contains="close audit pair conflicts",
         )
     elif slug == "history-duplicate-conflicting-order":
         duplicate = {
@@ -41981,6 +43105,7 @@ def v2_execute_history_cases(
                     "event_type": "closed",
                     "actor": "a",
                     "timestamp": "2026-01-01T00:00:00Z",
+                    "comment": "Duplicate event fixture close.",
                 },
                 {
                     "id": 1,
@@ -42009,7 +43134,8 @@ def v2_execute_history_cases(
                     "id": 2,
                     "event_type": "closed",
                     "actor": "a",
-                    "timestamp": "2026-01-02T00:00:00Z",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "comment": "ID-order fixture close.",
                 },
             ],
         }
@@ -42027,6 +43153,7 @@ def v2_execute_history_cases(
                     "event_type": "closed",
                     "actor": "a",
                     "timestamp": "2026-01-01T00:00:00Z",
+                    "comment": "Timestamp-order fixture close.",
                 },
                 {
                     "id": 1,
@@ -42043,7 +43170,7 @@ def v2_execute_history_cases(
                 timestamp_reordered,
                 issue_id="x",
             ),
-            contains="timestamps",
+            contains="timestamp descending",
         )
         conflicting = v2_history_fixture(
             manifest,
@@ -42062,7 +43189,7 @@ def v2_execute_history_cases(
                 audit_capture=conflicting[3],
                 history_contract=conflicting[4],
             ),
-            contains="conflicted",
+            contains="close audit pair conflicts",
         )
 
         def audit_document(
@@ -42167,15 +43294,16 @@ def v2_execute_history_cases(
             observed=after,
         )
     elif slug == "zero-all-priority-status-cells":
-        statuses = ["open", "in_progress", "blocked", "deferred", "closed"]
+        statuses = [*V2_RELEASED_KNOWN_STATUSES, "custom:review"]
         targets = [
             v2_synthetic_target(
-                priority * 5 + status_index,
+                priority * len(statuses) + status_index,
                 priority=priority,
                 status=status,
             )
             for priority in range(5)
             for status_index, status in enumerate(statuses)
+            if status != "tombstone"
         ]
         inventory = v2_synthetic_inventory(targets)
         zero = v2_build_zero_sets(
@@ -42184,12 +43312,48 @@ def v2_execute_history_cases(
             prior_campaign=v2_empty_prior_campaign(),
         )
         checks.check(
-            "all-25-cells-covered",
-            len(zero["cells"]) == 25
-            and zero["counts"]["issues"] == 25
-            and zero["counts"]["zero_receipts"] == 0,
-            expected={"cells": 25, "issues": 25, "zero": 0},
+            "released-and-custom-status-cells-covered",
+            zero["status_scopes"] == statuses
+            and zero["status_scopes_root"] == semantic_root(statuses)
+            and len(zero["cells"]) == 5 * len(statuses)
+            and zero["counts"]["issues"] == 5 * (len(statuses) - 1)
+            and zero["counts"]["zero_receipts"] == 5,
+            expected={
+                "status_scopes": statuses,
+                "cells": 5 * len(statuses),
+                "issues": 5 * (len(statuses) - 1),
+                "zero": 5,
+            },
             observed=zero["counts"],
+        )
+        legacy_planning_cells = [
+            cell
+            for cell in zero["cells"]
+            if cell["status"] in STATUS_SCOPES
+        ]
+        checks.check(
+            "legacy-25-planning-cells-retained",
+            len(legacy_planning_cells) == 25
+            and all(cell["issue_ids"] for cell in legacy_planning_cells)
+            and {
+                (cell["priority"], cell["status"])
+                for cell in legacy_planning_cells
+            }
+            == {
+                (priority, status)
+                for priority in range(5)
+                for status in STATUS_SCOPES
+            },
+            expected={
+                "cells": 25,
+                "statuses": list(STATUS_SCOPES),
+            },
+            observed={
+                "cells": len(legacy_planning_cells),
+                "statuses": sorted(
+                    {cell["status"] for cell in legacy_planning_cells}
+                ),
+            },
         )
         sparse_inventory = v2_synthetic_inventory(
             [v2_synthetic_target(100, priority=2, status="open")]
@@ -42215,8 +43379,9 @@ def v2_execute_history_cases(
             except HarnessError:
                 sparse_roots_valid = False
         checks.check(
-            "sparse-24-zero-receipts-rooted",
-            len(sparse_zero_receipts) == 24
+            "sparse-released-status-zero-receipts-rooted",
+            len(sparse_zero_receipts)
+            == 5 * len(V2_RELEASED_KNOWN_STATUSES) - 1
             and sparse_roots_valid
             and all(
                 receipt["count"] == 0
@@ -42225,7 +43390,12 @@ def v2_execute_history_cases(
                 == sparse_inventory["semantic_root"]
                 for receipt in sparse_zero_receipts
             ),
-            expected={"zero_receipts": 24, "issues": 1},
+            expected={
+                "zero_receipts": (
+                    5 * len(V2_RELEASED_KNOWN_STATUSES) - 1
+                ),
+                "issues": 1,
+            },
             observed=sparse["counts"],
         )
         empty_inventory = v2_synthetic_inventory([])
@@ -42238,14 +43408,18 @@ def v2_execute_history_cases(
             "empty-all-cells-have-zero-receipts",
             empty["counts"]
             == {
-                "cells": 25,
-                "zero_receipts": 25,
+                "cells": 5 * len(V2_RELEASED_KNOWN_STATUSES),
+                "zero_receipts": 5 * len(V2_RELEASED_KNOWN_STATUSES),
                 "issues": 0,
                 "scope_successors": 0,
                 "movements": 0,
             }
             and all(cell["zero_receipt"] is not None for cell in empty["cells"]),
-            expected={"cells": 25, "zero_receipts": 25, "issues": 0},
+            expected={
+                "cells": 5 * len(V2_RELEASED_KNOWN_STATUSES),
+                "zero_receipts": 5 * len(V2_RELEASED_KNOWN_STATUSES),
+                "issues": 0,
+            },
             observed=empty["counts"],
         )
 
@@ -42305,7 +43479,7 @@ def v2_execute_history_cases(
         )
 
         populated_receipt = json.loads(canonical_bytes(sparse))
-        populated_index = 2 * len(STATUS_SCOPES)
+        populated_index = 2 * len(sparse["status_scopes"])
         populated_cell = populated_receipt["cells"][populated_index]
         populated_cell["zero_receipt"] = v2_rooted(
             {
@@ -42349,7 +43523,7 @@ def v2_execute_history_cases(
         )
 
         wrong_counts = json.loads(canonical_bytes(sparse))
-        wrong_counts["counts"]["zero_receipts"] = 23
+        wrong_counts["counts"]["zero_receipts"] -= 1
         wrong_counts = v2_rooted(wrong_counts)
         semantic_mutations.append(
             ("wrong-zero-count", wrong_counts, "counts differ")
@@ -42386,7 +43560,10 @@ def v2_execute_history_cases(
                 inventory=sparse_inventory,
                 prior_campaign=v2_empty_prior_campaign(),
             ),
-            contains="exact 25-row array",
+            contains=(
+                "exact "
+                f"{5 * len(V2_RELEASED_KNOWN_STATUSES)}-row array"
+            ),
         )
 
         second_target = v2_synthetic_target(
@@ -44760,18 +45937,146 @@ def v2_execute_artifact_cases(
             ),
             contains="closure-mutated failed",
         )
+
+        class MutableRefusalProbe:
+            def __init__(self) -> None:
+                self.phase = "before"
+
+        object_state = MutableRefusalProbe()
+
+        def mutate_object_then_refuse() -> None:
+            object_state.phase = "after"
+            raise InputRefused(
+                "synthetic refusal after custom-object mutation"
+            )
+
+        object_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-object-refusal-state",
+                "fixture.object-refusal-state",
+            ).refuses(
+                "object-mutated",
+                InputRefused,
+                mutate_object_then_refuse,
+            ),
+            contains="object-mutated failed",
+        )
+        default_state = {"phase": "before"}
+
+        def mutate_default_then_refuse(
+            state: dict[str, str] = default_state,
+        ) -> None:
+            state["phase"] = "after"
+            raise InputRefused(
+                "synthetic refusal after default-argument mutation"
+            )
+
+        default_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-default-refusal-state",
+                "fixture.default-refusal-state",
+            ).refuses(
+                "default-mutated",
+                InputRefused,
+                mutate_default_then_refuse,
+            ),
+            contains="default-mutated failed",
+        )
+        global_memory = bytearray(b"stable")
+        global_memoryview = memoryview(global_memory)
+
+        def global_memoryview_template() -> None:
+            _fixture_global_memoryview[0] = 117
+            raise InputRefused(
+                "synthetic refusal after global-memoryview mutation"
+            )
+
+        global_memoryview_callback = types.FunctionType(
+            global_memoryview_template.__code__,
+            {
+                "_fixture_global_memoryview": global_memoryview,
+                "InputRefused": InputRefused,
+            },
+            "global_memoryview_callback",
+        )
+        try:
+            global_guard_error = expect_error(
+                EvidenceFailed,
+                lambda: V2CheckCollector(
+                    "fixture-global-refusal-state",
+                    "fixture.global-refusal-state",
+                ).refuses(
+                    "global-memoryview-mutated",
+                    InputRefused,
+                    global_memoryview_callback,
+                ),
+                contains="global-memoryview-mutated failed",
+            )
+            global_mutation_detected = global_memory[0] == 117
+        finally:
+            global_memory[0] = ord("s")
+            global_memoryview.release()
+        opaque_state = object()
+
+        def opaque_then_refuse() -> None:
+            _ = opaque_state
+            raise InputRefused("synthetic opaque-state refusal")
+
+        opaque_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-opaque-refusal-state",
+                "fixture.opaque-refusal-state",
+            ).refuses(
+                "opaque-refused",
+                InputRefused,
+                opaque_then_refuse,
+            ),
+            contains="unprojectable opaque state",
+        )
         checks.check(
             "refusal-closure-mutation-detected",
             mutated_state["phase"] == "after"
-            and guard_error.terminal == "EvidenceFailed",
+            and guard_error.terminal == "EvidenceFailed"
+            and object_state.phase == "after"
+            and object_guard_error.terminal == "EvidenceFailed"
+            and default_state["phase"] == "after"
+            and default_guard_error.terminal == "EvidenceFailed"
+            and global_mutation_detected
+            and global_guard_error.terminal == "EvidenceFailed"
+            and opaque_guard_error.terminal == "EvidenceFailed",
             expected={
-                "fixture_mutated": True,
-                "collector_terminal": "EvidenceFailed",
+                "closure_mutated": True,
+                "object_mutated": True,
+                "default_mutated": True,
+                "global_memoryview_mutated": True,
+                "opaque_state": "fail-closed",
+                "collector_terminals": ["EvidenceFailed"] * 5,
             },
             observed={
-                "fixture_mutated": mutated_state["phase"] == "after",
-                "collector_terminal": guard_error.terminal,
-                "diagnostic_root": text_root(str(guard_error)),
+                "closure_mutated": mutated_state["phase"] == "after",
+                "object_mutated": object_state.phase == "after",
+                "default_mutated": default_state["phase"] == "after",
+                "global_memoryview_mutated": global_mutation_detected,
+                "collector_terminals": [
+                    guard_error.terminal,
+                    object_guard_error.terminal,
+                    default_guard_error.terminal,
+                    global_guard_error.terminal,
+                    opaque_guard_error.terminal,
+                ],
+                "diagnostic_roots": [
+                    text_root(str(error))
+                    for error in (
+                        guard_error,
+                        object_guard_error,
+                        default_guard_error,
+                        global_guard_error,
+                        opaque_guard_error,
+                    )
+                ],
             },
         )
     elif slug == "log-order-terminal":
@@ -46976,6 +48281,7 @@ def v2_execute_fault_resource_cases(
         raw_right["dependents"] = [
             {
                 "id": "graph-left",
+                "title": "Specific fixture behavior",
                 "dependency_type": "blocks",
                 "status": "open",
                 "priority": 1,
@@ -47041,6 +48347,10 @@ def v2_execute_fault_resource_cases(
                 "graph-rollup-leaf",
             ),
         )
+        rollup_root["rollup"] = {
+            "status": "open",
+            "descendants": {"open": 2},
+        }
         rollup_terminal = fixture_issue(
             issue_id="graph-rollup-terminal",
             status="open",
@@ -47064,6 +48374,7 @@ def v2_execute_fault_resource_cases(
         rollup_terminal["dependents"] = [
             {
                 "id": "graph-rollup-root",
+                "title": "Specific fixture behavior",
                 "dependency_type": "blocks",
                 "status": "open",
                 "priority": 1,
@@ -47086,6 +48397,7 @@ def v2_execute_fault_resource_cases(
         rollup_leaf["dependents"] = [
             {
                 "id": "graph-rollup-terminal",
+                "title": "Specific fixture behavior",
                 "dependency_type": "blocks",
                 "status": "open",
                 "priority": 1,
@@ -47156,7 +48468,7 @@ def v2_execute_fault_resource_cases(
                     "status",
                     "open",
                 ),
-                "status or priority",
+                "disagrees with neighbor",
             ),
             (
                 "neighbor-priority",
@@ -47165,7 +48477,7 @@ def v2_execute_fault_resource_cases(
                     "priority",
                     3,
                 ),
-                "status or priority",
+                "disagrees with neighbor",
             ),
             (
                 "missing-reciprocal",
@@ -47198,6 +48510,15 @@ def v2_execute_fault_resource_cases(
                     }
                 ),
                 "self edge or duplicate neighbor",
+            ),
+            (
+                "rollup-descendant-count",
+                valid_rollup_graph,
+                lambda rows: rows[0]["rollup"]["descendants"].__setitem__(
+                    "open",
+                    1,
+                ),
+                "rollup descendant counts disagree",
             ),
         )
         for label, source, mutation, diagnostic in graph_failures:
@@ -47243,6 +48564,7 @@ def v2_execute_fault_resource_cases(
         cycle_left["dependents"] = [
             {
                 "id": "cycle-right",
+                "title": "Specific fixture behavior",
                 "dependency_type": "blocks",
                 "status": "open",
                 "priority": 1,
@@ -47262,6 +48584,7 @@ def v2_execute_fault_resource_cases(
         cycle_right["dependents"] = [
             {
                 "id": "cycle-left",
+                "title": "Specific fixture behavior",
                 "dependency_type": "blocks",
                 "status": "open",
                 "priority": 1,
@@ -47292,6 +48615,7 @@ def v2_execute_fault_resource_cases(
         parent_cycle_left["dependents"] = [
             {
                 "id": "parent-cycle-right",
+                "title": "Specific fixture behavior",
                 "dependency_type": "parent-child",
                 "status": "open",
                 "priority": 1,
@@ -47312,6 +48636,7 @@ def v2_execute_fault_resource_cases(
         parent_cycle_right["dependents"] = [
             {
                 "id": "parent-cycle-left",
+                "title": "Specific fixture behavior",
                 "dependency_type": "parent-child",
                 "status": "open",
                 "priority": 1,
@@ -48544,6 +49869,10 @@ def v2_execute_fault_resource_cases(
                 "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
                 "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
                 "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
+                "max_status_bytes": V2_STATUS_BYTES_CAP,
+                "max_first_divergence_bytes": (
+                    V2_FIRST_DIVERGENCE_BYTES_CAP
+                ),
                 "max_diagnostic_summary_bytes": (
                     V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
                 ),
@@ -48570,6 +49899,69 @@ def v2_execute_fault_resource_cases(
             }.items()),
             expected="all manifest caps bound",
             observed=manifest["caps"],
+        )
+        exact_status = v2_validate_status(
+            "s" * V2_STATUS_BYTES_CAP,
+            label="resource exact-cap status",
+            error_type=EvidenceFailed,
+        )
+        over_status_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_validate_status(
+                "s" * (V2_STATUS_BYTES_CAP + 1),
+                label="resource over-cap status",
+                error_type=EvidenceFailed,
+            ),
+            contains="canonical released-br status",
+        )
+        checks.check(
+            "status-byte-cap-exact-and-plus-one",
+            len(exact_status.encode("utf-8")) == V2_STATUS_BYTES_CAP
+            and over_status_error.terminal == "EvidenceFailed",
+            expected={
+                "exact_bytes": V2_STATUS_BYTES_CAP,
+                "plus_one_terminal": "EvidenceFailed",
+            },
+            observed={
+                "exact_bytes": len(exact_status.encode("utf-8")),
+                "plus_one_terminal": over_status_error.terminal,
+            },
+        )
+        exact_divergence_source = "d" * V2_FIRST_DIVERGENCE_BYTES_CAP
+        over_divergence_source = "d" * (
+            V2_FIRST_DIVERGENCE_BYTES_CAP + 1
+        )
+        exact_divergence = v2_bounded_first_divergence(
+            exact_divergence_source + " failed: synthetic detail",
+            fallback="unused",
+        )
+        bounded_divergence = v2_bounded_first_divergence(
+            over_divergence_source + " failed: synthetic detail",
+            fallback="unused",
+        )
+        checks.check(
+            "first-divergence-byte-cap-exact-and-plus-one",
+            exact_divergence == exact_divergence_source
+            and len(exact_divergence.encode("utf-8"))
+            == V2_FIRST_DIVERGENCE_BYTES_CAP
+            and len(bounded_divergence.encode("utf-8"))
+            == V2_FIRST_DIVERGENCE_BYTES_CAP
+            and text_root(over_divergence_source) in bounded_divergence,
+            expected={
+                "exact_bytes": V2_FIRST_DIVERGENCE_BYTES_CAP,
+                "plus_one_bounded_bytes": V2_FIRST_DIVERGENCE_BYTES_CAP,
+                "plus_one_root_retained": True,
+            },
+            observed={
+                "exact_bytes": len(exact_divergence.encode("utf-8")),
+                "plus_one_bounded_bytes": len(
+                    bounded_divergence.encode("utf-8")
+                ),
+                "plus_one_root_retained": (
+                    text_root(over_divergence_source)
+                    in bounded_divergence
+                ),
+            },
         )
         exact_check_id = v2_validate_check_id(
             "a" * V2_CHECK_ID_BYTES_CAP,
@@ -49348,6 +50740,7 @@ def v2_execute_fault_resource_cases(
         exact_relations = [
             {
                 "id": f"external:cap-{index:04d}",
+                "title": "Specific fixture behavior",
                 "dependency_type": "relates-to",
                 "status": "open",
                 "priority": 1,
@@ -49378,6 +50771,7 @@ def v2_execute_fault_resource_cases(
                 *exact_relations,
                 {
                     "id": "external:cap-plus-one",
+                    "title": "Specific fixture behavior",
                     "dependency_type": "relates-to",
                     "status": "open",
                     "priority": 1,
@@ -49393,6 +50787,7 @@ def v2_execute_fault_resource_cases(
         exact_dependent_relations = [
             {
                 "id": f"dependent-cap-{index:04d}",
+                "title": "Specific fixture behavior",
                 "dependency_type": "relates-to",
                 "status": "open",
                 "priority": 1,
@@ -49424,6 +50819,7 @@ def v2_execute_fault_resource_cases(
                         *exact_dependent_relations,
                         {
                             "id": "dependent-cap-plus-one",
+                            "title": "Specific fixture behavior",
                             "dependency_type": "relates-to",
                             "status": "open",
                             "priority": 1,
@@ -49437,6 +50833,7 @@ def v2_execute_fault_resource_cases(
             {
                 "id": V2_AUDIT_EVENTS_PER_ISSUE_CAP - index,
                 "event_type": "comment",
+                "actor": "fixture-auditor",
                 "timestamp": "2026-01-01T00:00:00+00:00",
                 "comment": "",
             }
@@ -49467,6 +50864,7 @@ def v2_execute_fault_resource_cases(
                         {
                             "id": 0,
                             "event_type": "comment",
+                            "actor": "fixture-auditor",
                             "timestamp": "2026-01-01T00:00:00+00:00",
                         },
                     ],
@@ -49591,12 +50989,12 @@ def v2_execute_fault_resource_cases(
                 (
                     "audit-round-empty-id-refused",
                     ["audit-valid", ""],
-                    "empty or non-string",
+                    "not a released-br local issue ID",
                 ),
                 (
                     "audit-round-non-string-id-refused",
                     ["audit-valid", 7],
-                    "empty or non-string",
+                    "not a released-br local issue ID",
                 ),
                 (
                     "audit-round-duplicate-id-refused",
@@ -51579,7 +52977,7 @@ def _v2_execute_nomock_cases_impl(
             observed=bv_projection["issue_count"],
         )
         checks.check(
-            "exact-25-cells-and-zero-receipts",
+            "legacy-exact-25-cells-and-zero-receipts",
             len(cells) == 25
             and all(
                 receipt["count"] == 0
@@ -51595,12 +52993,12 @@ def _v2_execute_nomock_cases_impl(
         live_nonclosed_ids = sorted(
             str(row.get("id") or "")
             for row in issues
-            if row.get("status") != "closed"
+            if not v2_is_terminal_status(row.get("status"))
         )
         inventoried_nonclosed_ids = sorted(
             row["id"]
             for row in production_inventory["rows"]
-            if row["status"] != "closed"
+            if not v2_is_terminal_status(row["status"])
         )
         checks.check(
             "production-v2-exact-covers-complete-nonclosed-universe",
@@ -51631,7 +53029,10 @@ def _v2_execute_nomock_cases_impl(
         )
         checks.check(
             "production-zero-validator-and-command-evidence",
-            len(production_zero["cells"]) == 25
+            len(production_zero["cells"])
+            == 5 * len(production_zero["status_scopes"])
+            and production_zero["status_scopes_root"]
+            == semantic_root(production_zero["status_scopes"])
             and production_zero["counts"]["issues"]
             == len(production_inventory["rows"])
             and bool(_command_receipts)
@@ -51641,7 +53042,8 @@ def _v2_execute_nomock_cases_impl(
                 for receipt in _command_receipts
             ),
             expected={
-                "cells": 25,
+                "cells": 5 * len(production_zero["status_scopes"]),
+                "status_scopes": production_zero["status_scopes"],
                 "targets": len(production_inventory["rows"]),
                 "commands": "nonempty successful receipts",
             },
@@ -51679,18 +53081,21 @@ def _v2_execute_nomock_cases_impl(
                     "event_type": "closed",
                     "actor": "other",
                     "timestamp": "2026-01-02T00:00:00.002000+00:00",
+                    "comment": "Other fixture close.",
                 },
                 {
                     "id": 2,
                     "event_type": "closed",
                     "actor": "first",
                     "timestamp": "2026-01-02T00:00:00.001000+00:00",
+                    "comment": "First fixture close.",
                 },
                 {
                     "id": 1,
                     "event_type": "status_changed",
                     "actor": "first",
                     "timestamp": "2026-01-02T00:00:00+00:00",
+                    "old_value": "open",
                     "new_value": "closed",
                 },
             ],
@@ -51829,6 +53234,11 @@ def _v2_execute_nomock_cases_impl(
             full_issues=source["captured"]["all_issues"],
             lint=source["captured"]["v1_lint_projection"],
         )
+        source_status_scopes = v2_canonical_status_scopes(
+            scope
+            for scope in source["captured"]["v1_lint_projection"]
+            if scope != "all"
+        )
         expected_source_receipts = [
             {"capture_sequence": index, **receipt}
             for index, receipt in enumerate(_command_receipts)
@@ -51867,7 +53277,10 @@ def _v2_execute_nomock_cases_impl(
             and observation["command_receipts"]
             == expected_source_receipts
             and [row["argv"] for row in source_receipts]
-            == v2_expected_observation_argv(source_issue_ids)
+            == v2_expected_observation_argv(
+                source_issue_ids,
+                status_scopes=source_status_scopes,
+            )
             and all(
                 row["exit_code"] == 0
                 and row["category"] == "SUCCESS"
@@ -51890,7 +53303,10 @@ def _v2_execute_nomock_cases_impl(
                 "selected_ids": [stable_id],
                 "source_issue_ids": fixture_before["issue_ids"],
                 "source_command_count": len(
-                    v2_expected_observation_argv(source_issue_ids)
+                    v2_expected_observation_argv(
+                        source_issue_ids,
+                        status_scopes=source_status_scopes,
+                    )
                 ),
             },
             observed={
