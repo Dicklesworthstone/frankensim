@@ -37,7 +37,7 @@ import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -178,8 +178,9 @@ V2_REPLAY_RESULT_SCHEMA = (
     "frankensim.beads-template-hygiene.replay-result.v2"
 )
 V2_REPLAY_RESULT_NO_CLAIM = (
-    "offline replay proves exact retained reconstruction only and does not "
-    "prove current tracker state or mint authority"
+    "exact retained reconstruction is artifact-proven; absence of live "
+    "tracker and network access is implementation-audited, not OS-sandbox-"
+    "proven; replay proves no current tracker state and mints no authority"
 )
 V2_REFUSAL_PROJECTION_SCHEMA = (
     "frankensim.beads-template-hygiene.refusal-projection.v2"
@@ -453,6 +454,12 @@ V2_ASSERTION_CHECKS_CAP = 256
 V2_CHECK_ID_BYTES_CAP = 256
 V2_CHECK_ID_PATTERN_TEXT = r"^[a-z0-9][a-z0-9._:-]*$"
 V2_CHECK_ID_PATTERN = re.compile(V2_CHECK_ID_PATTERN_TEXT)
+V2_LOCAL_ISSUE_ID_BYTES_CAP = 105
+V2_LOCAL_ISSUE_PREFIX_BYTES_CAP = 64
+V2_LOCAL_ISSUE_HASH_BYTES_CAP = 40
+V2_LOCAL_ISSUE_PREFIX_PATTERN = re.compile(r"^[a-z0-9_.:#-]+$")
+V2_LOCAL_ISSUE_HASH_PATTERN = re.compile(r"^[a-z0-9]+$")
+V2_EXTERNAL_RELATION_ID_BYTES_CAP = 256
 V2_LOG_DETERMINISM_POLICY = (
     "CANONICAL_ORDER_FOR_ROOTED_INPUTS; "
     "LIVE_STATE_TIMING_AND_FRESH_ATTEMPT_EVIDENCE_MAY_CHANGE_ROOTS"
@@ -658,6 +665,9 @@ V2_SOURCE_RELATION_FIELDS = frozenset(
 V2_SOURCE_COMMAND_RECEIPT_FIELDS = frozenset(
     {
         "capture_sequence",
+        "capture_ordinal",
+        "projection_kind",
+        "normalized_projection_root",
         "argv",
         "exit_code",
         "category",
@@ -704,6 +714,7 @@ V2_AUDIT_COMMAND_RECEIPT_FIELDS = frozenset(
         "result_category",
         "stdout_byte_length",
         "stdout_root",
+        "normalized_document_root",
         "stderr_byte_length",
         "stderr_root",
         "raw_stream_bodies_retained",
@@ -1046,8 +1057,12 @@ V2_SOURCE_OBSERVATION_NO_CLAIM = (
     "they neither authenticate people nor grant mutation authority"
 )
 V2_AUDIT_BRACKET_NO_CLAIM = (
-    "the rooted bracket binds audit reads between coherent source rounds; "
-    "it is process-local ordering, not a transactional snapshot or authority"
+    "the rooted bracket binds the supplied source-round and audit-capture "
+    "roots; call order is implementation-audited and is not independently "
+    "proven by retained chronology, a transactional snapshot, or authority"
+)
+V2_AUDIT_CAPTURE_POSITION = (
+    "IMPLEMENTATION_AUDITED_BETWEEN_SOURCE_ROUNDS_NOT_ARTIFACT_PROVEN"
 )
 V2_REVIEW_RECEIPTS_NO_CLAIM = (
     "review receipts are root-bound declarations only; they do not "
@@ -1148,6 +1163,21 @@ REQUIRED_SECTIONS_BY_TYPE = {
     "chore": (),
     "docs": (),
     "question": (),
+}
+LINT_SECTION_HINTS_BY_TYPE = {
+    "bug": {
+        "## Steps to Reproduce": "Describe how to reproduce the bug",
+        "## Acceptance Criteria": "Define criteria to verify the fix",
+    },
+    "task": {
+        "## Acceptance Criteria": "Define criteria to verify completion",
+    },
+    "feature": {
+        "## Acceptance Criteria": "Define criteria to verify completion",
+    },
+    "epic": {
+        "## Success Criteria": "Define high-level success criteria",
+    },
 }
 
 EXPECTED_CASE_IDS = (
@@ -1362,7 +1392,7 @@ def check_cancel() -> None:
 
 @contextmanager
 def v2_offline_replay_scope() -> Iterator[None]:
-    """Fail closed on every subprocess while any offline replay is active."""
+    """Fail closed on run_command-routed subprocesses during replay."""
     global _v2_offline_replay_depth
     with _v2_offline_replay_scope_lock:
         if _v2_offline_replay_depth == 0 and _v2_active_subprocesses:
@@ -2140,7 +2170,7 @@ def run_command(
     with _v2_offline_replay_scope_lock:
         if _v2_offline_replay_depth > 0:
             raise EvidenceFailed(
-                "offline v2 replay forbids every subprocess invocation"
+                "offline v2 replay forbids run_command-routed subprocesses"
             )
         _v2_active_subprocesses += 1
     try:
@@ -2188,14 +2218,90 @@ def br_read_json(
     return br_json(*arguments, *BR_READ_FLAGS, br_cwd=br_cwd)
 
 
+V2_BR_VERSION_FIELDS = frozenset(
+    {
+        "version",
+        "build",
+        "commit",
+        "branch",
+        "rust_version",
+        "target",
+        "features",
+    }
+)
+V2_BR_CAPABILITIES_FIELDS = frozenset(
+    {
+        "tool",
+        "version",
+        "contract_version",
+        "features",
+        "commands",
+        "global_flags",
+        "output_formats",
+        "exit_codes",
+        "env_vars",
+        "safety",
+        "recommended_entrypoints",
+    }
+)
+
+
+def v2_normalize_br_version(
+    document: Any,
+    *,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    required = {"version", "build"}
+    if (
+        not isinstance(document, dict)
+        or not required.issubset(document)
+        or not set(document).issubset(V2_BR_VERSION_FIELDS)
+    ):
+        raise error_type("br version has a non-closed released schema")
+    raw_features = document.get("features", [])
+    if not isinstance(raw_features, list):
+        raise error_type("br version features are malformed")
+    normalized = {
+        field: document.get(field)
+        for field in V2_BR_VERSION_FIELDS
+    }
+    normalized["features"] = list(raw_features)
+    if any(
+        not isinstance(normalized[field], str) or not normalized[field]
+        for field in required
+    ) or any(
+        normalized[field] is not None
+        and (
+            not isinstance(normalized[field], str)
+            or not normalized[field]
+        )
+        for field in ("commit", "branch", "rust_version", "target")
+    ):
+        raise error_type("br version identity scalars are malformed")
+    features = normalized["features"]
+    feature_order = {"self_update": 0, "mcp": 1}
+    if (
+        any(
+            not isinstance(feature, str)
+            or feature not in feature_order
+            for feature in features
+        )
+        or len(features) != len(set(features))
+        or features
+        != sorted(features, key=feature_order.__getitem__)
+    ):
+        raise error_type("br version features are noncanonical")
+    return {
+        field: normalized[field]
+        for field in sorted(V2_BR_VERSION_FIELDS)
+    }
+
+
 def br_version(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
-    document = br_read_json("version", "--json", br_cwd=br_cwd)
-    if not isinstance(document, dict):
-        raise InfrastructureFailed("br version --json did not return an object")
-    required = {"version", "build", "commit", "target", "features"}
-    if not required.issubset(document):
-        raise InfrastructureFailed("br version identity is incomplete")
-    return {key: document[key] for key in sorted(required)}
+    return v2_normalize_br_version(
+        br_read_json("version", "--json", br_cwd=br_cwd),
+        error_type=InfrastructureFailed,
+    )
 
 
 def v2_normalize_br_capability_commands(
@@ -2253,21 +2359,140 @@ def v2_normalize_br_capability_commands(
     return normalized
 
 
-def br_capabilities(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
-    document = br_read_json("capabilities", "--json", br_cwd=br_cwd)
-    if not isinstance(document, dict):
-        raise InfrastructureFailed("br capabilities --json did not return an object")
-    if document.get("contract_version") != "br.capabilities.v1":
-        raise InfrastructureFailed("unknown br capabilities contract")
+def v2_normalize_br_capability_rows(
+    value: Any,
+    *,
+    fields: frozenset[str],
+    identity_field: str,
+    label: str,
+    error_type: type[HarnessError],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > V2_LOG_EVENTS_CAP:
+        raise error_type(f"br capabilities {label} are malformed or over cap")
+    normalized: list[dict[str, Any]] = []
+    identities: list[Any] = []
+    for index, row in enumerate(value):
+        if not isinstance(row, dict) or set(row) != fields:
+            raise error_type(
+                f"br capabilities {label} row {index} has a non-closed schema"
+            )
+        if any(
+            (
+                type(row[field]) is not int
+                if field == "code"
+                else not isinstance(row[field], str) or not row[field]
+            )
+            for field in fields
+        ):
+            raise error_type(
+                f"br capabilities {label} row {index} has invalid scalars"
+            )
+        identities.append(row[identity_field])
+        normalized.append(dict(row))
+    if len(identities) != len(set(identities)):
+        raise error_type(f"br capabilities {label} identities are duplicated")
+    return normalized
+
+
+def v2_normalize_br_capabilities(
+    document: Any,
+    *,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    if (
+        not isinstance(document, dict)
+        or set(document) != V2_BR_CAPABILITIES_FIELDS
+        or document.get("tool") != "br"
+        or not isinstance(document.get("version"), str)
+        or not document["version"]
+        or document.get("contract_version") != "br.capabilities.v1"
+    ):
+        raise error_type("br capabilities identity or schema differs")
+    features = v2_normalize_br_capability_rows(
+        document["features"],
+        fields=frozenset({"name", "description"}),
+        identity_field="name",
+        label="features",
+        error_type=error_type,
+    )
     commands = v2_normalize_br_capability_commands(
-        document.get("commands"),
+        document["commands"],
+        error_type=error_type,
+    )
+    global_flags = v2_normalize_br_capability_rows(
+        document["global_flags"],
+        fields=frozenset({"flag", "description"}),
+        identity_field="flag",
+        label="global flags",
+        error_type=error_type,
+    )
+    exit_codes = v2_normalize_br_capability_rows(
+        document["exit_codes"],
+        fields=frozenset({"code", "category", "description"}),
+        identity_field="code",
+        label="exit codes",
+        error_type=error_type,
+    )
+    env_vars = v2_normalize_br_capability_rows(
+        document["env_vars"],
+        fields=frozenset({"name", "description"}),
+        identity_field="name",
+        label="environment variables",
+        error_type=error_type,
+    )
+    safety = v2_normalize_br_capability_rows(
+        document["safety"],
+        fields=frozenset({"name", "guarantee"}),
+        identity_field="name",
+        label="safety guarantees",
+        error_type=error_type,
+    )
+    output_formats = document["output_formats"]
+    recommended_entrypoints = document["recommended_entrypoints"]
+    for label, values in (
+        ("output formats", output_formats),
+        ("recommended entrypoints", recommended_entrypoints),
+    ):
+        if (
+            not isinstance(values, list)
+            or len(values) > V2_COMMAND_ARGUMENTS_CAP
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(values) != len(set(values))
+        ):
+            raise error_type(f"br capabilities {label} are malformed")
+    if not all(
+        (
+            features,
+            commands,
+            global_flags,
+            output_formats,
+            exit_codes,
+            env_vars,
+            safety,
+            recommended_entrypoints,
+        )
+    ):
+        raise error_type("br capabilities omits a released contract dimension")
+    return {
+        "tool": "br",
+        "version": document["version"],
+        "contract_version": "br.capabilities.v1",
+        "features": features,
+        "commands": commands,
+        "global_flags": global_flags,
+        "output_formats": list(output_formats),
+        "exit_codes": exit_codes,
+        "env_vars": env_vars,
+        "safety": safety,
+        "recommended_entrypoints": list(recommended_entrypoints),
+    }
+
+
+def br_capabilities(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
+    return v2_normalize_br_capabilities(
+        br_read_json("capabilities", "--json", br_cwd=br_cwd),
         error_type=InfrastructureFailed,
     )
-    return {
-        "contract_version": document["contract_version"],
-        "commands": commands,
-        "operation_count": len(commands),
-    }
 
 
 def file_identity(relative: str) -> dict[str, Any]:
@@ -2322,6 +2547,72 @@ def normalize_document(document: Any, *, label: str) -> list[dict[str, Any]]:
     return issues
 
 
+def v2_validate_issue_id(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> str:
+    if not isinstance(value, str):
+        raise error_type(f"{label} is not a released-br local issue ID")
+    encoded = value.encode("utf-8")
+    prefix, separator, remainder = value.rpartition("-")
+    child_parts = remainder.split(".")
+    issue_hash = child_parts[0]
+    valid_children = True
+    for child in child_parts[1:]:
+        if (
+            not child
+            or not child.isascii()
+            or not child.isdigit()
+        ):
+            valid_children = False
+            break
+        try:
+            if int(child) > 0xFFFF_FFFF:
+                valid_children = False
+                break
+        except ValueError:
+            valid_children = False
+            break
+    if (
+        not separator
+        or not prefix
+        or len(encoded) > V2_LOCAL_ISSUE_ID_BYTES_CAP
+        or len(prefix.encode("utf-8")) > V2_LOCAL_ISSUE_PREFIX_BYTES_CAP
+        or V2_LOCAL_ISSUE_PREFIX_PATTERN.fullmatch(prefix) is None
+        or not issue_hash
+        or len(issue_hash.encode("utf-8")) > V2_LOCAL_ISSUE_HASH_BYTES_CAP
+        or V2_LOCAL_ISSUE_HASH_PATTERN.fullmatch(issue_hash) is None
+        or not valid_children
+    ):
+        raise error_type(f"{label} is not a released-br local issue ID")
+    return value
+
+
+def v2_validate_external_relation_id(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("external:")
+        or not value.removeprefix("external:")
+        or len(value.encode("utf-8")) > V2_EXTERNAL_RELATION_ID_BYTES_CAP
+        or any(
+            unicodedata.category(character).startswith("C")
+            or unicodedata.category(character) in {"Zl", "Zp"}
+            for character in value
+        )
+    ):
+        raise error_type(
+            f"{label} is not a bounded command-safe external relation ID"
+        )
+    return value
+
+
 def v2_list_issue_ids(
     document: Any,
     *,
@@ -2354,11 +2645,11 @@ def v2_list_issue_ids(
             raise InfrastructureFailed(
                 f"{label} row {index} is not an object"
             )
-        issue_id = row.get("id")
-        if not isinstance(issue_id, str) or not issue_id:
-            raise InfrastructureFailed(
-                f"{label} row {index} has an invalid issue ID"
-            )
+        issue_id = v2_validate_issue_id(
+            row.get("id"),
+            label=f"{label} row {index} issue ID",
+            error_type=InfrastructureFailed,
+        )
         issue_ids.append(issue_id)
     issue_ids.sort()
     v2_assert_unique(issue_ids, label=f"{label} issue IDs")
@@ -2666,6 +2957,8 @@ V2_MANIFEST_TABLE_KEYS = {
         "source_capture_root_required_fields",
         "source_contract_required_fields",
         "source_observation_required_fields",
+        "br_version_required_fields",
+        "br_capabilities_required_fields",
         "source_capture_contract_required_fields",
         "source_audit_bracket_required_fields",
         "source_all_issue_required_fields",
@@ -2689,6 +2982,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "export_witness_materialization_required_fields",
         "export_witness_parallel_required_fields",
         "export_witness_batch_required_fields",
+        "export_witness_issue_count_policy",
+        "export_witness_capture_chunk_size_lines",
+        "export_witness_capture_max_parallelism",
         "audit_capture_position",
     },
     "row_contract": {
@@ -3593,6 +3889,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
         "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
         "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
+        "max_local_issue_id_bytes": V2_LOCAL_ISSUE_ID_BYTES_CAP,
+        "max_external_relation_id_bytes": (
+            V2_EXTERNAL_RELATION_ID_BYTES_CAP
+        ),
         "max_diagnostic_summary_bytes": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
         "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
         "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
@@ -3876,6 +4176,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
             "NEIGHBOR_AND_BLOCKING_CYCLES_REFUSED"
         )
         or source_contract["audit_capture_uses_bounded_runner"] is not True
+        or source_contract["export_witness_capture_chunk_size_lines"]
+        != V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+        or source_contract["export_witness_capture_max_parallelism"]
+        != V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
         or not v2_manifest_ordered_string_list(
             source_contract["source_closure_states"],
             V2_SOURCE_CLOSURE_STATES,
@@ -3922,6 +4226,14 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or not v2_manifest_closed_field_list(
             source_contract["source_observation_required_fields"],
             V2_SOURCE_OBSERVATION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["br_version_required_fields"],
+            V2_BR_VERSION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["br_capabilities_required_fields"],
+            V2_BR_CAPABILITIES_FIELDS,
         )
         or not v2_manifest_closed_field_list(
             source_contract["source_capture_contract_required_fields"],
@@ -4019,8 +4331,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
             source_contract["export_witness_batch_required_fields"],
             V2_BR_WITNESS_BATCH_FIELDS,
         )
+        or source_contract["export_witness_issue_count_policy"]
+        != "NON_EPHEMERAL_SOURCE_ISSUE_COUNT"
         or source_contract["audit_capture_position"]
-        != "BETWEEN_SOURCE_CAPTURE_ROUNDS"
+        != V2_AUDIT_CAPTURE_POSITION
     ):
         raise InputRefused("v2 semantic-review source contract differs")
     row_fields = document["row_contract"]["required_fields"]
@@ -4289,7 +4603,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
         )
         or replay_contract["result_rooted"] is not True
         or replay_contract["execution_process_guard"]
-        != "PROCESS_WIDE_REENTRANT_FAIL_CLOSED_SUBPROCESS_EXCLUSION"
+        != "RUN_COMMAND_ROUTED_REENTRANT_FAIL_CLOSED_SUBPROCESS_EXCLUSION"
         or replay_contract["explicit_cli_mode"] != "--replay-v2"
         or replay_contract["legacy_cli_mode"] != "--replay"
         or replay_contract["legacy_dispatch"]
@@ -4465,6 +4779,11 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         or issue["priority"] not in range(5)
     ):
         raise InfrastructureFailed("v2 br issue contains invalid core scalars")
+    issue_id = v2_validate_issue_id(
+        issue_id,
+        label="v2 br issue ID",
+        error_type=InfrastructureFailed,
+    )
     for field in (
         "assignee",
         "owner",
@@ -4584,7 +4903,22 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 raise InfrastructureFailed(
                     f"v2 br issue {issue_id} has an invalid relation row"
                 )
-            relation_neighbors.append(relation["id"])
+            relation_label = (
+                f"v2 br issue {issue_id} {relation_field} relation ID"
+            )
+            relation_neighbors.append(
+                v2_validate_external_relation_id(
+                    relation["id"],
+                    label=relation_label,
+                    error_type=InfrastructureFailed,
+                )
+                if relation["id"].startswith("external:")
+                else v2_validate_issue_id(
+                    relation["id"],
+                    label=relation_label,
+                    error_type=InfrastructureFailed,
+                )
+            )
         if len(relation_neighbors) != len(set(relation_neighbors)):
             raise InfrastructureFailed(
                 f"v2 br issue {issue_id} duplicates a "
@@ -4627,12 +4961,22 @@ def v2_show_all_issues(
         raise InputRefused(
             f"v2 source has more than {V2_INVENTORY_ROWS_CAP} issue rows"
         )
+    validated_issue_ids = [
+        v2_validate_issue_id(
+            issue_id,
+            label=f"v2 show issue ID {index}",
+            error_type=InputRefused,
+        )
+        for index, issue_id in enumerate(issue_ids)
+    ]
+    if len(validated_issue_ids) != len(set(validated_issue_ids)):
+        raise InputRefused("v2 show issue IDs are not unique")
     rows: list[dict[str, Any]] = []
     retained_projection_bytes = len(canonical_bytes([]))
     batch_size = min(CAPS["show_batch"], 56)
-    for offset in range(0, len(issue_ids), batch_size):
+    for offset in range(0, len(validated_issue_ids), batch_size):
         check_cancel()
-        batch = issue_ids[offset : offset + batch_size]
+        batch = validated_issue_ids[offset : offset + batch_size]
         document = br_read_json(
             "show",
             *batch,
@@ -4665,73 +5009,197 @@ def v2_show_all_issues(
             )
             rows.append(projected)
     rows.sort(key=lambda issue: issue["id"])
-    if [row["id"] for row in rows] != sorted(issue_ids):
+    if [row["id"] for row in rows] != sorted(validated_issue_ids):
         raise InfrastructureFailed("v2 br show membership differs from br list")
     return rows
 
 
-def lint_scopes(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for scope in LINT_SCOPES:
-        document = br_read_json(
-            "lint",
-            "--status",
-            scope,
-            "--json",
-            br_cwd=br_cwd,
+def v2_normalize_br_lint_document(
+    document: Any,
+    *,
+    scope: str,
+    error_type: type[HarnessError],
+) -> dict[str, Any]:
+    if not isinstance(document, dict) or set(document) != {
+        "total",
+        "issues",
+        "results",
+    }:
+        raise error_type(f"br lint {scope} has a non-closed output schema")
+    total = document["total"]
+    issues = document["issues"]
+    raw_results = document["results"]
+    if (
+        type(total) is not int
+        or type(issues) is not int
+        or total < 0
+        or issues < 0
+        or not isinstance(raw_results, list)
+        or total > CAPS["warnings"]
+        or issues > CAPS["issues"]
+    ):
+        raise error_type(f"br lint {scope} counts or rows are malformed")
+    normalized_rows: list[dict[str, Any]] = []
+    for index, raw_row in enumerate(raw_results):
+        if not isinstance(raw_row, dict) or set(raw_row) != {
+            "id",
+            "title",
+            "type",
+            "missing",
+            "warnings",
+            "suggestions",
+        }:
+            raise error_type(
+                f"br lint {scope} row {index} has a non-closed schema"
+            )
+        row = dict(raw_row)
+        issue_id = v2_validate_issue_id(
+            row["id"],
+            label=f"br lint {scope} row {index} ID",
+            error_type=error_type,
         )
-        if not isinstance(document, dict) or not isinstance(document.get("results"), list):
-            raise InfrastructureFailed(f"br lint {scope} has no results array")
-        total = document.get("total")
-        issues = document.get("issues")
-        if type(total) is not int or type(issues) is not int:
-            raise InfrastructureFailed(
-                f"br lint {scope} counts are not exact integers"
+        issue_type = row["type"]
+        missing = row["missing"]
+        suggestions = row["suggestions"]
+        required = REQUIRED_SECTIONS_BY_TYPE.get(issue_type)
+        if (
+            not isinstance(row["title"], str)
+            or not row["title"]
+            or not isinstance(issue_type, str)
+            or not issue_type
+            or not isinstance(missing, list)
+            or not missing
+            or any(
+                not isinstance(section, str) or not section
+                for section in missing
             )
-        if total < 0 or issues < 0:
-            raise InfrastructureFailed(f"br lint {scope} has negative counts")
-        if total > CAPS["warnings"]:
-            raise InfrastructureFailed(f"br lint {scope} exceeds warning cap")
-        normalized_rows: list[dict[str, Any]] = []
-        for index, row in enumerate(document["results"]):
-            if not isinstance(row, dict):
-                raise InfrastructureFailed(
-                    f"br lint {scope} row {index} is not an object"
-                )
-            issue_id = row.get("id")
-            missing = row.get("missing")
-            warnings = row.get("warnings")
-            if (
-                not isinstance(issue_id, str)
-                or not issue_id
-                or not isinstance(missing, list)
-                or not missing
-                or any(
-                    not isinstance(section, str) or not section
-                    for section in missing
-                )
-                or len(missing) != len(set(missing))
-                or type(warnings) is not int
-                or warnings != len(missing)
-            ):
-                raise InfrastructureFailed(
-                    f"br lint {scope} row {index} has invalid scalars"
-                )
-            normalized_rows.append(dict(row))
-        normalized_rows.sort(key=lambda row: row["id"])
-        if len(normalized_rows) != issues:
-            raise InfrastructureFailed(
-                f"br lint {scope} issue count differs from rows"
+            or required is None
+            or missing
+            != [section for section in required if section in set(missing)]
+            or len(missing) != len(set(missing))
+            or type(row["warnings"]) is not int
+            or row["warnings"] != len(missing)
+            or not isinstance(suggestions, list)
+            or len(suggestions) != len(missing)
+        ):
+            raise error_type(
+                f"br lint {scope} row {index} has invalid released scalars"
             )
-        if sum(row["warnings"] for row in normalized_rows) != total:
-            raise InfrastructureFailed(
-                f"br lint {scope} warning count differs from rows"
+        expected_suggestions = [
+            {
+                "section": section,
+                "hint": LINT_SECTION_HINTS_BY_TYPE[issue_type][section],
+            }
+            for section in missing
+        ]
+        if suggestions != expected_suggestions or any(
+            not isinstance(suggestion, dict)
+            or set(suggestion) != {"section", "hint"}
+            or any(
+                not isinstance(suggestion[field], str)
+                or not suggestion[field]
+                for field in ("section", "hint")
             )
-        result[scope] = {
-            "total": total,
-            "issues": issues,
-            "results": normalized_rows,
-        }
+            for suggestion in suggestions
+        ):
+            raise error_type(
+                f"br lint {scope} row {index} suggestions differ from "
+                "released-br"
+            )
+        row["id"] = issue_id
+        normalized_rows.append(row)
+    normalized_rows.sort(key=lambda row: row["id"])
+    ids = [row["id"] for row in normalized_rows]
+    if (
+        ids != sorted(set(ids))
+        or len(normalized_rows) != issues
+        or sum(row["warnings"] for row in normalized_rows) != total
+    ):
+        raise error_type(f"br lint {scope} count or membership differs")
+    return {
+        "total": total,
+        "issues": issues,
+        "results": normalized_rows,
+    }
+
+
+def v2_validate_lint_scope_coherence(
+    lint: Mapping[str, Any],
+    *,
+    full_issues: Sequence[Mapping[str, Any]] | None,
+    error_type: type[HarnessError],
+) -> None:
+    if not isinstance(lint, dict) or set(lint) != set(LINT_SCOPES):
+        raise error_type("br lint scope membership differs")
+    normalized = {
+        scope: v2_normalize_br_lint_document(
+            lint[scope],
+            scope=scope,
+            error_type=error_type,
+        )
+        for scope in LINT_SCOPES
+    }
+    if normalized != dict(lint):
+        raise error_type("br lint scopes are not canonically normalized")
+    all_by_id = {
+        row["id"]: row for row in normalized["all"]["results"]
+    }
+    for scope in STATUS_SCOPES:
+        for row in normalized[scope]["results"]:
+            if all_by_id.get(row["id"]) != row:
+                raise error_type(
+                    f"br lint {scope} row differs from the all-scope row"
+                )
+    if full_issues is None:
+        return
+    issue_by_id = {str(issue["id"]): issue for issue in full_issues}
+    for issue_id, row in all_by_id.items():
+        issue = issue_by_id.get(issue_id)
+        if (
+            issue is None
+            or row["title"] != issue["title"]
+            or row["type"] != issue["type"]
+        ):
+            raise error_type(
+                "br lint row identity differs from the full issue projection"
+            )
+        expected_scope = str(issue["status"])
+        for scope in STATUS_SCOPES:
+            scoped_row = next(
+                (
+                    candidate
+                    for candidate in normalized[scope]["results"]
+                    if candidate["id"] == issue_id
+                ),
+                None,
+            )
+            if (scoped_row == row) != (scope == expected_scope):
+                raise error_type(
+                    "br lint status scopes disagree with the full issue "
+                    "projection"
+                )
+
+
+def lint_scopes(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
+    result = {
+        scope: v2_normalize_br_lint_document(
+            br_read_json(
+                "lint",
+                "--status",
+                scope,
+                "--json",
+                br_cwd=br_cwd,
+            ),
+            scope=scope,
+            error_type=InfrastructureFailed,
+        )
+        for scope in LINT_SCOPES
+    }
+    v2_validate_lint_scope_coherence(
+        result,
+        full_issues=None,
+        error_type=InfrastructureFailed,
+    )
     return result
 
 
@@ -5087,7 +5555,19 @@ def lint_result_map(lint: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
         raw_sections = tuple(
             str(section) for section in (row.get("missing") or [])
         )
-        sections = tuple(sorted(raw_sections))
+        required_order = FIXTURE_REQUIRED_SECTIONS_BY_TYPE.get(
+            issue_type,
+            (),
+        )
+        raw_section_set = set(raw_sections)
+        sections = (
+            *(
+                section
+                for section in required_order
+                if section in raw_section_set
+            ),
+            *sorted(raw_section_set - set(required_order)),
+        )
         if not issue_id or not sections:
             raise InfrastructureFailed("lint result contains an empty ID or missing set")
         if len(sections) != len(set(sections)):
@@ -5748,25 +6228,81 @@ V2_BR_RELIABILITY_FIELDS = frozenset(
 V2_BR_RELIABILITY_ANOMALY_FIELDS = frozenset(
     {"code", "message", "severity"}
 )
+V2_BR_SYNC_ANOMALY_CONTRACT = {
+    "database_missing": ("recoverable", "database file missing"),
+    "database_not_sqlite": ("recoverable", "database file is not SQLite"),
+    "sidecar_mismatch": (
+        "degraded",
+        "sidecar mismatch (WAL=false, SHM=true)",
+    ),
+    "truncated_wal": ("recoverable", "truncated WAL sidecar (<32 bytes)"),
+    "jsonl_conflict_markers": (
+        "unsafe",
+        "JSONL contains merge conflict markers",
+    ),
+    "journal_sidecar_present": (
+        "degraded",
+        "journal sidecar present (incomplete transaction)",
+    ),
+    "orphaned_lock_file": (
+        "degraded",
+        "orphaned lock file (.beads.lock) present",
+    ),
+    "jsonl_newer": ("degraded", "JSONL has newer data than database"),
+    "db_newer": ("degraded", "database has newer data than JSONL"),
+}
+V2_BR_SYNC_ANOMALY_ORDER = tuple(V2_BR_SYNC_ANOMALY_CONTRACT)
+V2_BR_HEALTH_RANK = {
+    "healthy": 0,
+    "degraded": 1,
+    "recoverable": 2,
+    "unsafe": 3,
+}
 V2_BR_GIT_EXPORT_FIELDS = frozenset(
     {
+        "state",
         "available",
-        "head_hash",
-        "index_clean",
+        "reason",
+        "diagnostic_command",
         "tracked",
         "worktree_clean",
+        "index_clean",
+        "head_hash",
         "worktree_hash",
     }
 )
-V2_BR_WITNESS_FIELDS = frozenset(
+V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS = frozenset(
+    {
+        "available",
+        "tracked",
+        "worktree_clean",
+        "index_clean",
+        "head_hash",
+        "worktree_hash",
+    }
+)
+V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS = frozenset(
+    {"available", "reason", "diagnostic_command"}
+)
+V2_BR_WITNESS_REQUIRED_RAW_FIELDS = frozenset(
+    {"jsonl_path", "witness"}
+)
+V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES = 1_024
+V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM = 64
+V2_BR_WITNESS_BASE_FIELDS = frozenset(
     {
         "base_comparison",
         "base_jsonl_path",
         "base_parallel_work_plan",
         "base_reuse_materialization",
         "base_reuse_plan",
-        "jsonl_path",
-        "witness",
+    }
+)
+V2_BR_WITNESS_FIELDS = frozenset(
+    {
+        *V2_BR_WITNESS_REQUIRED_RAW_FIELDS,
+        *V2_BR_WITNESS_BASE_FIELDS,
+        "base_evidence_state",
     }
 )
 V2_BR_WITNESS_BODY_FIELDS = frozenset(
@@ -5935,12 +6471,18 @@ def v2_normalize_br_status(
         label="br status",
         error_type=error_type,
     )
-    summary = v2_br_exact_mapping(
-        outer["summary"],
-        V2_BR_STATUS_SUMMARY_FIELDS,
-        label="br status summary",
-        error_type=error_type,
-    )
+    raw_summary = outer["summary"]
+    optional_fields = {"average_lead_time_hours"}
+    if (
+        not isinstance(raw_summary, dict)
+        or not (V2_BR_STATUS_SUMMARY_FIELDS - optional_fields).issubset(
+            raw_summary
+        )
+        or not set(raw_summary).issubset(V2_BR_STATUS_SUMMARY_FIELDS)
+    ):
+        raise error_type("br status summary has a non-closed released schema")
+    summary = dict(raw_summary)
+    summary.setdefault("average_lead_time_hours", None)
     for field in V2_BR_STATUS_SUMMARY_FIELDS - {"average_lead_time_hours"}:
         v2_br_nonnegative_int(
             summary[field],
@@ -5949,7 +6491,11 @@ def v2_normalize_br_status(
             error_type=error_type,
         )
     lead_time = summary["average_lead_time_hours"]
-    if type(lead_time) is not float or not math.isfinite(lead_time) or lead_time < 0:
+    if lead_time is not None and (
+        type(lead_time) is not float
+        or not math.isfinite(lead_time)
+        or lead_time < 0
+    ):
         raise error_type("br status average lead time is not a finite nonnegative float")
     total = summary["total_issues"]
     for field in (
@@ -5989,15 +6535,15 @@ def v2_normalize_br_sync_status(
         cap=V2_INVENTORY_ROWS_CAP,
         error_type=error_type,
     )
-    if normalized["jsonl_exists"]:
+    if normalized["jsonl_content_hash"] is not None:
         v2_br_hash(
             normalized["jsonl_content_hash"],
             label="br sync status JSONL content hash",
             width=64,
             error_type=error_type,
         )
-    elif normalized["jsonl_content_hash"] not in {"", None}:
-        raise error_type("br sync status has a hash for an absent JSONL export")
+    if not normalized["jsonl_exists"] and normalized["jsonl_newer"]:
+        raise error_type("br sync status marks an absent JSONL export as newer")
     for field in ("last_export_time", "last_import_time"):
         value = normalized[field]
         if value is not None and not isinstance(value, str):
@@ -6038,61 +6584,148 @@ def v2_normalize_br_sync_status(
         if any(
             not isinstance(anomaly[field], str) or not anomaly[field]
             for field in ("code", "message", "severity")
-        ) or anomaly["severity"] not in {
-            "healthy",
-            "degraded",
-            "recoverable",
-            "unsafe",
-        }:
+        ):
             raise error_type(
                 f"br sync reliability anomaly {index} is malformed"
+            )
+        anomaly_contract = V2_BR_SYNC_ANOMALY_CONTRACT.get(
+            anomaly["code"]
+        )
+        if anomaly_contract != (
+            anomaly["severity"],
+            anomaly["message"],
+        ):
+            raise error_type(
+                f"br sync reliability anomaly {index} is not released-br exact"
             )
         anomaly_codes.append(anomaly["code"])
         normalized_anomalies.append(anomaly)
     if len(anomaly_codes) != len(set(anomaly_codes)):
         raise error_type("br sync reliability anomaly codes are duplicated")
+    anomaly_positions = [
+        V2_BR_SYNC_ANOMALY_ORDER.index(code)
+        for code in anomaly_codes
+    ]
+    if anomaly_positions != sorted(anomaly_positions):
+        raise error_type(
+            "br sync reliability anomalies are not in released-br order"
+        )
+    anomaly_code_set = set(anomaly_codes)
+    if (
+        {"database_missing", "database_not_sqlite"}
+        <= anomaly_code_set
+        or {"sidecar_mismatch", "truncated_wal"}
+        <= anomaly_code_set
+    ):
+        raise error_type(
+            "br sync reliability anomalies describe an impossible file state"
+        )
+    expected_health = max(
+        (
+            V2_BR_SYNC_ANOMALY_CONTRACT[code][0]
+            for code in anomaly_codes
+        ),
+        key=V2_BR_HEALTH_RANK.__getitem__,
+        default="healthy",
+    )
     if (
         reliability["source"] != "sync.status"
-        or reliability["health"]
-        not in {"healthy", "degraded", "recoverable", "unsafe"}
+        or reliability["health"] != expected_health
         or normalized["workspace_health"] != reliability["health"]
         or (reliability["health"] == "healthy") != (anomaly_count == 0)
+        or normalized["jsonl_newer"]
+        != ("jsonl_newer" in anomaly_codes)
+        or normalized["db_newer"] != ("db_newer" in anomaly_codes)
     ):
         raise error_type("br sync reliability audit identity is malformed")
     reliability["anomalies"] = normalized_anomalies
-    git_export = normalized["git_export"]
-    if git_export == {"available": False}:
-        normalized_git_export = {"available": False}
+    raw_git_export = normalized["git_export"]
+    if not isinstance(raw_git_export, dict):
+        raise error_type("br sync git export is not an object")
+    if set(raw_git_export) == V2_BR_GIT_EXPORT_PROBED_RAW_FIELDS:
+        normalized_git_export = {
+            "state": "PROBED",
+            **raw_git_export,
+            "reason": None,
+            "diagnostic_command": None,
+        }
+    elif set(raw_git_export) == V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS:
+        normalized_git_export = {
+            "state": "NOT_PROBED",
+            **raw_git_export,
+            "tracked": None,
+            "worktree_clean": None,
+            "index_clean": None,
+            "head_hash": None,
+            "worktree_hash": None,
+        }
+    elif set(raw_git_export) == {"available"}:
+        normalized_git_export = {
+            "state": "LEGACY_UNAVAILABLE",
+            **raw_git_export,
+            "reason": None,
+            "diagnostic_command": None,
+            "tracked": None,
+            "worktree_clean": None,
+            "index_clean": None,
+            "head_hash": None,
+            "worktree_hash": None,
+        }
+    elif set(raw_git_export) == V2_BR_GIT_EXPORT_FIELDS:
+        normalized_git_export = dict(raw_git_export)
     else:
-        optional_git_fields = {"head_hash"}
-        if not isinstance(git_export, dict) or not (
-            V2_BR_GIT_EXPORT_FIELDS - optional_git_fields
-        ).issubset(git_export) or not set(git_export).issubset(
-            V2_BR_GIT_EXPORT_FIELDS
-        ):
-            raise error_type("br sync git export has a non-closed schema")
-        normalized_git_export = dict(git_export)
-        normalized_git_export.setdefault("head_hash", None)
-        for field in ("available", "tracked", "worktree_clean", "index_clean"):
-            if type(normalized_git_export[field]) is not bool:
-                raise error_type(f"br sync git export {field} is not boolean")
-        if normalized_git_export["available"] is not True:
-            raise error_type("br sync unavailable git export has extra fields")
-        v2_br_hash(
-            normalized_git_export["worktree_hash"],
-            label="br sync git export worktree_hash",
-            width=40,
-            error_type=error_type,
-        )
-        if normalized_git_export["tracked"]:
-            v2_br_hash(
-                normalized_git_export["head_hash"],
-                label="br sync git export head_hash",
-                width=40,
-                error_type=error_type,
+        raise error_type("br sync git export has a non-closed union schema")
+    git_state = normalized_git_export["state"]
+    if git_state == "PROBED":
+        if normalized_git_export["available"] is not True or any(
+            type(normalized_git_export[field]) is not bool
+            for field in (
+                "tracked",
+                "worktree_clean",
+                "index_clean",
             )
-        elif normalized_git_export["head_hash"] is not None:
-            raise error_type("untracked br sync git export has a head hash")
+        ) or any(
+            normalized_git_export[field] is not None
+            for field in ("reason", "diagnostic_command")
+        ):
+            raise error_type("br sync probed git export is malformed")
+        hash_widths: set[int] = set()
+        for hash_field in ("head_hash", "worktree_hash"):
+            hash_value = normalized_git_export[hash_field]
+            if hash_value is None:
+                continue
+            if (
+                not isinstance(hash_value, str)
+                or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", hash_value)
+                is None
+            ):
+                raise error_type(
+                    f"br sync git export {hash_field} is not a canonical "
+                    "SHA-1 or SHA-256 object ID"
+                )
+            hash_widths.add(len(hash_value))
+        if len(hash_widths) > 1:
+            raise error_type("br sync git export mixes Git object formats")
+        if normalized["jsonl_exists"] != (
+            normalized_git_export["worktree_hash"] is not None
+        ):
+            raise error_type(
+                "br sync git export worktree hash disagrees with file presence"
+            )
+        if normalized_git_export["worktree_clean"] and (
+            not normalized_git_export["tracked"]
+            or normalized_git_export["worktree_hash"] is None
+        ):
+            raise error_type(
+                "clean br sync worktree lacks tracked content evidence"
+            )
+        if normalized_git_export["index_clean"] and (
+            normalized_git_export["tracked"]
+            != (normalized_git_export["head_hash"] is not None)
+        ):
+            raise error_type(
+                "clean br sync index disagrees with HEAD path presence"
+            )
         if (
             normalized_git_export["tracked"]
             and normalized_git_export["worktree_clean"]
@@ -6101,6 +6734,34 @@ def v2_normalize_br_sync_status(
             != normalized_git_export["worktree_hash"]
         ):
             raise error_type("clean br sync git export hashes disagree")
+    elif git_state == "NOT_PROBED":
+        if normalized_git_export != {
+            "state": "NOT_PROBED",
+            "available": False,
+            "reason": "not_probed",
+            "diagnostic_command": "br vcs-status --json",
+            "tracked": None,
+            "worktree_clean": None,
+            "index_clean": None,
+            "head_hash": None,
+            "worktree_hash": None,
+        }:
+            raise error_type("br sync not-probed git export is malformed")
+    elif git_state == "LEGACY_UNAVAILABLE":
+        if normalized_git_export != {
+            "state": "LEGACY_UNAVAILABLE",
+            "available": False,
+            "reason": None,
+            "diagnostic_command": None,
+            "tracked": None,
+            "worktree_clean": None,
+            "index_clean": None,
+            "head_hash": None,
+            "worktree_hash": None,
+        }:
+            raise error_type("br sync legacy-unavailable git export is malformed")
+    else:
+        raise error_type("br sync git export has an unknown normalized state")
     normalized["reliability_audit"] = reliability
     normalized["git_export"] = normalized_git_export
     return normalized
@@ -6155,6 +6816,14 @@ def v2_normalize_br_witness_actions(
                 raise error_type(f"br witness action {index} index contract differs")
             if base_index < comparable or base_index >= base_chunk_count:
                 raise error_type(f"br witness action {index} base index is invalid")
+            if (
+                action["line_count"] == 0
+                or action["byte_count"] < action["line_count"]
+            ):
+                raise error_type(
+                    f"br witness action {index} removed chunk has impossible "
+                    "line or byte counts"
+                )
             drops_started = True
             dropped_indices.append(base_index)
         elif type(candidate_index) is not int:
@@ -6197,6 +6866,28 @@ def v2_normalize_br_witness_actions(
             raise error_type("br witness candidate actions do not exact-cover chunks")
         if dropped_indices != list(range(comparable, base_chunk_count)):
             raise error_type("br witness dropped actions do not exact-cover base tail")
+        dropped_actions = [
+            action for action in normalized
+            if action["action"] == "drop_removed"
+        ]
+        if dropped_actions:
+            next_removed_line = comparison["base_line_count"] - sum(
+                action["line_count"] for action in dropped_actions
+            )
+            if next_removed_line < 0:
+                raise error_type(
+                    "br witness removed action lines exceed the base witness"
+                )
+            for action in dropped_actions:
+                if action["start_line"] != next_removed_line:
+                    raise error_type(
+                        "br witness removed action line spans are noncontiguous"
+                    )
+                next_removed_line += action["line_count"]
+            if next_removed_line != comparison["base_line_count"]:
+                raise error_type(
+                    "br witness removed action lines do not end at the base tail"
+                )
     else:
         if candidate_indices != sorted(set(candidate_indices)):
             raise error_type("br witness candidate actions are noncanonical")
@@ -6205,18 +6896,90 @@ def v2_normalize_br_witness_actions(
     return normalized
 
 
+def v2_br_witness_root(
+    *,
+    schema_version: str,
+    chunk_size_lines: int,
+    line_count: int,
+    byte_count: int,
+    chunks: Sequence[Mapping[str, Any]],
+) -> str:
+    def u64(value: int) -> bytes:
+        if type(value) is not int or not 0 <= value <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise EvidenceFailed("br witness root input exceeds u64")
+        return value.to_bytes(8, "little")
+
+    def framed(value: str) -> bytes:
+        encoded = value.encode("utf-8")
+        return u64(len(encoded)) + b"\0" + encoded + b"\0"
+
+    digest = hashlib.sha256()
+    digest.update(b"br:jsonl-witness:root:v1\0")
+    digest.update(framed(schema_version))
+    digest.update(u64(chunk_size_lines))
+    digest.update(u64(line_count))
+    digest.update(u64(byte_count))
+    digest.update(u64(len(chunks)))
+    for chunk in chunks:
+        digest.update(u64(chunk["index"]))
+        digest.update(u64(chunk["start_line"]))
+        digest.update(u64(chunk["line_count"]))
+        digest.update(u64(chunk["byte_count"]))
+        digest.update(framed(chunk["hash"]))
+        for field in ("first_line_hash", "last_line_hash"):
+            optional_hash = chunk[field]
+            if optional_hash is None:
+                digest.update(b"\0")
+            else:
+                digest.update(b"\x01")
+                digest.update(framed(optional_hash))
+    return digest.hexdigest()
+
+
 def v2_normalize_br_export_witness(
     document: Any,
     *,
     workspace_root: Path = REPO_ROOT,
+    expected_chunk_size_lines: int | None = None,
+    expected_max_parallelism: int | None = None,
     error_type: type[HarnessError],
 ) -> dict[str, Any]:
-    normalized = v2_br_exact_mapping(
-        document,
-        V2_BR_WITNESS_FIELDS,
-        label="br export witness",
-        error_type=error_type,
+    if not isinstance(document, dict):
+        raise error_type("br export witness is not an object")
+    document_fields = set(document)
+    raw_present_fields = (
+        V2_BR_WITNESS_REQUIRED_RAW_FIELDS | V2_BR_WITNESS_BASE_FIELDS
     )
+    if document_fields == V2_BR_WITNESS_REQUIRED_RAW_FIELDS:
+        normalized = {
+            **document,
+            "base_evidence_state": "ABSENT_NODATA",
+            **{field: None for field in V2_BR_WITNESS_BASE_FIELDS},
+        }
+    elif document_fields == raw_present_fields:
+        normalized = {
+            **document,
+            "base_evidence_state": "PRESENT",
+        }
+    elif document_fields == V2_BR_WITNESS_FIELDS:
+        normalized = dict(document)
+    else:
+        raise error_type(
+            "br export witness has a partial or non-closed base-evidence schema"
+        )
+    base_evidence_state = normalized["base_evidence_state"]
+    if base_evidence_state == "ABSENT_NODATA":
+        if any(
+            normalized[field] is not None
+            for field in V2_BR_WITNESS_BASE_FIELDS
+        ):
+            raise error_type(
+                "br export witness absent base evidence carries a base field"
+            )
+    elif base_evidence_state != "PRESENT" or any(
+        normalized[field] is None for field in V2_BR_WITNESS_BASE_FIELDS
+    ):
+        raise error_type("br export witness base evidence state is inconsistent")
     path_contract = {
         "jsonl_path": (
             str(workspace_root / ".beads" / "issues.jsonl"),
@@ -6228,6 +6991,8 @@ def v2_normalize_br_export_witness(
         ),
     }
     for field, (absolute, relative) in path_contract.items():
+        if field == "base_jsonl_path" and base_evidence_state == "ABSENT_NODATA":
+            continue
         if normalized[field] not in {absolute, relative}:
             raise error_type(f"br export witness {field} is outside its fixed path")
         normalized[field] = relative
@@ -6259,6 +7024,13 @@ def v2_normalize_br_export_witness(
     )
     if chunk_size == 0:
         raise error_type("br export witness chunk size is zero")
+    if (
+        expected_chunk_size_lines is not None
+        and chunk_size != expected_chunk_size_lines
+    ):
+        raise error_type(
+            "br export witness chunk size differs from its fixed invocation"
+        )
     v2_br_hash(
         witness["root_hash"],
         label="br export witness root_hash",
@@ -6292,14 +7064,25 @@ def v2_normalize_br_export_witness(
             cap=RUN_ARTIFACT_CAP,
             error_type=error_type,
         )
-        if chunk_lines == 0 or (index + 1 < len(raw_chunks) and chunk_lines != chunk_size):
-            raise error_type("br export witness chunk line count is noncanonical")
+        if chunk_lines == 0 or chunk_bytes < chunk_lines or (
+            index + 1 < len(raw_chunks) and chunk_lines != chunk_size
+        ):
+            raise error_type(
+                "br export witness chunk membership or byte count is noncanonical"
+            )
         for field in ("hash", "first_line_hash", "last_line_hash"):
             v2_br_hash(
                 chunk[field],
                 label=f"br export witness chunk {index} {field}",
                 width=64,
                 error_type=error_type,
+            )
+        if (
+            chunk_lines == 1
+            and chunk["first_line_hash"] != chunk["last_line_hash"]
+        ):
+            raise error_type(
+                "br export witness one-line chunk boundary hashes differ"
             )
         next_line += chunk_lines
         total_bytes += chunk_bytes
@@ -6310,7 +7093,22 @@ def v2_normalize_br_export_witness(
         raise error_type("br export witness empty membership is inconsistent")
     if next_line != line_count or total_bytes != byte_count:
         raise error_type("br export witness chunk arithmetic differs")
+    expected_witness_root = v2_br_witness_root(
+        schema_version=witness["schema_version"],
+        chunk_size_lines=chunk_size,
+        line_count=line_count,
+        byte_count=byte_count,
+        chunks=chunks,
+    )
+    if witness["root_hash"] != expected_witness_root:
+        raise error_type(
+            "br export witness root differs from its retained metadata"
+        )
     witness["chunks"] = chunks
+
+    if base_evidence_state == "ABSENT_NODATA":
+        normalized["witness"] = witness
+        return normalized
 
     comparison = v2_br_exact_mapping(
         normalized["base_comparison"],
@@ -6340,6 +7138,16 @@ def v2_normalize_br_export_witness(
     ):
         if type(comparison[field]) is not bool:
             raise error_type(f"br export witness comparison {field} is not boolean")
+    if (
+        expected_chunk_size_lines is not None
+        or expected_max_parallelism is not None
+    ) and not (
+        comparison["schema_versions_match"]
+        and comparison["chunk_size_lines_match"]
+    ):
+        raise error_type(
+            "br export witness comparison differs from its fixed invocation"
+        )
     first_changed = comparison["first_changed_chunk_index"]
     maximum_chunks = max(
         comparison["base_chunk_count"],
@@ -6388,6 +7196,46 @@ def v2_normalize_br_export_witness(
         != (not (witnesses_comparable and comparison["root_hashes_match"]))
     ):
         raise error_type("br export witness comparison arithmetic differs")
+    if (
+        (comparison["base_line_count"] == 0)
+        != (comparison["base_chunk_count"] == 0)
+        or (comparison["base_chunk_count"] == 0)
+        != (comparison["base_byte_count"] == 0)
+        or comparison["base_byte_count"]
+        < comparison["base_line_count"]
+        or (comparison["candidate_line_count"] == 0)
+        != (comparison["candidate_chunk_count"] == 0)
+        or (comparison["candidate_chunk_count"] == 0)
+        != (comparison["candidate_byte_count"] == 0)
+        or (comparison["unchanged_chunks"] == 0)
+        != (comparison["unchanged_byte_count"] == 0)
+        or (comparison["changed_chunks"] == 0)
+        != (comparison["changed_base_byte_count"] == 0)
+        or (comparison["changed_chunks"] == 0)
+        != (comparison["changed_candidate_byte_count"] == 0)
+        or (comparison["added_chunks"] == 0)
+        != (comparison["added_byte_count"] == 0)
+        or (comparison["removed_chunks"] == 0)
+        != (comparison["removed_byte_count"] == 0)
+    ):
+        raise error_type(
+            "br export witness byte and chunk emptiness differs"
+        )
+    if comparison["chunk_size_lines_match"] and comparison[
+        "base_chunk_count"
+    ]:
+        minimum_base_lines = (
+            comparison["base_chunk_count"] - 1
+        ) * chunk_size
+        maximum_base_lines = comparison["base_chunk_count"] * chunk_size
+        if not (
+            minimum_base_lines
+            < comparison["base_line_count"]
+            <= maximum_base_lines
+        ):
+            raise error_type(
+                "br export witness base chunk and line counts disagree"
+            )
     if not comparison["drift_detected"] and (
         first_changed is not None
         or any(
@@ -6419,6 +7267,41 @@ def v2_normalize_br_export_witness(
         comparison=comparison,
         error_type=error_type,
     )
+    if comparison["chunk_size_lines_match"]:
+        minimum_changed_base_bytes = 0
+        for action in actions:
+            if action["base_index"] is None:
+                continue
+            base_start = action["base_index"] * chunk_size
+            base_lines = min(
+                chunk_size,
+                comparison["base_line_count"] - base_start,
+            )
+            if action["action"] == "drop_removed":
+                if (
+                    action["start_line"] != base_start
+                    or action["line_count"] != base_lines
+                ):
+                    raise error_type(
+                        "br export witness removed action differs from its "
+                        "released base chunk geometry"
+                    )
+            elif action["action"] == "reuse_unchanged":
+                if action["line_count"] != base_lines:
+                    raise error_type(
+                        "br export witness reused action differs from its "
+                        "released base chunk geometry"
+                    )
+            elif action["action"] == "rebuild_candidate":
+                minimum_changed_base_bytes += base_lines
+        if (
+            comparison["changed_base_byte_count"]
+            < minimum_changed_base_bytes
+        ):
+            raise error_type(
+                "br export witness changed base bytes cannot contain its "
+                "released base chunk lines"
+            )
     candidate_action_kinds = [
         action["action"]
         for action in actions
@@ -6467,6 +7350,23 @@ def v2_normalize_br_export_witness(
     bytes_by_kind = Counter()
     for action in actions:
         bytes_by_kind[action["action"]] += action["byte_count"]
+    expected_rebuild_bytes = (
+        comparison["changed_candidate_byte_count"]
+        if witnesses_comparable
+        else comparison["added_byte_count"]
+    )
+    if (
+        bytes_by_kind["reuse_unchanged"]
+        != comparison["unchanged_byte_count"]
+        or bytes_by_kind["rebuild_candidate"] != expected_rebuild_bytes
+        or bytes_by_kind["read_added"]
+        != (comparison["added_byte_count"] if witnesses_comparable else 0)
+        or bytes_by_kind["drop_removed"]
+        != comparison["removed_byte_count"]
+    ):
+        raise error_type(
+            "br export witness action bytes differ from its comparison"
+        )
     candidate_actions = [
         action for action in actions if action["candidate_index"] is not None
     ]
@@ -6496,6 +7396,31 @@ def v2_normalize_br_export_witness(
         or by_kind["drop_removed"] != comparison["removed_chunks"]
     ):
         raise error_type("br export witness schedule arithmetic differs")
+    expected_root_hashes_match = (
+        witnesses_comparable
+        and comparison["base_line_count"]
+        == comparison["candidate_line_count"]
+        and comparison["base_byte_count"]
+        == comparison["candidate_byte_count"]
+        and comparison["base_chunk_count"]
+        == comparison["candidate_chunk_count"]
+        and all(
+            comparison[field] == 0
+            for field in (
+                "added_byte_count",
+                "added_chunks",
+                "changed_base_byte_count",
+                "changed_candidate_byte_count",
+                "changed_chunks",
+                "removed_byte_count",
+                "removed_chunks",
+            )
+        )
+    )
+    if comparison["root_hashes_match"] is not expected_root_hashes_match:
+        raise error_type(
+            "br export witness root-match evidence differs from its comparison"
+        )
     reuse_plan["actions"] = actions
     reuse_plan["schedule"] = schedule
 
@@ -6551,6 +7476,13 @@ def v2_normalize_br_export_witness(
         "max_parallelism"
     ] == 0:
         raise error_type("br export witness parallel plan is nondeterministic")
+    if (
+        expected_max_parallelism is not None
+        and parallel["max_parallelism"] != expected_max_parallelism
+    ):
+        raise error_type(
+            "br export witness parallelism differs from its fixed invocation"
+        )
     raw_batches = parallel["batches"]
     if not isinstance(raw_batches, list) or len(raw_batches) > V2_INVENTORY_ROWS_CAP:
         raise error_type("br export witness batches are malformed or over cap")
@@ -6630,6 +7562,56 @@ def v2_normalize_br_export_witness(
         or batched_actions != actions
     ):
         raise error_type("br export witness parallel batch coverage differs")
+    expected_action_groups: list[tuple[str, list[dict[str, Any]]]] = []
+    for action in actions:
+        kind = (
+            "candidate_output"
+            if action["candidate_index"] is not None
+            else "metadata_only_drop"
+        )
+        if (
+            not expected_action_groups
+            or expected_action_groups[-1][0] != kind
+            or len(expected_action_groups[-1][1])
+            == parallel["max_parallelism"]
+        ):
+            expected_action_groups.append((kind, []))
+        expected_action_groups[-1][1].append(action)
+    expected_batches: list[dict[str, Any]] = []
+    for index, (kind, group) in enumerate(expected_action_groups):
+        candidate_indices = [
+            action["candidate_index"]
+            for action in group
+            if action["candidate_index"] is not None
+        ]
+        expected_batches.append(
+            {
+                "action_count": len(group),
+                "actions": group,
+                "byte_count": sum(
+                    action["byte_count"] for action in group
+                ),
+                "candidate_end_index": (
+                    candidate_indices[-1] + 1
+                    if candidate_indices
+                    else None
+                ),
+                "candidate_start_index": (
+                    candidate_indices[0]
+                    if candidate_indices
+                    else None
+                ),
+                "index": index,
+                "kind": kind,
+                "line_count": sum(
+                    action["line_count"] for action in group
+                ),
+            }
+        )
+    if batches != expected_batches:
+        raise error_type(
+            "br export witness batches differ from released-br greedy batching"
+        )
     parallel["batches"] = batches
 
     normalized["witness"] = witness
@@ -6667,6 +7649,10 @@ def v2_validate_live_envelope_consistency(
         or summary["deferred_issues"] != status_counts["deferred"]
         or summary["closed_issues"] != status_counts["closed"]
         or inferred_blocked != status_counts["blocked"]
+        or summary["blocked_issues"] < status_counts["blocked"]
+        or summary["blocked_issues"]
+        > summary["total_issues"] - summary["closed_issues"]
+        or summary["ready_issues"] > summary["open_issues"]
         or summary["draft_issues"] != 0
         or summary["tombstone_issues"] != 0
     ):
@@ -6679,7 +7665,10 @@ def v2_validate_live_envelope_consistency(
     if (
         sync_status["jsonl_exists"] is not True
         or witness["line_count"] != exported_issue_count
-        or comparison["candidate_line_count"] != exported_issue_count
+        or (
+            export_witness["base_evidence_state"] == "PRESENT"
+            and comparison["candidate_line_count"] != exported_issue_count
+        )
     ):
         raise error_type("br sync witness disagrees with the all-status source")
 
@@ -6810,7 +7799,7 @@ def v2_validate_source_capture_contract(
     expected = v2_rooted(
         {
             "state": "NOT_REQUESTED" if not_requested else "CAPTURED",
-            "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+            "position": V2_AUDIT_CAPTURE_POSITION,
             "source_before_ordinal": 1,
             "source_after_ordinal": 2,
             "audit_capture_ordinals": [] if not_requested else [1, 2],
@@ -6995,6 +7984,7 @@ def v2_capture_live_round(
 ) -> V2LiveCaptureRound:
     if ordinal not in {1, 2}:
         raise EvidenceFailed("v2 source capture ordinal must be one or two")
+    receipt_start = len(_command_receipts)
     workspace_root = Path(br_cwd).resolve()
     source_files_before = (
         v2_source_file_identities() if ordinal == 1 else None
@@ -7025,6 +8015,12 @@ def v2_capture_live_round(
             br_cwd=br_cwd,
         ),
         workspace_root=workspace_root,
+        expected_chunk_size_lines=(
+            V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+        ),
+        expected_max_parallelism=(
+            V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+        ),
         error_type=InfrastructureFailed,
     )
     version = br_version(br_cwd=br_cwd)
@@ -7044,6 +8040,11 @@ def v2_capture_live_round(
     full_issues = v2_show_all_issues(issue_ids, br_cwd=br_cwd)
     v2_validate_source_graph(full_issues)
     lint = lint_scopes(br_cwd=br_cwd)
+    v2_validate_lint_scope_coherence(
+        lint,
+        full_issues=full_issues,
+        error_type=InfrastructureFailed,
+    )
     source_files = source_files_before or v2_source_file_identities()
     v2_validate_live_envelope_consistency(
         tracker_status=status,
@@ -7064,6 +8065,36 @@ def v2_capture_live_round(
         source_files=source_files,
         rule_contract=rule_contract,
     )
+    projection_entries = v2_observation_command_projection_entries(
+        tracker_status=status,
+        sync_status=sync_status,
+        export_witness=export_witness,
+        version=version,
+        capabilities=capabilities,
+        issue_ids=issue_ids,
+        full_issues=full_issues,
+        lint=lint,
+    )
+    round_receipts = _command_receipts[receipt_start:]
+    if len(round_receipts) != len(projection_entries):
+        raise InfrastructureFailed(
+            "v2 live capture receipt count differs from normalized "
+            "command projections"
+        )
+    for receipt, projection in zip(
+        round_receipts,
+        projection_entries,
+        strict=True,
+    ):
+        receipt.update(
+            {
+                "capture_ordinal": ordinal,
+                "projection_kind": projection["projection_kind"],
+                "normalized_projection_root": projection[
+                    "normalized_projection_root"
+                ],
+            }
+        )
     return V2LiveCaptureRound(
         ordinal=ordinal,
         issue_ids=tuple(issue_ids),
@@ -7097,7 +8128,7 @@ def v2_build_audit_bracket(
     return v2_rooted(
         {
             "state": "NOT_REQUESTED" if not_requested else "CAPTURED",
-            "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+            "position": V2_AUDIT_CAPTURE_POSITION,
             "source_before_ordinal": 1,
             "source_after_ordinal": 2,
             "audit_capture_ordinals": [] if not_requested else [1, 2],
@@ -9379,7 +10410,7 @@ def fixture_issue(
 
 
 FIXTURE_REQUIRED_SECTIONS_BY_TYPE = {
-    "bug": ("## Acceptance Criteria", "## Steps to Reproduce"),
+    "bug": ("## Steps to Reproduce", "## Acceptance Criteria"),
     "task": ("## Acceptance Criteria",),
     "feature": ("## Acceptance Criteria",),
     "epic": ("## Success Criteria",),
@@ -9710,7 +10741,7 @@ def fixture_true(condition: bool, label: str) -> None:
 
 
 def fixture_expected_missing(issue_type: str) -> tuple[str, ...]:
-    return tuple(sorted(FIXTURE_REQUIRED_SECTIONS_BY_TYPE.get(issue_type, ())))
+    return tuple(FIXTURE_REQUIRED_SECTIONS_BY_TYPE.get(issue_type, ()))
 
 
 def fixture_lint(
@@ -9789,7 +10820,9 @@ def fixture_lint(
                     "suggestions": [
                         {
                             "section": section,
-                            "hint": "fixture suggestion is non-authoritative",
+                            "hint": LINT_SECTION_HINTS_BY_TYPE[
+                                str(issue["type"])
+                            ][section],
                         }
                         for section in sections
                     ],
@@ -12422,6 +13455,68 @@ def v2_history_skew_microseconds(
     return skew_us, max_skew_ms * 1_000
 
 
+def v2_current_close_pairs(
+    events: Sequence[Mapping[str, Any]],
+    *,
+    issue_id: str,
+    show_timestamp: datetime,
+    close_reason: str,
+    max_skew_ms: Any,
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    """Return the uniquely admissible audit pair for the current closure.
+
+    Older close/transition pairs are retained audit history, not ambiguity.
+    A pair is current only when its close reason and timestamp bind to the
+    issue's present `closed_at`, and its same-actor transition precedes it.
+    """
+    pairs: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    transitions = [
+        event
+        for event in events
+        if isinstance(event, Mapping)
+        and event.get("event_type") == "status_changed"
+        and event.get("new_value") == "closed"
+    ]
+    for close_event in events:
+        if (
+            not isinstance(close_event, Mapping)
+            or close_event.get("event_type") != "closed"
+            or close_event.get("comment") != close_reason
+        ):
+            continue
+        close_actor = str(close_event.get("actor") or "").strip()
+        close_id = close_event.get("id")
+        if not close_actor or type(close_id) is not int:
+            continue
+        close_timestamp = v2_parse_timestamp(
+            close_event.get("timestamp"),
+            label=f"close audit {issue_id}",
+        )
+        skew_us, max_skew_us = v2_history_skew_microseconds(
+            show_timestamp=show_timestamp,
+            close_timestamp=close_timestamp,
+            max_skew_ms=max_skew_ms,
+        )
+        if skew_us < 0 or skew_us > max_skew_us:
+            continue
+        for transition in transitions:
+            transition_actor = str(transition.get("actor") or "").strip()
+            transition_id = transition.get("id")
+            if (
+                transition_actor != close_actor
+                or type(transition_id) is not int
+                or close_id <= transition_id
+            ):
+                continue
+            transition_timestamp = v2_parse_timestamp(
+                transition.get("timestamp"),
+                label=f"close transition {issue_id}",
+            )
+            if show_timestamp <= transition_timestamp <= close_timestamp:
+                pairs.append((close_event, transition))
+    return pairs
+
+
 def v2_normalize_audit_document(
     document: Any,
     *,
@@ -12454,7 +13549,7 @@ def v2_normalize_audit_document(
             raise EvidenceFailed(
                 f"audit event {issue_id}/{index} has unknown fields {sorted(unknown)}"
             )
-        required = {"id", "event_type", "timestamp"}
+        required = {"id", "event_type", "actor", "timestamp"}
         if not required.issubset(event):
             raise EvidenceFailed(
                 f"audit event {issue_id}/{index} lacks required fields"
@@ -12473,16 +13568,20 @@ def v2_normalize_audit_document(
             event["timestamp"],
             label=f"audit event {issue_id}/{index}",
         )
-        if previous_id is not None and event_id >= previous_id:
-            raise EvidenceFailed(
-                f"audit event order is not strictly newest-first for {issue_id}"
-            )
         if (
             previous_timestamp is not None
-            and event_timestamp > previous_timestamp
+            and (
+                event_timestamp > previous_timestamp
+                or (
+                    event_timestamp == previous_timestamp
+                    and previous_id is not None
+                    and event_id >= previous_id
+                )
+            )
         ):
             raise EvidenceFailed(
-                f"audit timestamps are not non-increasing for {issue_id}"
+                "audit events are not ordered by timestamp descending then "
+                f"ID descending for {issue_id}"
             )
         previous_id = event_id
         previous_timestamp = event_timestamp
@@ -12492,10 +13591,33 @@ def v2_normalize_audit_document(
             for key in sorted(V2_AUDIT_EVENT_KEYS)
             if key in event
         }
-        if not isinstance(normalized["event_type"], str):
+        if (
+            not isinstance(normalized["event_type"], str)
+            or not normalized["event_type"]
+            or normalized["event_type"]
+            != normalized["event_type"].lower()
+            or any(
+                unicodedata.category(character).startswith("C")
+                or unicodedata.category(character) in {"Zl", "Zp"}
+                for character in normalized["event_type"]
+            )
+        ):
             raise EvidenceFailed(f"audit event type is malformed for {issue_id}")
-        if "actor" in normalized and not isinstance(normalized["actor"], str):
+        if not isinstance(normalized["actor"], str):
             raise EvidenceFailed(f"audit actor is malformed for {issue_id}")
+        for optional_field in V2_AUDIT_EVENT_KEYS - required:
+            if optional_field in normalized and not isinstance(
+                normalized[optional_field], str
+            ):
+                raise EvidenceFailed(
+                    f"audit event {optional_field} is malformed for {issue_id}"
+                )
+        utc_timestamp = event_timestamp.astimezone(timezone.utc)
+        normalized["timestamp"] = utc_timestamp.isoformat(
+            timespec=(
+                "microseconds" if utc_timestamp.microsecond else "seconds"
+            )
+        ).removesuffix("+00:00") + "Z"
         normalized_events.append(normalized)
     return v2_rooted(
         {
@@ -12512,6 +13634,11 @@ def v2_capture_one_audit(
     capture_ordinal: int,
     br_cwd: Path = REPO_ROOT,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    issue_id = v2_validate_issue_id(
+        issue_id,
+        label="v2 audit issue ID",
+        error_type=InputRefused,
+    )
     argv = ["br", "audit", "log", issue_id, "--json", *BR_READ_FLAGS]
     receipts: list[dict[str, Any]] = []
     completed = run_command(
@@ -12528,6 +13655,11 @@ def v2_capture_one_audit(
         )
     command_receipt = receipts[0]
     stdout = completed.stdout.encode("utf-8")
+    document = strict_json_loads(stdout, label=f"audit log {issue_id}")
+    normalized_document = v2_normalize_audit_document(
+        document,
+        issue_id=issue_id,
+    )
     receipt = {
         "capture_ordinal": capture_ordinal,
         "issue_id": issue_id,
@@ -12536,12 +13668,12 @@ def v2_capture_one_audit(
         "result_category": command_receipt["category"],
         "stdout_byte_length": command_receipt["stdout"]["bytes"],
         "stdout_root": command_receipt["stdout"]["root"],
+        "normalized_document_root": normalized_document["semantic_root"],
         "stderr_byte_length": command_receipt["stderr"]["bytes"],
         "stderr_root": command_receipt["stderr"]["root"],
         "raw_stream_bodies_retained": False,
     }
-    document = strict_json_loads(stdout, label=f"audit log {issue_id}")
-    return issue_id, v2_normalize_audit_document(document, issue_id=issue_id), receipt
+    return issue_id, normalized_document, receipt
 
 
 def v2_capture_audit_round(
@@ -12559,16 +13691,17 @@ def v2_capture_audit_round(
         raise InputRefused(
             "v2 audit capture issue IDs exceed the inventory row cap"
         )
-    if any(
-        not isinstance(issue_id, str) or not issue_id
-        for issue_id in issue_ids
-    ):
-        raise InputRefused(
-            "v2 audit capture issue IDs contain an empty or non-string value"
+    validated_issue_ids = [
+        v2_validate_issue_id(
+            issue_id,
+            label=f"v2 audit capture issue ID {index}",
+            error_type=InputRefused,
         )
-    if len(issue_ids) != len(set(issue_ids)):
+        for index, issue_id in enumerate(issue_ids)
+    ]
+    if len(validated_issue_ids) != len(set(validated_issue_ids)):
         raise InputRefused("v2 audit capture issue IDs are not unique")
-    ordered_ids = sorted(issue_ids)
+    ordered_ids = sorted(validated_issue_ids)
     results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     retained_bytes = 0
     issue_iterator = iter(ordered_ids)
@@ -12631,6 +13764,17 @@ def v2_capture_audit_round(
     return documents, receipts
 
 
+def v2_audit_receipt_coherence_projection(
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        field: receipt[field]
+        for field in sorted(
+            V2_AUDIT_COMMAND_RECEIPT_FIELDS - {"capture_ordinal"}
+        )
+    }
+
+
 def v2_capture_histories(
     issue_ids: Sequence[str],
     *,
@@ -12660,6 +13804,22 @@ def v2_capture_histories(
         raise InputRefused(
             f"ConcurrentDrift: audit capture differs for {divergence}"
         )
+    first_receipts_by_id = {
+        str(receipt["issue_id"]): receipt for receipt in first_receipts
+    }
+    second_receipts_by_id = {
+        str(receipt["issue_id"]): receipt for receipt in second_receipts
+    }
+    for issue_id in sorted(first):
+        if v2_audit_receipt_coherence_projection(
+            first_receipts_by_id[issue_id]
+        ) != v2_audit_receipt_coherence_projection(
+            second_receipts_by_id[issue_id]
+        ):
+            raise InputRefused(
+                "ConcurrentDrift: audit command receipt differs for "
+                f"{issue_id}"
+            )
     receipts = sorted(
         [*first_receipts, *second_receipts],
         key=lambda row: (
@@ -12976,7 +14136,8 @@ def v2_validate_history_projection(
                 "comment_root": text_root(str(event.get("comment") or "")),
             }
             for event in audit_by_id[issue_id]["events"]
-            if event["event_type"] in {"comment_added", "comment"}
+            if event["event_type"]
+            in {"commented", "comment_added", "comment"}
         ]
         for comment_index, comment in enumerate(row["comments"]):
             if not isinstance(comment, dict):
@@ -13117,63 +14278,30 @@ def v2_validate_history_projection(
                 raise EvidenceFailed(
                     f"v2 history row {index} audit events are malformed"
                 )
-            close_events = [
-                event
-                for event in audit_events
-                if isinstance(event, dict)
-                and event.get("event_type") == "closed"
-            ]
-            transition_events = [
-                event
-                for event in audit_events
-                if isinstance(event, dict)
-                and event.get("event_type") == "status_changed"
-                and event.get("new_value") == "closed"
-            ]
-            if len(close_events) != 1 or len(transition_events) != 1:
-                raise EvidenceFailed(
-                    f"v2 history row {index} lacks known-closer evidence"
-                )
-            close_event = close_events[0]
-            transition = transition_events[0]
             show_timestamp = v2_parse_timestamp(
                 row["closed_at"],
                 label=f"v2 history row {index} closed source",
             )
-            close_timestamp = v2_parse_timestamp(
-                close_event.get("timestamp"),
-                label=f"v2 history row {index} close audit",
-            )
-            transition_timestamp = v2_parse_timestamp(
-                transition.get("timestamp"),
-                label=f"v2 history row {index} close transition",
-            )
-            close_actor = str(close_event.get("actor") or "").strip()
-            transition_actor = str(transition.get("actor") or "").strip()
-            skew_us, max_skew_us = v2_history_skew_microseconds(
+            current_pairs = v2_current_close_pairs(
+                audit_events,
+                issue_id=issue_id,
                 show_timestamp=show_timestamp,
-                close_timestamp=close_timestamp,
+                close_reason=row["close_reason"],
                 max_skew_ms=history_contract["known_pair_max_skew_ms"],
             )
+            if len(current_pairs) != 1:
+                raise EvidenceFailed(
+                    f"v2 history row {index} known-closer audit binding differs"
+                )
+            close_event, transition = current_pairs[0]
+            close_actor = str(close_event.get("actor") or "").strip()
             if (
                 not isinstance(row["close_actor"], str)
                 or not row["close_actor"].strip()
                 or row["close_actor"] != close_actor
-                or close_actor != transition_actor
                 or row["close_actor_source"]
                 != "br.audit.log.closed.actor"
                 or row["audit_event_root"] != semantic_root(close_event)
-                or close_event.get("comment") != row["close_reason"]
-                or type(close_event.get("id")) is not int
-                or type(transition.get("id")) is not int
-                or int(close_event["id"]) <= int(transition["id"])
-                or not (
-                    show_timestamp
-                    <= transition_timestamp
-                    <= close_timestamp
-                )
-                or skew_us < 0
-                or skew_us > max_skew_us
             ):
                 raise EvidenceFailed(
                     f"v2 history row {index} known-closer audit binding differs"
@@ -13314,38 +14442,16 @@ def v2_build_history(
             if event["event_type"] == "status_changed"
             and event.get("new_value") == "closed"
         ]
-        if len(close_events) == 1 and len(transition_events) == 1:
-            close_event = close_events[0]
-            transition = transition_events[0]
+        current_pairs = v2_current_close_pairs(
+            events,
+            issue_id=issue_id,
+            show_timestamp=show_timestamp,
+            close_reason=close_reason,
+            max_skew_ms=history_contract["known_pair_max_skew_ms"],
+        )
+        if len(current_pairs) == 1:
+            close_event, _transition = current_pairs[0]
             close_actor = str(close_event.get("actor") or "").strip()
-            transition_actor = str(transition.get("actor") or "").strip()
-            close_timestamp = v2_parse_timestamp(
-                close_event["timestamp"],
-                label=f"close audit {issue_id}",
-            )
-            transition_timestamp = v2_parse_timestamp(
-                transition["timestamp"],
-                label=f"close transition {issue_id}",
-            )
-            skew_us, max_skew_us = v2_history_skew_microseconds(
-                show_timestamp=show_timestamp,
-                close_timestamp=close_timestamp,
-                max_skew_ms=history_contract["known_pair_max_skew_ms"],
-            )
-            if (
-                not close_actor
-                or close_actor != transition_actor
-                or int(close_event["id"]) <= int(transition["id"])
-                or close_event.get("comment") != close_reason
-                or not (
-                    show_timestamp
-                    <= transition_timestamp
-                    <= close_timestamp
-                )
-                or skew_us < 0
-                or skew_us > max_skew_us
-            ):
-                raise EvidenceFailed(f"close audit pair conflicts for {issue_id}")
             closer_state = "KNOWN"
             actor_value: str | None = close_actor
             actor_source = "br.audit.log.closed.actor"
@@ -13361,7 +14467,7 @@ def v2_build_history(
             actor_source = str(history_contract["legacy_coverage_rows_root"])
             audit_event_root = None
         else:
-            raise EvidenceFailed(f"closure audit is conflicted for {issue_id}")
+            raise EvidenceFailed(f"close audit pair conflicts for {issue_id}")
         if closer_state not in V2_CLOSER_STATES:
             raise EvidenceFailed("history closer state escaped its closed set")
         comments = [
@@ -13373,7 +14479,8 @@ def v2_build_history(
                 "comment_root": text_root(str(event.get("comment") or "")),
             }
             for event in events
-            if event["event_type"] in {"comment_added", "comment"}
+            if event["event_type"]
+            in {"commented", "comment_added", "comment"}
         ]
         citations = v2_extract_citations(issue)
         candidate_consumers = sorted(
@@ -19217,15 +20324,46 @@ V2_SENSITIVE_KEY_TERMINALS = frozenset(
 V2_SENSITIVE_KEYS = frozenset(
     {
         "api_key",
+        "access_key_id",
         "private_key",
+        "secret_access_key",
         "authorization",
         "proxy_authorization",
+    }
+)
+V2_SENSITIVE_COMPACT_KEYS = frozenset(
+    {
+        "apikey",
+        "accesskeyid",
+        "privatekey",
+        "secretaccesskey",
+        "clientsecret",
+        "accesstoken",
+        "refreshtoken",
+    }
+)
+V2_SENSITIVE_COMPOUND_KEYS = frozenset(
+    {
+        "secret_key",
+        "token_value",
+        "password_value",
+        "credential_value",
     }
 )
 
 
 def v2_is_sensitive_key(value: Any) -> bool:
-    normalized = str(value).strip().lower().replace("-", "_")
+    normalized = re.sub(
+        r"(?<=[A-Z])(?=[A-Z][a-z])",
+        "_",
+        str(value).strip(),
+    )
+    normalized = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        "_",
+        normalized,
+    ).lower().replace("-", "_")
+    normalized = re.sub(r"\s+", "_", normalized)
     normalized = normalized.lstrip("_")
     segments = [
         segment
@@ -19234,11 +20372,81 @@ def v2_is_sensitive_key(value: Any) -> bool:
     ]
     if not segments:
         return False
-    final = segments[-1]
-    return (
-        final in V2_SENSITIVE_KEYS
-        or final.split("_")[-1] in V2_SENSITIVE_KEY_TERMINALS
+    def sensitive_segment(segment: str) -> bool:
+        return (
+            segment in V2_SENSITIVE_KEYS
+            or segment in V2_SENSITIVE_COMPOUND_KEYS
+            or segment.replace("_", "") in V2_SENSITIVE_COMPACT_KEYS
+            or any(
+                segment.endswith("_" + sensitive_key)
+                for sensitive_key in V2_SENSITIVE_KEYS
+            )
+            or segment.split("_")[-1]
+            in V2_SENSITIVE_KEY_TERMINALS
+            or (
+                segment.endswith("_value")
+                and sensitive_segment(segment.removesuffix("_value"))
+            )
+        )
+
+    return any(sensitive_segment(segment) for segment in segments)
+
+
+def v2_contains_sensitive_context_start(value: str) -> bool:
+    start_patterns: tuple[
+        tuple[re.Pattern[str], Callable[[str], bool]], ...
+    ] = (
+        (
+            re.compile(
+                r"(?P<key>[A-Za-z_][-A-Za-z0-9_.:\[\]]{0,127})"
+                r"\s*[:=]\s*"
+            ),
+            v2_is_sensitive_key,
+        ),
+        (
+            re.compile(
+                r"(?P<key_quote>[\"'])"
+                r"(?P<key>[A-Za-z_][-A-Za-z0-9_.: \[\]]{0,127})"
+                r"(?P=key_quote)\s*:\s*"
+            ),
+            v2_is_sensitive_key,
+        ),
+        (
+            re.compile(
+                r"(?<![A-Za-z0-9_-])"
+                r"(?P<key>--?[A-Za-z][-A-Za-z0-9_.\[\]]{0,127})\s+"
+            ),
+            lambda key: v2_is_sensitive_key(key.lstrip("-")),
+        ),
+        (
+            re.compile(r"(?i)\b(?P<key>Bearer)\s+"),
+            lambda _key: True,
+        ),
     )
+    return any(
+        sensitive_key(match.group("key"))
+        for pattern, sensitive_key in start_patterns
+        for match in pattern.finditer(value)
+    )
+
+
+def v2_is_sensitive_mapping_key(value: str) -> bool:
+    if v2_is_sensitive_key(value):
+        return True
+    assignment_name = value.split("=", 1)[0]
+    if assignment_name != value and v2_is_sensitive_key(assignment_name):
+        return True
+    header_name = value.split(":", 1)[0]
+    if header_name != value and v2_is_sensitive_key(header_name):
+        return True
+    split_option = re.match(
+        r"^--?(?P<key>[A-Za-z][-A-Za-z0-9_.\[\]]{0,127})\s+",
+        value,
+    )
+    return v2_contains_sensitive_context_start(value) or bool(
+        split_option
+        and v2_is_sensitive_key(split_option.group("key"))
+    ) or re.match(r"(?i)^Bearer\s+\S+", value) is not None
 
 
 def v2_redacted_value(value: str) -> str:
@@ -19302,11 +20510,26 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
         ):
             result.append(v2_redacted_value(value))
         else:
-            result.append(value)
+            contextual = v2_redact_contextual_text(value)
+            result.append(
+                contextual
+                if contextual != value
+                else value
+            )
     return result
 
 
 def v2_redact_contextual_text(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            structured = json.loads(stripped)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            structured = None
+        if isinstance(structured, (dict, list)):
+            return canonical_bytes(
+                v2_assertion_evidence_projection(structured)
+            ).decode("utf-8").rstrip("\n")
     text = value.replace(str(REPO_ROOT), "<repo>")
 
     authorization_header = re.compile(
@@ -19366,7 +20589,7 @@ def v2_redact_contextual_text(value: str) -> str:
         return source
 
     assignment_start = re.compile(
-        r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+        r"(?P<key>[A-Za-z_][-A-Za-z0-9_.:\[\]]{0,127})"
         r"(?P<sep>\s*[:=]\s*)"
     )
     text = redact_quoted_values(
@@ -19374,9 +20597,18 @@ def v2_redact_contextual_text(value: str) -> str:
         assignment_start,
         sensitive_key=v2_is_sensitive_key,
     )
+    quoted_property_start = re.compile(
+        r"(?P<key_quote>[\"'])(?P<key>[A-Za-z_][-A-Za-z0-9_.: \[\]]{0,127})"
+        r"(?P=key_quote)(?P<sep>\s*:\s*)"
+    )
+    text = redact_quoted_values(
+        text,
+        quoted_property_start,
+        sensitive_key=v2_is_sensitive_key,
+    )
     split_option_start = re.compile(
         r"(?<![A-Za-z0-9_-])"
-        r"(?P<key>--?[A-Za-z][A-Za-z0-9_-]{0,127})"
+        r"(?P<key>--?[A-Za-z][-A-Za-z0-9_.\[\]]{0,127})"
         r"(?P<sep>\s+)"
     )
     text = redact_quoted_values(
@@ -19392,37 +20624,67 @@ def v2_redact_contextual_text(value: str) -> str:
         bearer_start,
         sensitive_key=lambda _key: True,
     )
-    unquoted_assignment = re.compile(
-        r"(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
-        r"(?P<sep>\s*[:=]\s*)"
-        r"(?P<body>(?![\"'])[^\s,;]+)"
-    )
 
-    def redact_unquoted(match: re.Match[str]) -> str:
-        if not v2_is_sensitive_key(match.group("key")):
-            return match.group(0)
-        body = match.group("body")
-        replacement = body if body == "<redacted>" else "<redacted>"
-        return match.group("key") + match.group("sep") + replacement
+    def sensitive_line_tail_replacements(
+        source: str,
+        start_pattern: re.Pattern[str],
+        *,
+        sensitive_key: Callable[[str], bool],
+    ) -> list[tuple[int, int]]:
+        replacements: list[tuple[int, int]] = []
+        for match in start_pattern.finditer(source):
+            if not sensitive_key(match.group("key")):
+                continue
+            value_start = match.end()
+            if (
+                value_start >= len(source)
+                or source[value_start] in {'"', "'", "\r", "\n"}
+            ):
+                continue
+            line_end = len(source)
+            for separator in ("\r", "\n"):
+                position = source.find(separator, value_start)
+                if position >= 0:
+                    line_end = min(line_end, position)
+            replacements.append((value_start, line_end))
+        return replacements
 
-    text = unquoted_assignment.sub(redact_unquoted, text)
-    split_option = re.compile(
-        r"(?P<key>--?[A-Za-z][A-Za-z0-9_-]{0,127})"
-        r"(?P<sep>\s+)"
-        r"(?P<body>(?![\"'])[^\s,;]+)"
-    )
-
-    def redact_split(match: re.Match[str]) -> str:
-        if not v2_is_sensitive_key(match.group("key").lstrip("-")):
-            return match.group(0)
-        return match.group("key") + match.group("sep") + "<redacted>"
-
-    text = split_option.sub(redact_split, text)
-    text = re.sub(
-        r"(?i)\b(Bearer)(\s+)(?![\"']|<redacted>)[^\s,;]+",
-        r"\1\2<redacted>",
-        text,
-    )
+    tail_replacements = [
+        *sensitive_line_tail_replacements(
+            text,
+            assignment_start,
+            sensitive_key=v2_is_sensitive_key,
+        ),
+        *sensitive_line_tail_replacements(
+            text,
+            quoted_property_start,
+            sensitive_key=v2_is_sensitive_key,
+        ),
+        *sensitive_line_tail_replacements(
+            text,
+            split_option_start,
+            sensitive_key=lambda key: v2_is_sensitive_key(
+                key.lstrip("-")
+            ),
+        ),
+        *sensitive_line_tail_replacements(
+            text,
+            bearer_start,
+            sensitive_key=lambda _key: True,
+        ),
+    ]
+    merged_replacements: list[tuple[int, int]] = []
+    for start, end in sorted(tail_replacements):
+        if merged_replacements and start <= merged_replacements[-1][1]:
+            previous_start, previous_end = merged_replacements[-1]
+            merged_replacements[-1] = (
+                previous_start,
+                max(previous_end, end),
+            )
+        else:
+            merged_replacements.append((start, end))
+    for start, end in reversed(merged_replacements):
+        text = text[:start] + "<redacted>" + text[end:]
     text = re.sub(
         r"(?<![A-Za-z0-9_.-])/(?:[^\s/:]+/)*[^\s,;:]*",
         "<absolute-path>",
@@ -19490,9 +20752,12 @@ def v2_assertion_evidence_projection(
                     "assertion evidence mapping keys must be exact strings"
                 )
             redacted_key = v2_redact_contextual_text(key)
+            mapping_key_sensitive = v2_is_sensitive_mapping_key(key)
             projected_key = (
                 key
-                if redacted_key == key and not v2_contains_absolute_path(key)
+                if redacted_key == key
+                and not mapping_key_sensitive
+                and not v2_contains_absolute_path(key)
                 else "<redacted-key:"
                 + hashlib.sha256(key.encode("utf-8")).hexdigest()
                 + ">"
@@ -19503,7 +20768,7 @@ def v2_assertion_evidence_projection(
                 )
             projected[projected_key] = v2_assertion_evidence_projection(
                 item,
-                sensitive=v2_is_sensitive_key(key),
+                sensitive=mapping_key_sensitive,
                 depth=depth + 1,
             )
         return projected
@@ -19547,6 +20812,11 @@ def v2_source_command_receipts(
                     int(row["capture_sequence"]),
                     "",
                 ),
+                "capture_ordinal": row["capture_ordinal"],
+                "projection_kind": row["projection_kind"],
+                "normalized_projection_root": row[
+                    "normalized_projection_root"
+                ],
                 "argv": row["argv"],
                 "exit_code": row["exit_code"],
                 "result_category": row["category"],
@@ -19564,6 +20834,11 @@ def v2_source_command_receipts(
                     1_000_000,
                     str(row["issue_id"]),
                 ),
+                "capture_ordinal": row["capture_ordinal"],
+                "projection_kind": "audit_document",
+                "normalized_projection_root": row[
+                    "normalized_document_root"
+                ],
                 "argv": row["argv"],
                 "exit_code": row["exit_code"],
                 "result_category": row["result_category"],
@@ -22189,6 +23464,17 @@ def v2_validate_source_full_issue(
         raise InputRefused(
             f"v2 source all-issue row {index} has invalid core scalars"
         )
+    v2_validate_issue_id(
+        issue["id"],
+        label=f"v2 source all-issue row {index} ID",
+        error_type=InputRefused,
+    )
+    if issue["parent"]:
+        v2_validate_issue_id(
+            issue["parent"],
+            label=f"v2 source all-issue row {index} parent ID",
+            error_type=InputRefused,
+        )
     labels = issue["labels"]
     if (
         not isinstance(labels, list)
@@ -22248,6 +23534,22 @@ def v2_validate_source_full_issue(
                 raise InputRefused(
                     f"v2 source all-issue row {index} has an invalid "
                     f"{relation_field} row"
+                )
+            relation_label = (
+                f"v2 source all-issue row {index} {relation_field} "
+                f"row {relation_index} ID"
+            )
+            if relation["id"].startswith("external:"):
+                v2_validate_external_relation_id(
+                    relation["id"],
+                    label=relation_label,
+                    error_type=InputRefused,
+                )
+            else:
+                v2_validate_issue_id(
+                    relation["id"],
+                    label=relation_label,
+                    error_type=InputRefused,
                 )
         relation_neighbors = [
             relation["id"] for relation in relations
@@ -22513,7 +23815,7 @@ def v2_validate_source_stream_receipt(
         raise InputRefused(f"{label} scalar or retention contract differs")
 
 
-def v2_expected_observation_argv(
+def v2_expected_observation_round_argv(
     issue_ids: Sequence[str],
 ) -> list[list[str]]:
     ordered_ids = sorted(issue_ids)
@@ -22547,13 +23849,125 @@ def v2_expected_observation_argv(
         ]
         for scope in LINT_SCOPES
     )
+    return commands
+
+
+def v2_expected_observation_argv(
+    issue_ids: Sequence[str],
+) -> list[list[str]]:
+    commands = v2_expected_observation_round_argv(issue_ids)
     return [*commands, *commands]
+
+
+def v2_observation_command_projection_entries(
+    *,
+    tracker_status: Mapping[str, Any],
+    sync_status: Mapping[str, Any],
+    export_witness: Mapping[str, Any],
+    version: Mapping[str, Any],
+    capabilities: Mapping[str, Any],
+    issue_ids: Sequence[str],
+    full_issues: Sequence[Mapping[str, Any]],
+    lint: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    ordered_ids = sorted(str(issue_id) for issue_id in issue_ids)
+    if ordered_ids != list(issue_ids):
+        raise EvidenceFailed(
+            "v2 command projection issue IDs are noncanonical"
+        )
+    issue_by_id = {
+        str(issue["id"]): dict(issue)
+        for issue in full_issues
+    }
+    if sorted(issue_by_id) != ordered_ids:
+        raise EvidenceFailed(
+            "v2 command projection show membership differs from list"
+        )
+
+    def projection(
+        kind: str,
+        *,
+        selector: Mapping[str, Any],
+        document: Any,
+    ) -> dict[str, str]:
+        return {
+            "projection_kind": kind,
+            "normalized_projection_root": semantic_root(
+                {
+                    "schema": "frankensim.br-command-projection.v1",
+                    "projection_kind": kind,
+                    "selector": dict(selector),
+                    "document": document,
+                }
+            ),
+        }
+
+    entries = [
+        projection(
+            "tracker_status",
+            selector={},
+            document=dict(tracker_status),
+        ),
+        projection(
+            "sync_status",
+            selector={},
+            document=dict(sync_status),
+        ),
+        projection(
+            "export_witness",
+            selector={},
+            document=dict(export_witness),
+        ),
+        projection(
+            "br_version",
+            selector={},
+            document=dict(version),
+        ),
+        projection(
+            "br_capabilities",
+            selector={},
+            document=dict(capabilities),
+        ),
+        projection(
+            "issue_ids",
+            selector={"all": True},
+            document={
+                "issue_ids": ordered_ids,
+                "issue_count": len(ordered_ids),
+            },
+        ),
+    ]
+    batch_size = min(CAPS["show_batch"], 56)
+    for offset in range(0, len(ordered_ids), batch_size):
+        batch_ids = ordered_ids[offset : offset + batch_size]
+        entries.append(
+            projection(
+                "show_batch",
+                selector={"issue_ids": batch_ids},
+                document=[issue_by_id[issue_id] for issue_id in batch_ids],
+            )
+        )
+    for scope in LINT_SCOPES:
+        if scope not in lint:
+            raise EvidenceFailed(
+                f"v2 command projection lacks lint scope {scope}"
+            )
+        entries.append(
+            projection(
+                "lint_scope",
+                selector={"status": scope},
+                document=dict(lint[scope]),
+            )
+        )
+    return entries
 
 
 def v2_validate_source_command_receipts(
     observation: Mapping[str, Any],
     *,
     issue_ids: Sequence[str],
+    full_issues: Sequence[Mapping[str, Any]],
+    lint: Mapping[str, Any],
 ) -> list[Mapping[str, Any]]:
     receipts = observation.get("command_receipts")
     if not isinstance(receipts, list):
@@ -22564,7 +23978,25 @@ def v2_validate_source_command_receipts(
         raise InputRefused(
             "v2 source observation command receipts exceed the event budget"
         )
-    for index, receipt in enumerate(receipts):
+    round_projections = v2_observation_command_projection_entries(
+        tracker_status=observation["tracker_status"],
+        sync_status=observation["sync_status"],
+        export_witness=observation["export_witness"],
+        version=observation["br_version"],
+        capabilities=observation["br_capabilities"],
+        issue_ids=issue_ids,
+        full_issues=full_issues,
+        lint=lint,
+    )
+    expected_projections = [*round_projections, *round_projections]
+    if len(receipts) != len(expected_projections):
+        raise InputRefused(
+            "v2 source observation command receipt count differs from "
+            "normalized projections"
+        )
+    for index, (receipt, expected_projection) in enumerate(
+        zip(receipts, expected_projections, strict=True)
+    ):
         label = f"v2 source observation command receipt {index}"
         if not isinstance(receipt, dict):
             raise InputRefused(f"{label} is not an object")
@@ -22578,6 +24010,21 @@ def v2_validate_source_command_receipts(
         if (
             type(receipt["capture_sequence"]) is not int
             or receipt["capture_sequence"] != index
+            or receipt["capture_ordinal"]
+            != (1 if index < len(round_projections) else 2)
+            or type(receipt["capture_ordinal"]) is not int
+            or receipt["projection_kind"]
+            != expected_projection["projection_kind"]
+            or receipt["normalized_projection_root"]
+            != expected_projection["normalized_projection_root"]
+            or not isinstance(
+                receipt["normalized_projection_root"], str
+            )
+            or re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                receipt["normalized_projection_root"],
+            )
+            is None
             or type(receipt["exit_code"]) is not int
             or receipt["exit_code"] != 0
             or receipt["category"] != "SUCCESS"
@@ -22589,7 +24036,8 @@ def v2_validate_source_command_receipts(
             != "RAW_STREAM_BODIES_NOT_RETAINED"
         ):
             raise InputRefused(
-                f"{label} sequence, terminal, or cleanup contract differs"
+                f"{label} sequence, projection, terminal, or cleanup "
+                "contract differs"
             )
         v2_validate_source_stream_receipt(
             receipt["stdout"],
@@ -22684,6 +24132,12 @@ def v2_validate_audit_capture(
         raise InputRefused(
             "v2 source audit capture membership contract differs"
         )
+    for index, issue_id in enumerate(issue_ids):
+        v2_validate_issue_id(
+            issue_id,
+            label=f"v2 source audit issue ID {index}",
+            error_type=InputRefused,
+        )
     document_ids = [
         document.get("issue_id")
         for document in documents
@@ -22693,6 +24147,7 @@ def v2_validate_audit_capture(
         raise InputRefused(
             "v2 source audit document membership differs from issue IDs"
         )
+    documents_by_id: dict[str, Mapping[str, Any]] = {}
     for index, document in enumerate(documents):
         try:
             expected_document = v2_normalize_audit_document(
@@ -22715,6 +24170,7 @@ def v2_validate_audit_capture(
                 "v2 source audit document differs from its normalized "
                 f"projection at {divergence or '$'}"
             )
+        documents_by_id[document["issue_id"]] = document
     expected_order = [
         (capture_ordinal, issue_id)
         for capture_ordinal in (1, 2)
@@ -22769,8 +24225,14 @@ def v2_validate_audit_capture(
                     receipt[field],
                 )
                 is None
-                for field in ("stdout_root", "stderr_root")
+                for field in (
+                    "stdout_root",
+                    "normalized_document_root",
+                    "stderr_root",
+                )
             )
+            or receipt["normalized_document_root"]
+            != documents_by_id[issue_id]["semantic_root"]
             or receipt["raw_stream_bodies_retained"] is not False
         ):
             raise InputRefused(f"{label} identity or terminal contract differs")
@@ -22780,6 +24242,20 @@ def v2_validate_audit_capture(
         raise InputRefused(
             "v2 source audit command receipt order is noncanonical"
         )
+    receipts_by_coordinate = {
+        (receipt["capture_ordinal"], receipt["issue_id"]): receipt
+        for receipt in receipts
+    }
+    for issue_id in issue_ids:
+        if v2_audit_receipt_coherence_projection(
+            receipts_by_coordinate[(1, issue_id)]
+        ) != v2_audit_receipt_coherence_projection(
+            receipts_by_coordinate[(2, issue_id)]
+        ):
+            raise InputRefused(
+                "v2 source audit command receipts differ across captures for "
+                f"{issue_id}"
+            )
     verify_semantic_root(
         audit_capture,
         label="v2 source audit capture envelope",
@@ -23092,6 +24568,11 @@ def v2_preflight_source_v1_lint_nested_lists(
             warning_count=max(warning_count, declared_warnings),
             maximum_warnings_per_issue=maximum_warnings_per_issue,
         )
+    v2_validate_lint_scope_coherence(
+        lint,
+        full_issues=None,
+        error_type=InputRefused,
+    )
 
 
 def v2_preflight_source_observation_nested_lists(
@@ -23289,6 +24770,11 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             "v2 source all-issue membership is noncanonical"
         )
     v2_validate_source_graph(all_issues)
+    v2_validate_lint_scope_coherence(
+        captured["v1_lint_projection"],
+        full_issues=all_issues,
+        error_type=InputRefused,
+    )
     campaign = captured["campaign"]
     v2_exact_keys(
         campaign,
@@ -23487,41 +24973,21 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     br_version = observation.get("br_version")
     capture_contract = observation.get("capture_contract")
     source_files = observation.get("source_files")
-    normalized_capability_commands = v2_normalize_br_capability_commands(
-        (
-            observation.get("br_capabilities", {}).get("commands")
-            if isinstance(observation.get("br_capabilities"), dict)
-            else None
-        ),
+    normalized_br_version = v2_normalize_br_version(
+        br_version,
+        error_type=InputRefused,
+    )
+    normalized_br_capabilities = v2_normalize_br_capabilities(
+        observation.get("br_capabilities"),
         error_type=InputRefused,
     )
     if (
         observation["schema"] != V2_SOURCE_SCHEMA
-        or not isinstance(br_version, dict)
-        or set(br_version)
-        != {"build", "commit", "features", "target", "version"}
-        or any(
-            not isinstance(br_version.get(field), str)
-            for field in ("build", "commit", "target", "version")
-        )
-        or not str(br_version.get("version")).strip()
-        or not isinstance(br_version.get("features"), list)
-        or any(
-            not isinstance(feature, str) or not feature
-            for feature in br_version.get("features", [])
-        )
-        or br_version.get("features")
-        != sorted(set(br_version.get("features", [])))
-        or not isinstance(observation["br_capabilities"], dict)
-        or set(observation["br_capabilities"])
-        != {"commands", "contract_version", "operation_count"}
-        or observation["br_capabilities"]["contract_version"]
-        != "br.capabilities.v1"
-        or observation["br_capabilities"]["commands"]
-        != normalized_capability_commands
-        or type(observation["br_capabilities"]["operation_count"]) is not int
-        or observation["br_capabilities"]["operation_count"]
-        != len(normalized_capability_commands)
+        or br_version != normalized_br_version
+        or observation["br_capabilities"]
+        != normalized_br_capabilities
+        or normalized_br_capabilities["version"]
+        != normalized_br_version["version"]
         or any(
             not isinstance(observation[field], dict)
             for field in ("tracker_status", "sync_status", "export_witness")
@@ -23643,6 +25109,12 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     )
     normalized_export_witness = v2_normalize_br_export_witness(
         observation["export_witness"],
+        expected_chunk_size_lines=(
+            V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+        ),
+        expected_max_parallelism=(
+            V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+        ),
         error_type=InputRefused,
     )
     if (
@@ -23663,6 +25135,8 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     observation_receipts = v2_validate_source_command_receipts(
         observation,
         issue_ids=[row["id"] for row in all_issues],
+        full_issues=all_issues,
+        lint=captured["v1_lint_projection"],
     )
     v1_inventory_rows = captured["v1_inventory_projection"].get("rows")
     if (
@@ -24616,6 +26090,8 @@ def v2_reconstruct_retained(
 
 def v2_validate_replay_result_document(
     document: Mapping[str, Any],
+    *,
+    published_terminal: Mapping[str, Any],
 ) -> None:
     if (
         not isinstance(document, dict)
@@ -24653,6 +26129,55 @@ def v2_validate_replay_result_document(
     ):
         raise EvidenceFailed("v2 replay result contract differs")
     verify_semantic_root(document, label="v2 replay result")
+    if not isinstance(published_terminal, dict):
+        raise EvidenceFailed("v2 replay result lacks its published terminal")
+    verify_semantic_root(
+        published_terminal,
+        label="v2 replay result published terminal",
+    )
+    replay_equivalence = published_terminal.get("replay_equivalence")
+    try:
+        published_artifact_path = (
+            safe_relative(
+                published_terminal["artifact_root"],
+                label="v2 published replay artifact root",
+            )
+            / safe_relative(
+                published_terminal["artifact_dir"],
+                label="v2 published replay artifact directory",
+            )
+        )
+    except (KeyError, TypeError, UsageRefused) as error:
+        raise EvidenceFailed(
+            "v2 replay result published terminal path is malformed"
+        ) from error
+    if (
+        published_terminal.get("schema") != V2_TERMINAL_SCHEMA
+        or published_terminal.get("mode") != "replay"
+        or published_terminal.get("bundle_state") != "COMPLETE_GREEN"
+        or published_terminal.get("terminal") != "Pass"
+        or published_terminal.get("exit_code") != 0
+        or not isinstance(replay_equivalence, dict)
+        or document["replay_terminal_root"]
+        != published_terminal["semantic_root"]
+        or document["retained_terminal_root"]
+        != replay_equivalence.get("retained_terminal_root")
+        or document["subject_mode"]
+        != published_terminal.get("subject_mode")
+        or document["artifact_dir"] != str(published_artifact_path)
+        or any(
+            document[field] != replay_equivalence.get(field)
+            or document[field] is not False
+            for field in (
+                "live_tracker_reads",
+                "live_tracker_writes",
+                "network_access",
+            )
+        )
+    ):
+        raise EvidenceFailed(
+            "v2 replay result differs from its published terminal"
+        )
 
 
 def _v2_replay_bundle_offline(
@@ -24756,6 +26281,14 @@ def _v2_replay_bundle_offline(
         artifact_dir=output_dir,
         payloads=replay_payloads,
     )
+    _, published_payloads, published_terminal, _ = v2_read_retained_bundle(
+        artifact_root=artifact_root,
+        input_dir=output_dir,
+    )
+    if published_payloads != replay_payloads:
+        raise EvidenceFailed(
+            "v2 replay published payloads differ from their reconstruction"
+        )
     result = v2_rooted(
         {
             "schema": V2_REPLAY_RESULT_SCHEMA,
@@ -24763,18 +26296,17 @@ def _v2_replay_bundle_offline(
             "subject_mode": terminal["subject_mode"],
             "artifact_dir": publication["artifact_dir"],
             "retained_terminal_root": terminal["semantic_root"],
-            "replay_terminal_root": strict_json_loads(
-                replay_payloads["terminal.json"],
-                label="v2 replay terminal",
-                require_canonical=True,
-            )["semantic_root"],
+            "replay_terminal_root": published_terminal["semantic_root"],
             "live_tracker_reads": False,
             "live_tracker_writes": False,
             "network_access": False,
             "no_claim": V2_REPLAY_RESULT_NO_CLAIM,
         }
     )
-    v2_validate_replay_result_document(result)
+    v2_validate_replay_result_document(
+        result,
+        published_terminal=published_terminal,
+    )
     return result
 
 
@@ -24792,7 +26324,6 @@ def v2_replay_bundle(
             output_dir=output_dir,
             accepted_manifest=accepted_manifest,
         )
-    v2_validate_replay_result_document(result)
     return result
 
 
@@ -25585,7 +27116,7 @@ def v2_fixture_br_envelopes(
         {
             "summary": {
                 "average_lead_time_hours": 0.0,
-                "blocked_issues": 0,
+                "blocked_issues": int(status == "blocked"),
                 "closed_issues": int(status == "closed"),
                 "deferred_issues": int(status == "deferred"),
                 "draft_issues": 0,
@@ -25604,7 +27135,11 @@ def v2_fixture_br_envelopes(
         {
             "db_newer": False,
             "dirty_count": 0,
-            "git_export": {"available": False},
+            "git_export": {
+                "available": False,
+                "reason": "not_probed",
+                "diagnostic_command": "br vcs-status --json",
+            },
             "jsonl_content_hash": "0" * 64,
             "jsonl_exists": True,
             "jsonl_newer": False,
@@ -25687,7 +27222,9 @@ def v2_fixture_br_envelopes(
                 "batches": batches,
                 "candidate_output_batches": exported_count,
                 "deterministic_batch_order": True,
-                "max_parallelism": 1,
+                "max_parallelism": (
+                    V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+                ),
                 "metadata_only_drop_batches": 0,
                 "total_batches": exported_count,
             },
@@ -25725,10 +27262,20 @@ def v2_fixture_br_envelopes(
             "jsonl_path": ".beads/issues.jsonl",
             "witness": {
                 "byte_count": exported_count,
-                "chunk_size_lines": 1,
+                "chunk_size_lines": (
+                    V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+                ),
                 "chunks": chunks,
                 "line_count": exported_count,
-                "root_hash": "3" * 64,
+                "root_hash": v2_br_witness_root(
+                    schema_version="br.jsonl-witness.v1",
+                    chunk_size_lines=(
+                        V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+                    ),
+                    line_count=exported_count,
+                    byte_count=exported_count,
+                    chunks=chunks,
+                ),
                 "schema_version": "br.jsonl-witness.v1",
             },
         },
@@ -25752,6 +27299,13 @@ def v2_fixture_audit_capture(
     if not history_mode:
         return v2_not_requested_audit_capture()
     audit_events = [
+        {
+            "id": 3,
+            "event_type": "commented",
+            "actor": "fixture-commenter",
+            "timestamp": "2026-01-02T00:00:00.002000+00:00",
+            "comment": "Fixture retained canonical comment.",
+        },
         {
             "id": 2,
             "event_type": "closed",
@@ -25800,6 +27354,9 @@ def v2_fixture_audit_capture(
                     "stdout_root": (
                         "sha256-v1:" + hashlib.sha256(audit_stdout).hexdigest()
                     ),
+                    "normalized_document_root": normalized_audit[
+                        "semantic_root"
+                    ],
                     "stderr_byte_length": 0,
                     "stderr_root": (
                         "sha256-v1:" + hashlib.sha256(b"").hexdigest()
@@ -25904,9 +27461,102 @@ def v2_replayable_fixture_bundle(
         set(lint_ids) | set(independent_ids) | set(nonclosed_ids)
     )
     fixture_command_output = canonical_bytes({"fixture": "bounded-read"})
+    fixture_br_version = {
+        "version": "0.2.19",
+        "build": "release",
+        "commit": "fixture-released-br",
+        "branch": "fixture",
+        "rust_version": "1.99.0-nightly",
+        "target": "fixture",
+        "features": [],
+    }
+    fixture_br_capabilities = {
+        "tool": "br",
+        "version": "0.2.19",
+        "contract_version": "br.capabilities.v1",
+        "features": [
+            {
+                "name": "local_first_issue_tracking",
+                "description": "Fixture local-first contract.",
+            }
+        ],
+        "commands": [
+            {
+                "name": "list",
+                "summary": "List fixture issues",
+                "operation": "read",
+                "workspace": "required",
+                "machine_output": ["json"],
+                "examples": ["br list --json"],
+            }
+        ],
+        "global_flags": [
+            {
+                "flag": "--json",
+                "description": "Request machine-readable JSON output.",
+            }
+        ],
+        "output_formats": ["json"],
+        "exit_codes": [
+            {
+                "code": 0,
+                "category": "success",
+                "description": "Command completed successfully.",
+            }
+        ],
+        "env_vars": [
+            {
+                "name": "BR_OUTPUT_FORMAT",
+                "description": "Select the default output format.",
+            }
+        ],
+        "safety": [
+            {
+                "name": "no_automatic_git_operations",
+                "guarantee": "br does not run automatic git operations.",
+            }
+        ],
+        "recommended_entrypoints": ["br capabilities --format json"],
+    }
+    (
+        fixture_tracker_status,
+        fixture_sync_status,
+        fixture_export_witness,
+    ) = v2_fixture_br_envelopes(full_issue)
+    fixture_source_files = v2_source_file_identities()
+    fixture_source_files[2] = {
+        **fixture_source_files[2],
+        "content_identity": accepted_manifest["content_identity"],
+    }
+    fixture_rule_contract = {
+        "required_sections_by_type": REQUIRED_SECTIONS_BY_TYPE,
+        "clause_terms": list(CLAUSE_TERMS),
+        "classifier": "independent-template-findings-v2",
+    }
+    fixture_round_projections = v2_observation_command_projection_entries(
+        tracker_status=fixture_tracker_status,
+        sync_status=fixture_sync_status,
+        export_witness=fixture_export_witness,
+        version=fixture_br_version,
+        capabilities=fixture_br_capabilities,
+        issue_ids=[full_issue["id"]],
+        full_issues=[full_issue],
+        lint=lint,
+    )
+    fixture_projection_entries = [
+        *fixture_round_projections,
+        *fixture_round_projections,
+    ]
     fixture_command_receipts = [
         {
             "capture_sequence": index,
+            "capture_ordinal": (
+                1 if index < len(fixture_round_projections) else 2
+            ),
+            "projection_kind": projection["projection_kind"],
+            "normalized_projection_root": projection[
+                "normalized_projection_root"
+            ],
             "argv": argv,
             "exit_code": 0,
             "category": "SUCCESS",
@@ -25927,46 +27577,14 @@ def v2_replayable_fixture_bundle(
             "cleanup_error_kinds": [],
             "redaction_verdict": "RAW_STREAM_BODIES_NOT_RETAINED",
         }
-        for index, argv in enumerate(
-            v2_expected_observation_argv([full_issue["id"]])
+        for index, (argv, projection) in enumerate(
+            zip(
+                v2_expected_observation_argv([full_issue["id"]]),
+                fixture_projection_entries,
+                strict=True,
+            )
         )
     ]
-    fixture_br_version = {
-        "version": "0.2.19",
-        "build": "release",
-        "commit": "fixture-released-br",
-        "target": "fixture",
-        "features": [],
-    }
-    fixture_br_capabilities = {
-        "contract_version": "br.capabilities.v1",
-        "commands": [
-            {
-                "name": "list",
-                "summary": "List fixture issues",
-                "operation": "read",
-                "workspace": "required",
-                "machine_output": ["json"],
-                "examples": ["br list --json"],
-            }
-        ],
-        "operation_count": 1,
-    }
-    (
-        fixture_tracker_status,
-        fixture_sync_status,
-        fixture_export_witness,
-    ) = v2_fixture_br_envelopes(full_issue)
-    fixture_source_files = v2_source_file_identities()
-    fixture_source_files[2] = {
-        **fixture_source_files[2],
-        "content_identity": accepted_manifest["content_identity"],
-    }
-    fixture_rule_contract = {
-        "required_sections_by_type": REQUIRED_SECTIONS_BY_TYPE,
-        "clause_terms": list(CLAUSE_TERMS),
-        "classifier": "independent-template-findings-v2",
-    }
     fixture_capture = v2_capture_state(
         issue_ids=[full_issue["id"]],
         full_issues=[full_issue],
@@ -25993,7 +27611,7 @@ def v2_replayable_fixture_bundle(
                         "state": (
                             "CAPTURED" if history_mode else "NOT_REQUESTED"
                         ),
-                        "position": "BETWEEN_SOURCE_CAPTURE_ROUNDS",
+                        "position": V2_AUDIT_CAPTURE_POSITION,
                         "source_before_ordinal": 1,
                         "source_after_ordinal": 2,
                         "audit_capture_ordinals": (
@@ -28899,6 +30517,7 @@ def v2_execute_schema_cli_ux(
             "--history-plan",
             "--self-test-v2",
             "--case-v2",
+            "--replay",
             "--replay-v2",
             "--review-receipts",
             "--prior-campaign",
@@ -28920,8 +30539,17 @@ def v2_execute_schema_cli_ux(
         )
         checks.check(
             "help-complete-options",
-            all(option in completed.stdout for option in expected_options),
-            expected=sorted(expected_options),
+            all(option in completed.stdout for option in expected_options)
+            and (
+                "schema-autodetect a retained v2 bundle"
+                in completed.stdout
+            ),
+            expected={
+                "options": sorted(expected_options),
+                "legacy_replay_contract": (
+                    "schema-autodetect a retained v2 bundle"
+                ),
+            },
             observed={
                 "stdout_root": text_root(completed.stdout),
                 "stdout_bytes": len(completed.stdout.encode("utf-8")),
@@ -30835,6 +32463,1243 @@ def v2_execute_source_cases(
                 ],
             },
         )
+        valid_local_ids = (
+            "hyphenated-prefix-abc123.1.4294967295",
+            "namespace:repo#scope-abc123.0",
+            ("a" * 64) + "-" + ("b" * 40),
+        )
+        invalid_local_ids = (
+            "foo",
+            "foo-",
+            "foo-" + ("a" * 41),
+            "foo-ABC",
+            "foo-abc.child",
+            "foo-abc.4294967296",
+            ("a" * 64) + "-" + ("b" * 40) + ".1",
+            "--status",
+            "bad\nline",
+        )
+        issue_id_errors = [
+            expect_error(
+                InfrastructureFailed,
+                lambda issue_id=issue_id: v2_list_issue_ids(
+                    {
+                        "issues": [{"id": issue_id}],
+                        "has_more": False,
+                        "limit": 0,
+                        "offset": 0,
+                        "total": 1,
+                    },
+                    label="hostile issue list",
+                ),
+                contains="released-br local issue ID",
+            )
+            for issue_id in invalid_local_ids
+        ]
+        checks.check(
+            "released-br-local-id-grammar-preflights-positional-reads",
+            all(
+                v2_validate_issue_id(
+                    issue_id,
+                    label="valid fixture issue ID",
+                    error_type=EvidenceFailed,
+                )
+                == issue_id
+                for issue_id in valid_local_ids
+            )
+            and v2_validate_external_relation_id(
+                "external:project:capability",
+                label="valid external relation",
+                error_type=EvidenceFailed,
+            )
+            == "external:project:capability"
+            and all(
+                error.terminal == "InfrastructureFailed"
+                for error in issue_id_errors
+            ),
+            expected={
+                "valid_local_ids": list(valid_local_ids),
+                "invalid_local_id_terminal": "InfrastructureFailed",
+                "external_relation": "separately bounded",
+            },
+            observed={
+                "valid_local_ids": list(valid_local_ids),
+                "invalid_terminals": [
+                    error.terminal for error in issue_id_errors
+                ],
+            },
+        )
+        exported_source_issue = v2_full_issue_projection(
+            fixture_issue(
+                issue_id="fixture-exported-source",
+                status="open",
+                priority=2,
+                issue_type="task",
+            )
+        )
+        ephemeral_source_issue = {
+            **exported_source_issue,
+            "id": "fixture-ephemeral-source",
+            "ephemeral": True,
+        }
+        (
+            _exported_tracker_status,
+            exported_sync_status,
+            exported_witness,
+        ) = v2_fixture_br_envelopes(exported_source_issue)
+        omitted_average_status = {
+            "summary": {
+                "blocked_issues": 0,
+                "closed_issues": 0,
+                "deferred_issues": 0,
+                "draft_issues": 0,
+                "epics_eligible_for_closure": 0,
+                "in_progress_issues": 0,
+                "open_issues": 1,
+                "pinned_issues": 0,
+                "ready_issues": 1,
+                "tombstone_issues": 0,
+                "total_issues": 1,
+            }
+        }
+        normalized_omitted_average = v2_normalize_br_status(
+            omitted_average_status,
+            error_type=EvidenceFailed,
+        )
+        sync_with_probed_git = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="sync probed-git union seed",
+            require_canonical=True,
+        )
+        sync_with_probed_git["git_export"] = {
+            "available": True,
+            "tracked": True,
+            "worktree_clean": True,
+            "index_clean": True,
+            "head_hash": "a" * 40,
+            "worktree_hash": "a" * 40,
+        }
+        normalized_probed_git = v2_normalize_br_sync_status(
+            sync_with_probed_git,
+            error_type=EvidenceFailed,
+        )
+        sync_with_sha256_git = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync SHA-256 probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_sha256_git["git_export"]["head_hash"] = "a" * 64
+        sync_with_sha256_git["git_export"]["worktree_hash"] = "a" * 64
+        normalized_sha256_git = v2_normalize_br_sync_status(
+            sync_with_sha256_git,
+            error_type=EvidenceFailed,
+        )
+        sync_with_newly_staged_git = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync newly-staged probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_newly_staged_git["git_export"].update(
+            {
+                "tracked": True,
+                "worktree_clean": True,
+                "index_clean": False,
+                "head_hash": None,
+                "worktree_hash": "b" * 40,
+            }
+        )
+        normalized_newly_staged_git = v2_normalize_br_sync_status(
+            sync_with_newly_staged_git,
+            error_type=EvidenceFailed,
+        )
+        sync_with_staged_removal_git = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync staged-removal probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_staged_removal_git["jsonl_exists"] = False
+        sync_with_staged_removal_git["git_export"].update(
+            {
+                "tracked": False,
+                "worktree_clean": False,
+                "index_clean": False,
+                "head_hash": "c" * 40,
+                "worktree_hash": None,
+            }
+        )
+        normalized_staged_removal_git = v2_normalize_br_sync_status(
+            sync_with_staged_removal_git,
+            error_type=EvidenceFailed,
+        )
+        sync_with_missing_untracked_git = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync missing-untracked probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_missing_untracked_git["jsonl_exists"] = False
+        sync_with_missing_untracked_git["git_export"].update(
+            {
+                "tracked": False,
+                "worktree_clean": False,
+                "index_clean": True,
+                "head_hash": None,
+                "worktree_hash": None,
+            }
+        )
+        normalized_missing_untracked_git = v2_normalize_br_sync_status(
+            sync_with_missing_untracked_git,
+            error_type=EvidenceFailed,
+        )
+        sync_with_mixed_git_hashes = strict_json_loads(
+            canonical_bytes(sync_with_probed_git),
+            label="sync mixed-object-format probed-git seed",
+            require_canonical=True,
+        )
+        sync_with_mixed_git_hashes["git_export"]["worktree_hash"] = "a" * 64
+        mixed_git_hash_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                sync_with_mixed_git_hashes,
+                error_type=EvidenceFailed,
+            ),
+            contains="mixes Git object formats",
+        )
+        sync_with_not_probed_git = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="sync not-probed union seed",
+            require_canonical=True,
+        )
+        sync_with_not_probed_git["git_export"] = {
+            "available": False,
+            "reason": "not_probed",
+            "diagnostic_command": "br vcs-status --json",
+        }
+        normalized_not_probed_git = v2_normalize_br_sync_status(
+            sync_with_not_probed_git,
+            error_type=EvidenceFailed,
+        )
+        sync_existing_without_hash = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="sync existing-without-hash seed",
+            require_canonical=True,
+        )
+        sync_existing_without_hash["jsonl_content_hash"] = None
+        normalized_existing_without_hash = v2_normalize_br_sync_status(
+            sync_existing_without_hash,
+            error_type=EvidenceFailed,
+        )
+        sync_missing_with_stored_hash = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="sync missing-with-stored-hash seed",
+            require_canonical=True,
+        )
+        sync_missing_with_stored_hash["jsonl_exists"] = False
+        normalized_missing_with_stored_hash = v2_normalize_br_sync_status(
+            sync_missing_with_stored_hash,
+            error_type=EvidenceFailed,
+        )
+        invented_sync_anomaly = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="invented sync anomaly seed",
+            require_canonical=True,
+        )
+        invented_sync_anomaly["jsonl_newer"] = True
+        invented_sync_anomaly["workspace_health"] = "degraded"
+        invented_sync_anomaly["reliability_audit"] = {
+            "source": "sync.status",
+            "health": "degraded",
+            "anomaly_count": 1,
+            "anomalies": [
+                {
+                    "code": "invented",
+                    "message": "unrelated",
+                    "severity": "healthy",
+                }
+            ],
+        }
+        invented_sync_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                invented_sync_anomaly,
+                error_type=EvidenceFailed,
+            ),
+            contains="not released-br exact",
+        )
+        absent_newer_sync = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="absent newer sync seed",
+            require_canonical=True,
+        )
+        absent_newer_sync["jsonl_exists"] = False
+        absent_newer_sync["jsonl_newer"] = True
+        absent_newer_sync_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                absent_newer_sync,
+                error_type=EvidenceFailed,
+            ),
+            contains="absent JSONL export as newer",
+        )
+        wrong_health_sync = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="wrong sync health seed",
+            require_canonical=True,
+        )
+        wrong_health_sync["jsonl_newer"] = True
+        wrong_health_sync["workspace_health"] = "unsafe"
+        wrong_health_sync["reliability_audit"] = {
+            "source": "sync.status",
+            "health": "unsafe",
+            "anomaly_count": 1,
+            "anomalies": [
+                {
+                    "code": "jsonl_newer",
+                    "message": "JSONL has newer data than database",
+                    "severity": "degraded",
+                }
+            ],
+        }
+        wrong_health_sync_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                wrong_health_sync,
+                error_type=EvidenceFailed,
+            ),
+            contains="audit identity is malformed",
+        )
+        reversed_anomaly_sync = strict_json_loads(
+            canonical_bytes(exported_sync_status),
+            label="reversed sync anomaly seed",
+            require_canonical=True,
+        )
+        reversed_anomaly_sync["jsonl_newer"] = True
+        reversed_anomaly_sync["db_newer"] = True
+        reversed_anomaly_sync["workspace_health"] = "degraded"
+        reversed_anomaly_sync["reliability_audit"] = {
+            "source": "sync.status",
+            "health": "degraded",
+            "anomaly_count": 2,
+            "anomalies": [
+                {
+                    "code": "db_newer",
+                    "message": "database has newer data than JSONL",
+                    "severity": "degraded",
+                },
+                {
+                    "code": "jsonl_newer",
+                    "message": "JSONL has newer data than database",
+                    "severity": "degraded",
+                },
+            ],
+        }
+        reversed_anomaly_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                reversed_anomaly_sync,
+                error_type=EvidenceFailed,
+            ),
+            contains="released-br order",
+        )
+
+        def impossible_sync_anomaly_pair(
+            first: str,
+            second: str,
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(exported_sync_status),
+                label="impossible sync anomaly seed",
+                require_canonical=True,
+            )
+            anomalies = [
+                {
+                    "code": code,
+                    "severity": V2_BR_SYNC_ANOMALY_CONTRACT[code][0],
+                    "message": V2_BR_SYNC_ANOMALY_CONTRACT[code][1],
+                }
+                for code in (first, second)
+            ]
+            health = max(
+                (row["severity"] for row in anomalies),
+                key=V2_BR_HEALTH_RANK.__getitem__,
+            )
+            candidate["workspace_health"] = health
+            candidate["reliability_audit"] = {
+                "source": "sync.status",
+                "health": health,
+                "anomaly_count": len(anomalies),
+                "anomalies": anomalies,
+            }
+            return expect_error(
+                EvidenceFailed,
+                lambda: v2_normalize_br_sync_status(
+                    candidate,
+                    error_type=EvidenceFailed,
+                ),
+                contains="impossible file state",
+            )
+
+        impossible_database_pair_error = impossible_sync_anomaly_pair(
+            "database_missing",
+            "database_not_sqlite",
+        )
+        impossible_wal_pair_error = impossible_sync_anomaly_pair(
+            "sidecar_mismatch",
+            "truncated_wal",
+        )
+        checks.check(
+            "released-br-status-sync-union-and-coherence",
+            normalized_omitted_average["summary"][
+                "average_lead_time_hours"
+            ]
+            is None
+            and v2_normalize_br_status(
+                normalized_omitted_average,
+                error_type=EvidenceFailed,
+            )
+            == normalized_omitted_average
+            and normalized_probed_git["git_export"]["state"] == "PROBED"
+            and len(normalized_sha256_git["git_export"]["head_hash"]) == 64
+            and normalized_newly_staged_git["git_export"]["tracked"] is True
+            and normalized_newly_staged_git["git_export"]["head_hash"] is None
+            and normalized_staged_removal_git["git_export"]["tracked"] is False
+            and normalized_staged_removal_git["git_export"]["head_hash"]
+            == "c" * 40
+            and normalized_missing_untracked_git["git_export"][
+                "worktree_hash"
+            ]
+            is None
+            and mixed_git_hash_error.terminal == "EvidenceFailed"
+            and normalized_not_probed_git["git_export"]["state"]
+            == "NOT_PROBED"
+            and v2_normalize_br_sync_status(
+                normalized_not_probed_git,
+                error_type=EvidenceFailed,
+            )
+            == normalized_not_probed_git
+            and normalized_existing_without_hash["jsonl_content_hash"]
+            is None
+            and normalized_missing_with_stored_hash["jsonl_exists"]
+            is False
+            and normalized_missing_with_stored_hash["jsonl_content_hash"]
+            == "0" * 64
+            and invented_sync_error.terminal == "EvidenceFailed"
+            and absent_newer_sync_error.terminal == "EvidenceFailed"
+            and wrong_health_sync_error.terminal == "EvidenceFailed"
+            and reversed_anomaly_error.terminal == "EvidenceFailed"
+            and impossible_database_pair_error.terminal
+            == "EvidenceFailed"
+            and impossible_wal_pair_error.terminal == "EvidenceFailed",
+            expected={
+                "omitted_average": None,
+                "git_states": ["PROBED", "NOT_PROBED"],
+                "git_object_id_widths": [40, 64],
+                "git_index_head_states": [
+                    "newly_staged",
+                    "staged_removal",
+                    "missing_untracked",
+                ],
+                "mixed_object_formats": "EvidenceFailed",
+                "jsonl_hash": "independent optional metadata",
+                "invented_anomaly": "EvidenceFailed",
+                "absent_newer": "EvidenceFailed",
+                "wrong_health": "EvidenceFailed",
+                "reversed_anomalies": "EvidenceFailed",
+                "impossible_database_pair": "EvidenceFailed",
+                "impossible_wal_pair": "EvidenceFailed",
+            },
+            observed={
+                "omitted_average": normalized_omitted_average["summary"][
+                    "average_lead_time_hours"
+                ],
+                "git_states": [
+                    normalized_probed_git["git_export"]["state"],
+                    normalized_not_probed_git["git_export"]["state"],
+                ],
+                "git_object_id_widths": [
+                    len(normalized_probed_git["git_export"]["head_hash"]),
+                    len(normalized_sha256_git["git_export"]["head_hash"]),
+                ],
+                "git_index_head_states": [
+                    normalized_newly_staged_git["git_export"],
+                    normalized_staged_removal_git["git_export"],
+                    normalized_missing_untracked_git["git_export"],
+                ],
+                "mixed_object_formats": mixed_git_hash_error.terminal,
+                "invented_anomaly": invented_sync_error.terminal,
+                "absent_newer": absent_newer_sync_error.terminal,
+                "wrong_health": wrong_health_sync_error.terminal,
+                "reversed_anomalies": reversed_anomaly_error.terminal,
+                "impossible_database_pair": (
+                    impossible_database_pair_error.terminal
+                ),
+                "impossible_wal_pair": impossible_wal_pair_error.terminal,
+            },
+        )
+        ephemeral_witness = v2_fixture_br_envelopes(
+            ephemeral_source_issue
+        )[2]
+        checks.check(
+            "export-witness-excludes-ephemeral-source-issues",
+            exported_witness["witness"]["line_count"] == 1
+            and len(exported_witness["witness"]["chunks"]) == 1
+            and len(exported_witness["base_reuse_plan"]["actions"])
+            == 1
+            and len(
+                exported_witness["base_parallel_work_plan"]["batches"]
+            )
+            == 1
+            and ephemeral_witness["witness"]["line_count"] == 0
+            and ephemeral_witness["witness"]["chunks"] == []
+            and ephemeral_witness["base_comparison"][
+                "candidate_line_count"
+            ]
+            == 0
+            and ephemeral_witness["base_reuse_plan"]["actions"] == []
+            and ephemeral_witness["base_parallel_work_plan"]["batches"]
+            == [],
+            expected={
+                "non_ephemeral": {
+                    "lines": 1,
+                    "chunks": 1,
+                    "actions": 1,
+                    "batches": 1,
+                },
+                "ephemeral": {
+                    "lines": 0,
+                    "chunks": 0,
+                    "actions": 0,
+                    "batches": 0,
+                },
+            },
+            observed={
+                "non_ephemeral": {
+                    "lines": exported_witness["witness"]["line_count"],
+                    "chunks": len(exported_witness["witness"]["chunks"]),
+                    "actions": len(
+                        exported_witness["base_reuse_plan"]["actions"]
+                    ),
+                    "batches": len(
+                        exported_witness["base_parallel_work_plan"][
+                            "batches"
+                        ]
+                    ),
+                },
+                "ephemeral": {
+                    "lines": ephemeral_witness["witness"]["line_count"],
+                    "chunks": len(ephemeral_witness["witness"]["chunks"]),
+                    "actions": len(
+                        ephemeral_witness["base_reuse_plan"]["actions"]
+                    ),
+                    "batches": len(
+                        ephemeral_witness["base_parallel_work_plan"][
+                            "batches"
+                        ]
+                    ),
+                },
+            },
+        )
+        empty_released_witness = {
+            "jsonl_path": ".beads/issues.jsonl",
+            "witness": {
+                "byte_count": 0,
+                "chunk_size_lines": 2,
+                "chunks": [],
+                "line_count": 0,
+                "root_hash": (
+                    "7c74fddb73619fd597498901eaf9cc264a3d57ec98210be301a1871916f030e3"
+                ),
+                "schema_version": "br.jsonl-witness.v1",
+            },
+        }
+        normalized_empty_witness = v2_normalize_br_export_witness(
+            empty_released_witness,
+            error_type=EvidenceFailed,
+        )
+        partial_base_witness = {
+            **empty_released_witness,
+            "base_jsonl_path": ".beads/beads.base.jsonl",
+        }
+        partial_base_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                partial_base_witness,
+                error_type=EvidenceFailed,
+            ),
+            contains="partial or non-closed base-evidence schema",
+        )
+        forged_witness_root = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="forged export witness root seed",
+            require_canonical=True,
+        )
+        forged_witness_root["witness"]["root_hash"] = "f" * 64
+        forged_witness_root_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                forged_witness_root,
+                error_type=EvidenceFailed,
+            ),
+            contains="root differs from its retained metadata",
+        )
+        checks.check(
+            "export-witness-root-and-optional-base-contract",
+            normalized_empty_witness["base_evidence_state"]
+            == "ABSENT_NODATA"
+            and all(
+                normalized_empty_witness[field] is None
+                for field in V2_BR_WITNESS_BASE_FIELDS
+            )
+            and v2_normalize_br_export_witness(
+                normalized_empty_witness,
+                error_type=EvidenceFailed,
+            )
+            == normalized_empty_witness
+            and partial_base_error.terminal == "EvidenceFailed"
+            and forged_witness_root_error.terminal == "EvidenceFailed",
+            expected={
+                "released_empty_oracle_root": empty_released_witness[
+                    "witness"
+                ]["root_hash"],
+                "absent_base_state": "ABSENT_NODATA",
+                "partial_base": "EvidenceFailed",
+                "forged_root": "EvidenceFailed",
+            },
+            observed={
+                "root": normalized_empty_witness["witness"]["root_hash"],
+                "base_state": normalized_empty_witness[
+                    "base_evidence_state"
+                ],
+                "partial_base_terminal": partial_base_error.terminal,
+                "forged_root_terminal": forged_witness_root_error.terminal,
+            },
+        )
+        byte_split_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="fixture export witness byte split",
+            require_canonical=True,
+        )
+        for comparison in (
+            byte_split_witness["base_comparison"],
+            byte_split_witness["base_reuse_plan"]["comparison"],
+        ):
+            comparison["root_hashes_match"] = False
+            comparison["drift_detected"] = True
+            comparison["safe_reuse_prefix_chunks"] = 0
+            comparison["first_changed_chunk_index"] = 0
+        byte_split_witness["base_reuse_plan"]["actions"][0][
+            "action"
+        ] = "rebuild_candidate"
+        byte_split_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                byte_split_witness,
+                error_type=EvidenceFailed,
+            ),
+            contains="action bytes differ",
+        )
+        false_root_drift_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="fixture export witness false root drift",
+            require_canonical=True,
+        )
+        for comparison in (
+            false_root_drift_witness["base_comparison"],
+            false_root_drift_witness["base_reuse_plan"]["comparison"],
+        ):
+            comparison["root_hashes_match"] = False
+            comparison["drift_detected"] = True
+        root_match_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                false_root_drift_witness,
+                error_type=EvidenceFailed,
+            ),
+            contains="root-match evidence differs",
+        )
+        phantom_changed_base_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="fixture export witness phantom changed-base bytes",
+            require_canonical=True,
+        )
+        for comparison in (
+            phantom_changed_base_witness["base_comparison"],
+            phantom_changed_base_witness["base_reuse_plan"]["comparison"],
+        ):
+            comparison["base_byte_count"] = 2
+            comparison["changed_base_byte_count"] = 1
+            comparison["root_hashes_match"] = False
+            comparison["drift_detected"] = True
+        phantom_changed_base_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                phantom_changed_base_witness,
+                error_type=EvidenceFailed,
+            ),
+            contains="byte and chunk emptiness differs",
+        )
+        zero_byte_nonempty_witness = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="fixture export witness zero-byte nonempty JSONL",
+            require_canonical=True,
+        )
+        zero_byte_nonempty_witness["witness"]["byte_count"] = 0
+        zero_byte_nonempty_witness["witness"]["chunks"][0][
+            "byte_count"
+        ] = 0
+        for comparison in (
+            zero_byte_nonempty_witness["base_comparison"],
+            zero_byte_nonempty_witness["base_reuse_plan"]["comparison"],
+        ):
+            comparison["base_byte_count"] = 0
+            comparison["candidate_byte_count"] = 0
+            comparison["unchanged_byte_count"] = 0
+        zero_byte_nonempty_witness["base_reuse_plan"]["actions"][0][
+            "byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_reuse_plan"]["schedule"][
+            "candidate_output_byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_reuse_plan"]["schedule"][
+            "reusable_byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_reuse_materialization"][
+            "output_byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_reuse_materialization"][
+            "reused_byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_parallel_work_plan"]["batches"][0][
+            "byte_count"
+        ] = 0
+        zero_byte_nonempty_witness["base_parallel_work_plan"]["batches"][0][
+            "actions"
+        ][0]["byte_count"] = 0
+        zero_byte_nonempty_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                zero_byte_nonempty_witness,
+                error_type=EvidenceFailed,
+            ),
+            contains="chunk membership or byte count",
+        )
+        checks.check(
+            "export-witness-comparison-actions-and-root-bound",
+            byte_split_error.terminal == "EvidenceFailed"
+            and root_match_error.terminal == "EvidenceFailed"
+            and phantom_changed_base_error.terminal == "EvidenceFailed"
+            and zero_byte_nonempty_error.terminal == "EvidenceFailed",
+            expected={
+                "byte_split": "EvidenceFailed",
+                "false_root_drift": "EvidenceFailed",
+                "phantom_changed_base": "EvidenceFailed",
+                "zero_byte_nonempty": "EvidenceFailed",
+            },
+            observed={
+                "byte_split": byte_split_error.terminal,
+                "false_root_drift": root_match_error.terminal,
+                "phantom_changed_base": (
+                    phantom_changed_base_error.terminal
+                ),
+                "zero_byte_nonempty": zero_byte_nonempty_error.terminal,
+            },
+        )
+
+        def released_two_action_witness(
+            *,
+            drops: bool,
+        ) -> dict[str, Any]:
+            chunks = (
+                []
+                if drops
+                else [
+                    {
+                        "byte_count": 1,
+                        "first_line_hash": character * 64,
+                        "hash": hash_character * 64,
+                        "index": index,
+                        "last_line_hash": character * 64,
+                        "line_count": 1,
+                        "start_line": index,
+                    }
+                    for index, (character, hash_character) in enumerate(
+                        (("1", "2"), ("3", "4"))
+                    )
+                ]
+            )
+            candidate_count = 0 if drops else 2
+            actions = (
+                [
+                    {
+                        "action": "drop_removed",
+                        "base_index": index,
+                        "byte_count": 1,
+                        "candidate_index": None,
+                        "line_count": 1,
+                        "start_line": index,
+                    }
+                    for index in range(2)
+                ]
+                if drops
+                else [
+                    {
+                        "action": "reuse_unchanged",
+                        "base_index": index,
+                        "byte_count": 1,
+                        "candidate_index": index,
+                        "line_count": 1,
+                        "start_line": index,
+                    }
+                    for index in range(2)
+                ]
+            )
+            comparison = {
+                "added_byte_count": 0,
+                "added_chunks": 0,
+                "base_byte_count": 2,
+                "base_chunk_count": 2,
+                "base_line_count": 2,
+                "candidate_byte_count": candidate_count,
+                "candidate_chunk_count": candidate_count,
+                "candidate_line_count": candidate_count,
+                "changed_base_byte_count": 0,
+                "changed_candidate_byte_count": 0,
+                "changed_chunks": 0,
+                "chunk_size_lines_match": True,
+                "comparable_chunk_count": candidate_count,
+                "drift_detected": drops,
+                "first_changed_chunk_index": 0 if drops else None,
+                "removed_byte_count": 2 if drops else 0,
+                "removed_chunks": 2 if drops else 0,
+                "root_hashes_match": not drops,
+                "safe_reuse_prefix_chunks": candidate_count,
+                "schema_versions_match": True,
+                "unchanged_byte_count": candidate_count,
+                "unchanged_chunks": candidate_count,
+            }
+            batch_kind = (
+                "metadata_only_drop" if drops else "candidate_output"
+            )
+            batch = {
+                "action_count": 2,
+                "actions": actions,
+                "byte_count": 2,
+                "candidate_end_index": None if drops else 2,
+                "candidate_start_index": None if drops else 0,
+                "index": 0,
+                "kind": batch_kind,
+                "line_count": 2,
+            }
+            raw = {
+                "base_comparison": comparison,
+                "base_jsonl_path": ".beads/beads.base.jsonl",
+                "base_parallel_work_plan": {
+                    "batches": [batch],
+                    "candidate_output_batches": 0 if drops else 1,
+                    "deterministic_batch_order": True,
+                    "max_parallelism": 2,
+                    "metadata_only_drop_batches": 1 if drops else 0,
+                    "total_batches": 1,
+                },
+                "base_reuse_materialization": {
+                    "dropped_byte_count": 2 if drops else 0,
+                    "dropped_chunks": 2 if drops else 0,
+                    "output_byte_count": candidate_count,
+                    "read_added_byte_count": 0,
+                    "read_added_chunks": 0,
+                    "rebuilt_byte_count": 0,
+                    "rebuilt_chunks": 0,
+                    "reused_byte_count": candidate_count,
+                    "reused_chunks": candidate_count,
+                },
+                "base_reuse_plan": {
+                    "actions": actions,
+                    "comparison": comparison,
+                    "schedule": {
+                        "candidate_output_actions": candidate_count,
+                        "candidate_output_byte_count": candidate_count,
+                        "candidate_output_line_count": candidate_count,
+                        "deterministic_candidate_order": True,
+                        "dropped_byte_count": 2 if drops else 0,
+                        "max_parallel_candidate_actions": candidate_count,
+                        "metadata_only_drop_actions": 2 if drops else 0,
+                        "read_added_actions": 0,
+                        "read_added_byte_count": 0,
+                        "rebuild_actions": 0,
+                        "rebuild_byte_count": 0,
+                        "reusable_actions": candidate_count,
+                        "reusable_byte_count": candidate_count,
+                        "total_actions": 2,
+                    },
+                },
+                "jsonl_path": ".beads/issues.jsonl",
+                "witness": {
+                    "byte_count": candidate_count,
+                    "chunk_size_lines": 1,
+                    "chunks": chunks,
+                    "line_count": candidate_count,
+                    "root_hash": v2_br_witness_root(
+                        schema_version="br.jsonl-witness.v1",
+                        chunk_size_lines=1,
+                        line_count=candidate_count,
+                        byte_count=candidate_count,
+                        chunks=chunks,
+                    ),
+                    "schema_version": "br.jsonl-witness.v1",
+                },
+            }
+            return v2_normalize_br_export_witness(
+                raw,
+                error_type=EvidenceFailed,
+            )
+
+        two_candidate_witness = released_two_action_witness(drops=False)
+        two_drop_witness = released_two_action_witness(drops=True)
+
+        def split_released_batches(
+            witness_document: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(witness_document),
+                label="underfilled witness batch mutation",
+                require_canonical=True,
+            )
+            plan = candidate["base_parallel_work_plan"]
+            actions = candidate["base_reuse_plan"]["actions"]
+            drops = actions[0]["candidate_index"] is None
+            plan["batches"] = [
+                {
+                    "action_count": 1,
+                    "actions": [action],
+                    "byte_count": action["byte_count"],
+                    "candidate_end_index": (
+                        None
+                        if drops
+                        else action["candidate_index"] + 1
+                    ),
+                    "candidate_start_index": (
+                        None if drops else action["candidate_index"]
+                    ),
+                    "index": index,
+                    "kind": (
+                        "metadata_only_drop"
+                        if drops
+                        else "candidate_output"
+                    ),
+                    "line_count": action["line_count"],
+                }
+                for index, action in enumerate(actions)
+            ]
+            plan["total_batches"] = 2
+            plan["candidate_output_batches"] = 0 if drops else 2
+            plan["metadata_only_drop_batches"] = 2 if drops else 0
+            return candidate
+
+        underfilled_candidate_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                split_released_batches(two_candidate_witness),
+                error_type=EvidenceFailed,
+            ),
+            contains="greedy batching",
+        )
+        underfilled_drop_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                split_released_batches(two_drop_witness),
+                error_type=EvidenceFailed,
+            ),
+            contains="greedy batching",
+        )
+        zero_removed = strict_json_loads(
+            canonical_bytes(two_drop_witness),
+            label="zero removed witness mutation",
+            require_canonical=True,
+        )
+        for actions in (
+            zero_removed["base_reuse_plan"]["actions"],
+            zero_removed["base_parallel_work_plan"]["batches"][0][
+                "actions"
+            ],
+        ):
+            actions[0].update(
+                {"start_line": 999, "line_count": 0, "byte_count": 0}
+            )
+            actions[1].update(
+                {"start_line": 0, "line_count": 2, "byte_count": 2}
+            )
+        zero_removed_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                zero_removed,
+                error_type=EvidenceFailed,
+            ),
+            contains="impossible line or byte counts",
+        )
+        impossible_base_geometry = strict_json_loads(
+            canonical_bytes(two_drop_witness),
+            label="impossible base geometry mutation",
+            require_canonical=True,
+        )
+        for comparison in (
+            impossible_base_geometry["base_comparison"],
+            impossible_base_geometry["base_reuse_plan"]["comparison"],
+        ):
+            comparison["base_line_count"] = 100
+        impossible_base_geometry_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                impossible_base_geometry,
+                error_type=EvidenceFailed,
+            ),
+            contains="byte and chunk emptiness differs",
+        )
+        unequal_boundary_hash = strict_json_loads(
+            canonical_bytes(two_candidate_witness),
+            label="one-line boundary hash mutation",
+            require_canonical=True,
+        )
+        unequal_boundary_hash["witness"]["chunks"][0][
+            "last_line_hash"
+        ] = "5" * 64
+        unequal_boundary_hash["witness"]["root_hash"] = v2_br_witness_root(
+            schema_version="br.jsonl-witness.v1",
+            chunk_size_lines=1,
+            line_count=2,
+            byte_count=2,
+            chunks=unequal_boundary_hash["witness"]["chunks"],
+        )
+        unequal_boundary_hash_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                unequal_boundary_hash,
+                error_type=EvidenceFailed,
+            ),
+            contains="one-line chunk boundary hashes differ",
+        )
+        checks.check(
+            "export-witness-actions-batches-and-base-geometry-canonical",
+            all(
+                error.terminal == "EvidenceFailed"
+                for error in (
+                    underfilled_candidate_error,
+                    underfilled_drop_error,
+                    zero_removed_error,
+                    impossible_base_geometry_error,
+                    unequal_boundary_hash_error,
+                )
+            ),
+            expected={
+                "underfilled_candidate": "EvidenceFailed",
+                "underfilled_drop": "EvidenceFailed",
+                "zero_removed": "EvidenceFailed",
+                "base_geometry": "EvidenceFailed",
+                "one_line_boundary_hash": "EvidenceFailed",
+            },
+            observed=[
+                error.terminal
+                for error in (
+                    underfilled_candidate_error,
+                    underfilled_drop_error,
+                    zero_removed_error,
+                    impossible_base_geometry_error,
+                    unequal_boundary_hash_error,
+                )
+            ],
+        )
+        wrong_capture_chunk_size = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="wrong capture chunk-size mutation",
+            require_canonical=True,
+        )
+        wrong_capture_chunk_size["witness"]["chunk_size_lines"] = 1
+        wrong_capture_parallelism = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="wrong capture parallelism mutation",
+            require_canonical=True,
+        )
+        wrong_capture_parallelism["base_parallel_work_plan"][
+            "max_parallelism"
+        ] = 1
+        wrong_capture_schema_match = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="wrong capture schema-match mutation",
+            require_canonical=True,
+        )
+        wrong_capture_schema_match["base_comparison"][
+            "schema_versions_match"
+        ] = False
+        wrong_capture_schema_match["base_reuse_plan"]["comparison"][
+            "schema_versions_match"
+        ] = False
+        wrong_capture_chunk_match = strict_json_loads(
+            canonical_bytes(exported_witness),
+            label="wrong capture chunk-match mutation",
+            require_canonical=True,
+        )
+        wrong_capture_chunk_match["base_comparison"][
+            "chunk_size_lines_match"
+        ] = False
+        wrong_capture_chunk_match["base_reuse_plan"]["comparison"][
+            "chunk_size_lines_match"
+        ] = False
+        fixed_invocation_errors = [
+            expect_error(
+                EvidenceFailed,
+                lambda candidate=candidate: (
+                    v2_normalize_br_export_witness(
+                        candidate,
+                        expected_chunk_size_lines=(
+                            V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+                        ),
+                        expected_max_parallelism=(
+                            V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+                        ),
+                        error_type=EvidenceFailed,
+                    )
+                ),
+                contains="fixed invocation",
+            )
+            for candidate in (
+                wrong_capture_chunk_size,
+                wrong_capture_parallelism,
+                wrong_capture_schema_match,
+                wrong_capture_chunk_match,
+            )
+        ]
+        checks.check(
+            "export-witness-fixed-invocation-parameters-bound",
+            all(
+                error.terminal == "EvidenceFailed"
+                for error in fixed_invocation_errors
+            ),
+            expected={
+                "chunk_size_lines": (
+                    V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+                ),
+                "max_parallelism": (
+                    V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+                ),
+                "comparability": True,
+            },
+            observed=[error.terminal for error in fixed_invocation_errors],
+        )
+        impossible_changed_base_bytes = strict_json_loads(
+            canonical_bytes(two_candidate_witness),
+            label="changed base byte lower-bound mutation",
+            require_canonical=True,
+        )
+        candidate_chunks = impossible_changed_base_bytes["witness"][
+            "chunks"
+        ]
+        candidate_chunks[0].update(
+            {"start_line": 0, "line_count": 1_024, "byte_count": 10_000}
+        )
+        candidate_chunks[1].update(
+            {"start_line": 1_024, "line_count": 1, "byte_count": 1}
+        )
+        impossible_changed_base_bytes["witness"].update(
+            {
+                "chunk_size_lines": 1_024,
+                "line_count": 1_025,
+                "byte_count": 10_001,
+            }
+        )
+        impossible_changed_base_bytes["witness"][
+            "root_hash"
+        ] = v2_br_witness_root(
+            schema_version="br.jsonl-witness.v1",
+            chunk_size_lines=1_024,
+            line_count=1_025,
+            byte_count=10_001,
+            chunks=candidate_chunks,
+        )
+        for comparison in (
+            impossible_changed_base_bytes["base_comparison"],
+            impossible_changed_base_bytes["base_reuse_plan"][
+                "comparison"
+            ],
+        ):
+            comparison.update(
+                {
+                    "base_byte_count": 10_001,
+                    "base_line_count": 2_048,
+                    "candidate_byte_count": 10_001,
+                    "candidate_line_count": 1_025,
+                    "changed_base_byte_count": 1,
+                    "changed_candidate_byte_count": 1,
+                    "changed_chunks": 1,
+                    "drift_detected": True,
+                    "first_changed_chunk_index": 1,
+                    "root_hashes_match": False,
+                    "safe_reuse_prefix_chunks": 1,
+                    "unchanged_byte_count": 10_000,
+                    "unchanged_chunks": 1,
+                }
+            )
+        changed_actions = impossible_changed_base_bytes[
+            "base_reuse_plan"
+        ]["actions"]
+        changed_actions[0].update(
+            {"start_line": 0, "line_count": 1_024, "byte_count": 10_000}
+        )
+        changed_actions[1].update(
+            {
+                "action": "rebuild_candidate",
+                "start_line": 1_024,
+                "line_count": 1,
+                "byte_count": 1,
+            }
+        )
+        schedule = impossible_changed_base_bytes["base_reuse_plan"][
+            "schedule"
+        ]
+        schedule.update(
+            {
+                "candidate_output_byte_count": 10_001,
+                "candidate_output_line_count": 1_025,
+                "rebuild_actions": 1,
+                "rebuild_byte_count": 1,
+                "reusable_actions": 1,
+                "reusable_byte_count": 10_000,
+            }
+        )
+        materialization = impossible_changed_base_bytes[
+            "base_reuse_materialization"
+        ]
+        materialization.update(
+            {
+                "output_byte_count": 10_001,
+                "rebuilt_byte_count": 1,
+                "rebuilt_chunks": 1,
+                "reused_byte_count": 10_000,
+                "reused_chunks": 1,
+            }
+        )
+        changed_batch = impossible_changed_base_bytes[
+            "base_parallel_work_plan"
+        ]["batches"][0]
+        changed_batch.update(
+            {"line_count": 1_025, "byte_count": 10_001}
+        )
+        changed_batch["actions"] = strict_json_loads(
+            canonical_bytes(changed_actions),
+            label="changed base batch actions",
+            require_canonical=True,
+        )
+        impossible_changed_base_bytes["base_parallel_work_plan"][
+            "max_parallelism"
+        ] = 64
+        checks.refuses(
+            "export-witness-changed-base-byte-lower-bound",
+            EvidenceFailed,
+            lambda: v2_normalize_br_export_witness(
+                impossible_changed_base_bytes,
+                expected_chunk_size_lines=1_024,
+                expected_max_parallelism=64,
+                error_type=EvidenceFailed,
+            ),
+            contains="changed base bytes cannot contain",
+        )
         for count in (0, 1):
             inventory = v2_synthetic_inventory(
                 [v2_synthetic_target(0)] if count else []
@@ -31280,6 +34145,170 @@ def v2_execute_source_cases(
                 duplicate_relation_issue
             ),
             contains="duplicates a dependencies neighbor",
+        )
+        blocked_source_issue = v2_full_issue_projection(
+            fixture_issue(
+                issue_id="fixture-explicit-blocked-summary",
+                status="blocked",
+            )
+        )
+        (
+            blocked_tracker_status,
+            blocked_sync_status,
+            blocked_export_witness,
+        ) = v2_fixture_br_envelopes(blocked_source_issue)
+        understated_blocked_status = {
+            "summary": {
+                **blocked_tracker_status["summary"],
+                "blocked_issues": 0,
+            }
+        }
+        checks.refuses(
+            "explicit-blocked-status-requires-blocked-summary-lower-bound",
+            EvidenceFailed,
+            lambda: v2_validate_live_envelope_consistency(
+                tracker_status=understated_blocked_status,
+                sync_status=blocked_sync_status,
+                export_witness=blocked_export_witness,
+                full_issues=[blocked_source_issue],
+                error_type=EvidenceFailed,
+            ),
+            contains="status summary disagrees",
+        )
+        closed_source_issue = v2_full_issue_projection(
+            fixture_issue(
+                issue_id="fixture-closed-status-bounds",
+                status="closed",
+            )
+        )
+        (
+            closed_tracker_status,
+            closed_sync_status,
+            closed_export_witness,
+        ) = v2_fixture_br_envelopes(closed_source_issue)
+        impossible_ready_status = strict_json_loads(
+            canonical_bytes(closed_tracker_status),
+            label="closed ready-status seed",
+            require_canonical=True,
+        )
+        impossible_ready_status["summary"]["ready_issues"] = 1
+        checks.refuses(
+            "ready-summary-cannot-exceed-open-issues",
+            EvidenceFailed,
+            lambda: v2_validate_live_envelope_consistency(
+                tracker_status=impossible_ready_status,
+                sync_status=closed_sync_status,
+                export_witness=closed_export_witness,
+                full_issues=[closed_source_issue],
+                error_type=EvidenceFailed,
+            ),
+            contains="status summary disagrees",
+        )
+        impossible_blocked_status = strict_json_loads(
+            canonical_bytes(closed_tracker_status),
+            label="closed blocked-status seed",
+            require_canonical=True,
+        )
+        impossible_blocked_status["summary"]["blocked_issues"] = 1
+        checks.refuses(
+            "blocked-summary-cannot-exceed-nonclosed-issues",
+            EvidenceFailed,
+            lambda: v2_validate_live_envelope_consistency(
+                tracker_status=impossible_blocked_status,
+                sync_status=closed_sync_status,
+                export_witness=closed_export_witness,
+                full_issues=[closed_source_issue],
+                error_type=EvidenceFailed,
+            ),
+            contains="status summary disagrees",
+        )
+        lint_raw_issue = fixture_issue(
+            issue_id="fixture-lint-wire-shape",
+            issue_type="task",
+            status="open",
+        )
+        valid_lint = fixture_lint(
+            [lint_raw_issue],
+            {
+                lint_raw_issue["id"]: fixture_expected_missing("task")
+            },
+        )
+        v2_validate_lint_scope_coherence(
+            valid_lint,
+            full_issues=[v2_full_issue_projection(lint_raw_issue)],
+            error_type=EvidenceFailed,
+        )
+
+        def lint_mutation_error(
+            mutation: Callable[[dict[str, Any]], None],
+            *,
+            contains: str,
+        ) -> TerminalObservation:
+            candidate = strict_json_loads(
+                canonical_bytes(valid_lint),
+                label="lint wire-shape mutation seed",
+                require_canonical=True,
+            )
+            mutation(candidate)
+            return expect_error(
+                EvidenceFailed,
+                lambda: v2_validate_lint_scope_coherence(
+                    candidate,
+                    full_issues=[
+                        v2_full_issue_projection(lint_raw_issue)
+                    ],
+                    error_type=EvidenceFailed,
+                ),
+                contains=contains,
+            )
+
+        lint_wire_errors = [
+            lint_mutation_error(
+                lambda row: row["all"].__setitem__("extra", True),
+                contains="non-closed output schema",
+            ),
+            lint_mutation_error(
+                lambda row: row["all"]["results"][0].__setitem__(
+                    "extra",
+                    "hidden",
+                ),
+                contains="non-closed schema",
+            ),
+            lint_mutation_error(
+                lambda row: row["all"]["results"][0].__setitem__(
+                    "title",
+                    7,
+                ),
+                contains="invalid released scalars",
+            ),
+            lint_mutation_error(
+                lambda row: row["all"]["results"][0][
+                    "suggestions"
+                ][0].__setitem__("hint", "wrong hint"),
+                contains="suggestions differ",
+            ),
+            lint_mutation_error(
+                lambda row: row["open"]["results"][0].__setitem__(
+                    "title",
+                    "different scope title",
+                ),
+                contains="differs from the all-scope row",
+            ),
+        ]
+        checks.check(
+            "released-br-lint-wire-shape-and-scope-coherence",
+            all(
+                error.terminal == "EvidenceFailed"
+                for error in lint_wire_errors
+            ),
+            expected={
+                "top_extra": "EvidenceFailed",
+                "row_extra": "EvidenceFailed",
+                "title_scalar": "EvidenceFailed",
+                "suggestion_drift": "EvidenceFailed",
+                "scope_drift": "EvidenceFailed",
+            },
+            observed=[error.terminal for error in lint_wire_errors],
         )
     elif slug == "source-warning-partitions":
         sections = (
@@ -35227,6 +38256,13 @@ def v2_history_fixture(
     anchor = v2_full_issue_projection(anchor_raw)
     anchor_events = [
         {
+            "id": 3,
+            "event_type": "commented",
+            "actor": "fixture-commenter",
+            "timestamp": "2026-01-02T00:00:00.003000+00:00",
+            "comment": "Fixture retained canonical comment.",
+        },
+        {
             "id": 2,
             "event_type": "closed",
             "actor": "fixture-closer",
@@ -35444,6 +38480,179 @@ def v2_execute_history_cases(
                 row["close_actor"],
                 row["audit_event_root"],
             ),
+        )
+        expected_comment = {
+            "event_id": 3,
+            "actor": "fixture-commenter",
+            "timestamp": "2026-01-02T00:00:00.003000Z",
+            "comment": "Fixture retained canonical comment.",
+            "comment_root": text_root(
+                "Fixture retained canonical comment."
+            ),
+        }
+        checks.check(
+            "canonical-commented-event-retained",
+            row["comments"] == [expected_comment],
+            expected=expected_comment,
+            observed=(row["comments"][0] if row["comments"] else None),
+        )
+
+        def history_audit_with_events(
+            events: Sequence[Mapping[str, Any]],
+        ) -> dict[str, Any]:
+            raw_document = {
+                "issue_id": issues[0]["id"],
+                "events": [dict(event) for event in events],
+            }
+            normalized_document = v2_normalize_audit_document(
+                raw_document,
+                issue_id=issues[0]["id"],
+            )
+            stdout_bytes = canonical_bytes(raw_document)
+            candidate = strict_json_loads(
+                canonical_bytes(audit),
+                label="history audit-event fixture seed",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            candidate["documents"] = [normalized_document]
+            for receipt in candidate["command_receipts"]:
+                receipt["stdout_byte_length"] = len(stdout_bytes)
+                receipt["stdout_root"] = (
+                    "sha256-v1:" + hashlib.sha256(stdout_bytes).hexdigest()
+                )
+                receipt["normalized_document_root"] = normalized_document[
+                    "semantic_root"
+                ]
+            return v2_rooted(candidate)
+
+        reclosed_events = [
+            {
+                "id": 6,
+                "event_type": "commented",
+                "actor": "fixture-commenter",
+                "timestamp": "2026-01-02T00:00:00.002000+00:00",
+                "comment": "Fixture retained canonical comment.",
+            },
+            {
+                "id": 5,
+                "event_type": "closed",
+                "actor": "fixture-closer",
+                "timestamp": "2026-01-02T00:00:00.001000+00:00",
+                "comment": issues[0]["close_reason"],
+            },
+            {
+                "id": 4,
+                "event_type": "status_changed",
+                "actor": "fixture-closer",
+                "timestamp": "2026-01-02T00:00:00+00:00",
+                "old_value": "open",
+                "new_value": "closed",
+            },
+            {
+                "id": 3,
+                "event_type": "reopened",
+                "actor": "fixture-reopener",
+                "timestamp": "2026-01-01T12:00:00+00:00",
+                "comment": "Reopened for additional review.",
+            },
+            {
+                "id": 2,
+                "event_type": "closed",
+                "actor": "fixture-first-closer",
+                "timestamp": "2026-01-01T11:00:00.001000+00:00",
+                "comment": "Earlier close reason.",
+            },
+            {
+                "id": 1,
+                "event_type": "status_changed",
+                "actor": "fixture-first-closer",
+                "timestamp": "2026-01-01T11:00:00+00:00",
+                "old_value": "open",
+                "new_value": "closed",
+            },
+        ]
+        reclosed_audit = history_audit_with_events(reclosed_events)
+        reclosed_contract = dict(contract)
+        reclosed_contract["legacy_coverage_anchor_status_event_id"] = 4
+        reclosed_contract["legacy_coverage_anchor_close_event_id"] = 5
+        reclosed_history = v2_build_history(
+            source_root=source_root,
+            inventory=inventory,
+            authority=authority,
+            all_issues=issues,
+            audit_capture=reclosed_audit,
+            history_contract=reclosed_contract,
+        )
+        v2_validate_history_projection(
+            reclosed_history,
+            source_root=source_root,
+            inventory=inventory,
+            authority=authority,
+            audit_capture=reclosed_audit,
+            history_contract=reclosed_contract,
+        )
+        reclosed_row = reclosed_history["rows"][0]
+        current_close_event = reclosed_audit["documents"][0]["events"][1]
+        checks.check(
+            "close-reopen-reclose-selects-current-pair",
+            reclosed_row["closer_state"] == "KNOWN"
+            and reclosed_row["close_actor"] == "fixture-closer"
+            and reclosed_row["audit_event_root"]
+            == semantic_root(current_close_event),
+            expected={
+                "closer_state": "KNOWN",
+                "close_actor": "fixture-closer",
+                "audit_event_root": semantic_root(current_close_event),
+            },
+            observed={
+                "closer_state": reclosed_row["closer_state"],
+                "close_actor": reclosed_row["close_actor"],
+                "audit_event_root": reclosed_row["audit_event_root"],
+            },
+        )
+
+        ambiguous_events = [
+            {
+                "id": 5,
+                "event_type": "closed",
+                "actor": "fixture-closer",
+                "timestamp": "2026-01-02T00:00:00.002000+00:00",
+                "comment": issues[0]["close_reason"],
+            },
+            {
+                "id": 4,
+                "event_type": "status_changed",
+                "actor": "fixture-closer",
+                "timestamp": "2026-01-02T00:00:00.001000+00:00",
+                "old_value": "open",
+                "new_value": "closed",
+            },
+            {
+                "id": 3,
+                "event_type": "status_changed",
+                "actor": "fixture-closer",
+                "timestamp": "2026-01-02T00:00:00.000500+00:00",
+                "old_value": "open",
+                "new_value": "closed",
+            },
+        ]
+        ambiguous_audit = history_audit_with_events(ambiguous_events)
+        ambiguous_contract = dict(contract)
+        ambiguous_contract["legacy_coverage_anchor_status_event_id"] = 4
+        ambiguous_contract["legacy_coverage_anchor_close_event_id"] = 5
+        checks.refuses(
+            "ambiguous-current-close-pair-refused",
+            EvidenceFailed,
+            lambda: v2_build_history(
+                source_root=source_root,
+                inventory=inventory,
+                authority=authority,
+                all_issues=issues,
+                audit_capture=ambiguous_audit,
+                history_contract=ambiguous_contract,
+            ),
+            contains="close audit pair conflicts",
         )
 
         def audit_with_pair_timestamps(
@@ -38148,30 +41357,58 @@ def v2_execute_artifact_cases(
             "--api-key",
             "api-key-secret",
             "GITHUB_TOKEN=environment-secret",
+            "OPENAI_API_KEY=openai-environment-secret",
+            "AWS_SECRET_ACCESS_KEY=aws-environment-secret",
+            "AWS_ACCESS_KEY_ID=aws-identifier-secret",
+            "clientSecret=camel-environment-secret",
+            "APIKey=pascal-api-key-secret",
+            "XApiKey=pascal-x-api-key-secret",
+            "AWSAccessKeyId=pascal-aws-identifier-secret",
+            "AWSSecretAccessKey=pascal-aws-secret",
             "Authorization: Bearer header-secret",
             'client_secret="quoted multiword secret"',
             "ordinary",
             f"prefix:{REPO_ROOT}/private",
         ]
         sanitized = v2_sanitized_argv(hostile)
+        embedded_secret_argv = [
+            "ordinary=visible token=embedded-token-secret",
+            "--ordinary=visible --token embedded-option-secret",
+            "prefix: visible api_key=embedded-api-secret",
+            "foo=ok, token=embedded-comma-secret",
+            "token.value=embedded-flat-secret",
+            "token[0]=embedded-index-secret",
+            "token_value=embedded-value-secret",
+            "api_key_value=embedded-api-value-secret",
+            "access_token_value=embedded-access-value-secret",
+            "refresh_token_value=embedded-refresh-value-secret",
+            "client_secret_value=embedded-client-value-secret",
+            "secret_access_key_value=embedded-secret-access-value-secret",
+            "secret_key=embedded-key-secret",
+            "credential.value: embedded-credential-secret",
+            "x.api_key.value=embedded-hierarchical-api-secret",
+        ]
+        sanitized_embedded_secret_argv = v2_sanitized_argv(
+            embedded_secret_argv
+        )
+        preserved_arguments = {
+            2: "--access-token",
+            4: "--password",
+            6: "--token",
+            8: "--api-key",
+            hostile.index("ordinary"): "ordinary",
+        }
         checks.check(
             "sensitive-argv-redacted",
-            sanitized[0].startswith("<redacted:")
-            and sanitized[1].startswith("<redacted:")
-            and sanitized[2] == "--access-token"
-            and sanitized[3].startswith("<redacted:")
-            and sanitized[4] == "--password"
-            and sanitized[5].startswith("<redacted:")
-            and sanitized[6] == "--token"
-            and sanitized[7].startswith("<redacted:")
-            and sanitized[8] == "--api-key"
-            and sanitized[9].startswith("<redacted:")
+            all(
+                sanitized[index] == expected
+                for index, expected in preserved_arguments.items()
+            )
             and all(
                 sanitized[index].startswith("<redacted:")
-                for index in (10, 11, 12)
+                for index in range(len(sanitized))
+                if index not in preserved_arguments
             )
-            and sanitized[13] == "ordinary"
-            and sanitized[14].startswith("<redacted:")
             and all(
                 secret
                 not in canonical_bytes(sanitized).decode("utf-8")
@@ -38182,6 +41419,14 @@ def v2_execute_artifact_cases(
                     "short-token-secret",
                     "api-key-secret",
                     "environment-secret",
+                    "openai-environment-secret",
+                    "aws-environment-secret",
+                    "aws-identifier-secret",
+                    "camel-environment-secret",
+                    "pascal-api-key-secret",
+                    "pascal-x-api-key-secret",
+                    "pascal-aws-identifier-secret",
+                    "pascal-aws-secret",
                     "header-secret",
                     "quoted multiword secret",
                     str(REPO_ROOT),
@@ -38207,9 +41452,23 @@ def v2_execute_artifact_cases(
             v2_sanitized_argv(boundary_controls) == boundary_controls
             and not v2_is_sensitive_key("notsecret")
             and not v2_is_sensitive_key("secret-sauce")
+            and not v2_is_sensitive_key("token_bucket")
+            and not v2_is_sensitive_key("api_key_count")
             and v2_is_sensitive_key("GITHUB_TOKEN")
             and v2_is_sensitive_key("client_secret")
-            and v2_is_sensitive_key("api-key"),
+            and v2_is_sensitive_key("api-key")
+            and v2_is_sensitive_key("OPENAI_API_KEY")
+            and v2_is_sensitive_key("AWS_SECRET_ACCESS_KEY")
+            and v2_is_sensitive_key("AWS_ACCESS_KEY_ID")
+            and v2_is_sensitive_key("clientSecret")
+            and v2_is_sensitive_key("accessToken")
+            and v2_is_sensitive_key("refreshToken")
+            and v2_is_sensitive_key("apiKey")
+            and v2_is_sensitive_key("x-api-key")
+            and v2_is_sensitive_key("APIKey")
+            and v2_is_sensitive_key("XApiKey")
+            and v2_is_sensitive_key("AWSAccessKeyId")
+            and v2_is_sensitive_key("AWSSecretAccessKey"),
             expected={
                 "boundary_controls_retained": True,
                 "exact_sensitive_suffixes_detected": True,
@@ -38221,9 +41480,23 @@ def v2_execute_artifact_cases(
                     for value in (
                         "notsecret",
                         "secret-sauce",
+                        "token_bucket",
+                        "api_key_count",
                         "GITHUB_TOKEN",
                         "client_secret",
                         "api-key",
+                        "OPENAI_API_KEY",
+                        "AWS_SECRET_ACCESS_KEY",
+                        "AWS_ACCESS_KEY_ID",
+                        "clientSecret",
+                        "accessToken",
+                        "refreshToken",
+                        "apiKey",
+                        "x-api-key",
+                        "APIKey",
+                        "XApiKey",
+                        "AWSAccessKeyId",
+                        "AWSSecretAccessKey",
                     )
                 },
             },
@@ -38237,6 +41510,58 @@ def v2_execute_artifact_cases(
                 "deterministic": sanitized == v2_sanitized_argv(hostile),
                 "argument_count": len(sanitized),
             },
+        )
+        checks.check(
+            "embedded-argv-sensitive-tail-redacted",
+            sanitized_embedded_secret_argv
+            == [
+                "ordinary=visible token=<redacted>",
+                "--ordinary=visible --token <redacted>",
+                "prefix: visible api_key=<redacted>",
+                "foo=ok, token=<redacted>",
+                "token.value=<redacted>",
+                "token[0]=<redacted>",
+                "token_value=<redacted>",
+                "api_key_value=<redacted>",
+                "access_token_value=<redacted>",
+                "refresh_token_value=<redacted>",
+                "client_secret_value=<redacted>",
+                "secret_access_key_value=<redacted>",
+                "secret_key=<redacted>",
+                "credential.value: <redacted>",
+                "x.api_key.value=<redacted>",
+            ]
+            and all(
+                secret
+                not in canonical_bytes(
+                    sanitized_embedded_secret_argv
+                ).decode("utf-8")
+                for secret in (
+                    "embedded-token-secret",
+                    "embedded-option-secret",
+                    "embedded-api-secret",
+                    "embedded-comma-secret",
+                    "embedded-flat-secret",
+                    "embedded-index-secret",
+                    "embedded-value-secret",
+                    "embedded-api-value-secret",
+                    "embedded-access-value-secret",
+                    "embedded-refresh-value-secret",
+                    "embedded-client-value-secret",
+                    "embedded-secret-access-value-secret",
+                    "embedded-key-secret",
+                    "embedded-credential-secret",
+                    "embedded-hierarchical-api-secret",
+                )
+            )
+            and v2_sanitized_argv(sanitized_embedded_secret_argv)
+            == sanitized_embedded_secret_argv,
+            expected={
+                "benign_prefixes": "retained",
+                "later_sensitive_tails": "redacted",
+                "idempotent": True,
+            },
+            observed=sanitized_embedded_secret_argv,
         )
         refusal_payloads, _ = v2_refusal_bundle_payloads(
             mode="review-plan",
@@ -38334,6 +41659,34 @@ def v2_execute_artifact_cases(
         boundary_summary = v2_redact_contextual_text(
             "Authorization: Basic diagnostic-basic\n"
             "Proxy-Authorization: Bearer diagnostic-proxy\n"
+            "OPENAI_API_KEY=diagnostic-openai\n"
+            "AWS_SECRET_ACCESS_KEY='diagnostic-aws'\n"
+            "AWS_ACCESS_KEY_ID=diagnostic-aws-identifier\n"
+            'clientSecret="diagnostic-camel"\n'
+            "APIKey=diagnostic-pascal-api\n"
+            "XApiKey=diagnostic-pascal-x-api\n"
+            "AWSAccessKeyId=diagnostic-pascal-aws-identifier\n"
+            "AWSSecretAccessKey=diagnostic-pascal-aws\n"
+            "metadata:token=diagnostic-namespaced-token\n"
+            '{"token":"diagnostic-json-property"}\n'
+            'ordinary=visible token=diagnostic-benign-prefix-token\n'
+            'prefix: visible api_key=diagnostic-benign-prefix-api\n'
+            'foo=ok, token=diagnostic-comma-token,diagnostic-comma-tail\n'
+            '--ordinary visible --token diagnostic-benign-option\n'
+            'Bearer diagnostic-list-one,diagnostic-list-two\n'
+            '"api key": diagnostic-spaced-property\n'
+            '"token": ["diagnostic-array-one","diagnostic-array-two"]\n'
+            'token.value=diagnostic-flat-token\n'
+            'token[0]=diagnostic-index-token\n'
+            'token_value=diagnostic-token-value\n'
+            'api_key_value=diagnostic-api-key-value\n'
+            'access_token_value=diagnostic-access-token-value\n'
+            'refresh_token_value=diagnostic-refresh-token-value\n'
+            'client_secret_value=diagnostic-client-secret-value\n'
+            'secret_access_key_value=diagnostic-secret-access-key-value\n'
+            'secret_key=diagnostic-secret-key\n'
+            'credential.value: diagnostic-credential-value\n'
+            'x.api_key.value=diagnostic-hierarchical-api\n'
             'client_secret="diagnostic-line-one\ndiagnostic-line-two"\n'
             'client_secret="diagnostic-alpha\\\" diagnostic-escaped-tail"\n'
             '--token "diagnostic-split-alpha\\\" diagnostic-split-tail"\n'
@@ -38354,6 +41707,37 @@ def v2_execute_artifact_cases(
                 for secret in (
                     "diagnostic-basic",
                     "diagnostic-proxy",
+                    "diagnostic-openai",
+                    "diagnostic-aws",
+                    "diagnostic-aws-identifier",
+                    "diagnostic-camel",
+                    "diagnostic-pascal-api",
+                    "diagnostic-pascal-x-api",
+                    "diagnostic-pascal-aws-identifier",
+                    "diagnostic-pascal-aws",
+                    "diagnostic-namespaced-token",
+                    "diagnostic-json-property",
+                    "diagnostic-benign-prefix-token",
+                    "diagnostic-benign-prefix-api",
+                    "diagnostic-comma-token",
+                    "diagnostic-comma-tail",
+                    "diagnostic-benign-option",
+                    "diagnostic-list-one",
+                    "diagnostic-list-two",
+                    "diagnostic-spaced-property",
+                    "diagnostic-array-one",
+                    "diagnostic-array-two",
+                    "diagnostic-flat-token",
+                    "diagnostic-index-token",
+                    "diagnostic-token-value",
+                    "diagnostic-api-key-value",
+                    "diagnostic-access-token-value",
+                    "diagnostic-refresh-token-value",
+                    "diagnostic-client-secret-value",
+                    "diagnostic-secret-access-key-value",
+                    "diagnostic-secret-key",
+                    "diagnostic-credential-value",
+                    "diagnostic-hierarchical-api",
                     "diagnostic-line-one",
                     "diagnostic-line-two",
                     "diagnostic-alpha",
@@ -38366,7 +41750,9 @@ def v2_execute_artifact_cases(
                     "diagnostic-tail",
                 )
             )
-            and boundary_summary.count("<redacted>") == 7
+            and boundary_summary
+            == v2_redact_contextual_text(boundary_summary)
+            and boundary_summary.count("<redacted>") >= 17
             and "diagnostic-bearer-unclosed"
             not in unclosed_bearer_summary
             and "diagnostic-bearer-unclosed-tail"
@@ -38392,6 +41778,12 @@ def v2_execute_artifact_cases(
         retained_boundary = {
             "ordinary": "retained detail",
             "GITHUB_TOKEN": "retained-boundary-secret",
+            "OPENAI_API_KEY": "retained-openai-secret",
+            "AWS_SECRET_ACCESS_KEY": "retained-aws-secret",
+            "AWS_ACCESS_KEY_ID": "retained-aws-identifier",
+            "clientSecret": "retained-camel-secret",
+            "APIKey": "retained-pascal-api-secret",
+            "AWSSecretAccessKey": "retained-pascal-aws-secret",
             "nested": {
                 "client-secret": "nested-boundary-secret",
                 "authorization": "Bearer nested-bearer-secret",
@@ -38407,6 +41799,12 @@ def v2_execute_artifact_cases(
                 secret not in canonical_bytes(projected_boundary).decode("utf-8")
                 for secret in (
                     "retained-boundary-secret",
+                    "retained-openai-secret",
+                    "retained-aws-secret",
+                    "retained-aws-identifier",
+                    "retained-camel-secret",
+                    "retained-pascal-api-secret",
+                    "retained-pascal-aws-secret",
                     "nested-boundary-secret",
                     "nested-bearer-secret",
                 )
@@ -38440,12 +41838,43 @@ def v2_execute_artifact_cases(
         projected_path_key = v2_assertion_evidence_projection(
             {f"{REPO_ROOT}/private-key-name": "visible-value"}
         )
+        projected_assignment_key = v2_assertion_evidence_projection(
+            {
+                "token=opaque": "assignment-value-secret",
+                "metadata:token=namespaced-key-secret": (
+                    "namespaced-value-secret"
+                ),
+                "--token split-key-secret": "split-key-value-secret",
+                "Bearer bearer-key-secret": "bearer-key-value-secret",
+                "ordinary=visible token=embedded-key-secret": (
+                    "embedded-key-value-secret"
+                ),
+            }
+        )
+
+        class DuplicateProjectedKeyMapping(Mapping[str, str]):
+            def __getitem__(self, _key: str) -> str:
+                return "duplicate-projection-secret"
+
+            def __iter__(self) -> Iterator[str]:
+                return iter(("token=duplicate", "token=duplicate"))
+
+            def __len__(self) -> int:
+                return 2
+
         collision_error = expect_error(
             EvidenceFailed,
             lambda: v2_assertion_evidence_projection(
                 {1: "first", "1": "second"}
             ),
             contains="mapping keys must be exact strings",
+        )
+        projected_collision_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_assertion_evidence_projection(
+                DuplicateProjectedKeyMapping()
+            ),
+            contains="collide after projection",
         )
         checks.check(
             "assertion-evidence-sensitive-metadata-projected",
@@ -38461,7 +41890,27 @@ def v2_execute_artifact_cases(
             and str(REPO_ROOT)
             not in canonical_bytes(projected_path_key).decode("utf-8")
             and list(projected_path_key)[0].startswith("<redacted-key:")
-            and collision_error.terminal == "EvidenceFailed",
+            and list(projected_assignment_key)[0].startswith(
+                "<redacted-key:"
+            )
+            and b"token=opaque"
+            not in canonical_bytes(projected_assignment_key)
+            and all(
+                secret not in canonical_bytes(projected_assignment_key)
+                for secret in (
+                    b"assignment-value-secret",
+                    b"namespaced-key-secret",
+                    b"namespaced-value-secret",
+                    b"split-key-secret",
+                    b"split-key-value-secret",
+                    b"bearer-key-secret",
+                    b"bearer-key-value-secret",
+                    b"embedded-key-secret",
+                    b"embedded-key-value-secret",
+                )
+            )
+            and collision_error.terminal == "EvidenceFailed"
+            and projected_collision_error.terminal == "EvidenceFailed",
             expected={
                 "sensitive_strings_numbers_booleans_and_lists": "redacted",
                 "path_bearing_key": "projected",
@@ -38470,7 +41919,11 @@ def v2_execute_artifact_cases(
             observed={
                 "projected_evidence": projected_evidence,
                 "projected_path_key": projected_path_key,
+                "projected_assignment_key": projected_assignment_key,
                 "collision_terminal": collision_error.terminal,
+                "projected_collision_terminal": (
+                    projected_collision_error.terminal
+                ),
             },
         )
         mutated_state = {"phase": "before"}
@@ -38635,6 +42088,46 @@ def v2_execute_artifact_cases(
                 ],
             },
         )
+        fixture_replay_equivalence = {
+            "retained_terminal_root": terminal["semantic_root"],
+            "retained_source_root": reconstructed[0]["semantic_root"],
+            "retained_inventory_root": reconstructed[1]["semantic_root"],
+            "retained_authority_root": reconstructed[2]["semantic_root"],
+            "retained_review_plan_root": reconstructed[3]["semantic_root"],
+            "retained_history_root": reconstructed[4]["semantic_root"],
+            "retained_zero_sets_root": reconstructed[5]["semantic_root"],
+            "retained_events_content_root": terminal[
+                "events_content_root"
+            ],
+            "live_tracker_reads": False,
+            "live_tracker_writes": False,
+            "network_access": False,
+        }
+        fixture_replay_payloads = v2_bundle_payloads(
+            mode="replay",
+            subject_mode="review-plan",
+            artifact_root="target/v2-fixture",
+            artifact_dir="replay-output",
+            source=reconstructed[0],
+            inventory=reconstructed[1],
+            authority=reconstructed[2],
+            review_plan=reconstructed[3],
+            history=reconstructed[4],
+            zero_sets=reconstructed[5],
+            optional_payloads=reconstructed[6],
+            reproduction=v2_reproduction_argv(
+                mode="replay",
+                artifact_root="target/v2-fixture",
+                artifact_dir="replay-output",
+                replay_input="review-plan-run",
+            ),
+            replay_equivalence=fixture_replay_equivalence,
+        )
+        published_replay_terminal = strict_json_loads(
+            fixture_replay_payloads["terminal.json"],
+            label="fixture published replay terminal",
+            require_canonical=True,
+        )
         replay_result_seed = v2_rooted(
             {
                 "schema": V2_REPLAY_RESULT_SCHEMA,
@@ -38642,16 +42135,24 @@ def v2_execute_artifact_cases(
                 "subject_mode": "review-plan",
                 "artifact_dir": "target/v2-fixture/replay-output",
                 "retained_terminal_root": terminal["semantic_root"],
-                "replay_terminal_root": semantic_root(
-                    {"fixture": "replay terminal"}
-                ),
+                "replay_terminal_root": published_replay_terminal[
+                    "semantic_root"
+                ],
                 "live_tracker_reads": False,
                 "live_tracker_writes": False,
                 "network_access": False,
                 "no_claim": V2_REPLAY_RESULT_NO_CLAIM,
             }
         )
-        v2_validate_replay_result_document(replay_result_seed)
+        def validate_fixture_replay_result(
+            candidate: Mapping[str, Any],
+        ) -> None:
+            v2_validate_replay_result_document(
+                candidate,
+                published_terminal=published_replay_terminal,
+            )
+
+        validate_fixture_replay_result(replay_result_seed)
         checks.check(
             "replay-result-valid-closed-rooted",
             set(replay_result_seed) == V2_REPLAY_RESULT_FIELDS
@@ -38691,7 +42192,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-extra-field-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
+            lambda: validate_fixture_replay_result(
                 reroot_replay_result(
                     lambda row: row.__setitem__("unexpected", True)
                 )
@@ -38701,7 +42202,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-missing-field-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
+            lambda: validate_fixture_replay_result(
                 reroot_replay_result(
                     lambda row: row.pop("network_access")
                 )
@@ -38711,7 +42212,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-nonpass-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
+            lambda: validate_fixture_replay_result(
                 reroot_replay_result(
                     lambda row: row.__setitem__(
                         "terminal", "EvidenceFailed"
@@ -38723,7 +42224,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-live-activity-claim-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
+            lambda: validate_fixture_replay_result(
                 reroot_replay_result(
                     lambda row: row.__setitem__(
                         "live_tracker_reads", True
@@ -38735,7 +42236,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-unsafe-artifact-path-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
+            lambda: validate_fixture_replay_result(
                 reroot_replay_result(
                     lambda row: row.__setitem__(
                         "artifact_dir", "../escaped-replay"
@@ -38755,10 +42256,58 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "replay-result-stale-root-refused",
             EvidenceFailed,
-            lambda: v2_validate_replay_result_document(
-                stale_replay_result
-            ),
+            lambda: validate_fixture_replay_result(stale_replay_result),
             contains="semantic_root",
+        )
+        published_binding_mutations = (
+            (
+                "replay_terminal_root",
+                semantic_root({"fixture": "other published replay"}),
+            ),
+            (
+                "retained_terminal_root",
+                semantic_root({"fixture": "other retained terminal"}),
+            ),
+            (
+                "artifact_dir",
+                "target/v2-fixture/other-replay-output",
+            ),
+        )
+        published_binding_errors = [
+            expect_error(
+                EvidenceFailed,
+                lambda field=field, replacement=replacement: (
+                    validate_fixture_replay_result(
+                        reroot_replay_result(
+                            lambda row: row.__setitem__(
+                                field,
+                                replacement,
+                            )
+                        )
+                    )
+                ),
+                contains="differs from its published terminal",
+            )
+            for field, replacement in published_binding_mutations
+        ]
+        checks.check(
+            "replay-result-published-terminal-bindings-refused",
+            all(
+                error.terminal == "EvidenceFailed"
+                for error in published_binding_errors
+            ),
+            expected={
+                field: "EvidenceFailed"
+                for field, _ in published_binding_mutations
+            },
+            observed={
+                field: error.terminal
+                for (field, _), error in zip(
+                    published_binding_mutations,
+                    published_binding_errors,
+                    strict=True,
+                )
+            },
         )
 
         def forbidden_replay_subprocess() -> None:
@@ -38773,7 +42322,7 @@ def v2_execute_artifact_cases(
             "offline-replay-subprocess-guard-refuses",
             EvidenceFailed,
             forbidden_replay_subprocess,
-            contains="forbids every subprocess",
+            contains="forbids run_command-routed subprocesses",
         )
         post_guard = run_command(
             (sys.executable, "-c", "print('guard-restored')"),
@@ -39020,6 +42569,115 @@ def v2_execute_artifact_cases(
             ),
             contains="duplicates a dependencies neighbor",
         )
+        retained_id_mutations = (
+            (
+                "local_id",
+                lambda row: row.__setitem__("id", "--status"),
+                "released-br local issue ID",
+            ),
+            (
+                "parent_id",
+                lambda row: row.__setitem__("parent", "bad\nparent"),
+                "released-br local issue ID",
+            ),
+            (
+                "external_relation_id",
+                lambda row: row.__setitem__(
+                    "dependencies",
+                    [
+                        {
+                            "id": "external:evil\n--json",
+                            "type": "blocks",
+                            "status": "open",
+                            "priority": 1,
+                        }
+                    ],
+                ),
+                "bounded command-safe external relation ID",
+            ),
+        )
+        retained_id_errors = [
+            expect_error(
+                InputRefused,
+                lambda mutation=mutation: v2_validate_source_document(
+                    reroot_source_issue(mutation)
+                ),
+                contains=message,
+            )
+            for _name, mutation, message in retained_id_mutations
+        ]
+        checks.check(
+            "rerooted-source-released-br-id-grammar-refused",
+            all(
+                error.terminal == "InputRefused"
+                for error in retained_id_errors
+            ),
+            expected={
+                name: "InputRefused"
+                for name, _mutation, _message in retained_id_mutations
+            },
+            observed={
+                name: error.terminal
+                for (name, _mutation, _message), error in zip(
+                    retained_id_mutations,
+                    retained_id_errors,
+                    strict=True,
+                )
+            },
+        )
+
+        def reroot_source_lint(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(source_seed),
+                label="retained source lint mutation",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            lint_projection = strict_json_loads(
+                canonical_bytes(
+                    candidate["captured"]["v1_lint_projection"]
+                ),
+                label="retained lint projection mutation",
+                require_canonical=True,
+            )
+            mutation(lint_projection)
+            candidate["captured"]["v1_lint_projection"] = lint_projection
+            candidate["capture_roots"]["v1_lint_projection"] = (
+                semantic_root(lint_projection)
+            )
+            return v2_rooted(candidate)
+
+        retained_lint_mutations = (
+            lambda row: row["all"].__setitem__("extra", True),
+            lambda row: row["all"]["results"][0][
+                "suggestions"
+            ][0].__setitem__("hint", "forged retained hint"),
+            lambda row: row["open"]["results"][0].__setitem__(
+                "title",
+                "cross-scope retained drift",
+            ),
+        )
+        retained_lint_errors = [
+            expect_error(
+                InputRefused,
+                lambda mutation=mutation: v2_validate_source_document(
+                    reroot_source_lint(mutation)
+                ),
+                contains="br lint",
+            )
+            for mutation in retained_lint_mutations
+        ]
+        checks.check(
+            "rerooted-source-lint-wire-and-scope-drift-refused",
+            all(
+                error.terminal == "InputRefused"
+                for error in retained_lint_errors
+            ),
+            expected=["InputRefused"] * len(retained_lint_mutations),
+            observed=[error.terminal for error in retained_lint_errors],
+        )
 
         def reroot_observation_receipt(
             mutation: Callable[[dict[str, Any]], None],
@@ -39096,6 +42754,96 @@ def v2_execute_artifact_cases(
                 empty_stream_root
             ),
             contains="retention contract differs",
+        )
+
+        def reroot_observation_receipts(
+            mutation: Callable[[list[dict[str, Any]]], None],
+        ) -> dict[str, Any]:
+            def mutate_observation(
+                observation: dict[str, Any],
+            ) -> None:
+                receipts = strict_json_loads(
+                    canonical_bytes(observation["command_receipts"]),
+                    label="source command receipt-set mutation",
+                    require_canonical=True,
+                )
+                mutation(receipts)
+                observation["command_receipts"] = receipts
+
+            return reroot_source_capture(
+                "observation",
+                mutate_observation,
+            )
+
+        arbitrary_projection_root = reroot_observation_receipts(
+            lambda receipts: receipts[0].__setitem__(
+                "normalized_projection_root",
+                semantic_root({"unrelated": "one-byte stdout"}),
+            )
+        )
+
+        def swap_status_witness_projection_roots(
+            receipts: list[dict[str, Any]],
+        ) -> None:
+            receipts[0]["normalized_projection_root"], receipts[2][
+                "normalized_projection_root"
+            ] = (
+                receipts[2]["normalized_projection_root"],
+                receipts[0]["normalized_projection_root"],
+            )
+
+        swapped_projection_roots = reroot_observation_receipts(
+            swap_status_witness_projection_roots
+        )
+        capability_safety_drift = reroot_source_capture(
+            "observation",
+            lambda observation: observation["br_capabilities"]["safety"][
+                0
+            ].__setitem__(
+                "guarantee",
+                "forged safety guarantee retained without command evidence",
+            ),
+        )
+        capability_global_flag_drift = reroot_source_capture(
+            "observation",
+            lambda observation: observation["br_capabilities"][
+                "global_flags"
+            ][0].__setitem__(
+                "description",
+                "forged global flag semantics",
+            ),
+        )
+        command_projection_binding_errors = [
+            expect_error(
+                InputRefused,
+                lambda candidate=candidate: v2_validate_source_document(
+                    candidate
+                ),
+                contains="projection",
+            )
+            for candidate in (
+                arbitrary_projection_root,
+                swapped_projection_roots,
+                capability_safety_drift,
+                capability_global_flag_drift,
+            )
+        ]
+        checks.check(
+            "rerooted-source-command-normalized-projections-bound",
+            all(
+                error.terminal == "InputRefused"
+                for error in command_projection_binding_errors
+            ),
+            expected={
+                "arbitrary_root": "InputRefused",
+                "swapped_status_witness_roots": "InputRefused",
+                "capability_safety_drift": "InputRefused",
+                "capability_global_flag_drift": "InputRefused",
+            },
+            observed=[
+                error.terminal
+                for error in command_projection_binding_errors
+            ],
         )
         history_payloads, _, _ = v2_replayable_fixture_bundle(
             manifest,
@@ -39200,6 +42948,197 @@ def v2_execute_artifact_cases(
                 malformed_audit_events
             ),
             contains="source audit document",
+        )
+
+        def mutate_first_audit_event(
+            audit_capture: dict[str, Any],
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> None:
+            documents = strict_json_loads(
+                canonical_bytes(audit_capture["documents"]),
+                label="retained audit event wire mutation",
+                require_canonical=True,
+            )
+            document = dict(documents[0])
+            document.pop("semantic_root", None)
+            events = strict_json_loads(
+                canonical_bytes(document["events"]),
+                label="retained audit event rows",
+                require_canonical=True,
+            )
+            mutation(events[0])
+            document["events"] = events
+            documents[0] = v2_rooted(document)
+            audit_capture["documents"] = documents
+
+        audit_event_wire_mutations = (
+            lambda event: event.pop("actor"),
+            lambda event: event.__setitem__("comment", None),
+            lambda event: event.__setitem__(
+                "comment",
+                {"token": "retained-audit-wire-secret"},
+            ),
+            lambda event: event.__setitem__("event_type", "CLOSED"),
+            lambda event: event.__setitem__(
+                "timestamp",
+                event["timestamp"].removesuffix("Z") + "+00:00",
+            ),
+        )
+        audit_event_wire_errors = [
+            expect_error(
+                InputRefused,
+                lambda mutation=mutation: v2_validate_source_document(
+                    reroot_history_audit(
+                        lambda audit_capture: mutate_first_audit_event(
+                            audit_capture,
+                            mutation,
+                        )
+                    )
+                ),
+                contains="source audit document",
+            )
+            for mutation in audit_event_wire_mutations
+        ]
+        backdated_audit = v2_normalize_audit_document(
+            {
+                "issue_id": "fixture-audit-order",
+                "events": [
+                    {
+                        "id": 1,
+                        "event_type": "updated",
+                        "actor": "fixture",
+                        "timestamp": "2026-02-01T00:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "event_type": "created",
+                        "actor": "fixture",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                    },
+                ],
+            },
+            issue_id="fixture-audit-order",
+        )
+        equal_timestamp_wrong_id_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_audit_document(
+                {
+                    "issue_id": "fixture-audit-order",
+                    "events": [
+                        {
+                            "id": 1,
+                            "event_type": "updated",
+                            "actor": "fixture",
+                            "timestamp": "2026-01-01T00:00:00Z",
+                        },
+                        {
+                            "id": 2,
+                            "event_type": "created",
+                            "actor": "fixture",
+                            "timestamp": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                },
+                issue_id="fixture-audit-order",
+            ),
+            contains="timestamp descending then ID descending",
+        )
+        checks.check(
+            "rerooted-audit-released-event-wire-shapes-refused",
+            all(
+                error.terminal == "InputRefused"
+                for error in audit_event_wire_errors
+            )
+            and [event["id"] for event in backdated_audit["events"]]
+            == [1, 2]
+            and equal_timestamp_wrong_id_error.terminal
+            == "EvidenceFailed",
+            expected={
+                "missing_actor": "InputRefused",
+                "null_optional": "InputRefused",
+                "mapping_optional": "InputRefused",
+                "uppercase_event_type": "InputRefused",
+                "noncanonical_utc_offset": "InputRefused",
+                "backdated_unique_ids": "accepted",
+                "equal_timestamp_ascending_id": "EvidenceFailed",
+            },
+            observed=[
+                *(
+                    error.terminal
+                    for error in audit_event_wire_errors
+                ),
+                [event["id"] for event in backdated_audit["events"]],
+                equal_timestamp_wrong_id_error.terminal,
+            ],
+        )
+
+        def mutate_audit_receipts(
+            audit_capture: dict[str, Any],
+            mutation: Callable[[list[dict[str, Any]]], None],
+        ) -> None:
+            receipts = strict_json_loads(
+                canonical_bytes(audit_capture["command_receipts"]),
+                label="retained audit receipt binding mutation",
+                require_canonical=True,
+            )
+            mutation(receipts)
+            audit_capture["command_receipts"] = receipts
+
+        audit_stdout_root_drift = reroot_history_audit(
+            lambda audit_capture: mutate_audit_receipts(
+                audit_capture,
+                lambda receipts: receipts[0].__setitem__(
+                    "stdout_root",
+                    semantic_root({"unrelated": "audit stdout"}),
+                ),
+            )
+        )
+
+        def forge_both_normalized_audit_roots(
+            receipts: list[dict[str, Any]],
+        ) -> None:
+            forged_root = semantic_root({"forged": "audit document"})
+            for receipt in receipts:
+                receipt["normalized_document_root"] = forged_root
+
+        audit_document_root_drift = reroot_history_audit(
+            lambda audit_capture: mutate_audit_receipts(
+                audit_capture,
+                forge_both_normalized_audit_roots,
+            )
+        )
+        audit_receipt_binding_errors = [
+            expect_error(
+                InputRefused,
+                lambda candidate=candidate: v2_validate_source_document(
+                    candidate
+                ),
+                contains=message,
+            )
+            for candidate, message in (
+                (
+                    audit_stdout_root_drift,
+                    "command receipts differ across captures",
+                ),
+                (
+                    audit_document_root_drift,
+                    "identity or terminal contract differs",
+                ),
+            )
+        ]
+        checks.check(
+            "rerooted-audit-command-receipts-document-bound",
+            all(
+                error.terminal == "InputRefused"
+                for error in audit_receipt_binding_errors
+            ),
+            expected={
+                "raw_stdout_cross_round": "InputRefused",
+                "normalized_document_root": "InputRefused",
+            },
+            observed=[
+                error.terminal for error in audit_receipt_binding_errors
+            ],
         )
 
         def empty_audit_document_root(
@@ -44899,6 +48838,8 @@ def _v2_execute_nomock_cases_impl(
         source_receipts = v2_validate_source_command_receipts(
             observation,
             issue_ids=source_issue_ids,
+            full_issues=source["captured"]["all_issues"],
+            lint=source["captured"]["v1_lint_projection"],
         )
         expected_source_receipts = [
             {"capture_sequence": index, **receipt}
@@ -45561,7 +49502,6 @@ def _v2_execute_nomock_cases_impl(
                     explicit_completed,
                     label="explicit replay-v2 stdout",
                 )
-                v2_validate_replay_result_document(explicit_result)
                 (
                     _,
                     explicit_payloads,
@@ -45570,6 +49510,10 @@ def _v2_execute_nomock_cases_impl(
                 ) = v2_read_retained_bundle(
                     artifact_root=artifact_root,
                     input_dir=explicit_dir,
+                )
+                v2_validate_replay_result_document(
+                    explicit_result,
+                    published_terminal=explicit_terminal,
                 )
                 explicit_reconstructed = v2_reconstruct_retained(
                     artifact_root=artifact_root,
@@ -45829,7 +49773,6 @@ def _v2_execute_nomock_cases_impl(
                     legacy_completed,
                     label="legacy replay v2 autodetect stdout",
                 )
-                v2_validate_replay_result_document(legacy_result)
                 (
                     _,
                     legacy_payloads,
@@ -45838,6 +49781,10 @@ def _v2_execute_nomock_cases_impl(
                 ) = v2_read_retained_bundle(
                     artifact_root=artifact_root,
                     input_dir=legacy_dir,
+                )
+                v2_validate_replay_result_document(
+                    legacy_result,
+                    published_terminal=legacy_terminal,
                 )
                 checks.check(
                     "legacy-replay-v2-autodetect-success",
@@ -47765,7 +51712,13 @@ def parse_arguments(arguments: Sequence[str]) -> argparse.Namespace:
     modes.add_argument("--plan", action="store_true", help="write live review plan")
     modes.add_argument("--apply-manifest", metavar="REL")
     modes.add_argument("--negative", metavar="CASE")
-    modes.add_argument("--replay", metavar="REL")
+    modes.add_argument(
+        "--replay",
+        metavar="REL",
+        help=(
+            "replay a retained v1 bundle or schema-autodetect a retained v2 bundle"
+        ),
+    )
     modes.add_argument(
         "--replay-v2",
         metavar="REL",
@@ -47996,7 +51949,6 @@ def main(arguments: Sequence[str]) -> int:
                 output_dir=artifact_dir,
                 accepted_manifest=manifest_v2,
             )
-            v2_validate_replay_result_document(replay_result)
             json_stdout(replay_result)
             return 0
         if schema != RUN_TERMINAL_SCHEMA:
