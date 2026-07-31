@@ -26107,11 +26107,9 @@ def v2_execute_authority_cases(
             external_verdict="VALID",
         )
         valid_row = valid_receipts["receipts"][0]
-        expected_external_root = semantic_root(
-            {
-                "gate": "external",
-                "target_root": base_inventory["rows"][0]["target_root"],
-            }
+        expected_external_root = v2_fixture_gate_receipt_root(
+            "external",
+            target_root=base_inventory["rows"][0]["target_root"],
         )
         checks.check(
             "external-valid-root-is-exact-target-scope",
@@ -26182,28 +26180,16 @@ def v2_execute_authority_cases(
                 other_external_root,
             ),
         )
-        wrong_scope_decision = v2_derive_authority(
-            base_inventory,
-            wrong_scope,
-            current_br_version="0.3.0",
-            allow_mechanical_fixture=False,
-        )["decisions"][0]
-        checks.check(
-            "external-wrong-scope-root-never-self-verifies",
-            other_external_root != expected_external_root
-            and wrong_scope_decision["external_authority"][
-                "structurally_valid"
-            ]
-            is True
-            and wrong_scope_decision["external_authority"]["verified"] is False
-            and wrong_scope_decision["external_authority"]["trust_registry"]
-            == "NODATA",
-            expected={
-                "expected_scope": expected_external_root,
-                "verified": False,
-                "trust_registry": "NODATA",
-            },
-            observed=wrong_scope_decision["external_authority"],
+        checks.refuses(
+            "external-wrong-scope-root-refused-with-fixture-authority-enabled",
+            InputRefused,
+            lambda: v2_derive_authority(
+                base_inventory,
+                wrong_scope,
+                current_br_version="0.3.0",
+                allow_mechanical_fixture=True,
+            ),
+            contains="external receipt root is not target-scoped",
         )
         forged_root = semantic_root(
             {
@@ -26219,22 +26205,16 @@ def v2_execute_authority_cases(
                 forged_root,
             ),
         )
-        forged_decision = v2_derive_authority(
-            base_inventory,
-            forged,
-            current_br_version="0.3.0",
-            allow_mechanical_fixture=False,
-        )["decisions"][0]
-        checks.check(
-            "external-forged-root-never-self-verifies",
-            forged_root != expected_external_root
-            and forged_decision["external_authority"]["verified"] is False
-            and forged_decision["readiness"] == "DECLARED_READY",
-            expected=(False, "DECLARED_READY"),
-            observed=(
-                forged_decision["external_authority"]["verified"],
-                forged_decision["readiness"],
+        checks.refuses(
+            "external-forged-root-refused-with-fixture-authority-enabled",
+            InputRefused,
+            lambda: v2_derive_authority(
+                base_inventory,
+                forged,
+                current_br_version="0.3.0",
+                allow_mechanical_fixture=True,
             ),
+            contains="external receipt root is not target-scoped",
         )
         missing_root = reroot_external_receipt(
             valid_receipts,
@@ -26243,26 +26223,16 @@ def v2_execute_authority_cases(
                 "",
             ),
         )
-        missing_root_decision = v2_derive_authority(
-            base_inventory,
-            missing_root,
-            current_br_version="0.3.0",
-            allow_mechanical_fixture=False,
-        )["decisions"][0]
-        checks.check(
-            "external-valid-verdict-missing-root-not-structurally-valid",
-            missing_root_decision["external_authority"][
-                "structurally_valid"
-            ]
-            is False
-            and missing_root_decision["external_authority"]["verified"] is False,
-            expected=(False, False),
-            observed=(
-                missing_root_decision["external_authority"][
-                    "structurally_valid"
-                ],
-                missing_root_decision["external_authority"]["verified"],
+        checks.refuses(
+            "external-valid-verdict-missing-root-refused",
+            InputRefused,
+            lambda: v2_derive_authority(
+                base_inventory,
+                missing_root,
+                current_br_version="0.3.0",
+                allow_mechanical_fixture=True,
             ),
+            contains="external receipt root is not target-scoped",
         )
         stale_inventory = v2_synthetic_inventory(
             [v2_synthetic_target(0, status="blocked")]
@@ -26377,6 +26347,126 @@ def v2_execute_authority_cases(
                 current["decisions"][0]["readiness"],
                 current["current_br_conditional_write_capability"],
             ),
+        )
+        fully_valid_receipts = v2_synthetic_receipts(
+            base_inventory,
+            declared=True,
+            external_verdict="VALID",
+            conditional_verdict="VALID",
+            gate_verdict="VALID",
+        )
+
+        def reroot_fixture_gate_receipt(
+            field: str,
+            replacement_root: str,
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(fully_valid_receipts),
+                label="fixture-gate receipt mutation seed",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            row = dict(candidate["receipts"][0])
+            row.pop("semantic_root", None)
+            row[field] = replacement_root
+            candidate["receipts"] = [v2_rooted(row)]
+            return v2_rooted(candidate)
+
+        other_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    1,
+                    issue_id="synthetic-other-gate-scope",
+                )
+            ]
+        )
+        target_root = base_inventory["rows"][0]["target_root"]
+        other_target_root = other_inventory["rows"][0]["target_root"]
+        for gate, field in (
+            ("conditional", "conditional_capability_receipt_root"),
+            ("admission", "gate_admission_receipt_root"),
+        ):
+            expected_root = v2_fixture_gate_receipt_root(
+                gate,
+                target_root=target_root,
+            )
+            checks.check(
+                f"{gate}-valid-root-is-exact-target-scope",
+                fully_valid_receipts["receipts"][0][field] == expected_root,
+                expected=expected_root,
+                observed=fully_valid_receipts["receipts"][0][field],
+            )
+            wrong_scope = reroot_fixture_gate_receipt(
+                field,
+                v2_fixture_gate_receipt_root(
+                    gate,
+                    target_root=other_target_root,
+                ),
+            )
+            checks.refuses(
+                f"{gate}-wrong-scope-root-refused-with-fixture-authority-enabled",
+                InputRefused,
+                lambda wrong_scope=wrong_scope: v2_derive_authority(
+                    base_inventory,
+                    wrong_scope,
+                    current_br_version="0.3.0",
+                    allow_mechanical_fixture=True,
+                ),
+                contains=f"{gate} receipt root is not target-scoped",
+            )
+            forged = reroot_fixture_gate_receipt(
+                field,
+                semantic_root(
+                    {
+                        "gate": gate,
+                        "target_root": target_root,
+                        "forged": True,
+                    }
+                ),
+            )
+            checks.refuses(
+                f"{gate}-forged-root-refused-with-fixture-authority-enabled",
+                InputRefused,
+                lambda forged=forged: v2_derive_authority(
+                    base_inventory,
+                    forged,
+                    current_br_version="0.3.0",
+                    allow_mechanical_fixture=True,
+                ),
+                contains=f"{gate} receipt root is not target-scoped",
+            )
+        nonfixture_source = strict_json_loads(
+            canonical_bytes(fully_valid_receipts),
+            label="nonfixture source mutation seed",
+            require_canonical=True,
+        )
+        nonfixture_source.pop("semantic_root", None)
+        nonfixture_source["source"] = "NOT_PROVIDED"
+        nonfixture_decision = v2_derive_authority(
+            base_inventory,
+            v2_rooted(nonfixture_source),
+            current_br_version="0.3.0",
+            allow_mechanical_fixture=True,
+        )["decisions"][0]
+        checks.check(
+            "mechanical-fixture-override-requires-fixture-source",
+            nonfixture_decision["external_authority"]["verified"] is False
+            and nonfixture_decision["external_authority"]["trust_registry"]
+            == "NODATA"
+            and nonfixture_decision["conditional_write_capability"][
+                "verified"
+            ]
+            is False
+            and nonfixture_decision["gate_admission"]["verified"] is False
+            and nonfixture_decision["readiness"] == "DECLARED_READY",
+            expected={
+                "external": False,
+                "trust_registry": "NODATA",
+                "conditional": False,
+                "admission": False,
+                "readiness": "DECLARED_READY",
+            },
+            observed=nonfixture_decision,
         )
     elif slug == "route-manual-distinct":
         manual = v2_synthetic_authority(
