@@ -10,7 +10,7 @@ criterion_count = 25
 case_count = 96
 assertion_count = 96
 suite_status = "EXECUTABLE_CONTRACT_WITH_LOCAL_RETAINED_FULL_RUNS_NONPORTABLE"
-harness_contract_identity = "sha256-v1:590ff2d21c32ba003d8d6b4dd0da7ea01f4e33cee786f7ce221d135381658579"
+harness_contract_identity = "sha256-v1:de88fb443fd14561cce44d7bcb1ceadde630de6e251164c952b555ba9331e9dc"
 authority = "TEST_CONTRACT_ONLY"
 tracker_authority = "READ_ONLY"
 no_claim = "This manifest specifies deterministic review and history planning evidence. It does not mutate or repair a Bead, approve target semantics, authenticate a reviewer, admit a conditional-write capability, complete target implementation, validate scientific or performance claims, authorize product or promotion state, or authorize release."
@@ -1288,7 +1288,7 @@ assertion_id = "v2.case.cli-help-modes"
 criterion_ids = ["AC09", "AC21"]
 kinds = ["unit", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "actual subprocess help for review-plan, history-plan, deterministic priority/status/target/readiness/route filters, explanation, review receipts, artifact grammar, and versioned test runner, with zero exit, stdout-only text, and no ANSI"
+subject = "actual subprocess help for review-plan, history-plan, explicit --replay-v2, legacy schema-autodetect --replay, deterministic priority/status/target/readiness/route filters, explanation, review receipts, artifact grammar, and versioned test runner, with zero exit, stdout-only text, and no ANSI"
 
 [[case]]
 ordinal = 4
@@ -1297,7 +1297,7 @@ assertion_id = "v2.case.cli-exclusive-mode"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "zero or multiple modes, unknown mode, and duplicate mode refusal through the non-abbreviating parser"
+subject = "zero, multiple, duplicate, or unknown modes refuse through the non-abbreviating parser; explicit v2 replay is preclassified by terminal schema, legacy replay remains schema-autodetect compatibility, and replay auxiliary planner options refuse"
 
 [[case]]
 ordinal = 5
@@ -1315,7 +1315,7 @@ assertion_id = "v2.case.cli-path-admission"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "mutation", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "relative NFC and UTF-8-byte-bounded disjoint no-overwrite paths; dot, parent, backslash, drive, tilde, control, alias, and symlink paths refuse"
+subject = "relative NFC and UTF-8-byte-bounded disjoint no-overwrite paths plus descriptor-relative O_NOFOLLOW, unique-regular-file, stable path/content review-receipt reads; dot, parent, backslash, drive, tilde, control, symlinked leaf/parent, hard-link alias, cap-plus-one, and mid-read change refuse"
 
 [[case]]
 ordinal = 7
@@ -1324,7 +1324,7 @@ assertion_id = "v2.case.cli-review-receipts"
 criterion_ids = ["AC19"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "safe-relative root-bound review receipts cover all six semantic dispositions and all twelve ordered dimensions with exact verdict, reason, falsifier, evidence roots, canonical target order, strict booleans, disposition signals, no-finding rules, stale-root refusal, and reviewer provenance that cannot mint missing acceptance authority"
+subject = "safe-relative root-bound review receipts cover all six semantic dispositions and all twelve ordered dimensions with exact per-disposition signal dimensions, verdict, reason, falsifier, evidence roots, canonical target order, strict booleans, finding/no-finding rules, row/envelope provenance, source identity, stable selected-target reuse across unrelated campaign drift, and reviewer provenance that cannot mint missing acceptance authority"
 
 [[case]]
 ordinal = 8
@@ -1477,7 +1477,7 @@ assertion_id = "v2.case.source-cross-run-drift-scope"
 criterion_ids = ["AC01", "AC12", "AC16", "AC17", "AC25"]
 kinds = ["property", "metamorphic", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "raw br-shaped unrelated cross-run drift changes observation and campaign roots while preserving selected target, decision, and child keys; selected fields, lint membership, dependency neighbors, receipt owners, receipt consumers, and lanes invalidate affected keys through inventory, authority, and plan construction"
+subject = "raw br-shaped unrelated cross-run drift changes observation and campaign roots while preserving selected target, reviewed receipt scope, decision, and child keys; a prior-campaign receipt remains valid for the unchanged selected target, while selected fields, lint membership, dependency neighbors, receipt owners, evidence owners, consumers, and lanes invalidate affected keys through inventory, authority, and plan construction"
 
 [[case]]
 ordinal = 25
@@ -1792,7 +1792,7 @@ assertion_id = "v2.case.movement-live-to-history"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "coherent cross-campaign closure emits MOVED_TO_HISTORY with before and after status and priority, full-universe root and count, immutable prior evidence, destination-root kind, and an exact successor; a clean closed no-finding successor moves to history rather than disappearing"
+subject = "coherent cross-campaign closure emits MOVED_TO_HISTORY with before and after status and priority, full-universe and current-finding roots, immutable prior evidence, typed destination kind/state/reason, and exact successor lineage; priority-, status-, or target-filtered current findings remain typed successors, while only a closed no-current-finding successor is clean history"
 
 [[case]]
 ordinal = 60
@@ -1873,7 +1873,7 @@ assertion_id = "v2.case.log-raw-result-redaction"
 criterion_ids = ["AC09", "AC22"]
 kinds = ["logging", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "credential, environment, source path, absolute path, PID, timing, bulk body, and raw-stream injection retains only allowlisted bounded projections, exact roots, redacted diagnostic summaries, and automatic refusal-callback closure-state mutation detection"
+subject = "contextual sensitive assignments, split options, Authorization and Proxy-Authorization headers, quoted and escaped-quote Bearer values, environment values, source and absolute paths, scalar/container assertion evidence, and path- or assignment-bearing mapping keys retain only allowlisted bounded projections and exact roots; collisions and refusal-callback closure-state mutation refuse"
 
 [[case]]
 ordinal = 69
@@ -1909,7 +1909,7 @@ assertion_id = "v2.case.replay-tamper-live-denied"
 criterion_ids = ["AC09", "AC12", "AC15"]
 kinds = ["replay", "mutation"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "live tracker and network are denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse, including exact event bytes, sequence, roots, terminal location, terminal recovery, empty replay-equivalence bindings, malformed source-file envelopes, duplicate source labels or relation identities, nested no-claim substitutions, and source/audit command-receipt drift"
+subject = "offline replay emits a closed rooted replay-result document under a reentrant process-wide subprocess exclusion guard with zero live reads, writes, or network; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse, including exact event bytes, sequence, roots, terminal location/recovery, source/audit bracket and command receipts, nested no-claim substitutions, malformed result fields, live-activity claims, unsafe artifact paths, and guard escape attempts"
 
 [[case]]
 ordinal = 73
@@ -2107,7 +2107,7 @@ assertion_id = "v2.case.nomock-offline-replay"
 criterion_ids = ["AC09", "AC13"]
 kinds = ["no_mock_e2e", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "persistent retained review and history bundles are terminal-sealed last, pass strict path-and-descriptor identity reading, recover through bounded fresh attempts after incomplete prefixes, and reconstruct exact selected and NOT_REQUESTED projections; a released-br-derived review bundle replays into a disjoint persistent directory with live tracker writes, reads, and network denied"
+subject = "persistent retained review and history bundles are terminal-sealed last, pass strict path-and-descriptor identity reading, recover through bounded fresh attempts after incomplete prefixes, and reconstruct exact selected and NOT_REQUESTED projections; explicit --replay-v2 subprocesses prove rooted success and typed wrong-schema, auxiliary-option, unsafe-path, and accepted-execution failures, legacy --replay proves schema-autodetect asymmetry, and a released-br-derived review bundle replays disjointly with live reads, writes, network, and nested subprocess escape denied"
 
 [[case]]
 ordinal = 95

@@ -67,7 +67,7 @@ CASE_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v1"
 
 V2_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v2"
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = (
-    "sha256-v1:5307c4b0f3531fc0a66de1ff907d6228e3ef779feb3151b60ec32c51dbffaee7"
+    "sha256-v1:9c4bbe71898b5b6d1b68d016bedb88e391e38d4e2c236e9554140f4b77f8639e"
 )
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY = (
     "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
@@ -25580,6 +25580,7 @@ def v2_fixture_br_envelopes(
     full_issue: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     status = str(full_issue["status"])
+    exported_count = int(full_issue.get("ephemeral") is not True)
     tracker_status = v2_normalize_br_status(
         {
             "summary": {
@@ -25636,90 +25637,97 @@ def v2_fixture_br_envelopes(
         "line_count": 1,
         "start_line": 0,
     }
+    chunks = [chunk] if exported_count else []
+    actions = [action] if exported_count else []
     comparison = {
         "added_byte_count": 0,
         "added_chunks": 0,
-        "base_byte_count": 1,
-        "base_chunk_count": 1,
-        "base_line_count": 1,
-        "candidate_byte_count": 1,
-        "candidate_chunk_count": 1,
-        "candidate_line_count": 1,
+        "base_byte_count": exported_count,
+        "base_chunk_count": exported_count,
+        "base_line_count": exported_count,
+        "candidate_byte_count": exported_count,
+        "candidate_chunk_count": exported_count,
+        "candidate_line_count": exported_count,
         "changed_base_byte_count": 0,
         "changed_candidate_byte_count": 0,
         "changed_chunks": 0,
         "chunk_size_lines_match": True,
-        "comparable_chunk_count": 1,
+        "comparable_chunk_count": exported_count,
         "drift_detected": False,
         "first_changed_chunk_index": None,
         "removed_byte_count": 0,
         "removed_chunks": 0,
         "root_hashes_match": True,
-        "safe_reuse_prefix_chunks": 1,
+        "safe_reuse_prefix_chunks": exported_count,
         "schema_versions_match": True,
-        "unchanged_byte_count": 1,
-        "unchanged_chunks": 1,
+        "unchanged_byte_count": exported_count,
+        "unchanged_chunks": exported_count,
     }
+    batches = (
+        [
+            {
+                "action_count": 1,
+                "actions": [action],
+                "byte_count": 1,
+                "candidate_end_index": 1,
+                "candidate_start_index": 0,
+                "index": 0,
+                "kind": "candidate_output",
+                "line_count": 1,
+            }
+        ]
+        if exported_count
+        else []
+    )
     export_witness = v2_normalize_br_export_witness(
         {
             "base_comparison": comparison,
             "base_jsonl_path": ".beads/beads.base.jsonl",
             "base_parallel_work_plan": {
-                "batches": [
-                    {
-                        "action_count": 1,
-                        "actions": [action],
-                        "byte_count": 1,
-                        "candidate_end_index": 1,
-                        "candidate_start_index": 0,
-                        "index": 0,
-                        "kind": "candidate_output",
-                        "line_count": 1,
-                    }
-                ],
-                "candidate_output_batches": 1,
+                "batches": batches,
+                "candidate_output_batches": exported_count,
                 "deterministic_batch_order": True,
                 "max_parallelism": 1,
                 "metadata_only_drop_batches": 0,
-                "total_batches": 1,
+                "total_batches": exported_count,
             },
             "base_reuse_materialization": {
                 "dropped_byte_count": 0,
                 "dropped_chunks": 0,
-                "output_byte_count": 1,
+                "output_byte_count": exported_count,
                 "read_added_byte_count": 0,
                 "read_added_chunks": 0,
                 "rebuilt_byte_count": 0,
                 "rebuilt_chunks": 0,
-                "reused_byte_count": 1,
-                "reused_chunks": 1,
+                "reused_byte_count": exported_count,
+                "reused_chunks": exported_count,
             },
             "base_reuse_plan": {
-                "actions": [action],
+                "actions": actions,
                 "comparison": comparison,
                 "schedule": {
-                    "candidate_output_actions": 1,
-                    "candidate_output_byte_count": 1,
-                    "candidate_output_line_count": 1,
+                    "candidate_output_actions": exported_count,
+                    "candidate_output_byte_count": exported_count,
+                    "candidate_output_line_count": exported_count,
                     "deterministic_candidate_order": True,
                     "dropped_byte_count": 0,
-                    "max_parallel_candidate_actions": 1,
+                    "max_parallel_candidate_actions": exported_count,
                     "metadata_only_drop_actions": 0,
                     "read_added_actions": 0,
                     "read_added_byte_count": 0,
                     "rebuild_actions": 0,
                     "rebuild_byte_count": 0,
-                    "reusable_actions": 1,
-                    "reusable_byte_count": 1,
-                    "total_actions": 1,
+                    "reusable_actions": exported_count,
+                    "reusable_byte_count": exported_count,
+                    "total_actions": exported_count,
                 },
             },
             "jsonl_path": ".beads/issues.jsonl",
             "witness": {
-                "byte_count": 1,
+                "byte_count": exported_count,
                 "chunk_size_lines": 1,
-                "chunks": [chunk],
-                "line_count": 1,
+                "chunks": chunks,
+                "line_count": exported_count,
                 "root_hash": "3" * 64,
                 "schema_version": "br.jsonl-witness.v1",
             },
@@ -44628,7 +44636,10 @@ def _v2_execute_nomock_cases_impl(
             },
             observed={
                 "statuses": dict(statuses),
-                "priorities": dict(priorities),
+                "priorities": {
+                    f"P{priority}": priorities[priority]
+                    for priority in sorted(priorities)
+                },
                 "assigned": sum(bool(row.get("assignee")) for row in issues),
             },
         )
