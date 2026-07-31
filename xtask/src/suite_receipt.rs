@@ -288,8 +288,11 @@ fn package_name(package_id: &str) -> String {
     token.split('@').next().unwrap_or(token).to_string()
 }
 
-/// Enumerate workspace test targets via cargo metadata.
-fn metadata_targets(root: &Path) -> Result<Vec<(String, String, PathBuf)>, String> {
+/// Enumerate workspace test targets via cargo metadata, separating
+/// feature-gated targets (which `cargo test --workspace` itself skips under
+/// the default feature set) from the expected set. A gated target is not a
+/// build failure; it is recorded as excluded, on the record.
+fn metadata_targets(root: &Path) -> Result<(Vec<(String, String, PathBuf)>, Vec<String>), String> {
     let (ok, stdout, stderr) = run_command(
         "cargo",
         &["metadata", "--no-deps", "--format-version", "1"],
@@ -305,6 +308,7 @@ fn metadata_targets(root: &Path) -> Result<Vec<(String, String, PathBuf)>, Strin
         return Err("cargo metadata is not an object".to_string());
     };
     let mut targets = Vec::new();
+    let mut feature_excluded = Vec::new();
     match json_obj_field(map, "packages") {
         Some(JsonValue::Array(packages)) => {
             for package in packages {
@@ -330,6 +334,24 @@ fn metadata_targets(root: &Path) -> Result<Vec<(String, String, PathBuf)>, Strin
                         }
                         let target_name = json_string(target, "name")
                             .ok_or_else(|| format!("metadata {name} target without name"))?;
+                        if let Some(JsonValue::Array(required)) =
+                            json_obj_field(target, "required-features")
+                        {
+                            let features: Vec<String> = required
+                                .iter()
+                                .filter_map(|feature| match feature {
+                                    JsonValue::String(feature) => Some(feature.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !features.is_empty() {
+                                feature_excluded.push(format!(
+                                    "{name}::{target_name} (feature-gated: {})",
+                                    features.join(",")
+                                ));
+                                continue;
+                            }
+                        }
                         targets.push((name.clone(), target_name, package_root.clone()));
                     }
                 }
@@ -340,13 +362,13 @@ fn metadata_targets(root: &Path) -> Result<Vec<(String, String, PathBuf)>, Strin
     if targets.is_empty() {
         return Err("cargo metadata enumerated zero test targets".to_string());
     }
-    Ok(targets)
+    Ok((targets, feature_excluded))
 }
 
 /// Run the workspace suite and build the model. This is the long pole: a
 /// full test-target build plus every test executable, sequentially.
 pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
-    let targets = metadata_targets(root)?;
+    let (targets, feature_excluded) = metadata_targets(root)?;
     let (build_ok, build_stdout, build_stderr) = run_command(
         "cargo",
         &[
@@ -436,10 +458,14 @@ pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
         build_failures,
         known_red: Vec::new(),
         unexpected_red: Vec::new(),
-        excluded: vec![
-            "fs-wasm (standalone nested workspace, not a member of the native workspace)"
-                .to_string(),
-        ],
+        excluded: {
+            let mut excluded = feature_excluded;
+            excluded.push(
+                "fs-wasm (standalone nested workspace, not a member of the native workspace)"
+                    .to_string(),
+            );
+            excluded
+        },
     })
 }
 
