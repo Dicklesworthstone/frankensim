@@ -10426,7 +10426,7 @@ def v2_preflight_zero_array(
         raise EvidenceFailed(
             f"{label} is not the exact {exact_count}-row array"
         )
-    if len(value) > V2_INVENTORY_ROWS_CAP:
+    if exact_count is None and len(value) > V2_INVENTORY_ROWS_CAP:
         raise EvidenceFailed(
             f"{label} exceeds the {V2_INVENTORY_ROWS_CAP}-row cap"
         )
@@ -23166,6 +23166,19 @@ def v2_execute_schema_cli_ux(
                 label="priorities",
             ),
             contains="duplicate",
+        )
+        oversized_target_filter = ",".join(
+            f"target-{index:04d}-" + ("x" * 238)
+            for index in range(20)
+        )
+        checks.refuses(
+            "target-filter-aggregate-argument-cap-refused",
+            UsageRefused,
+            lambda: v2_parse_target_set(
+                oversized_target_filter,
+                label="targets",
+            ),
+            contains="bounded",
         )
         raw_filter_issues = [
             fixture_issue(
