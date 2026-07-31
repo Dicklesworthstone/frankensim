@@ -899,6 +899,21 @@ V2_HISTORY_ROW_FIELDS = frozenset(
         "semantic_root",
     }
 )
+V2_HISTORY_OWNERSHIP_FIELDS = frozenset(
+    {"created_by", "assignee", "owner", "closer_inference_forbidden"}
+)
+V2_HISTORY_COMMENT_FIELDS = frozenset(
+    {"event_id", "actor", "timestamp", "comment", "comment_root"}
+)
+V2_HISTORY_CITATION_FIELDS = frozenset(
+    {"field", "candidate_issue_id", "citation_root", "authoritative"}
+)
+V2_HISTORY_REVIEWED_CONSUMER_FIELDS = frozenset(
+    {"consumer", "receipt_root"}
+)
+V2_HISTORY_PROOF_FIELDS = frozenset(
+    {"state", "closed_adjudication_owner"}
+)
 V2_HISTORY_FIELDS = frozenset(
     {
         "schema",
@@ -1860,8 +1875,12 @@ def run_command(
 def br_json(*arguments: str) -> Any:
     completed = run_command(("br", *arguments))
     try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
+        return strict_json_loads(
+            completed.stdout.encode("utf-8"),
+            label=f"br {' '.join(arguments[:2])} output",
+            require_canonical=False,
+        )
+    except InputRefused as error:
         raise InfrastructureFailed(
             f"br {' '.join(arguments[:2])} emitted malformed JSON"
         ) from error
@@ -2010,7 +2029,27 @@ def v2_list_issue_ids(
     *,
     label: str,
 ) -> list[str]:
-    rows = normalize_document(document, label=label)
+    expected_fields = {"issues", "has_more", "limit", "offset", "total"}
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise InfrastructureFailed(
+            f"{label} does not use the exact released-br list envelope"
+        )
+    rows = document["issues"]
+    if (
+        not isinstance(rows, list)
+        or type(document["has_more"]) is not bool
+        or document["has_more"] is not False
+        or type(document["limit"]) is not int
+        or document["limit"] != 0
+        or type(document["offset"]) is not int
+        or document["offset"] != 0
+        or type(document["total"]) is not int
+        or document["total"] != len(rows)
+        or len(rows) > CAPS["issues"]
+    ):
+        raise InfrastructureFailed(
+            f"{label} has a malformed, truncated, or inconsistent list envelope"
+        )
     issue_ids: list[str] = []
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -3880,6 +3919,14 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
     issue_id = issue.get("id")
     issue_type = issue.get("issue_type", issue.get("type"))
     if (
+        "issue_type" in issue
+        and "type" in issue
+        and issue.get("issue_type") != issue.get("type")
+    ):
+        raise InfrastructureFailed(
+            "v2 br issue contains contradictory type aliases"
+        )
+    if (
         not isinstance(issue_id, str)
         or not issue_id
         or not isinstance(issue.get("title"), str)
@@ -3946,6 +3993,15 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             )
         relation_neighbors: list[str] = []
         for relation in relations:
+            if (
+                isinstance(relation, dict)
+                and "dependency_type" in relation
+                and "type" in relation
+                and relation.get("dependency_type") != relation.get("type")
+            ):
+                raise InfrastructureFailed(
+                    f"v2 br issue {issue_id} has contradictory relation aliases"
+                )
             relation_type = (
                 relation.get(
                     "dependency_type",
@@ -10568,10 +10624,36 @@ def v2_validate_history_projection(
     }
     if len(inventory_by_id) != len(inventory_rows):
         raise InputRefused("v2 history inventory membership is duplicated")
+    expected_history_ids = sorted(
+        issue_id
+        for issue_id, row in inventory_by_id.items()
+        if row.get("status") == "closed"
+    )
+    authority_rows = authority.get("decisions")
+    if not isinstance(authority_rows, list) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("target_id"), str)
+        for row in authority_rows
+    ):
+        raise InputRefused("v2 history authority decisions are malformed")
+    authority_by_id = {
+        row["target_id"]: row for row in authority_rows
+    }
+    if (
+        len(authority_by_id) != len(authority_rows)
+        or not set(expected_history_ids).issubset(authority_by_id)
+    ):
+        raise InputRefused(
+            "v2 history authority membership is duplicated or incomplete"
+        )
     if not isinstance(audit_capture, dict):
         raise InputRefused("v2 history audit capture is not an object")
     audit_issue_ids = audit_capture.get("issue_ids")
     audit_documents = audit_capture.get("documents")
+    expected_audit_issue_ids = sorted(
+        set(expected_history_ids)
+        | {str(history_contract["legacy_coverage_anchor_issue"])}
+    )
     if (
         not isinstance(audit_issue_ids, list)
         or len(audit_issue_ids) > V2_INVENTORY_ROWS_CAP
@@ -10580,6 +10662,7 @@ def v2_validate_history_projection(
             for issue_id in audit_issue_ids
         )
         or audit_issue_ids != sorted(set(audit_issue_ids))
+        or audit_issue_ids != expected_audit_issue_ids
         or not isinstance(audit_documents, list)
         or len(audit_documents) > V2_INVENTORY_ROWS_CAP
         or len(audit_documents) != len(audit_issue_ids)
@@ -10698,6 +10781,173 @@ def v2_validate_history_projection(
             raise EvidenceFailed(
                 f"v2 history row {index} scalar or source bindings differ"
             )
+        target = inventory_by_id[issue_id]
+        decision = authority_by_id[issue_id]
+        ownership = row["ownership"]
+        if not isinstance(ownership, dict):
+            raise InputRefused(
+                f"v2 history row {index} ownership is not an object"
+            )
+        v2_exact_keys(
+            ownership,
+            V2_HISTORY_OWNERSHIP_FIELDS,
+            label=f"v2 history row {index} ownership",
+        )
+        if (
+            any(
+                not isinstance(ownership[field], str)
+                for field in ("created_by", "assignee", "owner")
+            )
+            or ownership["assignee"] != target.get("tracker_assignee")
+            or ownership["owner"] != target.get("tracker_owner")
+            or ownership["closer_inference_forbidden"] is not True
+            or not isinstance(row["parent"], str)
+            or row["parent"] != target.get("parent")
+            or row["dependencies"] != target.get("dependencies")
+        ):
+            raise EvidenceFailed(
+                f"v2 history row {index} ownership or relation bindings differ"
+            )
+
+        expected_comments = [
+            {
+                "event_id": event["id"],
+                "actor": str(event.get("actor") or ""),
+                "timestamp": event["timestamp"],
+                "comment": str(event.get("comment") or ""),
+                "comment_root": text_root(str(event.get("comment") or "")),
+            }
+            for event in audit_by_id[issue_id]["events"]
+            if event["event_type"] in {"comment_added", "comment"}
+        ]
+        for comment_index, comment in enumerate(row["comments"]):
+            if not isinstance(comment, dict):
+                raise InputRefused(
+                    f"v2 history row {index} comment {comment_index} "
+                    "is not an object"
+                )
+            v2_exact_keys(
+                comment,
+                V2_HISTORY_COMMENT_FIELDS,
+                label=(
+                    f"v2 history row {index} comment {comment_index}"
+                ),
+            )
+        if row["comments"] != expected_comments:
+            raise EvidenceFailed(
+                f"v2 history row {index} comment projection differs"
+            )
+
+        citation_order: list[tuple[str, str]] = []
+        for citation_index, citation in enumerate(row["citations"]):
+            if not isinstance(citation, dict):
+                raise InputRefused(
+                    f"v2 history row {index} citation {citation_index} "
+                    "is not an object"
+                )
+            v2_exact_keys(
+                citation,
+                V2_HISTORY_CITATION_FIELDS,
+                label=(
+                    f"v2 history row {index} citation {citation_index}"
+                ),
+            )
+            citation_field = citation["field"]
+            candidate_id = citation["candidate_issue_id"]
+            if (
+                citation_field
+                not in {"description", "acceptance_criteria", "design", "notes"}
+                or not isinstance(candidate_id, str)
+                or not candidate_id
+                or citation["citation_root"] != text_root(candidate_id)
+                or citation["authoritative"] is not False
+            ):
+                raise EvidenceFailed(
+                    f"v2 history row {index} citation {citation_index} differs"
+                )
+            citation_order.append((citation_field, candidate_id))
+        if citation_order != sorted(set(citation_order)):
+            raise InputRefused(
+                f"v2 history row {index} citations are noncanonical"
+            )
+
+        expected_candidate_consumers = sorted(
+            {
+                str(edge["id"])
+                for edge in target.get("dependents") or []
+                if isinstance(edge, dict) and edge.get("id")
+            }
+            | {
+                citation["candidate_issue_id"]
+                for citation in row["citations"]
+            }
+        )
+        if (
+            any(
+                not isinstance(value, str) or not value
+                for value in row["candidate_consumers"]
+            )
+            or row["candidate_consumers"]
+            != expected_candidate_consumers
+        ):
+            raise EvidenceFailed(
+                f"v2 history row {index} candidate consumers differ"
+            )
+
+        for consumer_index, consumer in enumerate(row["reviewed_consumers"]):
+            if not isinstance(consumer, dict):
+                raise InputRefused(
+                    f"v2 history row {index} reviewed consumer "
+                    f"{consumer_index} is not an object"
+                )
+            v2_exact_keys(
+                consumer,
+                V2_HISTORY_REVIEWED_CONSUMER_FIELDS,
+                label=(
+                    f"v2 history row {index} reviewed consumer "
+                    f"{consumer_index}"
+                ),
+            )
+        expected_reviewed_consumers = (
+            [
+                {
+                    "consumer": decision["terminal_consumer"],
+                    "receipt_root": decision["reviewer_provenance"][
+                        "receipt_root"
+                    ],
+                }
+            ]
+            if decision["terminal_consumer"] != "UNRESOLVED"
+            and decision["reviewer_provenance"]["receipt_root"]
+            and decision["reviewer_provenance"]["reviewer"]
+            and decision["reviewer_provenance"]["reviewer_kind"]
+            != "NODATA"
+            else []
+        )
+        if row["reviewed_consumers"] != expected_reviewed_consumers:
+            raise EvidenceFailed(
+                f"v2 history row {index} reviewed consumers differ"
+            )
+
+        proof = row["proof"]
+        if not isinstance(proof, dict):
+            raise InputRefused(
+                f"v2 history row {index} proof is not an object"
+            )
+        v2_exact_keys(
+            proof,
+            V2_HISTORY_PROOF_FIELDS,
+            label=f"v2 history row {index} proof",
+        )
+        if proof != {
+            "state": "NO_IMPLEMENTATION_PROOF",
+            "closed_adjudication_owner": history_contract[
+                "closed_adjudication_owner"
+            ],
+        }:
+            raise EvidenceFailed(
+                f"v2 history row {index} proof boundary differs"
+            )
         verify_semantic_root(row, label=f"v2 history row {index}")
         if closer_state == "CONFLICTED":
             raise EvidenceFailed(
@@ -10782,8 +11032,10 @@ def v2_validate_history_projection(
                 )
         issue_ids.append(issue_id)
         closer_states.append(closer_state)
-    if issue_ids != sorted(issue_ids) or len(issue_ids) != len(set(issue_ids)):
-        raise InputRefused("v2 populated history membership is noncanonical")
+    if issue_ids != expected_history_ids:
+        raise EvidenceFailed(
+            "v2 populated history does not exact-match closed inventory membership"
+        )
     verify_semantic_root(history, label="v2 populated history")
     counts = history["counts"]
     if not isinstance(counts, dict):
@@ -15999,12 +16251,18 @@ def v2_validate_review_plan(
         "children": len(children),
         "oversize_targets": len(expected_oversize_roots),
         "readiness": dict(
-            sorted(Counter(child["readiness"] for child in children).items())
+            sorted(
+                Counter(
+                    decision["readiness"]
+                    for decision in authority_by_id.values()
+                ).items()
+            )
         ),
         "routes": dict(
             sorted(
                 Counter(
-                    child["remediation_route"] for child in children
+                    decision["remediation_route"]
+                    for decision in authority_by_id.values()
                 ).items()
             )
         ),
@@ -16404,11 +16662,19 @@ def v2_build_review_plan(
             "children": len(children),
             "oversize_targets": len(oversize_rows),
             "readiness": dict(
-                sorted(Counter(child["readiness"] for child in children).items())
+                sorted(
+                    Counter(
+                        decision["readiness"]
+                        for decision in all_authority_by_id.values()
+                    ).items()
+                )
             ),
             "routes": dict(
                 sorted(
-                    Counter(child["remediation_route"] for child in children).items()
+                    Counter(
+                        decision["remediation_route"]
+                        for decision in all_authority_by_id.values()
+                    ).items()
                 )
             ),
         },
@@ -18368,11 +18634,17 @@ def v2_synopsis(
     explain_target: str | None,
 ) -> dict[str, Any]:
     children = review_plan.get("children") or []
+    retained_without_direct_child = (
+        review_plan.get("retained_without_direct_child") or []
+    )
     selected_ids = sorted(
         {
             target_id
             for child in children
             for target_id in child.get("target_ids", [])
+        }
+        | {
+            row["target_id"] for row in retained_without_direct_child
         }
         | {
             row["issue_id"] for row in history.get("rows", [])
@@ -22600,8 +22872,17 @@ def v2_replayable_fixture_bundle(
     }
     fixture_br_capabilities = {
         "contract_version": "br.capabilities.v1",
-        "commands": {},
-        "operation_count": 0,
+        "commands": [
+            {
+                "name": "list",
+                "summary": "List fixture issues",
+                "operation": "read",
+                "workspace": "required",
+                "machine_output": ["json"],
+                "examples": ["br list --json"],
+            }
+        ],
+        "operation_count": 1,
     }
     fixture_tracker_status = {"fixture": True}
     fixture_sync_status = {"fixture": True}
