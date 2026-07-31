@@ -1240,6 +1240,7 @@ _command_receipts: list[dict[str, Any]] = []
 _v2_nomock_history_cache: dict[str, Any] | None = None
 _v2_outer_execution_context: dict[str, str] | None = None
 _v2_offline_replay_depth = 0
+_v2_active_subprocesses = 0
 _v2_offline_replay_scope_lock = threading.RLock()
 
 
@@ -1313,6 +1314,10 @@ def v2_offline_replay_scope() -> Iterator[None]:
     """Fail closed on every subprocess while any offline replay is active."""
     global _v2_offline_replay_depth
     with _v2_offline_replay_scope_lock:
+        if _v2_offline_replay_depth == 0 and _v2_active_subprocesses:
+            raise EvidenceFailed(
+                "offline v2 replay cannot overlap an active subprocess"
+            )
         _v2_offline_replay_depth += 1
     try:
         yield
@@ -1721,7 +1726,7 @@ def write_once(path: Path, payload: bytes) -> str:
     return "created"
 
 
-def run_command(
+def _run_command_unscoped(
     argv: Sequence[str],
     *,
     input_text: str | None = None,
@@ -1735,12 +1740,6 @@ def run_command(
     stdout_bytes_cap: int | None = None,
     stderr_bytes_cap: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    with _v2_offline_replay_scope_lock:
-        offline_replay_active = _v2_offline_replay_depth > 0
-    if offline_replay_active:
-        raise EvidenceFailed(
-            "offline v2 replay forbids every subprocess invocation"
-        )
     if honor_cancel:
         check_cancel()
     argv_values = [str(value) for value in argv]
