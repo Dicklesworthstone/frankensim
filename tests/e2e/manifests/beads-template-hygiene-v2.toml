@@ -223,7 +223,7 @@ case_order = [
 "v2.case.source-double-capture-coherent" = { case_id = "template-lint-v2.source-double-capture-coherent", check_count = 2, ordered_check_ids = ["production-coherence-validator-admits-equal-observations", "capture-binds-all-source-dimensions"] }
 "v2.case.source-within-run-drift" = { case_id = "template-lint-v2.source-within-run-drift", check_count = 12, ordered_check_ids = ["drift-field", "drift-relation", "drift-status", "drift-priority", "drift-owner", "drift-assignee", "drift-selected-membership", "drift-tracker-status", "drift-capability", "drift-lint-status-cut", "drift-source-file", "drift-rule-contract"] }
 "v2.case.source-count-preserving-swap" = { case_id = "template-lint-v2.source-count-preserving-swap", check_count = 4, ordered_check_ids = ["equal-count-field-swap", "equal-count-drop-add", "equal-count-warning-swap", "duplicate-membership"] }
-"v2.case.source-cross-run-drift-scope" = { case_id = "template-lint-v2.source-cross-run-drift-scope", check_count = 13, ordered_check_ids = ["unrelated-drift-changes-observation-and-campaign", "unrelated-drift-preserves-selected-target-root", "unrelated-drift-preserves-selected-decision-root", "unrelated-drift-stable-selected-key", "selected-field-invalidates-affected-key", "selected-owner-invalidates-affected-key", "selected-priority-lane-invalidates-affected-key", "selected-status-lane-invalidates-affected-key", "selected-dependency-neighbor-invalidates-affected-key", "selected-lint-membership-invalidates-affected-key", "selected-owner-receipt-invalidates-child-key", "selected-evidence-owner-receipt-invalidates-child-key", "selected-consumer-receipt-invalidates-child-key"] }
+"v2.case.source-cross-run-drift-scope" = { case_id = "template-lint-v2.source-cross-run-drift-scope", check_count = 23, ordered_check_ids = ["unrelated-drift-changes-observation-and-campaign", "unrelated-drift-preserves-selected-target-root", "unrelated-drift-preserves-selected-decision-root", "unrelated-drift-stable-selected-key", "reviewed-receipt-admitted-after-unrelated-campaign-drift", "reviewed-receipt-scope-root-stable-after-unrelated-drift", "reviewed-selected-decision-root-stable-after-unrelated-drift", "reviewed-selected-child-key-stable-after-unrelated-drift", "selected-field-invalidates-affected-key", "reviewed-receipt-selected-field-drift-refused", "selected-owner-invalidates-affected-key", "reviewed-receipt-selected-owner-drift-refused", "selected-priority-lane-invalidates-affected-key", "reviewed-receipt-selected-priority-lane-drift-refused", "selected-status-lane-invalidates-affected-key", "reviewed-receipt-selected-status-lane-drift-refused", "selected-dependency-neighbor-invalidates-affected-key", "reviewed-receipt-selected-dependency-neighbor-drift-refused", "selected-lint-membership-invalidates-affected-key", "reviewed-receipt-selected-lint-membership-drift-refused", "selected-owner-receipt-invalidates-child-key", "selected-evidence-owner-receipt-invalidates-child-key", "selected-consumer-receipt-invalidates-child-key"] }
 "v2.case.row-complete-planned-child" = { case_id = "template-lint-v2.row-complete-planned-child", check_count = 36, ordered_check_ids = ["planned-child-required-fields", "normalized-authority-row-lossless", "planned-child-transport-valid", "planned-child-affirmative-no-claim-refused", "planned-child-unknown-workflow-refused", "planned-child-wrong-lane-parent-refused", "planned-child-identity-lane-parent-refused", "planned-child-identity-generation-gate-refused", "planned-child-identity-compatibility-refused", "planned-child-uncovered-complete-compatibility-refused", "planned-child-false-compatibility-data-refused", "missing-title", "missing-target_ids", "missing-intended_generated_edges", "missing-semantic_review_disposition", "missing-semantic_review_receipt_state", "missing-semantic_review_action", "missing-semantic_review_receipt_roots", "missing-reviewed_no_change_receipt_roots", "missing-responsibility_assignments", "source-closure-transition-matrix-valid-cells", "source-closure-not-required-state-change-refused", "source-closure-required-flag-change-refused", "source-closure-stale-target-base-refused", "source-closure-verdict-state-mismatch-refused", "planned-child-false-multi-target-compatibility-refused", "planned-child-duplicate-compatibility-target-refused", "planned-child-empty-compatibility-target-refused", "responsibilities-are-distinct-target-indexed-rows", "responsibility-row-order-refused", "responsibility-row-missing-field-refused", "responsibility-row-duplicate-target-refused", "planned-child-malformed-target-root-refused", "planned-child-malformed-packing-root-refused", "planned-child-nonstring-external-root-typed-refusal", "semantic-plan-exact-scheduled-retained-partition"] }
 "v2.case.row-dispositions-distinct" = { case_id = "template-lint-v2.row-dispositions-distinct", check_count = 1, ordered_check_ids = ["disposition-workflows-distinct"] }
 "v2.case.authority-candidate-provenance" = { case_id = "template-lint-v2.authority-candidate-provenance", check_count = 2, ordered_check_ids = ["candidate-sources-rooted", "candidates-do-not-promote"] }
@@ -271,7 +271,7 @@ case_order = [
 "v2.case.log-order-terminal" = { case_id = "template-lint-v2.log-order-terminal", check_count = 2, ordered_check_ids = ["dense-unique-last-terminal", "terminal-binds-event-roots"] }
 "v2.case.replay-review-offline" = { case_id = "template-lint-v2.replay-review-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
 "v2.case.replay-history-offline" = { case_id = "template-lint-v2.replay-history-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
-"v2.case.replay-tamper-live-denied" = { case_id = "template-lint-v2.replay-tamper-live-denied", check_count = 54, ordered_check_ids = ["offline-baseline-no-live-or-network", "rerooted-source-affirmative-no-claim-refused", "rerooted-observation-affirmative-no-claim-refused", "rerooted-source-issue-affirmative-no-claim-refused", "rerooted-source-review-receipts-no-claim-refused", "rerooted-source-prior-campaign-no-claim-refused", "rerooted-source-file-identity-refused", "rerooted-source-files-empty-typed-refusal", "rerooted-source-files-short-typed-refusal", "rerooted-source-files-non-object-typed-refusal", "rerooted-source-duplicate-label-refused", "rerooted-source-duplicate-relation-identity-refused", "rerooted-source-command-stream-schema-refused", "rerooted-source-command-raw-stream-refused", "rerooted-source-command-unsanitized-argv-refused", "rerooted-source-command-empty-stream-root-refused", "rerooted-audit-affirmative-no-claim-refused", "rerooted-audit-extra-field-refused", "rerooted-audit-unsanitized-argv-refused", "rerooted-audit-malformed-events-refused", "rerooted-audit-empty-document-root-refused", "missing-artifact-refused", "extra-artifact-refused", "truncated-artifact-refused", "stale-semantic-root-refused", "rerooted-mutated-artifact-refused", "v1-confused-source-refused", "unsafe-optional-path-refused", "terminal-extra-field-refused", "green-path-terminal-confusion-refused", "reordered-event-stream-refused", "non-green-baseline-preserved", "rerooted-failure-category-refused", "rerooted-refusal-terminal-contract-refused", "refusal-terminal-exit-code-mismatch-refused", "rerooted-refusal-envelope-binding-refused", "rerooted-refusal-event-contract-refused", "rerooted-refusal-intermediate-first-divergence-refused", "rerooted-refusal-intermediate-recovery-refused", "rerooted-refusal-case-id-refused", "rerooted-refusal-assertion-id-refused", "rerooted-refusal-executor-id-refused", "rerooted-refusal-parameter-root-refused", "rerooted-refusal-start-argv-refused", "rerooted-refusal-later-argv-refused", "rerooted-refusal-prior-event-roots-refused", "rerooted-refusal-terminal-artifact_root-379cde89", "rerooted-refusal-terminal-artifact_root-5f70e49a", "rerooted-refusal-terminal-artifact_dir-55bd85b1", "rerooted-refusal-terminal-artifact_dir-0b17e459", "rerooted-refusal-terminal-replay_equivalence-14fc3460", "rerooted-refusal-terminal-recovery-ecc23918", "changed-artifact-identity-detected", "mixed-v1-schema-refused"] }
+"v2.case.replay-tamper-live-denied" = { case_id = "template-lint-v2.replay-tamper-live-denied", check_count = 63, ordered_check_ids = ["offline-baseline-no-live-or-network", "replay-result-valid-closed-rooted", "replay-result-extra-field-refused", "replay-result-missing-field-refused", "replay-result-nonpass-refused", "replay-result-live-activity-claim-refused", "replay-result-unsafe-artifact-path-refused", "replay-result-stale-root-refused", "offline-replay-subprocess-guard-refuses", "offline-replay-guard-reentrant-exception-safe", "rerooted-source-affirmative-no-claim-refused", "rerooted-observation-affirmative-no-claim-refused", "rerooted-source-issue-affirmative-no-claim-refused", "rerooted-source-review-receipts-no-claim-refused", "rerooted-source-prior-campaign-no-claim-refused", "rerooted-source-file-identity-refused", "rerooted-source-files-empty-typed-refusal", "rerooted-source-files-short-typed-refusal", "rerooted-source-files-non-object-typed-refusal", "rerooted-source-duplicate-label-refused", "rerooted-source-duplicate-relation-identity-refused", "rerooted-source-command-stream-schema-refused", "rerooted-source-command-raw-stream-refused", "rerooted-source-command-unsanitized-argv-refused", "rerooted-source-command-empty-stream-root-refused", "rerooted-audit-affirmative-no-claim-refused", "rerooted-audit-extra-field-refused", "rerooted-audit-unsanitized-argv-refused", "rerooted-audit-malformed-events-refused", "rerooted-audit-empty-document-root-refused", "missing-artifact-refused", "extra-artifact-refused", "truncated-artifact-refused", "stale-semantic-root-refused", "rerooted-mutated-artifact-refused", "v1-confused-source-refused", "unsafe-optional-path-refused", "terminal-extra-field-refused", "green-path-terminal-confusion-refused", "reordered-event-stream-refused", "non-green-baseline-preserved", "rerooted-failure-category-refused", "rerooted-refusal-terminal-contract-refused", "refusal-terminal-exit-code-mismatch-refused", "rerooted-refusal-envelope-binding-refused", "rerooted-refusal-event-contract-refused", "rerooted-refusal-intermediate-first-divergence-refused", "rerooted-refusal-intermediate-recovery-refused", "rerooted-refusal-case-id-refused", "rerooted-refusal-assertion-id-refused", "rerooted-refusal-executor-id-refused", "rerooted-refusal-parameter-root-refused", "rerooted-refusal-start-argv-refused", "rerooted-refusal-later-argv-refused", "rerooted-refusal-prior-event-roots-refused", "rerooted-refusal-terminal-artifact_root-379cde89", "rerooted-refusal-terminal-artifact_root-5f70e49a", "rerooted-refusal-terminal-artifact_dir-55bd85b1", "rerooted-refusal-terminal-artifact_dir-0b17e459", "rerooted-refusal-terminal-replay_equivalence-14fc3460", "rerooted-refusal-terminal-recovery-ecc23918", "changed-artifact-identity-detected", "mixed-v1-schema-refused"] }
 "v2.case.mutation-forged-approval" = { case_id = "template-lint-v2.mutation-forged-approval", check_count = 3, ordered_check_ids = ["stale-root-forged-approval", "self-issued-receipts-never-mechanical", "undeclared-manual-authorization-refused"] }
 "v2.case.mutation-forged-capability-deferred" = { case_id = "template-lint-v2.mutation-forged-capability-deferred", check_count = 4, ordered_check_ids = ["lying-cannot-upgrade", "non_atomic-cannot-upgrade", "version_mismatched-cannot-upgrade", "deferred-never-upgrades"] }
 "v2.case.mutation-missing-payload-edge" = { case_id = "template-lint-v2.mutation-missing-payload-edge", check_count = 6, ordered_check_ids = ["missing-required-payload-field", "duplicate-target-membership", "missing-edge", "reversed-edge", "duplicate-edge", "undeclared-edge"] }
@@ -293,7 +293,7 @@ case_order = [
 "v2.case.nomock-selected-drift-refusal" = { case_id = "template-lint-v2.nomock-selected-drift-refusal", check_count = 2, ordered_check_ids = ["released-selected-stale-root-refused-restored", "all-selected-logical-dimensions-invalidate"] }
 "v2.case.nomock-active-conflict-deferred" = { case_id = "template-lint-v2.nomock-active-conflict-deferred", check_count = 2, ordered_check_ids = ["active-conflict-defers-generated-child", "planner-does-not-mutate-active-target"] }
 "v2.case.nomock-oversize" = { case_id = "template-lint-v2.nomock-oversize", check_count = 2, ordered_check_ids = ["released-oversize-complete-registry", "released-oversize-target-restored"] }
-"v2.case.nomock-offline-replay" = { case_id = "template-lint-v2.nomock-offline-replay", check_count = 6, ordered_check_ids = ["review-plan-filesystem-read-reconstruct-exact", "review-plan-terminal-content-last-and-complete", "review-plan-disjoint-filesystem-replay-exact", "history-plan-filesystem-read-reconstruct-exact", "history-plan-terminal-content-last-and-complete", "offline-denies-live-reads"] }
+"v2.case.nomock-offline-replay" = { case_id = "template-lint-v2.nomock-offline-replay", check_count = 14, ordered_check_ids = ["review-plan-filesystem-read-reconstruct-exact", "review-plan-terminal-content-last-and-complete", "review-plan-disjoint-filesystem-replay-exact", "explicit-replay-v2-subprocess-success-rooted", "explicit-replay-v2-wrong-v1-refused-pre-manifest", "explicit-replay-v2-auxiliary-refused-pre-manifest", "explicit-replay-v2-path-refused-pre-manifest", "explicit-replay-v2-accepted-failure-classified", "legacy-replay-v2-autodetect-success", "legacy-replay-preclassification-asymmetry", "replay-subprocesses-prove-no-live-activity", "history-plan-filesystem-read-reconstruct-exact", "history-plan-terminal-content-last-and-complete", "offline-denies-live-reads"] }
 "v2.case.nomock-live-target-unchanged" = { case_id = "template-lint-v2.nomock-live-target-unchanged", check_count = 1, ordered_check_ids = ["read-only-modes-preserve-full-fixture-fingerprint"] }
 "v2.case.nomock-v1-regression" = { case_id = "template-lint-v2.nomock-v1-regression", check_count = 2, ordered_check_ids = ["frozen-v1-suite-exact", "v1-replay-and-v2-independence"] }
 
@@ -429,6 +429,9 @@ unreviewed_dimension_contract = "ALL_NODATA_EMPTY_REASON_EMPTY_FALSIFIER_NULL_RO
 reviewed_dimension_root_fields = ["target_root", "dimension", "verdict", "reason", "falsifier"]
 root_bound_review_requires_all_dimensions = true
 semantic_disposition_required_signals = { REMEDIATION_REQUIRED = "FINDING", REVIEWED_NO_CHANGE = "SATISFIED", ROLLUP_ONLY = "ROUTED", CONTRIBUTION_ONLY = "ROUTED", BLOCKED_AUTHORITY = "BLOCKED", TYPED_INAPPLICABLE = "NOT_APPLICABLE" }
+semantic_disposition_exact_signal_dimensions = { ROLLUP_ONLY = "dependencies=ROUTED", CONTRIBUTION_ONLY = "user_value=ROUTED", BLOCKED_AUTHORITY = "authority=BLOCKED", TYPED_INAPPLICABLE = "user_value=NOT_APPLICABLE" }
+remediation_required_dimension_policy = "ALL_SATISFIED_OR_FINDING_AND_AT_LEAST_ONE_FINDING"
+non_remediation_dimension_policy = "ALL_SATISFIED_EXCEPT_EXACT_SINGLE_DECLARED_SIGNAL"
 reviewed_no_change_requires_all_dimensions_satisfied = true
 non_remediation_dispositions_forbid_findings = true
 unreviewed_action = "SEMANTIC_REVIEW_REQUIRED"
@@ -441,19 +444,41 @@ relation_row_validation = "EXACT_INTERNAL_NEIGHBOR_STATUS_PRIORITY_RECIPROCAL_PA
 audit_capture_uses_bounded_runner = true
 source_closure_states = ["NOT_REQUIRED_BY_V1_CLASSIFICATION", "REVIEW_REQUIRED", "ROOT_BOUND_REVIEWED_COMPLETE", "ROOT_BOUND_REVIEW_BLOCKED", "ROOT_BOUND_NOT_APPLICABLE"]
 source_closure_transition = "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_DETERMINES_CLOSED_STATE"
+review_receipt_scope_schema = "frankensim.beads-template-hygiene.review-receipt-scope.v2"
+review_receipt_scope_fields = ["target_id", "target_root", "reviewer", "reviewer_kind", "coordination_assignee", "declared_domain_owner", "declared_acceptance_owner", "implementation_owner", "evidence_owner", "terminal_consumer", "source_closure", "user_effect", "review_minutes", "semantic_review_disposition", "semantic_review_dimensions", "semantic_review_rationale", "semantic_review_falsifier", "compatibility_key", "compatibility_target_ids", "compatibility_receipt_root", "compatibility_rationale", "compatibility_falsifier", "manual_authorization", "manual_authorization_source", "external_authority_adapter", "external_authority_receipt_root", "external_authority_verdict", "conditional_capability_identity", "conditional_capability_receipt_root", "conditional_capability_verdict", "gate_admission_receipt_root", "gate_admission_verdict", "no_claim"]
+review_receipt_provenance_fields = ["inventory_root", "campaign_epoch_root"]
+review_receipt_scope_root_policy = "EXCLUDES_ONLY_INVENTORY_ROOT_AND_CAMPAIGN_EPOCH_ROOT"
+empty_review_receipt_envelope_current_campaign = true
 source_document_required_fields = ["schema", "manifest", "v1_baseline", "contracts", "campaign_epoch_root", "captured", "capture_roots", "tracker_authority", "direct_tracker_file_access", "network_access", "no_claim", "semantic_root"]
 source_manifest_required_fields = ["path", "semantic_root", "content_identity", "harness_contract_identity", "case_count", "assertion_count", "criterion_count"]
 source_capture_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "campaign", "filters", "review_receipts", "prior_campaign", "audit_capture"]
 source_capture_root_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "review_receipts", "prior_campaign", "audit_capture"]
 source_contract_required_fields = ["source", "row", "authority", "packing", "history", "artifact", "logging", "replay", "caps"]
 source_observation_required_fields = ["schema", "capture_contract", "br_version", "br_capabilities", "tracker_status", "sync_status", "export_witness", "case_manifest_root", "case_manifest_content_identity", "coherent_capture_root", "source_files", "rule_contract_root", "live_issue_count", "live_issue_projection_root", "lint_issue_ids_root", "independent_finding_issue_ids_root", "nonclosed_issue_ids_root", "selected_review_issue_ids_root", "selected_review_issue_count", "nonclosed_issue_count", "closed_finding_issue_count", "status_cut", "command_receipts", "no_claim", "semantic_root"]
-source_all_issue_required_fields = ["id", "title", "type", "status", "priority", "assignee", "owner", "parent", "labels", "description", "acceptance_criteria", "design", "notes", "estimated_minutes", "updated_at", "dependencies", "dependents", "created_at", "created_by", "closed_at", "close_reason", "field_roots", "source_repo", "source_repo_path", "no_claim"]
+source_capture_contract_required_fields = ["audit_bracket", "coherent", "count", "direct_tracker_file_access", "network_access", "tracker_cli"]
+source_audit_bracket_required_fields = ["audit_capture_ordinals", "audit_capture_root", "no_claim", "position", "semantic_root", "source_after_ordinal", "source_after_root", "source_before_ordinal", "source_before_root", "state"]
+source_all_issue_required_fields = ["id", "title", "type", "status", "priority", "assignee", "owner", "parent", "labels", "description", "acceptance_criteria", "design", "notes", "estimated_minutes", "ephemeral", "updated_at", "dependencies", "dependents", "created_at", "created_by", "closed_at", "close_reason", "field_roots", "source_repo", "source_repo_path", "no_claim"]
 source_relation_required_fields = ["id", "type", "status", "priority"]
 source_command_receipt_required_fields = ["capture_sequence", "argv", "exit_code", "category", "stdout", "stderr", "cleanup_error_count", "cleanup_error_kinds", "redaction_verdict"]
 source_stream_receipt_required_fields = ["bytes", "root", "body_retained"]
 audit_capture_required_fields = ["capture_count", "worker_bound", "issue_ids", "documents", "command_receipts", "raw_stream_bodies_retained", "no_claim", "semantic_root"]
 audit_capture_not_requested_required_fields = ["state", "capture_count", "issue_ids", "documents", "command_receipts", "raw_stream_bodies_retained", "no_claim", "semantic_root"]
 audit_command_receipt_required_fields = ["capture_ordinal", "issue_id", "argv", "exit_code", "result_category", "stdout_byte_length", "stdout_root", "stderr_byte_length", "stderr_root", "raw_stream_bodies_retained"]
+tracker_status_summary_required_fields = ["average_lead_time_hours", "blocked_issues", "closed_issues", "deferred_issues", "draft_issues", "epics_eligible_for_closure", "in_progress_issues", "open_issues", "pinned_issues", "ready_issues", "tombstone_issues", "total_issues"]
+sync_status_required_fields = ["db_newer", "dirty_count", "git_export", "jsonl_content_hash", "jsonl_exists", "jsonl_newer", "last_export_time", "last_import_time", "reliability_audit", "workspace_health"]
+sync_reliability_required_fields = ["anomalies", "anomaly_count", "health", "source"]
+sync_reliability_anomaly_required_fields = ["code", "message", "severity"]
+sync_git_export_required_fields = ["available", "head_hash", "index_clean", "tracked", "worktree_clean", "worktree_hash"]
+export_witness_required_fields = ["base_comparison", "base_jsonl_path", "base_parallel_work_plan", "base_reuse_materialization", "base_reuse_plan", "jsonl_path", "witness"]
+export_witness_body_required_fields = ["byte_count", "chunk_size_lines", "chunks", "line_count", "root_hash", "schema_version"]
+export_witness_chunk_required_fields = ["byte_count", "first_line_hash", "hash", "index", "last_line_hash", "line_count", "start_line"]
+export_witness_comparison_required_fields = ["added_byte_count", "added_chunks", "base_byte_count", "base_chunk_count", "base_line_count", "candidate_byte_count", "candidate_chunk_count", "candidate_line_count", "changed_base_byte_count", "changed_candidate_byte_count", "changed_chunks", "chunk_size_lines_match", "comparable_chunk_count", "drift_detected", "first_changed_chunk_index", "removed_byte_count", "removed_chunks", "root_hashes_match", "safe_reuse_prefix_chunks", "schema_versions_match", "unchanged_byte_count", "unchanged_chunks"]
+export_witness_action_required_fields = ["action", "base_index", "byte_count", "candidate_index", "line_count", "start_line"]
+export_witness_schedule_required_fields = ["candidate_output_actions", "candidate_output_byte_count", "candidate_output_line_count", "deterministic_candidate_order", "dropped_byte_count", "max_parallel_candidate_actions", "metadata_only_drop_actions", "read_added_actions", "read_added_byte_count", "rebuild_actions", "rebuild_byte_count", "reusable_actions", "reusable_byte_count", "total_actions"]
+export_witness_materialization_required_fields = ["dropped_byte_count", "dropped_chunks", "output_byte_count", "read_added_byte_count", "read_added_chunks", "rebuilt_byte_count", "rebuilt_chunks", "reused_byte_count", "reused_chunks"]
+export_witness_parallel_required_fields = ["batches", "candidate_output_batches", "deterministic_batch_order", "max_parallelism", "metadata_only_drop_batches", "total_batches"]
+export_witness_batch_required_fields = ["action_count", "actions", "byte_count", "candidate_end_index", "candidate_start_index", "index", "kind", "line_count"]
+audit_capture_position = "BETWEEN_SOURCE_CAPTURE_ROUNDS"
 
 [row_contract]
 required_fields = [
@@ -725,13 +750,18 @@ movement_requires_exact_successor_lineage = true
 movement_current_universe = "FULL_ALL_STATUS_CAPTURE"
 movement_requires_current_universe_root = true
 movement_requires_current_universe_count = true
-movement_destination_root_kinds = ["INVENTORY_TARGET", "FULL_UNIVERSE_SUCCESSOR"]
+movement_destination_root_kinds = ["INVENTORY_TARGET", "FULL_UNIVERSE_FILTERED_FINDING", "FULL_UNIVERSE_CLEAN_SUCCESSOR"]
 movement_requires_destination_root_kind = true
 prior_target_absent_from_current_universe = "REFUSE"
-prior_target_outside_selected_inventory = "REQUIRE_CLOSED_WITHOUT_CURRENT_FINDING_SUCCESSOR"
-clean_closure_successor_reason = "CLOSED_WITHOUT_CURRENT_FINDING"
-clean_closure_successor_required_fields = ["issue_id", "status", "priority", "destination_root", "current_universe_root", "reason", "no_claim", "semantic_root"]
-movement_successor_lineage_fields = ["issue_id", "source_root", "destination_root", "destination_root_kind", "current_universe_root", "before_status", "after_status", "before_priority", "after_priority"]
+prior_target_outside_selected_inventory = "REQUIRE_TYPED_CURRENT_FINDING_OR_CLOSED_CLEAN_SUCCESSOR"
+scope_successor_finding_states = ["CURRENT_FINDING", "NO_CURRENT_FINDING"]
+scope_successor_reasons = ["FILTERED_CURRENT_FINDING", "CLOSED_WITHOUT_CURRENT_FINDING"]
+scope_successor_required_fields = ["issue_id", "status", "priority", "destination_root", "current_universe_root", "finding_state", "reason", "no_claim", "semantic_root"]
+current_finding_membership = "FULL_SOURCE_DERIVED_EXPLICIT_ROOT_REQUIRED"
+nonclosed_filtered_current_finding = "ALLOW_TYPED_FILTERED_SUCCESSOR"
+nonclosed_without_current_finding = "REFUSE"
+movement_required_fields = ["schema", "issue_id", "class", "before_status", "after_status", "before_priority", "after_priority", "source_root", "destination_root", "destination_root_kind", "destination_finding_state", "destination_reason", "current_universe_root", "current_finding_issue_ids_root", "prior_campaign_root", "prior_campaign_epoch_root", "current_campaign_root", "immutable_prior_evidence", "successor_lineage_root", "semantic_root"]
+movement_successor_lineage_fields = ["issue_id", "source_root", "destination_root", "destination_root_kind", "destination_finding_state", "destination_reason", "current_universe_root", "current_finding_issue_ids_root", "before_status", "after_status", "before_priority", "after_priority"]
 
 [cli_contract]
 planner_modes = ["--review-plan", "--history-plan"]
@@ -747,6 +777,8 @@ output_option = "UNSUPPORTED_REFUSE"
 duplicate_options = "REFUSE"
 review_receipts_option = "--review-receipts REL"
 review_receipts_paths = "SAFE_RELATIVE_ONLY"
+review_receipts_read_policy = "DESCRIPTOR_RELATIVE_O_NOFOLLOW_UNIQUE_REGULAR_STABLE_PATH_AND_CONTENT"
+review_receipts_aliases = "REFUSE"
 priority_filter_option = "--priorities P0,P1,..."
 status_filter_option = "--statuses open,closed,..."
 target_filter_option = "--targets ID,ID,..."
@@ -768,6 +800,13 @@ evidence_failure_exit = 5
 cancelled_exit = 6
 infrastructure_failure_exit = 7
 internal_fault_exit = 8
+v2_replay_mode = "--replay-v2 REL"
+legacy_replay_mode = "--replay REL"
+legacy_replay_dispatch = "TERMINAL_SCHEMA_AUTODETECT_COMPATIBILITY"
+explicit_v2_replay_terminal_schema = "frankensim.beads-template-hygiene.terminal.v2"
+explicit_replay_preclassified = true
+legacy_replay_preclassified = false
+replay_auxiliary_options = "REFUSE"
 
 [synopsis_contract]
 encoding = "UTF-8"
@@ -985,20 +1024,23 @@ subprocess_capture = "NONBLOCKING_SELECTOR_BOUNDED"
 subprocess_process_group = "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
 subprocess_failure_receipts = ["START_FAILED", "CAPTURE_FAILED", "TIMEOUT", "CANCELLED", "CANCELLED_AFTER_EXIT", "STDOUT_LIMIT", "STDERR_LIMIT", "NON_UTF8", "UNEXPECTED_EXIT"]
 subprocess_stream_cap_accounting = "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
-subprocess_argv_redaction = "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
+subprocess_argv_redaction = "COUNT_AND_BYTES_BOUNDED_CONTEXTUAL_SENSITIVE_VALUE_AND_ABSOLUTE_PATH_REDACTED"
 assertion_result_required_fields = ["schema", "case_id", "assertion_id", "executor_id", "parameters", "parameter_root", "ordered_checks", "ordered_check_roots", "check_count", "terminal", "no_claim", "semantic_root"]
 assertion_check_required_fields = ["check_id", "expected", "observed", "passed", "semantic_root"]
 self_test_log_line_cap = "EVERY_EMITTED_JSONL_DOCUMENT"
 split_form_sensitive_argv_redaction = "OPTION_NAME_RETAINED_VALUE_HASH_REDACTED"
+diagnostic_contextual_redaction = "AUTHORIZATION_HEADERS_ASSIGNMENTS_SPLIT_OPTIONS_MULTILINE_AND_UNCLOSED_QUOTES_REDACTED"
+assertion_sensitive_value_projection = "ROOT_ONLY_FOR_ALL_SCALAR_AND_CONTAINER_TYPES"
+assertion_mapping_key_policy = "STRING_ONLY_PATH_OR_ASSIGNMENT_KEYS_ROOT_REDACTED_COLLISIONS_REFUSED"
 forbidden_content = [
   "raw stdout body",
   "raw stderr body",
   "source_repo_path",
   "absolute path",
   "bulk issue body",
-  "credential",
-  "secret",
-  "token",
+  "sensitive assignment value",
+  "authorization header value",
+  "split sensitive option value",
   "environment value",
   "process ID",
   "thread ID",
@@ -1025,6 +1067,16 @@ replay_mints_authority = false
 replay_proves_current_tracker_state = false
 semantic_refusal_behavior = "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
 semantic_refusal_replay_mints_pass = false
+result_schema = "frankensim.beads-template-hygiene.replay-result.v2"
+result_required_fields = ["schema", "terminal", "subject_mode", "artifact_dir", "retained_terminal_root", "replay_terminal_root", "live_tracker_reads", "live_tracker_writes", "network_access", "no_claim", "semantic_root"]
+result_rooted = true
+execution_process_guard = "PROCESS_WIDE_REENTRANT_FAIL_CLOSED_SUBPROCESS_EXCLUSION"
+explicit_cli_mode = "--replay-v2"
+legacy_cli_mode = "--replay"
+legacy_dispatch = "SCHEMA_AUTODETECT_AFTER_UNCLASSIFIED_PREFLIGHT"
+v2_terminal_schema_required = "frankensim.beads-template-hygiene.terminal.v2"
+reproduction_mode = "--replay-v2"
+explicit_cli_subprocess_proof = "ARTIFACT_BACKED_SUCCESS_AND_TYPED_FAILURE_MATRIX"
 
 [caps]
 max_cases = 96
