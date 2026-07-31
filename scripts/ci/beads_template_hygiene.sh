@@ -20417,6 +20417,7 @@ def v2_validate_review_plan(
                     child["semantic_review_action"],
                     child["readiness"],
                     child["remediation_route"],
+                    child["desired_status"],
                 )
             if observed_vector != expected_vector:
                 raise EvidenceFailed(
