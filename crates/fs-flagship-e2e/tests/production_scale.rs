@@ -768,7 +768,7 @@ fn production_scale_arena_budget() {
         && run.arena.allocation_count == 1
         && run.arena.chunk_count == 1
         && run.lease.limit_bytes == Some(reservation_u64)
-        && run.lease.requested_bytes == reservation_u64
+        && run.lease.requested_bytes == reservation_u64 as u128
         && run.lease.peak_bytes == reservation_u64
         && run.lease.used_bytes == 0
         && run.lease.refusals == 0

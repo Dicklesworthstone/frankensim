@@ -122,7 +122,7 @@ fn memory_resident_shapes_round_sparse_occupancy_up_to_whole_tiles() {
             >= dense.active_cells().unwrap() * 100_000
     );
     assert!(
-        (sparse.active_cells().unwrap() - SPARSE_TILE_CELLS) * RATIO_PPM as usize
+        (sparse.active_cells().unwrap() - SPARSE_TILE_CELLS) * (RATIO_PPM as usize)
             < dense.active_cells().unwrap() * 100_000,
         "one fewer whole tile would undershoot ten percent"
     );
