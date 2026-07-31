@@ -28664,40 +28664,86 @@ def v2_state_projection_value(
     *,
     seen: dict[int, int] | None = None,
     context: dict[str, Any] | None = None,
+    module_paths: Sequence[Sequence[str]] | None = None,
+    bare_module_reference: bool = True,
     depth: int = 0,
 ) -> Any:
     if depth > V2_REFUSAL_STATE_DEPTH_CAP:
         raise EvidenceFailed("refusal-state projection exceeds its depth cap")
-    if value is None or type(value) in {bool, int, float, str}:
+    if value is None or type(value) is bool:
         return value
-    if value is MISSING:
-        return {"kind": "dataclasses.MISSING"}
+    if context is None:
+        context = v2_new_refusal_projection_context()
+    if type(value) is int:
+        v2_refusal_charge(
+            context,
+            "scalar_bytes",
+            max(1, (value.bit_length() + 7) // 8),
+        )
+        return value
+    if type(value) is float:
+        return {
+            "kind": "float",
+            "ieee754_binary64": struct.pack(">d", value).hex(),
+        }
+    if type(value) is complex:
+        return {
+            "kind": "complex",
+            "real_ieee754_binary64": struct.pack(">d", value.real).hex(),
+            "imag_ieee754_binary64": struct.pack(">d", value.imag).hex(),
+        }
+    if type(value) is str:
+        v2_refusal_charge(
+            context,
+            "scalar_bytes",
+            len(value.encode("utf-8")),
+        )
+        return value
+    if type(value) is bytes:
+        v2_refusal_charge(context, "scalar_bytes", len(value))
+        return {
+            "kind": "bytes",
+            "byte_length": len(value),
+            "content_root": "sha256-v1:" + hashlib.sha256(value).hexdigest(),
+        }
+    if value is Ellipsis or value is NotImplemented:
+        return {"kind": "singleton", "value": repr(value)}
+    for sentinel_name, sentinel in V2_DATACLASS_SENTINEL_IDENTITIES:
+        if value is sentinel:
+            return {"kind": f"dataclasses.{sentinel_name}"}
+    if v2_is_dangerous_builtin(value):
+        raise EvidenceFailed(
+            "refusal callback reaches a dynamic namespace builtin; provide "
+            "an explicit bounded external-state projection"
+        )
+    if context is None:
+        context = v2_new_refusal_projection_context()
     if seen is None:
         seen = {}
-    if context is None:
-        context = {
-            "function_cache": {},
-            "global_accesses": 0,
-        }
     identity = id(value)
-    function_cache = context["function_cache"]
-    if isinstance(value, types.FunctionType) and identity in function_cache:
-        return function_cache[identity]
-    if identity in seen:
-        ancestor_depth = seen[identity]
+    object_ids: dict[int, int] = context["object_ids"]
+    active_ids: set[int] = context["active_ids"]
+    if identity in object_ids:
         return {
-            "kind": "cycle",
-            "ancestor_depth": ancestor_depth,
-            "back_edge_distance": depth - ancestor_depth,
+            "kind": "reference",
+            "node_id": object_ids[identity],
+            "cycle": identity in active_ids,
         }
+    v2_refusal_charge(context, "nodes")
+    node_id = context["next_node_id"]
+    context["next_node_id"] += 1
+    object_ids[identity] = node_id
+    active_ids.add(identity)
     seen[identity] = depth
+
+    def finish(body: dict[str, Any]) -> dict[str, Any]:
+        return {"node_id": node_id, **body}
+
     try:
         metadata = (
             {}
-            if isinstance(
-                value,
-                (Path, types.FunctionType, types.ModuleType, type),
-            )
+            if type(value) in V2_REFUSAL_PATH_TYPES
+            or isinstance(value, (types.FunctionType, types.ModuleType, type))
             else v2_state_object_metadata(
                 value,
                 seen=seen,
