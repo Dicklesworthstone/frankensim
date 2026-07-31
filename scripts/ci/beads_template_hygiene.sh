@@ -594,6 +594,8 @@ V2_SOURCE_OBSERVATION_FIELDS = frozenset(
         "br_version",
         "br_capabilities",
         "tracker_status",
+        "tracker_ready_issue_ids",
+        "tracker_ready_issue_ids_root",
         "sync_status",
         "export_witness",
         "case_manifest_root",
@@ -1134,8 +1136,9 @@ V2_SOURCE_ISSUE_NO_CLAIM = (
     "repository paths are root-only, and no ownership or authority is inferred"
 )
 V2_SOURCE_OBSERVATION_NO_CLAIM = (
-    "double-captured br projections are tracker-read-only source evidence; "
-    "they neither authenticate people nor grant mutation authority"
+    "double-captured br projections, including exact ready membership, are "
+    "tracker-read-only source evidence; they neither authenticate people nor "
+    "grant mutation authority"
 )
 V2_AUDIT_BRACKET_NO_CLAIM = (
     "the rooted bracket binds the supplied source-round and audit-capture "
@@ -1236,6 +1239,18 @@ EVENT_LINE_CAP = 16_384
 STATUS_SCOPES = ("open", "in_progress", "blocked", "deferred", "closed")
 LINT_SCOPES = (*STATUS_SCOPES, "all")
 STATUS_ORDER = {status: index for index, status in enumerate(STATUS_SCOPES)}
+V2_RELEASED_KNOWN_STATUSES = (
+    "open",
+    "in_progress",
+    "blocked",
+    "deferred",
+    "draft",
+    "closed",
+    "tombstone",
+    "pinned",
+)
+V2_TERMINAL_STATUSES = frozenset({"closed", "tombstone"})
+V2_STATUS_BYTES_CAP = 128
 REQUIRED_SECTIONS_BY_TYPE = {
     "bug": ("## Steps to Reproduce", "## Acceptance Criteria"),
     "task": ("## Acceptance Criteria",),
@@ -2712,6 +2727,68 @@ def v2_validate_external_relation_id(
     return value
 
 
+def v2_validate_status(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or value != value.lower()
+        or value != unicodedata.normalize("NFC", value)
+        or value.startswith("-")
+        or len(value.encode("utf-8")) > V2_STATUS_BYTES_CAP
+        or any(
+            unicodedata.category(character).startswith("C")
+            or unicodedata.category(character) in {"Zl", "Zp"}
+            for character in value
+        )
+    ):
+        raise error_type(f"{label} is not a canonical released-br status")
+    return value
+
+
+def v2_canonical_status_scopes(
+    values: Iterable[Any],
+    *,
+    error_type: type[HarnessError] = EvidenceFailed,
+) -> tuple[str, ...]:
+    observed = {
+        v2_validate_status(
+            value,
+            label=f"v2 status scope row {index}",
+            error_type=error_type,
+        )
+        for index, value in enumerate(values)
+    }
+    known = [
+        status for status in V2_RELEASED_KNOWN_STATUSES if status in observed
+    ]
+    custom = sorted(
+        observed - set(V2_RELEASED_KNOWN_STATUSES),
+        key=lambda value: value.encode("utf-8"),
+    )
+    return tuple([*known, *custom])
+
+
+def v2_status_scopes(
+    issues: Sequence[Mapping[str, Any]],
+    *,
+    error_type: type[HarnessError] = EvidenceFailed,
+) -> tuple[str, ...]:
+    return v2_canonical_status_scopes(
+        (issue.get("status") for issue in issues),
+        error_type=error_type,
+    )
+
+
+def v2_is_terminal_status(value: Any) -> bool:
+    return value in V2_TERMINAL_STATUSES
+
+
 def v2_list_issue_ids(
     document: Any,
     *,
@@ -2750,6 +2827,31 @@ def v2_list_issue_ids(
             error_type=InfrastructureFailed,
         )
         issue_ids.append(issue_id)
+    issue_ids.sort()
+    v2_assert_unique(issue_ids, label=f"{label} issue IDs")
+    return issue_ids
+
+
+def v2_ready_issue_ids(document: Any, *, label: str) -> list[str]:
+    if not isinstance(document, list):
+        raise InfrastructureFailed(
+            f"{label} does not use the exact released-br ready array"
+        )
+    if len(document) > V2_INVENTORY_ROWS_CAP:
+        raise InfrastructureFailed(f"{label} exceeds the issue-row cap")
+    issue_ids: list[str] = []
+    for index, row in enumerate(document):
+        if not isinstance(row, dict):
+            raise InfrastructureFailed(
+                f"{label} row {index} is not an object"
+            )
+        issue_ids.append(
+            v2_validate_issue_id(
+                row.get("id"),
+                label=f"{label} row {index} issue ID",
+                error_type=InfrastructureFailed,
+            )
+        )
     issue_ids.sort()
     v2_assert_unique(issue_ids, label=f"{label} issue IDs")
     return issue_ids
@@ -4880,6 +4982,11 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         )
     issue_id = issue.get("id")
     issue_type = issue.get("issue_type", issue.get("type"))
+    issue_status = v2_validate_status(
+        issue.get("status"),
+        label="v2 br issue status",
+        error_type=InfrastructureFailed,
+    )
     if (
         "issue_type" in issue
         and "type" in issue
@@ -4894,8 +5001,7 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
         or not isinstance(issue.get("title"), str)
         or not isinstance(issue_type, str)
         or not issue_type
-        or issue.get("status")
-        not in {"open", "in_progress", "blocked", "deferred", "closed"}
+        or issue.get("status") != issue_status
         or type(issue.get("priority")) is not int
         or issue["priority"] not in range(5)
     ):
@@ -5097,6 +5203,15 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 if isinstance(relation, dict)
                 else None
             )
+            if isinstance(relation_status, str):
+                v2_validate_status(
+                    relation_status,
+                    label=(
+                        f"v2 br issue {issue_id} {relation_field} "
+                        "relation status"
+                    ),
+                    error_type=InfrastructureFailed,
+                )
             relation_priority = (
                 relation.get("priority")
                 if isinstance(relation, dict)
@@ -5125,16 +5240,7 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 or not relation_type
                 or not isinstance(relation.get("title"), str)
                 or not relation["title"]
-                or (
-                    relation_status
-                    not in {
-                        "open",
-                        "in_progress",
-                        "blocked",
-                        "deferred",
-                        "closed",
-                    }
-                )
+                or not isinstance(relation_status, str)
                 or (
                     type(relation_priority) is not int
                     or relation_priority not in range(5)
@@ -5437,22 +5543,29 @@ def v2_validate_lint_scope_coherence(
     full_issues: Sequence[Mapping[str, Any]] | None,
     error_type: type[HarnessError],
 ) -> None:
-    if not isinstance(lint, dict) or set(lint) != set(LINT_SCOPES):
+    if not isinstance(lint, dict) or "all" not in lint:
         raise error_type("br lint scope membership differs")
+    status_scopes = v2_canonical_status_scopes(
+        (scope for scope in lint if scope != "all"),
+        error_type=error_type,
+    )
+    if set(lint) != {*status_scopes, "all"}:
+        raise error_type("br lint scope membership differs")
+    ordered_scopes = (*status_scopes, "all")
     normalized = {
         scope: v2_normalize_br_lint_document(
             lint[scope],
             scope=scope,
             error_type=error_type,
         )
-        for scope in LINT_SCOPES
+        for scope in ordered_scopes
     }
     if normalized != dict(lint):
         raise error_type("br lint scopes are not canonically normalized")
     all_by_id = {
         row["id"]: row for row in normalized["all"]["results"]
     }
-    for scope in STATUS_SCOPES:
+    for scope in status_scopes:
         for row in normalized[scope]["results"]:
             if all_by_id.get(row["id"]) != row:
                 raise error_type(
@@ -5461,6 +5574,14 @@ def v2_validate_lint_scope_coherence(
     if full_issues is None:
         return
     issue_by_id = {str(issue["id"]): issue for issue in full_issues}
+    missing_status_scopes = set(v2_status_scopes(full_issues)) - set(
+        status_scopes
+    )
+    if missing_status_scopes:
+        raise error_type(
+            "br lint lacks full-issue status scopes: "
+            f"{sorted(missing_status_scopes)}"
+        )
     for issue_id, row in all_by_id.items():
         issue = issue_by_id.get(issue_id)
         if (
@@ -5472,7 +5593,7 @@ def v2_validate_lint_scope_coherence(
                 "br lint row identity differs from the full issue projection"
             )
         expected_scope = str(issue["status"])
-        for scope in STATUS_SCOPES:
+        for scope in status_scopes:
             scoped_row = next(
                 (
                     candidate
@@ -5488,7 +5609,15 @@ def v2_validate_lint_scope_coherence(
                 )
 
 
-def lint_scopes(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
+def lint_scopes(
+    *,
+    br_cwd: Path = REPO_ROOT,
+    status_scopes: Sequence[str] = STATUS_SCOPES,
+) -> dict[str, Any]:
+    canonical_status_scopes = v2_canonical_status_scopes(
+        status_scopes,
+        error_type=InfrastructureFailed,
+    )
     result = {
         scope: v2_normalize_br_lint_document(
             br_read_json(
@@ -5501,7 +5630,7 @@ def lint_scopes(*, br_cwd: Path = REPO_ROOT) -> dict[str, Any]:
             scope=scope,
             error_type=InfrastructureFailed,
         )
-        for scope in LINT_SCOPES
+        for scope in (*canonical_status_scopes, "all")
     }
     v2_validate_lint_scope_coherence(
         result,
@@ -5885,7 +6014,10 @@ def lint_result_map(lint: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
 def validate_scope_partitions(lint: Mapping[str, Any]) -> None:
     all_rows = lint_result_map(lint)
     union_rows: dict[str, tuple[str, ...]] = {}
-    for scope in STATUS_SCOPES:
+    status_scopes = v2_canonical_status_scopes(
+        (scope for scope in lint if scope != "all")
+    )
+    for scope in status_scopes:
         scope_ids: set[str] = set()
         for row in lint[scope]["results"]:
             issue_id = str(row.get("id", ""))
@@ -6453,6 +6585,7 @@ class V2LiveCaptureRound:
     full_issues: tuple[dict[str, Any], ...]
     lint: dict[str, Any]
     tracker_status: dict[str, Any]
+    tracker_ready_issue_ids: tuple[str, ...]
     sync_status: dict[str, Any]
     export_witness: dict[str, Any]
     version: dict[str, Any]
@@ -6469,6 +6602,7 @@ V2_CAPTURE_STATE_KEYS = {
     "full_issue_projection_root",
     "lint_projection_root",
     "tracker_status_root",
+    "tracker_ready_issue_ids_root",
     "sync_status_root",
     "export_witness_root",
     "br_version_root",
@@ -7950,29 +8084,28 @@ def v2_validate_live_envelope_consistency(
 ) -> None:
     summary = tracker_status["summary"]
     status_counts = Counter(str(issue.get("status") or "") for issue in full_issues)
-    total = len(full_issues)
-    inferred_blocked = total - sum(
-        summary[field]
-        for field in (
-            "open_issues",
-            "in_progress_issues",
-            "deferred_issues",
-            "closed_issues",
-        )
+    non_tombstone_total = sum(
+        issue.get("status") != "tombstone" for issue in full_issues
+    )
+    pinned_total = sum(
+        issue.get("pinned") is True or issue.get("status") == "pinned"
+        for issue in full_issues
+        if issue.get("status") != "tombstone"
     )
     if (
-        summary["total_issues"] != total
+        summary["total_issues"] != non_tombstone_total
         or summary["open_issues"] != status_counts["open"]
         or summary["in_progress_issues"] != status_counts["in_progress"]
         or summary["deferred_issues"] != status_counts["deferred"]
+        or summary["draft_issues"] != status_counts["draft"]
         or summary["closed_issues"] != status_counts["closed"]
-        or inferred_blocked != status_counts["blocked"]
+        or summary["tombstone_issues"] != status_counts["tombstone"]
+        or summary["pinned_issues"] != pinned_total
         or summary["blocked_issues"] < status_counts["blocked"]
         or summary["blocked_issues"]
         > summary["total_issues"] - summary["closed_issues"]
-        or summary["ready_issues"] > summary["open_issues"]
-        or summary["draft_issues"] != 0
-        or summary["tombstone_issues"] != 0
+        or summary["ready_issues"]
+        > summary["total_issues"] - summary["closed_issues"]
     ):
         raise error_type("br status summary disagrees with the all-status source")
     witness = export_witness["witness"]
@@ -8020,6 +8153,7 @@ def v2_capture_state(
     full_issues: Sequence[Mapping[str, Any]],
     lint: Mapping[str, Any],
     tracker_status: Mapping[str, Any],
+    tracker_ready_issue_ids: Sequence[str],
     sync_status: Mapping[str, Any],
     export_witness: Mapping[str, Any],
     version: Mapping[str, Any],
@@ -8032,6 +8166,7 @@ def v2_capture_state(
         raise EvidenceFailed("v2 capture issue IDs must be sorted")
     v2_assert_unique(normalized_ids, label="v2 capture issue IDs")
     normalized_issues = [dict(value) for value in full_issues]
+    normalized_ready_ids = [str(value) for value in tracker_ready_issue_ids]
     full_ids = [str(value.get("id") or "") for value in normalized_issues]
     if (
         "" in full_ids
@@ -8040,6 +8175,14 @@ def v2_capture_state(
     ):
         raise EvidenceFailed(
             "v2 capture full-issue membership differs from list membership"
+        )
+    if (
+        normalized_ready_ids != sorted(normalized_ready_ids)
+        or len(normalized_ready_ids) != len(set(normalized_ready_ids))
+        or not set(normalized_ready_ids).issubset(normalized_ids)
+    ):
+        raise EvidenceFailed(
+            "v2 capture ready membership is noncanonical or outside source"
         )
     document = {
         "issue_ids": normalized_ids,
@@ -8050,6 +8193,9 @@ def v2_capture_state(
         ),
         "lint_projection_root": semantic_root(dict(lint)),
         "tracker_status_root": semantic_root(dict(tracker_status)),
+        "tracker_ready_issue_ids_root": semantic_root(
+            normalized_ready_ids
+        ),
         "sync_status_root": semantic_root(dict(sync_status)),
         "export_witness_root": semantic_root(dict(export_witness)),
         "br_version_root": semantic_root(dict(version)),
@@ -8351,13 +8497,71 @@ def v2_capture_live_round(
         "0",
         br_cwd=br_cwd,
     )
-    issue_ids = v2_list_issue_ids(
+    listed_issue_ids = v2_list_issue_ids(
         listed,
         label=f"v2 br list capture {ordinal}",
     )
+    tombstones = br_read_json(
+        "list",
+        "--status",
+        "tombstone",
+        "--json",
+        "--limit",
+        "0",
+        br_cwd=br_cwd,
+    )
+    tombstone_issue_ids = v2_list_issue_ids(
+        tombstones,
+        label=f"v2 br tombstone list capture {ordinal}",
+    )
+    if set(listed_issue_ids) & set(tombstone_issue_ids):
+        raise InfrastructureFailed(
+            "released br list overlaps ordinary and tombstone membership"
+        )
+    if (
+        len(listed_issue_ids) != status["summary"]["total_issues"]
+        or len(tombstone_issue_ids)
+        != status["summary"]["tombstone_issues"]
+    ):
+        raise NoData(
+            "UnsupportedCapability: released br "
+            f"{version['version']} cannot enumerate "
+            "template rows; list/status membership proves a hidden or "
+            "otherwise unsupported issue universe"
+        )
+    issue_ids = sorted([*listed_issue_ids, *tombstone_issue_ids])
+    ready_document = br_read_json(
+        "ready",
+        "--json",
+        "--limit",
+        "0",
+        br_cwd=br_cwd,
+    )
+    tracker_ready_issue_ids = v2_ready_issue_ids(
+        ready_document,
+        label=f"v2 br ready capture {ordinal}",
+    )
+    if (
+        not set(tracker_ready_issue_ids).issubset(listed_issue_ids)
+        or len(tracker_ready_issue_ids)
+        != status["summary"]["ready_issues"]
+    ):
+        raise InfrastructureFailed(
+            "released br ready membership disagrees with list/status source"
+        )
     full_issues = v2_show_all_issues(issue_ids, br_cwd=br_cwd)
     v2_validate_source_graph(full_issues)
-    lint = lint_scopes(br_cwd=br_cwd)
+    lint_status_scopes = v2_canonical_status_scopes(
+        [
+            *V2_RELEASED_KNOWN_STATUSES,
+            *(issue["status"] for issue in full_issues),
+        ],
+        error_type=InfrastructureFailed,
+    )
+    lint = lint_scopes(
+        br_cwd=br_cwd,
+        status_scopes=lint_status_scopes,
+    )
     v2_validate_lint_scope_coherence(
         lint,
         full_issues=full_issues,
@@ -8376,6 +8580,7 @@ def v2_capture_live_round(
         full_issues=full_issues,
         lint=lint,
         tracker_status=status,
+        tracker_ready_issue_ids=tracker_ready_issue_ids,
         sync_status=sync_status,
         export_witness=export_witness,
         version=version,
@@ -8385,6 +8590,7 @@ def v2_capture_live_round(
     )
     projection_entries = v2_observation_command_projection_entries(
         tracker_status=status,
+        tracker_ready_issue_ids=tracker_ready_issue_ids,
         sync_status=sync_status,
         export_witness=export_witness,
         version=version,
@@ -8419,6 +8625,7 @@ def v2_capture_live_round(
         full_issues=tuple(full_issues),
         lint=lint,
         tracker_status=status,
+        tracker_ready_issue_ids=tuple(tracker_ready_issue_ids),
         sync_status=sync_status,
         export_witness=export_witness,
         version=version,
@@ -8476,10 +8683,11 @@ def v2_finalize_live_capture_pair(
             f"v2 source exceeds {V2_INVENTORY_ROWS_CAP} issue rows"
         )
     for issue in full_after:
-        if issue["status"] not in STATUS_SCOPES:
-            raise EvidenceFailed(
-                f"{issue['id']} has unpartitioned status {issue['status']}"
-            )
+        v2_validate_status(
+            issue["status"],
+            label=f"{issue['id']} source status",
+            error_type=EvidenceFailed,
+        )
         if issue["priority"] not in range(5):
             raise EvidenceFailed(
                 f"{issue['id']} has unpartitioned priority {issue['priority']}"
@@ -8493,11 +8701,27 @@ def v2_finalize_live_capture_pair(
     nonclosed_ids = {
         str(issue["id"])
         for issue in full_after
-        if issue["status"] != "closed"
+        if not v2_is_terminal_status(issue["status"])
     }
     finding_ids = lint_ids | set(independent)
-    target_ids = sorted(nonclosed_ids | finding_ids)
     full_by_id = {issue["id"]: issue for issue in full_after}
+    tombstone_finding_ids = sorted(
+        issue_id
+        for issue_id in finding_ids
+        if full_by_id[issue_id]["status"] == "tombstone"
+    )
+    if tombstone_finding_ids:
+        raise NoData(
+            "UnsupportedCapability: tombstone template findings require a "
+            "deleted-record adjudication contract; first issue "
+            f"{tombstone_finding_ids[0]}"
+        )
+    reviewable_finding_ids = {
+        issue_id
+        for issue_id in finding_ids
+        if full_by_id[issue_id]["status"] != "tombstone"
+    }
+    target_ids = sorted(nonclosed_ids | reviewable_finding_ids)
     target_issues = [full_by_id[issue_id] for issue_id in target_ids]
     source: dict[str, Any] = {
         "schema": V2_SOURCE_SCHEMA,
@@ -8512,6 +8736,10 @@ def v2_finalize_live_capture_pair(
         "br_version": after.version,
         "br_capabilities": after.capabilities,
         "tracker_status": after.tracker_status,
+        "tracker_ready_issue_ids": list(after.tracker_ready_issue_ids),
+        "tracker_ready_issue_ids_root": semantic_root(
+            list(after.tracker_ready_issue_ids)
+        ),
         "sync_status": after.sync_status,
         "export_witness": after.export_witness,
         "case_manifest_root": case_manifest["semantic_root"],
@@ -8527,8 +8755,14 @@ def v2_finalize_live_capture_pair(
         "selected_review_issue_ids_root": semantic_root(target_ids),
         "selected_review_issue_count": len(target_ids),
         "nonclosed_issue_count": len(nonclosed_ids),
-        "closed_finding_issue_count": len(finding_ids - nonclosed_ids),
-        "status_cut": list(STATUS_SCOPES),
+        "closed_finding_issue_count": len(
+            reviewable_finding_ids - nonclosed_ids
+        ),
+        "status_cut": list(
+            v2_canonical_status_scopes(
+                scope for scope in after.lint if scope != "all"
+            )
+        ),
         "command_receipts": [
             {"capture_sequence": index, **receipt}
             for index, receipt in enumerate(_command_receipts)
@@ -8586,7 +8820,7 @@ def v2_history_audit_ids_from_round(
         {
             issue["id"]
             for issue in capture.full_issues
-            if issue["status"] != "closed"
+            if not v2_is_terminal_status(issue["status"])
         }
         | set(lint_result_map(capture.lint))
         | independent_ids
@@ -23901,6 +24135,11 @@ def v2_validate_source_full_issue(
         V2_SOURCE_ALL_ISSUE_FIELDS,
         label=f"v2 source all-issue row {index}",
     )
+    issue_status = v2_validate_status(
+        issue.get("status"),
+        label=f"v2 source all-issue row {index} status",
+        error_type=InputRefused,
+    )
     string_fields = (
         "id",
         "title",
@@ -23938,7 +24177,7 @@ def v2_validate_source_full_issue(
         any(not isinstance(issue[field], str) for field in string_fields)
         or not issue["id"]
         or not issue["type"]
-        or issue["status"] not in STATUS_SCOPES
+        or issue["status"] != issue_status
         or type(issue["priority"]) is not int
         or issue["priority"] not in range(5)
         or type(issue["ephemeral"]) is not bool
@@ -24137,6 +24376,16 @@ def v2_validate_source_full_issue(
                     f"{relation_field} row {relation_index}"
                 ),
             )
+            relation_status = relation.get("status")
+            if isinstance(relation_status, str):
+                v2_validate_status(
+                    relation_status,
+                    label=(
+                        f"v2 source all-issue row {index} "
+                        f"{relation_field} row {relation_index} status"
+                    ),
+                    error_type=InputRefused,
+                )
             if (
                 not isinstance(relation["id"], str)
                 or not relation["id"]
@@ -24159,9 +24408,7 @@ def v2_validate_source_full_issue(
                 or not relation["type"]
                 or not isinstance(relation["title"], str)
                 or not relation["title"]
-                or (
-                    relation["status"] not in STATUS_SCOPES
-                )
+                or not isinstance(relation_status, str)
                 or (
                     type(relation["priority"]) is not int
                     or relation["priority"] not in range(5)
@@ -24490,8 +24737,11 @@ def v2_validate_source_stream_receipt(
 
 def v2_expected_observation_round_argv(
     issue_ids: Sequence[str],
+    *,
+    status_scopes: Sequence[str] = STATUS_SCOPES,
 ) -> list[list[str]]:
     ordered_ids = sorted(issue_ids)
+    canonical_status_scopes = v2_canonical_status_scopes(status_scopes)
     commands: list[list[str]] = [
         ["br", "status", "--json", "--no-activity", *BR_READ_FLAGS],
         ["br", "sync", "--status", "--json", *BR_READ_FLAGS],
@@ -24499,6 +24749,17 @@ def v2_expected_observation_round_argv(
         ["br", "version", "--json", *BR_READ_FLAGS],
         ["br", "capabilities", "--json", *BR_READ_FLAGS],
         ["br", "list", "--all", "--json", "--limit", "0", *BR_READ_FLAGS],
+        [
+            "br",
+            "list",
+            "--status",
+            "tombstone",
+            "--json",
+            "--limit",
+            "0",
+            *BR_READ_FLAGS,
+        ],
+        ["br", "ready", "--json", "--limit", "0", *BR_READ_FLAGS],
     ]
     batch_size = min(CAPS["show_batch"], 56)
     commands.extend(
@@ -24520,21 +24781,27 @@ def v2_expected_observation_round_argv(
             "--json",
             *BR_READ_FLAGS,
         ]
-        for scope in LINT_SCOPES
+        for scope in (*canonical_status_scopes, "all")
     )
     return commands
 
 
 def v2_expected_observation_argv(
     issue_ids: Sequence[str],
+    *,
+    status_scopes: Sequence[str] = STATUS_SCOPES,
 ) -> list[list[str]]:
-    commands = v2_expected_observation_round_argv(issue_ids)
+    commands = v2_expected_observation_round_argv(
+        issue_ids,
+        status_scopes=status_scopes,
+    )
     return [*commands, *commands]
 
 
 def v2_observation_command_projection_entries(
     *,
     tracker_status: Mapping[str, Any],
+    tracker_ready_issue_ids: Sequence[str],
     sync_status: Mapping[str, Any],
     export_witness: Mapping[str, Any],
     version: Mapping[str, Any],
@@ -24555,6 +24822,21 @@ def v2_observation_command_projection_entries(
     if sorted(issue_by_id) != ordered_ids:
         raise EvidenceFailed(
             "v2 command projection show membership differs from list"
+        )
+    ready_ids = [str(issue_id) for issue_id in tracker_ready_issue_ids]
+    ordinary_ids = {
+        issue_id
+        for issue_id in ordered_ids
+        if issue_by_id[issue_id]["status"] != "tombstone"
+    }
+    if (
+        ready_ids != sorted(ready_ids)
+        or len(ready_ids) != len(set(ready_ids))
+        or not set(ready_ids).issubset(ordinary_ids)
+    ):
+        raise EvidenceFailed(
+            "v2 command projection ready membership is noncanonical or "
+            "outside the ordinary issue universe"
         )
 
     def projection(
@@ -24603,10 +24885,40 @@ def v2_observation_command_projection_entries(
         ),
         projection(
             "issue_ids",
-            selector={"all": True},
+            selector={"all": True, "tombstones": False},
             document={
-                "issue_ids": ordered_ids,
-                "issue_count": len(ordered_ids),
+                "issue_ids": [
+                    issue_id
+                    for issue_id in ordered_ids
+                    if issue_by_id[issue_id]["status"] != "tombstone"
+                ],
+                "issue_count": sum(
+                    issue_by_id[issue_id]["status"] != "tombstone"
+                    for issue_id in ordered_ids
+                ),
+            },
+        ),
+        projection(
+            "tombstone_issue_ids",
+            selector={"status": "tombstone"},
+            document={
+                "issue_ids": [
+                    issue_id
+                    for issue_id in ordered_ids
+                    if issue_by_id[issue_id]["status"] == "tombstone"
+                ],
+                "issue_count": sum(
+                    issue_by_id[issue_id]["status"] == "tombstone"
+                    for issue_id in ordered_ids
+                ),
+            },
+        ),
+        projection(
+            "tracker_ready_issue_ids",
+            selector={},
+            document={
+                "issue_ids": ready_ids,
+                "issue_count": len(ready_ids),
             },
         ),
     ]
@@ -24620,7 +24932,10 @@ def v2_observation_command_projection_entries(
                 document=[issue_by_id[issue_id] for issue_id in batch_ids],
             )
         )
-    for scope in LINT_SCOPES:
+    lint_status_scopes = v2_canonical_status_scopes(
+        (scope for scope in lint if scope != "all")
+    )
+    for scope in (*lint_status_scopes, "all"):
         if scope not in lint:
             raise EvidenceFailed(
                 f"v2 command projection lacks lint scope {scope}"
@@ -24653,6 +24968,9 @@ def v2_validate_source_command_receipts(
         )
     round_projections = v2_observation_command_projection_entries(
         tracker_status=observation["tracker_status"],
+        tracker_ready_issue_ids=observation[
+            "tracker_ready_issue_ids"
+        ],
         sync_status=observation["sync_status"],
         export_witness=observation["export_witness"],
         version=observation["br_version"],
@@ -24720,7 +25038,12 @@ def v2_validate_source_command_receipts(
             receipt["stderr"],
             label=f"{label} stderr",
         )
-    expected_argv = v2_expected_observation_argv(issue_ids)
+    expected_argv = v2_expected_observation_argv(
+        issue_ids,
+        status_scopes=v2_canonical_status_scopes(
+            scope for scope in lint if scope != "all"
+        ),
+    )
     if [receipt["argv"] for receipt in receipts] != expected_argv:
         raise InputRefused(
             "v2 source observation command membership, order, or read-only "
@@ -25253,6 +25576,7 @@ def v2_preflight_source_observation_nested_lists(
 ) -> None:
     source_files = observation.get("source_files")
     status_cut = observation.get("status_cut")
+    tracker_ready_issue_ids = observation.get("tracker_ready_issue_ids")
     command_receipts = observation.get("command_receipts")
     br_version = observation.get("br_version")
     features = (
@@ -25275,6 +25599,14 @@ def v2_preflight_source_observation_nested_lists(
     if len(status_cut) > V2_INVENTORY_ROWS_CAP:
         raise InputRefused(
             "v2 source observation status cut exceeds the inventory row cap"
+        )
+    if not isinstance(tracker_ready_issue_ids, list):
+        raise InputRefused(
+            "v2 source observation ready membership is not an array"
+        )
+    if len(tracker_ready_issue_ids) > V2_INVENTORY_ROWS_CAP:
+        raise InputRefused(
+            "v2 source observation ready membership exceeds the issue-row cap"
         )
     if not isinstance(command_receipts, list):
         raise InputRefused(
@@ -25560,16 +25892,25 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         lint_ids = set(
             lint_result_map(captured["v1_lint_projection"])
         )
+        all_issue_by_id = {row["id"]: row for row in all_issues}
+        finding_ids = lint_ids | set(independent_findings)
+        tombstone_finding_ids = {
+            issue_id
+            for issue_id in finding_ids
+            if all_issue_by_id[issue_id]["status"] == "tombstone"
+        }
+        if tombstone_finding_ids:
+            raise InputRefused(
+                "v2 source contains unsupported tombstone template findings"
+            )
         target_ids = sorted(
             {
                 row["id"]
                 for row in all_issues
-                if row["status"] != "closed"
+                if not v2_is_terminal_status(row["status"])
             }
-            | lint_ids
-            | set(independent_findings)
+            | finding_ids
         )
-        all_issue_by_id = {row["id"]: row for row in all_issues}
     except HarnessError:
         raise
     except (
@@ -25676,6 +26017,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         "coherent_capture_root",
         "rule_contract_root",
         "live_issue_projection_root",
+        "tracker_ready_issue_ids_root",
         "lint_issue_ids_root",
         "independent_finding_issue_ids_root",
         "nonclosed_issue_ids_root",
@@ -25776,6 +26118,30 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         observation["tracker_status"],
         error_type=InputRefused,
     )
+    tracker_ready_issue_ids = observation["tracker_ready_issue_ids"]
+    all_issue_ids = [row["id"] for row in all_issues]
+    if (
+        any(
+            not isinstance(issue_id, str) or not issue_id
+            for issue_id in tracker_ready_issue_ids
+        )
+        or tracker_ready_issue_ids != sorted(tracker_ready_issue_ids)
+        or len(tracker_ready_issue_ids)
+        != len(set(tracker_ready_issue_ids))
+        or not set(tracker_ready_issue_ids).issubset(all_issue_ids)
+        or any(
+            all_issue_by_id[issue_id]["status"] == "tombstone"
+            for issue_id in tracker_ready_issue_ids
+        )
+        or len(tracker_ready_issue_ids)
+        != normalized_tracker_status["summary"]["ready_issues"]
+        or observation["tracker_ready_issue_ids_root"]
+        != semantic_root(tracker_ready_issue_ids)
+    ):
+        raise InputRefused(
+            "v2 source observation ready membership is noncanonical, "
+            "unrooted, or inconsistent with tracker status"
+        )
     normalized_sync_status = v2_normalize_br_sync_status(
         observation["sync_status"],
         error_type=InputRefused,
@@ -25836,16 +26202,32 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     expected_lint_ids = sorted(lint_ids)
     expected_independent_ids = sorted(independent_findings)
     expected_nonclosed_ids = sorted(
-        row["id"] for row in all_issues if row["status"] != "closed"
+        row["id"]
+        for row in all_issues
+        if not v2_is_terminal_status(row["status"])
     )
     expected_finding_ids = set(expected_lint_ids) | set(
         expected_independent_ids
     )
+    tombstone_finding_ids = sorted(
+        issue_id
+        for issue_id in expected_finding_ids
+        if all_issue_by_id[issue_id]["status"] == "tombstone"
+    )
+    if tombstone_finding_ids:
+        raise InputRefused(
+            "v2 source contains unsupported tombstone template findings"
+        )
+    expected_reviewable_finding_ids = {
+        issue_id
+        for issue_id in expected_finding_ids
+        if all_issue_by_id[issue_id]["status"] != "tombstone"
+    }
     expected_selected_ids = sorted(
-        set(expected_nonclosed_ids) | expected_finding_ids
+        set(expected_nonclosed_ids) | expected_reviewable_finding_ids
     )
     expected_closed_finding_ids = (
-        expected_finding_ids - set(expected_nonclosed_ids)
+        expected_reviewable_finding_ids - set(expected_nonclosed_ids)
     )
     observation_counts = {
         "live_issue_count": len(all_issues),
@@ -25867,7 +26249,14 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         != semantic_root(expected_nonclosed_ids)
         or observation["selected_review_issue_ids_root"]
         != semantic_root(expected_selected_ids)
-        or observation["status_cut"] != list(STATUS_SCOPES)
+        or observation["status_cut"]
+        != list(
+            v2_canonical_status_scopes(
+                scope
+                for scope in captured["v1_lint_projection"]
+                if scope != "all"
+            )
+        )
         or v1_inventory_ids != expected_selected_ids
         or any(
             type(observation[field]) is not int
@@ -25885,6 +26274,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         full_issues=all_issues,
         lint=captured["v1_lint_projection"],
         tracker_status=observation["tracker_status"],
+        tracker_ready_issue_ids=tracker_ready_issue_ids,
         sync_status=observation["sync_status"],
         export_witness=observation["export_witness"],
         version=observation["br_version"],
@@ -27788,6 +28178,15 @@ def v2_fixture_br_envelopes(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     status = str(full_issue["status"])
     exported_count = int(v2_issue_is_exportable(full_issue))
+    fixture_ready = (
+        status == "open"
+        and full_issue.get("pinned") is not True
+        and full_issue.get("ephemeral") is not True
+        and full_issue.get("is_template") is not True
+        and "-wisp-" not in str(full_issue["id"])
+        and not str(full_issue.get("defer_until") or "")
+        and not list(full_issue.get("dependencies") or ())
+    )
     tracker_status = v2_normalize_br_status(
         {
             "summary": {
@@ -27795,14 +28194,16 @@ def v2_fixture_br_envelopes(
                 "blocked_issues": int(status == "blocked"),
                 "closed_issues": int(status == "closed"),
                 "deferred_issues": int(status == "deferred"),
-                "draft_issues": 0,
+                "draft_issues": int(status == "draft"),
                 "epics_eligible_for_closure": 0,
                 "in_progress_issues": int(status == "in_progress"),
                 "open_issues": int(status == "open"),
-                "pinned_issues": 0,
-                "ready_issues": 0,
-                "tombstone_issues": 0,
-                "total_issues": 1,
+                "pinned_issues": int(
+                    full_issue.get("pinned") is True or status == "pinned"
+                ),
+                "ready_issues": int(fixture_ready),
+                "tombstone_issues": int(status == "tombstone"),
+                "total_issues": int(status != "tombstone"),
             }
         },
         error_type=EvidenceFailed,
@@ -28199,6 +28600,11 @@ def v2_replayable_fixture_bundle(
         fixture_sync_status,
         fixture_export_witness,
     ) = v2_fixture_br_envelopes(full_issue)
+    fixture_ready_issue_ids = (
+        [full_issue["id"]]
+        if fixture_tracker_status["summary"]["ready_issues"] == 1
+        else []
+    )
     fixture_source_files = v2_source_file_identities()
     fixture_source_files[2] = {
         **fixture_source_files[2],
@@ -28211,6 +28617,7 @@ def v2_replayable_fixture_bundle(
     }
     fixture_round_projections = v2_observation_command_projection_entries(
         tracker_status=fixture_tracker_status,
+        tracker_ready_issue_ids=fixture_ready_issue_ids,
         sync_status=fixture_sync_status,
         export_witness=fixture_export_witness,
         version=fixture_br_version,
@@ -28266,6 +28673,7 @@ def v2_replayable_fixture_bundle(
         full_issues=[full_issue],
         lint=lint,
         tracker_status=fixture_tracker_status,
+        tracker_ready_issue_ids=fixture_ready_issue_ids,
         sync_status=fixture_sync_status,
         export_witness=fixture_export_witness,
         version=fixture_br_version,
@@ -28303,6 +28711,10 @@ def v2_replayable_fixture_bundle(
             "br_version": fixture_br_version,
             "br_capabilities": fixture_br_capabilities,
             "tracker_status": fixture_tracker_status,
+            "tracker_ready_issue_ids": fixture_ready_issue_ids,
+            "tracker_ready_issue_ids_root": semantic_root(
+                fixture_ready_issue_ids
+            ),
             "sync_status": fixture_sync_status,
             "export_witness": fixture_export_witness,
             "case_manifest_root": accepted_manifest["semantic_root"],
@@ -33031,6 +33443,7 @@ def v2_execute_source_cases(
         *,
         lint: Mapping[str, Any] | None = None,
         tracker_status: Mapping[str, Any] | None = None,
+        tracker_ready_issue_ids: Sequence[str] = (),
         capabilities: Mapping[str, Any] | None = None,
         source_files: Sequence[Mapping[str, Any]] | None = None,
         rule_contract: Mapping[str, Any] | None = None,
@@ -33052,6 +33465,7 @@ def v2_execute_source_cases(
             full_issues=ordered,
             lint=normalized_lint,
             tracker_status=dict(tracker_status or {"state": "clean"}),
+            tracker_ready_issue_ids=tracker_ready_issue_ids,
             sync_status={"state": "synchronized"},
             export_witness={"state": "current"},
             version={"version": "0.2.19"},
