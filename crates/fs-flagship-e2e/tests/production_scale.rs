@@ -1633,7 +1633,7 @@ fn production_scale_sparse_lbm_million_cells() {
     let lease_while_live = retained_lease.receipt();
     let lease_live_pass = retained_charge.bytes() == retained_lease_bytes
         && lease_while_live.limit_bytes == Some(retained_lease_bytes)
-        && lease_while_live.requested_bytes == retained_lease_bytes
+        && lease_while_live.requested_bytes == retained_lease_bytes as u128
         && lease_while_live.peak_bytes == retained_lease_bytes
         && lease_while_live.used_bytes == retained_lease_bytes
         && lease_while_live.refusals == 0
@@ -1661,7 +1661,7 @@ fn production_scale_sparse_lbm_million_cells() {
     let lease_after_drop = retained_lease.receipt();
     let release_pass = lease_after_drop.limit_bytes == Some(retained_lease_bytes)
         && lease_after_drop.used_bytes == 0
-        && lease_after_drop.requested_bytes == retained_lease_bytes
+        && lease_after_drop.requested_bytes == retained_lease_bytes as u128
         && lease_after_drop.peak_bytes == retained_lease_bytes
         && lease_after_drop.refusals == 0
         && lease_after_drop.first_refusal.is_none()

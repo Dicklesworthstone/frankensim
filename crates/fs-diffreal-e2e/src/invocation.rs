@@ -214,13 +214,13 @@ impl AsBuiltInvocationPlan {
             && children[0].direct_consumed() == setup.consumed
             && children[0].direct_memory_peak_bytes() == setup.memory
             && children[0].memory_peak_bytes() == transaction_memory_peak
-            && children[0].memory_requested_bytes() == setup.memory
-            && children[0].memory_released_bytes() == setup.memory
+            && children[0].memory_requested_bytes() == setup.memory as u128
+            && children[0].memory_released_bytes() == setup.memory as u128
             && children[0].output_retained_bytes() == 0
             && receipt.remaining() == expected_remaining
             && receipt.memory_peak_bytes() == transaction_memory_peak
-            && receipt.memory_requested_bytes() == requested_memory
-            && receipt.memory_released_bytes() == requested_memory
+            && receipt.memory_requested_bytes() == requested_memory as u128
+            && receipt.memory_released_bytes() == requested_memory as u128
             && receipt.output_retained_bytes() == retained_output
     }
 }
@@ -250,8 +250,8 @@ fn leaf_evidence_matches(child: &fs_exec::ChildReceipt, expected: ExpectedLeafEv
         && child.direct_consumed() == expected.consumed
         && child.direct_memory_peak_bytes() == expected.memory
         && child.memory_peak_bytes() == expected.memory
-        && child.memory_requested_bytes() == expected.memory
-        && child.memory_released_bytes() == expected.memory
+        && child.memory_requested_bytes() == expected.memory as u128
+        && child.memory_released_bytes() == expected.memory as u128
         && child.output_retained_bytes() == expected.consumed.output().get()
 }
 
