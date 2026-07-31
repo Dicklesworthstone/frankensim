@@ -1747,12 +1747,14 @@ def v2_read_repo_relative_file_strict(
     relative = safe_relative(value, label=label)
     if type(cap) is not int or cap < 0:
         raise EvidenceFailed(f"{label} strict-read cap is invalid")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0)
-    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
-    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    file_flags |= getattr(os, "O_NONBLOCK", 0)
-    file_flags |= getattr(os, "O_NOFOLLOW", 0)
+    # The harness is already POSIX-only (`fcntl`, descriptor-relative opens,
+    # and `pread`). Keep every security-relevant flag as a statically visible
+    # module attribute so refusal-state analysis binds the exact constants
+    # instead of treating a dynamic `getattr(os, ...)` as unbounded module use.
+    directory_flags = (
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    )
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
     directory_descriptors: list[int] = []
     directory_links: list[tuple[int, str, int, int, int]] = []
     file_descriptor: int | None = None
