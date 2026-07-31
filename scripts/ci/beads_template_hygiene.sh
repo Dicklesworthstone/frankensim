@@ -468,9 +468,9 @@ V2_LOG_FORBIDDEN_CONTENT = (
     "source_repo_path",
     "absolute path",
     "bulk issue body",
-    "credential",
-    "secret",
-    "token",
+    "sensitive assignment value",
+    "authorization header value",
+    "split sensitive option value",
     "environment value",
     "process ID",
     "thread ID",
@@ -2640,6 +2640,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "reviewed_dimension_root_fields",
         "root_bound_review_requires_all_dimensions",
         "semantic_disposition_required_signals",
+        "semantic_disposition_exact_signal_dimensions",
+        "remediation_required_dimension_policy",
+        "non_remediation_dimension_policy",
         "reviewed_no_change_requires_all_dimensions_satisfied",
         "non_remediation_dispositions_forbid_findings",
         "unreviewed_action",
@@ -2652,12 +2655,19 @@ V2_MANIFEST_TABLE_KEYS = {
         "audit_capture_uses_bounded_runner",
         "source_closure_states",
         "source_closure_transition",
+        "review_receipt_scope_schema",
+        "review_receipt_scope_fields",
+        "review_receipt_provenance_fields",
+        "review_receipt_scope_root_policy",
+        "empty_review_receipt_envelope_current_campaign",
         "source_document_required_fields",
         "source_manifest_required_fields",
         "source_capture_required_fields",
         "source_capture_root_required_fields",
         "source_contract_required_fields",
         "source_observation_required_fields",
+        "source_capture_contract_required_fields",
+        "source_audit_bracket_required_fields",
         "source_all_issue_required_fields",
         "source_relation_required_fields",
         "source_command_receipt_required_fields",
@@ -2665,6 +2675,21 @@ V2_MANIFEST_TABLE_KEYS = {
         "audit_capture_required_fields",
         "audit_capture_not_requested_required_fields",
         "audit_command_receipt_required_fields",
+        "tracker_status_summary_required_fields",
+        "sync_status_required_fields",
+        "sync_reliability_required_fields",
+        "sync_reliability_anomaly_required_fields",
+        "sync_git_export_required_fields",
+        "export_witness_required_fields",
+        "export_witness_body_required_fields",
+        "export_witness_chunk_required_fields",
+        "export_witness_comparison_required_fields",
+        "export_witness_action_required_fields",
+        "export_witness_schedule_required_fields",
+        "export_witness_materialization_required_fields",
+        "export_witness_parallel_required_fields",
+        "export_witness_batch_required_fields",
+        "audit_capture_position",
     },
     "row_contract": {
         "required_fields",
@@ -2771,8 +2796,13 @@ V2_MANIFEST_TABLE_KEYS = {
         "movement_requires_destination_root_kind",
         "prior_target_absent_from_current_universe",
         "prior_target_outside_selected_inventory",
-        "clean_closure_successor_reason",
-        "clean_closure_successor_required_fields",
+        "scope_successor_finding_states",
+        "scope_successor_reasons",
+        "scope_successor_required_fields",
+        "current_finding_membership",
+        "nonclosed_filtered_current_finding",
+        "nonclosed_without_current_finding",
+        "movement_required_fields",
         "movement_successor_lineage_fields",
     },
     "cli_contract": {
@@ -2789,6 +2819,8 @@ V2_MANIFEST_TABLE_KEYS = {
         "duplicate_options",
         "review_receipts_option",
         "review_receipts_paths",
+        "review_receipts_read_policy",
+        "review_receipts_aliases",
         "priority_filter_option",
         "status_filter_option",
         "target_filter_option",
@@ -2810,6 +2842,13 @@ V2_MANIFEST_TABLE_KEYS = {
         "cancelled_exit",
         "infrastructure_failure_exit",
         "internal_fault_exit",
+        "v2_replay_mode",
+        "legacy_replay_mode",
+        "legacy_replay_dispatch",
+        "explicit_v2_replay_terminal_schema",
+        "explicit_replay_preclassified",
+        "legacy_replay_preclassified",
+        "replay_auxiliary_options",
     },
     "synopsis_contract": {
         "encoding",
@@ -2907,6 +2946,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "assertion_check_required_fields",
         "self_test_log_line_cap",
         "split_form_sensitive_argv_redaction",
+        "diagnostic_contextual_redaction",
+        "assertion_sensitive_value_projection",
+        "assertion_mapping_key_policy",
     },
     "replay_contract": {
         "artifact_only",
@@ -2927,6 +2969,16 @@ V2_MANIFEST_TABLE_KEYS = {
         "replay_proves_current_tracker_state",
         "semantic_refusal_behavior",
         "semantic_refusal_replay_mints_pass",
+        "result_schema",
+        "result_required_fields",
+        "result_rooted",
+        "execution_process_guard",
+        "explicit_cli_mode",
+        "legacy_cli_mode",
+        "legacy_dispatch",
+        "v2_terminal_schema_required",
+        "reproduction_mode",
+        "explicit_cli_subprocess_proof",
     },
     "caps": {
         "max_inventory_rows",
@@ -3675,7 +3727,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or logging_contract["subprocess_stream_cap_accounting"]
         != "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
         or logging_contract["subprocess_argv_redaction"]
-        != "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
+        != (
+            "COUNT_AND_BYTES_BOUNDED_CONTEXTUAL_SENSITIVE_VALUE_AND_"
+            "ABSOLUTE_PATH_REDACTED"
+        )
         or not v2_manifest_closed_field_list(
             logging_contract["assertion_result_required_fields"],
             V2_ASSERTION_RESULT_FIELDS,
@@ -3688,6 +3743,15 @@ def load_case_manifest_v2() -> dict[str, Any]:
         != "EVERY_EMITTED_JSONL_DOCUMENT"
         or logging_contract["split_form_sensitive_argv_redaction"]
         != "OPTION_NAME_RETAINED_VALUE_HASH_REDACTED"
+        or logging_contract["diagnostic_contextual_redaction"]
+        != (
+            "AUTHORIZATION_HEADERS_ASSIGNMENTS_SPLIT_OPTIONS_MULTILINE_"
+            "AND_UNCLOSED_QUOTES_REDACTED"
+        )
+        or logging_contract["assertion_sensitive_value_projection"]
+        != "ROOT_ONLY_FOR_ALL_SCALAR_AND_CONTAINER_TYPES"
+        or logging_contract["assertion_mapping_key_policy"]
+        != "STRING_ONLY_PATH_OR_ASSIGNMENT_KEYS_ROOT_REDACTED_COLLISIONS_REFUSED"
     ):
         raise InputRefused("v2 assertion logging contract differs")
     if not v2_manifest_ordered_string_list(
@@ -3726,6 +3790,13 @@ def load_case_manifest_v2() -> dict[str, Any]:
         raise InputRefused("v2 authority identity contract drifted")
     source_contract = document["source_contract"]
     expected_semantic_signals = dict(V2_SEMANTIC_SIGNAL_BY_DISPOSITION)
+    expected_exact_semantic_signals = {
+        disposition: f"{dimension}={signal}"
+        for disposition, (
+            dimension,
+            signal,
+        ) in V2_SEMANTIC_EXACT_SIGNAL_DIMENSION.items()
+    }
     if (
         source_contract["inventory_scope"]
         != "ALL_NONCLOSED_PLUS_CLOSED_FINDINGS"
@@ -3773,6 +3844,12 @@ def load_case_manifest_v2() -> dict[str, Any]:
         is not True
         or source_contract["semantic_disposition_required_signals"]
         != expected_semantic_signals
+        or source_contract["semantic_disposition_exact_signal_dimensions"]
+        != expected_exact_semantic_signals
+        or source_contract["remediation_required_dimension_policy"]
+        != "ALL_SATISFIED_OR_FINDING_AND_AT_LEAST_ONE_FINDING"
+        or source_contract["non_remediation_dimension_policy"]
+        != "ALL_SATISFIED_EXCEPT_EXACT_SINGLE_DECLARED_SIGNAL"
         or source_contract[
             "reviewed_no_change_requires_all_dimensions_satisfied"
         ]
@@ -3808,6 +3885,20 @@ def load_case_manifest_v2() -> dict[str, Any]:
             "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_"
             "DETERMINES_CLOSED_STATE"
         )
+        or source_contract["review_receipt_scope_schema"]
+        != V2_REVIEW_RECEIPT_SCOPE_SCHEMA
+        or not v2_manifest_ordered_string_list(
+            source_contract["review_receipt_scope_fields"],
+            V2_REVIEW_RECEIPT_SCOPE_FIELDS,
+        )
+        or not v2_manifest_ordered_string_list(
+            source_contract["review_receipt_provenance_fields"],
+            V2_REVIEW_RECEIPT_PROVENANCE_FIELDS,
+        )
+        or source_contract["review_receipt_scope_root_policy"]
+        != "EXCLUDES_ONLY_INVENTORY_ROOT_AND_CAMPAIGN_EPOCH_ROOT"
+        or source_contract["empty_review_receipt_envelope_current_campaign"]
+        is not True
         or not v2_manifest_closed_field_list(
             source_contract["source_document_required_fields"],
             V2_SOURCE_FIELDS,
@@ -3831,6 +3922,14 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or not v2_manifest_closed_field_list(
             source_contract["source_observation_required_fields"],
             V2_SOURCE_OBSERVATION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["source_capture_contract_required_fields"],
+            V2_SOURCE_CAPTURE_CONTRACT_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["source_audit_bracket_required_fields"],
+            V2_AUDIT_BRACKET_FIELDS,
         )
         or not v2_manifest_closed_field_list(
             source_contract["source_all_issue_required_fields"],
@@ -3862,6 +3961,66 @@ def load_case_manifest_v2() -> dict[str, Any]:
             source_contract["audit_command_receipt_required_fields"],
             V2_AUDIT_COMMAND_RECEIPT_FIELDS,
         )
+        or not v2_manifest_closed_field_list(
+            source_contract["tracker_status_summary_required_fields"],
+            V2_BR_STATUS_SUMMARY_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["sync_status_required_fields"],
+            V2_BR_SYNC_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["sync_reliability_required_fields"],
+            V2_BR_RELIABILITY_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["sync_reliability_anomaly_required_fields"],
+            V2_BR_RELIABILITY_ANOMALY_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["sync_git_export_required_fields"],
+            V2_BR_GIT_EXPORT_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_required_fields"],
+            V2_BR_WITNESS_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_body_required_fields"],
+            V2_BR_WITNESS_BODY_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_chunk_required_fields"],
+            V2_BR_WITNESS_CHUNK_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_comparison_required_fields"],
+            V2_BR_WITNESS_COMPARISON_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_action_required_fields"],
+            V2_BR_WITNESS_ACTION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_schedule_required_fields"],
+            V2_BR_WITNESS_SCHEDULE_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract[
+                "export_witness_materialization_required_fields"
+            ],
+            V2_BR_WITNESS_MATERIALIZATION_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_parallel_required_fields"],
+            V2_BR_WITNESS_PARALLEL_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            source_contract["export_witness_batch_required_fields"],
+            V2_BR_WITNESS_BATCH_FIELDS,
+        )
+        or source_contract["audit_capture_position"]
+        != "BETWEEN_SOURCE_CAPTURE_ROUNDS"
     ):
         raise InputRefused("v2 semantic-review source contract differs")
     row_fields = document["row_contract"]["required_fields"]
@@ -3982,40 +4141,66 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or history_contract["movement_requires_current_universe_count"]
         is not True
         or history_contract["movement_destination_root_kinds"]
-        != ["INVENTORY_TARGET", "FULL_UNIVERSE_SUCCESSOR"]
+        != [
+            "INVENTORY_TARGET",
+            "FULL_UNIVERSE_FILTERED_FINDING",
+            "FULL_UNIVERSE_CLEAN_SUCCESSOR",
+        ]
         or history_contract["movement_requires_destination_root_kind"]
         is not True
         or history_contract["prior_target_absent_from_current_universe"]
         != "REFUSE"
         or history_contract["prior_target_outside_selected_inventory"]
-        != "REQUIRE_CLOSED_WITHOUT_CURRENT_FINDING_SUCCESSOR"
-        or history_contract["clean_closure_successor_reason"]
-        != "CLOSED_WITHOUT_CURRENT_FINDING"
-        or history_contract["clean_closure_successor_required_fields"]
+        != "REQUIRE_TYPED_CURRENT_FINDING_OR_CLOSED_CLEAN_SUCCESSOR"
+        or history_contract["scope_successor_finding_states"]
+        != ["CURRENT_FINDING", "NO_CURRENT_FINDING"]
+        or history_contract["scope_successor_reasons"]
         != [
-            "issue_id",
-            "status",
-            "priority",
-            "destination_root",
-            "current_universe_root",
-            "reason",
-            "no_claim",
-            "semantic_root",
+            "FILTERED_CURRENT_FINDING",
+            "CLOSED_WITHOUT_CURRENT_FINDING",
         ]
+        or not v2_manifest_closed_field_list(
+            history_contract["scope_successor_required_fields"],
+            V2_SCOPE_SUCCESSOR_FIELDS,
+        )
+        or history_contract["current_finding_membership"]
+        != "FULL_SOURCE_DERIVED_EXPLICIT_ROOT_REQUIRED"
+        or history_contract["nonclosed_filtered_current_finding"]
+        != "ALLOW_TYPED_FILTERED_SUCCESSOR"
+        or history_contract["nonclosed_without_current_finding"]
+        != "REFUSE"
+        or not v2_manifest_closed_field_list(
+            history_contract["movement_required_fields"],
+            V2_MOVEMENT_RECEIPT_FIELDS,
+        )
         or history_contract["movement_successor_lineage_fields"]
         != [
-            "issue_id",
-            "source_root",
-            "destination_root",
-            "destination_root_kind",
-            "current_universe_root",
-            "before_status",
-            "after_status",
-            "before_priority",
-            "after_priority",
+            *V2_MOVEMENT_SUCCESSOR_LINEAGE_FIELDS,
         ]
     ):
         raise InputRefused("v2 clean-closure movement contract differs")
+    cli_contract = document["cli_contract"]
+    if (
+        cli_contract["planner_modes"]
+        != ["--review-plan", "--history-plan"]
+        or cli_contract["review_receipts_paths"] != "SAFE_RELATIVE_ONLY"
+        or cli_contract["review_receipts_read_policy"]
+        != (
+            "DESCRIPTOR_RELATIVE_O_NOFOLLOW_UNIQUE_REGULAR_STABLE_PATH_"
+            "AND_CONTENT"
+        )
+        or cli_contract["review_receipts_aliases"] != "REFUSE"
+        or cli_contract["v2_replay_mode"] != "--replay-v2 REL"
+        or cli_contract["legacy_replay_mode"] != "--replay REL"
+        or cli_contract["legacy_replay_dispatch"]
+        != "TERMINAL_SCHEMA_AUTODETECT_COMPATIBILITY"
+        or cli_contract["explicit_v2_replay_terminal_schema"]
+        != V2_TERMINAL_SCHEMA
+        or cli_contract["explicit_replay_preclassified"] is not True
+        or cli_contract["legacy_replay_preclassified"] is not False
+        or cli_contract["replay_auxiliary_options"] != "REFUSE"
+    ):
+        raise InputRefused("v2 CLI and replay-mode contract differs")
     artifact_contract = document["artifact_contract"]
     if (
         artifact_contract["bundle_states"]
@@ -4060,18 +4245,62 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or logging_contract["subprocess_stream_cap_accounting"]
         != "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
         or logging_contract["subprocess_argv_redaction"]
-        != "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
+        != (
+            "COUNT_AND_BYTES_BOUNDED_CONTEXTUAL_SENSITIVE_VALUE_AND_"
+            "ABSOLUTE_PATH_REDACTED"
+        )
     ):
         raise InputRefused("v2 bounded subprocess logging contract differs")
+    replay_contract = document["replay_contract"]
     if (
-        document["replay_contract"]["semantic_refusal_behavior"]
-        != "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
-        or document["replay_contract"][
-            "semantic_refusal_replay_mints_pass"
+        replay_contract["artifact_only"] is not True
+        or replay_contract["live_tracker_reads"] != "FORBIDDEN"
+        or replay_contract["live_tracker_writes"] != "FORBIDDEN"
+        or replay_contract["network_access"] != "FORBIDDEN"
+        or replay_contract["output_is_disjoint"] is not True
+        or replay_contract["overwrite"] != "FORBIDDEN"
+        or replay_contract[
+            "missing_unlisted_duplicate_changed_unsafe_extra"
+        ]
+        != "REFUSE"
+        or replay_contract["selected_projection_required"] is not True
+        or replay_contract["not_requested_projection_required"] is not True
+        or replay_contract["all_status_partition_required"] is not True
+        or replay_contract[
+            "oversize_inventory_required_when_nonempty"
+        ]
+        is not True
+        or replay_contract["first_divergence_required"] is not True
+        or replay_contract["v2_manifest_root_required"] is not True
+        or replay_contract["v1_manifest_root_required"] is not False
+        or replay_contract["replay_mints_authority"] is not False
+        or replay_contract[
+            "replay_proves_current_tracker_state"
         ]
         is not False
+        or replay_contract["semantic_refusal_behavior"]
+        != "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
+        or replay_contract["semantic_refusal_replay_mints_pass"]
+        is not False
+        or replay_contract["result_schema"] != V2_REPLAY_RESULT_SCHEMA
+        or not v2_manifest_closed_field_list(
+            replay_contract["result_required_fields"],
+            V2_REPLAY_RESULT_FIELDS,
+        )
+        or replay_contract["result_rooted"] is not True
+        or replay_contract["execution_process_guard"]
+        != "PROCESS_WIDE_REENTRANT_FAIL_CLOSED_SUBPROCESS_EXCLUSION"
+        or replay_contract["explicit_cli_mode"] != "--replay-v2"
+        or replay_contract["legacy_cli_mode"] != "--replay"
+        or replay_contract["legacy_dispatch"]
+        != "SCHEMA_AUTODETECT_AFTER_UNCLASSIFIED_PREFLIGHT"
+        or replay_contract["v2_terminal_schema_required"]
+        != V2_TERMINAL_SCHEMA
+        or replay_contract["reproduction_mode"] != "--replay-v2"
+        or replay_contract["explicit_cli_subprocess_proof"]
+        != "ARTIFACT_BACKED_SUCCESS_AND_TYPED_FAILURE_MATRIX"
     ):
-        raise InputRefused("v2 semantic-refusal replay contract differs")
+        raise InputRefused("v2 offline replay contract differs")
 
     v1_path = resolve_safe(
         str(CASE_MANIFEST_REL),
@@ -14262,28 +14491,7 @@ def v2_validate_zero_sets(
             )
         v2_exact_keys(
             movement,
-            {
-                "schema",
-                "issue_id",
-                "class",
-                "before_status",
-                "after_status",
-                "before_priority",
-                "after_priority",
-                "source_root",
-                "destination_root",
-                "destination_root_kind",
-                "destination_finding_state",
-                "destination_reason",
-                "current_universe_root",
-                "current_finding_issue_ids_root",
-                "prior_campaign_root",
-                "prior_campaign_epoch_root",
-                "current_campaign_root",
-                "immutable_prior_evidence",
-                "successor_lineage_root",
-                "semantic_root",
-            },
+            V2_MOVEMENT_RECEIPT_FIELDS,
             label=f"zero-set movement {index}",
         )
         verify_semantic_root(movement, label=f"zero-set movement {index}")
@@ -38470,14 +38678,17 @@ def v2_execute_artifact_cases(
         checks.check(
             "offline-replay-guard-reentrant-exception-safe",
             _v2_offline_replay_depth == 0
+            and _v2_active_subprocesses == 0
             and post_guard.returncode == 0
             and post_guard.stdout == "guard-restored\n",
             expected={
                 "scope_depth": 0,
+                "active_subprocesses": 0,
                 "post_guard_stdout": "guard-restored\n",
             },
             observed={
                 "scope_depth": _v2_offline_replay_depth,
+                "active_subprocesses": _v2_active_subprocesses,
                 "post_guard_returncode": post_guard.returncode,
                 "post_guard_stdout_root": text_root(post_guard.stdout),
             },
@@ -45162,19 +45373,53 @@ def _v2_execute_nomock_cases_impl(
                     raise InfrastructureFailed(
                         "explicit replay subprocess nonce could not be generated"
                     ) from error
-                offline_path_entries = list(
-                    dict.fromkeys(
-                        (
-                            str(Path(sys.executable).parent),
-                            "/usr/bin",
-                            "/bin",
-                        )
-                    )
+                offline_root, offline_dir = v2_fresh_nomock_artifact_location(
+                    manifest,
+                    label="offline-replay-command-path",
+                    identity_binding={"nonce": replay_subprocess_nonce},
                 )
-                offline_path = os.pathsep.join(offline_path_entries)
-                tracker_cli_visible = any(
-                    os.access(Path(entry) / "br", os.X_OK)
-                    for entry in offline_path_entries
+                offline_directory = resolve_run_dir(
+                    offline_root,
+                    offline_dir,
+                    label="offline replay command path fixture",
+                )
+                offline_bin = offline_directory / "bin"
+                offline_bin.mkdir(parents=True, exist_ok=False)
+
+                def shell_quote(value: str) -> str:
+                    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+                dirname_binary = next(
+                    (
+                        candidate
+                        for candidate in ("/usr/bin/dirname", "/bin/dirname")
+                        if os.access(candidate, os.X_OK)
+                    ),
+                    None,
+                )
+                if dirname_binary is None:
+                    raise InfrastructureFailed(
+                        "offline replay command path lacks dirname"
+                    )
+                for command_name, executable in (
+                    ("bash", "/bin/bash"),
+                    ("python3", sys.executable),
+                    ("dirname", dirname_binary),
+                ):
+                    launcher = offline_bin / command_name
+                    write_once(
+                        launcher,
+                        (
+                            "#!/bin/sh\nexec "
+                            + shell_quote(str(executable))
+                            + " \"$@\"\n"
+                        ).encode("utf-8"),
+                    )
+                    os.chmod(launcher, 0o755)
+                offline_path = str(offline_bin)
+                tracker_cli_visible = os.access(
+                    offline_bin / "br",
+                    os.X_OK,
                 )
                 offline_environment = {"PATH": offline_path}
 
