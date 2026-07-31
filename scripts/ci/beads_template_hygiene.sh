@@ -28203,7 +28203,12 @@ def v2_code_access_analysis(
                 continue
             path: list[str] = []
             for following in instructions[index + 1 :]:
-                if following.opname not in {"LOAD_ATTR", "LOAD_METHOD"}:
+                if following.opname not in {
+                    "LOAD_ATTR",
+                    "LOAD_METHOD",
+                    "STORE_ATTR",
+                    "DELETE_ATTR",
+                }:
                     break
                 if not isinstance(following.argval, str):
                     break
