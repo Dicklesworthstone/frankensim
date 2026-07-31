@@ -17,8 +17,11 @@ exec python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+import builtins
 from bisect import bisect_left
 from contextlib import contextmanager
+import dataclasses
+import dis
 import errno
 import fcntl
 import hashlib
@@ -29,15 +32,16 @@ import re
 import selectors
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import threading
 import time
 import types
 import unicodedata
-from collections import Counter, OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, MISSING, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -68,7 +72,7 @@ CASE_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v1"
 
 V2_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v2"
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = (
-    "sha256-v1:788dd9ff88a7a1d15433c25674a188e56d45b460a23689a9438eb8f91b89694c"
+    "sha256-v1:1eee13b13af4e1e21f71d5725d7f4c3d713b23cf20a275bf7807f6a7f0ecc7c9"
 )
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY = (
     "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
@@ -4982,13 +4986,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
     document["semantic_root"] = semantic_root(
         {key: value for key, value in document.items() if key != "semantic_root"}
     )
-    registry = v2_build_executor_registry(document)
-    if set(registry) != set(assertion_ids) or any(
-        not callable(executor) for executor in registry.values()
-    ):
-        raise InputRefused(
-            "v2 compiled executor registry differs from assertion membership"
-        )
+    # The runtime-only callable registry is proved by the dedicated
+    # compiled-executor-bijection assertion. Manifest admission binds the
+    # closed assertion membership without pulling every executor function into
+    # refusal-state projections merely because a registry stores it as data.
     return document
 
 
@@ -5032,6 +5033,17 @@ def canonical_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "assignee": str(issue.get("assignee") or ""),
         "owner": str(issue.get("owner") or ""),
         "parent": str(issue.get("parent") or ""),
+        "estimated_minutes": issue.get("estimated_minutes"),
+        "due_at": str(issue.get("due_at") or ""),
+        "defer_until": str(issue.get("defer_until") or ""),
+        "close_reason": str(issue.get("close_reason") or ""),
+        "ephemeral": issue.get("ephemeral") is True,
+        "pinned": issue.get("pinned") is True,
+        "is_template": issue.get("is_template") is True,
+        "external_ref": str(issue.get("external_ref") or ""),
+        "source_system": str(issue.get("source_system") or ""),
+        "source_repo": str(issue.get("source_repo") or ""),
+        "agent_context": str(issue.get("agent_context") or ""),
         "labels": sorted(str(label) for label in (issue.get("labels") or [])),
         "description": str(issue.get("description") or ""),
         "acceptance_criteria": str(issue.get("acceptance_criteria") or ""),
@@ -7309,17 +7321,34 @@ def v2_normalize_br_sync_status(
             raise error_type(
                 "br sync git export worktree hash disagrees with file presence"
             )
-        if normalized_git_export["index_clean"] and (
-            normalized_git_export["tracked"]
-            != (normalized_git_export["head_hash"] is not None)
-        ):
+        tracked = normalized_git_export["tracked"]
+        head_present = normalized_git_export["head_hash"] is not None
+        worktree_present = (
+            normalized_git_export["worktree_hash"] is not None
+        )
+        index_clean = normalized_git_export["index_clean"]
+        worktree_clean = normalized_git_export["worktree_clean"]
+        if index_clean and tracked != head_present:
             raise error_type(
                 "clean br sync index disagrees with HEAD path presence"
             )
+        if not tracked and not head_present and not index_clean:
+            raise error_type(
+                "absent br sync index and HEAD cannot be dirty"
+            )
+        if worktree_clean and tracked != worktree_present:
+            raise error_type(
+                "clean br sync worktree disagrees with index/worktree path "
+                "presence"
+            )
+        if not tracked and not worktree_present and not worktree_clean:
+            raise error_type(
+                "absent br sync index and worktree cannot be dirty"
+            )
         if (
-            normalized_git_export["tracked"]
-            and normalized_git_export["worktree_clean"]
-            and normalized_git_export["index_clean"]
+            tracked
+            and worktree_clean
+            and index_clean
             and normalized_git_export["head_hash"]
             != normalized_git_export["worktree_hash"]
         ):
@@ -11765,10 +11794,46 @@ def fixture_br_json(
 
 def fixture_br_list() -> list[dict[str, Any]]:
     document = fixture_br_json("list", "--all", "--deferred", "--limit", "0")
-    issues = document.get("issues") if isinstance(document, dict) else None
-    if not isinstance(issues, list) or document.get("has_more"):
-        raise InfrastructureFailed("fixture br list is malformed or truncated")
-    return [dict(issue) for issue in issues]
+    v2_list_issue_ids(document, label="fixture br database list")
+    return [dict(issue) for issue in document["issues"]]
+
+
+def fixture_br_export_list() -> list[dict[str, Any]]:
+    """Read the fixture's exported JSONL through released br, never directly."""
+    with fixture_br_lease():
+        fixture_root = resolve_safe(
+            str(FIXTURE_BR_ROOT_REL),
+            label="no-mock fixture root",
+            must_exist=True,
+        )
+        completed = run_command(
+            (
+                "br",
+                "list",
+                "--all",
+                "--deferred",
+                "--limit",
+                "0",
+                "--json",
+                "--no-db",
+                "--no-auto-flush",
+                "--no-auto-import",
+                "--no-color",
+            ),
+            command_cwd=fixture_root,
+            record_global_receipt=False,
+        )
+    try:
+        document = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise InfrastructureFailed(
+            "fixture br JSONL-only list emitted malformed JSON"
+        ) from error
+    v2_list_issue_ids(
+        document,
+        label="fixture br JSONL-only list",
+    )
+    return [dict(issue) for issue in document["issues"]]
 
 
 def fixture_br_show(issue_id: str) -> dict[str, Any]:
@@ -11975,21 +12040,36 @@ def _fixture_br_context_locked() -> dict[str, str]:
 
         fixture_br_json("sync", "--flush-only")
         fixture_rows = fixture_br_list()
-        expected_exported_rows = sum(
-            row.get("ephemeral") is not True
-            and "-wisp-" not in str(row.get("id") or "")
+        expected_exported_ids = sorted(
+            str(row.get("id") or "")
             for row in fixture_rows
+            if row.get("ephemeral") is not True
+            and "-wisp-" not in str(row.get("id") or "")
         )
+        exported_rows = fixture_br_export_list()
+        exported_ids = sorted(str(row.get("id") or "") for row in exported_rows)
         post_flush_status = fixture_br_json("sync", "--status")
         post_flush_witness = fixture_br_json("sync", "--witness")
-        witness_body = post_flush_witness.get("witness")
+        normalized_witness = v2_normalize_br_export_witness(
+            post_flush_witness,
+            input_kind="released_live",
+            workspace_root=fixture_root,
+            expected_chunk_size_lines=(
+                V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+            ),
+            expected_max_parallelism=(
+                V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+            ),
+            error_type=InfrastructureFailed,
+        )
+        witness_body = normalized_witness["witness"]
         if (
             post_flush_status.get("jsonl_exists") is not True
-            or not isinstance(witness_body, dict)
-            or witness_body.get("line_count") != expected_exported_rows
+            or exported_ids != expected_exported_ids
+            or witness_body["line_count"] != len(expected_exported_ids)
         ):
             raise InfrastructureFailed(
-                "no-mock fixture export does not cover its exportable issue set"
+                "no-mock fixture database, export, and witness disagree"
             )
 
         return {
@@ -27925,136 +28005,1071 @@ def peek_replay_schema(artifact_root: str, input_dir: str) -> str:
     return document["schema"]
 
 
+V2_REFUSAL_STATE_DEPTH_CAP = 32
+V2_REFUSAL_GLOBAL_ACCESS_CAP = 4_096
+V2_REFUSAL_NODE_CAP = 65_536
+V2_REFUSAL_ITEM_CAP = 262_144
+V2_REFUSAL_SCALAR_BYTES_CAP = 16 * 1_024 * 1_024
+V2_REFUSAL_INSTRUCTION_CAP = 1_000_000
+V2_REFUSAL_PROJECTION_BYTES_CAP = 16 * 1_024 * 1_024
+V2_GLOBAL_ACCESS_OPS = frozenset(
+    {
+        "DELETE_GLOBAL",
+        "DELETE_NAME",
+        "LOAD_GLOBAL",
+        "LOAD_NAME",
+        "STORE_GLOBAL",
+        "STORE_NAME",
+    }
+)
+V2_IMPORT_OPS = frozenset({"IMPORT_FROM", "IMPORT_NAME", "IMPORT_STAR"})
+V2_REFLECTIVE_NAMESPACE_ATTRIBUTES = frozenset(
+    {"__builtins__", "__closure__", "__globals__"}
+)
+V2_DANGEROUS_BUILTIN_IDENTITIES = (
+    builtins.globals,
+    builtins.eval,
+    builtins.exec,
+    builtins.__import__,
+)
+V2_DATACLASS_SENTINEL_IDENTITIES = tuple(
+    (name, sentinel)
+    for name, sentinel in (
+        ("MISSING", MISSING),
+        ("KW_ONLY", KW_ONLY),
+        (
+            "_HAS_DEFAULT_FACTORY",
+            getattr(dataclasses, "_HAS_DEFAULT_FACTORY", None),
+        ),
+    )
+    if sentinel is not None
+)
+V2_REFUSAL_TRUSTED_MODULES = (
+    argparse,
+    builtins,
+    dis,
+    errno,
+    fcntl,
+    hashlib,
+    json,
+    math,
+    os,
+    re,
+    selectors,
+    signal,
+    stat,
+    struct,
+    subprocess,
+    sys,
+    threading,
+    time,
+    types,
+    unicodedata,
+    tomllib,
+)
+V2_REFUSAL_TRUSTED_BUILTIN_TYPES = tuple(
+    sorted(
+        {
+            item
+            for _, item in dict.items(builtins.__dict__)
+            if isinstance(item, type)
+        },
+        key=lambda value: value.__qualname__.encode("utf-8"),
+    )
+)
+V2_REFUSAL_PATH_TYPES = tuple(
+    dict.fromkeys((type(Path()), type(PurePosixPath())))
+)
+
+
+def v2_new_refusal_projection_context(
+    limits: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    accepted_limits = {
+        "nodes": V2_REFUSAL_NODE_CAP,
+        "items": V2_REFUSAL_ITEM_CAP,
+        "scalar_bytes": V2_REFUSAL_SCALAR_BYTES_CAP,
+        "instructions": V2_REFUSAL_INSTRUCTION_CAP,
+        "projection_bytes": V2_REFUSAL_PROJECTION_BYTES_CAP,
+    }
+    if limits is not None:
+        if not isinstance(limits, Mapping) or not set(limits).issubset(
+            accepted_limits
+        ):
+            raise EvidenceFailed(
+                "refusal-state projection limits have unknown dimensions"
+            )
+        for name, value in limits.items():
+            if type(value) is not int or value < 0:
+                raise EvidenceFailed(
+                    "refusal-state projection limits must be nonnegative integers"
+                )
+            accepted_limits[name] = value
+    return {
+        "limits": accepted_limits,
+        "counters": {
+            "nodes": 0,
+            "items": 0,
+            "scalar_bytes": 0,
+            "instructions": 0,
+        },
+        "object_ids": {},
+        "active_ids": set(),
+        "next_node_id": 0,
+        "global_accesses": 0,
+    }
+
+
+def v2_refusal_charge(
+    context: dict[str, Any],
+    dimension: str,
+    amount: int = 1,
+) -> None:
+    counters = context["counters"]
+    counters[dimension] += amount
+    if counters[dimension] > context["limits"][dimension]:
+        label = dimension.replace("_", " ")
+        raise EvidenceFailed(
+            f"refusal-state projection exceeds its aggregate {label} cap"
+        )
+
+
+def v2_is_dangerous_builtin(value: Any) -> bool:
+    return any(value is candidate for candidate in V2_DANGEROUS_BUILTIN_IDENTITIES)
+
+
+def v2_is_trusted_module(value: types.ModuleType) -> bool:
+    return any(value is module for module in V2_REFUSAL_TRUSTED_MODULES)
+
+
+def v2_raw_module_dict(value: types.ModuleType) -> dict[str, Any]:
+    try:
+        raw = types.ModuleType.__getattribute__(value, "__dict__")
+    except Exception as error:
+        raise EvidenceFailed(
+            "refusal-state module inspection failed without running the callback"
+        ) from error
+    if type(raw) is not dict:
+        raise EvidenceFailed("refusal-state module dictionary is not exact")
+    return raw
+
+
+def v2_code_access_analysis(
+    code: types.CodeType,
+    *,
+    context: dict[str, Any],
+    depth: int = 0,
+) -> dict[str, Any]:
+    if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+        raise EvidenceFailed("refusal-state code traversal exceeds its depth cap")
+    instructions = list(dis.get_instructions(code))
+    v2_refusal_charge(context, "instructions", len(instructions))
+    accesses: defaultdict[str, set[str]] = defaultdict(set)
+    module_paths: defaultdict[str, set[tuple[str, ...]]] = defaultdict(set)
+    bare_global_names: set[str] = set()
+    for index, instruction in enumerate(instructions):
+        if instruction.opname in V2_IMPORT_OPS:
+            raise EvidenceFailed(
+                "refusal callback contains import bytecode; provide an explicit "
+                "bounded external-state projection"
+            )
+        if (
+            instruction.opname in {"LOAD_ATTR", "LOAD_METHOD"}
+            and instruction.argval in V2_REFLECTIVE_NAMESPACE_ATTRIBUTES
+        ):
+            raise EvidenceFailed(
+                "refusal callback uses reflective namespace access; provide an "
+                "explicit bounded external-state projection"
+            )
+        if (
+            instruction.opname in V2_GLOBAL_ACCESS_OPS
+            and isinstance(instruction.argval, str)
+        ):
+            name = instruction.argval
+            accesses[name].add(instruction.opname)
+            if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+                continue
+            path: list[str] = []
+            for following in instructions[index + 1 :]:
+                if following.opname not in {"LOAD_ATTR", "LOAD_METHOD"}:
+                    break
+                if not isinstance(following.argval, str):
+                    break
+                path.append(following.argval)
+            if path:
+                module_paths[name].add(tuple(path))
+            else:
+                bare_global_names.add(name)
+    for constant in code.co_consts:
+        if not isinstance(constant, types.CodeType):
+            continue
+        nested = v2_code_access_analysis(
+            constant,
+            context=context,
+            depth=depth + 1,
+        )
+        for name, operations in nested["accesses"].items():
+            accesses[name].update(operations)
+        for name, paths in nested["module_paths"].items():
+            module_paths[name].update(paths)
+        bare_global_names.update(nested["bare_global_names"])
+    context["global_accesses"] += len(accesses)
+    if context["global_accesses"] > V2_REFUSAL_GLOBAL_ACCESS_CAP:
+        raise EvidenceFailed(
+            "refusal-state transitive global access set exceeds its cap"
+        )
+    return {
+        "accesses": {
+            name: tuple(sorted(operations))
+            for name, operations in sorted(
+                accesses.items(),
+                key=lambda row: row[0].encode("utf-8"),
+            )
+        },
+        "module_paths": {
+            name: tuple(sorted(paths))
+            for name, paths in sorted(
+                module_paths.items(),
+                key=lambda row: row[0].encode("utf-8"),
+            )
+        },
+        "bare_global_names": frozenset(bare_global_names),
+    }
+
+
+def v2_code_global_accesses(
+    code: types.CodeType,
+    *,
+    context: dict[str, Any] | None = None,
+    depth: int = 0,
+) -> dict[str, tuple[str, ...]]:
+    if context is None:
+        context = v2_new_refusal_projection_context()
+    return v2_code_access_analysis(
+        code,
+        context=context,
+        depth=depth,
+    )["accesses"]
+
+
+def v2_code_constant_projection(
+    value: Any,
+    *,
+    context: dict[str, Any] | None = None,
+    depth: int = 0,
+) -> Any:
+    if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+        raise EvidenceFailed("refusal-state code constant exceeds its depth cap")
+    if context is None:
+        context = v2_new_refusal_projection_context()
+    if value is None or value is Ellipsis:
+        return {"kind": "singleton", "value": repr(value)}
+    if type(value) is bool:
+        return value
+    if type(value) is int:
+        v2_refusal_charge(
+            context,
+            "scalar_bytes",
+            max(1, (value.bit_length() + 7) // 8),
+        )
+        return value
+    if type(value) is str:
+        v2_refusal_charge(
+            context,
+            "scalar_bytes",
+            len(value.encode("utf-8")),
+        )
+        return value
+    if isinstance(value, float):
+        return {
+            "kind": "float",
+            "ieee754_binary64": struct.pack(">d", value).hex(),
+        }
+    if isinstance(value, complex):
+        return {
+            "kind": "complex",
+            "real_ieee754_binary64": struct.pack(">d", value.real).hex(),
+            "imag_ieee754_binary64": struct.pack(">d", value.imag).hex(),
+        }
+    if isinstance(value, bytes):
+        v2_refusal_charge(context, "scalar_bytes", len(value))
+        return {
+            "kind": "bytes",
+            "byte_length": len(value),
+            "content_root": "sha256-v1:" + hashlib.sha256(value).hexdigest(),
+        }
+    if isinstance(value, tuple):
+        v2_refusal_charge(context, "items", len(value))
+        return {
+            "kind": "tuple",
+            "items": [
+                v2_code_constant_projection(
+                    item,
+                    context=context,
+                    depth=depth + 1,
+                )
+                for item in value
+            ],
+        }
+    if isinstance(value, slice):
+        return {
+            "kind": "slice",
+            "start": v2_code_constant_projection(
+                value.start,
+                context=context,
+                depth=depth + 1,
+            ),
+            "stop": v2_code_constant_projection(
+                value.stop,
+                context=context,
+                depth=depth + 1,
+            ),
+            "step": v2_code_constant_projection(
+                value.step,
+                context=context,
+                depth=depth + 1,
+            ),
+        }
+    if isinstance(value, frozenset):
+        v2_refusal_charge(context, "items", len(value))
+        items = [
+            v2_code_constant_projection(
+                item,
+                context=context,
+                depth=depth + 1,
+            )
+            for item in value
+        ]
+        items.sort(key=canonical_bytes)
+        return {"kind": "frozenset", "items": items}
+    if isinstance(value, types.CodeType):
+        return v2_code_semantic_projection(
+            value,
+            context=context,
+            depth=depth + 1,
+        )
+    raise EvidenceFailed(
+        "refusal-state code contains an unsupported constant type: "
+        f"{type(value).__module__}.{type(value).__qualname__}"
+    )
+
+
+def v2_code_semantic_projection(
+    code: types.CodeType,
+    *,
+    context: dict[str, Any] | None = None,
+    depth: int = 0,
+) -> dict[str, Any]:
+    if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+        raise EvidenceFailed("refusal-state code projection exceeds its depth cap")
+    if context is None:
+        context = v2_new_refusal_projection_context()
+    v2_refusal_charge(context, "items", len(code.co_consts))
+    v2_refusal_charge(context, "scalar_bytes", len(code.co_code))
+    return {
+        "argcount": code.co_argcount,
+        "posonlyargcount": code.co_posonlyargcount,
+        "kwonlyargcount": code.co_kwonlyargcount,
+        "nlocals": code.co_nlocals,
+        "stacksize": code.co_stacksize,
+        "flags": code.co_flags,
+        "bytecode_root": (
+            "sha256-v1:" + hashlib.sha256(code.co_code).hexdigest()
+        ),
+        "constants": [
+            v2_code_constant_projection(
+                value,
+                context=context,
+                depth=depth + 1,
+            )
+            for value in code.co_consts
+        ],
+        "names": list(code.co_names),
+        "varnames": list(code.co_varnames),
+        "freevars": list(code.co_freevars),
+        "cellvars": list(code.co_cellvars),
+        "filename_root": text_root(code.co_filename),
+        "name": code.co_name,
+        "qualname": code.co_qualname,
+        "firstlineno": code.co_firstlineno,
+        "linetable_root": (
+            "sha256-v1:" + hashlib.sha256(code.co_linetable).hexdigest()
+        ),
+        "exceptiontable_root": (
+            "sha256-v1:"
+            + hashlib.sha256(code.co_exceptiontable).hexdigest()
+        ),
+    }
+
+
+def v2_type_identity(value: type[Any]) -> str:
+    try:
+        module = type.__getattribute__(value, "__module__")
+        qualname = type.__getattribute__(value, "__qualname__")
+    except Exception as error:
+        raise EvidenceFailed(
+            "refusal-state type identity inspection failed"
+        ) from error
+    return f"{module}.{qualname}"
+
+
+def v2_trusted_callable_projection(
+    value: Any,
+    *,
+    seen: dict[int, int],
+    context: dict[str, Any],
+    depth: int,
+) -> dict[str, Any]:
+    if v2_is_dangerous_builtin(value):
+        raise EvidenceFailed(
+            "refusal callback reaches a dynamic namespace builtin; provide "
+            "an explicit bounded external-state projection"
+        )
+    if isinstance(value, types.FunctionType):
+        return {
+            "kind": "trusted-module-python-callable",
+            "module": str(value.__module__ or ""),
+            "name": str(value.__name__),
+            "qualname": str(value.__qualname__),
+            "code": v2_code_semantic_projection(
+                value.__code__,
+                context=context,
+            ),
+            "defaults": v2_state_projection_value(
+                value.__defaults__,
+                seen=seen,
+                context=context,
+                depth=depth + 1,
+            ),
+            "keyword_defaults": v2_state_projection_value(
+                value.__kwdefaults__,
+                seen=seen,
+                context=context,
+                depth=depth + 1,
+            ),
+            "closure": [
+                v2_state_projection_value(
+                    cell.cell_contents,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+                for cell in (value.__closure__ or ())
+            ],
+        }
+    return {
+        "kind": "trusted-module-builtin-callable",
+        "type": v2_type_identity(type(value)),
+        "module": str(getattr(value, "__module__", "") or ""),
+        "qualname": str(
+            getattr(value, "__qualname__", "")
+            or getattr(value, "__name__", "")
+        ),
+    }
+
+
+def v2_raw_attribute_without_user_code(value: Any, name: str) -> Any:
+    if isinstance(value, types.ModuleType):
+        attributes = v2_raw_module_dict(value)
+    elif isinstance(value, type):
+        attributes = type.__getattribute__(value, "__dict__")
+    else:
+        try:
+            attributes = object.__getattribute__(value, "__dict__")
+        except Exception as error:
+            raise EvidenceFailed(
+                "refusal-state trusted module attribute path is not statically "
+                "inspectable"
+            ) from error
+    if not isinstance(attributes, Mapping) or name not in attributes:
+        raise EvidenceFailed(
+            "refusal-state trusted module attribute path is absent"
+        )
+    return attributes[name]
+
+
+def v2_project_module_value(
+    value: types.ModuleType,
+    *,
+    module_paths: Sequence[Sequence[str]] | None,
+    bare_reference: bool,
+    seen: dict[int, int],
+    context: dict[str, Any],
+    depth: int,
+) -> dict[str, Any]:
+    attributes = v2_raw_module_dict(value)
+    module_name = str(attributes.get("__name__") or "")
+    if v2_is_trusted_module(value):
+        if bare_reference or not module_paths:
+            raise EvidenceFailed(
+                "refusal callback uses a trusted module dynamically; provide "
+                "an explicit bounded external-state projection"
+            )
+        rows: list[dict[str, Any]] = []
+        for raw_path in module_paths:
+            path = tuple(str(part) for part in raw_path)
+            current: Any = value
+            for part in path:
+                current = v2_raw_attribute_without_user_code(current, part)
+            if v2_is_dangerous_builtin(current):
+                raise EvidenceFailed(
+                    "refusal callback reaches a dynamic namespace builtin; "
+                    "provide an explicit bounded external-state projection"
+                )
+            if isinstance(
+                current,
+                (types.FunctionType, types.BuiltinFunctionType),
+            ):
+                state = v2_trusted_callable_projection(
+                    current,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            else:
+                state = v2_state_projection_value(
+                    current,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            rows.append({"path": list(path), "state": state})
+        v2_refusal_charge(context, "items", len(rows))
+        return {
+            "kind": "trusted-module-attributes",
+            "module": module_name,
+            "attributes": rows,
+        }
+    excluded = {
+        "__builtins__",
+        "__cached__",
+        "__doc__",
+        "__file__",
+        "__loader__",
+        "__name__",
+        "__package__",
+        "__spec__",
+    }
+    names = sorted(
+        (name for name in attributes if name not in excluded),
+        key=lambda name: str(name).encode("utf-8"),
+    )
+    if any(not isinstance(name, str) for name in names):
+        raise EvidenceFailed("refusal-state module has a non-string attribute")
+    v2_refusal_charge(context, "items", len(names))
+    return {
+        "kind": "custom-module",
+        "module": module_name,
+        "attributes": [
+            {
+                "name": name,
+                "state": v2_state_projection_value(
+                    attributes[name],
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+            }
+            for name in names
+        ],
+    }
+
+
+def v2_state_object_metadata(
+    value: Any,
+    *,
+    seen: dict[int, int],
+    context: dict[str, Any],
+    depth: int,
+) -> dict[str, Any]:
+    try:
+        raw_attributes = object.__getattribute__(value, "__dict__")
+    except AttributeError:
+        raw_attributes = None
+    except Exception as error:
+        raise EvidenceFailed(
+            "refusal-state object dictionary inspection failed"
+        ) from error
+    if raw_attributes is not None and type(raw_attributes) is not dict:
+        raise EvidenceFailed("refusal-state object dictionary is not exact")
+    attribute_rows: list[dict[str, Any]] = []
+    for name, attribute in sorted(
+        dict.items(raw_attributes or {}),
+        key=lambda row: str(row[0]).encode("utf-8"),
+    ):
+        if not isinstance(name, str):
+            raise EvidenceFailed(
+                "refusal-state object has a non-string attribute"
+            )
+        attribute_rows.append(
+            {
+                "name": name,
+                "state": v2_state_projection_value(
+                    attribute,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+            }
+        )
+    slot_rows: list[dict[str, Any]] = []
+    try:
+        owners = type.__getattribute__(type(value), "__mro__")
+    except Exception as error:
+        raise EvidenceFailed("refusal-state object MRO inspection failed") from error
+    for owner in owners:
+        owner_attributes = type.__getattribute__(owner, "__dict__")
+        for descriptor_name, descriptor in owner_attributes.items():
+            if type(descriptor) is not types.MemberDescriptorType:
+                continue
+            try:
+                slot_value = types.MemberDescriptorType.__get__(
+                    descriptor,
+                    value,
+                    type(value),
+                )
+            except AttributeError:
+                continue
+            except Exception as error:
+                raise EvidenceFailed(
+                    "refusal-state slot inspection failed"
+                ) from error
+            slot_rows.append(
+                {
+                    "slot": f"{v2_type_identity(owner)}:{descriptor_name}",
+                    "state": v2_state_projection_value(
+                        slot_value,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    ),
+                }
+            )
+    slot_rows.sort(key=lambda row: row["slot"].encode("utf-8"))
+    v2_refusal_charge(
+        context,
+        "items",
+        len(attribute_rows) + len(slot_rows),
+    )
+    metadata: dict[str, Any] = {}
+    if attribute_rows:
+        metadata["attributes"] = attribute_rows
+    if slot_rows:
+        metadata["slots"] = slot_rows
+    return metadata
+
+
 def v2_state_projection_value(
     value: Any,
     *,
-    seen: set[int] | None = None,
+    seen: dict[int, int] | None = None,
+    context: dict[str, Any] | None = None,
     depth: int = 0,
 ) -> Any:
-    if depth > 32:
+    if depth > V2_REFUSAL_STATE_DEPTH_CAP:
         raise EvidenceFailed("refusal-state projection exceeds its depth cap")
     if value is None or type(value) in {bool, int, float, str}:
         return value
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        payload = (
-            value.tobytes()
-            if isinstance(value, memoryview)
-            else bytes(value)
-        )
-        return {
-            "kind": type(value).__name__,
-            "byte_length": len(payload),
-            "content_root": "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
-        }
-    if isinstance(value, Path):
-        return {
-            "kind": "path",
-            "path_root": text_root(str(value)),
-        }
+    if value is MISSING:
+        return {"kind": "dataclasses.MISSING"}
     if seen is None:
-        seen = set()
+        seen = {}
+    if context is None:
+        context = {
+            "function_cache": {},
+            "global_accesses": 0,
+        }
     identity = id(value)
+    function_cache = context["function_cache"]
+    if isinstance(value, types.FunctionType) and identity in function_cache:
+        return function_cache[identity]
     if identity in seen:
-        return {"kind": "cycle"}
-    seen.add(identity)
+        ancestor_depth = seen[identity]
+        return {
+            "kind": "cycle",
+            "ancestor_depth": ancestor_depth,
+            "back_edge_distance": depth - ancestor_depth,
+        }
+    seen[identity] = depth
     try:
+        metadata = (
+            {}
+            if isinstance(
+                value,
+                (Path, types.FunctionType, types.ModuleType, type),
+            )
+            else v2_state_object_metadata(
+                value,
+                seen=seen,
+                context=context,
+                depth=depth,
+            )
+        )
+        if isinstance(value, memoryview):
+            try:
+                payload = value.tobytes()
+            except ValueError:
+                return {
+                    "kind": "memoryview",
+                    "released": True,
+                    "object_state": metadata,
+                }
+            return {
+                "kind": "memoryview",
+                "released": False,
+                "byte_length": len(payload),
+                "content_root": (
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest()
+                ),
+                "format": value.format,
+                "itemsize": value.itemsize,
+                "ndim": value.ndim,
+                "shape": list(value.shape) if value.shape is not None else None,
+                "strides": (
+                    list(value.strides) if value.strides is not None else None
+                ),
+                "readonly": value.readonly,
+                "object_state": metadata,
+            }
+        if isinstance(value, (bytes, bytearray)):
+            payload = bytes(value)
+            return {
+                "kind": type(value).__name__,
+                "byte_length": len(payload),
+                "content_root": (
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest()
+                ),
+                "object_state": metadata,
+            }
+        if isinstance(value, Path):
+            return {
+                "kind": "path",
+                "path_root": text_root(str(value)),
+            }
+        if isinstance(value, re.Pattern):
+            return {
+                "kind": "regular-expression",
+                "pattern": value.pattern,
+                "flags": value.flags,
+                "groups": value.groups,
+                "groupindex": dict(value.groupindex),
+            }
         if isinstance(value, Mapping):
             entries = [
                 {
                     "key": v2_state_projection_value(
                         key,
                         seen=seen,
+                        context=context,
                         depth=depth + 1,
                     ),
                     "value": v2_state_projection_value(
                         item,
                         seen=seen,
+                        context=context,
                         depth=depth + 1,
                     ),
                 }
                 for key, item in value.items()
             ]
-            entries.sort(key=lambda entry: canonical_bytes(entry["key"]))
-            return {"kind": "mapping", "entries": entries}
-        if isinstance(value, (list, tuple)):
-            return {
+            projection = {
+                "kind": type(value).__name__,
+                "entries_in_iteration_order": entries,
+                "object_state": metadata,
+            }
+            if isinstance(value, defaultdict):
+                projection["default_factory"] = v2_state_projection_value(
+                    value.default_factory,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            return projection
+        if isinstance(value, (list, tuple, deque)):
+            projection = {
                 "kind": type(value).__name__,
                 "items": [
                     v2_state_projection_value(
                         item,
                         seen=seen,
+                        context=context,
                         depth=depth + 1,
                     )
                     for item in value
                 ],
+                "object_state": metadata,
             }
+            if isinstance(value, deque):
+                projection["maxlen"] = value.maxlen
+            return projection
         if isinstance(value, (set, frozenset)):
             items = [
                 v2_state_projection_value(
                     item,
                     seen=seen,
+                    context=context,
                     depth=depth + 1,
                 )
                 for item in value
             ]
             items.sort(key=canonical_bytes)
-            return {"kind": type(value).__name__, "items": items}
+            return {
+                "kind": type(value).__name__,
+                "items": items,
+                "object_state": metadata,
+            }
         if isinstance(value, argparse.Namespace):
             return {
                 "kind": "argparse.Namespace",
-                "attributes": v2_state_projection_value(
-                    vars(value),
+                "object_state": metadata,
+            }
+        if isinstance(value, types.ModuleType):
+            return {
+                "kind": "module-reference",
+                "module": str(value.__name__),
+            }
+        if isinstance(value, types.MethodType):
+            return {
+                "kind": "bound-python-method",
+                "function": v2_state_projection_value(
+                    value.__func__,
                     seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "bound_self": v2_state_projection_value(
+                    value.__self__,
+                    seen=seen,
+                    context=context,
                     depth=depth + 1,
                 ),
             }
+        if isinstance(
+            value,
+            (
+                types.BuiltinFunctionType,
+                types.BuiltinMethodType,
+                types.ClassMethodDescriptorType,
+                types.MethodDescriptorType,
+                types.MethodWrapperType,
+                types.WrapperDescriptorType,
+            ),
+        ):
+            bound_self = getattr(value, "__self__", None)
+            if isinstance(bound_self, types.ModuleType):
+                bound_projection: Any = {
+                    "kind": "module-reference",
+                    "module": str(bound_self.__name__),
+                }
+            elif isinstance(bound_self, type):
+                bound_projection = {
+                    "kind": "type-reference",
+                    "type": (
+                        f"{bound_self.__module__}.{bound_self.__qualname__}"
+                    ),
+                }
+            else:
+                bound_projection = v2_state_projection_value(
+                    bound_self,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            return {
+                "kind": "builtin-callable",
+                "type": (
+                    f"{type(value).__module__}.{type(value).__qualname__}"
+                ),
+                "module": str(getattr(value, "__module__", "") or ""),
+                "qualname": str(
+                    getattr(value, "__qualname__", "")
+                    or getattr(value, "__name__", "")
+                ),
+                "bound_self": bound_projection,
+            }
+        if isinstance(
+            value,
+            (types.GetSetDescriptorType, types.MemberDescriptorType),
+        ):
+            return {
+                "kind": "builtin-descriptor",
+                "type": (
+                    f"{type(value).__module__}.{type(value).__qualname__}"
+                ),
+                "name": str(getattr(value, "__name__", "") or ""),
+                "owner": str(
+                    getattr(value, "__objclass__", "") or ""
+                ),
+            }
+        if isinstance(value, types.FunctionType):
+            function_closure = value.__closure__ or ()
+            function_freevars = value.__code__.co_freevars
+            if len(function_closure) != len(function_freevars):
+                raise EvidenceFailed(
+                    "refusal-state function closure metadata differs"
+                )
+            closure_rows: list[dict[str, Any]] = []
+            for name, cell in zip(
+                function_freevars,
+                function_closure,
+                strict=True,
+            ):
+                try:
+                    closure_state = v2_state_projection_value(
+                        cell.cell_contents,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                except ValueError:
+                    closure_state = {"kind": "empty-cell"}
+                closure_rows.append({"name": name, "state": closure_state})
+            accesses = v2_code_global_accesses(value.__code__)
+            dynamic_accesses = sorted(
+                V2_DYNAMIC_GLOBAL_ACCESS_NAMES.intersection(accesses)
+            )
+            if dynamic_accesses:
+                raise EvidenceFailed(
+                    "refusal callback has dynamic global namespace access; "
+                    "provide an explicit bounded projection: "
+                    f"{value.__module__}.{value.__qualname__} "
+                    f"uses {','.join(dynamic_accesses)}"
+                )
+            context["global_accesses"] += len(accesses)
+            if context["global_accesses"] > V2_REFUSAL_GLOBAL_ACCESS_CAP:
+                raise EvidenceFailed(
+                    "refusal-state transitive global access set exceeds its cap"
+                )
+            global_rows: dict[str, dict[str, Any]] = {}
+            for name, operations in accesses.items():
+                present = name in value.__globals__
+                row: dict[str, Any] = {
+                    "operations": list(operations),
+                    "present": present,
+                }
+                if present:
+                    global_value = value.__globals__[name]
+                    if (
+                        isinstance(global_value, types.FunctionType)
+                        and V2_DIRECT_GLOBAL_CALL_MARKER not in operations
+                    ):
+                        # A registry or mapping may carry callbacks as data.
+                        # Bind their complete callable identity and defaults,
+                        # but do not invent execution of their global graph.
+                        row["state"] = v2_function_reference_projection(
+                            global_value,
+                            seen=seen,
+                            context=context,
+                            depth=depth + 1,
+                        )
+                    else:
+                        row["state"] = v2_state_projection_value(
+                            global_value,
+                            seen=seen,
+                            context=context,
+                            depth=depth + 1,
+                        )
+                global_rows[name] = row
+            projection = {
+                "kind": "function",
+                "module": str(value.__module__ or ""),
+                "name": str(value.__name__),
+                "qualname": str(value.__qualname__),
+                "doc_root": text_root(str(value.__doc__ or "")),
+                "code_root": semantic_root(
+                    v2_code_semantic_projection(value.__code__)
+                ),
+                "defaults": v2_state_projection_value(
+                    value.__defaults__,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "keyword_defaults": v2_state_projection_value(
+                    value.__kwdefaults__,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "annotations": v2_state_projection_value(
+                    value.__annotations__,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "closure": closure_rows,
+                "attributes": v2_state_projection_value(
+                    dict(vars(value)),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "referenced_globals": global_rows,
+            }
+            function_cache[identity] = projection
+            return projection
         if isinstance(value, type):
+            if value.__module__ != "__main__":
+                # Imported runtime types expose interpreter-managed caches and
+                # descriptors that can change while they are merely inspected.
+                # Their stable identity is bound here; locally defined mutable
+                # classes retain the complete state projection below.
+                return {
+                    "kind": "external-type-reference",
+                    "type": f"{value.__module__}.{value.__qualname__}",
+                    "metaclass": (
+                        f"{type(value).__module__}.{type(value).__qualname__}"
+                    ),
+                    "bases": [
+                        f"{base.__module__}.{base.__qualname__}"
+                        for base in value.__bases__
+                    ],
+                }
+            class_attributes: dict[str, Any] = {}
+            excluded_attributes = {
+                "__dict__",
+                "__doc__",
+                "__module__",
+                "__qualname__",
+                "__weakref__",
+            }
+            for name, attribute in vars(value).items():
+                if name in excluded_attributes:
+                    continue
+                if isinstance(attribute, (staticmethod, classmethod)):
+                    attribute = attribute.__func__
+                elif isinstance(attribute, property):
+                    attribute = {
+                        "fget": attribute.fget,
+                        "fset": attribute.fset,
+                        "fdel": attribute.fdel,
+                    }
+                class_attributes[name] = attribute
             return {
                 "kind": "type",
                 "type": f"{value.__module__}.{value.__qualname__}",
+                "metaclass": (
+                    f"{type(value).__module__}.{type(value).__qualname__}"
+                ),
+                "bases": [
+                    f"{base.__module__}.{base.__qualname__}"
+                    for base in value.__bases__
+                ],
+                "doc_root": text_root(str(value.__doc__ or "")),
+                "attributes": v2_state_projection_value(
+                    class_attributes,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
             }
-        try:
-            attributes = vars(value)
-        except (AttributeError, TypeError):
-            attributes = None
-        if isinstance(attributes, Mapping):
+        if metadata:
             return {
                 "kind": "object",
                 "type": (
                     f"{type(value).__module__}.{type(value).__qualname__}"
                 ),
-                "attributes": v2_state_projection_value(
-                    dict(attributes),
-                    seen=seen,
-                    depth=depth + 1,
-                ),
-            }
-        slot_names: list[str] = []
-        for base in type(value).__mro__:
-            raw_slots = base.__dict__.get("__slots__", ())
-            if isinstance(raw_slots, str):
-                raw_slots = (raw_slots,)
-            slot_names.extend(
-                str(name)
-                for name in raw_slots
-                if name not in {"__dict__", "__weakref__"}
-            )
-        if slot_names:
-            slot_values = {
-                name: getattr(value, name)
-                for name in sorted(set(slot_names))
-                if hasattr(value, name)
-            }
-            return {
-                "kind": "slotted-object",
-                "type": (
-                    f"{type(value).__module__}.{type(value).__qualname__}"
-                ),
-                "slots": v2_state_projection_value(
-                    slot_values,
-                    seen=seen,
-                    depth=depth + 1,
-                ),
+                "object_state": metadata,
             }
         return {
             "kind": "opaque",
@@ -28063,7 +29078,7 @@ def v2_state_projection_value(
             ),
         }
     finally:
-        seen.remove(identity)
+        seen.pop(identity, None)
 
 
 def v2_projection_contains_opaque(value: Any) -> bool:
@@ -28076,11 +29091,54 @@ def v2_projection_contains_opaque(value: Any) -> bool:
     return False
 
 
+def v2_projection_opaque_paths(
+    value: Any,
+    *,
+    path: str = "$",
+    limit: int = 8,
+) -> list[str]:
+    if limit <= 0:
+        return []
+    if isinstance(value, Mapping):
+        if value.get("kind") == "opaque":
+            return [f"{path}:{value.get('type', 'unknown')}"]
+        paths: list[str] = []
+        for key, item in value.items():
+            paths.extend(
+                v2_projection_opaque_paths(
+                    item,
+                    path=f"{path}.{key}",
+                    limit=limit - len(paths),
+                )
+            )
+            if len(paths) >= limit:
+                break
+        return paths
+    if isinstance(value, (list, tuple)):
+        paths = []
+        for index, item in enumerate(value):
+            paths.extend(
+                v2_projection_opaque_paths(
+                    item,
+                    path=f"{path}[{index}]",
+                    limit=limit - len(paths),
+                )
+            )
+            if len(paths) >= limit:
+                break
+        return paths
+    return []
+
+
 def v2_callback_refusal_projection(
     callback: Callable[[], Any],
     *,
     collector_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    projection_context: dict[str, Any] = {
+        "function_cache": {},
+        "global_accesses": 0,
+    }
     closure_rows: list[dict[str, Any]] = []
     closure = callback.__closure__ or ()
     freevars = callback.__code__.co_freevars
@@ -28099,49 +29157,82 @@ def v2_callback_refusal_projection(
         closure_rows.append(
             {
                 "name": name,
-                "state": v2_state_projection_value(value),
+                "state": v2_state_projection_value(
+                    value,
+                    context=projection_context,
+                ),
             }
         )
     default_rows = [
         {
             "index": index,
-            "state": v2_state_projection_value(value),
+            "state": v2_state_projection_value(
+                value,
+                context=projection_context,
+            ),
         }
         for index, value in enumerate(callback.__defaults__ or ())
     ]
     keyword_default_rows = [
         {
             "name": name,
-            "state": v2_state_projection_value(value),
+            "state": v2_state_projection_value(
+                value,
+                context=projection_context,
+            ),
         }
         for name, value in sorted(
             (callback.__kwdefaults__ or {}).items(),
             key=lambda pair: pair[0].encode("utf-8"),
         )
     ]
-    global_rows: list[dict[str, Any]] = []
-    for name in sorted(
-        set(callback.__code__.co_names),
-        key=lambda value: value.encode("utf-8"),
-    ):
-        value = callback.__globals__.get(name)
-        if isinstance(
-            value,
-            (
-                dict,
-                list,
-                set,
-                bytearray,
-                memoryview,
-                argparse.Namespace,
-            ),
-        ):
-            global_rows.append(
-                {
-                    "name": name,
-                    "state": v2_state_projection_value(value),
-                }
-            )
+    global_accesses = v2_code_global_accesses(callback.__code__)
+    dynamic_accesses = sorted(
+        V2_DYNAMIC_GLOBAL_ACCESS_NAMES.intersection(global_accesses)
+    )
+    if dynamic_accesses:
+        raise EvidenceFailed(
+            "refusal callback has dynamic global namespace access; provide "
+            "an explicit bounded projection: "
+            f"{callback.__module__}.{callback.__qualname__} "
+            f"uses {','.join(dynamic_accesses)}"
+        )
+    direct_module_names = sorted(
+        name
+        for name in global_accesses
+        if isinstance(callback.__globals__.get(name), types.ModuleType)
+    )
+    if direct_module_names:
+        raise EvidenceFailed(
+            "refusal callback directly references module state; provide an "
+            "explicit bounded projection"
+        )
+    projection_context["global_accesses"] += len(global_accesses)
+    global_rows: dict[str, dict[str, Any]] = {}
+    for name, operations in global_accesses.items():
+        present = name in callback.__globals__
+        row: dict[str, Any] = {
+            "operations": list(operations),
+            "present": present,
+        }
+        if present:
+            global_value = callback.__globals__[name]
+            if (
+                isinstance(global_value, types.FunctionType)
+                and V2_DIRECT_GLOBAL_CALL_MARKER not in operations
+            ):
+                row["state"] = v2_function_reference_projection(
+                    global_value,
+                    seen={},
+                    context=projection_context,
+                    depth=0,
+                )
+            else:
+                row["state"] = v2_state_projection_value(
+                    global_value,
+                    context=projection_context,
+                )
+        global_rows[name] = row
     projection = {
         "callback_closure": closure_rows,
         "callback_defaults": default_rows,
@@ -28154,9 +29245,10 @@ def v2_callback_refusal_projection(
         "cancel_requested": _cancel_requested,
     }
     if v2_projection_contains_opaque(projection):
+        opaque_paths = v2_projection_opaque_paths(projection)
         raise EvidenceFailed(
-            "refusal callback contains unprojectable opaque state; provide "
-            "an explicit bounded projection"
+            "refusal callback contains unprojectable opaque state at "
+            f"{', '.join(opaque_paths)}; provide an explicit bounded projection"
         )
     return projection
 
@@ -28239,11 +29331,49 @@ class V2CheckCollector:
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} stateful refusal lacks a projection label"
             )
-        before_value = projection()
+        try:
+            before_value = projection()
+        except HarnessError as error:
+            raise EvidenceFailed(
+                f"{self.case_id}/{check_id} refusal projection failed "
+                f"before callback: {error}"
+            ) from error
         before = semantic_root(before_value)
         error = expect_error(error_type, callback, contains=contains)
-        after_value = projection()
+        try:
+            after_value = projection()
+        except HarnessError as projection_error:
+            raise EvidenceFailed(
+                f"{self.case_id}/{check_id} refusal projection failed "
+                f"after callback: {projection_error}"
+            ) from projection_error
         after = semantic_root(after_value)
+        projection_divergence = first_projection_divergence(
+            before_value,
+            after_value,
+        )
+        if projection_divergence is not None:
+            self.check(
+                check_id,
+                False,
+                expected={
+                    "terminal": error_type.terminal,
+                    "unchanged_projection_root": before,
+                    "projection_label": projection_label,
+                    "first_divergence": None,
+                },
+                observed={
+                    "terminal": error.terminal,
+                    "changed_projection_root": after,
+                    "projection_label": projection_label,
+                    "first_divergence": projection_divergence,
+                    "diagnostic_root": text_root(str(error)),
+                    "diagnostic_summary": v2_bounded_diagnostic_summary(
+                        error
+                    ),
+                },
+            )
+            return
         self.check(
             check_id,
             before == after and error.terminal == error_type.terminal,
@@ -30128,11 +31258,6 @@ def v2_execute_schema_cli_ux(
             EvidenceFailed,
             lambda: v2_test_terminal_document(
                 manifest=probe_manifest,
-                registry={
-                    str(probe_case["assertion_id"]): (
-                        v2_execute_schema_cli_ux
-                    )
-                },
                 results=[],
                 event_roots=[],
                 selected=None,
@@ -31622,7 +32747,6 @@ def v2_execute_schema_cli_ux(
         ]
         valid_probe_suite = v2_test_terminal_document(
             manifest=probe_manifest,
-            registry=v2_build_executor_registry(probe_manifest),
             results=[valid_probe_result],
             event_roots=valid_probe_event_roots,
             selected=str(probe_case["id"]),
@@ -31670,7 +32794,6 @@ def v2_execute_schema_cli_ux(
             EvidenceFailed,
             lambda: v2_test_terminal_document(
                 manifest=probe_manifest,
-                registry=v2_build_executor_registry(probe_manifest),
                 results=[forged_suite_result],
                 event_roots=valid_probe_event_roots,
                 selected=str(probe_case["id"]),
@@ -32592,6 +33715,8 @@ def v2_execute_schema_cli_ux(
                 contains="bounded byte cap",
             )
 
+            expected_os_pread = os.pread
+
             def read_while_identity_changes() -> bytes:
                 original_pread = os.pread
                 touched = False
@@ -32633,6 +33758,14 @@ def v2_execute_schema_cli_ux(
                 InputRefused,
                 read_while_identity_changes,
                 contains="changed while being read",
+                projection=lambda: {
+                    "os_pread_restored": os.pread is expected_os_pread,
+                    "command_receipt_count": len(_command_receipts),
+                    "cancel_requested": _cancel_requested,
+                },
+                projection_label=(
+                    "HARNESS_STATE_AND_OS_PREAD_RESTORATION"
+                ),
             )
     elif slug == "cli-review-receipts":
         inventory = v2_synthetic_inventory([v2_synthetic_target(0)])
@@ -34599,23 +35732,40 @@ def v2_execute_source_cases(
             input_kind="released_live",
             error_type=EvidenceFailed,
         )
-        sync_with_untracked_clean_git = strict_json_loads(
+        sync_with_untracked_present_git = strict_json_loads(
             canonical_bytes(sync_with_probed_git),
-            label="sync untracked-clean probed-git seed",
+            label="sync untracked-present probed-git seed",
             require_canonical=True,
         )
-        sync_with_untracked_clean_git["git_export"].update(
+        sync_with_untracked_present_git["git_export"].update(
             {
                 "tracked": False,
-                "worktree_clean": True,
+                "worktree_clean": False,
                 "index_clean": True,
             }
         )
-        sync_with_untracked_clean_git["git_export"].pop("head_hash")
-        normalized_untracked_clean_git = v2_normalize_br_sync_status(
-            sync_with_untracked_clean_git,
+        sync_with_untracked_present_git["git_export"].pop("head_hash")
+        normalized_untracked_present_git = v2_normalize_br_sync_status(
+            sync_with_untracked_present_git,
             input_kind="released_live",
             error_type=EvidenceFailed,
+        )
+        impossible_untracked_clean_git = strict_json_loads(
+            canonical_bytes(sync_with_untracked_present_git),
+            label="sync impossible untracked-clean probed-git seed",
+            require_canonical=True,
+        )
+        impossible_untracked_clean_git["git_export"][
+            "worktree_clean"
+        ] = True
+        impossible_untracked_clean_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                impossible_untracked_clean_git,
+                input_kind="released_live",
+                error_type=EvidenceFailed,
+            ),
+            contains="worktree disagrees with index/worktree path presence",
         )
         sync_with_sha256_git = strict_json_loads(
             canonical_bytes(sync_with_probed_git),
@@ -34657,7 +35807,7 @@ def v2_execute_source_cases(
         sync_with_staged_removal_git["git_export"].update(
             {
                 "tracked": False,
-                "worktree_clean": False,
+                "worktree_clean": True,
                 "index_clean": False,
                 "head_hash": "c" * 40,
                 "worktree_hash": None,
@@ -34667,6 +35817,23 @@ def v2_execute_source_cases(
             sync_with_staged_removal_git,
             input_kind="released_live",
             error_type=EvidenceFailed,
+        )
+        impossible_staged_removal_git = strict_json_loads(
+            canonical_bytes(sync_with_staged_removal_git),
+            label="sync impossible dirty staged-removal seed",
+            require_canonical=True,
+        )
+        impossible_staged_removal_git["git_export"][
+            "worktree_clean"
+        ] = False
+        impossible_staged_removal_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                impossible_staged_removal_git,
+                input_kind="released_live",
+                error_type=EvidenceFailed,
+            ),
+            contains="absent br sync index and worktree cannot be dirty",
         )
         sync_with_missing_untracked_git = strict_json_loads(
             canonical_bytes(sync_with_probed_git),
@@ -34689,6 +35856,21 @@ def v2_execute_source_cases(
             sync_with_missing_untracked_git,
             input_kind="released_live",
             error_type=EvidenceFailed,
+        )
+        impossible_missing_index_git = strict_json_loads(
+            canonical_bytes(sync_with_missing_untracked_git),
+            label="sync impossible dirty absent index seed",
+            require_canonical=True,
+        )
+        impossible_missing_index_git["git_export"]["index_clean"] = False
+        impossible_missing_index_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_normalize_br_sync_status(
+                impossible_missing_index_git,
+                input_kind="released_live",
+                error_type=EvidenceFailed,
+            ),
+            contains="absent br sync index and HEAD cannot be dirty",
         )
         sync_with_mixed_git_hashes = strict_json_loads(
             canonical_bytes(sync_with_probed_git),
@@ -35025,29 +36207,34 @@ def v2_execute_source_cases(
             "truncated_wal",
         )
         checks.check(
-            "released-br-status-sync-union-and-coherence",
-            normalized_omitted_average["summary"][
-                "average_lead_time_hours"
-            ]
-            is None
-            and v2_normalize_br_status(
-                normalized_omitted_average,
-                error_type=EvidenceFailed,
-            )
-            == normalized_omitted_average
-            and normalized_probed_git["git_export"]["state"] == "PROBED"
-            and normalized_untracked_clean_git["git_export"]["state"]
+            "sync-live-git-export-union-and-optional-hashes",
+            normalized_probed_git["git_export"]["state"] == "PROBED"
+            and normalized_untracked_present_git["git_export"]["state"]
             == "PROBED"
-            and normalized_untracked_clean_git["git_export"]["tracked"]
+            and normalized_untracked_present_git["git_export"]["tracked"]
             is False
-            and normalized_untracked_clean_git["git_export"]["head_hash"]
+            and normalized_untracked_present_git["git_export"]["head_hash"]
             is None
-            and len(normalized_sha256_git["git_export"]["head_hash"]) == 64
-            and normalized_newly_staged_git["git_export"]["tracked"] is True
-            and normalized_newly_staged_git["git_export"]["head_hash"] is None
-            and normalized_staged_removal_git["git_export"]["tracked"] is False
+            and normalized_untracked_present_git["git_export"][
+                "worktree_clean"
+            ]
+            is False
+            and len(normalized_probed_git["git_export"]["head_hash"])
+            == 40
+            and len(normalized_sha256_git["git_export"]["head_hash"])
+            == 64
+            and normalized_newly_staged_git["git_export"]["tracked"]
+            is True
+            and normalized_newly_staged_git["git_export"]["head_hash"]
+            is None
+            and normalized_staged_removal_git["git_export"]["tracked"]
+            is False
             and normalized_staged_removal_git["git_export"]["head_hash"]
             == "c" * 40
+            and normalized_staged_removal_git["git_export"][
+                "worktree_clean"
+            ]
+            is True
             and normalized_missing_untracked_git["git_export"][
                 "worktree_hash"
             ]
@@ -35056,17 +36243,115 @@ def v2_execute_source_cases(
                 "worktree_clean"
             ]
             is True
-            and mixed_git_hash_error.terminal == "EvidenceFailed"
             and normalized_not_probed_git["git_export"]["state"]
             == "NOT_PROBED"
             and normalized_legacy_unavailable_git["git_export"]["state"]
             == "LEGACY_UNAVAILABLE"
-            and v2_normalize_br_sync_status(
-                normalized_not_probed_git,
-                input_kind="retained",
-                error_type=EvidenceFailed,
-            )
-            == normalized_not_probed_git
+            and mixed_git_hash_error.terminal == "EvidenceFailed"
+            and impossible_untracked_clean_error.terminal
+            == "EvidenceFailed"
+            and impossible_staged_removal_error.terminal
+            == "EvidenceFailed"
+            and impossible_missing_index_error.terminal
+            == "EvidenceFailed",
+            expected={
+                "states": [
+                    "PROBED",
+                    "NOT_PROBED",
+                    "LEGACY_UNAVAILABLE",
+                ],
+                "object_id_widths": [40, 64],
+                "absent_optional_hashes": None,
+                "index_head_states": {
+                    "newly_staged": {
+                        "tracked": True,
+                        "head_hash": None,
+                        "worktree_clean": True,
+                    },
+                    "staged_removal": {
+                        "tracked": False,
+                        "head_hash": "c" * 40,
+                        "worktree_clean": True,
+                    },
+                    "untracked_present": {
+                        "tracked": False,
+                        "head_hash": None,
+                        "worktree_clean": False,
+                    },
+                    "both_absent": {
+                        "worktree_clean": True,
+                        "worktree_hash": None,
+                    },
+                },
+                "mixed_object_formats": "EvidenceFailed",
+                "impossible_cleanliness_states": {
+                    "untracked_present_clean": "EvidenceFailed",
+                    "staged_removal_dirty": "EvidenceFailed",
+                    "absent_index_dirty": "EvidenceFailed",
+                },
+            },
+            observed={
+                "states": [
+                    normalized_probed_git["git_export"]["state"],
+                    normalized_not_probed_git["git_export"]["state"],
+                    normalized_legacy_unavailable_git["git_export"][
+                        "state"
+                    ],
+                ],
+                "object_id_widths": [
+                    len(
+                        normalized_probed_git["git_export"]["head_hash"]
+                    ),
+                    len(normalized_sha256_git["git_export"]["head_hash"]),
+                ],
+                "untracked_present": normalized_untracked_present_git[
+                    "git_export"
+                ],
+                "newly_staged": normalized_newly_staged_git["git_export"],
+                "staged_removal": normalized_staged_removal_git[
+                    "git_export"
+                ],
+                "missing_untracked": normalized_missing_untracked_git[
+                    "git_export"
+                ],
+                "mixed_object_formats": mixed_git_hash_error.terminal,
+                "impossible_cleanliness_states": {
+                    "untracked_present_clean": (
+                        impossible_untracked_clean_error.terminal
+                    ),
+                    "staged_removal_dirty": (
+                        impossible_staged_removal_error.terminal
+                    ),
+                    "absent_index_dirty": (
+                        impossible_missing_index_error.terminal
+                    ),
+                },
+            },
+        )
+        checks.check(
+            "sync-empty-optional-timestamps-refused",
+            empty_timestamp_errors
+            == {
+                "last_export_time": "EvidenceFailed",
+                "last_import_time": "EvidenceFailed",
+            },
+            expected={
+                "last_export_time": "EvidenceFailed",
+                "last_import_time": "EvidenceFailed",
+            },
+            observed=empty_timestamp_errors,
+        )
+        status_round_trip = v2_normalize_br_status(
+            normalized_omitted_average,
+            error_type=EvidenceFailed,
+        ) == normalized_omitted_average
+        checks.check(
+            "released-br-status-and-reliability-coherence",
+            normalized_omitted_average["summary"][
+                "average_lead_time_hours"
+            ]
+            is None
+            and status_round_trip
             and normalized_existing_without_hash["jsonl_content_hash"]
             is None
             and normalized_missing_with_stored_hash["jsonl_exists"]
@@ -35079,32 +36364,12 @@ def v2_execute_source_cases(
             and reversed_anomaly_error.terminal == "EvidenceFailed"
             and impossible_database_pair_error.terminal
             == "EvidenceFailed"
-            and impossible_wal_pair_error.terminal == "EvidenceFailed"
-            and empty_timestamp_errors
-            == {
-                "last_export_time": "EvidenceFailed",
-                "last_import_time": "EvidenceFailed",
-            },
+            and impossible_wal_pair_error.terminal == "EvidenceFailed",
             expected={
                 "omitted_average": None,
-                "git_states": [
-                    "PROBED",
-                    "NOT_PROBED",
-                    "LEGACY_UNAVAILABLE",
-                ],
-                "git_object_id_widths": [40, 64],
-                "omitted_absent_git_hashes": "normalized to null",
-                "git_index_head_states": [
-                    "newly_staged",
-                    "staged_removal",
-                    "missing_untracked",
-                ],
-                "empty_optional_timestamps": {
-                    "last_export_time": "EvidenceFailed",
-                    "last_import_time": "EvidenceFailed",
-                },
-                "mixed_object_formats": "EvidenceFailed",
-                "jsonl_hash": "independent optional metadata",
+                "status_round_trip": True,
+                "existing_jsonl_without_stored_hash": None,
+                "absent_jsonl_with_independent_stored_hash": "0" * 64,
                 "invented_anomaly": "EvidenceFailed",
                 "absent_newer": "EvidenceFailed",
                 "wrong_health": "EvidenceFailed",
@@ -35116,27 +36381,17 @@ def v2_execute_source_cases(
                 "omitted_average": normalized_omitted_average["summary"][
                     "average_lead_time_hours"
                 ],
-                "git_states": [
-                    normalized_probed_git["git_export"]["state"],
-                    normalized_not_probed_git["git_export"]["state"],
-                    normalized_legacy_unavailable_git["git_export"]["state"],
-                ],
-                "git_object_id_widths": [
-                    len(normalized_probed_git["git_export"]["head_hash"]),
-                    len(normalized_sha256_git["git_export"]["head_hash"]),
-                ],
-                "omitted_absent_git_hashes": (
-                    normalized_untracked_clean_git["git_export"][
-                        "head_hash"
+                "status_round_trip": status_round_trip,
+                "existing_jsonl_without_stored_hash": (
+                    normalized_existing_without_hash[
+                        "jsonl_content_hash"
                     ]
                 ),
-                "git_index_head_states": [
-                    normalized_newly_staged_git["git_export"],
-                    normalized_staged_removal_git["git_export"],
-                    normalized_missing_untracked_git["git_export"],
-                ],
-                "empty_optional_timestamps": empty_timestamp_errors,
-                "mixed_object_formats": mixed_git_hash_error.terminal,
+                "absent_jsonl_with_independent_stored_hash": (
+                    normalized_missing_with_stored_hash[
+                        "jsonl_content_hash"
+                    ]
+                ),
                 "invented_anomaly": invented_sync_error.terminal,
                 "absent_newer": absent_newer_sync_error.terminal,
                 "wrong_health": wrong_health_sync_error.terminal,
@@ -45962,6 +47217,85 @@ def v2_execute_artifact_cases(
             ),
             contains="object-mutated failed",
         )
+        class MutableTypeProbe:
+            phase = "before"
+
+        def mutate_type_then_refuse() -> None:
+            MutableTypeProbe.phase = "after"
+            raise InputRefused(
+                "synthetic refusal after captured-type mutation"
+            )
+
+        type_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-type-refusal-state",
+                "fixture.type-refusal-state",
+            ).refuses(
+                "type-mutated",
+                InputRefused,
+                mutate_type_then_refuse,
+            ),
+            contains="type-mutated failed",
+        )
+
+        def mutable_function_probe() -> None:
+            return None
+
+        mutable_function_probe.phase = "before"
+
+        def mutate_function_then_refuse() -> None:
+            mutable_function_probe.phase = "after"
+            raise InputRefused(
+                "synthetic refusal after captured-function mutation"
+            )
+
+        function_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-function-refusal-state",
+                "fixture.function-refusal-state",
+            ).refuses(
+                "function-mutated",
+                InputRefused,
+                mutate_function_then_refuse,
+            ),
+            contains="function-mutated failed",
+        )
+        checks.check(
+            "refusal-closure-custom-object-function-type-mutation-detected",
+            mutated_state["phase"] == "after"
+            and guard_error.terminal == "EvidenceFailed"
+            and object_state.phase == "after"
+            and object_guard_error.terminal == "EvidenceFailed"
+            and MutableTypeProbe.phase == "after"
+            and type_guard_error.terminal == "EvidenceFailed"
+            and mutable_function_probe.phase == "after"
+            and function_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "mutated_dimensions": [
+                    "closure-mapping",
+                    "custom-object",
+                    "captured-type",
+                    "captured-function",
+                ],
+                "collector_terminals": ["EvidenceFailed"] * 4,
+            },
+            observed={
+                "phases": [
+                    mutated_state["phase"],
+                    object_state.phase,
+                    MutableTypeProbe.phase,
+                    mutable_function_probe.phase,
+                ],
+                "collector_terminals": [
+                    guard_error.terminal,
+                    object_guard_error.terminal,
+                    type_guard_error.terminal,
+                    function_guard_error.terminal,
+                ],
+            },
+        )
         default_state = {"phase": "before"}
 
         def mutate_default_then_refuse(
@@ -45984,6 +47318,280 @@ def v2_execute_artifact_cases(
             ),
             contains="default-mutated failed",
         )
+        keyword_default_state = {"phase": "before"}
+
+        def mutate_keyword_default_then_refuse(
+            *,
+            state: dict[str, str] = keyword_default_state,
+        ) -> None:
+            state["phase"] = "after"
+            raise InputRefused(
+                "synthetic refusal after keyword-default mutation"
+            )
+
+        keyword_default_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-keyword-default-refusal-state",
+                "fixture.keyword-default-refusal-state",
+            ).refuses(
+                "keyword-default-mutated",
+                InputRefused,
+                mutate_keyword_default_then_refuse,
+            ),
+            contains="keyword-default-mutated failed",
+        )
+        checks.check(
+            "refusal-positional-keyword-default-mutation-detected",
+            default_state["phase"] == "after"
+            and default_guard_error.terminal == "EvidenceFailed"
+            and keyword_default_state["phase"] == "after"
+            and keyword_default_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "positional_default": "detected",
+                "keyword_default": "detected",
+                "collector_terminals": ["EvidenceFailed"] * 2,
+            },
+            observed={
+                "positional_default_phase": default_state["phase"],
+                "keyword_default_phase": keyword_default_state["phase"],
+                "collector_terminals": [
+                    default_guard_error.terminal,
+                    keyword_default_guard_error.terminal,
+                ],
+            },
+        )
+
+        def code_before() -> str:
+            return "before"
+
+        def code_after() -> str:
+            return "after"
+
+        original_code = code_before.__code__
+        same_bytecode = original_code.co_code == code_after.__code__.co_code
+
+        def mutate_function_code_then_refuse() -> None:
+            code_before.__code__ = code_after.__code__
+            raise InputRefused(
+                "synthetic refusal after function-code mutation"
+            )
+
+        try:
+            code_guard_error = expect_error(
+                EvidenceFailed,
+                lambda: V2CheckCollector(
+                    "fixture-function-code-refusal-state",
+                    "fixture.function-code-refusal-state",
+                ).refuses(
+                    "function-code-mutated",
+                    InputRefused,
+                    mutate_function_code_then_refuse,
+                ),
+                contains="function-code-mutated failed",
+            )
+            code_mutation_happened = code_before.__code__ is code_after.__code__
+        finally:
+            code_before.__code__ = original_code
+        checks.check(
+            "refusal-function-code-semantics-mutation-detected",
+            same_bytecode
+            and code_mutation_happened
+            and code_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "raw_bytecode_equal": True,
+                "full_code_semantics_changed": True,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "raw_bytecode_equal": same_bytecode,
+                "full_code_semantics_changed": code_mutation_happened,
+                "collector_terminal": code_guard_error.terminal,
+            },
+        )
+
+        class StatefulList(list[str]):
+            pass
+
+        stateful_list = StatefulList(["stable"])
+        stateful_list.phase = "before"
+
+        def mutate_list_metadata_then_refuse() -> None:
+            stateful_list.phase = "after"
+            raise InputRefused(
+                "synthetic refusal after list-subclass metadata mutation"
+            )
+
+        list_metadata_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-list-subclass-refusal-state",
+                "fixture.list-subclass-refusal-state",
+            ).refuses(
+                "list-subclass-metadata-mutated",
+                InputRefused,
+                mutate_list_metadata_then_refuse,
+            ),
+            contains="list-subclass-metadata-mutated failed",
+        )
+
+        def default_factory_before() -> str:
+            return "before"
+
+        def default_factory_after() -> str:
+            return "after"
+
+        factory_mapping: defaultdict[str, str] = defaultdict(
+            default_factory_before
+        )
+
+        def mutate_default_factory_then_refuse() -> None:
+            factory_mapping.default_factory = default_factory_after
+            raise InputRefused(
+                "synthetic refusal after defaultdict factory mutation"
+            )
+
+        default_factory_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-defaultdict-refusal-state",
+                "fixture.defaultdict-refusal-state",
+            ).refuses(
+                "defaultdict-factory-mutated",
+                InputRefused,
+                mutate_default_factory_then_refuse,
+            ),
+            contains="defaultdict-factory-mutated failed",
+        )
+        checks.check(
+            "refusal-container-subclass-and-defaultdict-state-detected",
+            stateful_list == ["stable"]
+            and stateful_list.phase == "after"
+            and list_metadata_guard_error.terminal == "EvidenceFailed"
+            and factory_mapping == {}
+            and factory_mapping.default_factory is default_factory_after
+            and default_factory_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "list_items_unchanged": True,
+                "list_metadata_mutation": "detected",
+                "mapping_entries_unchanged": True,
+                "default_factory_mutation": "detected",
+                "collector_terminals": ["EvidenceFailed"] * 2,
+            },
+            observed={
+                "list_items": list(stateful_list),
+                "list_phase": stateful_list.phase,
+                "mapping_entries": dict(factory_mapping),
+                "factory_is_after": (
+                    factory_mapping.default_factory
+                    is default_factory_after
+                ),
+                "collector_terminals": [
+                    list_metadata_guard_error.terminal,
+                    default_factory_guard_error.terminal,
+                ],
+            },
+        )
+
+        class HybridSlotProbe:
+            __slots__ = ("__phase", "__dict__")
+
+            def __init__(self) -> None:
+                self.__phase = "before"
+                self.public_phase = "stable"
+
+        hybrid_slot_probe = HybridSlotProbe()
+
+        def mutate_private_slot_then_refuse() -> None:
+            hybrid_slot_probe._HybridSlotProbe__phase = "after"
+            raise InputRefused(
+                "synthetic refusal after private-slot mutation"
+            )
+
+        private_slot_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-private-slot-refusal-state",
+                "fixture.private-slot-refusal-state",
+            ).refuses(
+                "private-slot-mutated",
+                InputRefused,
+                mutate_private_slot_then_refuse,
+            ),
+            contains="private-slot-mutated failed",
+        )
+        checks.check(
+            "refusal-hybrid-private-slot-state-detected",
+            hybrid_slot_probe.public_phase == "stable"
+            and hybrid_slot_probe._HybridSlotProbe__phase == "after"
+            and private_slot_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "dict_attribute": "stable",
+                "private_slot": "after",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "dict_attribute": hybrid_slot_probe.public_phase,
+                "private_slot": hybrid_slot_probe._HybridSlotProbe__phase,
+                "collector_terminal": private_slot_guard_error.terminal,
+            },
+        )
+
+        cycle_root: list[Any] = []
+        cycle_child: list[Any] = []
+        cycle_root.append(cycle_child)
+        cycle_child.append(cycle_child)
+
+        def mutate_cycle_topology_then_refuse() -> None:
+            cycle_child[0] = cycle_root
+            raise InputRefused(
+                "synthetic refusal after cycle-topology mutation"
+            )
+
+        cycle_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-cycle-topology-refusal-state",
+                "fixture.cycle-topology-refusal-state",
+            ).refuses(
+                "cycle-topology-mutated",
+                InputRefused,
+                mutate_cycle_topology_then_refuse,
+            ),
+            contains="cycle-topology-mutated failed",
+        )
+        checks.check(
+            "refusal-cycle-topology-mutation-detected",
+            cycle_child[0] is cycle_root
+            and cycle_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "cycle_target": "root",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "cycle_targets_root": cycle_child[0] is cycle_root,
+                "collector_terminal": cycle_guard_error.terminal,
+            },
+        )
+
+        def guarded_global_mutation(
+            *,
+            callback: Callable[[], Any],
+            label: str,
+        ) -> HarnessError:
+            return expect_error(
+                EvidenceFailed,
+                lambda: V2CheckCollector(
+                    f"fixture-{label}-refusal-state",
+                    f"fixture.{label}-refusal-state",
+                ).refuses(
+                    f"{label}-mutated",
+                    InputRefused,
+                    callback,
+                ),
+                contains=f"{label}-mutated failed",
+            )
+
         global_memory = bytearray(b"stable")
         global_memoryview = memoryview(global_memory)
 
@@ -46002,26 +47610,279 @@ def v2_execute_artifact_cases(
             "global_memoryview_callback",
         )
         try:
-            global_guard_error = expect_error(
-                EvidenceFailed,
-                lambda: V2CheckCollector(
-                    "fixture-global-refusal-state",
-                    "fixture.global-refusal-state",
-                ).refuses(
-                    "global-memoryview-mutated",
-                    InputRefused,
-                    global_memoryview_callback,
-                ),
-                contains="global-memoryview-mutated failed",
+            memoryview_guard_error = guarded_global_mutation(
+                callback=global_memoryview_callback,
+                label="global-memoryview",
             )
-            global_mutation_detected = global_memory[0] == 117
+            memoryview_mutation_detected = global_memory[0] == 117
         finally:
             global_memory[0] = ord("s")
             global_memoryview.release()
+        checks.check(
+            "refusal-referenced-global-memoryview-mutation-detected",
+            memoryview_mutation_detected
+            and memoryview_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "memoryview_mutated": True,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "memoryview_mutated": memoryview_mutation_detected,
+                "collector_terminal": memoryview_guard_error.terminal,
+            },
+        )
+
+        global_custom = MutableRefusalProbe()
+
+        def global_custom_template() -> None:
+            _fixture_global_custom.phase = "after"
+            raise InputRefused(
+                "synthetic refusal after global custom-object mutation"
+            )
+
+        custom_callback = types.FunctionType(
+            global_custom_template.__code__,
+            {
+                "_fixture_global_custom": global_custom,
+                "InputRefused": InputRefused,
+            },
+            "global_custom_callback",
+        )
+        custom_guard_error = guarded_global_mutation(
+            callback=custom_callback,
+            label="global-custom-object",
+        )
+        checks.check(
+            "refusal-referenced-global-custom-object-mutation-detected",
+            global_custom.phase == "after"
+            and custom_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "custom_object_phase": "after",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "custom_object_phase": global_custom.phase,
+                "collector_terminal": custom_guard_error.terminal,
+            },
+        )
+
+        global_nested = ({"phase": "before"},)
+
+        def global_nested_template() -> None:
+            _fixture_global_nested[0]["phase"] = "after"
+            raise InputRefused(
+                "synthetic refusal after tuple-nested global mutation"
+            )
+
+        nested_callback = types.FunctionType(
+            global_nested_template.__code__,
+            {
+                "_fixture_global_nested": global_nested,
+                "InputRefused": InputRefused,
+            },
+            "global_nested_callback",
+        )
+        nested_guard_error = guarded_global_mutation(
+            callback=nested_callback,
+            label="global-tuple-nested-mapping",
+        )
+        checks.check(
+            "refusal-referenced-global-tuple-nested-mutation-detected",
+            global_nested[0]["phase"] == "after"
+            and nested_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "nested_mapping_phase": "after",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "nested_mapping_phase": global_nested[0]["phase"],
+                "collector_terminal": nested_guard_error.terminal,
+            },
+        )
+
+        global_deque = deque(["before"])
+
+        def global_deque_template() -> None:
+            _fixture_global_deque.append("after")
+            raise InputRefused(
+                "synthetic refusal after global deque mutation"
+            )
+
+        deque_callback = types.FunctionType(
+            global_deque_template.__code__,
+            {
+                "_fixture_global_deque": global_deque,
+                "InputRefused": InputRefused,
+            },
+            "global_deque_callback",
+        )
+        deque_guard_error = guarded_global_mutation(
+            callback=deque_callback,
+            label="global-deque",
+        )
+        checks.check(
+            "refusal-referenced-global-deque-mutation-detected",
+            list(global_deque) == ["before", "after"]
+            and deque_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "deque_items": ["before", "after"],
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "deque_items": list(global_deque),
+                "collector_terminal": deque_guard_error.terminal,
+            },
+        )
+
+        def global_rebind_template() -> None:
+            global _fixture_global_binding
+            _fixture_global_binding = {"phase": "after"}
+            raise InputRefused(
+                "synthetic refusal after global binding replacement"
+            )
+
+        rebind_globals = {
+            "_fixture_global_binding": {"phase": "before"},
+            "InputRefused": InputRefused,
+        }
+        rebind_callback = types.FunctionType(
+            global_rebind_template.__code__,
+            rebind_globals,
+            "global_rebind_callback",
+        )
+        rebind_guard_error = guarded_global_mutation(
+            callback=rebind_callback,
+            label="global-rebinding",
+        )
+
+        def global_delete_template() -> None:
+            global _fixture_deleted_binding
+            del _fixture_deleted_binding
+            raise InputRefused(
+                "synthetic refusal after global binding deletion"
+            )
+
+        delete_globals = {
+            "_fixture_deleted_binding": {"phase": "before"},
+            "InputRefused": InputRefused,
+        }
+        delete_callback = types.FunctionType(
+            global_delete_template.__code__,
+            delete_globals,
+            "global_delete_callback",
+        )
+        delete_guard_error = guarded_global_mutation(
+            callback=delete_callback,
+            label="global-deletion",
+        )
+        checks.check(
+            "refusal-global-rebinding-and-deletion-detected",
+            rebind_globals["_fixture_global_binding"]
+            == {"phase": "after"}
+            and rebind_guard_error.terminal == "EvidenceFailed"
+            and "_fixture_deleted_binding" not in delete_globals
+            and delete_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "replacement": {"phase": "after"},
+                "deleted_binding_present": False,
+                "collector_terminals": ["EvidenceFailed"] * 2,
+            },
+            observed={
+                "replacement": rebind_globals["_fixture_global_binding"],
+                "deleted_binding_present": (
+                    "_fixture_deleted_binding" in delete_globals
+                ),
+                "collector_terminals": [
+                    rebind_guard_error.terminal,
+                    delete_guard_error.terminal,
+                ],
+            },
+        )
+
+        helper_state = {"phase": "before"}
+
+        def helper_template() -> None:
+            _fixture_helper_state["phase"] = "after"
+
+        helper_function = types.FunctionType(
+            helper_template.__code__,
+            {"_fixture_helper_state": helper_state},
+            "helper_function",
+        )
+
+        def helper_callback_template() -> None:
+            _fixture_helper_function()
+            raise InputRefused(
+                "synthetic refusal after transitive helper mutation"
+            )
+
+        helper_callback = types.FunctionType(
+            helper_callback_template.__code__,
+            {
+                "_fixture_helper_function": helper_function,
+                "InputRefused": InputRefused,
+            },
+            "helper_callback",
+        )
+        helper_guard_error = guarded_global_mutation(
+            callback=helper_callback,
+            label="transitive-helper-global",
+        )
+        checks.check(
+            "refusal-transitive-helper-global-mutation-detected",
+            helper_state["phase"] == "after"
+            and helper_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "helper_state_phase": "after",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "helper_state_phase": helper_state["phase"],
+                "collector_terminal": helper_guard_error.terminal,
+            },
+        )
+
+        dynamic_callback_invoked = {"value": False}
+
+        def dynamic_global_then_refuse() -> None:
+            _ = globals()
+            dynamic_callback_invoked["value"] = True
+            raise InputRefused(
+                "synthetic refusal after dynamic global access"
+            )
+
+        dynamic_guard_error = expect_error(
+            EvidenceFailed,
+            lambda: V2CheckCollector(
+                "fixture-dynamic-global-refusal-state",
+                "fixture.dynamic-global-refusal-state",
+            ).refuses(
+                "dynamic-global-access",
+                InputRefused,
+                dynamic_global_then_refuse,
+            ),
+            contains="dynamic global namespace access",
+        )
+        checks.check(
+            "refusal-dynamic-global-access-fails-closed-before-callback",
+            dynamic_callback_invoked["value"] is False
+            and dynamic_guard_error.terminal == "EvidenceFailed",
+            expected={
+                "callback_invoked": False,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "callback_invoked": dynamic_callback_invoked["value"],
+                "collector_terminal": dynamic_guard_error.terminal,
+            },
+        )
+
         opaque_state = object()
+        opaque_callback_invoked = {"value": False}
 
         def opaque_then_refuse() -> None:
             _ = opaque_state
+            opaque_callback_invoked["value"] = True
             raise InputRefused("synthetic opaque-state refusal")
 
         opaque_guard_error = expect_error(
@@ -46037,46 +47898,18 @@ def v2_execute_artifact_cases(
             contains="unprojectable opaque state",
         )
         checks.check(
-            "refusal-closure-mutation-detected",
-            mutated_state["phase"] == "after"
-            and guard_error.terminal == "EvidenceFailed"
-            and object_state.phase == "after"
-            and object_guard_error.terminal == "EvidenceFailed"
-            and default_state["phase"] == "after"
-            and default_guard_error.terminal == "EvidenceFailed"
-            and global_mutation_detected
-            and global_guard_error.terminal == "EvidenceFailed"
-            and opaque_guard_error.terminal == "EvidenceFailed",
+            "refusal-opaque-state-fails-closed-before-callback",
+            opaque_guard_error.terminal == "EvidenceFailed"
+            and opaque_callback_invoked["value"] is False,
             expected={
-                "closure_mutated": True,
-                "object_mutated": True,
-                "default_mutated": True,
-                "global_memoryview_mutated": True,
                 "opaque_state": "fail-closed",
-                "collector_terminals": ["EvidenceFailed"] * 5,
+                "callback_invoked": False,
+                "collector_terminal": "EvidenceFailed",
             },
             observed={
-                "closure_mutated": mutated_state["phase"] == "after",
-                "object_mutated": object_state.phase == "after",
-                "default_mutated": default_state["phase"] == "after",
-                "global_memoryview_mutated": global_mutation_detected,
-                "collector_terminals": [
-                    guard_error.terminal,
-                    object_guard_error.terminal,
-                    default_guard_error.terminal,
-                    global_guard_error.terminal,
-                    opaque_guard_error.terminal,
-                ],
-                "diagnostic_roots": [
-                    text_root(str(error))
-                    for error in (
-                        guard_error,
-                        object_guard_error,
-                        default_guard_error,
-                        global_guard_error,
-                        opaque_guard_error,
-                    )
-                ],
+                "callback_invoked": opaque_callback_invoked["value"],
+                "collector_terminal": opaque_guard_error.terminal,
+                "diagnostic_root": text_root(str(opaque_guard_error)),
             },
         )
     elif slug == "log-order-terminal":
@@ -46444,6 +48277,12 @@ def v2_execute_artifact_cases(
             EvidenceFailed,
             forbidden_replay_subprocess,
             contains="forbids run_command-routed subprocesses",
+            projection=lambda: {
+                "offline_replay_depth": _v2_offline_replay_depth,
+                "active_subprocess_count": _v2_active_subprocesses,
+                "command_receipt_count": len(_command_receipts),
+            },
+            projection_label="REPLAY_AND_SUBPROCESS_HARNESS_STATE",
         )
 
         original_unscoped_runner = _run_command_unscoped
@@ -53117,8 +54956,134 @@ def _v2_execute_nomock_cases_impl(
 
     elif slug == "nomock-current-br-two-gate-nodata":
         context = fixture_br_context()
+        fixture_root = resolve_safe(
+            str(FIXTURE_BR_ROOT_REL),
+            label="no-mock baseline fixture root",
+            must_exist=True,
+        )
+        stable_issue = fixture_br_show(context["stable_id"])
+        regression_issue = fixture_br_show(context["regression_id"])
+        ready_ids = v2_ready_issue_ids(
+            fixture_br_json("ready", "--limit", "0"),
+            label="no-mock fixture ready membership",
+        )
+        fixture_rows = fixture_br_list()
+        db_exportable_ids = sorted(
+            str(row.get("id") or "")
+            for row in fixture_rows
+            if row.get("ephemeral") is not True
+            and "-wisp-" not in str(row.get("id") or "")
+        )
+        exported_ids = sorted(
+            str(row.get("id") or "")
+            for row in fixture_br_export_list()
+        )
+        normalized_witness = v2_normalize_br_export_witness(
+            fixture_br_json("sync", "--witness"),
+            input_kind="released_live",
+            workspace_root=fixture_root,
+            expected_chunk_size_lines=(
+                V2_BR_WITNESS_CAPTURE_CHUNK_SIZE_LINES
+            ),
+            expected_max_parallelism=(
+                V2_BR_WITNESS_CAPTURE_MAX_PARALLELISM
+            ),
+            error_type=EvidenceFailed,
+        )
+        witness_body = normalized_witness["witness"]
+        canonical_witness_root = v2_br_witness_root(
+            schema_version=witness_body["schema_version"],
+            chunk_size_lines=witness_body["chunk_size_lines"],
+            line_count=witness_body["line_count"],
+            byte_count=witness_body["byte_count"],
+            chunks=witness_body["chunks"],
+        )
+        stable_description_root = text_root(FIXTURE_BR_STABLE_DESCRIPTION)
+        observed_stable_description_root = text_root(
+            str(stable_issue.get("description") or "")
+        )
+        stable_ready = context["stable_id"] in ready_ids
+        stable_non_actionable_reasons = v2_non_actionable_reasons(
+            stable_issue,
+            tracker_ready=stable_ready,
+        )
+        checks.check(
+            "released-fixture-actionable-export-baseline",
+            stable_issue.get("id") == context["stable_id"]
+            and stable_issue.get("title") == FIXTURE_BR_STABLE_TITLE
+            and stable_issue.get("description")
+            == FIXTURE_BR_STABLE_DESCRIPTION
+            and observed_stable_description_root
+            == stable_description_root
+            and stable_issue.get("status") == "open"
+            and stable_issue.get("ephemeral") is not True
+            and stable_issue.get("pinned") is not True
+            and stable_issue.get("is_template") is not True
+            and not str(stable_issue.get("defer_until") or "")
+            and stable_ready
+            and stable_non_actionable_reasons == []
+            and regression_issue.get("id") == context["regression_id"]
+            and regression_issue.get("status") == "closed"
+            and regression_issue.get("close_reason")
+            == FIXTURE_BR_REGRESSION_CLOSE_REASON
+            and regression_issue.get("ephemeral") is True
+            and db_exportable_ids == [context["stable_id"]]
+            and exported_ids == [context["stable_id"]]
+            and witness_body["line_count"] == 1
+            and witness_body["root_hash"] == canonical_witness_root,
+            expected={
+                "stable_id": context["stable_id"],
+                "stable_status": "open",
+                "stable_description_root": stable_description_root,
+                "stable_ready": True,
+                "stable_non_actionable_reasons": [],
+                "stable_flags": {
+                    "ephemeral": False,
+                    "pinned": False,
+                    "is_template": False,
+                    "deferred": False,
+                },
+                "regression_id": context["regression_id"],
+                "regression_status": "closed",
+                "regression_close_reason": (
+                    FIXTURE_BR_REGRESSION_CLOSE_REASON
+                ),
+                "regression_ephemeral": True,
+                "db_exportable_ids": [context["stable_id"]],
+                "jsonl_exported_ids": [context["stable_id"]],
+                "witness_line_count": 1,
+                "witness_root": canonical_witness_root,
+            },
+            observed={
+                "stable": {
+                    "id": stable_issue.get("id"),
+                    "title": stable_issue.get("title"),
+                    "description_root": observed_stable_description_root,
+                    "status": stable_issue.get("status"),
+                    "ready": stable_ready,
+                    "non_actionable_reasons": (
+                        stable_non_actionable_reasons
+                    ),
+                    "ephemeral": stable_issue.get("ephemeral") is True,
+                    "pinned": stable_issue.get("pinned") is True,
+                    "is_template": stable_issue.get("is_template") is True,
+                    "deferred": bool(stable_issue.get("defer_until")),
+                },
+                "regression": {
+                    "id": regression_issue.get("id"),
+                    "status": regression_issue.get("status"),
+                    "close_reason": regression_issue.get("close_reason"),
+                    "ephemeral": regression_issue.get("ephemeral"),
+                },
+                "ready_ids": ready_ids,
+                "db_exportable_ids": db_exportable_ids,
+                "jsonl_exported_ids": exported_ids,
+                "witness_line_count": witness_body["line_count"],
+                "witness_root": witness_body["root_hash"],
+            },
+        )
         before = fixture_br_semantic_projection(
-            fixture_br_show(context["stable_id"])
+            stable_issue
         )
         payloads, accepted, components = v2_replayable_fixture_bundle(
             manifest,
@@ -55263,7 +57228,10 @@ def v2_validate_test_terminal_document(
         for assertion_id in expected_completed_assertion_ids
     )
     expected_registry_root = semantic_root(
-        sorted(v2_build_executor_registry(accepted_manifest))
+        sorted(
+            str(row["assertion_id"])
+            for row in accepted_manifest["case"]
+        )
     )
     if (
         document["schema"] != V2_TEST_TERMINAL_SCHEMA
@@ -55429,7 +57397,6 @@ def v2_validate_test_terminal_document(
 def v2_test_terminal_document(
     *,
     manifest: Mapping[str, Any],
-    registry: Mapping[str, Any],
     results: Sequence[Mapping[str, Any]],
     event_roots: Sequence[str],
     selected: str | None,
@@ -55471,7 +57438,12 @@ def v2_test_terminal_document(
                 row["semantic_root"] for row in validated_results
             ],
             "ordered_event_roots": list(event_roots),
-            "compiled_executor_ids_root": semantic_root(sorted(registry)),
+            "compiled_executor_ids_root": semantic_root(
+                sorted(
+                    str(row["assertion_id"])
+                    for row in manifest["case"]
+                )
+            ),
             "skipped_assertions": [],
             "aggregate_count_only": False,
             "failure_scope": failure_scope,
@@ -55567,7 +57539,6 @@ def run_v2_self_tests(
         _, recovery = v2_runner_failure_policy(error.terminal)
         suite_failure = v2_test_terminal_document(
             manifest=manifest,
-            registry=registry,
             results=results,
             event_roots=event_roots,
             selected=selected,
@@ -55782,7 +57753,6 @@ def run_v2_self_tests(
             event_roots.append(failed["semantic_root"])
             suite_failure = v2_test_terminal_document(
                 manifest=manifest,
-                registry=registry,
                 results=results,
                 event_roots=event_roots,
                 selected=selected,
@@ -55815,7 +57785,6 @@ def run_v2_self_tests(
         )
     terminal = v2_test_terminal_document(
         manifest=manifest,
-        registry=registry,
         results=results,
         event_roots=event_roots,
         selected=selected,
