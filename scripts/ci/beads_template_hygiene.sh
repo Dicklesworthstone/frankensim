@@ -1129,8 +1129,9 @@ V2_SOURCE_NO_CLAIM = (
 V2_SOURCE_ISSUE_NO_CLAIM = (
     "this released-field-complete tracker projection retains exact field "
     "presence and raw-value roots as source evidence only; normalized fields "
-    "support bounded planning, source repository paths are root-only, and no "
-    "ownership or authority is inferred"
+    "support bounded planning, rollup descendant counts are graph-checked but "
+    "workflow-ordered rollup status is retained rather than re-derived, source "
+    "repository paths are root-only, and no ownership or authority is inferred"
 )
 V2_SOURCE_OBSERVATION_NO_CLAIM = (
     "double-captured br projections are tracker-read-only source evidence; "
@@ -24149,6 +24150,7 @@ def v2_validate_source_full_issue(
                 or not isinstance(relation["type"], str)
                 or not relation["type"]
                 or not isinstance(relation["title"], str)
+                or not relation["title"]
                 or (
                     relation["status"] not in STATUS_SCOPES
                 )
@@ -24407,6 +24409,35 @@ def v2_validate_source_graph(
         relation_label="parent hierarchy cycle",
         neighbors_for=parent_neighbors,
     )
+
+    for issue_id, issue in sorted(issue_by_id.items()):
+        rollup = issue["rollup"]
+        if rollup is None:
+            continue
+        visited = {issue_id}
+        frontier = [issue_id]
+        descendant_counts: Counter[str] = Counter()
+        while frontier:
+            next_frontier: list[str] = []
+            for current in frontier:
+                for relation in issue_by_id[current]["dependents"]:
+                    child_id = relation["id"]
+                    if (
+                        relation["type"] != "parent-child"
+                        or child_id.startswith("external:")
+                        or child_id in visited
+                    ):
+                        continue
+                    visited.add(child_id)
+                    descendant_counts[issue_by_id[child_id]["status"]] += 1
+                    next_frontier.append(child_id)
+            frontier = sorted(next_frontier)
+        expected_descendants = dict(sorted(descendant_counts.items()))
+        if rollup["descendants"] != expected_descendants:
+            raise EvidenceFailed(
+                "v2 source graph rollup descendant counts disagree for "
+                f"{issue_id}"
+            )
 
 
 def v2_validate_retained_argv(value: Any, *, label: str) -> list[str]:
