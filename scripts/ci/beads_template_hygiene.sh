@@ -34782,6 +34782,158 @@ def v2_execute_source_cases(
             ),
             contains="status summary disagrees",
         )
+        complete_raw_issue = fixture_issue(
+            issue_id="fixture-complete-released-show",
+            status="open",
+        )
+        complete_raw_issue.update(
+            {
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "created_by": "fixture-creator",
+                "closed_by_session": "fixture-session-a",
+                "due_at": "2026-02-01T00:00:00+00:00",
+                "defer_until": "2026-01-15T00:00:00+00:00",
+                "external_ref": "EXT-A",
+                "source_system": "fixture-system",
+                "agent_context": '{"constraints":["retain"]}',
+                "sender": "fixture-sender-a",
+                "ephemeral": False,
+                "pinned": False,
+                "is_template": False,
+                "compaction_level": 0,
+                "original_size": 100,
+                "comments": [
+                    {
+                        "id": 1,
+                        "issue_id": "fixture-complete-released-show",
+                        "author": "fixture-commenter",
+                        "text": "alpha",
+                        "created_at": "2026-01-01T01:00:00+00:00",
+                    }
+                ],
+                "rollup": {
+                    "status": "open",
+                    "descendants": {"closed": 1, "open": 1},
+                },
+            }
+        )
+        complete_projection = v2_full_issue_projection(
+            complete_raw_issue
+        )
+        v2_validate_source_full_issue(complete_projection, index=0)
+
+        def complete_projection_variant(
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(complete_raw_issue),
+                label="complete released-show mutation seed",
+                require_canonical=True,
+            )
+            mutation(candidate)
+            return v2_full_issue_projection(candidate)
+
+        complete_variants = [
+            complete_projection_variant(
+                lambda row: row["comments"][0].__setitem__(
+                    "text", "bravo"
+                )
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("ephemeral", True)
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("pinned", True)
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("is_template", True)
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__(
+                    "defer_until", "2026-01-16T00:00:00+00:00"
+                )
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("external_ref", "EXT-B")
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__(
+                    "agent_context", '{"constraints":["revise"]}'
+                )
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__(
+                    "closed_by_session", "fixture-session-b"
+                )
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("sender", "fixture-sender-b")
+            ),
+            complete_projection_variant(
+                lambda row: row.__setitem__("external_ref", "")
+            ),
+            complete_projection_variant(
+                lambda row: row.pop("external_ref")
+            ),
+        ]
+        complete_target_root = v2_target_root(complete_projection)
+        unknown_show_field = strict_json_loads(
+            canonical_bytes(complete_raw_issue),
+            label="unknown released-show field seed",
+            require_canonical=True,
+        )
+        unknown_show_field["invented_field"] = "hidden"
+        unknown_show_error = expect_error(
+            InfrastructureFailed,
+            lambda: v2_full_issue_projection(unknown_show_field),
+            contains="unknown released-show fields",
+        )
+        checks.check(
+            "complete-released-show-fields-bind-target-root",
+            complete_projection["comments"][0]["text"] == "alpha"
+            and complete_projection["agent_context"]
+            == '{"constraints":["retain"]}'
+            and complete_projection["rollup"]["descendants"]
+            == {"closed": 1, "open": 1}
+            and complete_projection["released_fields_present"]
+            == sorted(complete_raw_issue)
+            and len(
+                {
+                    complete_target_root,
+                    *(v2_target_root(row) for row in complete_variants),
+                }
+            )
+            == len(complete_variants) + 1
+            and complete_variants[-2]["external_ref"] == ""
+            and complete_variants[-1]["external_ref"] == ""
+            and complete_variants[-2]["source_issue_projection_root"]
+            != complete_variants[-1]["source_issue_projection_root"]
+            and unknown_show_error.terminal == "InfrastructureFailed",
+            expected={
+                "retained_dimensions": [
+                    "comments",
+                    "actionability",
+                    "governance",
+                    "closure_provenance",
+                    "field_presence",
+                    "rollup",
+                ],
+                "distinct_target_roots": len(complete_variants) + 1,
+                "unknown_field": "InfrastructureFailed",
+            },
+            observed={
+                "source_issue_projection_root": complete_projection[
+                    "source_issue_projection_root"
+                ],
+                "distinct_target_roots": len(
+                    {
+                        complete_target_root,
+                        *(v2_target_root(row) for row in complete_variants),
+                    }
+                ),
+                "unknown_field": unknown_show_error.terminal,
+            },
+        )
         lint_raw_issue = fixture_issue(
             issue_id="fixture-lint-wire-shape",
             issue_type="task",
