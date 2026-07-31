@@ -5037,7 +5037,7 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             if (
                 isinstance(relation, dict)
                 and (
-                    not {"id", "status", "priority"}.issubset(
+                    not {"id", "title", "status", "priority"}.issubset(
                         relation
                     )
                     or set(relation)
@@ -5052,7 +5052,8 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 )
             ):
                 raise InfrastructureFailed(
-                    f"v2 br issue {issue_id} has a non-closed relation row"
+                    f"v2 br issue {issue_id} has an invalid relation row "
+                    "with a non-closed schema"
                 )
             if (
                 isinstance(relation, dict)
@@ -5102,13 +5103,8 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 )
                 or not isinstance(relation_type, str)
                 or not relation_type
-                or (
-                    "title" in relation
-                    and (
-                        not isinstance(relation["title"], str)
-                        or not relation["title"]
-                    )
-                )
+                or not isinstance(relation.get("title"), str)
+                or not relation["title"]
                 or (
                     relation_status
                     not in {
@@ -10692,9 +10688,23 @@ def fixture_issue(
         "notes": notes,
         "estimated_minutes": 60,
         "updated_at": "frozen",
-        "dependencies": [dict(edge) for edge in dependencies],
+        "dependencies": [
+            {
+                "title": str(
+                    edge.get("title") or "Specific fixture behavior"
+                ),
+                **dict(edge),
+            }
+            for edge in dependencies
+        ],
         "dependents": [
-            {"id": child, "type": "parent-child", "status": "open", "priority": 1}
+            {
+                "id": child,
+                "title": "Specific fixture behavior",
+                "type": "parent-child",
+                "status": "open",
+                "priority": 1,
+            }
             for child in children
         ],
     }
@@ -14905,6 +14915,7 @@ def v2_build_history(
                 "closer_inference_forbidden": True,
             },
             "comments": comments,
+            "tracker_comments": list(issue["comments"]),
             "notes": issue["notes"],
             "notes_root": issue["field_roots"]["notes"],
             "parent": issue["parent"],
@@ -14965,6 +14976,7 @@ def v2_build_history(
         source_root=source_root,
         inventory=inventory,
         authority=authority,
+        all_issues=all_issues,
         audit_capture=audit_capture,
         history_contract=history_contract,
     )
@@ -38787,11 +38799,21 @@ def v2_history_fixture(
         "closed_at": anchor_closed_at,
         "close_reason": "Fixture anchor completed.",
         "estimated_minutes": 5,
+        "comments": [
+            {
+                "id": 10,
+                "issue_id": anchor_id,
+                "author": "fixture-tracker-commenter",
+                "text": "Fixture retained tracker comment.",
+                "created_at": "2026-01-01T12:00:00+00:00",
+            }
+        ],
         "dependencies": [],
         "dependents": (
             [
                 {
                     "id": "fixture-consumer",
+                    "title": "Fixture consumer",
                     "dependency_type": "blocks",
                     "status": "open",
                     "priority": 2,
@@ -39038,11 +39060,33 @@ def v2_execute_history_cases(
                 "Fixture retained canonical comment."
             ),
         }
+        expected_tracker_comment = {
+            "id": 10,
+            "issue_id": "fixture-anchor",
+            "author": "fixture-tracker-commenter",
+            "text": "Fixture retained tracker comment.",
+            "created_at": "2026-01-01T12:00:00+00:00",
+        }
         checks.check(
             "canonical-commented-event-retained",
-            row["comments"] == [expected_comment],
-            expected=expected_comment,
-            observed=(row["comments"][0] if row["comments"] else None),
+            row["comments"] == [expected_comment]
+            and row["tracker_comments"] == [expected_tracker_comment],
+            expected={
+                "audit_comment": expected_comment,
+                "tracker_comment": expected_tracker_comment,
+                "streams_equated": False,
+            },
+            observed={
+                "audit_comment": (
+                    row["comments"][0] if row["comments"] else None
+                ),
+                "tracker_comment": (
+                    row["tracker_comments"][0]
+                    if row["tracker_comments"]
+                    else None
+                ),
+                "streams_equated": False,
+            },
         )
 
         def history_audit_with_events(
@@ -39137,6 +39181,7 @@ def v2_execute_history_cases(
             source_root=source_root,
             inventory=inventory,
             authority=authority,
+            all_issues=issues,
             audit_capture=reclosed_audit,
             history_contract=reclosed_contract,
         )
@@ -39326,6 +39371,7 @@ def v2_execute_history_cases(
                 source_root=source_root,
                 inventory=inventory,
                 authority=authority,
+                all_issues=issues,
                 audit_capture=cap_plus_one_audit,
                 history_contract=exact_contract,
             ),
@@ -39378,6 +39424,7 @@ def v2_execute_history_cases(
                 source_root=source_root,
                 inventory=inventory,
                 authority=authority,
+                all_issues=issues,
                 audit_capture=audit,
                 history_contract=contract,
             ),
@@ -39421,6 +39468,7 @@ def v2_execute_history_cases(
                     source_root=source_root,
                     inventory=inventory,
                     authority=authority,
+                    all_issues=issues,
                     audit_capture=audit,
                     history_contract=contract,
                 ),
@@ -39440,6 +39488,7 @@ def v2_execute_history_cases(
                 source_root=source_root,
                 inventory=inventory,
                 authority=authority,
+                all_issues=issues,
                 audit_capture=audit,
                 history_contract=contract,
             ),
@@ -39466,6 +39515,7 @@ def v2_execute_history_cases(
                 source_root=source_root,
                 inventory=inventory,
                 authority=authority,
+                all_issues=issues,
                 audit_capture=audit,
                 history_contract=contract,
             ),
@@ -39505,6 +39555,7 @@ def v2_execute_history_cases(
                 source_root=source_root,
                 inventory=inventory,
                 authority=authority,
+                all_issues=issues,
                 audit_capture=duplicate_audit,
                 history_contract=contract,
             ),
@@ -39609,6 +39660,7 @@ def v2_execute_history_cases(
                 source_root=valid_source_root,
                 inventory=valid_args[0],
                 authority=valid_args[1],
+                all_issues=valid_args[2],
                 audit_capture=valid_args[3],
                 history_contract=valid_args[4],
             ),
