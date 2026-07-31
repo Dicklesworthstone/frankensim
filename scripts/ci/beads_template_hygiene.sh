@@ -16703,6 +16703,247 @@ def v2_execute_schema_cli_ux(
             ),
             contains="duplicate",
         )
+        expected_actions = {
+            "REMEDIATION_REQUIRED": "REMEDIATION_CANDIDATE",
+            "REVIEWED_NO_CHANGE": "RETAINED_ADJUDICATION",
+            "ROLLUP_ONLY": "RETAINED_ADJUDICATION",
+            "CONTRIBUTION_ONLY": "RETAINED_ADJUDICATION",
+            "BLOCKED_AUTHORITY": "AUTHORITY_RESOLUTION_REQUIRED",
+            "TYPED_INAPPLICABLE": "RETAINED_ADJUDICATION",
+        }
+        reviewed_documents: dict[str, dict[str, Any]] = {}
+        for disposition, expected_action in expected_actions.items():
+            receipts = v2_synthetic_receipts(
+                inventory,
+                semantic_reviewed=True,
+                semantic_disposition=disposition,
+            )
+            v2_validate_receipt_bindings(receipts, inventory)
+            decision = v2_derive_authority(
+                inventory,
+                receipts,
+                current_br_version="0.2.19",
+            )["decisions"][0]
+            reviewed_documents[disposition] = receipts
+            checks.check(
+                f"semantic-disposition-{disposition.lower()}",
+                decision["semantic_review_disposition"] == disposition
+                and decision["semantic_review_receipt_state"]
+                == "ROOT_BOUND_REVIEWED"
+                and decision["semantic_review_action"] == expected_action
+                and len(decision["semantic_review_dimensions"])
+                == len(V2_SEMANTIC_REVIEW_DIMENSIONS)
+                and [
+                    row["dimension"]
+                    for row in decision["semantic_review_dimensions"]
+                ]
+                == list(V2_SEMANTIC_REVIEW_DIMENSIONS)
+                and all(
+                    isinstance(row["evidence_root"], str)
+                    and row["evidence_root"].startswith("sha256-v1:")
+                    for row in decision["semantic_review_dimensions"]
+                ),
+                expected={
+                    "disposition": disposition,
+                    "state": "ROOT_BOUND_REVIEWED",
+                    "action": expected_action,
+                    "dimensions": len(V2_SEMANTIC_REVIEW_DIMENSIONS),
+                },
+                observed={
+                    "disposition": decision[
+                        "semantic_review_disposition"
+                    ],
+                    "state": decision["semantic_review_receipt_state"],
+                    "action": decision["semantic_review_action"],
+                    "dimensions": len(
+                        decision["semantic_review_dimensions"]
+                    ),
+                },
+            )
+
+        def reroot_receipt_document(
+            document: Mapping[str, Any],
+            mutation: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = json.loads(canonical_bytes(document))
+            candidate.pop("semantic_root", None)
+            receipt = candidate["receipts"][0]
+            receipt.pop("semantic_root", None)
+            mutation(receipt)
+            candidate["receipts"][0] = v2_rooted(receipt)
+            return v2_rooted(candidate)
+
+        base_reviewed = reviewed_documents["REMEDIATION_REQUIRED"]
+        malformed_receipts: list[
+            tuple[str, Callable[[dict[str, Any]], None], str]
+        ] = [
+            (
+                "manual-authorization-string-false",
+                lambda row: row.__setitem__(
+                    "manual_authorization",
+                    "false",
+                ),
+                "not boolean",
+            ),
+            (
+                "partial-semantic-dimensions",
+                lambda row: row.__setitem__(
+                    "semantic_review_dimensions",
+                    row["semantic_review_dimensions"][:-1],
+                ),
+                "every semantic dimension",
+            ),
+            (
+                "reordered-semantic-dimensions",
+                lambda row: row.__setitem__(
+                    "semantic_review_dimensions",
+                    list(reversed(row["semantic_review_dimensions"])),
+                ),
+                "noncanonical",
+            ),
+            (
+                "nodata-reviewed-dimension",
+                lambda row: row["semantic_review_dimensions"][0].update(
+                    {"verdict": "NODATA"}
+                ),
+                "reviewed verdict",
+            ),
+            (
+                "wrong-dimension-evidence-root",
+                lambda row: row["semantic_review_dimensions"][0].update(
+                    {"evidence_root": semantic_root({"wrong": "scope"})}
+                ),
+                "evidence root",
+            ),
+            (
+                "missing-dimension-reason",
+                lambda row: row["semantic_review_dimensions"][0].update(
+                    {"reason": ""}
+                ),
+                "reason",
+            ),
+            (
+                "missing-dimension-falsifier",
+                lambda row: row["semantic_review_dimensions"][0].update(
+                    {"falsifier": ""}
+                ),
+                "falsifier",
+            ),
+            (
+                "stale-target-root",
+                lambda row: row.__setitem__(
+                    "target_root",
+                    semantic_root({"stale": "target"}),
+                ),
+                "source roots drifted",
+            ),
+        ]
+        for name, mutation, diagnostic in malformed_receipts:
+            candidate = reroot_receipt_document(base_reviewed, mutation)
+            checks.refuses(
+                name,
+                InputRefused,
+                lambda candidate=candidate: v2_validate_receipt_bindings(
+                    candidate,
+                    inventory,
+                ),
+                contains=diagnostic,
+            )
+
+        mixed_no_change = reroot_receipt_document(
+            reviewed_documents["REVIEWED_NO_CHANGE"],
+            lambda row: row["semantic_review_dimensions"][1].update(
+                {
+                    "verdict": "ROUTED",
+                    "evidence_root": semantic_root(
+                        {
+                            "target_root": row["target_root"],
+                            "dimension": row[
+                                "semantic_review_dimensions"
+                            ][1]["dimension"],
+                            "verdict": "ROUTED",
+                            "reason": row[
+                                "semantic_review_dimensions"
+                            ][1]["reason"],
+                            "falsifier": row[
+                                "semantic_review_dimensions"
+                            ][1]["falsifier"],
+                        }
+                    ),
+                }
+            ),
+        )
+        checks.refuses(
+            "reviewed-no-change-mixed-verdict-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                mixed_no_change,
+                inventory,
+            ),
+            contains="every dimension SATISFIED",
+        )
+
+        blocked_without_acceptance = reroot_receipt_document(
+            reviewed_documents["BLOCKED_AUTHORITY"],
+            lambda row: row.__setitem__(
+                "declared_acceptance_owner",
+                "",
+            ),
+        )
+        blocked_decision = v2_derive_authority(
+            inventory,
+            blocked_without_acceptance,
+            current_br_version="0.2.19",
+        )["decisions"][0]
+        checks.check(
+            "blocked-review-retained-without-acceptance-authority",
+            blocked_decision["semantic_review_receipt_state"]
+            == "ROOT_BOUND_REVIEWED"
+            and blocked_decision["semantic_review_action"]
+            == "AUTHORITY_RESOLUTION_REQUIRED"
+            and blocked_decision["readiness"] == "REVIEW_ONLY"
+            and blocked_decision["reviewer_provenance"]["reviewer"]
+            == "synthetic-reviewer"
+            and blocked_decision["declared_acceptance_owner"] == "",
+            expected={
+                "state": "ROOT_BOUND_REVIEWED",
+                "action": "AUTHORITY_RESOLUTION_REQUIRED",
+                "readiness": "REVIEW_ONLY",
+            },
+            observed={
+                "state": blocked_decision[
+                    "semantic_review_receipt_state"
+                ],
+                "action": blocked_decision["semantic_review_action"],
+                "readiness": blocked_decision["readiness"],
+                "reviewer": blocked_decision["reviewer_provenance"][
+                    "reviewer"
+                ],
+            },
+        )
+
+        two_inventory = v2_synthetic_inventory(
+            [v2_synthetic_target(0), v2_synthetic_target(1)]
+        )
+        reversed_receipts = v2_synthetic_receipts(
+            two_inventory,
+            semantic_reviewed=True,
+        )
+        reversed_receipts = dict(reversed_receipts)
+        reversed_receipts.pop("semantic_root", None)
+        reversed_receipts["receipts"] = list(
+            reversed(reversed_receipts["receipts"])
+        )
+        reversed_receipts = v2_rooted(reversed_receipts)
+        checks.refuses(
+            "noncanonical-receipt-row-order-refused",
+            InputRefused,
+            lambda: v2_validate_receipt_bindings(
+                reversed_receipts,
+                two_inventory,
+            ),
+            contains="canonical target order",
+        )
     elif slug == "cli-filters-explain":
         first = v2_parse_csv_set(
             "P2,P0",
