@@ -328,7 +328,21 @@ fn metadata_targets(root: &Path) -> Result<(Vec<(String, String, PathBuf)>, Vec<
                         let JsonValue::Object(target) = target else {
                             continue;
                         };
-                        // `test: true` marks targets compiled in test mode.
+                        // `test: true` marks targets compiled in test mode,
+                        // but examples and build scripts also carry it:
+                        // cargo test does not RUN those as tests. Only lib
+                        // (unit tests), test (integration), and bin (binary
+                        // unit tests) targets produce runnable test
+                        // executables; anything else is enumeration noise.
+                        let runnable_kind = match json_obj_field(target, "kind") {
+                            Some(JsonValue::Array(kinds)) => kinds.iter().any(|kind| {
+                                matches!(kind, JsonValue::String(k) if k == "lib" || k == "test" || k == "bin")
+                            }),
+                            _ => false,
+                        };
+                        if !runnable_kind {
+                            continue;
+                        }
                         if !matches!(json_obj_field(target, "test"), Some(JsonValue::Bool)) {
                             continue;
                         }
