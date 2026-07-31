@@ -2482,6 +2482,7 @@ dependencies = [
  "fsci-runtime",
  "nalgebra",
  "npyz",
+ "rayon",
  "thiserror",
  "zip",
 ]
