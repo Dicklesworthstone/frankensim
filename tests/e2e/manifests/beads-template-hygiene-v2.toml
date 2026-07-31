@@ -9,7 +9,8 @@ immutable_after_acceptance = true
 criterion_count = 25
 case_count = 96
 assertion_count = 96
-suite_status = "NO_DATA_UNTIL_V2_HARNESS_AND_RETAINED_RUN_EXIST"
+suite_status = "EXECUTABLE_CONTRACT_WITH_LOCAL_RETAINED_FULL_RUNS_NONPORTABLE"
+harness_contract_identity = "sha256-v1:590ff2d21c32ba003d8d6b4dd0da7ea01f4e33cee786f7ce221d135381658579"
 authority = "TEST_CONTRACT_ONLY"
 tracker_authority = "READ_ONLY"
 no_claim = "This manifest specifies deterministic review and history planning evidence. It does not mutate or repair a Bead, approve target semantics, authenticate a reviewer, admit a conditional-write capability, complete target implementation, validate scientific or performance claims, authorize product or promotion state, or authorize release."
@@ -113,6 +114,190 @@ case_order = [
   "template-lint-v2.nomock-v1-regression",
 ]
 
+[check_obligations]
+"v2.case.schema-closed-manifest" = { case_id = "template-lint-v2.schema-closed-manifest", check_count = 13, ordered_check_ids = ["top-level-closed", "duplicate-toml-key-refused", "schema-version", "accepted-manifest-content-identity-exact", "harness-contract-identity-exact", "harness-manifest-pin-normalization-stable", "harness-semantic-weakening-with-stable-check-ids-refused", "trailing-newline-drift-preserves-toml-semantics", "semantically-equivalent-manifest-byte-drift-refused", "ordered-manifest-list-refuses-scalars-and-duplicates", "manifest-pattern-wrong-type-refused", "manifest-pattern-invalid-regex-refused", "cap-terminal-contract-drift-refused"] }
+"v2.case.schema-executable-assertions" = { case_id = "template-lint-v2.schema-executable-assertions", check_count = 84, ordered_check_ids = [
+  "case-assertion-bijection",
+  "criterion-links-executable",
+  "compiled-executor-bijection",
+  "check-obligation-order-membership-bijection",
+  "runner-snapshot-reconstructs-obligation-order",
+  "check-obligation-root-binds-case-assertion-subject-and-order",
+  "runner-refuses-stale-manifest-semantic-root",
+  "runner-refuses-nonobject-manifest",
+  "runner-fail-seals-malformed-assertion-result",
+  "self-test-event-and-terminal-schemas-distinct-and-closed",
+  "self-test-event-rerooted-binding-refused",
+  "self-test-terminal-vacuous-pass-refused",
+  "runner-fail-seals-executor-system-exit",
+  "failure-event-category-recovery-substitution-refused",
+  "failure-event-projection-substitution-refused",
+  "failure-event-sanitized-argv-substitution-refused",
+  "suite-terminal-arbitrary-event-root-refused",
+  "suite-terminal-duplicate-event-root-refused",
+  "suite-terminal-recovery-policy-substitution-refused",
+  "suite-terminal-empty-diagnostic-refused",
+  "event-unhashable-terminal-typed-refusal",
+  "event-unhashable-stage-typed-refusal",
+  "event-boolean-optional-artifact-count-refused",
+  "suite-terminal-unhashable-root-typed-refusal",
+  "suite-unhashable-terminal-typed-refusal",
+  "runner-classifies-infrastructure-failure-exactly",
+  "runner-fail-seals-empty-typed-diagnostic",
+  "accepted-execution-terminal-schema-closed",
+  "execution-impossible-mode-context-refused",
+  "accepted-replay-execution-context-closed",
+  "outer-terminal-selection-preflight-vs-accepted-execution",
+  "preflight-unhashable-terminal-typed-refusal",
+  "preflight-unhashable-mode-typed-refusal",
+  "execution-unhashable-terminal-typed-refusal",
+  "execution-unhashable-phase-typed-refusal",
+  "execution-nonobject-typed-refusal",
+  "runner-fail-seals-zero-byte-prepublication-failure",
+  "runner-does-not-retry-unknown-partial-output",
+  "json-stdout-real-stream-failures-poison-publication",
+  "output-abort-broken-stderr-still-exits-infrastructurefailed",
+  "runner-seals-between-case-cancellation",
+  "runner-seals-last-case-post-executor-cancellation",
+  "exact-obligation-admits-actual-probe-result",
+  "runner-classifies-noncanonical-result-as-evidence",
+  "self-test-emitter-unknown-schema-refused",
+  "self-test-emitter-nonobject-refused",
+  "self-test-emitter-malformed-manifest-context-refused",
+  "self-test-emitter-mutated-result-refused",
+  "self-test-emitter-out-of-manifest-context-refused",
+  "self-test-event-forged-expected-result-refused",
+  "suite-terminal-boolean-zero-exit-refused",
+  "suite-terminal-forged-expected-result-refused",
+  "suite-terminal-arbitrary-case-root-refused",
+  "runner-fail-seals-executor-manifest-mutation",
+  "runner-classifies-noncanonical-executor-mutation-as-evidence",
+  "collector-refuses-truthy-nonboolean-conditions",
+  "assertion-result-dropped-obligated-check-refused",
+  "assertion-result-extra-unobligated-check-refused",
+  "assertion-result-reordered-obligated-checks-refused",
+  "assertion-result-substituted-obligated-check-refused",
+  "assertion-result-missing-field-refused",
+  "assertion-result-extra-field-refused",
+  "assertion-result-affirmative-no-claim-refused",
+  "assertion-result-wrong-family-refused",
+  "assertion-result-wrong-slug-refused",
+  "assertion-result-parameter-root-refused",
+  "assertion-result-false-check-refused",
+  "assertion-result-duplicate-check-refused",
+  "assertion-result-stale-check-root-refused",
+  "assertion-result-ordered-root-refused",
+  "assertion-result-check-cap-refused",
+  "check-obligation-missing-field-refused",
+  "check-obligation-extra-field-refused",
+  "check-obligation-boolean-count-refused",
+  "check-obligation-empty-refused",
+  "check-obligation-count-mismatch-refused",
+  "check-obligation-cap-plus-one-refused",
+  "check-obligation-duplicate-id-refused",
+  "check-obligation-noncanonical-id-refused",
+  "check-obligation-overlong-id-refused",
+  "check-obligation-wrong-case-refused",
+  "check-obligation-registry-missing-member-refused",
+  "check-obligation-registry-extra-member-refused",
+  "check-obligation-registry-order-drift-refused",
+] }
+"v2.case.cli-help-modes" = { case_id = "template-lint-v2.cli-help-modes", check_count = 3, ordered_check_ids = ["help-exit-zero", "help-complete-options", "help-stream-contract"] }
+"v2.case.cli-exclusive-mode" = { case_id = "template-lint-v2.cli-exclusive-mode", check_count = 5, ordered_check_ids = ["mode-required", "multiple-modes", "duplicate-mode", "unknown-mode", "one-mode-admitted"] }
+"v2.case.cli-artifact-grammar" = { case_id = "template-lint-v2.cli-artifact-grammar", check_count = 5, ordered_check_ids = ["artifact-root-required", "artifact-dir-required", "output-unsupported", "duplicate-artifact-root", "exact-artifact-grammar-admitted"] }
+"v2.case.cli-path-admission" = { case_id = "template-lint-v2.cli-path-admission", check_count = 12, ordered_check_ids = ["nfc-relative-admitted", "unsafe-path-00", "unsafe-path-01", "unsafe-path-02", "unsafe-path-03", "unsafe-path-04", "unsafe-path-05", "unsafe-path-06", "unsafe-path-07", "unsafe-path-08", "unsafe-path-09", "path-bounded-byte-cap"] }
+"v2.case.cli-review-receipts" = { case_id = "template-lint-v2.cli-review-receipts", check_count = 24, ordered_check_ids = ["absent-receipt-review-only", "duplicate-json-key", "semantic-disposition-remediation_required", "semantic-disposition-reviewed_no_change", "semantic-disposition-rollup_only", "semantic-disposition-contribution_only", "semantic-disposition-blocked_authority", "semantic-disposition-typed_inapplicable", "manual-authorization-string-false", "partial-semantic-dimensions", "reordered-semantic-dimensions", "nodata-reviewed-dimension", "wrong-dimension-evidence-root", "missing-dimension-reason", "missing-dimension-falsifier", "stale-target-root", "affirmative-review-receipt-row-no-claim", "affirmative-review-receipt-document-no-claim-refused", "reviewed-no-change-mixed-verdict-refused", "blocked-review-retained-without-acceptance-authority", "noncanonical-receipt-row-order-refused", "external-receipt-source-identity-binds-canonical-input", "external-receipt-missing-source-identity-refused", "external-receipt-forged-source-identity-refused"] }
+"v2.case.cli-filters-explain" = { case_id = "template-lint-v2.cli-filters-explain", check_count = 16, ordered_check_ids = ["all-filter-grammars-order-invariant", "canonical-filter-reproduction-argv", "unknown-filter-refused", "unknown-status-filter-refused", "unknown-route-filter-refused", "unknown-readiness-filter-refused", "duplicate-filter-member-refused", "target-filter-aggregate-argument-cap-refused", "priority-status-target-filter-exact-membership", "unknown-target-filter-refused", "route-readiness-filters-select-authority-projection", "nonmatching-authority-filter-is-explicit-empty-selection", "selected-target-explanation-is-root-bound", "absent-explain-target-refused", "filtered-out-explain-target-refused", "selected-target-without-authority-refused"] }
+"v2.case.ux-empty-synopsis" = { case_id = "template-lint-v2.ux-empty-synopsis", check_count = 4, ordered_check_ids = ["empty-synopsis-exact-sections", "empty-synopsis-exact-zero-values", "empty-synopsis-operator-fields-exact", "empty-synopsis-bounded-utf8"] }
+"v2.case.ux-large-synopsis" = { case_id = "template-lint-v2.ux-large-synopsis", check_count = 5, ordered_check_ids = ["selected-id-preview-boundary-11", "selected-id-preview-boundary-12", "selected-id-preview-boundary-13", "synopsis-byte-cap-injected-n-minus-one-n-n-plus-one", "large-synopsis-retains-complete-artifact-no-claim"] }
+"v2.case.ux-streams-color-tty" = { case_id = "template-lint-v2.ux-streams-color-tty", check_count = 5, ordered_check_ids = ["actual-help-stdout-stderr-no-color", "actual-invalid-cli-typed-exit-and-streams", "actual-accepted-v2-failure-uses-execution-terminal", "pipe-execution-no-tty-dependency-and-no-color-determinism", "actual-v2-manifest-preflight-closed"] }
+"v2.case.compat-v1-immutable" = { case_id = "template-lint-v2.compat-v1-immutable", check_count = 5, ordered_check_ids = ["v1-content-root", "v1-semantic-root", "v1-registry-counts", "v1-manifest-baseline-portably-retained", "nonportable-adoption-evidence-is-explicit-nodata"] }
+"v2.case.source-zero-one" = { case_id = "template-lint-v2.source-zero-one", check_count = 8, ordered_check_ids = ["empty-source-capture-is-first-class", "cardinality-0", "cardinality-1", "synthetic-target-root-is-production-exact", "synthetic-source-field-drift-refused", "nonclosed-no-warning-still-inventoried-unreviewed", "partial-unreviewed-dimensions-refused", "closed-no-finding-remains-outside-active-review-scope"] }
+"v2.case.source-rows-9-10-11" = { case_id = "template-lint-v2.source-rows-9-10-11", check_count = 3, ordered_check_ids = ["population-9", "population-10", "population-11"] }
+"v2.case.source-rows-12-13" = { case_id = "template-lint-v2.source-rows-12-13", check_count = 2, ordered_check_ids = ["population-12", "population-13"] }
+"v2.case.source-rows-24-25-26" = { case_id = "template-lint-v2.source-rows-24-25-26", check_count = 3, ordered_check_ids = ["population-24", "population-25", "population-26"] }
+"v2.case.source-rows-4096" = { case_id = "template-lint-v2.source-rows-4096", check_count = 2, ordered_check_ids = ["row-cap-admitted", "row-cap-plus-one"] }
+"v2.case.source-warnings-8192" = { case_id = "template-lint-v2.source-warnings-8192", check_count = 2, ordered_check_ids = ["warning-cap-admitted", "warning-cap-plus-one"] }
+"v2.case.source-all-types-statuses-priorities" = { case_id = "template-lint-v2.source-all-types-statuses-priorities", check_count = 21, ordered_check_ids = ["covering-array-priorities", "covering-array-statuses-types", "raw-source-cartesian-enum-coverage", "missing-null-collections-normalize-empty", "labels-falsey-0-refused", "labels-falsey-1-refused", "labels-falsey-2-refused", "dependencies-falsey-0-refused", "dependencies-falsey-1-refused", "dependencies-falsey-2-refused", "dependents-falsey-0-refused", "dependents-falsey-1-refused", "dependents-falsey-2-refused", "relation-row-0-refused", "relation-row-1-refused", "relation-row-2-refused", "relation-row-3-refused", "relation-row-4-refused", "relation-row-5-refused", "raw-source-duplicate-label-refused", "raw-source-duplicate-relation-refused"] }
+"v2.case.source-warning-partitions" = { case_id = "template-lint-v2.source-warning-partitions", check_count = 13, ordered_check_ids = ["seven-exclusive-warning-partitions", "warning-partitions-input-order-invariant", "production-zero-cells-rooted", "hidden-duplicate-warning-row-refused", "retained-inventory-rows-non-array-preflight", "retained-inventory-warning-cap-preflight", "retained-inventory-per-issue-warning-cap-preflight", "retained-lint-results-non-array-preflight", "retained-lint-row-cap-preflight", "retained-lint-per-issue-warning-cap-preflight", "retained-observation-receipts-non-array-preflight", "retained-observation-receipt-cap-preflight", "retained-observation-source-file-cap-preflight"] }
+"v2.case.source-double-capture-coherent" = { case_id = "template-lint-v2.source-double-capture-coherent", check_count = 2, ordered_check_ids = ["production-coherence-validator-admits-equal-observations", "capture-binds-all-source-dimensions"] }
+"v2.case.source-within-run-drift" = { case_id = "template-lint-v2.source-within-run-drift", check_count = 12, ordered_check_ids = ["drift-field", "drift-relation", "drift-status", "drift-priority", "drift-owner", "drift-assignee", "drift-selected-membership", "drift-tracker-status", "drift-capability", "drift-lint-status-cut", "drift-source-file", "drift-rule-contract"] }
+"v2.case.source-count-preserving-swap" = { case_id = "template-lint-v2.source-count-preserving-swap", check_count = 4, ordered_check_ids = ["equal-count-field-swap", "equal-count-drop-add", "equal-count-warning-swap", "duplicate-membership"] }
+"v2.case.source-cross-run-drift-scope" = { case_id = "template-lint-v2.source-cross-run-drift-scope", check_count = 13, ordered_check_ids = ["unrelated-drift-changes-observation-and-campaign", "unrelated-drift-preserves-selected-target-root", "unrelated-drift-preserves-selected-decision-root", "unrelated-drift-stable-selected-key", "selected-field-invalidates-affected-key", "selected-owner-invalidates-affected-key", "selected-priority-lane-invalidates-affected-key", "selected-status-lane-invalidates-affected-key", "selected-dependency-neighbor-invalidates-affected-key", "selected-lint-membership-invalidates-affected-key", "selected-owner-receipt-invalidates-child-key", "selected-evidence-owner-receipt-invalidates-child-key", "selected-consumer-receipt-invalidates-child-key"] }
+"v2.case.row-complete-planned-child" = { case_id = "template-lint-v2.row-complete-planned-child", check_count = 36, ordered_check_ids = ["planned-child-required-fields", "normalized-authority-row-lossless", "planned-child-transport-valid", "planned-child-affirmative-no-claim-refused", "planned-child-unknown-workflow-refused", "planned-child-wrong-lane-parent-refused", "planned-child-identity-lane-parent-refused", "planned-child-identity-generation-gate-refused", "planned-child-identity-compatibility-refused", "planned-child-uncovered-complete-compatibility-refused", "planned-child-false-compatibility-data-refused", "missing-title", "missing-target_ids", "missing-intended_generated_edges", "missing-semantic_review_disposition", "missing-semantic_review_receipt_state", "missing-semantic_review_action", "missing-semantic_review_receipt_roots", "missing-reviewed_no_change_receipt_roots", "missing-responsibility_assignments", "source-closure-transition-matrix-valid-cells", "source-closure-not-required-state-change-refused", "source-closure-required-flag-change-refused", "source-closure-stale-target-base-refused", "source-closure-verdict-state-mismatch-refused", "planned-child-false-multi-target-compatibility-refused", "planned-child-duplicate-compatibility-target-refused", "planned-child-empty-compatibility-target-refused", "responsibilities-are-distinct-target-indexed-rows", "responsibility-row-order-refused", "responsibility-row-missing-field-refused", "responsibility-row-duplicate-target-refused", "planned-child-malformed-target-root-refused", "planned-child-malformed-packing-root-refused", "planned-child-nonstring-external-root-typed-refusal", "semantic-plan-exact-scheduled-retained-partition"] }
+"v2.case.row-dispositions-distinct" = { case_id = "template-lint-v2.row-dispositions-distinct", check_count = 1, ordered_check_ids = ["disposition-workflows-distinct"] }
+"v2.case.authority-candidate-provenance" = { case_id = "template-lint-v2.authority-candidate-provenance", check_count = 2, ordered_check_ids = ["candidate-sources-rooted", "candidates-do-not-promote"] }
+"v2.case.authority-self-report-declared" = { case_id = "template-lint-v2.authority-self-report-declared", check_count = 22, ordered_check_ids = ["self-report-ceiling", "reserved-authority-sentinel-0-refused", "reserved-authority-sentinel-1-refused", "reserved-authority-sentinel-2-refused", "reserved-authority-sentinel-3-refused", "reserved-authority-sentinel-4-refused", "reserved-authority-sentinel-5-refused", "reserved-authority-sentinel-6-refused", "reserved-authority-sentinel-7-refused", "reserved-authority-sentinel-8-refused", "reserved-authority-sentinel-9-refused", "reserved-authority-sentinel-10-refused", "reserved-authority-sentinel-11-refused", "reserved-authority-sentinel-12-refused", "reserved-authority-sentinel-13-refused", "reserved-authority-sentinel-14-refused", "symbol-only-authority-identity-0-refused", "symbol-only-authority-identity-1-refused", "symbol-only-authority-identity-2-refused", "authority-identity-byte-cap-exact", "authority-identity-byte-cap-plus-one-refused", "authority-identity-markdown-fence-escapes-backticks"] }
+"v2.case.authority-external-receipt" = { case_id = "template-lint-v2.authority-external-receipt", check_count = 12, ordered_check_ids = ["external-nodata-not-verified", "external-invalid-not-verified", "external-expired-not-verified", "external-revoked-not-verified", "external-conflicted-not-verified", "independent-fixture-external-valid", "external-valid-root-is-exact-target-scope", "external-stale-row-semantic-root-refused", "external-wrong-scope-root-refused-with-fixture-authority-enabled", "external-forged-root-refused-with-fixture-authority-enabled", "external-valid-verdict-missing-root-refused", "external-receipt-stale-target-scope-refused"] }
+"v2.case.capability-valid-missing-failed" = { case_id = "template-lint-v2.capability-valid-missing-failed", check_count = 3, ordered_check_ids = ["capability-nodata-false", "capability-failed-false", "capability-alone-not-mechanical"] }
+"v2.case.capability-lying-nonatomic-version" = { case_id = "template-lint-v2.capability-lying-nonatomic-version", check_count = 5, ordered_check_ids = ["lying-not-conditional", "non_atomic-not-conditional", "version_mismatched-not-conditional", "conflicted-not-conditional", "failed-not-conditional"] }
+"v2.case.readiness-two-gate-truth-table" = { case_id = "template-lint-v2.readiness-two-gate-truth-table", check_count = 11, ordered_check_ids = ["both-gates-plus-admission-only", "current-tool-nodata", "conditional-valid-root-is-exact-target-scope", "conditional-wrong-scope-root-refused-with-fixture-authority-enabled", "conditional-forged-root-refused-with-fixture-authority-enabled", "conditional-valid-verdict-missing-root-refused", "admission-valid-root-is-exact-target-scope", "admission-wrong-scope-root-refused-with-fixture-authority-enabled", "admission-forged-root-refused-with-fixture-authority-enabled", "admission-valid-verdict-missing-root-refused", "mechanical-fixture-override-requires-fixture-source"] }
+"v2.case.route-manual-distinct" = { case_id = "template-lint-v2.route-manual-distinct", check_count = 2, ordered_check_ids = ["three-routes-distinct", "manual-no-cas-claims"] }
+"v2.case.route-deferred-reactivation" = { case_id = "template-lint-v2.route-deferred-reactivation", check_count = 4, ordered_check_ids = ["deferred-always-analysis", "reactivation-requires-fresh-capture-and-reinventory", "deferred-receipt-refused-after-reactivation", "owner-reviewed-fresh-reactivation-replans-manual-open"] }
+"v2.case.route-active-owner-conflict" = { case_id = "template-lint-v2.route-active-owner-conflict", check_count = 2, ordered_check_ids = ["active-in_progress-false", "active-open-true"] }
+"v2.case.route-no-target-mutation" = { case_id = "template-lint-v2.route-no-target-mutation", check_count = 4, ordered_check_ids = ["success-receipt-route-plan-explanation-target-unchanged", "receipt-failure-target-unchanged", "explanation-failure-target-unchanged", "analysis-route-target-unchanged"] }
+"v2.case.packing-hard-keys" = { case_id = "template-lint-v2.packing-hard-keys", check_count = 10, ordered_check_ids = ["hard-key-priority", "hard-key-status", "hard-key-disposition", "hard-key-type", "hard-key-missing", "hard-key-semantic-review-disposition", "hard-key-semantic-review-receipt-state", "hard-key-semantic-review-action", "hard-key-readiness", "hard-key-remediation-route"] }
+"v2.case.packing-compatible-receipt" = { case_id = "template-lint-v2.packing-compatible-receipt", check_count = 2, ordered_check_ids = ["compatible-merge", "receipt-rationale-falsifier"] }
+"v2.case.packing-generic-merge-refused" = { case_id = "template-lint-v2.packing-generic-merge-refused", check_count = 5, ordered_check_ids = ["bare-type-twins-cannot-merge", "lexical-similarity-twins-cannot-merge", "copied-prose-twins-cannot-merge", "aggregate-warning-count-twins-cannot-merge", "generic-domain-twins-cannot-merge"] }
+"v2.case.packing-rationale-falsifier" = { case_id = "template-lint-v2.packing-rationale-falsifier", check_count = 2, ordered_check_ids = ["singleton-rationale", "merge-witness-rationale"] }
+"v2.case.packing-target-cap-10-25" = { case_id = "template-lint-v2.packing-target-cap-10-25", check_count = 5, ordered_check_ids = ["cap-10-population-10", "cap-10-population-11", "cap-25-population-25", "cap-25-population-26", "configured-cap-26"] }
+"v2.case.packing-minutes-479-480-481" = { case_id = "template-lint-v2.packing-minutes-479-480-481", check_count = 3, ordered_check_ids = ["minutes-479-bounded", "minutes-480-bounded", "minutes-481-oversize"] }
+"v2.case.packing-transport-cap-boundaries" = { case_id = "template-lint-v2.packing-transport-cap-boundaries", check_count = 27, ordered_check_ids = ["baseline-transport-valid", "generated-child-preflight-size-equals-final-canonical-size", "generated-child-payload-cap-exact-and-plus-one", "generated-child-payload-cap-forces-compatible-split", "planned-child-hard-cap-n-minus-one-and-n", "planned-child-hard-cap-plus-one", "description-transport-n-minus-one-and-n", "description-transport-cap-plus-one", "acceptance-transport-n-minus-one-and-n", "acceptance-transport-cap-plus-one", "design-transport-n-minus-one-and-n", "design-transport-cap-plus-one", "notes-transport-n-minus-one-and-n", "notes-transport-cap-plus-one", "aggregate-nondescription-argv-cap-exact", "aggregate-nondescription-cap-plus-one-refused", "retained-payload-n-minus-one-and-n-standard", "retained-payload-cap-plus-one-routes-oversize", "review-plan-children-cap-precedes-stale-root", "review-plan-packing_witnesses-cap-precedes-stale-root", "review-plan-semantic_adjudications-cap-precedes-stale-root", "review-plan-retained_without_direct_child-cap-precedes-stale-root", "review-plan-remediation_candidates-cap-precedes-stale-root", "review-plan-oversize_content-cap-precedes-stale-root", "review-plan-builder-cap-precedes-rooting", "review-plan-byte-cap-precedes-stale-root", "review-plan-builder-byte-cap-before-rooting"] }
+"v2.case.packing-exact-small-optimum" = { case_id = "template-lint-v2.packing-exact-small-optimum", check_count = 14, ordered_check_ids = ["exact-count-01", "exact-count-02", "exact-count-03", "exact-count-04", "exact-count-05", "exact-count-06", "exact-count-07", "exact-count-08", "exact-count-09", "exact-count-10", "exact-count-11", "exact-count-12", "exact-count-13", "independent-enumeration-confirms-varied-load-optimum"] }
+"v2.case.packing-large-gap-witness" = { case_id = "template-lint-v2.packing-large-gap-witness", check_count = 5, ordered_check_ids = ["large-witness-complete-and-independently-validated", "independent-validator-refuses-lower-bound-vector-mutation", "independent-validator-refuses-achieved-objective-mutation", "independent-validator-refuses-child-count-gap-mutation", "independent-validator-refuses-gap-witness-mutation"] }
+"v2.case.packing-order-invariant" = { case_id = "template-lint-v2.packing-order-invariant", check_count = 3, ordered_check_ids = ["input-order-invariant-8", "input-order-invariant-14", "warning-receipt-dependency-object-field-permutations-invariant"] }
+"v2.case.packing-refinement-imbalance" = { case_id = "template-lint-v2.packing-refinement-imbalance", check_count = 1, ordered_check_ids = ["refinement-never-remerges"] }
+"v2.case.packing-oversize-escalation" = { case_id = "template-lint-v2.packing-oversize-escalation", check_count = 3, ordered_check_ids = ["oversize-registry-complete", "oversize-manual-route-preserved", "oversize-future-automated-route-preserved"] }
+"v2.case.history-known-closer" = { case_id = "template-lint-v2.history-known-closer", check_count = 12, ordered_check_ids = ["known-closer-exact", "known-pair-exact-millisecond-cap-admitted", "known-pair-cap-plus-one-microsecond-builder-refused", "known-pair-cap-plus-one-microsecond-validator-refused", "known-pair-negative-skew-and-order-refused", "rerooted-known-closer-source-refused", "rerooted-known-closer-actor-refused", "rerooted-known-closer-audit-event-root-refused", "rerooted-known-closer-close-reason-refused", "rerooted-history-notes-root-lie-refused", "rerooted-history-audit-stream-substitution-refused", "rerooted-history-duplicate-audit-membership-refused"] }
+"v2.case.history-legacy-closer" = { case_id = "template-lint-v2.history-legacy-closer", check_count = 1, ordered_check_ids = ["legacy-actor-nodata"] }
+"v2.case.history-unknown-conflicted-closer" = { case_id = "template-lint-v2.history-unknown-conflicted-closer", check_count = 3, ordered_check_ids = ["conflicting-closers-refused", "missing-actor-retained-empty", "rerooted-conflicted-green-history-refused"] }
+"v2.case.history-timestamp-reason" = { case_id = "template-lint-v2.history-timestamp-reason", check_count = 10, ordered_check_ids = ["valid-timestamp-0", "valid-timestamp-1", "valid-timestamp-2", "invalid-timestamp-0", "invalid-timestamp-1", "invalid-timestamp-2", "submicrosecond-timestamp-precision-refused", "basic-time-submicrosecond-precision-refused", "fractional-offset-submicrosecond-precision-refused", "missing-reason-refused"] }
+"v2.case.history-missing-audit-event" = { case_id = "template-lint-v2.history-missing-audit-event", check_count = 1, ordered_check_ids = ["modern-missing-close-refused"] }
+"v2.case.history-duplicate-conflicting-order" = { case_id = "template-lint-v2.history-duplicate-conflicting-order", check_count = 5, ordered_check_ids = ["duplicate-event-id", "reordered-event-id", "reordered-event-timestamp", "conflicting-close-event-pair-refused", "between-capture-events-first-divergence-refused"] }
+"v2.case.history-consumer-candidates" = { case_id = "template-lint-v2.history-consumer-candidates", check_count = 1, ordered_check_ids = ["candidate-not-reviewed"] }
+"v2.case.history-immutable-relations" = { case_id = "template-lint-v2.history-immutable-relations", check_count = 1, ordered_check_ids = ["closed-source-unchanged"] }
+"v2.case.zero-all-priority-status-cells" = { case_id = "template-lint-v2.zero-all-priority-status-cells", check_count = 20, ordered_check_ids = ["all-25-cells-covered", "sparse-24-zero-receipts-rooted", "empty-all-cells-have-zero-receipts", "wrong-zero-coordinate", "wrong-zero-source-root", "missing-zero-receipt", "receipt-on-populated-cell", "reordered-zero-cells", "wrong-zero-count", "zero-cell-count-precedes-stale-root", "zero-inventory-cap-precedes-root", "zero-current-universe-cap-precedes-root", "zero-prior-cap-precedes-root", "zero-scope-successor-cap-precedes-root", "zero-movement-cap-precedes-root", "zero-builder-inventory-cap-before-sorting", "zero-builder-current-cap-before-copying", "zero-builder-prior-cap-before-indexing", "zero-byte-cap-precedes-stale-root", "zero-builder-byte-cap-before-rooting"] }
+"v2.case.movement-cross-lane" = { case_id = "template-lint-v2.movement-cross-lane", check_count = 4, ordered_check_ids = ["movement-class-lineage", "rerooted-movement-class-refused", "rerooted-movement-destination_root_kind-refused", "rerooted-movement-current_universe_root-refused"] }
+"v2.case.movement-live-to-history" = { case_id = "template-lint-v2.movement-live-to-history", check_count = 6, ordered_check_ids = ["movement-class-lineage", "rerooted-movement-class-refused", "rerooted-movement-destination_root_kind-refused", "rerooted-movement-current_universe_root-refused", "prior-target-absent-current-universe-refused", "prior-target-nonclosed-out-of-scope-refused"] }
+"v2.case.movement-history-to-live" = { case_id = "template-lint-v2.movement-history-to-live", check_count = 4, ordered_check_ids = ["movement-class-lineage", "rerooted-movement-class-refused", "rerooted-movement-destination_root_kind-refused", "rerooted-movement-current_universe_root-refused"] }
+"v2.case.artifact-review-base-set" = { case_id = "template-lint-v2.artifact-review-base-set", check_count = 1, ordered_check_ids = ["review-nine-base-files"] }
+"v2.case.artifact-history-base-set" = { case_id = "template-lint-v2.artifact-history-base-set", check_count = 1, ordered_check_ids = ["history-nine-base-files"] }
+"v2.case.artifact-not-requested-projection" = { case_id = "template-lint-v2.artifact-not-requested-projection", check_count = 2, ordered_check_ids = ["not-requested-closed-schema", "empty-populated-root-differs"] }
+"v2.case.artifact-oversize-inventory" = { case_id = "template-lint-v2.artifact-oversize-inventory", check_count = 2, ordered_check_ids = ["registered-optional-exact", "optional-roots-complete"] }
+"v2.case.artifact-no-overwrite-partial" = { case_id = "template-lint-v2.artifact-no-overwrite-partial", check_count = 8, ordered_check_ids = ["existing-output-refused", "partial-prefix-not-complete", "complete-non-green-inputrefused", "filesystem-replay-preserves-inputrefused", "complete-non-green-nodata", "filesystem-replay-preserves-nodata", "complete-non-green-evidencefailed", "filesystem-replay-preserves-evidencefailed"] }
+"v2.case.artifact-membership-path-safety" = { case_id = "template-lint-v2.artifact-membership-path-safety", check_count = 18, ordered_check_ids = ["unsafe-member-0", "unsafe-member-1", "unsafe-member-2", "unsafe-member-3", "unsafe-member-4", "unsafe-member-5", "extra-membership-detected", "inode-alias-refused", "external-hardlink-refused", "retained-missing-member-production-refusal", "retained-changed-member-production-refusal", "retained-symlink-member-production-refusal", "retained-over-cap-member-production-refusal", "retained-no-overwrite-production-refusal", "retained-replay-same-path-refused", "retained-replay-descendant-path-refused", "retained-replay-ancestor-path-refused", "retained-artifact-fixture-root"] }
+"v2.case.log-assertion-argv-evidence" = { case_id = "template-lint-v2.log-assertion-argv-evidence", check_count = 1, ordered_check_ids = ["events-have-required-evidence"] }
+"v2.case.log-raw-result-redaction" = { case_id = "template-lint-v2.log-raw-result-redaction", check_count = 6, ordered_check_ids = ["sensitive-argv-redacted", "split-redaction-deterministic-and-count-preserving", "whole-refusal-bundle-redacts-split-secrets", "raw-stream-root-only", "diagnostic-summary-redacted-bounded", "refusal-closure-mutation-detected"] }
+"v2.case.log-order-terminal" = { case_id = "template-lint-v2.log-order-terminal", check_count = 2, ordered_check_ids = ["dense-unique-last-terminal", "terminal-binds-event-roots"] }
+"v2.case.replay-review-offline" = { case_id = "template-lint-v2.replay-review-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
+"v2.case.replay-history-offline" = { case_id = "template-lint-v2.replay-history-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
+"v2.case.replay-tamper-live-denied" = { case_id = "template-lint-v2.replay-tamper-live-denied", check_count = 54, ordered_check_ids = ["offline-baseline-no-live-or-network", "rerooted-source-affirmative-no-claim-refused", "rerooted-observation-affirmative-no-claim-refused", "rerooted-source-issue-affirmative-no-claim-refused", "rerooted-source-review-receipts-no-claim-refused", "rerooted-source-prior-campaign-no-claim-refused", "rerooted-source-file-identity-refused", "rerooted-source-files-empty-typed-refusal", "rerooted-source-files-short-typed-refusal", "rerooted-source-files-non-object-typed-refusal", "rerooted-source-duplicate-label-refused", "rerooted-source-duplicate-relation-identity-refused", "rerooted-source-command-stream-schema-refused", "rerooted-source-command-raw-stream-refused", "rerooted-source-command-unsanitized-argv-refused", "rerooted-source-command-empty-stream-root-refused", "rerooted-audit-affirmative-no-claim-refused", "rerooted-audit-extra-field-refused", "rerooted-audit-unsanitized-argv-refused", "rerooted-audit-malformed-events-refused", "rerooted-audit-empty-document-root-refused", "missing-artifact-refused", "extra-artifact-refused", "truncated-artifact-refused", "stale-semantic-root-refused", "rerooted-mutated-artifact-refused", "v1-confused-source-refused", "unsafe-optional-path-refused", "terminal-extra-field-refused", "green-path-terminal-confusion-refused", "reordered-event-stream-refused", "non-green-baseline-preserved", "rerooted-failure-category-refused", "rerooted-refusal-terminal-contract-refused", "refusal-terminal-exit-code-mismatch-refused", "rerooted-refusal-envelope-binding-refused", "rerooted-refusal-event-contract-refused", "rerooted-refusal-intermediate-first-divergence-refused", "rerooted-refusal-intermediate-recovery-refused", "rerooted-refusal-case-id-refused", "rerooted-refusal-assertion-id-refused", "rerooted-refusal-executor-id-refused", "rerooted-refusal-parameter-root-refused", "rerooted-refusal-start-argv-refused", "rerooted-refusal-later-argv-refused", "rerooted-refusal-prior-event-roots-refused", "rerooted-refusal-terminal-artifact_root-379cde89", "rerooted-refusal-terminal-artifact_root-5f70e49a", "rerooted-refusal-terminal-artifact_dir-55bd85b1", "rerooted-refusal-terminal-artifact_dir-0b17e459", "rerooted-refusal-terminal-replay_equivalence-14fc3460", "rerooted-refusal-terminal-recovery-ecc23918", "changed-artifact-identity-detected", "mixed-v1-schema-refused"] }
+"v2.case.mutation-forged-approval" = { case_id = "template-lint-v2.mutation-forged-approval", check_count = 3, ordered_check_ids = ["stale-root-forged-approval", "self-issued-receipts-never-mechanical", "undeclared-manual-authorization-refused"] }
+"v2.case.mutation-forged-capability-deferred" = { case_id = "template-lint-v2.mutation-forged-capability-deferred", check_count = 4, ordered_check_ids = ["lying-cannot-upgrade", "non_atomic-cannot-upgrade", "version_mismatched-cannot-upgrade", "deferred-never-upgrades"] }
+"v2.case.mutation-missing-payload-edge" = { case_id = "template-lint-v2.mutation-missing-payload-edge", check_count = 6, ordered_check_ids = ["missing-required-payload-field", "duplicate-target-membership", "missing-edge", "reversed-edge", "duplicate-edge", "undeclared-edge"] }
+"v2.case.mutation-relation-neighbor-drift" = { case_id = "template-lint-v2.mutation-relation-neighbor-drift", check_count = 13, ordered_check_ids = ["only-affected-logical-key-moves", "source-graph-valid-reciprocal-and-parent-pairs", "source-graph-rollup-hierarchy-and-blocking-composition-admitted", "source-graph-absent-neighbor-refused", "source-graph-neighbor-status-refused", "source-graph-neighbor-priority-refused", "source-graph-missing-reciprocal-refused", "source-graph-parent-scalar-refused", "source-graph-self-edge-refused", "source-graph-duplicate-neighbor-refused", "source-graph-external-parent-child-refused", "source-graph-blocking-cycle-refused", "source-graph-parent-hierarchy-cycle-refused"] }
+"v2.case.mutation-dropped-duplicate-target" = { case_id = "template-lint-v2.mutation-dropped-duplicate-target", check_count = 6, ordered_check_ids = ["dropped-target", "duplicated-target", "cross-lane-substitution", "cross-lane-construction-refused-at-hard-partition", "bytearray-and-memoryview-state-is-content-bound", "refusal-guard-detects-bytearray-mutation"] }
+"v2.case.fault-output-lock-export" = { case_id = "template-lint-v2.fault-output-lock-export", check_count = 10, ordered_check_ids = ["existing-output-reservation", "exclusive-writer-no-overwrite", "fault-is-non-green", "file-directory-prefix-collision-refused-before-write", "case-alias-collision-refused-before-write", "exact-prefix-verification-precedes-every-payload-write", "directory-entry-open-fstat-fsync-close-order", "directory-fstat-failure-closes-both-descriptors", "directory-fsync-failure-closes-both-descriptors", "terminal-assignment-failure-state-is-exact"] }
+"v2.case.cancel-signals-drained" = { case_id = "template-lint-v2.cancel-signals-drained", check_count = 23, ordered_check_ids = ["sigint-source", "sigint-audit", "sigint-packing", "sigint-publication", "sigint-replay", "sigterm-source", "sigterm-audit", "sigterm-packing", "sigterm-publication", "sigterm-replay", "live-subprocess-cancellation-drains-and-receipts", "descendant-drain-cleanup-diagnostics", "exited-leader-descendant-pipes-time-out-and-drain", "sigkill-permission-error-refuses-drained-claim", "publication-cancellation-before-publication-terminal-only", "publication-cancellation-publication-start-terminal-only", "publication-cancellation-partial-prefix", "publication-cancellation-assignment-started", "publication-cancellation-assignment-committed", "publication-cancellation-post-seal", "publication-cancellation-identity-loss", "post-seal-cancellation-wrapper-refuses-green-return", "cancellation-state-restored"] }
+"v2.case.restart-deterministic" = { case_id = "template-lint-v2.restart-deterministic", check_count = 11, ordered_check_ids = ["fresh-restart-same-logical-state", "restart-still-no-overwrite", "incomplete-prefix-selects-and-reuses-fresh-attempt", "bounded-incomplete-attempt-exhaustion", "nonempty-invalid-terminal-must-be-stable-before-recovery", "invalid-terminal-signature-shape-refused", "persistent-prefix-state-classification", "persistent-prefix-nondirectory-refused", "persistent-prefix-nonregular-terminal-refused", "persistent-partial-terminal-can-complete-during-grace", "persistent-stable-nonempty-invalid-terminal-refused"] }
+"v2.case.resource-all-caps" = { case_id = "template-lint-v2.resource-all-caps", check_count = 57, ordered_check_ids = ["manifest-cap-bindings", "check-id-byte-cap-exact-and-plus-one", "bounded-read-exact-cap-and-cap-plus-one", "bounded-read-stale-size-check-cannot-bypass-cap", "fault-fixture-content-addressed-reuse-beyond-attempt-cap", "fault-fixture-strict-descriptor-and-altered-projection-refused", "fault-fixture-rerooted-seal-refused", "fault-fixture-tree-caps-cover-all-member-kinds", "child-transport-cache-lru-cardinality-bounded", "bundle-enumeration-exact-caps-admitted", "bundle-file-cap-plus-one", "bundle-directory-cap-plus-one", "bundle-path-byte-cap-plus-one", "bundle-negative-counter", "publication-preflight-file-cap-exact", "publication-preflight-file-cap-plus-one", "source-cardinality-caps-exact", "inventory-row-cap-plus-one", "warning-row-cap-plus-one", "per-issue-warning-cap-plus-one", "source-cap-counter-wrong-type", "clause-streaming-line-boundaries-match-python", "complete-clause-membership-root-is-exact", "complete-clause-forged-membership-root-refused", "complete-clause-forged-maximum-refused", "complete-clause-forged-overflow-root-refused", "clause-row-cap-exact-and-plus-one", "clause-byte-cap-exact-and-plus-one", "label-cap-plus-one", "relation-cap-plus-one", "dependent-relation-cap-plus-one", "audit-event-cap-plus-one", "history-citation-cap-exact", "history-citation-cap-plus-one", "compatibility-target-cap-plus-one", "audit-capture-aggregate-cap-plus-one", "source-projection-aggregate-cap-plus-one", "audit-round-string-sequence-refused", "audit-round-empty-id-refused", "audit-round-non-string-id-refused", "audit-round-duplicate-id-refused", "audit-round-row-cap-plus-one-refused", "audit-round-invalid-membership-makes-zero-capture-calls", "retained-audit-capture-aggregate-n-minus-one-n-plus-one", "audit-capture-wires-distinct-stream-cap", "retained-audit-stream-cap-plus-one", "event-count-cap-plus-one-production-validator", "artifact-cap-plus-one-production-validator", "log-line-cap-plus-one-production-validator", "argv-count-cap-plus-one", "argv-byte-cap-plus-one", "path-component-cap-plus-one", "stdout-capture-cap-is-exact", "stderr-capture-cap-is-exact", "non-utf8-capture-retains-root-only-receipt", "start-failure-receipt-redacts-sensitive-argv", "stdin-cap-plus-one-refused-before-start"] }
+"v2.case.mutation-truncation-oversize-root" = { case_id = "template-lint-v2.mutation-truncation-oversize-root", check_count = 6, ordered_check_ids = ["oversize-registry-byte-laundering", "oversize-content-omission", "retained-truncation-production-refusal", "retained-oversize-content-root-production-refusal", "retained-forged-semantic-root-production-refusal", "retained-mutation-fixture-root"] }
+"v2.case.fault-partial-publication-conflict" = { case_id = "template-lint-v2.fault-partial-publication-conflict", check_count = 5, ordered_check_ids = ["duplicate-terminal-refused", "retained-partial-prefix-manual-recovery", "retained-partial-prefix-conflicting-retry-refused", "retained-duplicate-terminal-manual-recovery", "retained-partial-conflict-fixture-root"] }
+"v2.case.fault-replay-manual-recovery" = { case_id = "template-lint-v2.fault-replay-manual-recovery", check_count = 5, ordered_check_ids = ["replay-mismatch", "ambiguous-source", "audit-conflict", "publication-ambiguity", "retained-replay-recovery-fixture-root"] }
+"v2.case.nomock-br-robot-cells" = { case_id = "template-lint-v2.nomock-br-robot-cells", check_count = 5, ordered_check_ids = ["released-br-all-state-coverage", "robot-deferred-accounting", "exact-25-cells-and-zero-receipts", "production-v2-exact-covers-complete-nonclosed-universe", "production-zero-validator-and-command-evidence"] }
+"v2.case.nomock-audit-known-legacy-conflict" = { case_id = "template-lint-v2.nomock-audit-known-legacy-conflict", check_count = 2, ordered_check_ids = ["released-known-and-legacy", "conflicting-close-state-retained"] }
+"v2.case.nomock-current-br-two-gate-nodata" = { case_id = "template-lint-v2.nomock-current-br-two-gate-nodata", check_count = 2, ordered_check_ids = ["current-released-two-gate-nodata", "released-target-unchanged"] }
+"v2.case.nomock-review-plan" = { case_id = "template-lint-v2.nomock-review-plan", check_count = 3, ordered_check_ids = ["exact-nine-file-released-bundle", "released-plan-offline-replay", "mode-specific-projection-and-audit"] }
+"v2.case.nomock-history-plan" = { case_id = "template-lint-v2.nomock-history-plan", check_count = 3, ordered_check_ids = ["exact-nine-file-released-bundle", "released-plan-offline-replay", "mode-specific-projection-and-audit"] }
+"v2.case.nomock-unrelated-drift-stability" = { case_id = "template-lint-v2.nomock-unrelated-drift-stability", check_count = 2, ordered_check_ids = ["unrelated-observation-moves-selected-key-stable", "unrelated-fixture-restored"] }
+"v2.case.nomock-selected-drift-refusal" = { case_id = "template-lint-v2.nomock-selected-drift-refusal", check_count = 2, ordered_check_ids = ["released-selected-stale-root-refused-restored", "all-selected-logical-dimensions-invalidate"] }
+"v2.case.nomock-active-conflict-deferred" = { case_id = "template-lint-v2.nomock-active-conflict-deferred", check_count = 2, ordered_check_ids = ["active-conflict-defers-generated-child", "planner-does-not-mutate-active-target"] }
+"v2.case.nomock-oversize" = { case_id = "template-lint-v2.nomock-oversize", check_count = 2, ordered_check_ids = ["released-oversize-complete-registry", "released-oversize-target-restored"] }
+"v2.case.nomock-offline-replay" = { case_id = "template-lint-v2.nomock-offline-replay", check_count = 6, ordered_check_ids = ["review-plan-filesystem-read-reconstruct-exact", "review-plan-terminal-content-last-and-complete", "review-plan-disjoint-filesystem-replay-exact", "history-plan-filesystem-read-reconstruct-exact", "history-plan-terminal-content-last-and-complete", "offline-denies-live-reads"] }
+"v2.case.nomock-live-target-unchanged" = { case_id = "template-lint-v2.nomock-live-target-unchanged", check_count = 1, ordered_check_ids = ["read-only-modes-preserve-full-fixture-fingerprint"] }
+"v2.case.nomock-v1-regression" = { case_id = "template-lint-v2.nomock-v1-regression", check_count = 2, ordered_check_ids = ["frozen-v1-suite-exact", "v1-replay-and-v2-independence"] }
+
+
 [schema_contract]
 unknown_keys = "REFUSE_RECURSIVELY"
 duplicate_keys = "REFUSE"
@@ -131,8 +316,14 @@ closed_inline_tables = true
 prose_assertions_authorize_pass = false
 compiled_executor_required = true
 aggregate_check_count_authorizes_pass = false
+check_obligation_policy = "EXACT_ORDERED_CHECK_IDS_CASE_ASSERTION_SUBJECT_AND_COUNT"
+accepted_content_identity_policy = "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
+harness_contract_identity_policy = "MANIFEST_PINNED_SHA256_OF_HARNESS_BYTES_WITH_MANIFEST_PIN_VALUE_NORMALIZED"
+retained_run_artifact_policy = "LOCAL_IGNORED_ARTIFACTS_NONPORTABLE"
+portable_retained_run_proof = false
 case_id_pattern = "^template-lint-v2\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
 assertion_id_pattern = "^v2\\.case\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+check_id_pattern = "^[a-z0-9][a-z0-9._:-]*$"
 allowed_top_level_keys = [
   "schema",
   "schema_version",
@@ -150,6 +341,8 @@ allowed_top_level_keys = [
   "tracker_authority",
   "no_claim",
   "case_order",
+  "check_obligations",
+  "harness_contract_identity",
   "schema_contract",
   "compatibility_contract",
   "source_contract",
@@ -249,7 +442,7 @@ audit_capture_uses_bounded_runner = true
 source_closure_states = ["NOT_REQUIRED_BY_V1_CLASSIFICATION", "REVIEW_REQUIRED", "ROOT_BOUND_REVIEWED_COMPLETE", "ROOT_BOUND_REVIEW_BLOCKED", "ROOT_BOUND_NOT_APPLICABLE"]
 source_closure_transition = "REQUIRED_FLAG_IMMUTABLE_AND_ROOT_BOUND_DIMENSION_VERDICT_DETERMINES_CLOSED_STATE"
 source_document_required_fields = ["schema", "manifest", "v1_baseline", "contracts", "campaign_epoch_root", "captured", "capture_roots", "tracker_authority", "direct_tracker_file_access", "network_access", "no_claim", "semantic_root"]
-source_manifest_required_fields = ["path", "semantic_root", "content_identity", "case_count", "assertion_count", "criterion_count"]
+source_manifest_required_fields = ["path", "semantic_root", "content_identity", "harness_contract_identity", "case_count", "assertion_count", "criterion_count"]
 source_capture_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "campaign", "filters", "review_receipts", "prior_campaign", "audit_capture"]
 source_capture_root_required_fields = ["all_issues", "v1_lint_projection", "v1_inventory_projection", "observation", "review_receipts", "prior_campaign", "audit_capture"]
 source_contract_required_fields = ["source", "row", "authority", "packing", "history", "artifact", "logging", "replay", "caps"]
@@ -668,8 +861,12 @@ publication_parent_durability = "FSYNC_EACH_PARENT_AFTER_CHILD_CREATION"
 [logging_contract]
 format = "JSONL"
 encoding = "UTF-8"
-schema = "frankensim.beads-template-hygiene-event.v2"
-deterministic = true
+schema = "frankensim.beads-template-hygiene.event.v2"
+self_test_schema = "frankensim.beads-template-hygiene.test-event.v2"
+self_test_terminal_schema = "frankensim.beads-template-hygiene.test-terminal.v2"
+preflight_terminal_schema = "frankensim.beads-template-hygiene.preflight-terminal.v2"
+execution_terminal_schema = "frankensim.beads-template-hygiene.execution-terminal.v2"
+deterministic = "CANONICAL_ORDER_FOR_ROOTED_INPUTS; LIVE_STATE_TIMING_AND_FRESH_ATTEMPT_EVIDENCE_MAY_CHANGE_ROOTS"
 redacted = true
 sequence = "dense unsigned integers starting at zero"
 required_fields = [
@@ -694,7 +891,85 @@ required_fields = [
   "safe_relative_artifacts",
   "no_claim",
 ]
+self_test_required_fields = [
+  "schema",
+  "case_id",
+  "assertion_id",
+  "executor_id",
+  "parameter_root",
+  "stage",
+  "sequence",
+  "argv",
+  "exit_code",
+  "result_category",
+  "semantic_projection",
+  "stdout_byte_length",
+  "stdout_root",
+  "stderr_byte_length",
+  "stderr_root",
+  "first_divergence",
+  "recovery",
+  "terminal",
+  "safe_relative_artifacts",
+  "no_claim",
+  "semantic_root",
+]
+self_test_terminal_required_fields = [
+  "schema",
+  "terminal",
+  "exit_code",
+  "selected",
+  "manifest_root",
+  "manifest_content_identity",
+  "harness_contract_identity",
+  "case_count",
+  "assertion_count",
+  "check_count",
+  "ordered_case_ids",
+  "ordered_assertion_ids",
+  "ordered_case_roots",
+  "ordered_event_roots",
+  "compiled_executor_ids_root",
+  "skipped_assertions",
+  "aggregate_count_only",
+  "failure_scope",
+  "first_divergence",
+  "diagnostic_root",
+  "diagnostic_summary",
+  "recovery",
+  "no_claim",
+  "semantic_root",
+]
+preflight_terminal_required_fields = [
+  "schema",
+  "terminal",
+  "exit_code",
+  "mode",
+  "first_divergence",
+  "diagnostic_root",
+  "diagnostic_summary",
+  "recovery",
+  "no_claim",
+  "semantic_root",
+]
+execution_terminal_required_fields = [
+  "schema",
+  "terminal",
+  "exit_code",
+  "mode",
+  "manifest_root",
+  "phase",
+  "artifact_state",
+  "complete_evidence_bundle",
+  "first_divergence",
+  "diagnostic_root",
+  "diagnostic_summary",
+  "recovery",
+  "no_claim",
+  "semantic_root",
+]
 argv_representation = "array"
+timing_policy = "BOUNDED_ELAPSED_DURATION_ALLOWED_IN_ASSERTION_EVIDENCE; WALL_CLOCK_TIMESTAMPS_AND_SCHEDULER_IDENTITIES_FORBIDDEN"
 raw_stream_bodies_retained = false
 raw_stream_roots_cover_complete_bounded_stream = true
 terminal_event_required = true
@@ -727,7 +1002,7 @@ forbidden_content = [
   "environment value",
   "process ID",
   "thread ID",
-  "scheduler timing",
+  "scheduler identity",
   "wall-clock timestamp",
 ]
 
@@ -765,6 +1040,7 @@ max_acceptance_bytes = 32768
 max_design_bytes = 16384
 max_notes_bytes = 16384
 max_aggregate_non_description_argv_bytes = 61440
+max_child_transport_cache_entries = 8192
 max_review_minutes_per_child = 480
 exact_optimality_max_targets = 13
 max_clause_bytes = 65536
@@ -786,6 +1062,7 @@ max_authority_identity_bytes = 1024
 max_log_events = 262144
 max_log_line_bytes = 65536
 max_assertion_checks = 256
+max_check_id_bytes = 256
 max_diagnostic_summary_bytes = 512
 max_artifact_bytes = 67108864
 max_synopsis_bytes = 8192
@@ -832,6 +1109,7 @@ assertion_skip_is_pass = false
 expected_refusal_requires_unchanged_projection = true
 expected_nodata_requires_unchanged_projection = true
 aggregate_count_only_is_pass = false
+exact_check_obligation_required = true
 
 [[criterion]]
 id = "AC01"
@@ -940,7 +1218,7 @@ assertion_id = "v2.case.schema-closed-manifest"
 criterion_ids = ["AC15"]
 kinds = ["schema"]
 fixture_engine = "PURE_PROJECTION"
-subject = "recursive closed-schema validation, duplicate and unknown key refusal"
+subject = "recursive closed-schema validation, duplicate and unknown key refusal, an external harness pin over the exact accepted manifest bytes, and a manifest-pinned normalized identity over the executable harness bytes; semantically equivalent manifest drift and same-check-ID harness weakening both refuse"
 
 [[case]]
 ordinal = 2
@@ -949,7 +1227,7 @@ assertion_id = "v2.case.schema-executable-assertions"
 criterion_ids = ["AC15", "AC22"]
 kinds = ["schema", "logging"]
 fixture_engine = "PURE_PROJECTION"
-subject = "criterion, case, compiled executor, assertion-result, and evidence-root bijection; prose and aggregate counts cannot pass, and malformed executor results fail-seal as typed EvidenceFailed assertion and suite terminals"
+subject = "criterion, case, compiled executor, assertion-result, evidence-root, and exact ordered per-case check-obligation bijection; obligations bind case, assertion, subject, count, and order; test events and suite terminals are distinct closed rooted schemas; prose, aggregate counts, vacuous Pass, truthy nonbooleans, SystemExit zero, cancellation gaps, executor input mutation, malformed results, and obligation divergence cannot pass"
 
 [[case]]
 ordinal = 3
@@ -1030,7 +1308,7 @@ assertion_id = "v2.case.ux-streams-color-tty"
 criterion_ids = ["AC21"]
 kinds = ["unit", "ux"]
 fixture_engine = "PURE_PROJECTION"
-subject = "actual piped subprocess help and invalid invocation prove stdout/stderr separation, canonical typed exits, operation without a TTY, deterministic NO_COLOR behavior, and no ANSI"
+subject = "actual piped subprocess help and invalid v2 invocation prove stdout/stderr separation, a closed rooted preflight-failure schema for argument and accepted-manifest refusal, canonical typed exits, operation without a TTY, deterministic NO_COLOR behavior, and no ANSI"
 
 [[case]]
 ordinal = 12
@@ -1370,7 +1648,7 @@ ordinal = 49
 id = "template-lint-v2.history-known-closer"
 assertion_id = "v2.case.history-known-closer"
 criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
-kinds = ["unit", "state"]
+kinds = ["unit", "boundary", "state"]
 fixture_engine = "PURE_PROJECTION"
 subject = "unique well-formed close audit event yields KNOWN actor and exact source, timestamp, reason, and event root; each history audit-stream root is bound to the unique canonical retained audit document and substituted or duplicated membership refuses"
 
@@ -1399,7 +1677,7 @@ assertion_id = "v2.case.history-timestamp-reason"
 criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
 kinds = ["unit", "mutation", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "valid boundary timestamps pass; malformed, missing, ambiguous timestamps and missing reasons refuse deterministically"
+subject = "canonical RFC3339 boundary timestamps with at most microsecond precision pass; malformed, missing, ambiguous, basic-time, over-precise UTC or fractional-offset timestamps and missing reasons refuse deterministically"
 
 [[case]]
 ordinal = 53
@@ -1525,7 +1803,7 @@ assertion_id = "v2.case.artifact-membership-path-safety"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["mutation", "replay", "resource"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "missing, unlisted, duplicate, changed, unsafe, symlink, extra, over-cap, and Unicode-aliased files refuse"
+subject = "missing, unlisted, duplicate, changed, unsafe, symlink, extra, over-cap, and Unicode-aliased files refuse; same, descendant, and ancestor replay outputs remain disjoint; the six invalid or control variants are content-addressed, final-sealed, and repeatably verified without overwrite"
 
 [[case]]
 ordinal = 67
@@ -1660,7 +1938,7 @@ assertion_id = "v2.case.resource-all-caps"
 criterion_ids = ["AC05", "AC11", "AC13", "AC22"]
 kinds = ["resource", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "independent n-1, n, n+1 assertions cover row, warning, field, payload, argv, path, artifact, event, log-line, synopsis, selected-ID, subprocess stream, input, timeout, and persistent-attempt caps; exact output prefixes, non-UTF8, start failure, cleanup diagnostics, and sensitive argv receipts are bounded and redacted"
+subject = "independent n-1, n, n+1 assertions cover row, warning, field, payload, argv, path, artifact, event, log-line, synopsis, selected-ID, subprocess stream, single-descriptor input reads, timeout, persistent-attempt, and bounded child-transport LRU-cache caps; content-addressed retained fault fixtures reuse beyond the old attempt cap with an exact final tree seal; output prefixes, non-UTF8, start failure, cleanup diagnostics, and sensitive argv receipts are bounded and redacted"
 
 [[case]]
 ordinal = 82
@@ -1669,7 +1947,7 @@ assertion_id = "v2.case.mutation-truncation-oversize-root"
 criterion_ids = ["AC05", "AC13", "AC22"]
 kinds = ["mutation", "resource", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "semantic truncation, bounded-index completeness claim, oversize path/root swap, omitted content, and aggregate-cap laundering refuse"
+subject = "semantic truncation, bounded-index completeness claim, oversize path/root swap, omitted content, and aggregate-cap laundering refuse; exact invalid retained variants are content-addressed, final-sealed, and repeatably verified without overwrite"
 
 [[case]]
 ordinal = 83
@@ -1678,7 +1956,7 @@ assertion_id = "v2.case.fault-partial-publication-conflict"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["fault", "state", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "fail-sealed conflict artifact, partial publication, duplicate terminal, changed parent, and terminal disagreement remain non-green with recovery"
+subject = "fail-sealed conflict artifact, partial publication, duplicate terminal, changed parent, and terminal disagreement remain non-green with recovery; the intentionally partial retained tree has a distinct content-addressed final fixture seal and is repeatably verified without overwrite"
 
 [[case]]
 ordinal = 84
@@ -1687,7 +1965,7 @@ assertion_id = "v2.case.fault-replay-manual-recovery"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["fault", "replay", "state"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "replay mismatch, ambiguous source, irreconcilable audit conflict, and publication ambiguity retain first divergence and MANUAL_RECOVERY_REQUIRED"
+subject = "replay mismatch, ambiguous source, irreconcilable audit conflict, and publication ambiguity retain first divergence and MANUAL_RECOVERY_REQUIRED; every exact invalid retained tree is content-addressed, final-sealed, and repeatably verified without replay output"
 
 [[case]]
 ordinal = 85

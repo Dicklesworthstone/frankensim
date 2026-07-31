@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,6 +64,19 @@ ARTIFACT_IDENTITY_SCHEMA = "frankensim.beads-template-hygiene.artifact-identity.
 CASE_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v1"
 
 V2_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v2"
+V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = (
+    "sha256-v1:5307c4b0f3531fc0a66de1ff907d6228e3ef779feb3151b60ec32c51dbffaee7"
+)
+V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY = (
+    "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
+)
+V2_HARNESS_CONTRACT_IDENTITY_POLICY = (
+    "MANIFEST_PINNED_SHA256_OF_HARNESS_BYTES_WITH_MANIFEST_PIN_VALUE_NORMALIZED"
+)
+V2_SUITE_STATUS = (
+    "EXECUTABLE_CONTRACT_WITH_LOCAL_RETAINED_FULL_RUNS_NONPORTABLE"
+)
+V2_RETAINED_RUN_ARTIFACT_POLICY = "LOCAL_IGNORED_ARTIFACTS_NONPORTABLE"
 V2_SOURCE_SCHEMA = "frankensim.beads-template-hygiene.source.v2"
 V2_INVENTORY_SCHEMA = "frankensim.beads-template-hygiene.inventory.v2"
 V2_AUTHORITY_SCHEMA = "frankensim.beads-template-hygiene.authority.v2"
@@ -85,6 +98,13 @@ V2_ZERO_RECEIPT_NO_CLAIM = (
     "zero is exact only for this rooted campaign cell"
 )
 V2_EVENT_SCHEMA = "frankensim.beads-template-hygiene.event.v2"
+V2_TEST_EVENT_SCHEMA = (
+    "frankensim.beads-template-hygiene.test-event.v2"
+)
+V2_TEST_EVENT_NO_CLAIM = (
+    "the test event records one compiled bounded assertion and mints no "
+    "tracker, semantic, implementation, or release authority"
+)
 V2_TERMINAL_SCHEMA = "frankensim.beads-template-hygiene.terminal.v2"
 V2_REVIEW_RECEIPTS_SCHEMA = (
     "frankensim.beads-template-hygiene.review-receipts.v2"
@@ -94,6 +114,12 @@ V2_ASSERTION_RESULT_SCHEMA = (
 )
 V2_TEST_TERMINAL_SCHEMA = (
     "frankensim.beads-template-hygiene.test-terminal.v2"
+)
+V2_PREFLIGHT_TERMINAL_SCHEMA = (
+    "frankensim.beads-template-hygiene.preflight-terminal.v2"
+)
+V2_EXECUTION_TERMINAL_SCHEMA = (
+    "frankensim.beads-template-hygiene.execution-terminal.v2"
 )
 V2_REFUSAL_PROJECTION_SCHEMA = (
     "frankensim.beads-template-hygiene.refusal-projection.v2"
@@ -328,6 +354,9 @@ V2_CHILD_DESIGN_CAP = 16_384
 V2_CHILD_NOTES_CAP = 16_384
 V2_CHILD_ARGV_AGGREGATE_CAP = 61_440
 V2_EXACT_OPTIMALITY_MAX_TARGETS = 13
+V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP = (
+    1 << V2_EXACT_OPTIMALITY_MAX_TARGETS
+)
 V2_SYNOPSIS_BYTES_CAP = 8_192
 V2_SYNOPSIS_ID_PREVIEW_CAP = 12
 V2_AUDIT_WORKERS = 8
@@ -355,6 +384,44 @@ V2_AUTHORITY_IDENTITY_CANONICALIZATION = (
 V2_LOG_EVENTS_CAP = 262_144
 V2_LOG_LINE_BYTES_CAP = 65_536
 V2_ASSERTION_CHECKS_CAP = 256
+V2_CHECK_ID_BYTES_CAP = 256
+V2_CHECK_ID_PATTERN_TEXT = r"^[a-z0-9][a-z0-9._:-]*$"
+V2_CHECK_ID_PATTERN = re.compile(V2_CHECK_ID_PATTERN_TEXT)
+V2_LOG_DETERMINISM_POLICY = (
+    "CANONICAL_ORDER_FOR_ROOTED_INPUTS; "
+    "LIVE_STATE_TIMING_AND_FRESH_ATTEMPT_EVIDENCE_MAY_CHANGE_ROOTS"
+)
+V2_LOG_SEQUENCE_POLICY = "dense unsigned integers starting at zero"
+V2_LOG_TIMING_POLICY = (
+    "BOUNDED_ELAPSED_DURATION_ALLOWED_IN_ASSERTION_EVIDENCE; "
+    "WALL_CLOCK_TIMESTAMPS_AND_SCHEDULER_IDENTITIES_FORBIDDEN"
+)
+V2_LOG_FORBIDDEN_CONTENT = (
+    "raw stdout body",
+    "raw stderr body",
+    "source_repo_path",
+    "absolute path",
+    "bulk issue body",
+    "credential",
+    "secret",
+    "token",
+    "environment value",
+    "process ID",
+    "thread ID",
+    "scheduler identity",
+    "wall-clock timestamp",
+)
+V2_SUBPROCESS_FAILURE_RECEIPTS = (
+    "START_FAILED",
+    "CAPTURE_FAILED",
+    "TIMEOUT",
+    "CANCELLED",
+    "CANCELLED_AFTER_EXIT",
+    "STDOUT_LIMIT",
+    "STDERR_LIMIT",
+    "NON_UTF8",
+    "UNEXPECTED_EXIT",
+)
 V2_CLAUSE_INDEX_SCHEMA = (
     "frankensim.beads-template-hygiene.clause-index.v2"
 )
@@ -417,6 +484,7 @@ V2_SOURCE_MANIFEST_FIELDS = frozenset(
         "path",
         "semantic_root",
         "content_identity",
+        "harness_contract_identity",
         "case_count",
         "assertion_count",
         "criterion_count",
@@ -706,6 +774,13 @@ V2_ASSERTION_CHECK_FIELDS = frozenset(
         "semantic_root",
     }
 )
+V2_CHECK_OBLIGATION_FIELDS = frozenset(
+    {
+        "case_id",
+        "check_count",
+        "ordered_check_ids",
+    }
+)
 V2_EVENT_FIELDS = frozenset(
     {
         "schema",
@@ -728,6 +803,72 @@ V2_EVENT_FIELDS = frozenset(
         "terminal",
         "safe_relative_artifacts",
         "no_claim",
+    }
+)
+V2_TEST_EVENT_FIELDS = frozenset(
+    {
+        *V2_EVENT_FIELDS,
+        "semantic_root",
+    }
+)
+V2_TEST_TERMINAL_FIELDS = frozenset(
+    {
+        "schema",
+        "terminal",
+        "exit_code",
+        "selected",
+        "manifest_root",
+        "manifest_content_identity",
+        "harness_contract_identity",
+        "case_count",
+        "assertion_count",
+        "check_count",
+        "ordered_case_ids",
+        "ordered_assertion_ids",
+        "ordered_case_roots",
+        "ordered_event_roots",
+        "compiled_executor_ids_root",
+        "skipped_assertions",
+        "aggregate_count_only",
+        "failure_scope",
+        "first_divergence",
+        "diagnostic_root",
+        "diagnostic_summary",
+        "recovery",
+        "no_claim",
+        "semantic_root",
+    }
+)
+V2_PREFLIGHT_TERMINAL_FIELDS = frozenset(
+    {
+        "schema",
+        "terminal",
+        "exit_code",
+        "mode",
+        "first_divergence",
+        "diagnostic_root",
+        "diagnostic_summary",
+        "recovery",
+        "no_claim",
+        "semantic_root",
+    }
+)
+V2_EXECUTION_TERMINAL_FIELDS = frozenset(
+    {
+        "schema",
+        "terminal",
+        "exit_code",
+        "mode",
+        "manifest_root",
+        "phase",
+        "artifact_state",
+        "complete_evidence_bundle",
+        "first_divergence",
+        "diagnostic_root",
+        "diagnostic_summary",
+        "recovery",
+        "no_claim",
+        "semantic_root",
     }
 )
 V2_HISTORY_ROW_FIELDS = frozenset(
@@ -1047,6 +1188,7 @@ BR_READ_FLAGS = (
 _cancel_requested = False
 _command_receipts: list[dict[str, Any]] = []
 _v2_nomock_history_cache: dict[str, Any] | None = None
+_v2_outer_execution_context: dict[str, str] | None = None
 
 
 def request_cancel(_signum: int, _frame: object) -> None:
@@ -1084,6 +1226,17 @@ class CancelledDrained(HarnessError):
 
 class InfrastructureFailed(HarnessError):
     terminal = "InfrastructureFailed"
+
+
+class OutputPublicationFailed(InfrastructureFailed):
+    def __init__(
+        self,
+        message: str,
+        *,
+        bytes_committed: int | None,
+    ) -> None:
+        super().__init__(message)
+        self.bytes_committed = bytes_committed
 
 
 class PublishedV2Refusal(HarnessError):
@@ -1158,8 +1311,29 @@ def text_root(value: str) -> str:
 
 
 def json_stdout(value: Any) -> None:
-    sys.stdout.buffer.write(canonical_bytes(value))
-    sys.stdout.flush()
+    payload = canonical_bytes(value)
+    try:
+        written = sys.stdout.buffer.write(payload)
+        if type(written) is not int or written != len(payload):
+            raise OutputPublicationFailed(
+                "canonical JSONL publication was incomplete",
+                bytes_committed=(
+                    written
+                    if (
+                        type(written) is int
+                        and 0 <= written <= len(payload)
+                    )
+                    else None
+                ),
+            )
+        sys.stdout.flush()
+    except OutputPublicationFailed:
+        raise
+    except BaseException as error:
+        raise OutputPublicationFailed(
+            "canonical JSONL publication failed with unknown commit state",
+            bytes_committed=None,
+        ) from error
 
 
 def terminal_row(
@@ -1233,15 +1407,77 @@ def resolve_safe(value: str, *, label: str, must_exist: bool = False) -> Path:
     return candidate
 
 
-def bounded_read(path: Path, *, cap: int = CAPS["input_artifact_bytes"]) -> bytes:
-    if not path.is_file():
-        raise InputRefused(f"expected regular file: {path.relative_to(REPO_ROOT)}")
-    size = path.stat().st_size
-    if size > cap:
-        raise InputRefused(
-            f"input artifact exceeds {cap} byte cap: {path.relative_to(REPO_ROOT)}"
+def bounded_read(
+    path: Path,
+    *,
+    cap: int = CAPS["input_artifact_bytes"],
+    nofollow: bool = False,
+    require_unique_link: bool = False,
+) -> bytes:
+    if type(cap) is not int or cap < 0:
+        raise EvidenceFailed("bounded-read cap must be a nonnegative integer")
+    if type(nofollow) is not bool or type(require_unique_link) is not bool:
+        raise EvidenceFailed(
+            "bounded-read descriptor policies must be exact booleans"
         )
-    return path.read_bytes()
+    try:
+        display_path = str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        display_path = str(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    if nofollow:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise EvidenceFailed(
+                "bounded-read nofollow policy is unavailable on this host"
+            )
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise InputRefused(
+            f"expected readable regular file: {display_path}"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise InputRefused(f"expected regular file: {display_path}")
+        if require_unique_link and before.st_nlink != 1:
+            raise InputRefused(
+                f"expected unique regular file: {display_path}"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(cap + 1)
+        after = os.fstat(descriptor)
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InputRefused(
+            f"bounded input read failed: {display_path}"
+        ) from error
+    finally:
+        os.close(descriptor)
+    if len(payload) > cap:
+        raise InputRefused(
+            f"input artifact exceeds {cap} byte cap: {display_path}"
+        )
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if any(
+        getattr(before, field) != getattr(after, field)
+        for field in stable_fields
+    ):
+        raise InputRefused(
+            f"input artifact changed during bounded read: {display_path}"
+        )
+    return payload
 
 
 def write_once(path: Path, payload: bytes) -> str:
@@ -1855,6 +2091,8 @@ V2_MANIFEST_TOP_LEVEL_KEYS = {
     "tracker_authority",
     "no_claim",
     "case_order",
+    "check_obligations",
+    "harness_contract_identity",
     "schema_contract",
     "compatibility_contract",
     "source_contract",
@@ -1928,8 +2166,14 @@ V2_MANIFEST_TABLE_KEYS = {
         "prose_assertions_authorize_pass",
         "compiled_executor_required",
         "aggregate_check_count_authorizes_pass",
+        "check_obligation_policy",
+        "accepted_content_identity_policy",
+        "harness_contract_identity_policy",
+        "retained_run_artifact_policy",
+        "portable_retained_run_proof",
         "case_id_pattern",
         "assertion_id_pattern",
+        "check_id_pattern",
         "allowed_top_level_keys",
     },
     "compatibility_contract": {
@@ -2232,11 +2476,20 @@ V2_MANIFEST_TABLE_KEYS = {
         "format",
         "encoding",
         "schema",
+        "self_test_schema",
+        "self_test_terminal_schema",
+        "preflight_terminal_schema",
+        "execution_terminal_schema",
         "deterministic",
         "redacted",
         "sequence",
         "required_fields",
+        "self_test_required_fields",
+        "self_test_terminal_required_fields",
+        "preflight_terminal_required_fields",
+        "execution_terminal_required_fields",
         "argv_representation",
+        "timing_policy",
         "raw_stream_bodies_retained",
         "raw_stream_roots_cover_complete_bounded_stream",
         "terminal_event_required",
@@ -2293,6 +2546,7 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_design_bytes",
         "max_notes_bytes",
         "max_aggregate_non_description_argv_bytes",
+        "max_child_transport_cache_entries",
         "max_clause_bytes",
         "max_clause_rows_per_issue",
         "max_labels_per_issue",
@@ -2313,6 +2567,7 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_log_events",
         "max_log_line_bytes",
         "max_assertion_checks",
+        "max_check_id_bytes",
         "max_diagnostic_summary_bytes",
         "max_synopsis_bytes",
         "max_synopsis_selected_ids",
@@ -2341,6 +2596,7 @@ V2_MANIFEST_TABLE_KEYS = {
         "assertion_evidence_required",
         "assertion_skip_is_pass",
         "aggregate_count_only_is_pass",
+        "exact_check_obligation_required",
         "compiled_executor_id",
         "runner",
     },
@@ -2391,6 +2647,227 @@ def v2_validate_cap_terminal_contract(caps: Mapping[str, Any]) -> None:
         raise InputRefused("v2 manifest cap terminal contract is malformed")
 
 
+def v2_validate_accepted_manifest_payload(payload: bytes) -> str:
+    if re.fullmatch(
+        r"sha256-v1:[0-9a-f]{64}",
+        V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY,
+    ) is None:
+        raise EvidenceFailed(
+            "accepted v2 manifest content identity pin is malformed"
+        )
+    if not isinstance(payload, bytes):
+        raise EvidenceFailed(
+            "accepted v2 manifest identity input must be exact bytes"
+        )
+    observed = "sha256-v1:" + hashlib.sha256(payload).hexdigest()
+    if observed != V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY:
+        raise InputRefused("accepted v2 manifest content identity drifted")
+    return observed
+
+
+def v2_harness_contract_identity(payload: bytes) -> str:
+    if not isinstance(payload, bytes):
+        raise EvidenceFailed(
+            "v2 harness contract identity input must be exact bytes"
+        )
+    pin_pattern = re.compile(
+        rb'(?m)(^V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = \(\n'
+        rb'    ")sha256-v1:[0-9a-f]{64}("\n\)$)'
+    )
+    normalized_pin = b"sha256-v1:" + (b"0" * 64)
+    normalized, replacement_count = pin_pattern.subn(
+        lambda match: match.group(1) + normalized_pin + match.group(2),
+        payload,
+    )
+    if replacement_count != 1:
+        raise EvidenceFailed(
+            "v2 harness manifest-pin normalization site is not unique"
+        )
+    return "sha256-v1:" + hashlib.sha256(normalized).hexdigest()
+
+
+def v2_validate_harness_contract_payload(
+    payload: bytes,
+    expected_identity: Any,
+) -> str:
+    if (
+        not isinstance(expected_identity, str)
+        or re.fullmatch(r"sha256-v1:[0-9a-f]{64}", expected_identity) is None
+    ):
+        raise InputRefused(
+            "v2 manifest harness contract identity is malformed"
+        )
+    observed = v2_harness_contract_identity(payload)
+    if observed != expected_identity:
+        raise InputRefused("accepted v2 harness contract identity drifted")
+    return observed
+
+
+def v2_validate_check_id(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError] = EvidenceFailed,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > V2_CHECK_ID_BYTES_CAP
+        or V2_CHECK_ID_PATTERN.fullmatch(value) is None
+    ):
+        raise error_type(f"{label} is not a canonical bounded check ID")
+    return value
+
+
+def v2_validate_check_obligation(
+    case: Mapping[str, Any],
+    obligation: Any,
+    *,
+    error_type: type[HarnessError] = InputRefused,
+) -> Mapping[str, Any]:
+    assertion_id = str(case.get("assertion_id") or "")
+    if (
+        not isinstance(obligation, dict)
+        or set(obligation) != V2_CHECK_OBLIGATION_FIELDS
+    ):
+        raise error_type(
+            f"{assertion_id} has a non-closed check obligation"
+        )
+    ordered_check_ids = obligation.get("ordered_check_ids")
+    check_count = obligation.get("check_count")
+    if (
+        obligation.get("case_id") != case.get("id")
+        or type(check_count) is not int
+        or not 1 <= check_count <= V2_ASSERTION_CHECKS_CAP
+        or not isinstance(ordered_check_ids, list)
+        or len(ordered_check_ids) != check_count
+    ):
+        raise error_type(
+            f"{assertion_id} has a malformed check obligation"
+        )
+    validated_ids = [
+        v2_validate_check_id(
+            value,
+            label=f"{assertion_id} obligated check {index}",
+            error_type=error_type,
+        )
+        for index, value in enumerate(ordered_check_ids)
+    ]
+    if len(validated_ids) != len(set(validated_ids)):
+        raise error_type(
+            f"{assertion_id} check obligation contains duplicate IDs"
+        )
+    return obligation
+
+
+def v2_check_obligation_root(
+    case: Mapping[str, Any],
+    obligation: Mapping[str, Any],
+) -> str:
+    return semantic_root(
+        {
+            "case_id": case["id"],
+            "assertion_id": case["assertion_id"],
+            "subject": case["subject"],
+            "check_count": obligation["check_count"],
+            "ordered_check_ids": obligation["ordered_check_ids"],
+        }
+    )
+
+
+def v2_validate_check_obligation_registry(
+    cases: Sequence[Mapping[str, Any]],
+    obligations: Any,
+    *,
+    error_type: type[HarnessError] = InputRefused,
+) -> Mapping[str, Mapping[str, Any]]:
+    assertion_ids = [str(case.get("assertion_id") or "") for case in cases]
+    if (
+        not isinstance(obligations, dict)
+        or list(obligations) != assertion_ids
+    ):
+        raise error_type(
+            "v2 check-obligation order or membership differs from assertions"
+        )
+    for case in cases:
+        assertion_id = str(case["assertion_id"])
+        v2_validate_check_obligation(
+            case,
+            obligations[assertion_id],
+            error_type=error_type,
+        )
+    return obligations
+
+
+def v2_clone_runner_manifest(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise EvidenceFailed(
+            "accepted v2 runner manifest is not an object"
+        )
+    if (
+        manifest.get("semantic_root")
+        != semantic_root(
+            {
+                key: value
+                for key, value in manifest.items()
+                if key != "semantic_root"
+            }
+        )
+    ):
+        raise EvidenceFailed(
+            "accepted v2 runner manifest has a stale semantic root"
+        )
+    source_cases = manifest.get("case")
+    source_obligations = manifest.get("check_obligations")
+    if not isinstance(source_cases, list):
+        raise EvidenceFailed(
+            "accepted v2 runner manifest has no ordered case registry"
+        )
+    v2_validate_check_obligation_registry(
+        source_cases,
+        source_obligations,
+        error_type=EvidenceFailed,
+    )
+    snapshot = strict_json_loads(
+        canonical_bytes(manifest),
+        label="accepted v2 runner manifest snapshot",
+        require_canonical=True,
+    )
+    if snapshot != manifest:
+        raise EvidenceFailed(
+            "accepted v2 runner manifest could not be cloned exactly"
+        )
+    snapshot_cases = snapshot.get("case")
+    snapshot_obligations = snapshot.get("check_obligations")
+    if (
+        not isinstance(snapshot_cases, list)
+        or not isinstance(snapshot_obligations, dict)
+    ):
+        raise EvidenceFailed(
+            "accepted v2 runner manifest snapshot lost its registries"
+        )
+    assertion_ids = [
+        str(case.get("assertion_id") or "") for case in snapshot_cases
+    ]
+    if set(snapshot_obligations) != set(assertion_ids):
+        raise EvidenceFailed(
+            "accepted v2 runner manifest snapshot changed obligation membership"
+        )
+    snapshot["check_obligations"] = {
+        assertion_id: snapshot_obligations[assertion_id]
+        for assertion_id in assertion_ids
+    }
+    v2_validate_check_obligation_registry(
+        snapshot_cases,
+        snapshot["check_obligations"],
+        error_type=EvidenceFailed,
+    )
+    return snapshot
+
+
 def load_case_manifest_v2() -> dict[str, Any]:
     if os.environ.get("FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD") == "1":
         raise EvidenceFailed(
@@ -2402,6 +2879,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
         must_exist=True,
     )
     payload = bounded_read(path)
+    content_identity = v2_validate_accepted_manifest_payload(payload)
     try:
         document = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
@@ -2430,6 +2908,8 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or type(document["case_count"]) is not int
         or type(document["assertion_count"]) is not int
         or not isinstance(document["suite_status"], str)
+        or document["suite_status"] != V2_SUITE_STATUS
+        or not isinstance(document["harness_contract_identity"], str)
         or not isinstance(document["case_order"], list)
         or not all(
             isinstance(value, str) and value
@@ -2443,6 +2923,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
         or document["tracker_authority"] != "READ_ONLY"
     ):
         raise InputRefused("v2 manifest identity or authority contract drifted")
+    harness_contract_identity = v2_validate_harness_contract_payload(
+        bounded_read(REPO_ROOT / SCRIPT_REL),
+        document["harness_contract_identity"],
+    )
     for table_name, expected_keys in V2_MANIFEST_TABLE_KEYS.items():
         table = document.get(table_name)
         if not isinstance(table, dict):
@@ -2453,6 +2937,28 @@ def load_case_manifest_v2() -> dict[str, Any]:
         V2_MANIFEST_TOP_LEVEL_KEYS,
     ):
         raise InputRefused("v2 allowed-top-level set differs from the harness")
+    schema_contract = document["schema_contract"]
+    if (
+        schema_contract["criterion_bijection"] is not True
+        or schema_contract["closed_inline_tables"] is not True
+        or schema_contract["prose_assertions_authorize_pass"] is not False
+        or schema_contract["compiled_executor_required"] is not True
+        or schema_contract["aggregate_check_count_authorizes_pass"] is not False
+        or schema_contract["check_obligation_policy"]
+        != "EXACT_ORDERED_CHECK_IDS_CASE_ASSERTION_SUBJECT_AND_COUNT"
+        or schema_contract["accepted_content_identity_policy"]
+        != V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY
+        or schema_contract["harness_contract_identity_policy"]
+        != V2_HARNESS_CONTRACT_IDENTITY_POLICY
+        or schema_contract["retained_run_artifact_policy"]
+        != V2_RETAINED_RUN_ARTIFACT_POLICY
+        or schema_contract["portable_retained_run_proof"] is not False
+        or schema_contract["check_id_pattern"]
+        != V2_CHECK_ID_PATTERN_TEXT
+    ):
+        raise InputRefused(
+            "v2 manifest assertion-obligation or identity policy drifted"
+        )
 
     cases = document.get("case")
     criteria = document.get("criterion")
@@ -2552,6 +3058,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
     v2_assert_unique(assertion_ids, label="v2 assertion IDs")
     if document["case_order"] != case_ids:
         raise InputRefused("v2 case_order differs from dense case rows")
+    v2_validate_check_obligation_registry(
+        cases,
+        document["check_obligations"],
+    )
 
     criterion_ids = [f"AC{index:02d}" for index in range(1, 26)]
     actual_criterion_ids: list[str] = []
@@ -2607,6 +3117,9 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_aggregate_non_description_argv_bytes": (
             V2_CHILD_ARGV_AGGREGATE_CAP
         ),
+        "max_child_transport_cache_entries": (
+            V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
+        ),
         "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
         "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
         "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
@@ -2631,6 +3144,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_log_events": V2_LOG_EVENTS_CAP,
         "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
         "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
+        "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
         "max_diagnostic_summary_bytes": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
         "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
         "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
@@ -2651,6 +3165,10 @@ def load_case_manifest_v2() -> dict[str, Any]:
         if type(caps[name]) is not int or caps[name] != expected:
             raise InputRefused(f"v2 manifest cap {name} differs from the harness")
     v2_validate_cap_terminal_contract(caps)
+    if document["case_contract"]["exact_check_obligation_required"] is not True:
+        raise InputRefused(
+            "v2 case contract does not require exact check obligations"
+        )
     if not v2_manifest_ordered_string_list(
         document["artifact_contract"]["base_set"],
         V2_RUN_ARTIFACTS,
@@ -2687,10 +3205,81 @@ def load_case_manifest_v2() -> dict[str, Any]:
         raise InputRefused("v2 artifact publication contract differs")
     logging_contract = document["logging_contract"]
     if (
-        not v2_manifest_closed_field_list(
+        logging_contract["format"] != "JSONL"
+        or logging_contract["encoding"] != "UTF-8"
+        or logging_contract["schema"] != V2_EVENT_SCHEMA
+        or logging_contract["self_test_schema"] != V2_TEST_EVENT_SCHEMA
+        or logging_contract["self_test_terminal_schema"]
+        != V2_TEST_TERMINAL_SCHEMA
+        or logging_contract["preflight_terminal_schema"]
+        != V2_PREFLIGHT_TERMINAL_SCHEMA
+        or logging_contract["execution_terminal_schema"]
+        != V2_EXECUTION_TERMINAL_SCHEMA
+        or logging_contract["deterministic"] != V2_LOG_DETERMINISM_POLICY
+        or logging_contract["redacted"] is not True
+        or logging_contract["sequence"] != V2_LOG_SEQUENCE_POLICY
+        or not v2_manifest_closed_field_list(
             logging_contract["required_fields"],
             V2_EVENT_FIELDS,
         )
+        or not v2_manifest_closed_field_list(
+            logging_contract["self_test_required_fields"],
+            V2_TEST_EVENT_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            logging_contract["self_test_terminal_required_fields"],
+            V2_TEST_TERMINAL_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            logging_contract["preflight_terminal_required_fields"],
+            V2_PREFLIGHT_TERMINAL_FIELDS,
+        )
+        or not v2_manifest_closed_field_list(
+            logging_contract["execution_terminal_required_fields"],
+            V2_EXECUTION_TERMINAL_FIELDS,
+        )
+        or logging_contract["argv_representation"] != "array"
+        or logging_contract["timing_policy"] != V2_LOG_TIMING_POLICY
+        or logging_contract["raw_stream_bodies_retained"] is not False
+        or logging_contract[
+            "raw_stream_roots_cover_complete_bounded_stream"
+        ]
+        is not True
+        or logging_contract["terminal_event_required"] is not True
+        or logging_contract["terminal_event_must_be_last"] is not True
+        or logging_contract["assertion_start_event_required"] is not True
+        or logging_contract["assertion_terminal_event_required"] is not True
+        or logging_contract[
+            "case_terminal_binds_ordered_assertion_roots"
+        ]
+        is not True
+        or logging_contract["suite_terminal_binds_ordered_case_roots"]
+        is not True
+        or not v2_manifest_ordered_string_list(
+            logging_contract["forbidden_content"],
+            V2_LOG_FORBIDDEN_CONTENT,
+        )
+        or logging_contract[
+            "semantic_refusal_first_divergence_required"
+        ]
+        is not True
+        or logging_contract["semantic_refusal_recovery_required"] is not True
+        or logging_contract[
+            "semantic_refusal_terminal_fields_must_agree"
+        ]
+        is not True
+        or logging_contract["subprocess_capture"]
+        != "NONBLOCKING_SELECTOR_BOUNDED"
+        or logging_contract["subprocess_process_group"]
+        != "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
+        or not v2_manifest_ordered_string_list(
+            logging_contract["subprocess_failure_receipts"],
+            V2_SUBPROCESS_FAILURE_RECEIPTS,
+        )
+        or logging_contract["subprocess_stream_cap_accounting"]
+        != "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
+        or logging_contract["subprocess_argv_redaction"]
+        != "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
         or not v2_manifest_closed_field_list(
             logging_contract["assertion_result_required_fields"],
             V2_ASSERTION_RESULT_FIELDS,
@@ -3070,18 +3659,8 @@ def load_case_manifest_v2() -> dict[str, Any]:
         != "NONBLOCKING_SELECTOR_BOUNDED"
         or logging_contract["subprocess_process_group"]
         != "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
-        or logging_contract["subprocess_failure_receipts"]
-        != [
-            "START_FAILED",
-            "CAPTURE_FAILED",
-            "TIMEOUT",
-            "CANCELLED",
-            "CANCELLED_AFTER_EXIT",
-            "STDOUT_LIMIT",
-            "STDERR_LIMIT",
-            "NON_UTF8",
-            "UNEXPECTED_EXIT",
-        ]
+        or tuple(logging_contract["subprocess_failure_receipts"])
+        != V2_SUBPROCESS_FAILURE_RECEIPTS
         or logging_contract["subprocess_stream_cap_accounting"]
         != "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
         or logging_contract["subprocess_argv_redaction"]
@@ -3151,9 +3730,8 @@ def load_case_manifest_v2() -> dict[str, Any]:
             "v1 compatibility retention or proof-authority boundary differs"
         )
 
-    document["content_identity"] = (
-        "sha256-v1:" + hashlib.sha256(payload).hexdigest()
-    )
+    document["content_identity"] = content_identity
+    document["harness_contract_identity"] = harness_contract_identity
     document["semantic_root"] = semantic_root(
         {key: value for key, value in document.items() if key != "semantic_root"}
     )
@@ -9538,11 +10116,26 @@ V2_AUDIT_EVENT_KEYS = {
     "harness",
     "model",
 }
+V2_CANONICAL_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 def v2_parse_timestamp(value: Any, *, label: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise EvidenceFailed(f"{label} lacks a timestamp")
+    if any(
+        len(component) > 6
+        for component in re.findall(r"[.,](\d+)", value)
+    ):
+        raise EvidenceFailed(
+            f"{label} timestamp precision exceeds exact microseconds"
+        )
+    if V2_CANONICAL_TIMESTAMP_PATTERN.fullmatch(value) is None:
+        raise EvidenceFailed(
+            f"{label} has a malformed noncanonical timestamp"
+        )
     try:
         parsed = datetime.fromisoformat(
             value[:-1] + "+00:00" if value.endswith("Z") else value
@@ -9552,6 +10145,28 @@ def v2_parse_timestamp(value: Any, *, label: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise EvidenceFailed(f"{label} timestamp lacks an explicit UTC offset")
     return parsed
+
+
+def v2_history_skew_microseconds(
+    *,
+    show_timestamp: datetime,
+    close_timestamp: datetime,
+    max_skew_ms: Any,
+) -> tuple[int, int]:
+    if type(max_skew_ms) is not int or max_skew_ms < 0:
+        raise EvidenceFailed(
+            "known-closer maximum skew must be a nonnegative integer "
+            "millisecond contract"
+        )
+    delta = close_timestamp - show_timestamp
+    skew_us = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    # The retained/public contract remains integer milliseconds. Conversion
+    # to integer microseconds makes the admission comparison exact without
+    # changing that external unit or silently truncating a fractional ms.
+    return skew_us, max_skew_ms * 1_000
 
 
 def v2_normalize_audit_document(
@@ -10079,8 +10694,10 @@ def v2_validate_history_projection(
             )
             close_actor = str(close_event.get("actor") or "").strip()
             transition_actor = str(transition.get("actor") or "").strip()
-            skew_ms = int(
-                (close_timestamp - show_timestamp).total_seconds() * 1000
+            skew_us, max_skew_us = v2_history_skew_microseconds(
+                show_timestamp=show_timestamp,
+                close_timestamp=close_timestamp,
+                max_skew_ms=history_contract["known_pair_max_skew_ms"],
             )
             if (
                 not isinstance(row["close_actor"], str)
@@ -10099,9 +10716,8 @@ def v2_validate_history_projection(
                     <= transition_timestamp
                     <= close_timestamp
                 )
-                or skew_ms < 0
-                or skew_ms
-                > int(history_contract["known_pair_max_skew_ms"])
+                or skew_us < 0
+                or skew_us > max_skew_us
             ):
                 raise EvidenceFailed(
                     f"v2 history row {index} known-closer audit binding differs"
@@ -10253,8 +10869,10 @@ def v2_build_history(
                 transition["timestamp"],
                 label=f"close transition {issue_id}",
             )
-            skew_ms = int(
-                (close_timestamp - show_timestamp).total_seconds() * 1000
+            skew_us, max_skew_us = v2_history_skew_microseconds(
+                show_timestamp=show_timestamp,
+                close_timestamp=close_timestamp,
+                max_skew_ms=history_contract["known_pair_max_skew_ms"],
             )
             if (
                 not close_actor
@@ -10266,8 +10884,8 @@ def v2_build_history(
                     <= transition_timestamp
                     <= close_timestamp
                 )
-                or skew_ms < 0
-                or skew_ms > int(history_contract["known_pair_max_skew_ms"])
+                or skew_us < 0
+                or skew_us > max_skew_us
             ):
                 raise EvidenceFailed(f"close audit pair conflicts for {issue_id}")
             closer_state = "KNOWN"
@@ -11403,6 +12021,9 @@ def v2_build_source_document(
                 "path": str(CASE_MANIFEST_V2_REL),
                 "semantic_root": manifest["semantic_root"],
                 "content_identity": manifest["content_identity"],
+                "harness_contract_identity": manifest[
+                    "harness_contract_identity"
+                ],
                 "case_count": manifest["case_count"],
                 "assertion_count": manifest["assertion_count"],
                 "criterion_count": manifest["criterion_count"],
@@ -14367,10 +14988,10 @@ def v2_make_child(
     return rooted
 
 
-_v2_child_transport_cache: dict[
+_v2_child_transport_cache: OrderedDict[
     tuple[Any, ...],
     dict[str, int],
-] = {}
+] = OrderedDict()
 
 
 def v2_child_transport_observations(
@@ -14400,6 +15021,7 @@ def v2_child_transport_observations(
     )
     cached = _v2_child_transport_cache.get(cache_key)
     if cached is not None:
+        _v2_child_transport_cache.move_to_end(cache_key)
         return dict(cached)
     candidate = v2_make_child(
         rows,
@@ -14427,6 +15049,12 @@ def v2_child_transport_observations(
         "generated_child_payload_bytes": len(canonical_bytes(candidate)),
     }
     _v2_child_transport_cache[cache_key] = dict(observations)
+    _v2_child_transport_cache.move_to_end(cache_key)
+    while (
+        len(_v2_child_transport_cache)
+        > V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
+    ):
+        _v2_child_transport_cache.popitem(last=False)
     return observations
 
 
@@ -18750,11 +19378,9 @@ def v2_validate_source_graph(
                     )
     blocking_types = {
         "blocks",
-        "parent-child",
         "conditional-blocks",
         "waits-for",
     }
-    visit_state: dict[str, int] = {}
 
     def blocking_neighbors(issue_id: str) -> Iterable[str]:
         for relation in issue_by_id[issue_id]["dependencies"]:
@@ -18764,34 +19390,66 @@ def v2_validate_source_graph(
             ):
                 yield relation["id"]
 
-    for start in sorted(issue_by_id):
-        if visit_state.get(start, 0) != 0:
-            continue
-        visit_state[start] = 1
-        stack: list[tuple[str, Any]] = [
-            (start, iter(blocking_neighbors(start)))
-        ]
-        while stack:
-            current, neighbors = stack[-1]
-            try:
-                neighbor_id = next(neighbors)
-            except StopIteration:
-                visit_state[current] = 2
-                stack.pop()
+    def validate_acyclic(
+        *,
+        relation_label: str,
+        neighbors_for: Callable[[str], Iterable[str]],
+    ) -> None:
+        visit_state: dict[str, int] = {}
+        for start in sorted(issue_by_id):
+            if visit_state.get(start, 0) != 0:
                 continue
-            neighbor_state = visit_state.get(neighbor_id, 0)
-            if neighbor_state == 1:
-                raise EvidenceFailed(
-                    "v2 source graph contains a blocking dependency cycle"
-                )
-            if neighbor_state == 0:
-                visit_state[neighbor_id] = 1
-                stack.append(
-                    (
+            visit_state[start] = 1
+            stack: list[tuple[str, Any]] = [
+                (start, iter(neighbors_for(start)))
+            ]
+            while stack:
+                current, neighbors = stack[-1]
+                try:
+                    neighbor_id = next(neighbors)
+                except StopIteration:
+                    visit_state[current] = 2
+                    stack.pop()
+                    continue
+                neighbor_state = visit_state.get(neighbor_id, 0)
+                if neighbor_state == 1:
+                    active_path = [node for node, _ in stack]
+                    cycle_start = active_path.index(neighbor_id)
+                    cycle = [
+                        *active_path[cycle_start:],
                         neighbor_id,
-                        iter(blocking_neighbors(neighbor_id)),
+                    ]
+                    preview = " -> ".join(cycle[:8])
+                    if len(cycle) > 8:
+                        preview += " -> ..."
+                    raise EvidenceFailed(
+                        "v2 source graph contains a "
+                        f"{relation_label}: nodes={len(cycle) - 1}, "
+                        f"root={semantic_root(cycle)}, preview={preview}"
                     )
-                )
+                if neighbor_state == 0:
+                    visit_state[neighbor_id] = 1
+                    stack.append(
+                        (
+                            neighbor_id,
+                            iter(neighbors_for(neighbor_id)),
+                        )
+                    )
+
+    validate_acyclic(
+        relation_label="blocking dependency cycle",
+        neighbors_for=blocking_neighbors,
+    )
+
+    def parent_neighbors(issue_id: str) -> Iterable[str]:
+        parent_id = str(issue_by_id[issue_id]["parent"] or "")
+        if parent_id:
+            yield parent_id
+
+    validate_acyclic(
+        relation_label="parent hierarchy cycle",
+        neighbors_for=parent_neighbors,
+    )
 
 
 def v2_validate_retained_argv(value: Any, *, label: str) -> list[str]:
@@ -19501,7 +20159,11 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
                 manifest[field],
             )
             is not None
-            for field in ("semantic_root", "content_identity")
+            for field in (
+                "semantic_root",
+                "content_identity",
+                "harness_contract_identity",
+            )
         )
         or any(
             type(manifest[field]) is not int or manifest[field] < 0
@@ -20128,6 +20790,8 @@ def v2_validate_source_manifest_anchor(
         retained.get("semantic_root") != accepted_manifest.get("semantic_root")
         or retained.get("content_identity")
         != accepted_manifest.get("content_identity")
+        or retained.get("harness_contract_identity")
+        != accepted_manifest.get("harness_contract_identity")
         or retained.get("case_count") != accepted_manifest.get("case_count")
         or retained.get("assertion_count")
         != accepted_manifest.get("assertion_count")
@@ -20881,6 +21545,7 @@ def v2_replay_bundle(
     artifact_root: str,
     input_dir: str,
     output_dir: str,
+    accepted_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_directory, retained_payloads, terminal, events = (
         v2_read_retained_bundle(
@@ -20888,7 +21553,11 @@ def v2_replay_bundle(
             input_dir=input_dir,
         )
     )
-    accepted_manifest = load_case_manifest_v2()
+    accepted_manifest = (
+        load_case_manifest_v2()
+        if accepted_manifest is None
+        else v2_clone_runner_manifest(accepted_manifest)
+    )
     if terminal.get("bundle_state") == "COMPLETE_NON_GREEN":
         result = v2_validate_refusal_bundle(
             artifact_root=artifact_root,
@@ -21177,12 +21846,15 @@ class V2CheckCollector:
         expected: Any,
         observed: Any,
     ) -> None:
-        if (
-            not isinstance(check_id, str)
-            or not check_id
-            or check_id != check_id.strip()
-            or check_id in {row["check_id"] for row in self.rows}
-        ):
+        v2_validate_check_id(
+            check_id,
+            label=f"{self.case_id} emitted check",
+        )
+        if type(condition) is not bool:
+            raise EvidenceFailed(
+                f"{self.case_id}/{check_id} produced a non-boolean condition"
+            )
+        if check_id in {row["check_id"] for row in self.rows}:
             raise EvidenceFailed(
                 f"{self.case_id} produced a duplicate or noncanonical check ID"
             )
@@ -21195,11 +21867,11 @@ class V2CheckCollector:
                 "check_id": check_id,
                 "expected": self._bounded(expected),
                 "observed": self._bounded(observed),
-                "passed": bool(condition),
+                "passed": condition,
             }
         )
         self.rows.append(row)
-        if not condition:
+        if condition is not True:
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} failed: "
                 f"expected {expected!r}, observed {observed!r}"
@@ -21266,6 +21938,53 @@ class V2CheckCollector:
         return v2_rooted(document)
 
 
+def v2_synthetic_source_issue(
+    target: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct the production source shape from a normalized test row."""
+    return {
+        "id": str(target.get("id") or ""),
+        "title": str(target.get("title") or ""),
+        "type": str(
+            target.get("type") or target.get("issue_type") or ""
+        ),
+        "status": str(target.get("status") or ""),
+        "priority": target.get("priority"),
+        "assignee": str(target.get("tracker_assignee") or ""),
+        "owner": str(target.get("tracker_owner") or ""),
+        "parent": str(target.get("parent") or ""),
+        "labels": list(target.get("labels") or []),
+        "field_roots": dict(target.get("field_roots") or {}),
+        "missing_sections": list(target.get("missing_sections") or []),
+        "disposition": str(target.get("disposition") or ""),
+        "dependencies": list(target.get("dependencies") or []),
+        "dependents": list(target.get("dependents") or []),
+    }
+
+
+def v2_validate_synthetic_target_identity(
+    target: Mapping[str, Any],
+) -> None:
+    source_issue = v2_synthetic_source_issue(target)
+    expected_target_root = v2_target_root(source_issue)
+    expected_dependency_root = v2_dependency_neighborhood_root(
+        source_issue
+    )
+    if target.get("target_root") != expected_target_root:
+        raise EvidenceFailed(
+            "synthetic target root differs from the production stable "
+            "issue projection"
+        )
+    if (
+        target.get("dependency_neighborhood_root")
+        != expected_dependency_root
+    ):
+        raise EvidenceFailed(
+            "synthetic dependency root differs from the production stable "
+            "issue projection"
+        )
+
+
 def v2_synthetic_target(
     index: int,
     *,
@@ -21285,27 +22004,10 @@ def v2_synthetic_target(
         field: text_root(f"{issue_id}:{field}")
         for field in ("description", "acceptance_criteria", "design", "notes")
     }
-    dependency_root = semantic_root(
-        {"dependencies": [], "dependents": []}
-    )
-    target_root = semantic_root(
-        {
-            "id": issue_id,
-            "priority": priority,
-            "status": status,
-            "disposition": disposition,
-            "type": issue_type,
-            "missing_sections": sorted(missing_sections),
-            "field_roots": field_roots,
-            "dependency_neighborhood_root": dependency_root,
-            "assignee": assignee,
-        }
-    )
     active_context = v2_active_work_context(
         {"status": status, "assignee": assignee}
     )
-    return v2_rooted(
-        {
+    target = {
             "id": issue_id,
             "issue_id": issue_id,
             "title": f"Synthetic target {index:04d}",
@@ -21363,9 +22065,7 @@ def v2_synthetic_target(
                     "notes": "",
                 }
             ),
-            "target_root": target_root,
             "v1_row_root": semantic_root({"id": issue_id, "v1": True}),
-            "dependency_neighborhood_root": dependency_root,
             "dependencies": [],
             "dependents": [],
             "domain_candidates": [],
@@ -21401,12 +22101,24 @@ def v2_synthetic_target(
             "active_work_context": active_context,
             "no_claim": "synthetic planning row grants no authority",
         }
+    source_issue = v2_synthetic_source_issue(target)
+    target["dependency_neighborhood_root"] = (
+        v2_dependency_neighborhood_root(source_issue)
     )
+    target["target_root"] = v2_target_root(source_issue)
+    v2_validate_synthetic_target_identity(target)
+    return v2_rooted(target)
 
 
 def v2_synthetic_inventory(
     targets: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    for row in targets:
+        if not isinstance(row, Mapping):
+            raise EvidenceFailed(
+                "synthetic inventory target is not an object"
+            )
+        v2_validate_synthetic_target_identity(row)
     campaign_root = semantic_root(
         [
             {"id": row["id"], "target_root": row["target_root"]}
@@ -22218,6 +22930,107 @@ def v2_execute_schema_cli_ux(
             expected=(V2_MANIFEST_SCHEMA, 2),
             observed=(manifest["schema"], manifest["schema_version"]),
         )
+        manifest_payload = bounded_read(REPO_ROOT / CASE_MANIFEST_V2_REL)
+        accepted_identity = v2_validate_accepted_manifest_payload(
+            manifest_payload
+        )
+        checks.check(
+            "accepted-manifest-content-identity-exact",
+            accepted_identity
+            == manifest["content_identity"]
+            == V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY,
+            expected=V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY,
+            observed={
+                "loaded": manifest["content_identity"],
+                "revalidated": accepted_identity,
+            },
+        )
+        harness_payload = bounded_read(REPO_ROOT / SCRIPT_REL)
+        harness_contract_identity = v2_validate_harness_contract_payload(
+            harness_payload,
+            manifest["harness_contract_identity"],
+        )
+        checks.check(
+            "harness-contract-identity-exact",
+            harness_contract_identity
+            == manifest["harness_contract_identity"],
+            expected=manifest["harness_contract_identity"],
+            observed=harness_contract_identity,
+        )
+        current_pin = V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY.encode("ascii")
+        alternate_pin = b"sha256-v1:" + (b"f" * 64)
+        if current_pin == alternate_pin or harness_payload.count(current_pin) != 1:
+            raise EvidenceFailed(
+                "harness identity normalization fixture is not unique"
+            )
+        normalized_pin_payload = harness_payload.replace(
+            current_pin,
+            alternate_pin,
+            1,
+        )
+        checks.check(
+            "harness-manifest-pin-normalization-stable",
+            v2_harness_contract_identity(normalized_pin_payload)
+            == harness_contract_identity,
+            expected=harness_contract_identity,
+            observed=v2_harness_contract_identity(
+                normalized_pin_payload
+            ),
+        )
+        weakening_source = (
+            b'            or check.get("passed") is not True\n'
+        )
+        weakening_replacement = (
+            b'            or type(check.get("passed")) is not bool\n'
+        )
+        if harness_payload.count(weakening_source) != 1:
+            raise EvidenceFailed(
+                "harness semantic-weakening mutation site is not unique"
+            )
+        weakened_harness_payload = harness_payload.replace(
+            weakening_source,
+            weakening_replacement,
+            1,
+        )
+        checks.refuses(
+            "harness-semantic-weakening-with-stable-check-ids-refused",
+            InputRefused,
+            lambda: v2_validate_harness_contract_payload(
+                weakened_harness_payload,
+                manifest["harness_contract_identity"],
+            ),
+            contains="harness contract identity drifted",
+            projection=lambda: {
+                "accepted_harness_contract_identity": manifest[
+                    "harness_contract_identity"
+                ],
+                "mutated_harness_contract_identity": (
+                    v2_harness_contract_identity(weakened_harness_payload)
+                ),
+            },
+            projection_label="HARNESS_CONTRACT_IDENTITIES",
+        )
+        drift_payload = manifest_payload + b"\n"
+        original_document = tomllib.loads(manifest_payload.decode("utf-8"))
+        drift_document = tomllib.loads(drift_payload.decode("utf-8"))
+        checks.check(
+            "trailing-newline-drift-preserves-toml-semantics",
+            drift_document == original_document,
+            expected=semantic_root(original_document),
+            observed=semantic_root(drift_document),
+        )
+        identity_projection = lambda: {
+            "accepted_identity": V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY,
+            "loaded_identity": manifest["content_identity"],
+        }
+        checks.refuses(
+            "semantically-equivalent-manifest-byte-drift-refused",
+            InputRefused,
+            lambda: v2_validate_accepted_manifest_payload(drift_payload),
+            contains="content identity drifted",
+            projection=identity_projection,
+            projection_label="ACCEPTED_MANIFEST_IDENTITIES",
+        )
         checks.check(
             "ordered-manifest-list-refuses-scalars-and-duplicates",
             not v2_manifest_ordered_string_list(
@@ -22311,9 +23124,112 @@ def v2_execute_schema_cli_ux(
             expected=semantic_root(sorted(assertion_ids)),
             observed=semantic_root(sorted(registry)),
         )
-        probe_case = dict(manifest["case"][0])
+        obligations = v2_validate_check_obligation_registry(
+            manifest["case"],
+            manifest["check_obligations"],
+        )
+        checks.check(
+            "check-obligation-order-membership-bijection",
+            list(obligations) == assertion_ids,
+            expected=assertion_ids,
+            observed=list(obligations),
+        )
+        runner_snapshot = v2_clone_runner_manifest(manifest)
+        checks.check(
+            "runner-snapshot-reconstructs-obligation-order",
+            runner_snapshot == manifest
+            and list(runner_snapshot["check_obligations"])
+            == assertion_ids
+            and runner_snapshot is not manifest
+            and runner_snapshot["check_obligations"]
+            is not manifest["check_obligations"],
+            expected={
+                "value_equal": True,
+                "ordered_assertion_ids": assertion_ids,
+                "distinct_snapshot": True,
+                "distinct_obligation_registry": True,
+            },
+            observed={
+                "value_equal": runner_snapshot == manifest,
+                "ordered_assertion_ids": list(
+                    runner_snapshot["check_obligations"]
+                ),
+                "distinct_snapshot": runner_snapshot is not manifest,
+                "distinct_obligation_registry": (
+                    runner_snapshot["check_obligations"]
+                    is not manifest["check_obligations"]
+                ),
+            },
+        )
+        obligation_roots = [
+            v2_check_obligation_root(
+                row,
+                obligations[str(row["assertion_id"])],
+            )
+            for row in manifest["case"]
+        ]
+        subject_mutation = dict(manifest["case"][0])
+        subject_mutation["subject"] = (
+            str(subject_mutation["subject"]) + " drift"
+        )
+        first_obligation = obligations[
+            str(manifest["case"][0]["assertion_id"])
+        ]
+        checks.check(
+            "check-obligation-root-binds-case-assertion-subject-and-order",
+            len(obligation_roots) == len(set(obligation_roots)) == 96
+            and v2_check_obligation_root(
+                subject_mutation,
+                first_obligation,
+            )
+            != obligation_roots[0],
+            expected={
+                "unique_roots": 96,
+                "subject_mutation_changes_root": True,
+            },
+            observed={
+                "unique_roots": len(set(obligation_roots)),
+                "subject_mutation_changes_root": (
+                    v2_check_obligation_root(
+                        subject_mutation,
+                        first_obligation,
+                    )
+                    != obligation_roots[0]
+                ),
+            },
+        )
+        probe_case = dict(manifest["case"][2])
+        probe_obligation = obligations[str(probe_case["assertion_id"])]
         probe_manifest = dict(manifest)
         probe_manifest["case"] = [probe_case]
+        probe_manifest["check_obligations"] = {
+            str(probe_case["assertion_id"]): probe_obligation,
+        }
+        probe_manifest["semantic_root"] = semantic_root(
+            {
+                key: value
+                for key, value in probe_manifest.items()
+                if key != "semantic_root"
+            }
+        )
+        stale_probe_manifest = strict_json_loads(
+            canonical_bytes(probe_manifest),
+            label="stale runner manifest mutation seed",
+            require_canonical=True,
+        )
+        stale_probe_manifest["case"][0]["subject"] += " stale"
+        checks.refuses(
+            "runner-refuses-stale-manifest-semantic-root",
+            EvidenceFailed,
+            lambda: v2_clone_runner_manifest(stale_probe_manifest),
+            contains="stale semantic root",
+        )
+        checks.refuses(
+            "runner-refuses-nonobject-manifest",
+            EvidenceFailed,
+            lambda: v2_clone_runner_manifest([]),
+            contains="not an object",
+        )
         emitted: list[dict[str, Any]] = []
         original_registry_builder = v2_build_executor_registry
         original_json_stdout = json_stdout
@@ -22322,7 +23238,7 @@ def v2_execute_schema_cli_ux(
             _manifest: Mapping[str, Any],
         ) -> dict[str, Callable[..., dict[str, Any]]]:
             parameters = {
-                "family": "forged-compiled-executor",
+                "family": "schema-cli-ux",
                 "slug": str(probe_case["id"]).removeprefix(
                     "template-lint-v2."
                 ),
@@ -22344,12 +23260,10 @@ def v2_execute_schema_cli_ux(
                     "parameters": parameters,
                     "parameter_root": semantic_root(parameters),
                     "ordered_checks": [forged_check],
-                    "ordered_check_roots": [
-                        semantic_root({"forged": "not-the-check-root"})
-                    ],
+                    "ordered_check_roots": [forged_check["semantic_root"]],
                     "check_count": 1,
                     "terminal": "Pass",
-                    "no_claim": "forged shallow evidence must fail closed",
+                    "no_claim": V2_ASSERTION_RESULT_NO_CLAIM,
                 }
             )
             return {
@@ -22383,7 +23297,7 @@ def v2_execute_schema_cli_ux(
             and emitted[-2]["result_category"] == "ASSERTION_FAILED"
             and emitted[-1]["terminal"] == "EvidenceFailed"
             and emitted[-1]["recovery"] == "FIX_ASSERTION_OR_SUBJECT"
-            and emitted[-1]["completed_case_roots"] == [],
+            and emitted[-1]["ordered_case_roots"] == [],
             expected={
                 "exit_code": TERMINAL_EXIT["EvidenceFailed"],
                 "events": 3,
@@ -22400,28 +23314,1819 @@ def v2_execute_schema_cli_ux(
                 "suite_terminal": emitted[-1] if emitted else None,
             },
         )
-        probe_collector = V2CheckCollector(
-            str(probe_case["id"]),
-            str(probe_case["assertion_id"]),
+        checks.check(
+            "self-test-event-and-terminal-schemas-distinct-and-closed",
+            len(emitted) == 3
+            and all(
+                event["schema"] == V2_TEST_EVENT_SCHEMA
+                and set(event) == V2_TEST_EVENT_FIELDS
+                for event in emitted[:2]
+            )
+            and emitted[-1]["schema"] == V2_TEST_TERMINAL_SCHEMA
+            and set(emitted[-1]) == V2_TEST_TERMINAL_FIELDS
+            and manifest["logging_contract"]["self_test_schema"]
+            == V2_TEST_EVENT_SCHEMA
+            and set(
+                manifest["logging_contract"]["self_test_required_fields"]
+            )
+            == V2_TEST_EVENT_FIELDS
+            and manifest["logging_contract"]["self_test_terminal_schema"]
+            == V2_TEST_TERMINAL_SCHEMA
+            and set(
+                manifest["logging_contract"][
+                    "self_test_terminal_required_fields"
+                ]
+            )
+            == V2_TEST_TERMINAL_FIELDS,
+            expected={
+                "event_schema": V2_TEST_EVENT_SCHEMA,
+                "terminal_schema": V2_TEST_TERMINAL_SCHEMA,
+                "event_fields": sorted(V2_TEST_EVENT_FIELDS),
+                "terminal_fields": sorted(V2_TEST_TERMINAL_FIELDS),
+            },
+            observed={
+                "event_schemas": [
+                    row.get("schema") for row in emitted[:2]
+                ],
+                "terminal_schema": (
+                    emitted[-1].get("schema") if emitted else None
+                ),
+                "event_fields": (
+                    sorted(emitted[0]) if emitted else []
+                ),
+                "terminal_fields": (
+                    sorted(emitted[-1]) if emitted else []
+                ),
+            },
         )
-        probe_collector.check(
-            "valid-probe-check",
-            True,
-            expected=True,
-            observed=True,
+        rerooted_start_event = strict_json_loads(
+            canonical_bytes(emitted[0]),
+            label="self-test event binding mutation seed",
+            require_canonical=True,
         )
-        expected_family = next(
-            family
-            for first, last, family in V2_EXECUTOR_FAMILY_NAMES
-            if first <= int(probe_case["ordinal"]) <= last
+        rerooted_start_event["parameter_root"] = semantic_root(
+            {"forged": "parameter"}
         )
-        valid_probe_result = probe_collector.finish(
-            {
-                "family": expected_family,
-                "slug": str(probe_case["id"]).removeprefix(
-                    "template-lint-v2."
+        rerooted_start_event = v2_rooted(rerooted_start_event)
+        checks.refuses(
+            "self-test-event-rerooted-binding-refused",
+            EvidenceFailed,
+            lambda: v2_validate_test_event_document(
+                rerooted_start_event,
+                expected_harness_contract_identity=manifest[
+                    "harness_contract_identity"
+                ],
+                expected_case=probe_case,
+                expected_obligation=probe_obligation,
+                expected_sequence=0,
+                expected_stage="assertion-start",
+                expected_result=None,
+                expected_terminal=None,
+                final=True,
+            ),
+            contains="expected case binding",
+        )
+        checks.refuses(
+            "self-test-terminal-vacuous-pass-refused",
+            EvidenceFailed,
+            lambda: v2_test_terminal_document(
+                manifest=probe_manifest,
+                registry={
+                    str(probe_case["assertion_id"]): (
+                        v2_execute_schema_cli_ux
+                    )
+                },
+                results=[],
+                event_roots=[],
+                selected=None,
+                terminal="Pass",
+                first_divergence=None,
+                diagnostic_root=None,
+                diagnostic_summary=None,
+                recovery="NOT_REQUIRED",
+                failure_scope=None,
+            ),
+            contains="terminal contract differs",
+        )
+
+        system_exit_emitted: list[dict[str, Any]] = []
+
+        def system_exit_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def exit_zero(
+                _case: Mapping[str, Any],
+                _accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                raise SystemExit(0)
+
+            return {str(probe_case["assertion_id"]): exit_zero}
+
+        globals()["v2_build_executor_registry"] = system_exit_registry
+        globals()["json_stdout"] = lambda document: (
+            system_exit_emitted.append(dict(document))
+        )
+        system_exit_code: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            system_exit_code = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        system_exit_assertion = (
+            system_exit_emitted[-2]
+            if len(system_exit_emitted) >= 2
+            else {}
+        )
+        system_exit_terminal = (
+            system_exit_emitted[-1] if system_exit_emitted else {}
+        )
+        checks.check(
+            "runner-fail-seals-executor-system-exit",
+            system_exit_code == TERMINAL_EXIT["InternalFault"]
+            and len(system_exit_emitted) == 3
+            and system_exit_assertion.get("terminal") == "InternalFault"
+            and system_exit_assertion.get("result_category")
+            == "INTERNAL_EXECUTOR_FAULT"
+            and system_exit_assertion.get("recovery")
+            == "FIX_INTERNAL_EXECUTOR_FAULT"
+            and system_exit_assertion.get(
+                "semantic_projection", {}
+            ).get("unexpected_exception_type")
+            == "SystemExit"
+            and system_exit_terminal.get("terminal") == "InternalFault"
+            and system_exit_terminal.get("recovery")
+            == "FIX_INTERNAL_EXECUTOR_FAULT"
+            and system_exit_terminal.get("ordered_case_roots") == [],
+            expected={
+                "exit_code": TERMINAL_EXIT["InternalFault"],
+                "events": 3,
+                "terminal": "InternalFault",
+                "result_category": "INTERNAL_EXECUTOR_FAULT",
+                "recovery": "FIX_INTERNAL_EXECUTOR_FAULT",
+                "unexpected_exception_type": "SystemExit",
+                "completed": [],
+            },
+            observed={
+                "exit_code": system_exit_code,
+                "events": len(system_exit_emitted),
+                "assertion_terminal": system_exit_assertion,
+                "suite_terminal": system_exit_terminal,
+            },
+        )
+
+        expected_system_exit_projection = dict(
+            system_exit_assertion.get("semantic_projection", {})
+        )
+
+        def validate_system_exit_assertion(
+            document: Mapping[str, Any],
+        ) -> None:
+            v2_validate_test_event_document(
+                document,
+                expected_harness_contract_identity=manifest[
+                    "harness_contract_identity"
+                ],
+                expected_case=probe_case,
+                expected_obligation=probe_obligation,
+                expected_sequence=1,
+                expected_stage="assertion-terminal",
+                expected_projection=expected_system_exit_projection,
+                expected_terminal="InternalFault",
+                final=True,
+            )
+
+        mismatched_failure_policy = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="failure policy mutation seed",
+            require_canonical=True,
+        )
+        mismatched_failure_policy["result_category"] = (
+            "ASSERTION_FAILED"
+        )
+        mismatched_failure_policy["recovery"] = (
+            "FIX_ASSERTION_OR_SUBJECT"
+        )
+        mismatched_failure_policy = v2_rooted(
+            mismatched_failure_policy
+        )
+        checks.refuses(
+            "failure-event-category-recovery-substitution-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                mismatched_failure_policy
+            ),
+            contains="contract differs",
+        )
+        mismatched_failure_projection = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="failure projection mutation seed",
+            require_canonical=True,
+        )
+        mismatched_failure_projection["semantic_projection"][
+            "subject"
+        ] += " forged"
+        mismatched_failure_projection = v2_rooted(
+            mismatched_failure_projection
+        )
+        checks.refuses(
+            "failure-event-projection-substitution-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                mismatched_failure_projection
+            ),
+            contains="expected case binding",
+        )
+        mismatched_failure_argv = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="failure argv mutation seed",
+            require_canonical=True,
+        )
+        mismatched_failure_argv["argv"] = v2_sanitized_argv(
+            [
+                str(SCRIPT_REL),
+                "--case-v2",
+                str(manifest["case"][3]["id"]),
+            ]
+        )
+        mismatched_failure_argv = v2_rooted(
+            mismatched_failure_argv
+        )
+        checks.refuses(
+            "failure-event-sanitized-argv-substitution-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                mismatched_failure_argv
+            ),
+            contains="expected case binding",
+        )
+        expected_system_exit_event_roots = [
+            str(system_exit_emitted[0]["semantic_root"]),
+            str(system_exit_assertion["semantic_root"]),
+        ]
+
+        def validate_system_exit_suite(
+            document: Mapping[str, Any],
+            *,
+            expected_event_roots: Sequence[str] = (
+                expected_system_exit_event_roots
+            ),
+        ) -> None:
+            v2_validate_test_terminal_document(
+                document,
+                accepted_manifest=probe_manifest,
+                expected_results=[],
+                expected_event_roots=expected_event_roots,
+                expected_terminal=system_exit_terminal["terminal"],
+                expected_first_divergence=system_exit_terminal[
+                    "first_divergence"
+                ],
+                expected_diagnostic_root=system_exit_terminal[
+                    "diagnostic_root"
+                ],
+                expected_diagnostic_summary=system_exit_terminal[
+                    "diagnostic_summary"
+                ],
+                expected_recovery=system_exit_terminal["recovery"],
+                expected_failure_scope=system_exit_terminal[
+                    "failure_scope"
+                ],
+            )
+
+        substituted_suite_event_root = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite event-root mutation seed",
+            require_canonical=True,
+        )
+        substituted_suite_event_root["ordered_event_roots"][0] = (
+            semantic_root({"forged": "suite-event-root"})
+        )
+        substituted_suite_event_root = v2_rooted(
+            substituted_suite_event_root
+        )
+        checks.refuses(
+            "suite-terminal-arbitrary-event-root-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite(
+                substituted_suite_event_root
+            ),
+            contains="terminal contract differs",
+        )
+        duplicate_suite_event_root = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite duplicate-root mutation seed",
+            require_canonical=True,
+        )
+        duplicate_suite_event_root["ordered_event_roots"][1] = (
+            duplicate_suite_event_root["ordered_event_roots"][0]
+        )
+        duplicate_suite_event_root = v2_rooted(
+            duplicate_suite_event_root
+        )
+        checks.refuses(
+            "suite-terminal-duplicate-event-root-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite(
+                duplicate_suite_event_root
+            ),
+            contains="terminal contract differs",
+        )
+
+        def validate_system_exit_suite_as_claimed(
+            document: Mapping[str, Any],
+        ) -> None:
+            v2_validate_test_terminal_document(
+                document,
+                accepted_manifest=probe_manifest,
+                expected_results=[],
+                expected_event_roots=expected_system_exit_event_roots,
+                expected_terminal=document["terminal"],
+                expected_first_divergence=document[
+                    "first_divergence"
+                ],
+                expected_diagnostic_root=document["diagnostic_root"],
+                expected_diagnostic_summary=document[
+                    "diagnostic_summary"
+                ],
+                expected_recovery=document["recovery"],
+                expected_failure_scope=document["failure_scope"],
+            )
+
+        substituted_suite_recovery = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite recovery mutation seed",
+            require_canonical=True,
+        )
+        substituted_suite_recovery["recovery"] = (
+            "RETRY_AFTER_CANCELLATION"
+        )
+        substituted_suite_recovery = v2_rooted(
+            substituted_suite_recovery
+        )
+        checks.refuses(
+            "suite-terminal-recovery-policy-substitution-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite_as_claimed(
+                substituted_suite_recovery
+            ),
+            contains="terminal contract differs",
+        )
+        empty_suite_diagnostic = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite diagnostic mutation seed",
+            require_canonical=True,
+        )
+        empty_suite_diagnostic["diagnostic_summary"] = ""
+        empty_suite_diagnostic = v2_rooted(empty_suite_diagnostic)
+        checks.refuses(
+            "suite-terminal-empty-diagnostic-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite_as_claimed(
+                empty_suite_diagnostic
+            ),
+            contains="terminal contract differs",
+        )
+        unhashable_event_terminal = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="event terminal type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_event_terminal["terminal"] = []
+        unhashable_event_terminal = v2_rooted(
+            unhashable_event_terminal
+        )
+        checks.refuses(
+            "event-unhashable-terminal-typed-refusal",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                unhashable_event_terminal
+            ),
+            contains="contract differs",
+        )
+        unhashable_event_stage = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="event stage type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_event_stage["stage"] = []
+        unhashable_event_stage = v2_rooted(
+            unhashable_event_stage
+        )
+        checks.refuses(
+            "event-unhashable-stage-typed-refusal",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                unhashable_event_stage
+            ),
+            contains="contract differs",
+        )
+        boolean_optional_artifact_count = strict_json_loads(
+            canonical_bytes(system_exit_assertion),
+            label="event optional artifact count mutation seed",
+            require_canonical=True,
+        )
+        boolean_optional_artifact_count[
+            "safe_relative_artifacts"
+        ]["optional_count"] = False
+        boolean_optional_artifact_count = v2_rooted(
+            boolean_optional_artifact_count
+        )
+        checks.refuses(
+            "event-boolean-optional-artifact-count-refused",
+            EvidenceFailed,
+            lambda: validate_system_exit_assertion(
+                boolean_optional_artifact_count
+            ),
+            contains="contract differs",
+        )
+        unhashable_suite_roots = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite root type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_suite_roots["ordered_event_roots"][0] = []
+        unhashable_suite_roots = v2_rooted(unhashable_suite_roots)
+        checks.refuses(
+            "suite-terminal-unhashable-root-typed-refusal",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite(
+                unhashable_suite_roots,
+                expected_event_roots=unhashable_suite_roots[
+                    "ordered_event_roots"
+                ],
+            ),
+            contains="terminal contract differs",
+        )
+        unhashable_suite_terminal = strict_json_loads(
+            canonical_bytes(system_exit_terminal),
+            label="suite terminal type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_suite_terminal["terminal"] = []
+        unhashable_suite_terminal = v2_rooted(
+            unhashable_suite_terminal
+        )
+        checks.refuses(
+            "suite-unhashable-terminal-typed-refusal",
+            EvidenceFailed,
+            lambda: validate_system_exit_suite(
+                unhashable_suite_terminal
+            ),
+            contains="terminal contract differs",
+        )
+        infrastructure_emitted: list[dict[str, Any]] = []
+
+        def infrastructure_failure_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def fail_infrastructure(
+                _case: Mapping[str, Any],
+                _accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                raise InfrastructureFailed(
+                    "synthetic executor infrastructure failure"
+                )
+
+            return {
+                str(probe_case["assertion_id"]): fail_infrastructure,
+            }
+
+        globals()["v2_build_executor_registry"] = (
+            infrastructure_failure_registry
+        )
+        globals()["json_stdout"] = lambda document: (
+            infrastructure_emitted.append(dict(document))
+        )
+        infrastructure_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            infrastructure_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        infrastructure_assertion = (
+            infrastructure_emitted[-2]
+            if len(infrastructure_emitted) >= 2
+            else {}
+        )
+        infrastructure_terminal = (
+            infrastructure_emitted[-1]
+            if infrastructure_emitted
+            else {}
+        )
+        checks.check(
+            "runner-classifies-infrastructure-failure-exactly",
+            infrastructure_exit
+            == TERMINAL_EXIT["InfrastructureFailed"]
+            and len(infrastructure_emitted) == 3
+            and infrastructure_assertion.get("terminal")
+            == "InfrastructureFailed"
+            and infrastructure_assertion.get("result_category")
+            == "INFRASTRUCTURE_FAILED"
+            and infrastructure_assertion.get("recovery")
+            == "RESTORE_INFRASTRUCTURE_AND_RETRY"
+            and infrastructure_terminal.get("terminal")
+            == "InfrastructureFailed"
+            and infrastructure_terminal.get("recovery")
+            == "RESTORE_INFRASTRUCTURE_AND_RETRY",
+            expected={
+                "exit_code": TERMINAL_EXIT["InfrastructureFailed"],
+                "documents": 3,
+                "terminal": "InfrastructureFailed",
+                "result_category": "INFRASTRUCTURE_FAILED",
+                "recovery": "RESTORE_INFRASTRUCTURE_AND_RETRY",
+            },
+            observed={
+                "exit_code": infrastructure_exit,
+                "documents": len(infrastructure_emitted),
+                "assertion_terminal": infrastructure_assertion,
+                "suite_terminal": infrastructure_terminal,
+            },
+        )
+        empty_failure_emitted: list[dict[str, Any]] = []
+
+        def empty_failure_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def fail_without_message(
+                _case: Mapping[str, Any],
+                _accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                raise InfrastructureFailed()
+
+            return {
+                str(probe_case["assertion_id"]): fail_without_message,
+            }
+
+        globals()["v2_build_executor_registry"] = (
+            empty_failure_registry
+        )
+        globals()["json_stdout"] = lambda document: (
+            empty_failure_emitted.append(dict(document))
+        )
+        empty_failure_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            empty_failure_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        empty_failure_assertion = (
+            empty_failure_emitted[-2]
+            if len(empty_failure_emitted) >= 2
+            else {}
+        )
+        empty_failure_terminal = (
+            empty_failure_emitted[-1]
+            if empty_failure_emitted
+            else {}
+        )
+        expected_empty_diagnostic = (
+            "InfrastructureFailed: no diagnostic message"
+        )
+        checks.check(
+            "runner-fail-seals-empty-typed-diagnostic",
+            empty_failure_exit
+            == TERMINAL_EXIT["InfrastructureFailed"]
+            and len(empty_failure_emitted) == 3
+            and empty_failure_assertion.get(
+                "semantic_projection", {}
+            ).get("diagnostic_summary")
+            == expected_empty_diagnostic
+            and empty_failure_terminal.get("diagnostic_summary")
+            == expected_empty_diagnostic
+            and empty_failure_terminal.get("terminal")
+            == "InfrastructureFailed",
+            expected={
+                "exit_code": TERMINAL_EXIT["InfrastructureFailed"],
+                "documents": 3,
+                "diagnostic_summary": expected_empty_diagnostic,
+                "terminal": "InfrastructureFailed",
+            },
+            observed={
+                "exit_code": empty_failure_exit,
+                "documents": empty_failure_emitted,
+            },
+        )
+        execution_context = {
+            "mode": "case-v2",
+            "manifest_root": probe_manifest["semantic_root"],
+            "phase": "TEST_RUNNER",
+            "artifact_state": "NOT_APPLICABLE",
+        }
+        execution_terminal = v2_execution_terminal_document(
+            InfrastructureFailed(
+                "synthetic accepted-execution infrastructure failure"
+            ),
+            context=execution_context,
+        )
+        checks.check(
+            "accepted-execution-terminal-schema-closed",
+            execution_terminal["schema"]
+            == V2_EXECUTION_TERMINAL_SCHEMA
+            and set(execution_terminal)
+            == V2_EXECUTION_TERMINAL_FIELDS
+            and execution_terminal["terminal"]
+            == "InfrastructureFailed"
+            and execution_terminal["mode"] == "case-v2"
+            and execution_terminal["manifest_root"]
+            == probe_manifest["semantic_root"]
+            and execution_terminal["phase"] == "TEST_RUNNER"
+            and execution_terminal["artifact_state"]
+            == "NOT_APPLICABLE"
+            and execution_terminal["complete_evidence_bundle"] is False
+            and manifest["logging_contract"][
+                "execution_terminal_schema"
+            ]
+            == V2_EXECUTION_TERMINAL_SCHEMA
+            and set(
+                manifest["logging_contract"][
+                    "execution_terminal_required_fields"
+                ]
+            )
+            == V2_EXECUTION_TERMINAL_FIELDS,
+            expected={
+                "schema": V2_EXECUTION_TERMINAL_SCHEMA,
+                "fields": sorted(V2_EXECUTION_TERMINAL_FIELDS),
+                "terminal": "InfrastructureFailed",
+                "mode": "case-v2",
+                "phase": "TEST_RUNNER",
+                "artifact_state": "NOT_APPLICABLE",
+                "complete_evidence_bundle": False,
+            },
+            observed={
+                "schema": execution_terminal["schema"],
+                "fields": sorted(execution_terminal),
+                "terminal": execution_terminal["terminal"],
+                "mode": execution_terminal["mode"],
+                "manifest_root": execution_terminal[
+                    "manifest_root"
+                ],
+                "phase": execution_terminal["phase"],
+                "artifact_state": execution_terminal[
+                    "artifact_state"
+                ],
+                "complete_evidence_bundle": execution_terminal[
+                    "complete_evidence_bundle"
+                ],
+                "semantic_root": execution_terminal["semantic_root"],
+            },
+        )
+        impossible_execution_context = strict_json_loads(
+            canonical_bytes(execution_terminal),
+            label="execution context mutation seed",
+            require_canonical=True,
+        )
+        impossible_execution_context["phase"] = "LIVE_PLANNER"
+        impossible_execution_context["artifact_state"] = (
+            "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+        )
+        impossible_execution_context = v2_rooted(
+            impossible_execution_context
+        )
+        checks.refuses(
+            "execution-impossible-mode-context-refused",
+            EvidenceFailed,
+            lambda: v2_validate_execution_terminal_document(
+                impossible_execution_context
+            ),
+            contains="contract differs",
+        )
+        replay_execution_context = {
+            "mode": "replay-v2",
+            "manifest_root": probe_manifest["semantic_root"],
+            "phase": "OFFLINE_REPLAY",
+            "artifact_state": (
+                "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+            ),
+        }
+        replay_execution_terminal = v2_execution_terminal_document(
+            EvidenceFailed("synthetic accepted replay failure"),
+            context=replay_execution_context,
+        )
+        checks.check(
+            "accepted-replay-execution-context-closed",
+            replay_execution_terminal["schema"]
+            == V2_EXECUTION_TERMINAL_SCHEMA
+            and replay_execution_terminal["mode"] == "replay-v2"
+            and replay_execution_terminal["phase"]
+            == "OFFLINE_REPLAY"
+            and replay_execution_terminal["artifact_state"]
+            == "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+            and v2_raw_invocation_mode(
+                ["--replay", "retained-v2"]
+            )
+            is None,
+            expected={
+                "schema": V2_EXECUTION_TERMINAL_SCHEMA,
+                "mode": "replay-v2",
+                "phase": "OFFLINE_REPLAY",
+                "artifact_state": (
+                    "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+                ),
+                "raw_replay_preclassified": False,
+            },
+            observed={
+                "schema": replay_execution_terminal["schema"],
+                "mode": replay_execution_terminal["mode"],
+                "phase": replay_execution_terminal["phase"],
+                "artifact_state": replay_execution_terminal[
+                    "artifact_state"
+                ],
+                "manifest_root": replay_execution_terminal[
+                    "manifest_root"
+                ],
+                "semantic_root": replay_execution_terminal[
+                    "semantic_root"
+                ],
+                "raw_replay_mode": v2_raw_invocation_mode(
+                    ["--replay", "retained-v2"]
+                ),
+            },
+        )
+        outer_preflight = v2_outer_failure_document(
+            InputRefused("synthetic preflight failure"),
+            raw_mode="case-v2",
+            execution_context=None,
+        )
+        outer_execution = v2_outer_failure_document(
+            InputRefused("synthetic accepted execution failure"),
+            raw_mode="case-v2",
+            execution_context=execution_context,
+        )
+        checks.check(
+            "outer-terminal-selection-preflight-vs-accepted-execution",
+            outer_preflight is not None
+            and outer_execution is not None
+            and outer_preflight["schema"]
+            == V2_PREFLIGHT_TERMINAL_SCHEMA
+            and outer_execution["schema"]
+            == V2_EXECUTION_TERMINAL_SCHEMA
+            and "manifest_root" not in outer_preflight
+            and outer_execution["manifest_root"]
+            == probe_manifest["semantic_root"],
+            expected={
+                "preflight_schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+                "execution_schema": V2_EXECUTION_TERMINAL_SCHEMA,
+                "accepted_manifest_bound": True,
+            },
+            observed={
+                "preflight_schema": outer_preflight["schema"],
+                "preflight_semantic_root": outer_preflight[
+                    "semantic_root"
+                ],
+                "execution_schema": outer_execution["schema"],
+                "execution_manifest_root": outer_execution[
+                    "manifest_root"
+                ],
+                "execution_semantic_root": outer_execution[
+                    "semantic_root"
+                ],
+            },
+        )
+        preflight_terminal = v2_preflight_terminal_document(
+            InputRefused("synthetic preflight refusal"),
+            mode="case-v2",
+        )
+        unhashable_preflight_terminal = strict_json_loads(
+            canonical_bytes(preflight_terminal),
+            label="preflight terminal type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_preflight_terminal["terminal"] = []
+        unhashable_preflight_terminal = v2_rooted(
+            unhashable_preflight_terminal
+        )
+        checks.refuses(
+            "preflight-unhashable-terminal-typed-refusal",
+            EvidenceFailed,
+            lambda: v2_validate_preflight_terminal_document(
+                unhashable_preflight_terminal
+            ),
+            contains="contract differs",
+        )
+        unhashable_preflight_mode = strict_json_loads(
+            canonical_bytes(preflight_terminal),
+            label="preflight mode type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_preflight_mode["mode"] = []
+        unhashable_preflight_mode = v2_rooted(
+            unhashable_preflight_mode
+        )
+        checks.refuses(
+            "preflight-unhashable-mode-typed-refusal",
+            EvidenceFailed,
+            lambda: v2_validate_preflight_terminal_document(
+                unhashable_preflight_mode
+            ),
+            contains="contract differs",
+        )
+        unhashable_execution_terminal = strict_json_loads(
+            canonical_bytes(execution_terminal),
+            label="execution terminal type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_execution_terminal["terminal"] = []
+        unhashable_execution_terminal = v2_rooted(
+            unhashable_execution_terminal
+        )
+        checks.refuses(
+            "execution-unhashable-terminal-typed-refusal",
+            EvidenceFailed,
+            lambda: v2_validate_execution_terminal_document(
+                unhashable_execution_terminal
+            ),
+            contains="contract differs",
+        )
+        unhashable_execution_phase = strict_json_loads(
+            canonical_bytes(execution_terminal),
+            label="execution phase type mutation seed",
+            require_canonical=True,
+        )
+        unhashable_execution_phase["phase"] = []
+        unhashable_execution_phase = v2_rooted(
+            unhashable_execution_phase
+        )
+        checks.refuses(
+            "execution-unhashable-phase-typed-refusal",
+            EvidenceFailed,
+            lambda: v2_validate_execution_terminal_document(
+                unhashable_execution_phase
+            ),
+            contains="contract differs",
+        )
+        checks.refuses(
+            "execution-nonobject-typed-refusal",
+            EvidenceFailed,
+            lambda: v2_validate_execution_terminal_document([]),
+            contains="not an object",
+        )
+        publication_probe_result = v2_execute_schema_cli_ux(
+            probe_case,
+            manifest,
+        )
+
+        def publication_probe_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            return {
+                str(probe_case["assertion_id"]): (
+                    lambda _case, _accepted: publication_probe_result
                 ),
             }
+
+        prepublication_emitted: list[dict[str, Any]] = []
+        original_log_line_validator = v2_validate_log_line_payload
+        publication_validation_count = 0
+
+        def fail_second_prepublication_validation(
+            payload: bytes,
+            *,
+            label: str,
+        ) -> None:
+            nonlocal publication_validation_count
+            if label == "v2 self-test JSONL document":
+                publication_validation_count += 1
+                if publication_validation_count == 2:
+                    raise InfrastructureFailed(
+                        "synthetic zero-byte prepublication failure"
+                    )
+            original_log_line_validator(payload, label=label)
+
+        globals()["v2_build_executor_registry"] = (
+            publication_probe_registry
+        )
+        globals()["v2_validate_log_line_payload"] = (
+            fail_second_prepublication_validation
+        )
+        globals()["json_stdout"] = lambda document: (
+            prepublication_emitted.append(dict(document))
+        )
+        prepublication_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            prepublication_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["v2_validate_log_line_payload"] = (
+                original_log_line_validator
+            )
+            globals()["json_stdout"] = original_json_stdout
+        checks.check(
+            "runner-fail-seals-zero-byte-prepublication-failure",
+            prepublication_exit
+            == TERMINAL_EXIT["InfrastructureFailed"]
+            and publication_validation_count == 4
+            and len(prepublication_emitted) == 3
+            and prepublication_emitted[0].get("stage")
+            == "assertion-start"
+            and prepublication_emitted[1].get("terminal")
+            == "InfrastructureFailed"
+            and prepublication_emitted[1].get("result_category")
+            == "INFRASTRUCTURE_FAILED"
+            and prepublication_emitted[2].get("terminal")
+            == "InfrastructureFailed",
+            expected={
+                "exit_code": TERMINAL_EXIT["InfrastructureFailed"],
+                "publication_validations": 4,
+                "documents": 3,
+                "terminal": "InfrastructureFailed",
+                "result_category": "INFRASTRUCTURE_FAILED",
+            },
+            observed={
+                "exit_code": prepublication_exit,
+                "publication_validations": publication_validation_count,
+                "documents": prepublication_emitted,
+            },
+        )
+        partial_output_emitted: list[dict[str, Any]] = []
+
+        def fail_unknown_partial_output(
+            document: Mapping[str, Any],
+        ) -> None:
+            if document.get("schema") == V2_ASSERTION_RESULT_SCHEMA:
+                raise OutputPublicationFailed(
+                    "synthetic unknown partial output",
+                    bytes_committed=None,
+                )
+            partial_output_emitted.append(dict(document))
+
+        globals()["v2_build_executor_registry"] = (
+            publication_probe_registry
+        )
+        globals()["json_stdout"] = fail_unknown_partial_output
+        partial_output_error: OutputPublicationFailed | None = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except OutputPublicationFailed as error:
+            partial_output_error = error
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        checks.check(
+            "runner-does-not-retry-unknown-partial-output",
+            partial_output_error is not None
+            and partial_output_error.bytes_committed is None
+            and len(partial_output_emitted) == 1
+            and partial_output_emitted[0].get("stage")
+            == "assertion-start",
+            expected={
+                "exception": "OutputPublicationFailed",
+                "bytes_committed": None,
+                "documents_before_failure": 1,
+                "retried_failure_document": False,
+            },
+            observed={
+                "exception": (
+                    type(partial_output_error).__name__
+                    if partial_output_error is not None
+                    else None
+                ),
+                "bytes_committed": (
+                    partial_output_error.bytes_committed
+                    if partial_output_error is not None
+                    else None
+                ),
+                "document_count": len(partial_output_emitted),
+                "document_schemas": [
+                    row.get("schema")
+                    for row in partial_output_emitted
+                ],
+                "document_stages": [
+                    row.get("stage")
+                    for row in partial_output_emitted
+                ],
+                "document_roots": [
+                    row.get("semantic_root")
+                    for row in partial_output_emitted
+                ],
+            },
+        )
+
+        class SyntheticBinarySink:
+            def __init__(self, mode: str) -> None:
+                self.mode = mode
+                self.write_calls = 0
+                self.payload_length = 0
+
+            def write(self, payload: bytes) -> int:
+                self.write_calls += 1
+                self.payload_length = len(payload)
+                if self.mode == "write-runtime":
+                    raise RuntimeError(
+                        "synthetic writer runtime failure"
+                    )
+                if self.mode == "short":
+                    return len(payload) - 1
+                if self.mode == "over":
+                    return len(payload) + 1
+                return len(payload)
+
+        class SyntheticStdoutSink:
+            def __init__(self, mode: str) -> None:
+                self.mode = mode
+                self.buffer = SyntheticBinarySink(mode)
+                self.flush_calls = 0
+
+            def flush(self) -> None:
+                self.flush_calls += 1
+                if self.mode == "flush-runtime":
+                    raise RuntimeError(
+                        "synthetic flush runtime failure"
+                    )
+
+        def capture_real_writer_failure(
+            mode: str,
+        ) -> tuple[OutputPublicationFailed, SyntheticStdoutSink]:
+            sink = SyntheticStdoutSink(mode)
+            original_stdout = sys.stdout
+            globals()["sys"].stdout = sink
+            captured: OutputPublicationFailed | None = None
+            try:
+                json_stdout({"schema": "synthetic-writer-probe"})
+            except OutputPublicationFailed as error:
+                captured = error
+            finally:
+                globals()["sys"].stdout = original_stdout
+            if captured is None:
+                raise EvidenceFailed(
+                    f"synthetic {mode} writer failure was not normalized"
+                )
+            return captured, sink
+
+        short_write_error, short_write_sink = (
+            capture_real_writer_failure("short")
+        )
+        over_write_error, over_write_sink = (
+            capture_real_writer_failure("over")
+        )
+        runtime_write_error, runtime_write_sink = (
+            capture_real_writer_failure("write-runtime")
+        )
+        runtime_flush_error, runtime_flush_sink = (
+            capture_real_writer_failure("flush-runtime")
+        )
+        checks.check(
+            "json-stdout-real-stream-failures-poison-publication",
+            short_write_error.bytes_committed
+            == short_write_sink.buffer.payload_length - 1
+            and over_write_error.bytes_committed is None
+            and runtime_write_error.bytes_committed is None
+            and runtime_flush_error.bytes_committed is None
+            and short_write_sink.buffer.write_calls == 1
+            and over_write_sink.buffer.write_calls == 1
+            and runtime_write_sink.buffer.write_calls == 1
+            and runtime_flush_sink.buffer.write_calls == 1
+            and runtime_flush_sink.flush_calls == 1,
+            expected={
+                "short_write_exact_count": True,
+                "impossible_overcount_unknown": True,
+                "runtime_write_unknown": True,
+                "runtime_flush_unknown": True,
+                "write_attempts_each": 1,
+                "flush_attempts": 1,
+            },
+            observed={
+                "short_write_bytes": (
+                    short_write_error.bytes_committed
+                ),
+                "short_payload_bytes": (
+                    short_write_sink.buffer.payload_length
+                ),
+                "over_write_bytes": (
+                    over_write_error.bytes_committed
+                ),
+                "runtime_write_bytes": (
+                    runtime_write_error.bytes_committed
+                ),
+                "runtime_flush_bytes": (
+                    runtime_flush_error.bytes_committed
+                ),
+                "write_calls": [
+                    short_write_sink.buffer.write_calls,
+                    over_write_sink.buffer.write_calls,
+                    runtime_write_sink.buffer.write_calls,
+                    runtime_flush_sink.buffer.write_calls,
+                ],
+                "flush_calls": runtime_flush_sink.flush_calls,
+            },
+        )
+
+        class BrokenStderrSink:
+            def __init__(self) -> None:
+                self.write_calls = 0
+
+            def write(self, _payload: str) -> int:
+                self.write_calls += 1
+                raise RuntimeError("synthetic broken stderr")
+
+            def flush(self) -> None:
+                raise RuntimeError("synthetic broken stderr flush")
+
+        broken_stderr = BrokenStderrSink()
+        original_stderr = sys.stderr
+        globals()["sys"].stderr = broken_stderr
+        broken_stderr_exit: Any = None
+        try:
+            v2_abort_after_output_failure(
+                OutputPublicationFailed(
+                    "synthetic output publication failure",
+                    bytes_committed=None,
+                )
+            )
+        except SystemExit as error:
+            broken_stderr_exit = error.code
+        finally:
+            globals()["sys"].stderr = original_stderr
+        checks.check(
+            "output-abort-broken-stderr-still-exits-infrastructurefailed",
+            broken_stderr_exit
+            == TERMINAL_EXIT["InfrastructureFailed"]
+            and broken_stderr.write_calls == 1,
+            expected={
+                "exit_code": TERMINAL_EXIT["InfrastructureFailed"],
+                "stderr_write_attempts": 1,
+            },
+            observed={
+                "exit_code": broken_stderr_exit,
+                "stderr_write_attempts": broken_stderr.write_calls,
+            },
+        )
+        cancellation_cases = [
+            dict(manifest["case"][2]),
+            dict(manifest["case"][3]),
+        ]
+        cancellation_manifest = dict(manifest)
+        cancellation_manifest["case"] = cancellation_cases
+        cancellation_manifest["check_obligations"] = {
+            str(row["assertion_id"]): obligations[
+                str(row["assertion_id"])
+            ]
+            for row in cancellation_cases
+        }
+        cancellation_manifest["semantic_root"] = semantic_root(
+            {
+                key: value
+                for key, value in cancellation_manifest.items()
+                if key != "semantic_root"
+            }
+        )
+        first_cancellation_result = v2_execute_schema_cli_ux(
+            cancellation_cases[0],
+            manifest,
+        )
+        cancellation_emitted: list[dict[str, Any]] = []
+
+        def between_case_cancellation_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            return {
+                str(cancellation_cases[0]["assertion_id"]): (
+                    lambda _case, _accepted: first_cancellation_result
+                ),
+                str(cancellation_cases[1]["assertion_id"]): (
+                    v2_execute_schema_cli_ux
+                ),
+            }
+
+        def capture_then_cancel_between(
+            document: Mapping[str, Any],
+        ) -> None:
+            cancellation_emitted.append(dict(document))
+            if (
+                document.get("schema") == V2_TEST_EVENT_SCHEMA
+                and document.get("case_id")
+                == cancellation_cases[0]["id"]
+                and document.get("stage") == "assertion-terminal"
+                and document.get("terminal") == "Pass"
+            ):
+                globals()["_cancel_requested"] = True
+
+        prior_cancel_requested = _cancel_requested
+        globals()["_cancel_requested"] = False
+        globals()[
+            "v2_build_executor_registry"
+        ] = between_case_cancellation_registry
+        globals()["json_stdout"] = capture_then_cancel_between
+        cancellation_exit: Any = None
+        try:
+            run_v2_self_tests(cancellation_manifest)
+        except SystemExit as error:
+            cancellation_exit = error.code
+        finally:
+            globals()["_cancel_requested"] = prior_cancel_requested
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        first_cancellation_terminal = (
+            cancellation_emitted[-2]
+            if len(cancellation_emitted) >= 2
+            else {}
+        )
+        cancellation_terminal = (
+            cancellation_emitted[-1] if cancellation_emitted else {}
+        )
+        checks.check(
+            "runner-seals-between-case-cancellation",
+            cancellation_exit == TERMINAL_EXIT["CancelledDrained"]
+            and len(cancellation_emitted) == 4
+            and first_cancellation_terminal.get("terminal") == "Pass"
+            and cancellation_terminal.get("terminal")
+            == "CancelledDrained"
+            and cancellation_terminal.get("failure_scope")
+            == "suite-boundary"
+            and cancellation_terminal.get("case_count") == 1
+            and cancellation_terminal.get("ordered_case_ids")
+            == [cancellation_cases[0]["id"]]
+            and len(
+                cancellation_terminal.get("ordered_event_roots", [])
+            )
+            == 2
+            and "keyboard"
+            not in str(
+                cancellation_terminal.get("diagnostic_summary", "")
+            ).lower(),
+            expected={
+                "exit_code": TERMINAL_EXIT["CancelledDrained"],
+                "documents": 4,
+                "terminal": "CancelledDrained",
+                "completed_cases": 1,
+                "event_roots": 2,
+                "failure_scope": "suite-boundary",
+                "recovery": "RETRY_AFTER_CANCELLATION",
+                "keyboard_diagnostic": False,
+            },
+            observed={
+                "exit_code": cancellation_exit,
+                "documents": len(cancellation_emitted),
+                "first_assertion_terminal": first_cancellation_terminal,
+                "suite_terminal": cancellation_terminal,
+            },
+        )
+        last_case_result = v2_execute_schema_cli_ux(
+            probe_case,
+            manifest,
+        )
+        last_case_emitted: list[dict[str, Any]] = []
+
+        def last_case_cancellation_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def cancel_after_executor(
+                _case: Mapping[str, Any],
+                _accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                globals()["_cancel_requested"] = True
+                return last_case_result
+
+            return {
+                str(probe_case["assertion_id"]): cancel_after_executor,
+            }
+
+        globals()["_cancel_requested"] = False
+        globals()["v2_build_executor_registry"] = (
+            last_case_cancellation_registry
+        )
+        globals()["json_stdout"] = lambda document: (
+            last_case_emitted.append(dict(document))
+        )
+        last_case_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            last_case_exit = error.code
+        finally:
+            globals()["_cancel_requested"] = prior_cancel_requested
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        last_case_assertion = (
+            last_case_emitted[-2]
+            if len(last_case_emitted) >= 2
+            else {}
+        )
+        last_case_terminal = (
+            last_case_emitted[-1] if last_case_emitted else {}
+        )
+        checks.check(
+            "runner-seals-last-case-post-executor-cancellation",
+            last_case_exit == TERMINAL_EXIT["CancelledDrained"]
+            and len(last_case_emitted) == 3
+            and last_case_assertion.get("terminal")
+            == "CancelledDrained"
+            and last_case_assertion.get("result_category")
+            == "CANCELLED_DRAINED"
+            and last_case_assertion.get("recovery")
+            == "RETRY_AFTER_CANCELLATION"
+            and "keyboard"
+            not in str(
+                last_case_assertion.get(
+                    "semantic_projection", {}
+                ).get("diagnostic_summary", "")
+            ).lower()
+            and last_case_terminal.get("terminal")
+            == "CancelledDrained"
+            and last_case_terminal.get("failure_scope") == "assertion"
+            and last_case_terminal.get("case_count") == 0,
+            expected={
+                "exit_code": TERMINAL_EXIT["CancelledDrained"],
+                "documents": 3,
+                "terminal": "CancelledDrained",
+                "failure_scope": "assertion",
+                "completed_cases": 0,
+                "keyboard_diagnostic": False,
+            },
+            observed={
+                "exit_code": last_case_exit,
+                "documents": len(last_case_emitted),
+                "assertion_terminal": last_case_assertion,
+                "suite_terminal": last_case_terminal,
+            },
+        )
+        valid_probe_result = v2_execute_schema_cli_ux(
+            probe_case,
+            manifest,
+        )
+        validated_probe_result = v2_validate_assertion_result(
+            probe_case,
+            valid_probe_result,
+            probe_obligation,
+        )
+        checks.check(
+            "exact-obligation-admits-actual-probe-result",
+            validated_probe_result["semantic_root"]
+            == valid_probe_result["semantic_root"],
+            expected=valid_probe_result["semantic_root"],
+            observed=validated_probe_result["semantic_root"],
+        )
+        noncanonical_result = dict(valid_probe_result)
+        noncanonical_result["ordered_checks"] = [
+            dict(row) for row in valid_probe_result["ordered_checks"]
+        ]
+        noncanonical_result["ordered_checks"][0]["observed"] = object()
+        noncanonical_result_emitted: list[dict[str, Any]] = []
+
+        def noncanonical_result_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            return {
+                str(probe_case["assertion_id"]): (
+                    lambda _case, _accepted: noncanonical_result
+                ),
+            }
+
+        globals()["v2_build_executor_registry"] = (
+            noncanonical_result_registry
+        )
+        globals()["json_stdout"] = lambda document: (
+            noncanonical_result_emitted.append(dict(document))
+        )
+        noncanonical_result_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            noncanonical_result_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        noncanonical_result_assertion = (
+            noncanonical_result_emitted[-2]
+            if len(noncanonical_result_emitted) >= 2
+            else {}
+        )
+        checks.check(
+            "runner-classifies-noncanonical-result-as-evidence",
+            noncanonical_result_exit
+            == TERMINAL_EXIT["EvidenceFailed"]
+            and len(noncanonical_result_emitted) == 3
+            and noncanonical_result_assertion.get("terminal")
+            == "EvidenceFailed"
+            and noncanonical_result_assertion.get("result_category")
+            == "ASSERTION_FAILED"
+            and noncanonical_result_assertion.get(
+                "semantic_projection", {}
+            ).get("unexpected_exception_type")
+            is None,
+            expected={
+                "exit_code": TERMINAL_EXIT["EvidenceFailed"],
+                "documents": 3,
+                "terminal": "EvidenceFailed",
+                "result_category": "ASSERTION_FAILED",
+                "unexpected_exception_type": None,
+            },
+            observed={
+                "exit_code": noncanonical_result_exit,
+                "documents": noncanonical_result_emitted,
+            },
+        )
+        checks.refuses(
+            "self-test-emitter-unknown-schema-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                {"schema": "frankensim.unknown.v2"},
+                accepted_manifest=probe_manifest,
+            ),
+            contains="unknown document schema",
+        )
+        checks.refuses(
+            "self-test-emitter-nonobject-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                [],
+                accepted_manifest=probe_manifest,
+            ),
+            contains="non-object document",
+        )
+        checks.refuses(
+            "self-test-emitter-malformed-manifest-context-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                valid_probe_result,
+                accepted_manifest={
+                    "case": None,
+                    "check_obligations": {},
+                },
+                expected_case=probe_case,
+                expected_obligation=probe_obligation,
+            ),
+            contains="lacks accepted registries",
+        )
+        mutated_probe_result = strict_json_loads(
+            canonical_bytes(valid_probe_result),
+            label="assertion-result emission mutation seed",
+            require_canonical=True,
+        )
+        mutated_probe_check = dict(
+            mutated_probe_result["ordered_checks"][0]
+        )
+        mutated_probe_check["passed"] = False
+        mutated_probe_check = v2_rooted(mutated_probe_check)
+        mutated_probe_result["ordered_checks"][0] = (
+            mutated_probe_check
+        )
+        mutated_probe_result["ordered_check_roots"][0] = (
+            mutated_probe_check["semantic_root"]
+        )
+        mutated_probe_result = v2_rooted(mutated_probe_result)
+        checks.refuses(
+            "self-test-emitter-mutated-result-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                mutated_probe_result,
+                accepted_manifest=probe_manifest,
+                expected_case=probe_case,
+                expected_obligation=probe_obligation,
+            ),
+            contains="malformed check evidence",
+        )
+        invented_emission_case = strict_json_loads(
+            canonical_bytes(probe_case),
+            label="emission context mutation seed",
+            require_canonical=True,
+        )
+        invented_emission_case["subject"] += " invented"
+        checks.refuses(
+            "self-test-emitter-out-of-manifest-context-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                valid_probe_result,
+                accepted_manifest=probe_manifest,
+                expected_case=invented_emission_case,
+                expected_obligation=probe_obligation,
+            ),
+            contains="differs from the accepted manifest",
+        )
+        valid_probe_start = v2_test_log_event(
+            case=probe_case,
+            obligation=probe_obligation,
+            harness_contract_identity=manifest[
+                "harness_contract_identity"
+            ],
+            sequence=0,
+            stage="assertion-start",
+        )
+        valid_probe_terminal_event = v2_test_log_event(
+            case=probe_case,
+            obligation=probe_obligation,
+            harness_contract_identity=manifest[
+                "harness_contract_identity"
+            ],
+            sequence=1,
+            stage="assertion-terminal",
+            result=valid_probe_result,
+            terminal="Pass",
+        )
+        checks.refuses(
+            "self-test-event-forged-expected-result-refused",
+            EvidenceFailed,
+            lambda: v2_emit_test_document(
+                valid_probe_terminal_event,
+                accepted_manifest=probe_manifest,
+                expected_case=probe_case,
+                expected_obligation=probe_obligation,
+                expected_sequence=1,
+                expected_stage="assertion-terminal",
+                expected_result=mutated_probe_result,
+                expected_terminal="Pass",
+            ),
+            contains="malformed check evidence",
+        )
+        valid_probe_event_roots = [
+            valid_probe_start["semantic_root"],
+            valid_probe_terminal_event["semantic_root"],
+        ]
+        valid_probe_suite = v2_test_terminal_document(
+            manifest=probe_manifest,
+            registry=v2_build_executor_registry(probe_manifest),
+            results=[valid_probe_result],
+            event_roots=valid_probe_event_roots,
+            selected=str(probe_case["id"]),
+            terminal="Pass",
+            first_divergence=None,
+            diagnostic_root=None,
+            diagnostic_summary=None,
+            recovery="NOT_REQUIRED",
+            failure_scope=None,
+        )
+        boolean_pass_exit = strict_json_loads(
+            canonical_bytes(valid_probe_suite),
+            label="suite boolean exit mutation seed",
+            require_canonical=True,
+        )
+        boolean_pass_exit["exit_code"] = False
+        boolean_pass_exit = v2_rooted(boolean_pass_exit)
+        checks.refuses(
+            "suite-terminal-boolean-zero-exit-refused",
+            EvidenceFailed,
+            lambda: v2_validate_test_terminal_document(
+                boolean_pass_exit,
+                accepted_manifest=probe_manifest,
+                expected_results=[valid_probe_result],
+                expected_event_roots=valid_probe_event_roots,
+                expected_terminal="Pass",
+                expected_first_divergence=None,
+                expected_diagnostic_root=None,
+                expected_diagnostic_summary=None,
+                expected_recovery="NOT_REQUIRED",
+                expected_failure_scope=None,
+            ),
+            contains="terminal contract differs",
+        )
+        forged_suite_result = {
+            "case_id": probe_case["id"],
+            "assertion_id": probe_case["assertion_id"],
+            "check_count": probe_obligation["check_count"],
+            "semantic_root": semantic_root(
+                {"forged": "minimal suite result"}
+            ),
+        }
+        checks.refuses(
+            "suite-terminal-forged-expected-result-refused",
+            EvidenceFailed,
+            lambda: v2_test_terminal_document(
+                manifest=probe_manifest,
+                registry=v2_build_executor_registry(probe_manifest),
+                results=[forged_suite_result],
+                event_roots=valid_probe_event_roots,
+                selected=str(probe_case["id"]),
+                terminal="Pass",
+                first_divergence=None,
+                diagnostic_root=None,
+                diagnostic_summary=None,
+                recovery="NOT_REQUIRED",
+                failure_scope=None,
+            ),
+            contains="malformed assertion evidence",
+        )
+        substituted_suite_case_root = strict_json_loads(
+            canonical_bytes(valid_probe_suite),
+            label="suite case-root mutation seed",
+            require_canonical=True,
+        )
+        substituted_suite_case_root["ordered_case_roots"][0] = (
+            semantic_root({"forged": "suite-case-root"})
+        )
+        substituted_suite_case_root = v2_rooted(
+            substituted_suite_case_root
+        )
+        checks.refuses(
+            "suite-terminal-arbitrary-case-root-refused",
+            EvidenceFailed,
+            lambda: v2_validate_test_terminal_document(
+                substituted_suite_case_root,
+                accepted_manifest=probe_manifest,
+                expected_results=[valid_probe_result],
+                expected_event_roots=valid_probe_event_roots,
+                expected_terminal="Pass",
+                expected_first_divergence=None,
+                expected_diagnostic_root=None,
+                expected_diagnostic_summary=None,
+                expected_recovery="NOT_REQUIRED",
+                expected_failure_scope=None,
+            ),
+            contains="terminal contract differs",
+        )
+        manifest_mutation_emitted: list[dict[str, Any]] = []
+
+        def manifest_mutation_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def mutate_manifest(
+                _case: Mapping[str, Any],
+                accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                mutable = accepted
+                mutable["harness_contract_identity"] = semantic_root(
+                    {"forged": "executor-manifest"}
+                )
+                return valid_probe_result
+
+            return {
+                str(probe_case["assertion_id"]): mutate_manifest,
+            }
+
+        globals()["v2_build_executor_registry"] = manifest_mutation_registry
+        globals()["json_stdout"] = lambda document: (
+            manifest_mutation_emitted.append(dict(document))
+        )
+        manifest_mutation_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            manifest_mutation_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        mutation_assertion = (
+            manifest_mutation_emitted[-2]
+            if len(manifest_mutation_emitted) >= 2
+            else {}
+        )
+        mutation_terminal = (
+            manifest_mutation_emitted[-1]
+            if manifest_mutation_emitted
+            else {}
+        )
+        checks.check(
+            "runner-fail-seals-executor-manifest-mutation",
+            manifest_mutation_exit == TERMINAL_EXIT["EvidenceFailed"]
+            and len(manifest_mutation_emitted) == 3
+            and mutation_assertion.get("terminal") == "EvidenceFailed"
+            and mutation_assertion.get("result_category")
+            == "ASSERTION_FAILED"
+            and mutation_assertion.get("recovery")
+            == "FIX_ASSERTION_OR_SUBJECT"
+            and mutation_terminal.get("terminal") == "EvidenceFailed"
+            and mutation_terminal.get("ordered_case_roots") == [],
+            expected={
+                "exit_code": TERMINAL_EXIT["EvidenceFailed"],
+                "documents": 3,
+                "terminal": "EvidenceFailed",
+                "completed": [],
+            },
+            observed={
+                "exit_code": manifest_mutation_exit,
+                "documents": len(manifest_mutation_emitted),
+                "assertion_terminal": mutation_assertion,
+                "suite_terminal": mutation_terminal,
+            },
+        )
+        noncanonical_mutation_emitted: list[dict[str, Any]] = []
+
+        def noncanonical_mutation_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            def make_manifest_noncanonical(
+                _case: Mapping[str, Any],
+                accepted: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                accepted["harness_contract_identity"] = object()
+                return valid_probe_result
+
+            return {
+                str(probe_case["assertion_id"]): (
+                    make_manifest_noncanonical
+                ),
+            }
+
+        globals()["v2_build_executor_registry"] = (
+            noncanonical_mutation_registry
+        )
+        globals()["json_stdout"] = lambda document: (
+            noncanonical_mutation_emitted.append(dict(document))
+        )
+        noncanonical_mutation_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            noncanonical_mutation_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        noncanonical_mutation_assertion = (
+            noncanonical_mutation_emitted[-2]
+            if len(noncanonical_mutation_emitted) >= 2
+            else {}
+        )
+        checks.check(
+            "runner-classifies-noncanonical-executor-mutation-as-evidence",
+            noncanonical_mutation_exit
+            == TERMINAL_EXIT["EvidenceFailed"]
+            and len(noncanonical_mutation_emitted) == 3
+            and noncanonical_mutation_assertion.get("terminal")
+            == "EvidenceFailed"
+            and noncanonical_mutation_assertion.get("result_category")
+            == "ASSERTION_FAILED"
+            and noncanonical_mutation_assertion.get(
+                "semantic_projection", {}
+            ).get("unexpected_exception_type")
+            is None,
+            expected={
+                "exit_code": TERMINAL_EXIT["EvidenceFailed"],
+                "documents": 3,
+                "terminal": "EvidenceFailed",
+                "result_category": "ASSERTION_FAILED",
+                "unexpected_exception_type": None,
+            },
+            observed={
+                "exit_code": noncanonical_mutation_exit,
+                "documents": noncanonical_mutation_emitted,
+            },
+        )
+        nonboolean_terminals: list[str] = []
+        for index, condition in enumerate(("false", 1, [True])):
+            nonboolean_collector = V2CheckCollector(
+                str(probe_case["id"]),
+                str(probe_case["assertion_id"]),
+            )
+            nonboolean_error = expect_error(
+                EvidenceFailed,
+                lambda condition=condition, index=index: (
+                    nonboolean_collector.check(
+                        f"nonboolean-probe-{index}",
+                        condition,  # type: ignore[arg-type]
+                        expected=False,
+                        observed=condition,
+                    )
+                ),
+                contains="non-boolean condition",
+            )
+            nonboolean_terminals.append(nonboolean_error.terminal)
+        checks.check(
+            "collector-refuses-truthy-nonboolean-conditions",
+            nonboolean_terminals == ["EvidenceFailed"] * 3,
+            expected=["EvidenceFailed"] * 3,
+            observed=nonboolean_terminals,
         )
 
         def mutate_probe_result(
@@ -22435,6 +25140,80 @@ def v2_execute_schema_cli_ux(
             candidate.pop("semantic_root", None)
             callback(candidate)
             return v2_rooted(candidate)
+
+        def bind_result_checks(
+            row: dict[str, Any],
+            ordered_checks: Sequence[Mapping[str, Any]],
+        ) -> None:
+            row["ordered_checks"] = [
+                dict(check) for check in ordered_checks
+            ]
+            row["ordered_check_roots"] = [
+                str(check["semantic_root"]) for check in ordered_checks
+            ]
+            row["check_count"] = len(ordered_checks)
+
+        def drop_obligated_check(row: dict[str, Any]) -> None:
+            bind_result_checks(row, row["ordered_checks"][:-1])
+
+        def add_unobligated_check(row: dict[str, Any]) -> None:
+            extra_check = v2_rooted(
+                {
+                    "check_id": "unobligated-extra-check",
+                    "expected": True,
+                    "observed": True,
+                    "passed": True,
+                }
+            )
+            bind_result_checks(
+                row,
+                [*row["ordered_checks"], extra_check],
+            )
+
+        def reorder_obligated_checks(row: dict[str, Any]) -> None:
+            ordered = list(row["ordered_checks"])
+            ordered[0], ordered[1] = ordered[1], ordered[0]
+            bind_result_checks(row, ordered)
+
+        def substitute_obligated_check(row: dict[str, Any]) -> None:
+            replacement = dict(row["ordered_checks"][0])
+            replacement.pop("semantic_root", None)
+            replacement["check_id"] = "substituted-valid-check"
+            replacement = v2_rooted(replacement)
+            bind_result_checks(
+                row,
+                [replacement, *row["ordered_checks"][1:]],
+            )
+
+        for check_id, mutation in (
+            (
+                "assertion-result-dropped-obligated-check-refused",
+                drop_obligated_check,
+            ),
+            (
+                "assertion-result-extra-unobligated-check-refused",
+                add_unobligated_check,
+            ),
+            (
+                "assertion-result-reordered-obligated-checks-refused",
+                reorder_obligated_checks,
+            ),
+            (
+                "assertion-result-substituted-obligated-check-refused",
+                substitute_obligated_check,
+            ),
+        ):
+            candidate = mutate_probe_result(mutation)
+            checks.refuses(
+                check_id,
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_assertion_result(
+                    probe_case,
+                    candidate,
+                    probe_obligation,
+                ),
+                contains="exact ordered obligation",
+            )
 
         malformed_results: list[tuple[str, dict[str, Any]]] = []
         malformed_results.append(
@@ -22507,8 +25286,10 @@ def v2_execute_schema_cli_ux(
             check.pop("semantic_root", None)
             check["passed"] = False
             check = v2_rooted(check)
-            row["ordered_checks"] = [check]
-            row["ordered_check_roots"] = [check["semantic_root"]]
+            bind_result_checks(
+                row,
+                [check, *row["ordered_checks"][1:]],
+            )
 
         malformed_results.append(
             (
@@ -22519,12 +25300,10 @@ def v2_execute_schema_cli_ux(
 
         def duplicate_check(row: dict[str, Any]) -> None:
             check = dict(row["ordered_checks"][0])
-            row["ordered_checks"] = [check, dict(check)]
-            row["ordered_check_roots"] = [
-                check["semantic_root"],
-                check["semantic_root"],
-            ]
-            row["check_count"] = 2
+            bind_result_checks(
+                row,
+                [check, dict(check), *row["ordered_checks"][1:]],
+            )
 
         malformed_results.append(
             (
@@ -22536,8 +25315,10 @@ def v2_execute_schema_cli_ux(
         def stale_check_root(row: dict[str, Any]) -> None:
             check = dict(row["ordered_checks"][0])
             check["observed"] = False
-            row["ordered_checks"] = [check]
-            row["ordered_check_roots"] = [check["semantic_root"]]
+            bind_result_checks(
+                row,
+                [check, *row["ordered_checks"][1:]],
+            )
 
         malformed_results.append(
             (
@@ -22551,7 +25332,10 @@ def v2_execute_schema_cli_ux(
                 mutate_probe_result(
                     lambda row: row.__setitem__(
                         "ordered_check_roots",
-                        [semantic_root({"wrong": "check"})],
+                        [
+                            semantic_root({"wrong": "check"}),
+                            *row["ordered_check_roots"][1:],
+                        ],
                     )
                 ),
             )
@@ -22582,7 +25366,174 @@ def v2_execute_schema_cli_ux(
                 lambda candidate=candidate: v2_validate_assertion_result(
                     probe_case,
                     candidate,
+                    probe_obligation,
                 ),
+            )
+
+        def mutate_probe_obligation(
+            callback: Callable[[dict[str, Any]], None],
+        ) -> dict[str, Any]:
+            candidate = {
+                "case_id": str(probe_obligation["case_id"]),
+                "check_count": int(probe_obligation["check_count"]),
+                "ordered_check_ids": list(
+                    probe_obligation["ordered_check_ids"]
+                ),
+            }
+            callback(candidate)
+            return candidate
+
+        malformed_obligations: list[tuple[str, dict[str, Any]]] = [
+            (
+                "check-obligation-missing-field-refused",
+                mutate_probe_obligation(
+                    lambda row: row.pop("case_id")
+                ),
+            ),
+            (
+                "check-obligation-extra-field-refused",
+                mutate_probe_obligation(
+                    lambda row: row.__setitem__("unexpected", True)
+                ),
+            ),
+            (
+                "check-obligation-boolean-count-refused",
+                mutate_probe_obligation(
+                    lambda row: row.__setitem__("check_count", True)
+                ),
+            ),
+            (
+                "check-obligation-empty-refused",
+                mutate_probe_obligation(
+                    lambda row: row.update(
+                        {
+                            "check_count": 0,
+                            "ordered_check_ids": [],
+                        }
+                    )
+                ),
+            ),
+            (
+                "check-obligation-count-mismatch-refused",
+                mutate_probe_obligation(
+                    lambda row: row.__setitem__(
+                        "check_count",
+                        int(row["check_count"]) + 1,
+                    )
+                ),
+            ),
+            (
+                "check-obligation-cap-plus-one-refused",
+                mutate_probe_obligation(
+                    lambda row: row.update(
+                        {
+                            "check_count": V2_ASSERTION_CHECKS_CAP + 1,
+                            "ordered_check_ids": [
+                                f"check-{index:03d}"
+                                for index in range(
+                                    V2_ASSERTION_CHECKS_CAP + 1
+                                )
+                            ],
+                        }
+                    )
+                ),
+            ),
+            (
+                "check-obligation-duplicate-id-refused",
+                mutate_probe_obligation(
+                    lambda row: row.update(
+                        {
+                            "check_count": 2,
+                            "ordered_check_ids": [
+                                row["ordered_check_ids"][0],
+                                row["ordered_check_ids"][0],
+                            ],
+                        }
+                    )
+                ),
+            ),
+            (
+                "check-obligation-noncanonical-id-refused",
+                mutate_probe_obligation(
+                    lambda row: row.update(
+                        {
+                            "check_count": 1,
+                            "ordered_check_ids": ["Noncanonical-ID"],
+                        }
+                    )
+                ),
+            ),
+            (
+                "check-obligation-overlong-id-refused",
+                mutate_probe_obligation(
+                    lambda row: row.update(
+                        {
+                            "check_count": 1,
+                            "ordered_check_ids": [
+                                "a" * (V2_CHECK_ID_BYTES_CAP + 1)
+                            ],
+                        }
+                    )
+                ),
+            ),
+            (
+                "check-obligation-wrong-case-refused",
+                mutate_probe_obligation(
+                    lambda row: row.__setitem__(
+                        "case_id",
+                        str(manifest["case"][3]["id"]),
+                    )
+                ),
+            ),
+        ]
+        for check_id, candidate in malformed_obligations:
+            checks.refuses(
+                check_id,
+                EvidenceFailed,
+                lambda candidate=candidate: v2_validate_check_obligation(
+                    probe_case,
+                    candidate,
+                    error_type=EvidenceFailed,
+                ),
+            )
+
+        missing_registry = dict(obligations)
+        missing_registry.pop(assertion_ids[-1])
+        extra_registry = dict(obligations)
+        extra_registry["v2.case.unregistered"] = dict(first_obligation)
+        reordered_registry = {
+            assertion_ids[1]: obligations[assertion_ids[1]],
+            assertion_ids[0]: obligations[assertion_ids[0]],
+            **{
+                assertion_id: obligations[assertion_id]
+                for assertion_id in assertion_ids[2:]
+            },
+        }
+        for check_id, candidate in (
+            (
+                "check-obligation-registry-missing-member-refused",
+                missing_registry,
+            ),
+            (
+                "check-obligation-registry-extra-member-refused",
+                extra_registry,
+            ),
+            (
+                "check-obligation-registry-order-drift-refused",
+                reordered_registry,
+            ),
+        ):
+            checks.refuses(
+                check_id,
+                EvidenceFailed,
+                lambda candidate=candidate: (
+                    v2_validate_check_obligation_registry(
+                        manifest["case"],
+                        candidate,
+                        error_type=EvidenceFailed,
+                    )
+                ),
+                contains="order or membership",
             )
     elif slug == "cli-help-modes":
         completed = run_command(
@@ -23773,7 +26724,11 @@ def v2_execute_schema_cli_ux(
             record_global_receipt=False,
         )
         invalid_result = run_command(
-            [str(REPO_ROOT / SCRIPT_REL), "--unknown-v2-mode"],
+            [
+                str(REPO_ROOT / SCRIPT_REL),
+                "--self-test-v2",
+                "--unknown-v2-mode",
+            ],
             expected=(TERMINAL_EXIT["UsageRefused"],),
             environment_overrides={
                 "NO_COLOR": "1",
@@ -23786,6 +26741,7 @@ def v2_execute_schema_cli_ux(
             label="v2 invalid CLI terminal",
             require_canonical=True,
         )
+        v2_validate_preflight_terminal_document(invalid_document)
         checks.check(
             "actual-help-stdout-stderr-no-color",
             help_result.returncode == 0
@@ -23811,6 +26767,8 @@ def v2_execute_schema_cli_ux(
             "actual-invalid-cli-typed-exit-and-streams",
             invalid_result.returncode == TERMINAL_EXIT["UsageRefused"]
             and invalid_result.stderr == ""
+            and invalid_document["schema"] == V2_PREFLIGHT_TERMINAL_SCHEMA
+            and set(invalid_document) == V2_PREFLIGHT_TERMINAL_FIELDS
             and invalid_document["terminal"] == "UsageRefused"
             and invalid_document["exit_code"]
             == TERMINAL_EXIT["UsageRefused"]
@@ -23818,12 +26776,14 @@ def v2_execute_schema_cli_ux(
             and "\x1b[" not in invalid_result.stderr,
             expected={
                 "exit": TERMINAL_EXIT["UsageRefused"],
+                "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
                 "terminal": "UsageRefused",
                 "stderr": "",
                 "ansi": False,
             },
             observed={
                 "exit": invalid_result.returncode,
+                "schema": invalid_document.get("schema"),
                 "terminal": invalid_document.get("terminal"),
                 "typed_exit": invalid_document.get("exit_code"),
                 "stderr_root": text_root(invalid_result.stderr),
@@ -23831,8 +26791,66 @@ def v2_execute_schema_cli_ux(
                 in (invalid_result.stdout + invalid_result.stderr),
             },
         )
+        accepted_failure_result = run_command(
+            [
+                str(REPO_ROOT / SCRIPT_REL),
+                "--case-v2",
+                "template-lint-v2.unknown-accepted-case",
+            ],
+            expected=(TERMINAL_EXIT["UsageRefused"],),
+            environment_overrides={
+                "NO_COLOR": "1",
+                "TERM": "dumb",
+            },
+            record_global_receipt=False,
+        )
+        accepted_failure_document = strict_json_loads(
+            accepted_failure_result.stdout,
+            label="v2 accepted-execution terminal",
+            require_canonical=True,
+        )
+        v2_validate_execution_terminal_document(
+            accepted_failure_document
+        )
+        checks.check(
+            "actual-accepted-v2-failure-uses-execution-terminal",
+            accepted_failure_result.returncode
+            == TERMINAL_EXIT["UsageRefused"]
+            and accepted_failure_result.stderr == ""
+            and accepted_failure_document["schema"]
+            == V2_EXECUTION_TERMINAL_SCHEMA
+            and accepted_failure_document["terminal"]
+            == "UsageRefused"
+            and accepted_failure_document["mode"] == "case-v2"
+            and accepted_failure_document["phase"] == "TEST_RUNNER"
+            and accepted_failure_document["artifact_state"]
+            == "NOT_APPLICABLE"
+            and accepted_failure_document["manifest_root"]
+            == manifest["semantic_root"],
+            expected={
+                "exit": TERMINAL_EXIT["UsageRefused"],
+                "schema": V2_EXECUTION_TERMINAL_SCHEMA,
+                "terminal": "UsageRefused",
+                "mode": "case-v2",
+                "phase": "TEST_RUNNER",
+                "artifact_state": "NOT_APPLICABLE",
+                "manifest_root": manifest["semantic_root"],
+                "stderr": "",
+            },
+            observed={
+                "exit": accepted_failure_result.returncode,
+                "document": accepted_failure_document,
+                "stderr_root": text_root(
+                    accepted_failure_result.stderr
+                ),
+            },
+        )
         repeated_invalid = run_command(
-            [str(REPO_ROOT / SCRIPT_REL), "--unknown-v2-mode"],
+            [
+                str(REPO_ROOT / SCRIPT_REL),
+                "--self-test-v2",
+                "--unknown-v2-mode",
+            ],
             expected=(TERMINAL_EXIT["UsageRefused"],),
             environment_overrides={"TERM": "dumb"},
             record_global_receipt=False,
@@ -23851,6 +26869,51 @@ def v2_execute_schema_cli_ux(
                 "stdout_root": text_root(repeated_invalid.stdout),
                 "stderr_root": text_root(repeated_invalid.stderr),
                 "exit": repeated_invalid.returncode,
+            },
+        )
+        forbidden_manifest_result = run_command(
+            [str(REPO_ROOT / SCRIPT_REL), "--self-test-v2"],
+            expected=(TERMINAL_EXIT["EvidenceFailed"],),
+            environment_overrides={
+                "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1",
+                "NO_COLOR": "1",
+                "TERM": "dumb",
+            },
+            record_global_receipt=False,
+        )
+        forbidden_manifest_document = strict_json_loads(
+            forbidden_manifest_result.stdout,
+            label="v2 forbidden-manifest preflight terminal",
+            require_canonical=True,
+        )
+        v2_validate_preflight_terminal_document(
+            forbidden_manifest_document
+        )
+        checks.check(
+            "actual-v2-manifest-preflight-closed",
+            forbidden_manifest_result.returncode
+            == TERMINAL_EXIT["EvidenceFailed"]
+            and forbidden_manifest_result.stderr == ""
+            and forbidden_manifest_document["schema"]
+            == V2_PREFLIGHT_TERMINAL_SCHEMA
+            and set(forbidden_manifest_document)
+            == V2_PREFLIGHT_TERMINAL_FIELDS
+            and forbidden_manifest_document["terminal"]
+            == "EvidenceFailed"
+            and forbidden_manifest_document["mode"] == "self-test-v2"
+            and forbidden_manifest_document["recovery"]
+            == "FIX_HARNESS_OR_CONTRACT_AND_RETRY",
+            expected={
+                "exit": TERMINAL_EXIT["EvidenceFailed"],
+                "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+                "terminal": "EvidenceFailed",
+                "mode": "self-test-v2",
+                "recovery": "FIX_HARNESS_OR_CONTRACT_AND_RETRY",
+            },
+            observed={
+                "exit": forbidden_manifest_result.returncode,
+                "document": forbidden_manifest_document,
+                "stderr_root": text_root(forbidden_manifest_result.stderr),
             },
         )
     elif slug == "compat-v1-immutable":
@@ -24069,6 +27132,85 @@ def v2_execute_source_cases(
                 expected=count,
                 observed=inventory["counts"]["targets"],
             )
+        fidelity_target = v2_synthetic_target(
+            7,
+            issue_id="synthetic-production-root-fidelity",
+            priority=1,
+            status="in_progress",
+            disposition="OWNER_REVIEW_REQUIRED",
+            issue_type="bug",
+            missing_sections=(
+                "## Acceptance Criteria",
+                "## Steps to Reproduce",
+            ),
+            assignee="fixture-owner",
+        )
+        fidelity_source_issue = v2_synthetic_source_issue(
+            fidelity_target
+        )
+        fidelity_projection = v2_stable_issue_projection(
+            fidelity_source_issue
+        )
+        fidelity_inventory = v2_synthetic_inventory(
+            [fidelity_target]
+        )
+        checks.check(
+            "synthetic-target-root-is-production-exact",
+            fidelity_target["target_root"]
+            == semantic_root(fidelity_projection)
+            == v2_target_root(fidelity_source_issue)
+            == fidelity_inventory["rows"][0]["target_root"]
+            and fidelity_target["dependency_neighborhood_root"]
+            == v2_dependency_neighborhood_root(
+                fidelity_source_issue
+            )
+            and fidelity_projection["assignee"] == "fixture-owner"
+            and fidelity_projection["owner"] == ""
+            and fidelity_projection["type"] == "bug"
+            and fidelity_projection["missing_sections"]
+            == [
+                "## Acceptance Criteria",
+                "## Steps to Reproduce",
+            ],
+            expected={
+                "target_root": v2_target_root(
+                    fidelity_source_issue
+                ),
+                "dependency_root": v2_dependency_neighborhood_root(
+                    fidelity_source_issue
+                ),
+                "source_projection": fidelity_projection,
+            },
+            observed={
+                "target_root": fidelity_target["target_root"],
+                "inventory_target_root": fidelity_inventory["rows"][0][
+                    "target_root"
+                ],
+                "dependency_root": fidelity_target[
+                    "dependency_neighborhood_root"
+                ],
+                "source_projection": fidelity_projection,
+            },
+        )
+        drifted_fidelity_target = dict(fidelity_target)
+        drifted_fidelity_target.pop("semantic_root", None)
+        drifted_fidelity_target["title"] = (
+            "Synthetic source title changed after root construction"
+        )
+        drifted_fidelity_target = v2_rooted(
+            drifted_fidelity_target
+        )
+        checks.refuses(
+            "synthetic-source-field-drift-refused",
+            EvidenceFailed,
+            lambda: v2_synthetic_inventory(
+                [drifted_fidelity_target]
+            ),
+            contains=(
+                "target root differs from the production stable issue "
+                "projection"
+            ),
+        )
         no_warning_id = "fixture-no-template-warning"
         _, _, no_warning_snapshot, no_warning_inventory = authentic_capture(
             [
@@ -26435,6 +29577,18 @@ def v2_execute_authority_cases(
                 ),
                 contains=f"{gate} receipt root is not target-scoped",
             )
+            missing = reroot_fixture_gate_receipt(field, "")
+            checks.refuses(
+                f"{gate}-valid-verdict-missing-root-refused",
+                InputRefused,
+                lambda missing=missing: v2_derive_authority(
+                    base_inventory,
+                    missing,
+                    current_br_version="0.3.0",
+                    allow_mechanical_fixture=True,
+                ),
+                contains=f"{gate} receipt root is not target-scoped",
+            )
         nonfixture_source = strict_json_loads(
             canonical_bytes(fully_valid_receipts),
             label="nonfixture source mutation seed",
@@ -26639,7 +29793,7 @@ def v2_execute_authority_cases(
                 max_targets=10,
             )
             checks.check(
-                f"active-{status}-{bool(assignee)}",
+                f"active-{status}-{str(bool(assignee)).lower()}",
                 authority["decisions"][0]["remediation_route"] == "ANALYSIS_ONLY"
                 and plan["children"][0]["desired_status"] == "deferred",
                 expected=("ANALYSIS_ONLY", "deferred"),
@@ -26677,11 +29831,14 @@ def v2_execute_authority_cases(
             ],
         }
         mutation_target.pop("semantic_root", None)
-        mutation_target["dependency_neighborhood_root"] = semantic_root(
-            {
-                "dependencies": mutation_target["dependencies"],
-                "dependents": mutation_target["dependents"],
-            }
+        mutation_source_issue = v2_synthetic_source_issue(
+            mutation_target
+        )
+        mutation_target["dependency_neighborhood_root"] = (
+            v2_dependency_neighborhood_root(mutation_source_issue)
+        )
+        mutation_target["target_root"] = v2_target_root(
+            mutation_source_issue
         )
         mutation_target = v2_rooted(mutation_target)
         mutation_inventory = v2_synthetic_inventory([mutation_target])
@@ -26971,6 +30128,12 @@ def v2_execute_packing_cases(
                 "title": "Review mesh import boundary",
             }
         )
+        lexical_a = dict(lexical_a)
+        lexical_a.pop("semantic_root", None)
+        lexical_a["target_root"] = v2_target_root(
+            v2_synthetic_source_issue(lexical_a)
+        )
+        lexical_a = v2_rooted(lexical_a)
         lexical_b = v2_rooted(
             {
                 **{
@@ -26981,6 +30144,12 @@ def v2_execute_packing_cases(
                 "title": "Review mesh imports boundary",
             }
         )
+        lexical_b = dict(lexical_b)
+        lexical_b.pop("semantic_root", None)
+        lexical_b["target_root"] = v2_target_root(
+            v2_synthetic_source_issue(lexical_b)
+        )
+        lexical_b = v2_rooted(lexical_b)
         check_hostile_twins(
             "lexical-similarity-twins",
             [lexical_a, lexical_b],
@@ -27005,7 +30174,9 @@ def v2_execute_packing_cases(
             label="copied-prose clause roots",
             require_canonical=True,
         )
-        copied_b["target_root"] = v2_target_root(copied_b)
+        copied_b["target_root"] = v2_target_root(
+            v2_synthetic_source_issue(copied_b)
+        )
         copied_b = v2_rooted(copied_b)
         check_hostile_twins(
             "copied-prose-twins",
@@ -28280,13 +31451,11 @@ def v2_history_fixture(
     issue_by_id = {row["id"]: row for row in all_issues}
     target = dict(target)
     target["field_roots"] = issue_by_id[target_id]["field_roots"]
-    target["target_root"] = semantic_root(
-        {
-            "id": target_id,
-            "field_roots": target["field_roots"],
-            "status": "closed",
-        }
+    target_source_issue = v2_synthetic_source_issue(target)
+    target["dependency_neighborhood_root"] = (
+        v2_dependency_neighborhood_root(target_source_issue)
     )
+    target["target_root"] = v2_target_root(target_source_issue)
     target = v2_rooted(target)
     inventory = v2_synthetic_inventory([target])
     authority = v2_synthetic_authority(inventory)
@@ -28364,13 +31533,164 @@ def v2_execute_history_cases(
             row["closer_state"] == "KNOWN"
             and row["close_actor"] == "fixture-closer"
             and row["close_actor_source"] == "br.audit.log.closed.actor"
-            and row["audit_event_root"],
+            and isinstance(row["audit_event_root"], str)
+            and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                row["audit_event_root"],
+            )
+            is not None,
             expected=("KNOWN", "fixture-closer"),
             observed=(
                 row["closer_state"],
                 row["close_actor"],
                 row["audit_event_root"],
             ),
+        )
+
+        def audit_with_pair_timestamps(
+            *,
+            close_timestamp: str,
+            transition_timestamp: str,
+        ) -> dict[str, Any]:
+            candidate = strict_json_loads(
+                canonical_bytes(audit),
+                label="history skew-boundary audit seed",
+                require_canonical=True,
+            )
+            candidate.pop("semantic_root", None)
+            document = dict(candidate["documents"][0])
+            document.pop("semantic_root", None)
+            events = [dict(event) for event in document["events"]]
+            for event in events:
+                if event["event_type"] == "closed":
+                    event["timestamp"] = close_timestamp
+                elif (
+                    event["event_type"] == "status_changed"
+                    and event.get("new_value") == "closed"
+                ):
+                    event["timestamp"] = transition_timestamp
+            document["events"] = events
+            candidate["documents"] = [v2_rooted(document)]
+            return v2_rooted(candidate)
+
+        exact_contract = dict(contract)
+        exact_contract["known_pair_max_skew_ms"] = 2
+        exact_history = v2_build_history(
+            source_root=source_root,
+            inventory=inventory,
+            authority=authority,
+            all_issues=issues,
+            audit_capture=audit,
+            history_contract=exact_contract,
+        )
+        exact_close_event = next(
+            event
+            for event in audit["documents"][0]["events"]
+            if event["event_type"] == "closed"
+        )
+        exact_skew_us, exact_cap_us = v2_history_skew_microseconds(
+            show_timestamp=v2_parse_timestamp(
+                issues[0]["closed_at"],
+                label="history exact-cap source",
+            ),
+            close_timestamp=v2_parse_timestamp(
+                exact_close_event["timestamp"],
+                label="history exact-cap close",
+            ),
+            max_skew_ms=exact_contract["known_pair_max_skew_ms"],
+        )
+        checks.check(
+            "known-pair-exact-millisecond-cap-admitted",
+            exact_history["rows"][0]["closer_state"] == "KNOWN"
+            and exact_contract["known_pair_max_skew_ms"] == 2
+            and exact_skew_us == exact_cap_us == 2_000,
+            expected={
+                "retained_contract_ms": 2,
+                "exact_skew_us": 2_000,
+                "exact_cap_us": 2_000,
+            },
+            observed={
+                "retained_contract_ms": exact_contract[
+                    "known_pair_max_skew_ms"
+                ],
+                "exact_skew_us": exact_skew_us,
+                "exact_cap_us": exact_cap_us,
+            },
+        )
+        cap_plus_one_audit = audit_with_pair_timestamps(
+            close_timestamp="2026-01-02T00:00:00.002001+00:00",
+            transition_timestamp="2026-01-02T00:00:00.001000+00:00",
+        )
+        checks.refuses(
+            "known-pair-cap-plus-one-microsecond-builder-refused",
+            EvidenceFailed,
+            lambda: v2_build_history(
+                source_root=source_root,
+                inventory=inventory,
+                authority=authority,
+                all_issues=issues,
+                audit_capture=cap_plus_one_audit,
+                history_contract=exact_contract,
+            ),
+            contains="close audit pair conflicts",
+        )
+        cap_plus_one_history = strict_json_loads(
+            canonical_bytes(exact_history),
+            label="history cap-plus-one validator seed",
+            require_canonical=True,
+        )
+        cap_plus_one_history.pop("semantic_root", None)
+        cap_plus_one_history["audit_capture_root"] = cap_plus_one_audit[
+            "semantic_root"
+        ]
+        cap_plus_one_row = dict(cap_plus_one_history["rows"][0])
+        cap_plus_one_row.pop("semantic_root", None)
+        cap_plus_one_document = cap_plus_one_audit["documents"][0]
+        cap_plus_one_close = next(
+            event
+            for event in cap_plus_one_document["events"]
+            if event["event_type"] == "closed"
+        )
+        cap_plus_one_row["audit_stream_root"] = cap_plus_one_document[
+            "semantic_root"
+        ]
+        cap_plus_one_row["source_roots"][2] = cap_plus_one_document[
+            "semantic_root"
+        ]
+        cap_plus_one_row["audit_event_root"] = semantic_root(
+            cap_plus_one_close
+        )
+        cap_plus_one_history["rows"] = [v2_rooted(cap_plus_one_row)]
+        cap_plus_one_history = v2_rooted(cap_plus_one_history)
+        checks.refuses(
+            "known-pair-cap-plus-one-microsecond-validator-refused",
+            EvidenceFailed,
+            lambda: v2_validate_history_projection(
+                cap_plus_one_history,
+                source_root=source_root,
+                inventory=inventory,
+                authority=authority,
+                audit_capture=cap_plus_one_audit,
+                history_contract=exact_contract,
+            ),
+            contains="known-closer audit binding differs",
+        )
+        negative_skew_audit = audit_with_pair_timestamps(
+            close_timestamp="2026-01-01T23:59:59.999999+00:00",
+            transition_timestamp="2026-01-01T23:59:59.999998+00:00",
+        )
+        checks.refuses(
+            "known-pair-negative-skew-and-order-refused",
+            EvidenceFailed,
+            lambda: v2_build_history(
+                source_root=source_root,
+                inventory=inventory,
+                authority=authority,
+                all_issues=issues,
+                audit_capture=negative_skew_audit,
+                history_contract=exact_contract,
+            ),
+            contains="close audit pair conflicts",
         )
 
         def reroot_history_row(
@@ -28659,6 +31979,33 @@ def v2_execute_history_cases(
                 lambda value=value: v2_parse_timestamp(value, label="fixture"),
                 contains="timestamp",
             )
+        checks.refuses(
+            "submicrosecond-timestamp-precision-refused",
+            EvidenceFailed,
+            lambda: v2_parse_timestamp(
+                "2026-01-01T00:00:00.0010009+00:00",
+                label="fixture",
+            ),
+            contains="precision exceeds exact microseconds",
+        )
+        checks.refuses(
+            "basic-time-submicrosecond-precision-refused",
+            EvidenceFailed,
+            lambda: v2_parse_timestamp(
+                "20260101T000000.0010009+00:00",
+                label="fixture",
+            ),
+            contains="precision exceeds exact microseconds",
+        )
+        checks.refuses(
+            "fractional-offset-submicrosecond-precision-refused",
+            EvidenceFailed,
+            lambda: v2_parse_timestamp(
+                "2026-01-01T00:00:00+00:00:00.0010009",
+                label="fixture",
+            ),
+            contains="precision exceeds exact microseconds",
+        )
         inventory, authority, issues, audit, contract = v2_history_fixture(
             manifest,
             missing_modern_event=True,
@@ -29473,50 +32820,426 @@ def v2_synthetic_payloads(
     return payloads, components
 
 
+V2_FAULT_FIXTURE_SEAL_SCHEMA = (
+    "frankensim.beads-template-hygiene.fault-fixture-seal.v2"
+)
+V2_FAULT_FIXTURE_SEAL_NAME = ".fault-fixture-seal-v2.json"
+V2_FAULT_FIXTURE_SEAL_FIELDS = frozenset(
+    {
+        "schema",
+        "manifest_content_identity",
+        "harness_contract_identity",
+        "label",
+        "tree_projection",
+        "tree_root",
+        "no_claim",
+        "semantic_root",
+    }
+)
+
+
+def v2_fault_fixture_tree_projection(base: Path) -> list[dict[str, Any]]:
+    try:
+        base_stat = os.lstat(base)
+    except OSError as error:
+        raise EvidenceFailed(
+            "retained fault fixture base cannot be inspected"
+        ) from error
+    if not stat.S_ISDIR(base_stat.st_mode):
+        raise EvidenceFailed(
+            "retained fault fixture base is not a directory"
+        )
+    projection: list[dict[str, Any]] = []
+    seen_identities: dict[tuple[int, int], str] = {}
+    directory_count = 0
+    nondirectory_count = 0
+    enumerated_path_bytes = 0
+    total_member_cap = (
+        V2_BUNDLE_FILES_CAP + V2_BUNDLE_DIRECTORIES_CAP
+    )
+    pending = [base]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = []
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries.append(entry)
+                    seal_allowance = 1 if directory == base else 0
+                    if (
+                        len(projection) + len(entries)
+                        > total_member_cap + seal_allowance
+                    ):
+                        raise EvidenceFailed(
+                            "retained fault fixture enumeration exceeds "
+                            "the aggregate member cap"
+                        )
+            entries.sort(key=lambda entry: entry.name)
+        except HarnessError:
+            raise
+        except OSError as error:
+            raise EvidenceFailed(
+                "retained fault fixture directory cannot be enumerated"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(base).as_posix()
+            if relative == V2_FAULT_FIXTURE_SEAL_NAME:
+                continue
+            try:
+                relative = v2_safe_member(
+                    relative,
+                    label="retained fault fixture member",
+                )
+            except InputRefused as error:
+                raise EvidenceFailed(
+                    "retained fault fixture member path is unsafe"
+                ) from error
+            relative_bytes = len(relative.encode("utf-8"))
+            enumerated_path_bytes += relative_bytes
+            v2_validate_bundle_enumeration_budget(
+                file_count=nondirectory_count,
+                directory_count=directory_count,
+                path_bytes=enumerated_path_bytes,
+            )
+            try:
+                value = os.lstat(path)
+            except OSError as error:
+                raise EvidenceFailed(
+                    "retained fault fixture member cannot be inspected"
+                ) from error
+            if stat.S_ISDIR(value.st_mode):
+                directory_count += 1
+                v2_validate_bundle_enumeration_budget(
+                    file_count=nondirectory_count,
+                    directory_count=directory_count,
+                    path_bytes=enumerated_path_bytes,
+                )
+                projection.append({"path": relative, "kind": "directory"})
+                pending.append(path)
+                continue
+            if stat.S_ISLNK(value.st_mode):
+                nondirectory_count += 1
+                v2_validate_bundle_enumeration_budget(
+                    file_count=nondirectory_count,
+                    directory_count=directory_count,
+                    path_bytes=enumerated_path_bytes,
+                )
+                try:
+                    target = os.readlink(path)
+                except OSError as error:
+                    raise EvidenceFailed(
+                        "retained fault fixture symlink cannot be read"
+                    ) from error
+                target_path = PurePosixPath(target)
+                raw_target_parts = target.split("/")
+                if (
+                    target_path.is_absolute()
+                    or ".." in target_path.parts
+                    or any(
+                        part in {"", ".", ".."}
+                        for part in raw_target_parts
+                    )
+                    or len(raw_target_parts) > CAPS["path_depth"]
+                    or any(
+                        len(part.encode("utf-8"))
+                        > CAPS["path_component_bytes"]
+                        for part in raw_target_parts
+                    )
+                    or len(target.encode("utf-8"))
+                    > CAPS["relative_path_bytes"]
+                ):
+                    raise EvidenceFailed(
+                        "retained fault fixture symlink target is unsafe"
+                    )
+                projection.append(
+                    {
+                        "path": relative,
+                        "kind": "symlink",
+                        "target": target,
+                    }
+                )
+                continue
+            if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                raise EvidenceFailed(
+                    "retained fault fixture contains an unsafe member kind"
+                )
+            nondirectory_count += 1
+            v2_validate_bundle_enumeration_budget(
+                file_count=nondirectory_count,
+                directory_count=directory_count,
+                path_bytes=enumerated_path_bytes,
+            )
+            identity = (int(value.st_dev), int(value.st_ino))
+            if identity in seen_identities:
+                raise EvidenceFailed(
+                    "retained fault fixture contains an inode alias"
+                )
+            seen_identities[identity] = relative
+            if value.st_size > RUN_ARTIFACT_CAP + 1:
+                raise EvidenceFailed(
+                    "retained fault fixture file exceeds the fault cap"
+                )
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(path, flags)
+            except OSError as error:
+                raise EvidenceFailed(
+                    "retained fault fixture file cannot be opened safely"
+                ) from error
+            digest = hashlib.sha256()
+            total = 0
+            try:
+                before = os.fstat(descriptor)
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > RUN_ARTIFACT_CAP + 1:
+                        raise EvidenceFailed(
+                            "retained fault fixture file grew beyond its cap"
+                        )
+                    digest.update(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if (
+                before.st_dev != value.st_dev
+                or before.st_ino != value.st_ino
+                or before.st_nlink != 1
+                or total != before.st_size
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise EvidenceFailed(
+                    "retained fault fixture file changed during verification"
+                )
+            projection.append(
+                {
+                    "path": relative,
+                    "kind": "file",
+                    "byte_length": total,
+                    "content_root": "sha256-v1:" + digest.hexdigest(),
+                }
+            )
+    projection.sort(key=lambda row: (row["path"], row["kind"]))
+    return projection
+
+
+def v2_fault_fixture_seal_path(
+    artifact_root: str,
+    fixture_base: str,
+) -> Path:
+    return (
+        resolve_run_dir(
+            artifact_root,
+            fixture_base,
+            label="retained fault fixture",
+            must_exist=True,
+        )
+        / V2_FAULT_FIXTURE_SEAL_NAME
+    )
+
+
+def v2_parse_fault_fixture_seal(payload: bytes) -> Any:
+    try:
+        return strict_json_loads(
+            payload,
+            label="retained fault fixture seal",
+            require_canonical=True,
+        )
+    except HarnessError as error:
+        raise EvidenceFailed(
+            "retained fault fixture seal is malformed or noncanonical; "
+            "manual recovery is required"
+        ) from error
+
+
+def v2_verify_fault_fixture_seal(
+    manifest: Mapping[str, Any],
+    *,
+    artifact_root: str,
+    fixture_base: str,
+    label: str,
+) -> str:
+    seal_path = v2_fault_fixture_seal_path(artifact_root, fixture_base)
+    try:
+        seal_payload = bounded_read(
+            seal_path,
+            cap=RUN_ARTIFACT_CAP,
+            nofollow=True,
+            require_unique_link=True,
+        )
+    except HarnessError as error:
+        raise EvidenceFailed(
+            "retained fault fixture seal cannot be read through a unique "
+            "nofollow descriptor"
+        ) from error
+    seal = v2_parse_fault_fixture_seal(seal_payload)
+    base = seal_path.parent
+    projection = v2_fault_fixture_tree_projection(base)
+    return v2_validate_fault_fixture_seal(
+        manifest,
+        label=label,
+        seal=seal,
+        projection=projection,
+    )
+
+
+def v2_validate_fault_fixture_seal(
+    manifest: Mapping[str, Any],
+    *,
+    label: str,
+    seal: Any,
+    projection: Any,
+) -> str:
+    if (
+        not isinstance(seal, dict)
+        or set(seal) != V2_FAULT_FIXTURE_SEAL_FIELDS
+    ):
+        raise EvidenceFailed(
+            "retained fault fixture seal has a non-closed schema"
+        )
+    verify_semantic_root(seal, label="retained fault fixture seal")
+    if not isinstance(projection, list):
+        raise EvidenceFailed(
+            "retained fault fixture projection is not an ordered array"
+        )
+    tree_root = semantic_root(projection)
+    if (
+        seal["schema"] != V2_FAULT_FIXTURE_SEAL_SCHEMA
+        or seal["manifest_content_identity"] != manifest["content_identity"]
+        or seal["harness_contract_identity"]
+        != manifest["harness_contract_identity"]
+        or seal["label"] != label
+        or seal["tree_projection"] != projection
+        or seal["tree_root"] != tree_root
+        or seal["no_claim"]
+        != (
+            "the seal proves only exact retained fault-fixture bytes and "
+            "membership; it mints no product or tracker authority"
+        )
+    ):
+        raise EvidenceFailed(
+            "retained fault fixture differs from its final seal; "
+            "manual recovery is required"
+        )
+    return tree_root
+
+
+def v2_finish_fault_fixture(
+    manifest: Mapping[str, Any],
+    *,
+    artifact_root: str,
+    fixture_base: str,
+    label: str,
+) -> str:
+    seal_path = v2_fault_fixture_seal_path(artifact_root, fixture_base)
+    try:
+        os.lstat(seal_path)
+        seal_exists = True
+    except FileNotFoundError:
+        seal_exists = False
+    except OSError as error:
+        raise EvidenceFailed(
+            "retained fault fixture seal cannot be inspected"
+        ) from error
+    if seal_exists:
+        return v2_verify_fault_fixture_seal(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=fixture_base,
+            label=label,
+        )
+    projection = v2_fault_fixture_tree_projection(seal_path.parent)
+    tree_root = semantic_root(projection)
+    seal = v2_rooted(
+        {
+            "schema": V2_FAULT_FIXTURE_SEAL_SCHEMA,
+            "manifest_content_identity": manifest["content_identity"],
+            "harness_contract_identity": manifest[
+                "harness_contract_identity"
+            ],
+            "label": label,
+            "tree_projection": projection,
+            "tree_root": tree_root,
+            "no_claim": (
+                "the seal proves only exact retained fault-fixture bytes and "
+                "membership; it mints no product or tracker authority"
+            ),
+        }
+    )
+    v2_write_exclusive(seal_path, canonical_bytes(seal))
+    v2_fsync_directory(seal_path.parent)
+    return v2_verify_fault_fixture_seal(
+        manifest,
+        artifact_root=artifact_root,
+        fixture_base=fixture_base,
+        label=label,
+    )
+
+
 def v2_fresh_fault_fixture_base(
     manifest: Mapping[str, Any],
     *,
     label: str,
-) -> tuple[str, str]:
-    """Select a bounded, never-reused prefix for retained fault fixtures."""
+) -> tuple[str, str, bool]:
+    """Claim or exactly verify one deterministic retained fault-fixture base."""
     identity = hashlib.sha256(
         canonical_bytes(
             {
                 "manifest_content_identity": manifest["content_identity"],
-                "script_content_identity": (
-                    "sha256-v1:"
-                    + hashlib.sha256(
-                        bounded_read(REPO_ROOT / SCRIPT_REL)
-                    ).hexdigest()
-                ),
+                "harness_contract_identity": manifest[
+                    "harness_contract_identity"
+                ],
                 "label": label,
             }
         )
     ).hexdigest()[:24]
     artifact_root = "target/beads-template-hygiene/v2-e2e"
     base = f"retained-fault-{label}-{identity}"
-    for attempt in range(1, V2_PERSISTENT_ATTEMPTS_CAP + 1):
-        candidate = (
-            base
-            if attempt == 1
-            else f"{base}-attempt-{attempt:04d}"
-        )
-        output = resolve_run_dir(
-            artifact_root,
-            candidate,
-            label="retained fault fixture",
-        )
+    root_relative = safe_relative(
+        artifact_root,
+        label="retained fault fixture root",
+    )
+    root_descriptor = v2_open_or_create_directory_chain(
+        root_relative,
+        label="retained fault fixture root",
+    )
+    created = False
+    try:
         try:
-            os.lstat(output)
-        except FileNotFoundError:
-            return artifact_root, candidate
+            os.mkdir(base, 0o755, dir_fd=root_descriptor)
+            os.fsync(root_descriptor)
+            created = True
+        except FileExistsError:
+            created = False
         except OSError as error:
             raise EvidenceFailed(
-                "retained fault fixture cannot be inspected safely"
+                "retained fault fixture cannot be claimed safely"
             ) from error
-    raise EvidenceFailed(
-        "retained fault fixture exhausted its bounded fresh-attempt budget"
-    )
+    finally:
+        os.close(root_descriptor)
+    if not created:
+        seal_path = v2_fault_fixture_seal_path(artifact_root, base)
+        deadline = time.monotonic() + 5.0
+        while not seal_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not seal_path.exists():
+            raise EvidenceFailed(
+                "retained fault fixture lacks its final seal; "
+                "manual recovery is required"
+            )
+        v2_verify_fault_fixture_seal(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=base,
+            label=label,
+        )
+    return artifact_root, base, created
 
 
 def v2_fault_fixture_payloads(
@@ -29732,7 +33455,7 @@ def v2_execute_artifact_cases(
                 accepted_manifest=manifest,
             )
             checks.check(
-                f"complete-non-green-{error_type.terminal}",
+                f"complete-non-green-{error_type.terminal.lower()}",
                 set(refusal_payloads) == set(V2_RUN_ARTIFACTS)
                 and refusal_terminal["bundle_state"]
                 == "COMPLETE_NON_GREEN"
@@ -29770,7 +33493,8 @@ def v2_execute_artifact_cases(
                 )
             except PublishedV2Refusal as replay_error:
                 checks.check(
-                    f"filesystem-replay-preserves-{error_type.terminal}",
+                    "filesystem-replay-preserves-"
+                    f"{error_type.terminal.lower()}",
                     replay_error.terminal == error_type.terminal
                     and replay_error.document["exit_code"]
                     == TERMINAL_EXIT[error_type.terminal]
@@ -29859,9 +33583,11 @@ def v2_execute_artifact_cases(
             projection=identity_projection,
             projection_label="BUNDLE_MEMBER_IDENTITIES",
         )
-        artifact_root, fixture_base = v2_fresh_fault_fixture_base(
+        artifact_root, fixture_base, fixture_created = (
+            v2_fresh_fault_fixture_base(
             manifest,
             label="artifact-membership-path-safety",
+            )
         )
 
         missing_dir = f"{fixture_base}/missing-member"
@@ -29872,11 +33598,12 @@ def v2_execute_artifact_cases(
         )
         missing_publication = dict(missing_payloads)
         missing_publication.pop("source-v2.json")
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=missing_dir,
-            payloads=missing_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=missing_dir,
+                payloads=missing_publication,
+            )
         missing_error = expect_error(
             InputRefused,
             lambda: v2_read_retained_bundle(
@@ -29906,11 +33633,12 @@ def v2_execute_artifact_cases(
         )
         changed_publication = dict(changed_payloads)
         changed_publication["source-v2.json"] += b" "
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=changed_dir,
-            payloads=changed_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=changed_dir,
+                payloads=changed_publication,
+            )
         changed_output_dir = f"{fixture_base}/changed-replay-output"
         changed_error = expect_error(
             InputRefused,
@@ -29952,27 +33680,29 @@ def v2_execute_artifact_cases(
         )
         symlink_publication = dict(symlink_payloads)
         symlink_publication.pop("source-v2.json")
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=symlink_dir,
-            payloads=symlink_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=symlink_dir,
+                payloads=symlink_publication,
+            )
         symlink_output = resolve_run_dir(
             artifact_root,
             symlink_dir,
             label="symlink-member fixture",
             must_exist=True,
         )
-        try:
-            os.symlink(
-                "inventory-v2.json",
-                symlink_output / "source-v2.json",
-            )
-            v2_fsync_directory(symlink_output)
-        except OSError as error:
-            raise InfrastructureFailed(
-                "retained symlink-member fixture could not be created"
-            ) from error
+        if fixture_created:
+            try:
+                os.symlink(
+                    "inventory-v2.json",
+                    symlink_output / "source-v2.json",
+                )
+                v2_fsync_directory(symlink_output)
+            except OSError as error:
+                raise InfrastructureFailed(
+                    "retained symlink-member fixture could not be created"
+                ) from error
         symlink_error = expect_error(
             InputRefused,
             lambda: v2_read_retained_bundle(
@@ -30006,11 +33736,12 @@ def v2_execute_artifact_cases(
         )
         over_cap_publication = dict(over_cap_payloads)
         over_cap_publication.pop("source-v2.json")
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=over_cap_dir,
-            payloads=over_cap_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=over_cap_dir,
+                payloads=over_cap_publication,
+            )
         over_cap_output = resolve_run_dir(
             artifact_root,
             over_cap_dir,
@@ -30018,29 +33749,30 @@ def v2_execute_artifact_cases(
             must_exist=True,
         )
         over_cap_descriptor: int | None = None
-        try:
-            over_cap_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            over_cap_flags |= getattr(os, "O_NOFOLLOW", 0)
-            over_cap_descriptor = os.open(
-                over_cap_output / "source-v2.json",
-                over_cap_flags,
-                0o644,
-            )
-            os.ftruncate(over_cap_descriptor, RUN_ARTIFACT_CAP + 1)
-            os.fsync(over_cap_descriptor)
-            os.close(over_cap_descriptor)
-            over_cap_descriptor = None
-            v2_fsync_directory(over_cap_output)
-        except OSError as error:
-            raise InfrastructureFailed(
-                "retained over-cap fixture could not be created"
-            ) from error
-        finally:
-            if over_cap_descriptor is not None:
-                try:
-                    os.close(over_cap_descriptor)
-                except OSError:
-                    pass
+        if fixture_created:
+            try:
+                over_cap_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                over_cap_flags |= getattr(os, "O_NOFOLLOW", 0)
+                over_cap_descriptor = os.open(
+                    over_cap_output / "source-v2.json",
+                    over_cap_flags,
+                    0o644,
+                )
+                os.ftruncate(over_cap_descriptor, RUN_ARTIFACT_CAP + 1)
+                os.fsync(over_cap_descriptor)
+                os.close(over_cap_descriptor)
+                over_cap_descriptor = None
+                v2_fsync_directory(over_cap_output)
+            except OSError as error:
+                raise InfrastructureFailed(
+                    "retained over-cap fixture could not be created"
+                ) from error
+            finally:
+                if over_cap_descriptor is not None:
+                    try:
+                        os.close(over_cap_descriptor)
+                    except OSError:
+                        pass
         over_cap_error = expect_error(
             InputRefused,
             lambda: v2_read_retained_bundle(
@@ -30075,11 +33807,12 @@ def v2_execute_artifact_cases(
             artifact_root=artifact_root,
             artifact_dir=valid_dir,
         )
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=valid_dir,
-            payloads=valid_payloads,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=valid_dir,
+                payloads=valid_payloads,
+            )
         _, retained_before, _, _ = v2_read_retained_bundle(
             artifact_root=artifact_root,
             input_dir=valid_dir,
@@ -30124,22 +33857,100 @@ def v2_execute_artifact_cases(
                 ),
                 contains="must be disjoint",
             )
+            _, retained_disjoint, _, _ = v2_read_retained_bundle(
+                artifact_root=artifact_root,
+                input_dir=valid_dir,
+            )
+            output_path = resolve_run_dir(
+                artifact_root,
+                output_dir,
+                label=f"{label} disjoint replay output",
+            )
+            descendant_created = (
+                label == "descendant" and output_path.exists()
+            )
             checks.check(
                 f"retained-replay-{label}-path-refused",
                 disjoint_error.terminal == "InputRefused"
-                and retained_after == valid_payloads,
+                and retained_disjoint == valid_payloads
+                and not descendant_created,
                 expected={
                     "terminal": "InputRefused",
                     "retained_input_unchanged": True,
+                    "descendant_output_created": False,
                 },
                 observed={
                     "terminal": disjoint_error.terminal,
                     "diagnostic": str(disjoint_error),
                     "retained_input_unchanged": (
-                        retained_after == valid_payloads
+                        retained_disjoint == valid_payloads
                     ),
+                    "descendant_output_created": descendant_created,
                 },
             )
+        ancestor_container = f"{fixture_base}/ancestor-container"
+        ancestor_input = f"{ancestor_container}/valid-source"
+        ancestor_payloads, _ = v2_fault_fixture_payloads(
+            manifest,
+            artifact_root=artifact_root,
+            artifact_dir=ancestor_input,
+        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=ancestor_input,
+                payloads=ancestor_payloads,
+            )
+        ancestor_path = resolve_run_dir(
+            artifact_root,
+            ancestor_container,
+            label="ancestor replay fixture",
+            must_exist=True,
+        )
+        ancestor_members_before = sorted(
+            entry.name for entry in os.scandir(ancestor_path)
+        )
+        ancestor_error = expect_error(
+            InputRefused,
+            lambda: v2_replay_bundle(
+                artifact_root=artifact_root,
+                input_dir=ancestor_input,
+                output_dir=ancestor_container,
+            ),
+            contains="must be disjoint",
+        )
+        _, retained_ancestor, _, _ = v2_read_retained_bundle(
+            artifact_root=artifact_root,
+            input_dir=ancestor_input,
+        )
+        ancestor_members_after = sorted(
+            entry.name for entry in os.scandir(ancestor_path)
+        )
+        checks.check(
+            "retained-replay-ancestor-path-refused",
+            ancestor_error.terminal == "InputRefused"
+            and retained_ancestor == ancestor_payloads
+            and ancestor_members_after == ancestor_members_before,
+            expected={
+                "terminal": "InputRefused",
+                "retained_input_unchanged": True,
+                "ancestor_members": ancestor_members_before,
+            },
+            observed={
+                "terminal": ancestor_error.terminal,
+                "diagnostic": str(ancestor_error),
+                "retained_input_unchanged": (
+                    retained_ancestor == ancestor_payloads
+                ),
+                "ancestor_members": ancestor_members_after,
+            },
+        )
+        fixture_tree_root = v2_finish_fault_fixture(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=fixture_base,
+            label="artifact-membership-path-safety",
+        )
         checks.check(
             "retained-artifact-fixture-root",
             all(
@@ -30155,17 +33966,25 @@ def v2_execute_artifact_cases(
                     "symlink-member",
                     "over-cap-member",
                     "valid-source",
+                    "ancestor-container",
                 )
-            ),
+            )
+            and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                fixture_tree_root,
+            )
+            is not None,
             expected={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
-                "retained_variants": 5,
+                "retained_variants": 6,
+                "tree_root": fixture_tree_root,
             },
             observed={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
-                "retained_variants": 5,
+                "retained_variants": 6,
+                "tree_root": fixture_tree_root,
             },
         )
     elif slug == "log-assertion-argv-evidence":
@@ -31686,21 +35505,14 @@ def v2_execute_fault_resource_cases(
                 "priority": 1,
             }
         ]
-        changed_target["dependency_neighborhood_root"] = semantic_root(
-            {
-                "dependencies": [
-                    ("blocks", "synthetic-neighbor", "open", 1)
-                ],
-                "dependents": [],
-            }
+        changed_source_issue = v2_synthetic_source_issue(
+            changed_target
         )
-        changed_target["target_root"] = semantic_root(
-            {
-                "prior": targets[0]["target_root"],
-                "dependency_neighborhood_root": changed_target[
-                    "dependency_neighborhood_root"
-                ],
-            }
+        changed_target["dependency_neighborhood_root"] = (
+            v2_dependency_neighborhood_root(changed_source_issue)
+        )
+        changed_target["target_root"] = v2_target_root(
+            changed_source_issue
         )
         changed_target = v2_rooted(changed_target)
         after_inventory = v2_synthetic_inventory([changed_target, targets[1]])
@@ -31794,6 +35606,82 @@ def v2_execute_fault_resource_cases(
         )
         external_graph = [v2_full_issue_projection(raw_external)]
         v2_validate_source_graph(external_graph)
+        rollup_root = fixture_issue(
+            issue_id="graph-rollup-root",
+            status="open",
+            priority=1,
+            dependencies=(
+                {
+                    "id": "graph-rollup-terminal",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+            children=(
+                "graph-rollup-terminal",
+                "graph-rollup-leaf",
+            ),
+        )
+        rollup_terminal = fixture_issue(
+            issue_id="graph-rollup-terminal",
+            status="open",
+            priority=1,
+            parent="graph-rollup-root",
+            dependencies=(
+                {
+                    "id": "graph-rollup-root",
+                    "dependency_type": "parent-child",
+                    "status": "open",
+                    "priority": 1,
+                },
+                {
+                    "id": "graph-rollup-leaf",
+                    "dependency_type": "blocks",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        rollup_terminal["dependents"] = [
+            {
+                "id": "graph-rollup-root",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        rollup_leaf = fixture_issue(
+            issue_id="graph-rollup-leaf",
+            status="open",
+            priority=1,
+            parent="graph-rollup-root",
+            dependencies=(
+                {
+                    "id": "graph-rollup-root",
+                    "dependency_type": "parent-child",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        rollup_leaf["dependents"] = [
+            {
+                "id": "graph-rollup-terminal",
+                "dependency_type": "blocks",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        valid_rollup_graph = [
+            v2_full_issue_projection(issue)
+            for issue in (
+                rollup_root,
+                rollup_terminal,
+                rollup_leaf,
+            )
+        ]
+        v2_validate_source_graph(valid_rollup_graph)
         checks.check(
             "source-graph-valid-reciprocal-and-parent-pairs",
             True,
@@ -31802,6 +35690,22 @@ def v2_execute_fault_resource_cases(
                 "relation_rows": 2,
                 "parent_rows": 2,
                 "external_rows": 1,
+            },
+        )
+        checks.check(
+            "source-graph-rollup-hierarchy-and-blocking-composition-admitted",
+            True,
+            expected=(
+                "parent hierarchy is distinct from execution-blocking edges"
+            ),
+            observed={
+                "issue_count": len(valid_rollup_graph),
+                "execution_chain": [
+                    "graph-rollup-root",
+                    "graph-rollup-terminal",
+                    "graph-rollup-leaf",
+                ],
+                "shared_parent": "graph-rollup-root",
             },
         )
 
@@ -31955,6 +35859,56 @@ def v2_execute_fault_resource_cases(
             lambda: v2_validate_source_graph(cycle_graph),
             contains="blocking dependency cycle",
         )
+        parent_cycle_left = fixture_issue(
+            issue_id="parent-cycle-left",
+            parent="parent-cycle-right",
+            dependencies=(
+                {
+                    "id": "parent-cycle-right",
+                    "dependency_type": "parent-child",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        parent_cycle_left["dependents"] = [
+            {
+                "id": "parent-cycle-right",
+                "dependency_type": "parent-child",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        parent_cycle_right = fixture_issue(
+            issue_id="parent-cycle-right",
+            parent="parent-cycle-left",
+            dependencies=(
+                {
+                    "id": "parent-cycle-left",
+                    "dependency_type": "parent-child",
+                    "status": "open",
+                    "priority": 1,
+                },
+            ),
+        )
+        parent_cycle_right["dependents"] = [
+            {
+                "id": "parent-cycle-left",
+                "dependency_type": "parent-child",
+                "status": "open",
+                "priority": 1,
+            }
+        ]
+        parent_cycle_graph = [
+            v2_full_issue_projection(parent_cycle_left),
+            v2_full_issue_projection(parent_cycle_right),
+        ]
+        checks.refuses(
+            "source-graph-parent-hierarchy-cycle-refused",
+            EvidenceFailed,
+            lambda: v2_validate_source_graph(parent_cycle_graph),
+            contains="parent hierarchy cycle",
+        )
 
     elif slug == "mutation-dropped-duplicate-target":
         targets = [v2_synthetic_target(0), v2_synthetic_target(1)]
@@ -31999,6 +35953,44 @@ def v2_execute_fault_resource_cases(
                 cross_lane_plan,
                 exact_inventory,
                 exact_authority,
+            ),
+            contains="scalar or enum contract",
+        )
+        cross_lane_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    0,
+                    issue_id="synthetic-cross-lane-0",
+                    priority=2,
+                ),
+                v2_synthetic_target(
+                    1,
+                    issue_id="synthetic-cross-lane-1",
+                    priority=4,
+                ),
+            ]
+        )
+        cross_lane_authority = v2_synthetic_authority(
+            cross_lane_inventory
+        )
+        cross_lane_decisions = {
+            row["target_id"]: row
+            for row in cross_lane_authority["decisions"]
+        }
+        checks.refuses(
+            "cross-lane-construction-refused-at-hard-partition",
+            EvidenceFailed,
+            lambda: v2_make_child(
+                [
+                    (
+                        target,
+                        cross_lane_decisions[target["id"]],
+                    )
+                    for target in cross_lane_inventory["rows"]
+                ],
+                packing_witness={
+                    "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
+                },
             ),
             contains="hard partition",
         )
@@ -33098,6 +37090,9 @@ def v2_execute_fault_resource_cases(
                 "max_generated_child_payload_bytes": (
                     V2_GENERATED_CHILD_PAYLOAD_CAP
                 ),
+                "max_child_transport_cache_entries": (
+                    V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
+                ),
                 "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
                 "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
                 "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
@@ -33130,6 +37125,7 @@ def v2_execute_fault_resource_cases(
                 "max_log_events": V2_LOG_EVENTS_CAP,
                 "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
                 "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
+                "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
                 "max_diagnostic_summary_bytes": (
                     V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
                 ),
@@ -33157,6 +37153,437 @@ def v2_execute_fault_resource_cases(
             expected="all manifest caps bound",
             observed=manifest["caps"],
         )
+        exact_check_id = v2_validate_check_id(
+            "a" * V2_CHECK_ID_BYTES_CAP,
+            label="exact-cap check ID",
+        )
+        over_check_id_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_validate_check_id(
+                "a" * (V2_CHECK_ID_BYTES_CAP + 1),
+                label="over-cap check ID",
+            ),
+            contains="canonical bounded check ID",
+        )
+        checks.check(
+            "check-id-byte-cap-exact-and-plus-one",
+            len(exact_check_id.encode("utf-8"))
+            == V2_CHECK_ID_BYTES_CAP
+            and over_check_id_error.terminal == "EvidenceFailed",
+            expected={
+                "exact_bytes": V2_CHECK_ID_BYTES_CAP,
+                "plus_one_terminal": "EvidenceFailed",
+            },
+            observed={
+                "exact_bytes": len(exact_check_id.encode("utf-8")),
+                "plus_one_terminal": over_check_id_error.terminal,
+            },
+        )
+        bounded_script_path = REPO_ROOT / SCRIPT_REL
+        bounded_script_payload = bounded_read(bounded_script_path)
+        exact_bounded_payload = bounded_read(
+            bounded_script_path,
+            cap=len(bounded_script_payload),
+        )
+        bounded_plus_one_error = expect_error(
+            InputRefused,
+            lambda: bounded_read(
+                bounded_script_path,
+                cap=len(bounded_script_payload) - 1,
+            ),
+            contains="exceeds",
+        )
+        checks.check(
+            "bounded-read-exact-cap-and-cap-plus-one",
+            exact_bounded_payload == bounded_script_payload
+            and bounded_plus_one_error.terminal == "InputRefused",
+            expected={
+                "exact_bytes": len(bounded_script_payload),
+                "plus_one_terminal": "InputRefused",
+            },
+            observed={
+                "exact_bytes": len(exact_bounded_payload),
+                "plus_one_terminal": bounded_plus_one_error.terminal,
+            },
+        )
+        original_path_is_file = Path.is_file
+        original_path_stat = Path.stat
+        original_path_read_bytes = Path.read_bytes
+        stale_path_method_calls: list[str] = []
+
+        def stale_is_file(_path: Path) -> bool:
+            stale_path_method_calls.append("is_file")
+            return True
+
+        def stale_stat(_path: Path) -> Any:
+            stale_path_method_calls.append("stat")
+            return type("StaleStat", (), {"st_size": 0})()
+
+        def stale_read_bytes(_path: Path) -> bytes:
+            stale_path_method_calls.append("read_bytes")
+            return bounded_script_payload + b"x"
+
+        try:
+            Path.is_file = stale_is_file
+            Path.stat = stale_stat
+            Path.read_bytes = stale_read_bytes
+            stale_size_error = expect_error(
+                InputRefused,
+                lambda: bounded_read(
+                    bounded_script_path,
+                    cap=len(bounded_script_payload) - 1,
+                ),
+                contains="exceeds",
+            )
+        finally:
+            Path.is_file = original_path_is_file
+            Path.stat = original_path_stat
+            Path.read_bytes = original_path_read_bytes
+        checks.check(
+            "bounded-read-stale-size-check-cannot-bypass-cap",
+            stale_size_error.terminal == "InputRefused"
+            and stale_path_method_calls == [],
+            expected={
+                "terminal": "InputRefused",
+                "path_method_calls": [],
+            },
+            observed={
+                "terminal": stale_size_error.terminal,
+                "path_method_calls": stale_path_method_calls,
+            },
+        )
+        repeat_artifact_root, repeat_base, repeat_created = (
+            v2_fresh_fault_fixture_base(
+                manifest,
+                label="resource-populated-repeatability",
+            )
+        )
+        repeat_directory = resolve_run_dir(
+            repeat_artifact_root,
+            repeat_base,
+            label="retained populated fault fixture",
+            must_exist=True,
+        )
+        repeat_payload = (
+            b"frankensim retained populated fault fixture v2\n"
+        )
+        if repeat_created:
+            v2_write_exclusive(
+                repeat_directory / "payload.txt",
+                repeat_payload,
+            )
+            try:
+                os.mkdir(repeat_directory / "nested", 0o755)
+                os.symlink(
+                    "payload.txt",
+                    repeat_directory / "payload-link",
+                )
+            except OSError as error:
+                raise InfrastructureFailed(
+                    "retained populated fault fixture could not be built"
+                ) from error
+            v2_fsync_directory(repeat_directory / "nested")
+            v2_fsync_directory(repeat_directory)
+        repeat_roots = [
+            v2_finish_fault_fixture(
+                manifest,
+                artifact_root=repeat_artifact_root,
+                fixture_base=repeat_base,
+                label="resource-populated-repeatability",
+            )
+        ]
+        repeat_bases = [repeat_base]
+        repeat_creation_states = [repeat_created]
+        for _ in range(V2_PERSISTENT_ATTEMPTS_CAP + 1):
+            (
+                observed_artifact_root,
+                observed_base,
+                observed_created,
+            ) = v2_fresh_fault_fixture_base(
+                manifest,
+                label="resource-populated-repeatability",
+            )
+            repeat_bases.append(observed_base)
+            repeat_creation_states.append(observed_created)
+            repeat_roots.append(
+                v2_finish_fault_fixture(
+                    manifest,
+                    artifact_root=observed_artifact_root,
+                    fixture_base=observed_base,
+                    label="resource-populated-repeatability",
+                )
+            )
+        repeat_projection = v2_fault_fixture_tree_projection(
+            repeat_directory
+        )
+        expected_repeat_projection = [
+            {"path": "nested", "kind": "directory"},
+            {
+                "path": "payload-link",
+                "kind": "symlink",
+                "target": "payload.txt",
+            },
+            {
+                "path": "payload.txt",
+                "kind": "file",
+                "byte_length": len(repeat_payload),
+                "content_root": (
+                    "sha256-v1:"
+                    + hashlib.sha256(repeat_payload).hexdigest()
+                ),
+            },
+        ]
+        checks.check(
+            "fault-fixture-content-addressed-reuse-beyond-attempt-cap",
+            len(set(repeat_bases)) == 1
+            and len(set(repeat_roots)) == 1
+            and not any(repeat_creation_states[1:])
+            and repeat_projection == expected_repeat_projection,
+            expected={
+                "unique_bases": 1,
+                "unique_tree_roots": 1,
+                "repeat_creations": 0,
+                "reuse_count": V2_PERSISTENT_ATTEMPTS_CAP + 1,
+                "tree_projection": expected_repeat_projection,
+            },
+            observed={
+                "unique_bases": len(set(repeat_bases)),
+                "unique_tree_roots": len(set(repeat_roots)),
+                "repeat_creations": sum(
+                    1 for created in repeat_creation_states[1:] if created
+                ),
+                "reuse_count": V2_PERSISTENT_ATTEMPTS_CAP + 1,
+                "tree_projection": repeat_projection,
+            },
+        )
+        repeat_seal_path = (
+            repeat_directory / V2_FAULT_FIXTURE_SEAL_NAME
+        )
+        strict_repeat_seal = strict_json_loads(
+            bounded_read(
+                repeat_seal_path,
+                cap=RUN_ARTIFACT_CAP,
+                nofollow=True,
+                require_unique_link=True,
+            ),
+            label="retained populated fault fixture seal",
+            require_canonical=True,
+        )
+        symlink_read_error = expect_error(
+            InputRefused,
+            lambda: bounded_read(
+                repeat_directory / "payload-link",
+                cap=len(repeat_payload),
+                nofollow=True,
+                require_unique_link=True,
+            ),
+            contains="expected readable regular file",
+        )
+        policy_type_error = expect_error(
+            EvidenceFailed,
+            lambda: bounded_read(
+                repeat_seal_path,
+                nofollow=1,  # type: ignore[arg-type]
+            ),
+            contains="exact booleans",
+        )
+        altered_projection = strict_json_loads(
+            canonical_bytes(repeat_projection),
+            label="retained fault fixture projection mutation seed",
+            require_canonical=True,
+        )
+        altered_file = next(
+            row
+            for row in altered_projection
+            if row["kind"] == "file"
+        )
+        altered_file["content_root"] = semantic_root(
+            {"forged": "fault-fixture-member"}
+        )
+        projection_before = semantic_root(
+            v2_fault_fixture_tree_projection(repeat_directory)
+        )
+        altered_projection_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_validate_fault_fixture_seal(
+                manifest,
+                label="resource-populated-repeatability",
+                seal=strict_repeat_seal,
+                projection=altered_projection,
+            ),
+            contains="differs from its final seal",
+        )
+        projection_after = semantic_root(
+            v2_fault_fixture_tree_projection(repeat_directory)
+        )
+        malformed_seal_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_parse_fault_fixture_seal(
+                b'{"schema": "not-canonical"}\n'
+            ),
+            contains="manual recovery",
+        )
+        checks.check(
+            "fault-fixture-strict-descriptor-and-altered-projection-refused",
+            symlink_read_error.terminal == "InputRefused"
+            and policy_type_error.terminal == "EvidenceFailed"
+            and altered_projection_error.terminal == "EvidenceFailed"
+            and malformed_seal_error.terminal == "EvidenceFailed"
+            and projection_before == projection_after,
+            expected={
+                "nofollow_symlink_terminal": "InputRefused",
+                "nonboolean_policy_terminal": "EvidenceFailed",
+                "altered_projection_terminal": "EvidenceFailed",
+                "malformed_seal_terminal": "EvidenceFailed",
+                "retained_projection_unchanged": True,
+            },
+            observed={
+                "nofollow_symlink_terminal": symlink_read_error.terminal,
+                "nonboolean_policy_terminal": policy_type_error.terminal,
+                "altered_projection_terminal": (
+                    altered_projection_error.terminal
+                ),
+                "malformed_seal_terminal": malformed_seal_error.terminal,
+                "retained_projection_unchanged": (
+                    projection_before == projection_after
+                ),
+            },
+        )
+        forged_seal = strict_json_loads(
+            canonical_bytes(strict_repeat_seal),
+            label="retained fault fixture seal mutation seed",
+            require_canonical=True,
+        )
+        forged_seal.pop("semantic_root", None)
+        forged_seal["tree_projection"] = altered_projection
+        forged_seal["tree_root"] = semantic_root(altered_projection)
+        forged_seal = v2_rooted(forged_seal)
+        checks.refuses(
+            "fault-fixture-rerooted-seal-refused",
+            EvidenceFailed,
+            lambda: v2_validate_fault_fixture_seal(
+                manifest,
+                label="resource-populated-repeatability",
+                seal=forged_seal,
+                projection=repeat_projection,
+            ),
+            contains="differs from its final seal",
+        )
+        prior_fault_files_cap = V2_BUNDLE_FILES_CAP
+        prior_fault_directories_cap = V2_BUNDLE_DIRECTORIES_CAP
+        prior_fault_path_bytes_cap = (
+            V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP
+        )
+        fault_cap_terminals: list[str] = []
+        try:
+            globals()["V2_BUNDLE_FILES_CAP"] = 1
+            fault_cap_terminals.append(
+                expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fault_fixture_tree_projection(
+                        repeat_directory
+                    ),
+                    contains="file-count cap",
+                ).terminal
+            )
+            globals()["V2_BUNDLE_FILES_CAP"] = prior_fault_files_cap
+            globals()["V2_BUNDLE_DIRECTORIES_CAP"] = 0
+            fault_cap_terminals.append(
+                expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fault_fixture_tree_projection(
+                        repeat_directory
+                    ),
+                    contains="directory-count cap",
+                ).terminal
+            )
+            globals()[
+                "V2_BUNDLE_DIRECTORIES_CAP"
+            ] = prior_fault_directories_cap
+            globals()["V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP"] = 1
+            fault_cap_terminals.append(
+                expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fault_fixture_tree_projection(
+                        repeat_directory
+                    ),
+                    contains="enumerated-path byte cap",
+                ).terminal
+            )
+        finally:
+            globals()["V2_BUNDLE_FILES_CAP"] = prior_fault_files_cap
+            globals()[
+                "V2_BUNDLE_DIRECTORIES_CAP"
+            ] = prior_fault_directories_cap
+            globals()[
+                "V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP"
+            ] = prior_fault_path_bytes_cap
+        checks.check(
+            "fault-fixture-tree-caps-cover-all-member-kinds",
+            fault_cap_terminals == ["EvidenceFailed"] * 3,
+            expected=["EvidenceFailed"] * 3,
+            observed=fault_cap_terminals,
+        )
+        prior_transport_cache_cap = (
+            V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
+        )
+        prior_transport_cache = OrderedDict(
+            (key, dict(value))
+            for key, value in _v2_child_transport_cache.items()
+        )
+        try:
+            globals()["V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP"] = 2
+            _v2_child_transport_cache.clear()
+            first_cache_key: tuple[Any, ...] | None = None
+            for index in range(3):
+                cache_inventory = v2_synthetic_inventory(
+                    [
+                        v2_synthetic_target(
+                            index,
+                            issue_id=f"synthetic-cache-{index}",
+                        )
+                    ]
+                )
+                cache_authority = v2_synthetic_authority(
+                    cache_inventory
+                )
+                v2_child_transport_observations(
+                    [
+                        (
+                            cache_inventory["rows"][0],
+                            cache_authority["decisions"][0],
+                        )
+                    ]
+                )
+                if first_cache_key is None:
+                    first_cache_key = next(
+                        iter(_v2_child_transport_cache)
+                    )
+            checks.check(
+                "child-transport-cache-lru-cardinality-bounded",
+                len(_v2_child_transport_cache) == 2
+                and first_cache_key is not None
+                and first_cache_key not in _v2_child_transport_cache,
+                expected={
+                    "cap": 2,
+                    "first_entry_evicted": True,
+                },
+                observed={
+                    "entries": len(_v2_child_transport_cache),
+                    "first_entry_evicted": (
+                        first_cache_key
+                        not in _v2_child_transport_cache
+                        if first_cache_key is not None
+                        else False
+                    ),
+                },
+            )
+        finally:
+            globals()["V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP"] = (
+                prior_transport_cache_cap
+            )
+            _v2_child_transport_cache.clear()
+            _v2_child_transport_cache.update(prior_transport_cache)
         v2_validate_bundle_enumeration_budget(
             file_count=V2_BUNDLE_FILES_CAP,
             directory_count=V2_BUNDLE_DIRECTORIES_CAP,
@@ -34184,9 +38611,11 @@ def v2_execute_fault_resource_cases(
             ),
             contains="membership differs",
         )
-        artifact_root, fixture_base = v2_fresh_fault_fixture_base(
-            manifest,
-            label="mutation-truncation-oversize-root",
+        artifact_root, fixture_base, fixture_created = (
+            v2_fresh_fault_fixture_base(
+                manifest,
+                label="mutation-truncation-oversize-root",
+            )
         )
 
         truncation_dir = f"{fixture_base}/truncated-source"
@@ -34199,11 +38628,12 @@ def v2_execute_fault_resource_cases(
         truncated_publication["source-v2.json"] = (
             truncated_publication["source-v2.json"][:-1]
         )
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=truncation_dir,
-            payloads=truncated_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=truncation_dir,
+                payloads=truncated_publication,
+            )
         truncation_output = f"{fixture_base}/truncated-replay-output"
         truncation_error = expect_error(
             InputRefused,
@@ -34267,11 +38697,12 @@ def v2_execute_fault_resource_cases(
         oversize_publication[oversize_member] = (
             bytes([oversize_bytes[0] ^ 1]) + oversize_bytes[1:]
         )
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=oversize_dir,
-            payloads=oversize_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=oversize_dir,
+                payloads=oversize_publication,
+            )
         oversize_output = f"{fixture_base}/oversize-replay-output"
         oversize_error = expect_error(
             EvidenceFailed,
@@ -34332,11 +38763,12 @@ def v2_execute_fault_resource_cases(
         root_publication["inventory-v2.json"] = canonical_bytes(
             forged_inventory
         )
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=root_dir,
-            payloads=root_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=root_dir,
+                payloads=root_publication,
+            )
         root_output = f"{fixture_base}/forged-root-replay-output"
         root_error = expect_error(
             EvidenceFailed,
@@ -34372,6 +38804,12 @@ def v2_execute_fault_resource_cases(
                 ).exists(),
             },
         )
+        fixture_tree_root = v2_finish_fault_fixture(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=fixture_base,
+            label="mutation-truncation-oversize-root",
+        )
         checks.check(
             "retained-mutation-fixture-root",
             all(
@@ -34386,16 +38824,23 @@ def v2_execute_fault_resource_cases(
                     "oversize-root-mutation",
                     "forged-semantic-root",
                 )
-            ),
+            )
+            and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                fixture_tree_root,
+            )
+            is not None,
             expected={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": 3,
+                "tree_root": fixture_tree_root,
             },
             observed={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": 3,
+                "tree_root": fixture_tree_root,
             },
         )
 
@@ -34413,9 +38858,11 @@ def v2_execute_fault_resource_cases(
             lambda: v2_read_event_stream(duplicate_terminal),
             contains="unique and last",
         )
-        artifact_root, fixture_base = v2_fresh_fault_fixture_base(
-            manifest,
-            label="fault-partial-publication-conflict",
+        artifact_root, fixture_base, fixture_created = (
+            v2_fresh_fault_fixture_base(
+                manifest,
+                label="fault-partial-publication-conflict",
+            )
         )
         partial_dir = f"{fixture_base}/partial-prefix"
         partial_payloads, _ = v2_fault_fixture_payloads(
@@ -34423,21 +38870,22 @@ def v2_execute_fault_resource_cases(
             artifact_root=artifact_root,
             artifact_dir=partial_dir,
         )
-        reservation = v2_reserve_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=partial_dir,
-        )
-        try:
-            for name in ("source-v2.json", "inventory-v2.json"):
-                reservation.written_identities[name] = (
-                    v2_write_reserved_member(
-                        reservation,
-                        relative=PurePosixPath(name),
-                        payload=partial_payloads[name],
+        if fixture_created:
+            reservation = v2_reserve_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=partial_dir,
+            )
+            try:
+                for name in ("source-v2.json", "inventory-v2.json"):
+                    reservation.written_identities[name] = (
+                        v2_write_reserved_member(
+                            reservation,
+                            relative=PurePosixPath(name),
+                            payload=partial_payloads[name],
+                        )
                     )
-                )
-        finally:
-            v2_close_reservation(reservation)
+            finally:
+                v2_close_reservation(reservation)
         partial_output = resolve_run_dir(
             artifact_root,
             partial_dir,
@@ -34467,6 +38915,22 @@ def v2_execute_fault_resource_cases(
             expected=expected_membership,
             observed=observed_membership,
             manifest_root=manifest["semantic_root"],
+            available_roots={
+                "source": strict_json_loads(
+                    partial_payloads["source-v2.json"],
+                    label="partial-prefix retained source",
+                    require_canonical=True,
+                )["semantic_root"],
+                "inventory": strict_json_loads(
+                    partial_payloads["inventory-v2.json"],
+                    label="partial-prefix retained inventory",
+                    require_canonical=True,
+                )["semantic_root"],
+                "authority": None,
+                "review_plan": None,
+                "history": None,
+                "zero_sets": None,
+            },
         )
         checks.check(
             "retained-partial-prefix-manual-recovery",
@@ -34486,6 +38950,19 @@ def v2_execute_fault_resource_cases(
             and recovery["recovery"] == "MANUAL_RECOVERY_REQUIRED"
             and recovery["terminal"] == "EvidenceFailed"
             and recovery["detail_root"] == text_root(str(partial_error))
+            and recovery["available_roots"]["source"]
+            is not None
+            and recovery["available_roots"]["inventory"]
+            is not None
+            and all(
+                recovery["available_roots"][name] is None
+                for name in (
+                    "authority",
+                    "review_plan",
+                    "history",
+                    "zero_sets",
+                )
+            )
             and recovery["complete_green_prefix"] is False
             and recovery["retry_requires_fresh_run_dir"] is True,
             expected={
@@ -34562,11 +39039,12 @@ def v2_execute_fault_resource_cases(
             canonical_bytes(row)
             for row in [*duplicate_events, extra_terminal]
         )
-        v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=duplicate_dir,
-            payloads=duplicate_publication,
-        )
+        if fixture_created:
+            v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=duplicate_dir,
+                payloads=duplicate_publication,
+            )
         duplicate_error = expect_error(
             EvidenceFailed,
             lambda: v2_read_retained_bundle(
@@ -34606,6 +39084,12 @@ def v2_execute_fault_resource_cases(
                 "failure_evidence": duplicate_recovery,
             },
         )
+        fixture_tree_root = v2_finish_fault_fixture(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=fixture_base,
+            label="fault-partial-publication-conflict",
+        )
         checks.check(
             "retained-partial-conflict-fixture-root",
             partial_output.exists()
@@ -34614,23 +39098,32 @@ def v2_execute_fault_resource_cases(
                 duplicate_dir,
                 label="duplicate-terminal fixture",
                 must_exist=True,
-            ).exists(),
+            ).exists()
+            and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                fixture_tree_root,
+            )
+            is not None,
             expected={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": 2,
+                "tree_root": fixture_tree_root,
             },
             observed={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": 2,
+                "tree_root": fixture_tree_root,
             },
         )
 
     elif slug == "fault-replay-manual-recovery":
-        artifact_root, fixture_base = v2_fresh_fault_fixture_base(
-            manifest,
-            label="fault-replay-manual-recovery",
+        artifact_root, fixture_base, fixture_created = (
+            v2_fresh_fault_fixture_base(
+                manifest,
+                label="fault-replay-manual-recovery",
+            )
         )
         scenarios: list[
             tuple[
@@ -34776,11 +39269,12 @@ def v2_execute_fault_resource_cases(
             diagnostic,
             expected_divergence,
         ) in scenarios:
-            v2_publish_bundle(
-                artifact_root=artifact_root,
-                artifact_dir=input_dir,
-                payloads=observed_payloads,
-            )
+            if fixture_created:
+                v2_publish_bundle(
+                    artifact_root=artifact_root,
+                    artifact_dir=input_dir,
+                    payloads=observed_payloads,
+                )
             output_dir = f"{fixture_base}/{label}-replay-output"
             replay_error = expect_error(
                 error_type,
@@ -34876,6 +39370,12 @@ def v2_execute_fault_resource_cases(
                     ).exists(),
                 },
             )
+        fixture_tree_root = v2_finish_fault_fixture(
+            manifest,
+            artifact_root=artifact_root,
+            fixture_base=fixture_base,
+            label="fault-replay-manual-recovery",
+        )
         checks.check(
             "retained-replay-recovery-fixture-root",
             all(
@@ -34886,16 +39386,23 @@ def v2_execute_fault_resource_cases(
                     must_exist=True,
                 ).exists()
                 for label, input_dir, *_ in scenarios
-            ),
+            )
+            and re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                fixture_tree_root,
+            )
+            is not None,
             expected={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": len(scenarios),
+                "tree_root": fixture_tree_root,
             },
             observed={
                 "artifact_root": artifact_root,
                 "fixture_base": fixture_base,
                 "retained_variants": len(scenarios),
+                "tree_root": fixture_tree_root,
             },
         )
 
@@ -36235,22 +40742,27 @@ def v2_build_executor_registry(
 def v2_test_log_event(
     *,
     case: Mapping[str, Any],
+    obligation: Mapping[str, Any],
+    harness_contract_identity: str,
     sequence: int,
     stage: str,
     result: Mapping[str, Any] | None = None,
     terminal: str | None = None,
 ) -> dict[str, Any]:
     assertion_id = str(case["assertion_id"])
+    obligation_root = v2_check_obligation_root(case, obligation)
     parameter = {
         "case_id": case["id"],
         "assertion_id": assertion_id,
         "ordinal": case["ordinal"],
         "fixture_engine": case["fixture_engine"],
+        "check_obligation_root": obligation_root,
+        "harness_contract_identity": harness_contract_identity,
         "stage": stage,
     }
-    return v2_rooted(
+    event = v2_rooted(
         {
-            "schema": V2_EVENT_SCHEMA,
+            "schema": V2_TEST_EVENT_SCHEMA,
             "case_id": case["id"],
             "assertion_id": assertion_id,
             "executor_id": assertion_id,
@@ -36273,12 +40785,16 @@ def v2_test_log_event(
                     "result_root": result["semantic_root"],
                     "check_count": result["check_count"],
                     "ordered_check_roots": result["ordered_check_roots"],
+                    "check_obligation_root": obligation_root,
+                    "harness_contract_identity": harness_contract_identity,
                 }
                 if result is not None
                 else {
                     "criterion_ids": list(case["criterion_ids"]),
                     "kinds": list(case["kinds"]),
                     "fixture_engine": case["fixture_engine"],
+                    "check_obligation_root": obligation_root,
+                    "harness_contract_identity": harness_contract_identity,
                 }
             ),
             "stdout_byte_length": 0,
@@ -36293,12 +40809,298 @@ def v2_test_log_event(
                 "optional_count": 0,
                 "optional_paths_root": semantic_root([]),
             },
-            "no_claim": (
-                "the test event records one compiled bounded assertion and "
-                "mints no tracker, semantic, implementation, or release authority"
-            ),
+            "no_claim": V2_TEST_EVENT_NO_CLAIM,
         }
     )
+    v2_validate_test_event_document(
+        event,
+        expected_harness_contract_identity=harness_contract_identity,
+        expected_case=case,
+        expected_obligation=obligation,
+        expected_sequence=sequence,
+        expected_stage=stage,
+        expected_result=result,
+        expected_terminal=terminal,
+    )
+    return event
+
+
+V2_TEST_FAILURE_PROJECTION_FIELDS = frozenset(
+    {
+        "diagnostic_code",
+        "diagnostic_root",
+        "diagnostic_summary",
+        "unexpected_exception_type",
+        "subject",
+        "check_obligation_root",
+        "harness_contract_identity",
+    }
+)
+
+
+def v2_runner_failure_policy(terminal: str) -> tuple[str, str]:
+    if terminal == "CancelledDrained":
+        return "CANCELLED_DRAINED", "RETRY_AFTER_CANCELLATION"
+    if terminal == "InfrastructureFailed":
+        return "INFRASTRUCTURE_FAILED", "RESTORE_INFRASTRUCTURE_AND_RETRY"
+    if terminal == "InternalFault":
+        return "INTERNAL_EXECUTOR_FAULT", "FIX_INTERNAL_EXECUTOR_FAULT"
+    if terminal in {
+        "UsageRefused",
+        "InputRefused",
+        "NoData",
+        "EvidenceFailed",
+    }:
+        return "ASSERTION_FAILED", "FIX_ASSERTION_OR_SUBJECT"
+    raise EvidenceFailed(
+        "v2 runner failure policy received an unknown terminal"
+    )
+
+
+def v2_runner_diagnostic(error: BaseException) -> str:
+    diagnostic = str(error)
+    if diagnostic.strip():
+        return diagnostic
+    return f"{type(error).__name__}: no diagnostic message"
+
+
+def v2_validate_test_event_document(
+    document: Mapping[str, Any],
+    *,
+    expected_harness_contract_identity: str,
+    expected_case: Mapping[str, Any] | None = None,
+    expected_obligation: Mapping[str, Any] | None = None,
+    expected_sequence: int | None = None,
+    expected_stage: str | None = None,
+    expected_result: Mapping[str, Any] | None = None,
+    expected_projection: Mapping[str, Any] | None = None,
+    expected_terminal: str | None = None,
+    final: bool = False,
+) -> None:
+    if not isinstance(document, dict):
+        raise EvidenceFailed("v2 self-test event is not an object")
+    if set(document) != V2_TEST_EVENT_FIELDS:
+        raise EvidenceFailed("v2 self-test event has a non-closed schema")
+    projection = document["semantic_projection"]
+    artifacts = document["safe_relative_artifacts"]
+    terminal = document["terminal"]
+    case_id = document["case_id"]
+    assertion_id = document["assertion_id"]
+    if (
+        document["schema"] != V2_TEST_EVENT_SCHEMA
+        or not isinstance(expected_harness_contract_identity, str)
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            expected_harness_contract_identity,
+        )
+        is None
+        or type(document["sequence"]) is not int
+        or document["sequence"] < 0
+        or not isinstance(case_id, str)
+        or re.fullmatch(
+            r"template-lint-v2\.[a-z0-9]+(?:-[a-z0-9]+)*",
+            case_id,
+        )
+        is None
+        or assertion_id
+        != "v2.case." + case_id.removeprefix("template-lint-v2.")
+        or document["executor_id"] != assertion_id
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            str(document["parameter_root"]),
+        )
+        is None
+        or not isinstance(document["stage"], str)
+        or document["stage"] not in {
+            "assertion-start",
+            "assertion-terminal",
+        }
+        or not isinstance(document["argv"], list)
+        or not isinstance(projection, dict)
+        or projection.get("harness_contract_identity")
+        != expected_harness_contract_identity
+        or not isinstance(artifacts, dict)
+        or set(artifacts) != {
+            "base",
+            "optional_count",
+            "optional_paths_root",
+        }
+        or artifacts["base"] != []
+        or type(artifacts["optional_count"]) is not int
+        or artifacts["optional_count"] != 0
+        or artifacts["optional_paths_root"] != semantic_root([])
+        or type(document["exit_code"]) is not int
+        or type(document["stdout_byte_length"]) is not int
+        or document["stdout_byte_length"] != 0
+        or type(document["stderr_byte_length"]) is not int
+        or document["stderr_byte_length"] != 0
+        or document["stdout_root"]
+        != "sha256-v1:" + hashlib.sha256(b"").hexdigest()
+        or document["stderr_root"]
+        != "sha256-v1:" + hashlib.sha256(b"").hexdigest()
+        or document["no_claim"] != V2_TEST_EVENT_NO_CLAIM
+        or (
+            document["stage"] == "assertion-start"
+            and (
+                terminal is not None
+                or document["exit_code"] != 0
+                or document["result_category"] != "PASS"
+                or document["first_divergence"] is not None
+                or document["recovery"] != "NOT_REQUIRED"
+            )
+        )
+        or (
+            document["stage"] == "assertion-terminal"
+            and (
+                not isinstance(terminal, str)
+                or terminal not in TERMINAL_EXIT
+                or document["exit_code"] != TERMINAL_EXIT[terminal]
+            )
+        )
+        or (
+            terminal == "Pass"
+            and (
+                document["result_category"] != "PASS"
+                or document["first_divergence"] is not None
+                or document["recovery"] != "NOT_REQUIRED"
+            )
+        )
+        or (
+            final
+            and terminal not in {None, "Pass"}
+            and (
+                not isinstance(document["first_divergence"], str)
+                or not document["first_divergence"].strip()
+                or len(
+                    document["first_divergence"].encode("utf-8")
+                )
+                > V2_FIRST_DIVERGENCE_BYTES_CAP
+                or set(projection) != V2_TEST_FAILURE_PROJECTION_FIELDS
+                or not isinstance(
+                    projection.get("diagnostic_code"),
+                    str,
+                )
+                or projection.get("diagnostic_code")
+                != document["first_divergence"]
+                or re.fullmatch(
+                    r"sha256-v1:[0-9a-f]{64}",
+                    str(projection.get("diagnostic_root")),
+                )
+                is None
+                or not isinstance(
+                    projection.get("diagnostic_summary"),
+                    str,
+                )
+                or not projection.get("diagnostic_summary").strip()
+                or len(
+                    projection["diagnostic_summary"].encode("utf-8")
+                )
+                > V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+                or (
+                    projection.get("unexpected_exception_type")
+                    is not None
+                    and (
+                        not isinstance(
+                            projection.get(
+                                "unexpected_exception_type"
+                            ),
+                            str,
+                        )
+                        or not projection[
+                            "unexpected_exception_type"
+                        ].strip()
+                    )
+                )
+                or not isinstance(projection.get("subject"), str)
+                or not projection.get("subject").strip()
+                or re.fullmatch(
+                    r"sha256-v1:[0-9a-f]{64}",
+                    str(projection.get("check_obligation_root")),
+                )
+                is None
+                or document["result_category"]
+                != v2_runner_failure_policy(terminal)[0]
+                or document["recovery"]
+                != v2_runner_failure_policy(terminal)[1]
+            )
+        )
+    ):
+        raise EvidenceFailed("v2 self-test event contract differs")
+    if expected_case is not None:
+        if expected_obligation is None:
+            raise EvidenceFailed(
+                "v2 self-test event validation lacks an expected obligation"
+            )
+        obligation_root = v2_check_obligation_root(
+            expected_case,
+            expected_obligation,
+        )
+        expected_parameter = {
+            "case_id": expected_case["id"],
+            "assertion_id": expected_case["assertion_id"],
+            "ordinal": expected_case["ordinal"],
+            "fixture_engine": expected_case["fixture_engine"],
+            "check_obligation_root": obligation_root,
+            "harness_contract_identity": (
+                expected_harness_contract_identity
+            ),
+            "stage": expected_stage,
+        }
+        bound_projection = (
+            dict(expected_projection)
+            if expected_projection is not None
+            else (
+                {
+                    "result_root": expected_result["semantic_root"],
+                    "check_count": expected_result["check_count"],
+                    "ordered_check_roots": expected_result[
+                        "ordered_check_roots"
+                    ],
+                    "check_obligation_root": obligation_root,
+                    "harness_contract_identity": (
+                        expected_harness_contract_identity
+                    ),
+                }
+                if expected_result is not None
+                else {
+                    "criterion_ids": list(expected_case["criterion_ids"]),
+                    "kinds": list(expected_case["kinds"]),
+                    "fixture_engine": expected_case["fixture_engine"],
+                    "check_obligation_root": obligation_root,
+                    "harness_contract_identity": (
+                        expected_harness_contract_identity
+                    ),
+                }
+            )
+        )
+        if (
+            document["case_id"] != expected_case["id"]
+            or document["assertion_id"] != expected_case["assertion_id"]
+            or document["sequence"] != expected_sequence
+            or document["stage"] != expected_stage
+            or document["terminal"] != expected_terminal
+            or document["argv"]
+            != v2_sanitized_argv(
+                [
+                    str(SCRIPT_REL),
+                    "--case-v2",
+                    str(expected_case["id"]),
+                ]
+            )
+            or document["parameter_root"] != semantic_root(expected_parameter)
+            or projection != bound_projection
+        ):
+            raise EvidenceFailed(
+                "v2 self-test event differs from its expected case binding"
+            )
+    try:
+        v2_validate_retained_argv(
+            document["argv"],
+            label="v2 self-test event argv",
+        )
+    except InputRefused as error:
+        raise EvidenceFailed(str(error)) from error
+    verify_semantic_root(document, label="v2 self-test event")
 
 
 def v2_validate_log_line_payload(
@@ -36312,7 +41114,149 @@ def v2_validate_log_line_payload(
         )
 
 
-def v2_emit_test_document(document: Mapping[str, Any]) -> None:
+def v2_validate_emission_case_context(
+    accepted_manifest: Mapping[str, Any],
+    *,
+    expected_case: Mapping[str, Any],
+    expected_obligation: Mapping[str, Any],
+) -> None:
+    if (
+        not isinstance(accepted_manifest, dict)
+        or not isinstance(expected_case, dict)
+        or not isinstance(expected_obligation, dict)
+    ):
+        raise EvidenceFailed(
+            "v2 self-test emission context is not object-shaped"
+        )
+    manifest_cases = accepted_manifest.get("case")
+    accepted_obligations = accepted_manifest.get(
+        "check_obligations"
+    )
+    if (
+        not isinstance(manifest_cases, list)
+        or not isinstance(accepted_obligations, dict)
+    ):
+        raise EvidenceFailed(
+            "v2 self-test emission context lacks accepted registries"
+        )
+    accepted_cases = [
+        row
+        for row in manifest_cases
+        if isinstance(row, dict)
+        and row.get("id") == expected_case.get("id")
+    ]
+    accepted_obligation = accepted_obligations.get(
+        str(expected_case.get("assertion_id"))
+    )
+    if (
+        len(accepted_cases) != 1
+        or accepted_cases[0] != expected_case
+        or accepted_obligation != expected_obligation
+    ):
+        raise EvidenceFailed(
+            "v2 self-test emission context differs from the accepted manifest"
+        )
+    v2_validate_check_obligation(
+        accepted_cases[0],
+        accepted_obligation,
+        error_type=EvidenceFailed,
+    )
+
+
+def v2_emit_test_document(
+    document: Mapping[str, Any],
+    *,
+    accepted_manifest: Mapping[str, Any],
+    expected_case: Mapping[str, Any] | None = None,
+    expected_obligation: Mapping[str, Any] | None = None,
+    expected_sequence: int | None = None,
+    expected_stage: str | None = None,
+    expected_result: Mapping[str, Any] | None = None,
+    expected_projection: Mapping[str, Any] | None = None,
+    expected_terminal: str | None = None,
+    expected_results: Sequence[Mapping[str, Any]] | None = None,
+    expected_event_roots: Sequence[str] | None = None,
+    expected_first_divergence: str | None = None,
+    expected_diagnostic_root: str | None = None,
+    expected_diagnostic_summary: str | None = None,
+    expected_recovery: str | None = None,
+    expected_failure_scope: str | None = None,
+) -> None:
+    if not isinstance(document, dict):
+        raise EvidenceFailed(
+            "v2 self-test emitter received a non-object document"
+        )
+    if document.get("schema") == V2_TEST_EVENT_SCHEMA:
+        if expected_case is None or expected_obligation is None:
+            raise EvidenceFailed(
+                "v2 self-test event emission lacks exact expected context"
+            )
+        v2_validate_emission_case_context(
+            accepted_manifest,
+            expected_case=expected_case,
+            expected_obligation=expected_obligation,
+        )
+        if expected_result is not None:
+            v2_validate_assertion_result(
+                expected_case,
+                expected_result,
+                expected_obligation,
+            )
+        v2_validate_test_event_document(
+            document,
+            expected_harness_contract_identity=(
+                accepted_manifest["harness_contract_identity"]
+            ),
+            expected_case=expected_case,
+            expected_obligation=expected_obligation,
+            expected_sequence=expected_sequence,
+            expected_stage=expected_stage,
+            expected_result=expected_result,
+            expected_projection=expected_projection,
+            expected_terminal=expected_terminal,
+            final=True,
+        )
+    elif document.get("schema") == V2_ASSERTION_RESULT_SCHEMA:
+        if expected_case is None or expected_obligation is None:
+            raise EvidenceFailed(
+                "v2 assertion-result emission lacks exact expected context"
+            )
+        v2_validate_emission_case_context(
+            accepted_manifest,
+            expected_case=expected_case,
+            expected_obligation=expected_obligation,
+        )
+        v2_validate_assertion_result(
+            expected_case,
+            document,
+            expected_obligation,
+        )
+    elif document.get("schema") == V2_TEST_TERMINAL_SCHEMA:
+        if (
+            expected_results is None
+            or expected_event_roots is None
+            or expected_terminal is None
+            or expected_recovery is None
+        ):
+            raise EvidenceFailed(
+                "v2 suite-terminal emission lacks exact expected context"
+            )
+        v2_validate_test_terminal_document(
+            document,
+            accepted_manifest=accepted_manifest,
+            expected_results=expected_results,
+            expected_event_roots=expected_event_roots,
+            expected_terminal=expected_terminal,
+            expected_first_divergence=expected_first_divergence,
+            expected_diagnostic_root=expected_diagnostic_root,
+            expected_diagnostic_summary=expected_diagnostic_summary,
+            expected_recovery=expected_recovery,
+            expected_failure_scope=expected_failure_scope,
+        )
+    else:
+        raise EvidenceFailed(
+            "v2 self-test emitter received an unknown document schema"
+        )
     v2_validate_log_line_payload(
         canonical_bytes(document),
         label="v2 self-test JSONL document",
@@ -36348,7 +41292,13 @@ def v2_bounded_first_divergence(
 def v2_validate_assertion_result(
     case: Mapping[str, Any],
     result: Any,
+    obligation: Any,
 ) -> Mapping[str, Any]:
+    obligation = v2_validate_check_obligation(
+        case,
+        obligation,
+        error_type=EvidenceFailed,
+    )
     malformed = (
         not isinstance(result, dict)
         or set(result) != V2_ASSERTION_RESULT_FIELDS
@@ -36397,35 +41347,427 @@ def v2_validate_assertion_result(
         if (
             not isinstance(check, dict)
             or set(check) != V2_ASSERTION_CHECK_FIELDS
-            or not isinstance(check.get("check_id"), str)
-            or not check.get("check_id")
-            or check.get("check_id") != check.get("check_id").strip()
             or check.get("passed") is not True
         ):
             raise EvidenceFailed(
                 f"{case['assertion_id']} returned malformed check evidence "
                 f"at index {index}"
             )
-        verify_semantic_root(
-            check,
-            label=f"{case['assertion_id']} ordered check {index}",
+        try:
+            verify_semantic_root(
+                check,
+                label=f"{case['assertion_id']} ordered check {index}",
+            )
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+            RecursionError,
+        ) as error:
+            raise EvidenceFailed(
+                f"{case['assertion_id']} returned noncanonical check "
+                f"evidence at index {index}"
+            ) from error
+        check_ids.append(
+            v2_validate_check_id(
+                check.get("check_id"),
+                label=(
+                    f"{case['assertion_id']} ordered check {index}"
+                ),
+            )
         )
-        check_ids.append(check["check_id"])
         observed_roots.append(check["semantic_root"])
     if len(check_ids) != len(set(check_ids)):
         raise EvidenceFailed(
             f"{case['assertion_id']} returned duplicate check IDs"
         )
+    if (
+        result["check_count"] != obligation["check_count"]
+        or check_ids != obligation["ordered_check_ids"]
+    ):
+        raise EvidenceFailed(
+            f"{case['assertion_id']} returned checks that differ from its "
+            "exact ordered obligation"
+        )
     if result["ordered_check_roots"] != observed_roots:
         raise EvidenceFailed(
             f"{case['assertion_id']} returned unbound ordered check roots"
         )
-    verify_semantic_root(result, label=f"{case['assertion_id']} assertion result")
+    try:
+        verify_semantic_root(
+            result,
+            label=f"{case['assertion_id']} assertion result",
+        )
+        result_payload = canonical_bytes(result)
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+    ) as error:
+        raise EvidenceFailed(
+            f"{case['assertion_id']} returned noncanonical assertion evidence"
+        ) from error
     v2_validate_log_line_payload(
-        canonical_bytes(result),
+        result_payload,
         label=f"{case['assertion_id']} assertion result",
     )
     return result
+
+
+def v2_validate_suite_expected_results(
+    accepted_manifest: Mapping[str, Any],
+    *,
+    selected: Any,
+    expected_results: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    accepted_cases = (
+        accepted_manifest.get("case")
+        if isinstance(accepted_manifest, dict)
+        else None
+    )
+    accepted_obligations = (
+        accepted_manifest.get("check_obligations")
+        if isinstance(accepted_manifest, dict)
+        else None
+    )
+    if (
+        not isinstance(accepted_cases, list)
+        or not isinstance(accepted_obligations, dict)
+    ):
+        raise EvidenceFailed(
+            "v2 suite-terminal accepted manifest lacks registries"
+        )
+    if selected is not None and not isinstance(selected, str):
+        raise EvidenceFailed(
+            "v2 suite-terminal selection is not a string or null"
+        )
+    if not isinstance(expected_results, (list, tuple)):
+        raise EvidenceFailed(
+            "v2 suite-terminal expected results are not ordered"
+        )
+    expected_cases = [
+        row
+        for row in accepted_cases
+        if isinstance(row, dict)
+        if selected is None or row["id"] == selected
+    ]
+    if (
+        not expected_cases
+        or len(expected_results) > len(expected_cases)
+    ):
+        raise EvidenceFailed(
+            "v2 suite-terminal expected result cardinality differs"
+        )
+    validated_results: list[Mapping[str, Any]] = []
+    for index, result in enumerate(expected_results):
+        case = expected_cases[index]
+        obligation = accepted_obligations.get(
+            str(case["assertion_id"])
+        )
+        validated_results.append(
+            v2_validate_assertion_result(
+                case,
+                result,
+                obligation,
+            )
+        )
+    return expected_cases, validated_results
+
+
+def v2_validate_test_terminal_document(
+    document: Mapping[str, Any],
+    *,
+    accepted_manifest: Mapping[str, Any],
+    expected_results: Sequence[Mapping[str, Any]],
+    expected_event_roots: Sequence[str],
+    expected_terminal: str,
+    expected_first_divergence: str | None,
+    expected_diagnostic_root: str | None,
+    expected_diagnostic_summary: str | None,
+    expected_recovery: str,
+    expected_failure_scope: str | None,
+) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != V2_TEST_TERMINAL_FIELDS
+    ):
+        raise EvidenceFailed("v2 self-test terminal has a non-closed schema")
+    terminal = document["terminal"]
+    case_ids = document["ordered_case_ids"]
+    assertion_ids = document["ordered_assertion_ids"]
+    case_roots = document["ordered_case_roots"]
+    event_roots = document["ordered_event_roots"]
+    failure_scope = document["failure_scope"]
+    selected = document["selected"]
+    expected_cases, validated_results = (
+        v2_validate_suite_expected_results(
+            accepted_manifest,
+            selected=selected,
+            expected_results=expected_results,
+        )
+    )
+    expected_case_ids = [str(row["id"]) for row in expected_cases]
+    expected_assertion_ids = [
+        str(row["assertion_id"]) for row in expected_cases
+    ]
+    expected_result_roots = [
+        str(row["semantic_root"]) for row in validated_results
+    ]
+    bound_event_roots = list(expected_event_roots)
+    completed_count = len(validated_results)
+    expected_completed_case_ids = expected_case_ids[:completed_count]
+    expected_completed_assertion_ids = expected_assertion_ids[
+        :completed_count
+    ]
+    expected_check_count = sum(
+        int(
+            accepted_manifest["check_obligations"][
+                assertion_id
+            ]["check_count"]
+        )
+        for assertion_id in expected_completed_assertion_ids
+    )
+    expected_registry_root = semantic_root(
+        sorted(v2_build_executor_registry(accepted_manifest))
+    )
+    if (
+        document["schema"] != V2_TEST_TERMINAL_SCHEMA
+        or not isinstance(terminal, str)
+        or terminal not in TERMINAL_EXIT
+        or terminal != expected_terminal
+        or type(document["exit_code"]) is not int
+        or document["exit_code"] != TERMINAL_EXIT[terminal]
+        or document["first_divergence"]
+        != expected_first_divergence
+        or document["diagnostic_root"] != expected_diagnostic_root
+        or document["diagnostic_summary"]
+        != expected_diagnostic_summary
+        or document["recovery"] != expected_recovery
+        or failure_scope != expected_failure_scope
+        or not isinstance(document["recovery"], str)
+        or (
+            selected is not None
+            and not isinstance(selected, str)
+        )
+        or not expected_cases
+        or document["manifest_root"] != accepted_manifest["semantic_root"]
+        or document["manifest_content_identity"]
+        != accepted_manifest["content_identity"]
+        or document["harness_contract_identity"]
+        != accepted_manifest["harness_contract_identity"]
+        or type(document["case_count"]) is not int
+        or type(document["assertion_count"]) is not int
+        or type(document["check_count"]) is not int
+        or document["case_count"] < 0
+        or document["case_count"] != len(validated_results)
+        or document["assertion_count"] != document["case_count"]
+        or document["check_count"] < 0
+        or (
+            failure_scope is not None
+            and not isinstance(failure_scope, str)
+        )
+        or not isinstance(case_ids, list)
+        or not isinstance(assertion_ids, list)
+        or not isinstance(case_roots, list)
+        or not isinstance(event_roots, list)
+        or len(case_ids) != document["case_count"]
+        or len(assertion_ids) != document["assertion_count"]
+        or len(case_roots) != document["case_count"]
+        or case_roots != expected_result_roots
+        or event_roots != bound_event_roots
+        or any(not isinstance(value, str) for value in case_ids)
+        or any(not isinstance(value, str) for value in assertion_ids)
+        or any(not isinstance(value, str) for value in case_roots)
+        or any(not isinstance(value, str) for value in event_roots)
+        or len(case_roots) != len(set(case_roots))
+        or len(event_roots) != len(set(event_roots))
+        or len(case_ids) != len(set(case_ids))
+        or len(assertion_ids) != len(set(assertion_ids))
+        or case_ids != expected_completed_case_ids
+        or assertion_ids != expected_completed_assertion_ids
+        or document["check_count"] != expected_check_count
+        or any(
+            assertion_id
+            != "v2.case."
+            + case_id.removeprefix("template-lint-v2.")
+            for case_id, assertion_id in zip(case_ids, assertion_ids)
+        )
+        or any(
+            re.fullmatch(r"sha256-v1:[0-9a-f]{64}", str(root)) is None
+            for root in [*case_roots, *event_roots]
+        )
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            str(document["compiled_executor_ids_root"]),
+        )
+        is None
+        or document["compiled_executor_ids_root"] != expected_registry_root
+        or document["skipped_assertions"] != []
+        or document["aggregate_count_only"] is not False
+        or (
+            terminal == "Pass"
+            and (
+                case_ids != expected_case_ids
+                or assertion_ids != expected_assertion_ids
+                or len(event_roots) != 2 * len(expected_case_ids)
+                or failure_scope is not None
+                or
+                document["first_divergence"] is not None
+                or document["diagnostic_root"] is not None
+                or document["diagnostic_summary"] is not None
+                or document["recovery"] != "NOT_REQUIRED"
+                or document["no_claim"]
+                != (
+                    f"the suite proves only its {len(case_ids)} selected "
+                    "bounded executable contracts; it does not mutate or "
+                    "complete live target Beads"
+                )
+            )
+        )
+        or (
+            terminal != "Pass"
+            and failure_scope == "assertion"
+            and (
+                len(event_roots) != 2 * (len(case_ids) + 1)
+                or len(case_ids) >= len(expected_case_ids)
+                or
+                not isinstance(document["first_divergence"], str)
+                or not document["first_divergence"].strip()
+                or len(
+                    document["first_divergence"].encode("utf-8")
+                )
+                > V2_FIRST_DIVERGENCE_BYTES_CAP
+                or re.fullmatch(
+                    r"sha256-v1:[0-9a-f]{64}",
+                    str(document["diagnostic_root"]),
+                )
+                is None
+                or not isinstance(document["diagnostic_summary"], str)
+                or not document["diagnostic_summary"].strip()
+                or len(
+                    document["diagnostic_summary"].encode("utf-8")
+                )
+                > V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+                or document["recovery"]
+                != v2_runner_failure_policy(terminal)[1]
+                or document["no_claim"] != "the v2 suite did not pass"
+            )
+        )
+        or (
+            terminal != "Pass"
+            and failure_scope == "suite-boundary"
+            and (
+                len(event_roots) != 2 * len(case_ids)
+                or len(case_ids) > len(expected_case_ids)
+                or
+                not isinstance(document["first_divergence"], str)
+                or not document["first_divergence"].strip()
+                or len(
+                    document["first_divergence"].encode("utf-8")
+                )
+                > V2_FIRST_DIVERGENCE_BYTES_CAP
+                or re.fullmatch(
+                    r"sha256-v1:[0-9a-f]{64}",
+                    str(document["diagnostic_root"]),
+                )
+                is None
+                or not isinstance(document["diagnostic_summary"], str)
+                or not document["diagnostic_summary"].strip()
+                or len(
+                    document["diagnostic_summary"].encode("utf-8")
+                )
+                > V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+                or document["recovery"]
+                != v2_runner_failure_policy(terminal)[1]
+                or document["no_claim"] != "the v2 suite did not pass"
+            )
+        )
+        or (
+            terminal != "Pass"
+            and failure_scope not in {"assertion", "suite-boundary"}
+        )
+    ):
+        raise EvidenceFailed("v2 self-test terminal contract differs")
+    verify_semantic_root(document, label="v2 self-test terminal")
+
+
+def v2_test_terminal_document(
+    *,
+    manifest: Mapping[str, Any],
+    registry: Mapping[str, Any],
+    results: Sequence[Mapping[str, Any]],
+    event_roots: Sequence[str],
+    selected: str | None,
+    terminal: str,
+    first_divergence: str | None,
+    diagnostic_root: str | None,
+    diagnostic_summary: str | None,
+    recovery: str,
+    failure_scope: str | None,
+) -> dict[str, Any]:
+    _, validated_results = v2_validate_suite_expected_results(
+        manifest,
+        selected=selected,
+        expected_results=results,
+    )
+    document = v2_rooted(
+        {
+            "schema": V2_TEST_TERMINAL_SCHEMA,
+            "terminal": terminal,
+            "exit_code": TERMINAL_EXIT[terminal],
+            "selected": selected,
+            "manifest_root": manifest["semantic_root"],
+            "manifest_content_identity": manifest["content_identity"],
+            "harness_contract_identity": manifest[
+                "harness_contract_identity"
+            ],
+            "case_count": len(validated_results),
+            "assertion_count": len(validated_results),
+            "check_count": sum(
+                int(row["check_count"]) for row in validated_results
+            ),
+            "ordered_case_ids": [
+                row["case_id"] for row in validated_results
+            ],
+            "ordered_assertion_ids": [
+                row["assertion_id"] for row in validated_results
+            ],
+            "ordered_case_roots": [
+                row["semantic_root"] for row in validated_results
+            ],
+            "ordered_event_roots": list(event_roots),
+            "compiled_executor_ids_root": semantic_root(sorted(registry)),
+            "skipped_assertions": [],
+            "aggregate_count_only": False,
+            "failure_scope": failure_scope,
+            "first_divergence": first_divergence,
+            "diagnostic_root": diagnostic_root,
+            "diagnostic_summary": diagnostic_summary,
+            "recovery": recovery,
+            "no_claim": (
+                "the suite proves only its "
+                f"{len(validated_results)} selected bounded "
+                "executable contracts; it does not mutate or complete live "
+                "target Beads"
+                if terminal == "Pass"
+                else "the v2 suite did not pass"
+            ),
+        }
+    )
+    v2_validate_test_terminal_document(
+        document,
+        accepted_manifest=manifest,
+        expected_results=validated_results,
+        expected_event_roots=event_roots,
+        expected_terminal=terminal,
+        expected_first_divergence=first_divergence,
+        expected_diagnostic_root=diagnostic_root,
+        expected_diagnostic_summary=diagnostic_summary,
+        expected_recovery=recovery,
+        expected_failure_scope=failure_scope,
+    )
+    return document
 
 
 def run_v2_self_tests(
@@ -36433,7 +41775,27 @@ def run_v2_self_tests(
     *,
     selected: str | None = None,
 ) -> dict[str, Any]:
+    accepted_manifest = v2_clone_runner_manifest(manifest)
+    manifest = accepted_manifest
     registry = v2_build_executor_registry(manifest)
+    accepted_obligations = v2_validate_check_obligation_registry(
+        manifest["case"],
+        manifest["check_obligations"],
+        error_type=EvidenceFailed,
+    )
+    obligations_by_assertion: dict[str, dict[str, Any]] = {}
+    for manifest_case in manifest["case"]:
+        manifest_assertion_id = str(manifest_case["assertion_id"])
+        accepted = v2_validate_check_obligation(
+            manifest_case,
+            accepted_obligations.get(manifest_assertion_id),
+            error_type=EvidenceFailed,
+        )
+        obligations_by_assertion[manifest_assertion_id] = {
+            "case_id": str(accepted["case_id"]),
+            "check_count": int(accepted["check_count"]),
+            "ordered_check_ids": list(accepted["ordered_check_ids"]),
+        }
     cases = [
         row
         for row in manifest["case"]
@@ -36444,53 +41806,141 @@ def run_v2_self_tests(
     results: list[dict[str, Any]] = []
     event_roots: list[str] = []
     sequence = 0
+
+    def fail_suite_boundary(
+        caught_error: BaseException,
+        *,
+        fallback: str,
+    ) -> None:
+        if isinstance(caught_error, CancelledDrained):
+            error: HarnessError = caught_error
+        elif isinstance(caught_error, KeyboardInterrupt):
+            error = CancelledDrained(
+                "keyboard cancellation drained at the suite boundary"
+            )
+        elif isinstance(caught_error, HarnessError):
+            error = caught_error
+        else:
+            error = HarnessError(
+                f"{type(caught_error).__name__}: {caught_error}"
+            )
+        diagnostic = v2_runner_diagnostic(error)
+        diagnostic_summary = v2_bounded_diagnostic_summary(diagnostic)
+        first_divergence = v2_bounded_first_divergence(
+            diagnostic,
+            fallback=fallback,
+        )
+        _, recovery = v2_runner_failure_policy(error.terminal)
+        suite_failure = v2_test_terminal_document(
+            manifest=manifest,
+            registry=registry,
+            results=results,
+            event_roots=event_roots,
+            selected=selected,
+            terminal=error.terminal,
+            first_divergence=first_divergence,
+            diagnostic_root=text_root(diagnostic),
+            diagnostic_summary=diagnostic_summary,
+            recovery=recovery,
+            failure_scope="suite-boundary",
+        )
+        v2_emit_test_document(
+            suite_failure,
+            accepted_manifest=manifest,
+            expected_results=results,
+            expected_event_roots=event_roots,
+            expected_terminal=error.terminal,
+            expected_first_divergence=first_divergence,
+            expected_diagnostic_root=text_root(diagnostic),
+            expected_diagnostic_summary=diagnostic_summary,
+            expected_recovery=recovery,
+            expected_failure_scope="suite-boundary",
+        )
+        raise SystemExit(TERMINAL_EXIT[error.terminal])
+
     for case in cases:
-        check_cancel()
+        try:
+            check_cancel()
+        except BaseException as caught_error:
+            fail_suite_boundary(
+                caught_error,
+                fallback="before-assertion-start",
+            )
+        assertion_id = str(case["assertion_id"])
+        obligation = v2_validate_check_obligation(
+            case,
+            obligations_by_assertion.get(assertion_id),
+            error_type=EvidenceFailed,
+        )
         start = v2_test_log_event(
             case=case,
+            obligation=obligation,
+            harness_contract_identity=manifest["harness_contract_identity"],
             sequence=sequence,
             stage="assertion-start",
         )
-        v2_emit_test_document(start)
+        v2_emit_test_document(
+            start,
+            accepted_manifest=manifest,
+            expected_case=case,
+            expected_obligation=obligation,
+            expected_sequence=sequence,
+            expected_stage="assertion-start",
+            expected_terminal=None,
+        )
         event_roots.append(start["semantic_root"])
         sequence += 1
         executor = registry.get(str(case["assertion_id"]))
-        if executor is None:
-            failure = EvidenceFailed(
-                f"{case['assertion_id']} has no exact compiled executor"
-            )
-            terminal = failure.terminal
-            failed = v2_test_log_event(
-                case=case,
-                sequence=sequence,
-                stage="assertion-terminal",
-                terminal=terminal,
-            )
-            v2_emit_test_document(failed)
-            event_roots.append(failed["semantic_root"])
-            suite_failure = v2_rooted(
-                {
-                    "schema": V2_TEST_TERMINAL_SCHEMA,
-                    "terminal": terminal,
-                    "exit_code": TERMINAL_EXIT[terminal],
-                    "selected": selected,
-                    "manifest_root": manifest["semantic_root"],
-                    "completed_case_roots": [
-                        row["semantic_root"] for row in results
-                    ],
-                    "ordered_event_roots": event_roots,
-                    "first_divergence": str(case["assertion_id"]),
-                    "recovery": "IMPLEMENT_COMPILED_EXECUTOR",
-                    "no_claim": "the v2 suite did not pass",
-                }
-            )
-            v2_emit_test_document(suite_failure)
-            raise SystemExit(TERMINAL_EXIT[terminal])
         try:
-            result = executor(case, manifest)
-            result = v2_validate_assertion_result(case, result)
+            if executor is None:
+                raise EvidenceFailed(
+                    f"{case['assertion_id']} has no exact compiled executor"
+                )
+            executor_manifest = v2_clone_runner_manifest(manifest)
+            executor_case = strict_json_loads(
+                canonical_bytes(case),
+                label=f"{case['assertion_id']} executor case snapshot",
+                require_canonical=True,
+            )
+            executor_manifest_before = canonical_bytes(executor_manifest)
+            executor_case_before = canonical_bytes(executor_case)
+            result = executor(executor_case, executor_manifest)
+            check_cancel()
+            try:
+                executor_manifest_after = canonical_bytes(
+                    executor_manifest
+                )
+                executor_case_after = canonical_bytes(executor_case)
+            except (
+                TypeError,
+                ValueError,
+                OverflowError,
+                RecursionError,
+            ) as error:
+                raise EvidenceFailed(
+                    f"{case['assertion_id']} made its accepted case or "
+                    "manifest snapshot noncanonical"
+                ) from error
+            if (
+                executor_manifest_after != executor_manifest_before
+                or executor_case_after != executor_case_before
+            ):
+                raise EvidenceFailed(
+                    f"{case['assertion_id']} mutated its accepted case or "
+                    "manifest snapshot"
+                )
+            result = v2_validate_assertion_result(
+                case,
+                result,
+                obligation,
+            )
+            check_cancel()
             terminal_event = v2_test_log_event(
                 case=case,
+                obligation=obligation,
+                harness_contract_identity=manifest[
+                    "harness_contract_identity"
+                ],
                 sequence=sequence,
                 stage="assertion-terminal",
                 result=result,
@@ -36500,16 +41950,49 @@ def run_v2_self_tests(
                 canonical_bytes(terminal_event),
                 label=f"{case['assertion_id']} terminal event",
             )
-        except Exception as caught_error:
-            internal_fault = not isinstance(caught_error, HarnessError)
-            error = (
-                caught_error
-                if isinstance(caught_error, HarnessError)
-                else HarnessError(
+            v2_emit_test_document(
+                result,
+                accepted_manifest=manifest,
+                expected_case=case,
+                expected_obligation=obligation,
+            )
+            v2_emit_test_document(
+                terminal_event,
+                accepted_manifest=manifest,
+                expected_case=case,
+                expected_obligation=obligation,
+                expected_sequence=sequence,
+                expected_stage="assertion-terminal",
+                expected_result=result,
+                expected_terminal="Pass",
+            )
+            event_roots.append(terminal_event["semantic_root"])
+            sequence += 1
+            results.append(result)
+        except OutputPublicationFailed:
+            raise
+        except BaseException as caught_error:
+            cancelled = isinstance(
+                caught_error,
+                (KeyboardInterrupt, CancelledDrained),
+            )
+            internal_fault = (
+                not isinstance(caught_error, HarnessError)
+                and not cancelled
+            )
+            if isinstance(caught_error, CancelledDrained):
+                error: HarnessError = caught_error
+            elif isinstance(caught_error, KeyboardInterrupt):
+                error: HarnessError = CancelledDrained(
+                    "keyboard cancellation drained at the assertion boundary"
+                )
+            elif isinstance(caught_error, HarnessError):
+                error = caught_error
+            else:
+                error = HarnessError(
                     f"{type(caught_error).__name__}: {caught_error}"
                 )
-            )
-            diagnostic = str(error)
+            diagnostic = v2_runner_diagnostic(error)
             diagnostic_summary = v2_bounded_diagnostic_summary(diagnostic)
             first_divergence = v2_bounded_first_divergence(
                 diagnostic,
@@ -36517,22 +42000,22 @@ def run_v2_self_tests(
             )
             failed = v2_test_log_event(
                 case=case,
+                obligation=obligation,
+                harness_contract_identity=manifest[
+                    "harness_contract_identity"
+                ],
                 sequence=sequence,
                 stage="assertion-terminal",
                 terminal=error.terminal,
             )
             failed["first_divergence"] = first_divergence
-            failed["recovery"] = (
-                "FIX_INTERNAL_EXECUTOR_FAULT"
-                if internal_fault
-                else "FIX_ASSERTION_OR_SUBJECT"
+            (
+                failed["result_category"],
+                failed["recovery"],
+            ) = v2_runner_failure_policy(
+                error.terminal
             )
-            failed["result_category"] = (
-                "INTERNAL_EXECUTOR_FAULT"
-                if internal_fault
-                else "ASSERTION_FAILED"
-            )
-            failed["semantic_projection"] = {
+            failure_projection = {
                 "diagnostic_code": first_divergence,
                 "diagnostic_root": text_root(diagnostic),
                 "diagnostic_summary": diagnostic_summary,
@@ -36542,72 +42025,323 @@ def run_v2_self_tests(
                     else None
                 ),
                 "subject": case["subject"],
+                "check_obligation_root": v2_check_obligation_root(
+                    case,
+                    obligation,
+                ),
+                "harness_contract_identity": manifest[
+                    "harness_contract_identity"
+                ],
             }
+            failed["semantic_projection"] = failure_projection
             failed = v2_rooted(failed)
-            v2_emit_test_document(failed)
-            event_roots.append(failed["semantic_root"])
-            suite_failure = v2_rooted(
-                {
-                    "schema": V2_TEST_TERMINAL_SCHEMA,
-                    "terminal": error.terminal,
-                    "exit_code": TERMINAL_EXIT[error.terminal],
-                    "selected": selected,
-                    "manifest_root": manifest["semantic_root"],
-                    "completed_case_roots": [
-                        row["semantic_root"] for row in results
-                    ],
-                    "ordered_event_roots": event_roots,
-                    "first_divergence": first_divergence,
-                    "diagnostic_root": text_root(diagnostic),
-                    "diagnostic_summary": diagnostic_summary,
-                    "recovery": (
-                        "FIX_INTERNAL_EXECUTOR_FAULT"
-                        if internal_fault
-                        else "FIX_ASSERTION_OR_SUBJECT"
-                    ),
-                    "no_claim": "the v2 suite did not pass",
-                }
+            v2_emit_test_document(
+                failed,
+                accepted_manifest=manifest,
+                expected_case=case,
+                expected_obligation=obligation,
+                expected_sequence=sequence,
+                expected_stage="assertion-terminal",
+                expected_projection=failure_projection,
+                expected_terminal=error.terminal,
             )
-            v2_emit_test_document(suite_failure)
+            event_roots.append(failed["semantic_root"])
+            suite_failure = v2_test_terminal_document(
+                manifest=manifest,
+                registry=registry,
+                results=results,
+                event_roots=event_roots,
+                selected=selected,
+                terminal=error.terminal,
+                first_divergence=first_divergence,
+                diagnostic_root=text_root(diagnostic),
+                diagnostic_summary=diagnostic_summary,
+                recovery=failed["recovery"],
+                failure_scope="assertion",
+            )
+            v2_emit_test_document(
+                suite_failure,
+                accepted_manifest=manifest,
+                expected_results=results,
+                expected_event_roots=event_roots,
+                expected_terminal=error.terminal,
+                expected_first_divergence=first_divergence,
+                expected_diagnostic_root=text_root(diagnostic),
+                expected_diagnostic_summary=diagnostic_summary,
+                expected_recovery=failed["recovery"],
+                expected_failure_scope="assertion",
+            )
             raise SystemExit(TERMINAL_EXIT[error.terminal])
-        v2_emit_test_document(result)
-        v2_emit_test_document(terminal_event)
-        event_roots.append(terminal_event["semantic_root"])
-        sequence += 1
-        results.append(result)
-    terminal = v2_rooted(
+    try:
+        check_cancel()
+    except BaseException as caught_error:
+        fail_suite_boundary(
+            caught_error,
+            fallback="before-suite-terminal",
+        )
+    terminal = v2_test_terminal_document(
+        manifest=manifest,
+        registry=registry,
+        results=results,
+        event_roots=event_roots,
+        selected=selected,
+        terminal="Pass",
+        first_divergence=None,
+        diagnostic_root=None,
+        diagnostic_summary=None,
+        recovery="NOT_REQUIRED",
+        failure_scope=None,
+    )
+    v2_emit_test_document(
+        terminal,
+        accepted_manifest=manifest,
+        expected_results=results,
+        expected_event_roots=event_roots,
+        expected_terminal="Pass",
+        expected_first_divergence=None,
+        expected_diagnostic_root=None,
+        expected_diagnostic_summary=None,
+        expected_recovery="NOT_REQUIRED",
+        expected_failure_scope=None,
+    )
+    return terminal
+
+
+def v2_raw_invocation_mode(arguments: Sequence[str]) -> str | None:
+    for argument in arguments:
+        for option, mode in (
+            ("--self-test-v2", "self-test-v2"),
+            ("--case-v2", "case-v2"),
+            ("--review-plan", "review-plan"),
+            ("--history-plan", "history-plan"),
+        ):
+            if argument == option or argument.startswith(option + "="):
+                return mode
+    return None
+
+
+V2_PREFLIGHT_RECOVERY_BY_TERMINAL = {
+    "UsageRefused": "CORRECT_ARGUMENTS_AND_RETRY",
+    "InputRefused": "CORRECT_ACCEPTED_INPUT_AND_RETRY",
+    "NoData": "PROVIDE_REQUIRED_DATA_AND_RETRY",
+    "EvidenceFailed": "FIX_HARNESS_OR_CONTRACT_AND_RETRY",
+    "CancelledDrained": "RETRY_AFTER_CANCELLATION",
+    "InfrastructureFailed": "RESTORE_INFRASTRUCTURE_AND_RETRY",
+    "InternalFault": "FIX_INTERNAL_FAULT_AND_RETRY",
+}
+
+V2_PREFLIGHT_MODES = frozenset(
+    {
+        "self-test-v2",
+        "case-v2",
+        "review-plan",
+        "history-plan",
+        "replay-v2",
+    }
+)
+
+V2_EXECUTION_CONTEXT_BY_MODE = {
+    "self-test-v2": ("TEST_RUNNER", "NOT_APPLICABLE"),
+    "case-v2": ("TEST_RUNNER", "NOT_APPLICABLE"),
+    "review-plan": (
+        "LIVE_PLANNER",
+        "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX",
+    ),
+    "history-plan": (
+        "LIVE_PLANNER",
+        "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX",
+    ),
+    "replay-v2": (
+        "OFFLINE_REPLAY",
+        "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX",
+    ),
+}
+
+
+def v2_validate_preflight_terminal_document(
+    document: Mapping[str, Any],
+) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != V2_PREFLIGHT_TERMINAL_FIELDS
+    ):
+        raise EvidenceFailed("v2 preflight terminal has a non-closed schema")
+    if (
+        document["schema"] != V2_PREFLIGHT_TERMINAL_SCHEMA
+        or not isinstance(document["terminal"], str)
+        or document["terminal"] not in TERMINAL_EXIT
+        or document["terminal"] == "Pass"
+        or document["exit_code"]
+        != TERMINAL_EXIT[document["terminal"]]
+        or not isinstance(document["mode"], str)
+        or document["mode"] not in V2_PREFLIGHT_MODES
+        or not isinstance(document["first_divergence"], str)
+        or not document["first_divergence"].strip()
+        or len(document["first_divergence"].encode("utf-8"))
+        > V2_FIRST_DIVERGENCE_BYTES_CAP
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            str(document["diagnostic_root"]),
+        )
+        is None
+        or not isinstance(document["diagnostic_summary"], str)
+        or not document["diagnostic_summary"].strip()
+        or len(document["diagnostic_summary"].encode("utf-8"))
+        > V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+        or document["recovery"]
+        != V2_PREFLIGHT_RECOVERY_BY_TERMINAL.get(
+            document["terminal"]
+        )
+        or document["no_claim"]
+        != (
+            "the preflight terminal records a typed failure before accepted "
+            "v2 execution and mints no assertion, artifact, tracker, or "
+            "release authority"
+        )
+    ):
+        raise EvidenceFailed("v2 preflight terminal contract differs")
+    verify_semantic_root(document, label="v2 preflight terminal")
+
+
+def v2_preflight_terminal_document(
+    error: BaseException,
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    terminal = (
+        error.terminal
+        if isinstance(error, HarnessError)
+        else "InternalFault"
+    )
+    diagnostic = f"{type(error).__name__}: {error}"
+    diagnostic_summary = v2_bounded_diagnostic_summary(diagnostic)
+    recovery = V2_PREFLIGHT_RECOVERY_BY_TERMINAL.get(
+        terminal,
+        "FIX_INTERNAL_FAULT_AND_RETRY",
+    )
+    document = v2_rooted(
         {
-            "schema": V2_TEST_TERMINAL_SCHEMA,
-            "terminal": "Pass",
-            "exit_code": 0,
-            "selected": selected,
-            "manifest_root": manifest["semantic_root"],
-            "manifest_content_identity": manifest["content_identity"],
-            "case_count": len(results),
-            "assertion_count": len(results),
-            "check_count": sum(int(row["check_count"]) for row in results),
-            "ordered_case_ids": [row["case_id"] for row in results],
-            "ordered_assertion_ids": [
-                row["assertion_id"] for row in results
-            ],
-            "ordered_case_roots": [
-                row["semantic_root"] for row in results
-            ],
-            "ordered_event_roots": event_roots,
-            "compiled_executor_ids_root": semantic_root(sorted(registry)),
-            "skipped_assertions": [],
-            "aggregate_count_only": False,
-            "first_divergence": None,
-            "recovery": "NOT_REQUIRED",
+            "schema": V2_PREFLIGHT_TERMINAL_SCHEMA,
+            "terminal": terminal,
+            "exit_code": TERMINAL_EXIT[terminal],
+            "mode": mode,
+            "first_divergence": v2_bounded_first_divergence(
+                diagnostic,
+                fallback=mode,
+            ),
+            "diagnostic_root": text_root(diagnostic),
+            "diagnostic_summary": diagnostic_summary,
+            "recovery": recovery,
             "no_claim": (
-                f"the suite proves only its {len(results)} selected bounded "
-                "executable contracts; "
-                "it does not mutate or complete live target Beads"
+                "the preflight terminal records a typed failure before "
+                "accepted v2 execution and mints no assertion, artifact, "
+                "tracker, or release authority"
             ),
         }
     )
-    v2_emit_test_document(terminal)
-    return terminal
+    v2_validate_preflight_terminal_document(document)
+    return document
+
+
+def v2_validate_execution_terminal_document(
+    document: Mapping[str, Any],
+) -> None:
+    if not isinstance(document, dict):
+        raise EvidenceFailed("v2 execution terminal is not an object")
+    terminal = document.get("terminal")
+    mode = document.get("mode")
+    if (
+        set(document) != V2_EXECUTION_TERMINAL_FIELDS
+        or document.get("schema") != V2_EXECUTION_TERMINAL_SCHEMA
+        or not isinstance(terminal, str)
+        or terminal not in TERMINAL_EXIT
+        or terminal == "Pass"
+        or document["exit_code"] != TERMINAL_EXIT[terminal]
+        or not isinstance(mode, str)
+        or mode not in V2_EXECUTION_CONTEXT_BY_MODE
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            str(document["manifest_root"]),
+        )
+        is None
+        or not isinstance(document["phase"], str)
+        or document["phase"]
+        != V2_EXECUTION_CONTEXT_BY_MODE[mode][0]
+        or not isinstance(document["artifact_state"], str)
+        or document["artifact_state"]
+        != V2_EXECUTION_CONTEXT_BY_MODE[mode][1]
+        or type(document["complete_evidence_bundle"]) is not bool
+        or document["complete_evidence_bundle"] is not False
+        or not isinstance(document["first_divergence"], str)
+        or not document["first_divergence"].strip()
+        or len(document["first_divergence"].encode("utf-8"))
+        > V2_FIRST_DIVERGENCE_BYTES_CAP
+        or re.fullmatch(
+            r"sha256-v1:[0-9a-f]{64}",
+            str(document["diagnostic_root"]),
+        )
+        is None
+        or not isinstance(document["diagnostic_summary"], str)
+        or not document["diagnostic_summary"].strip()
+        or len(document["diagnostic_summary"].encode("utf-8"))
+        > V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
+        or document["recovery"]
+        != V2_PREFLIGHT_RECOVERY_BY_TERMINAL.get(terminal)
+        or document["no_claim"]
+        != (
+            "the execution terminal records a failure after accepted v2 "
+            "manifest loading; evidence may be incomplete and any reserved "
+            "artifact prefix is not claimed complete; it mints no tracker, "
+            "implementation, product, or release authority"
+        )
+    ):
+        raise EvidenceFailed("v2 execution terminal contract differs")
+    verify_semantic_root(document, label="v2 execution terminal")
+
+
+def v2_execution_terminal_document(
+    error: BaseException,
+    *,
+    context: Mapping[str, str],
+) -> dict[str, Any]:
+    terminal = (
+        error.terminal
+        if isinstance(error, HarnessError)
+        else "InternalFault"
+    )
+    diagnostic = f"{type(error).__name__}: {error}"
+    document = v2_rooted(
+        {
+            "schema": V2_EXECUTION_TERMINAL_SCHEMA,
+            "terminal": terminal,
+            "exit_code": TERMINAL_EXIT[terminal],
+            "mode": context["mode"],
+            "manifest_root": context["manifest_root"],
+            "phase": context["phase"],
+            "artifact_state": context["artifact_state"],
+            "complete_evidence_bundle": False,
+            "first_divergence": v2_bounded_first_divergence(
+                diagnostic,
+                fallback=context["phase"],
+            ),
+            "diagnostic_root": text_root(diagnostic),
+            "diagnostic_summary": v2_bounded_diagnostic_summary(
+                diagnostic
+            ),
+            "recovery": V2_PREFLIGHT_RECOVERY_BY_TERMINAL.get(
+                terminal,
+                "FIX_INTERNAL_FAULT_AND_RETRY",
+            ),
+            "no_claim": (
+                "the execution terminal records a failure after accepted v2 "
+                "manifest loading; evidence may be incomplete and any "
+                "reserved artifact prefix is not claimed complete; it mints "
+                "no tracker, implementation, product, or release authority"
+            ),
+        }
+    )
+    v2_validate_execution_terminal_document(document)
+    return document
 
 
 class HarnessArgumentParser(argparse.ArgumentParser):
@@ -36745,7 +42479,53 @@ def require_artifact_dir(arguments: argparse.Namespace) -> str:
     return arguments.artifact_dir
 
 
+def v2_abort_after_output_failure(
+    error: OutputPublicationFailed,
+) -> None:
+    commit_state = (
+        str(error.bytes_committed)
+        if error.bytes_committed is not None
+        else "unknown"
+    )
+    try:
+        sys.stderr.write(
+            "InfrastructureFailed: canonical JSONL output may be incomplete; "
+            f"bytes_committed={commit_state}; output was not retried\n"
+        )
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    raise SystemExit(TERMINAL_EXIT["InfrastructureFailed"])
+
+
+def v2_publish_outer_document(document: Mapping[str, Any]) -> None:
+    try:
+        json_stdout(document)
+    except OutputPublicationFailed as error:
+        v2_abort_after_output_failure(error)
+
+
+def v2_outer_failure_document(
+    error: BaseException,
+    *,
+    raw_mode: str | None,
+    execution_context: Mapping[str, str] | None,
+) -> dict[str, Any] | None:
+    if execution_context is not None:
+        return v2_execution_terminal_document(
+            error,
+            context=execution_context,
+        )
+    if raw_mode is not None:
+        return v2_preflight_terminal_document(
+            error,
+            mode=raw_mode,
+        )
+    return None
+
+
 def main(arguments: Sequence[str]) -> int:
+    global _v2_outer_execution_context, _v2_outer_mode
     parsed = parse_arguments(arguments)
     v2_auxiliary_options = {
         "--review-receipts",
@@ -36767,11 +42547,29 @@ def main(arguments: Sequence[str]) -> int:
         }:
             raise UsageRefused("v2 test-runner modes do not accept planner options")
         manifest_v2 = load_case_manifest_v2()
+        _v2_outer_execution_context = {
+            "mode": (
+                "self-test-v2" if parsed.self_test_v2 else "case-v2"
+            ),
+            "manifest_root": manifest_v2["semantic_root"],
+            "phase": "TEST_RUNNER",
+            "artifact_state": "NOT_APPLICABLE",
+        }
         run_v2_self_tests(manifest_v2, selected=parsed.case_v2)
         return 0
 
     if parsed.review_plan or parsed.history_plan:
         manifest_v2 = load_case_manifest_v2()
+        _v2_outer_execution_context = {
+            "mode": (
+                "review-plan" if parsed.review_plan else "history-plan"
+            ),
+            "manifest_root": manifest_v2["semantic_root"],
+            "phase": "LIVE_PLANNER",
+            "artifact_state": (
+                "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+            ),
+        }
         synopsis = v2_execute_live_plan(
             mode="review-plan" if parsed.review_plan else "history-plan",
             parsed=parsed,
@@ -36783,14 +42581,25 @@ def main(arguments: Sequence[str]) -> int:
     if parsed.replay:
         schema = peek_replay_schema(parsed.artifact_root, parsed.replay)
         if schema == V2_TERMINAL_SCHEMA:
+            _v2_outer_mode = "replay-v2"
             if parsed.provided_options & v2_auxiliary_options:
                 raise UsageRefused("v2 replay does not accept live planner options")
             artifact_dir = require_v2_artifact_grammar(parsed)
+            manifest_v2 = load_case_manifest_v2()
+            _v2_outer_execution_context = {
+                "mode": "replay-v2",
+                "manifest_root": manifest_v2["semantic_root"],
+                "phase": "OFFLINE_REPLAY",
+                "artifact_state": (
+                    "MAY_CONTAIN_INCOMPLETE_RESERVED_PREFIX"
+                ),
+            }
             json_stdout(
                 v2_replay_bundle(
                     artifact_root=parsed.artifact_root,
                     input_dir=parsed.replay,
                     output_dir=artifact_dir,
+                    accepted_manifest=manifest_v2,
                 )
             )
             return 0
@@ -36919,12 +42728,23 @@ def main(arguments: Sequence[str]) -> int:
     raise UsageRefused("no mode selected")
 
 
+_v2_outer_mode = v2_raw_invocation_mode(sys.argv[1:])
 try:
     main_exit = main(sys.argv[1:])
+except OutputPublicationFailed as error:
+    v2_abort_after_output_failure(error)
 except PublishedV2Refusal as error:
-    json_stdout(error.document)
+    v2_publish_outer_document(error.document)
     raise SystemExit(TERMINAL_EXIT[error.terminal])
 except HarnessError as error:
+    v2_failure = v2_outer_failure_document(
+        error,
+        raw_mode=_v2_outer_mode,
+        execution_context=_v2_outer_execution_context,
+    )
+    if v2_failure is not None:
+        v2_publish_outer_document(v2_failure)
+        raise SystemExit(TERMINAL_EXIT[error.terminal])
     mode = next(
         (
             sys.argv[index].lstrip("-")
@@ -36933,7 +42753,7 @@ except HarnessError as error:
         ),
         "unknown",
     )
-    json_stdout(
+    v2_publish_outer_document(
         terminal_row(
             error.terminal,
             mode=mode,
@@ -36942,7 +42762,23 @@ except HarnessError as error:
     )
     raise SystemExit(TERMINAL_EXIT[error.terminal])
 except KeyboardInterrupt:
-    json_stdout(
+    cancelled = CancelledDrained(
+        (
+            "keyboard cancellation drained after accepted v2 manifest "
+            "loading"
+            if _v2_outer_execution_context is not None
+            else "keyboard cancellation drained before accepted v2 execution"
+        )
+    )
+    v2_failure = v2_outer_failure_document(
+        cancelled,
+        raw_mode=_v2_outer_mode,
+        execution_context=_v2_outer_execution_context,
+    )
+    if v2_failure is not None:
+        v2_publish_outer_document(v2_failure)
+        raise SystemExit(TERMINAL_EXIT["CancelledDrained"])
+    v2_publish_outer_document(
         terminal_row(
             "CancelledDrained",
             mode="unknown",
@@ -36953,7 +42789,15 @@ except KeyboardInterrupt:
 except SystemExit:
     raise
 except BaseException as error:
-    json_stdout(
+    v2_failure = v2_outer_failure_document(
+        error,
+        raw_mode=_v2_outer_mode,
+        execution_context=_v2_outer_execution_context,
+    )
+    if v2_failure is not None:
+        v2_publish_outer_document(v2_failure)
+        raise SystemExit(TERMINAL_EXIT["InternalFault"])
+    v2_publish_outer_document(
         terminal_row(
             "InternalFault",
             mode="unknown",
