@@ -28044,6 +28044,14 @@ V2_DATACLASS_SENTINEL_IDENTITIES = tuple(
     )
     if sentinel is not None
 )
+V2_REFUSAL_TRUSTED_RUNTIME_VALUE_IDENTITIES = (
+    ("typing.Any", Any),
+    ("typing.Callable", Callable),
+    ("typing.Iterable", Iterable),
+    ("typing.Iterator", Iterator),
+    ("typing.Mapping", Mapping),
+    ("typing.Sequence", Sequence),
+)
 V2_REFUSAL_TRUSTED_MODULES = (
     argparse,
     builtins,
@@ -28170,8 +28178,9 @@ def v2_code_access_analysis(
     for index, instruction in enumerate(instructions):
         if instruction.opname in V2_IMPORT_OPS:
             raise EvidenceFailed(
-                "refusal callback contains import bytecode; provide an explicit "
-                "bounded external-state projection"
+                "refusal callback contains import bytecode in "
+                f"{code.co_qualname}; provide an explicit bounded external-state "
+                "projection"
             )
         if (
             instruction.opname in {"LOAD_ATTR", "LOAD_METHOD"}
@@ -28200,11 +28209,53 @@ def v2_code_access_analysis(
                 module_paths[name].add(tuple(path))
             else:
                 bare_global_names.add(name)
-    for constant in code.co_consts:
-        if not isinstance(constant, types.CodeType):
+    nested_by_local: dict[str, types.CodeType] = {}
+    immediately_invoked_nested: list[types.CodeType] = []
+    for index, instruction in enumerate(instructions):
+        if instruction.opname != "MAKE_FUNCTION":
             continue
+        nested_code = next(
+            (
+                prior.argval
+                for prior in reversed(instructions[max(0, index - 3) : index])
+                if prior.opname == "LOAD_CONST"
+                and isinstance(prior.argval, types.CodeType)
+            ),
+            None,
+        )
+        if nested_code is None:
+            continue
+        if (
+            index + 1 < len(instructions)
+            and instructions[index + 1].opname == "STORE_FAST"
+            and isinstance(instructions[index + 1].argval, str)
+        ):
+            nested_by_local[instructions[index + 1].argval] = nested_code
+        elif any(
+            following.opname == "CALL"
+            for following in instructions[index + 1 : index + 6]
+        ):
+            immediately_invoked_nested.append(nested_code)
+    called_locals = {
+        str(instruction.argval)
+        for index, instruction in enumerate(instructions)
+        if instruction.opname in {"LOAD_FAST", "LOAD_DEREF"}
+        and isinstance(instruction.argval, str)
+        and any(
+            following.opname == "CALL"
+            for following in instructions[index + 1 : index + 6]
+        )
+    }
+    invoked_nested_codes = [
+        *immediately_invoked_nested,
+        *(
+            nested_by_local[name]
+            for name in sorted(called_locals.intersection(nested_by_local))
+        ),
+    ]
+    for nested_code in invoked_nested_codes:
         nested = v2_code_access_analysis(
-            constant,
+            nested_code,
             context=context,
             depth=depth + 1,
         )
@@ -28448,11 +28499,24 @@ def v2_trusted_callable_projection(
                 depth=depth + 1,
             ),
             "closure": [
-                v2_state_projection_value(
-                    cell.cell_contents,
-                    seen=seen,
-                    context=context,
-                    depth=depth + 1,
+                (
+                    {
+                        "kind": "trusted-module-binding",
+                        "module": str(
+                            v2_raw_module_dict(cell.cell_contents).get(
+                                "__name__"
+                            )
+                            or ""
+                        ),
+                    }
+                    if isinstance(cell.cell_contents, types.ModuleType)
+                    and v2_is_trusted_module(cell.cell_contents)
+                    else v2_state_projection_value(
+                        cell.cell_contents,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
                 )
                 for cell in (value.__closure__ or ())
             ],
@@ -28502,8 +28566,9 @@ def v2_project_module_value(
     if v2_is_trusted_module(value):
         if bare_reference or not module_paths:
             raise EvidenceFailed(
-                "refusal callback uses a trusted module dynamically; provide "
-                "an explicit bounded external-state projection"
+                f"refusal callback uses trusted module {module_name} "
+                "dynamically; provide an explicit bounded external-state "
+                "projection"
             )
         rows: list[dict[str, Any]] = []
         for raw_path in module_paths:
@@ -28520,19 +28585,35 @@ def v2_project_module_value(
                 current,
                 (types.FunctionType, types.BuiltinFunctionType),
             ):
-                state = v2_trusted_callable_projection(
-                    current,
-                    seen=seen,
-                    context=context,
-                    depth=depth + 1,
-                )
+                try:
+                    state = v2_trusted_callable_projection(
+                        current,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                except HarnessError as error:
+                    path_text = ".".join(path)
+                    raise EvidenceFailed(
+                        "refusal-state trusted module callable "
+                        f"{module_name}.{path_text} is not bounded: "
+                        f"{v2_bounded_diagnostic_summary(error)}"
+                    ) from error
             else:
-                state = v2_state_projection_value(
-                    current,
-                    seen=seen,
-                    context=context,
-                    depth=depth + 1,
-                )
+                try:
+                    state = v2_state_projection_value(
+                        current,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                except HarnessError as error:
+                    path_text = ".".join(path)
+                    raise EvidenceFailed(
+                        "refusal-state trusted module value "
+                        f"{module_name}.{path_text} is not bounded: "
+                        f"{v2_bounded_diagnostic_summary(error)}"
+                    ) from error
             rows.append({"path": list(path), "state": state})
         v2_refusal_charge(context, "items", len(rows))
         return {
@@ -28557,21 +28638,26 @@ def v2_project_module_value(
     if any(not isinstance(name, str) for name in names):
         raise EvidenceFailed("refusal-state module has a non-string attribute")
     v2_refusal_charge(context, "items", len(names))
+    module_attribute_rows: list[dict[str, Any]] = []
+    for name in names:
+        try:
+            state = v2_state_projection_value(
+                attributes[name],
+                seen=seen,
+                context=context,
+                depth=depth + 1,
+            )
+        except HarnessError as error:
+            raise EvidenceFailed(
+                "refusal-state custom module attribute "
+                f"{module_name}.{name} is not bounded: "
+                f"{v2_bounded_diagnostic_summary(error)}"
+            ) from error
+        module_attribute_rows.append({"name": name, "state": state})
     return {
         "kind": "custom-module",
         "module": module_name,
-        "attributes": [
-            {
-                "name": name,
-                "state": v2_state_projection_value(
-                    attributes[name],
-                    seen=seen,
-                    context=context,
-                    depth=depth + 1,
-                ),
-            }
-            for name in names
-        ],
+        "attributes": module_attribute_rows,
     }
 
 
@@ -28711,13 +28797,19 @@ def v2_state_projection_value(
     for sentinel_name, sentinel in V2_DATACLASS_SENTINEL_IDENTITIES:
         if value is sentinel:
             return {"kind": f"dataclasses.{sentinel_name}"}
+    for runtime_name, runtime_value in (
+        V2_REFUSAL_TRUSTED_RUNTIME_VALUE_IDENTITIES
+    ):
+        if value is runtime_value:
+            return {
+                "kind": "trusted-runtime-value",
+                "identity": runtime_name,
+            }
     if v2_is_dangerous_builtin(value):
         raise EvidenceFailed(
             "refusal callback reaches a dynamic namespace builtin; provide "
             "an explicit bounded external-state projection"
         )
-    if context is None:
-        context = v2_new_refusal_projection_context()
     if seen is None:
         seen = {}
     identity = id(value)
@@ -28755,12 +28847,13 @@ def v2_state_projection_value(
             try:
                 payload = value.tobytes()
             except ValueError:
-                return {
+                return finish({
                     "kind": "memoryview",
                     "released": True,
                     "object_state": metadata,
-                }
-            return {
+                })
+            v2_refusal_charge(context, "scalar_bytes", len(payload))
+            return finish({
                 "kind": "memoryview",
                 "released": False,
                 "byte_length": len(payload),
@@ -28776,33 +28869,54 @@ def v2_state_projection_value(
                 ),
                 "readonly": value.readonly,
                 "object_state": metadata,
-            }
-        if isinstance(value, (bytes, bytearray)):
-            payload = bytes(value)
-            return {
-                "kind": type(value).__name__,
+            })
+        if isinstance(value, bytearray):
+            payload = memoryview(value).tobytes()
+            v2_refusal_charge(context, "scalar_bytes", len(payload))
+            return finish({
+                "kind": "bytearray",
                 "byte_length": len(payload),
                 "content_root": (
                     "sha256-v1:" + hashlib.sha256(payload).hexdigest()
                 ),
                 "object_state": metadata,
-            }
-        if isinstance(value, Path):
-            return {
+                "type_state": v2_state_projection_value(
+                    type(value),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+            })
+        if type(value) in V2_REFUSAL_PATH_TYPES:
+            path_text = str(value)
+            v2_refusal_charge(
+                context,
+                "scalar_bytes",
+                len(path_text.encode("utf-8")),
+            )
+            return finish({
                 "kind": "path",
-                "path_root": text_root(str(value)),
-            }
-        if isinstance(value, re.Pattern):
-            return {
+                "path_root": text_root(path_text),
+            })
+        if type(value) is re.Pattern:
+            return finish({
                 "kind": "regular-expression",
                 "pattern": value.pattern,
                 "flags": value.flags,
                 "groups": value.groups,
                 "groupindex": dict(value.groupindex),
-            }
-        if isinstance(value, Mapping):
-            entries = [
-                {
+            })
+        if isinstance(value, Mapping) and not isinstance(value, dict):
+            raise EvidenceFailed(
+                "refusal-state arbitrary Mapping inspection is forbidden; "
+                "provide an explicit bounded projection"
+            )
+        if isinstance(value, dict):
+            raw_entries = list(dict.items(value))
+            v2_refusal_charge(context, "items", 2 * len(raw_entries))
+            entries = []
+            for key, item in raw_entries:
+                entries.append({
                     "key": v2_state_projection_value(
                         key,
                         seen=seen,
@@ -28815,25 +28929,44 @@ def v2_state_projection_value(
                         context=context,
                         depth=depth + 1,
                     ),
-                }
-                for key, item in value.items()
-            ]
+                })
             projection = {
-                "kind": type(value).__name__,
+                "kind": "dictionary",
+                "type": v2_type_identity(type(value)),
                 "entries_in_iteration_order": entries,
                 "object_state": metadata,
+                "type_state": v2_state_projection_value(
+                    type(value),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
             }
             if isinstance(value, defaultdict):
                 projection["default_factory"] = v2_state_projection_value(
-                    value.default_factory,
+                    object.__getattribute__(value, "default_factory"),
                     seen=seen,
                     context=context,
                     depth=depth + 1,
                 )
-            return projection
-        if isinstance(value, (list, tuple, deque)):
+            return finish(projection)
+        if isinstance(value, list):
+            sequence_items = list(list.__iter__(value))
+            sequence_kind = "list"
+        elif isinstance(value, tuple):
+            sequence_items = list(tuple.__iter__(value))
+            sequence_kind = "tuple"
+        elif isinstance(value, deque):
+            sequence_items = list(deque.__iter__(value))
+            sequence_kind = "deque"
+        else:
+            sequence_items = None
+            sequence_kind = ""
+        if sequence_items is not None:
+            v2_refusal_charge(context, "items", len(sequence_items))
             projection = {
-                "kind": type(value).__name__,
+                "kind": sequence_kind,
+                "type": v2_type_identity(type(value)),
                 "items": [
                     v2_state_projection_value(
                         item,
@@ -28841,41 +28974,79 @@ def v2_state_projection_value(
                         context=context,
                         depth=depth + 1,
                     )
-                    for item in value
+                    for item in sequence_items
                 ],
                 "object_state": metadata,
+                "type_state": v2_state_projection_value(
+                    type(value),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
             }
             if isinstance(value, deque):
-                projection["maxlen"] = value.maxlen
-            return projection
+                projection["maxlen"] = object.__getattribute__(
+                    value,
+                    "maxlen",
+                )
+            return finish(projection)
         if isinstance(value, (set, frozenset)):
-            items = [
-                v2_state_projection_value(
+            raw_items = (
+                list(set.__iter__(value))
+                if isinstance(value, set)
+                else list(frozenset.__iter__(value))
+            )
+            v2_refusal_charge(context, "items", len(raw_items))
+            items: list[Any] = []
+            for item in raw_items:
+                projected_item = v2_state_projection_value(
                     item,
                     seen=seen,
                     context=context,
                     depth=depth + 1,
                 )
-                for item in value
-            ]
+                if isinstance(projected_item, dict) and "node_id" in projected_item:
+                    raise EvidenceFailed(
+                        "refusal-state sets may contain only graph-free scalar "
+                        "values"
+                    )
+                items.append(projected_item)
             items.sort(key=canonical_bytes)
-            return {
-                "kind": type(value).__name__,
+            return finish({
+                "kind": "set" if isinstance(value, set) else "frozenset",
                 "items": items,
                 "object_state": metadata,
-            }
+                "type_state": v2_state_projection_value(
+                    type(value),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+            })
         if isinstance(value, argparse.Namespace):
-            return {
+            return finish({
                 "kind": "argparse.Namespace",
                 "object_state": metadata,
-            }
+                "type_state": v2_state_projection_value(
+                    type(value),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+            })
         if isinstance(value, types.ModuleType):
-            return {
-                "kind": "module-reference",
-                "module": str(value.__name__),
-            }
+            return finish(
+                v2_project_module_value(
+                    value,
+                    module_paths=module_paths,
+                    bare_reference=bare_module_reference,
+                    seen=seen,
+                    context=context,
+                    depth=depth,
+                )
+            )
         if isinstance(value, types.MethodType):
-            return {
+            return finish({
                 "kind": "bound-python-method",
                 "function": v2_state_projection_value(
                     value.__func__,
@@ -28889,7 +29060,7 @@ def v2_state_projection_value(
                     context=context,
                     depth=depth + 1,
                 ),
-            }
+            })
         if isinstance(
             value,
             (
@@ -28901,19 +29072,27 @@ def v2_state_projection_value(
                 types.WrapperDescriptorType,
             ),
         ):
+            if v2_is_dangerous_builtin(value):
+                raise EvidenceFailed(
+                    "refusal callback reaches a dynamic namespace builtin; "
+                    "provide an explicit bounded external-state projection"
+                )
             bound_self = getattr(value, "__self__", None)
             if isinstance(bound_self, types.ModuleType):
+                bound_attributes = v2_raw_module_dict(bound_self)
                 bound_projection: Any = {
-                    "kind": "module-reference",
-                    "module": str(bound_self.__name__),
+                    "kind": "trusted-bound-module"
+                    if v2_is_trusted_module(bound_self)
+                    else "custom-bound-module",
+                    "module": str(bound_attributes.get("__name__") or ""),
                 }
             elif isinstance(bound_self, type):
-                bound_projection = {
-                    "kind": "type-reference",
-                    "type": (
-                        f"{bound_self.__module__}.{bound_self.__qualname__}"
-                    ),
-                }
+                bound_projection = v2_state_projection_value(
+                    bound_self,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
             else:
                 bound_projection = v2_state_projection_value(
                     bound_self,
@@ -28921,32 +29100,28 @@ def v2_state_projection_value(
                     context=context,
                     depth=depth + 1,
                 )
-            return {
+            return finish({
                 "kind": "builtin-callable",
-                "type": (
-                    f"{type(value).__module__}.{type(value).__qualname__}"
-                ),
+                "type": v2_type_identity(type(value)),
                 "module": str(getattr(value, "__module__", "") or ""),
                 "qualname": str(
                     getattr(value, "__qualname__", "")
                     or getattr(value, "__name__", "")
                 ),
                 "bound_self": bound_projection,
-            }
+            })
         if isinstance(
             value,
             (types.GetSetDescriptorType, types.MemberDescriptorType),
         ):
-            return {
+            return finish({
                 "kind": "builtin-descriptor",
-                "type": (
-                    f"{type(value).__module__}.{type(value).__qualname__}"
-                ),
+                "type": v2_type_identity(type(value)),
                 "name": str(getattr(value, "__name__", "") or ""),
                 "owner": str(
                     getattr(value, "__objclass__", "") or ""
                 ),
-            }
+            })
         if isinstance(value, types.FunctionType):
             function_closure = value.__closure__ or ()
             function_freevars = value.__code__.co_freevars
@@ -28970,42 +29145,56 @@ def v2_state_projection_value(
                 except ValueError:
                     closure_state = {"kind": "empty-cell"}
                 closure_rows.append({"name": name, "state": closure_state})
-            accesses = v2_code_global_accesses(value.__code__)
-            dynamic_accesses = sorted(
-                V2_DYNAMIC_GLOBAL_ACCESS_NAMES.intersection(accesses)
+            analysis = v2_code_access_analysis(
+                value.__code__,
+                context=context,
             )
-            if dynamic_accesses:
+            accesses = analysis["accesses"]
+            function_globals = value.__globals__
+            function_builtins = value.__builtins__
+            if isinstance(function_builtins, types.ModuleType):
+                builtin_values = v2_raw_module_dict(function_builtins)
+            elif type(function_builtins) is dict:
+                builtin_values = function_builtins
+            else:
                 raise EvidenceFailed(
-                    "refusal callback has dynamic global namespace access; "
-                    "provide an explicit bounded projection: "
-                    f"{value.__module__}.{value.__qualname__} "
-                    f"uses {','.join(dynamic_accesses)}"
-                )
-            context["global_accesses"] += len(accesses)
-            if context["global_accesses"] > V2_REFUSAL_GLOBAL_ACCESS_CAP:
-                raise EvidenceFailed(
-                    "refusal-state transitive global access set exceeds its cap"
+                    "refusal-state function builtins mapping is not exact"
                 )
             global_rows: dict[str, dict[str, Any]] = {}
             for name, operations in accesses.items():
-                present = name in value.__globals__
+                global_present = name in function_globals
+                builtin_present = not global_present and name in builtin_values
                 row: dict[str, Any] = {
                     "operations": list(operations),
-                    "present": present,
+                    "source": (
+                        "global"
+                        if global_present
+                        else "builtin"
+                        if builtin_present
+                        else "missing"
+                    ),
                 }
-                if present:
-                    global_value = value.__globals__[name]
-                    if (
-                        isinstance(global_value, types.FunctionType)
-                        and V2_DIRECT_GLOBAL_CALL_MARKER not in operations
-                    ):
-                        # A registry or mapping may carry callbacks as data.
-                        # Bind their complete callable identity and defaults,
-                        # but do not invent execution of their global graph.
-                        row["state"] = v2_function_reference_projection(
+                if global_present or builtin_present:
+                    global_value = (
+                        function_globals[name]
+                        if global_present
+                        else builtin_values[name]
+                    )
+                    if v2_is_dangerous_builtin(global_value):
+                        raise EvidenceFailed(
+                            "refusal callback reaches a dynamic namespace "
+                            "builtin; provide an explicit bounded external-state "
+                            "projection"
+                        )
+                    if isinstance(global_value, types.ModuleType):
+                        row["state"] = v2_state_projection_value(
                             global_value,
                             seen=seen,
                             context=context,
+                            module_paths=analysis["module_paths"].get(name),
+                            bare_module_reference=(
+                                name in analysis["bare_global_names"]
+                            ),
                             depth=depth + 1,
                         )
                     else:
@@ -29016,14 +29205,20 @@ def v2_state_projection_value(
                             depth=depth + 1,
                         )
                 global_rows[name] = row
-            projection = {
+            function_attributes = object.__getattribute__(value, "__dict__")
+            if type(function_attributes) is not dict:
+                raise EvidenceFailed(
+                    "refusal-state function attribute dictionary is not exact"
+                )
+            projection = finish({
                 "kind": "function",
                 "module": str(value.__module__ or ""),
                 "name": str(value.__name__),
                 "qualname": str(value.__qualname__),
                 "doc_root": text_root(str(value.__doc__ or "")),
-                "code_root": semantic_root(
-                    v2_code_semantic_projection(value.__code__)
+                "code": v2_code_semantic_projection(
+                    value.__code__,
+                    context=context,
                 ),
                 "defaults": v2_state_projection_value(
                     value.__defaults__,
@@ -29045,85 +29240,203 @@ def v2_state_projection_value(
                 ),
                 "closure": closure_rows,
                 "attributes": v2_state_projection_value(
-                    dict(vars(value)),
+                    function_attributes,
                     seen=seen,
                     context=context,
                     depth=depth + 1,
                 ),
                 "referenced_globals": global_rows,
-            }
-            function_cache[identity] = projection
+            })
             return projection
         if isinstance(value, type):
-            if value.__module__ != "__main__":
-                # Imported runtime types expose interpreter-managed caches and
-                # descriptors that can change while they are merely inspected.
-                # Their stable identity is bound here; locally defined mutable
-                # classes retain the complete state projection below.
-                return {
-                    "kind": "external-type-reference",
-                    "type": f"{value.__module__}.{value.__qualname__}",
-                    "metaclass": (
-                        f"{type(value).__module__}.{type(value).__qualname__}"
-                    ),
-                    "bases": [
-                        f"{base.__module__}.{base.__qualname__}"
-                        for base in value.__bases__
-                    ],
-                }
-            class_attributes: dict[str, Any] = {}
+            if any(
+                value is trusted_type
+                for trusted_type in V2_REFUSAL_TRUSTED_BUILTIN_TYPES
+            ):
+                return finish({
+                    "kind": "trusted-builtin-type",
+                    "type": v2_type_identity(value),
+                })
+            class_dictionary = type.__getattribute__(value, "__dict__")
             excluded_attributes = {
+                "_abc_impl",
+                "__base__",
+                "__bases__",
                 "__dict__",
                 "__doc__",
+                "__mro__",
                 "__module__",
                 "__qualname__",
+                "__subclasses__",
                 "__weakref__",
             }
-            for name, attribute in vars(value).items():
+            class_attribute_rows: list[dict[str, Any]] = []
+            for name, attribute in sorted(
+                class_dictionary.items(),
+                key=lambda row: str(row[0]).encode("utf-8"),
+            ):
                 if name in excluded_attributes:
                     continue
-                if isinstance(attribute, (staticmethod, classmethod)):
-                    attribute = attribute.__func__
-                elif isinstance(attribute, property):
-                    attribute = {
-                        "fget": attribute.fget,
-                        "fset": attribute.fset,
-                        "fdel": attribute.fdel,
+                if not isinstance(name, str):
+                    raise EvidenceFailed(
+                        "refusal-state class has a non-string attribute"
+                    )
+                if type(attribute) in {staticmethod, classmethod}:
+                    attribute = object.__getattribute__(
+                        attribute,
+                        "__func__",
+                    )
+                if type(attribute) is property:
+                    property_functions = {
+                        accessor: object.__getattribute__(
+                            attribute,
+                            accessor,
+                        )
+                        for accessor in ("fget", "fset", "fdel")
                     }
-                class_attributes[name] = attribute
-            return {
+                    attribute_state = {
+                        "kind": "property",
+                        **{
+                            accessor: (
+                                v2_trusted_callable_projection(
+                                    function,
+                                    seen=seen,
+                                    context=context,
+                                    depth=depth + 1,
+                                )
+                                if function is not None
+                                else None
+                            )
+                            for accessor, function in property_functions.items()
+                        },
+                    }
+                elif isinstance(attribute, types.ModuleType) and v2_is_trusted_module(
+                    attribute
+                ):
+                    attribute_state = {
+                        "kind": "trusted-module-binding",
+                        "module": str(
+                            v2_raw_module_dict(attribute).get("__name__") or ""
+                        ),
+                    }
+                elif isinstance(attribute, types.FunctionType):
+                    # Class dictionaries carry methods as data. Bind their
+                    # complete code/default/closure structure without treating
+                    # every method body as an executed call edge.
+                    attribute_state = v2_trusted_callable_projection(
+                        attribute,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                else:
+                    try:
+                        attribute_state = v2_state_projection_value(
+                            attribute,
+                            seen=seen,
+                            context=context,
+                            depth=depth + 1,
+                        )
+                    except HarnessError as error:
+                        raise EvidenceFailed(
+                            "refusal-state class attribute "
+                            f"{v2_type_identity(value)}.{name} is not bounded: "
+                            f"{v2_bounded_diagnostic_summary(error)}"
+                        ) from error
+                class_attribute_rows.append(
+                    {
+                        "name": name,
+                        "state": attribute_state,
+                    }
+                )
+            v2_refusal_charge(context, "items", len(class_attribute_rows))
+            bases = type.__getattribute__(value, "__bases__")
+            return finish({
                 "kind": "type",
-                "type": f"{value.__module__}.{value.__qualname__}",
-                "metaclass": (
-                    f"{type(value).__module__}.{type(value).__qualname__}"
-                ),
-                "bases": [
-                    f"{base.__module__}.{base.__qualname__}"
-                    for base in value.__bases__
-                ],
-                "doc_root": text_root(str(value.__doc__ or "")),
-                "attributes": v2_state_projection_value(
-                    class_attributes,
+                "type": v2_type_identity(value),
+                "metaclass": v2_state_projection_value(
+                    type(value),
                     seen=seen,
                     context=context,
                     depth=depth + 1,
                 ),
-            }
-        if metadata:
-            return {
-                "kind": "object",
-                "type": (
-                    f"{type(value).__module__}.{type(value).__qualname__}"
+                "bases": [
+                    v2_state_projection_value(
+                        base,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                    for base in tuple.__iter__(bases)
+                ],
+                "doc_root": text_root(
+                    str(type.__getattribute__(value, "__doc__") or "")
                 ),
+                "attributes": class_attribute_rows,
+            })
+        type_state = v2_state_projection_value(
+            type(value),
+            seen=seen,
+            context=context,
+            depth=depth + 1,
+        )
+        call_state: Any = None
+        if callable(value):
+            call_descriptor: Any = None
+            for owner in type.__getattribute__(type(value), "__mro__"):
+                owner_dictionary = type.__getattribute__(owner, "__dict__")
+                if "__call__" in owner_dictionary:
+                    call_descriptor = owner_dictionary["__call__"]
+                    break
+            if call_descriptor is None:
+                raise EvidenceFailed(
+                    "refusal-state callable implementation is not statically "
+                    "inspectable"
+                )
+            if type(call_descriptor) in {staticmethod, classmethod}:
+                call_descriptor = object.__getattribute__(
+                    call_descriptor,
+                    "__func__",
+                )
+            if isinstance(call_descriptor, types.FunctionType):
+                call_state = v2_state_projection_value(
+                    call_descriptor,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            elif isinstance(
+                call_descriptor,
+                (
+                    types.BuiltinFunctionType,
+                    types.MethodDescriptorType,
+                    types.WrapperDescriptorType,
+                ),
+            ):
+                call_state = v2_trusted_callable_projection(
+                    call_descriptor,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                )
+            else:
+                raise EvidenceFailed(
+                    "refusal-state callable implementation is opaque"
+                )
+        if metadata or call_state is not None:
+            return finish({
+                "kind": "object",
+                "type": v2_type_identity(type(value)),
+                "type_state": type_state,
                 "object_state": metadata,
-            }
-        return {
+                "call_implementation": call_state,
+            })
+        return finish({
             "kind": "opaque",
-            "type": (
-                f"{type(value).__module__}.{type(value).__qualname__}"
-            ),
-        }
+            "type": v2_type_identity(type(value)),
+        })
     finally:
+        active_ids.discard(identity)
         seen.pop(identity, None)
 
 
@@ -29180,114 +29493,23 @@ def v2_callback_refusal_projection(
     callback: Callable[[], Any],
     *,
     collector_rows: Sequence[Mapping[str, Any]],
+    limits: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    projection_context: dict[str, Any] = {
-        "function_cache": {},
-        "global_accesses": 0,
-    }
-    closure_rows: list[dict[str, Any]] = []
-    closure = callback.__closure__ or ()
-    freevars = callback.__code__.co_freevars
-    if len(closure) != len(freevars):
-        raise EvidenceFailed("refusal callback closure metadata differs")
-    for name, cell in sorted(
-        zip(freevars, closure),
-        key=lambda pair: pair[0].encode("utf-8"),
-    ):
-        try:
-            value = cell.cell_contents
-        except ValueError as error:
-            raise EvidenceFailed(
-                "refusal callback contains an empty closure cell"
-            ) from error
-        closure_rows.append(
-            {
-                "name": name,
-                "state": v2_state_projection_value(
-                    value,
-                    context=projection_context,
-                ),
-            }
-        )
-    default_rows = [
-        {
-            "index": index,
-            "state": v2_state_projection_value(
-                value,
-                context=projection_context,
-            ),
-        }
-        for index, value in enumerate(callback.__defaults__ or ())
-    ]
-    keyword_default_rows = [
-        {
-            "name": name,
-            "state": v2_state_projection_value(
-                value,
-                context=projection_context,
-            ),
-        }
-        for name, value in sorted(
-            (callback.__kwdefaults__ or {}).items(),
-            key=lambda pair: pair[0].encode("utf-8"),
-        )
-    ]
-    global_accesses = v2_code_global_accesses(callback.__code__)
-    dynamic_accesses = sorted(
-        V2_DYNAMIC_GLOBAL_ACCESS_NAMES.intersection(global_accesses)
-    )
-    if dynamic_accesses:
-        raise EvidenceFailed(
-            "refusal callback has dynamic global namespace access; provide "
-            "an explicit bounded projection: "
-            f"{callback.__module__}.{callback.__qualname__} "
-            f"uses {','.join(dynamic_accesses)}"
-        )
-    direct_module_names = sorted(
-        name
-        for name in global_accesses
-        if isinstance(callback.__globals__.get(name), types.ModuleType)
-    )
-    if direct_module_names:
-        raise EvidenceFailed(
-            "refusal callback directly references module state; provide an "
-            "explicit bounded projection"
-        )
-    projection_context["global_accesses"] += len(global_accesses)
-    global_rows: dict[str, dict[str, Any]] = {}
-    for name, operations in global_accesses.items():
-        present = name in callback.__globals__
-        row: dict[str, Any] = {
-            "operations": list(operations),
-            "present": present,
-        }
-        if present:
-            global_value = callback.__globals__[name]
-            if (
-                isinstance(global_value, types.FunctionType)
-                and V2_DIRECT_GLOBAL_CALL_MARKER not in operations
-            ):
-                row["state"] = v2_function_reference_projection(
-                    global_value,
-                    seen={},
-                    context=projection_context,
-                    depth=0,
-                )
-            else:
-                row["state"] = v2_state_projection_value(
-                    global_value,
-                    context=projection_context,
-                )
-        global_rows[name] = row
+    projection_context = v2_new_refusal_projection_context(limits)
     projection = {
-        "callback_closure": closure_rows,
-        "callback_defaults": default_rows,
-        "callback_keyword_defaults": keyword_default_rows,
-        "mutable_callback_globals": global_rows,
-        "collector_check_roots": [
-            row["semantic_root"] for row in collector_rows
-        ],
-        "command_receipts": list(_command_receipts),
+        "schema": V2_REFUSAL_PROJECTION_SCHEMA,
+        "automatic_callback_state": v2_state_projection_value(
+            callback,
+            context=projection_context,
+        ),
+        "collector_check_roots": v2_state_projection_value(
+            [row["semantic_root"] for row in collector_rows],
+            context=projection_context,
+        ),
+        "command_receipts": v2_state_projection_value(
+            list(_command_receipts),
+            context=projection_context,
+        ),
         "cancel_requested": _cancel_requested,
     }
     if v2_projection_contains_opaque(projection):
@@ -29295,6 +29517,11 @@ def v2_callback_refusal_projection(
         raise EvidenceFailed(
             "refusal callback contains unprojectable opaque state at "
             f"{', '.join(opaque_paths)}; provide an explicit bounded projection"
+        )
+    payload = canonical_bytes(projection)
+    if len(payload) > projection_context["limits"]["projection_bytes"]:
+        raise EvidenceFailed(
+            "refusal-state projection exceeds its aggregate projection bytes cap"
         )
     return projection
 
@@ -29367,73 +29594,120 @@ class V2CheckCollector:
         projection: Callable[[], Any] | None = None,
         projection_label: str | None = None,
     ) -> None:
-        if projection is None:
-            projection = lambda: v2_callback_refusal_projection(
-                callback,
-                collector_rows=self.rows,
-            )
-            projection_label = "CALLBACK_CLOSURE_AND_HARNESS_STATE"
-        elif not projection_label:
+        if projection is not None and not projection_label:
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} stateful refusal lacks a projection label"
             )
+        effective_projection_label = (
+            "AUTOMATIC_CALLBACK_GRAPH_AND_EXPLICIT_EXTERNAL_STATE"
+            if projection is not None
+            else "AUTOMATIC_CALLBACK_GRAPH_AND_HARNESS_STATE"
+        )
+
+        def capture_projection() -> dict[str, Any]:
+            automatic = v2_callback_refusal_projection(
+                callback,
+                collector_rows=self.rows,
+            )
+            return {
+                "automatic_callback_state": automatic,
+                "explicit_external_state": (
+                    projection() if projection is not None else None
+                ),
+                "explicit_projection_label": projection_label,
+            }
+
         try:
-            before_value = projection()
-        except HarnessError as error:
+            before_value = capture_projection()
+        except Exception as error:
+            projection_diagnostic = (
+                v2_bounded_diagnostic_summary(error)
+                if isinstance(error, HarnessError)
+                else type(error).__name__
+            )
             raise EvidenceFailed(
                 f"{self.case_id}/{check_id} refusal projection failed "
-                f"before callback: {error}"
+                f"before callback: {projection_diagnostic}"
             ) from error
         before = semantic_root(before_value)
-        error = expect_error(error_type, callback, contains=contains)
+        caught: Exception | None = None
+        returned = False
         try:
-            after_value = projection()
-        except HarnessError as projection_error:
-            raise EvidenceFailed(
-                f"{self.case_id}/{check_id} refusal projection failed "
-                f"after callback: {projection_error}"
-            ) from projection_error
-        after = semantic_root(after_value)
-        projection_divergence = first_projection_divergence(
-            before_value,
-            after_value,
+            callback()
+            returned = True
+        except Exception as error:
+            caught = error
+        after_value: dict[str, Any] | None = None
+        after_projection_error: Exception | None = None
+        try:
+            after_value = capture_projection()
+        except Exception as error:
+            after_projection_error = error
+        after = semantic_root(after_value) if after_value is not None else None
+        projection_divergence = (
+            first_projection_divergence(before_value, after_value)
+            if after_value is not None
+            else None
         )
-        if projection_divergence is not None:
-            self.check(
-                check_id,
-                False,
-                expected={
-                    "terminal": error_type.terminal,
-                    "unchanged_projection_root": before,
-                    "projection_label": projection_label,
-                    "first_divergence": None,
-                },
-                observed={
-                    "terminal": error.terminal,
-                    "changed_projection_root": after,
-                    "projection_label": projection_label,
-                    "first_divergence": projection_divergence,
-                    "diagnostic_root": text_root(str(error)),
-                    "diagnostic_summary": v2_bounded_diagnostic_summary(
-                        error
-                    ),
-                },
-            )
-            return
+        exact_error_type = caught is not None and type(caught) is error_type
+        caught_terminal = (
+            caught.terminal if isinstance(caught, HarnessError) else None
+        )
+        diagnostic = (
+            BaseException.__str__(caught)
+            if isinstance(caught, HarnessError)
+            else ""
+        )
+        contains_match = (
+            contains is None
+            or (exact_error_type and contains in diagnostic)
+        )
+        projection_unchanged = (
+            after_projection_error is None
+            and projection_divergence is None
+            and before == after
+        )
         self.check(
             check_id,
-            before == after and error.terminal == error_type.terminal,
+            not returned
+            and exact_error_type
+            and caught_terminal == error_type.terminal
+            and contains_match
+            and projection_unchanged,
             expected={
+                "returned": False,
+                "exact_error_type": error_type.__name__,
                 "terminal": error_type.terminal,
+                "contains_match": True,
                 "unchanged_projection_root": before,
-                "projection_label": projection_label,
+                "projection_label": effective_projection_label,
+                "first_divergence": None,
+                "after_projection_error": None,
             },
             observed={
-                "terminal": error.terminal,
-                "unchanged_projection_root": after,
-                "projection_label": projection_label,
-                "diagnostic_root": text_root(str(error)),
-                "diagnostic_summary": v2_bounded_diagnostic_summary(error),
+                "returned": returned,
+                "caught_error_type": (
+                    type(caught).__name__ if caught is not None else None
+                ),
+                "terminal": caught_terminal,
+                "contains_match": contains_match,
+                "projection_root_after": after,
+                "projection_label": effective_projection_label,
+                "explicit_projection_label": projection_label,
+                "first_divergence": projection_divergence,
+                "after_projection_error": (
+                    type(after_projection_error).__name__
+                    if after_projection_error is not None
+                    else None
+                ),
+                "diagnostic_root": (
+                    text_root(diagnostic) if diagnostic else None
+                ),
+                "diagnostic_summary": (
+                    v2_bounded_diagnostic_summary(diagnostic)
+                    if diagnostic
+                    else None
+                ),
             },
         )
 
@@ -47907,7 +48181,7 @@ def v2_execute_artifact_cases(
                 InputRefused,
                 dynamic_global_then_refuse,
             ),
-            contains="dynamic global namespace access",
+            contains="dynamic namespace builtin",
         )
         checks.check(
             "refusal-dynamic-global-access-fails-closed-before-callback",
@@ -47956,6 +48230,1061 @@ def v2_execute_artifact_cases(
                 "callback_invoked": opaque_callback_invoked["value"],
                 "collector_terminal": opaque_guard_error.terminal,
                 "diagnostic_root": text_root(str(opaque_guard_error)),
+            },
+        )
+
+        shared_alias_target = {"phase": "stable"}
+        shared_alias_graph = [shared_alias_target, shared_alias_target]
+
+        def split_shared_alias_then_refuse() -> None:
+            shared_alias_graph[1] = {"phase": "stable"}
+            raise InputRefused("synthetic shared-alias split")
+
+        shared_alias_collector = V2CheckCollector(
+            "fixture-shared-alias-refusal-state",
+            "fixture.shared-alias-refusal-state",
+        )
+        shared_alias_error = expect_error(
+            EvidenceFailed,
+            lambda: shared_alias_collector.refuses(
+                "shared-alias-split",
+                InputRefused,
+                split_shared_alias_then_refuse,
+            ),
+            contains="shared-alias-split failed",
+        )
+        checks.check(
+            "refusal-shared-alias-split-detected",
+            shared_alias_graph[0] == shared_alias_graph[1]
+            and shared_alias_graph[0] is not shared_alias_graph[1]
+            and shared_alias_error.terminal == "EvidenceFailed"
+            and len(shared_alias_collector.rows) == 1
+            and shared_alias_collector.rows[0]["passed"] is False,
+            expected={
+                "values_equal": True,
+                "identities_distinct": True,
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "values_equal": shared_alias_graph[0]
+                == shared_alias_graph[1],
+                "identities_distinct": shared_alias_graph[0]
+                is not shared_alias_graph[1],
+                "collector_rows": len(shared_alias_collector.rows),
+                "collector_terminal": shared_alias_error.terminal,
+            },
+        )
+
+        shared_cycle: list[Any] = []
+        shared_cycle.append(shared_cycle)
+        shared_cycle_graph = [shared_cycle, shared_cycle]
+
+        def split_shared_cycle_then_refuse() -> None:
+            replacement_cycle: list[Any] = []
+            replacement_cycle.append(replacement_cycle)
+            shared_cycle_graph[1] = replacement_cycle
+            raise InputRefused("synthetic shared-cycle alias split")
+
+        shared_cycle_collector = V2CheckCollector(
+            "fixture-shared-cycle-refusal-state",
+            "fixture.shared-cycle-refusal-state",
+        )
+        shared_cycle_error = expect_error(
+            EvidenceFailed,
+            lambda: shared_cycle_collector.refuses(
+                "shared-cycle-alias-split",
+                InputRefused,
+                split_shared_cycle_then_refuse,
+            ),
+            contains="shared-cycle-alias-split failed",
+        )
+        checks.check(
+            "refusal-shared-cycle-alias-split-detected",
+            shared_cycle_graph[0][0] is shared_cycle_graph[0]
+            and shared_cycle_graph[1][0] is shared_cycle_graph[1]
+            and shared_cycle_graph[0] is not shared_cycle_graph[1]
+            and shared_cycle_error.terminal == "EvidenceFailed"
+            and len(shared_cycle_collector.rows) == 1,
+            expected={
+                "two_self_cycles": True,
+                "identities_distinct": True,
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "first_self_cycle": shared_cycle_graph[0][0]
+                is shared_cycle_graph[0],
+                "second_self_cycle": shared_cycle_graph[1][0]
+                is shared_cycle_graph[1],
+                "identities_distinct": shared_cycle_graph[0]
+                is not shared_cycle_graph[1],
+                "collector_rows": len(shared_cycle_collector.rows),
+                "collector_terminal": shared_cycle_error.terminal,
+            },
+        )
+
+        aliased_helper_state = {"phase": "before"}
+
+        def aliased_helper() -> None:
+            aliased_helper_state["phase"] = "after"
+
+        def invoke_aliased_helper_then_refuse() -> None:
+            local_helper = aliased_helper
+            local_helper()
+            raise InputRefused("synthetic aliased-helper mutation")
+
+        aliased_helper_collector = V2CheckCollector(
+            "fixture-aliased-helper-refusal-state",
+            "fixture.aliased-helper-refusal-state",
+        )
+        aliased_helper_error = expect_error(
+            EvidenceFailed,
+            lambda: aliased_helper_collector.refuses(
+                "aliased-helper-mutated",
+                InputRefused,
+                invoke_aliased_helper_then_refuse,
+            ),
+            contains="aliased-helper-mutated failed",
+        )
+        checks.check(
+            "refusal-aliased-helper-call-mutation-detected",
+            aliased_helper_state["phase"] == "after"
+            and aliased_helper_error.terminal == "EvidenceFailed"
+            and len(aliased_helper_collector.rows) == 1,
+            expected={
+                "helper_phase": "after",
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "helper_phase": aliased_helper_state["phase"],
+                "collector_rows": len(aliased_helper_collector.rows),
+                "collector_terminal": aliased_helper_error.terminal,
+            },
+        )
+
+        reflective_helper_invoked = {"value": False}
+
+        def reflective_helper_template() -> None:
+            return None
+
+        reflective_helper = types.FunctionType(
+            reflective_helper_template.__code__,
+            {"hidden": {"phase": "before"}},
+            "reflective_helper",
+        )
+
+        def mutate_helper_globals_reflectively() -> None:
+            reflective_helper.__globals__["hidden"]["phase"] = "after"
+            reflective_helper_invoked["value"] = True
+            raise InputRefused("synthetic reflective helper mutation")
+
+        reflective_helper_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_callback_refusal_projection(
+                mutate_helper_globals_reflectively,
+                collector_rows=[],
+            ),
+            contains="reflective namespace access",
+        )
+        checks.check(
+            "refusal-helper-globals-access-fails-closed-before-callback",
+            reflective_helper_invoked["value"] is False
+            and reflective_helper.__globals__["hidden"]["phase"] == "before"
+            and reflective_helper_error.terminal == "EvidenceFailed",
+            expected={
+                "callback_invoked": False,
+                "hidden_phase": "before",
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "callback_invoked": reflective_helper_invoked["value"],
+                "hidden_phase": reflective_helper.__globals__["hidden"][
+                    "phase"
+                ],
+                "collector_terminal": reflective_helper_error.terminal,
+            },
+        )
+
+        dangerous_builtin_results: dict[str, dict[str, Any]] = {}
+        for dangerous_name, dangerous_builtin in (
+            ("globals", builtins.globals),
+            ("eval", builtins.eval),
+            ("exec", builtins.exec),
+            ("import", builtins.__import__),
+        ):
+            invocation = {"value": False}
+
+            def dangerous_alias_callback(
+                alias: Callable[..., Any] = dangerous_builtin,
+                marker: dict[str, bool] = invocation,
+            ) -> None:
+                marker["value"] = True
+                alias()
+                raise InputRefused("unreachable dangerous builtin callback")
+
+            dangerous_error = expect_error(
+                EvidenceFailed,
+                lambda callback=dangerous_alias_callback: (
+                    v2_callback_refusal_projection(
+                        callback,
+                        collector_rows=[],
+                    )
+                ),
+                contains="dynamic namespace builtin",
+            )
+            dangerous_builtin_results[dangerous_name] = {
+                "callback_invoked": invocation["value"],
+                "terminal": dangerous_error.terminal,
+            }
+        checks.check(
+            "refusal-dangerous-builtin-aliases-fail-closed-before-callback",
+            dangerous_builtin_results
+            == {
+                name: {
+                    "callback_invoked": False,
+                    "terminal": "EvidenceFailed",
+                }
+                for name in ("globals", "eval", "exec", "import")
+            },
+            expected={
+                name: {
+                    "callback_invoked": False,
+                    "terminal": "EvidenceFailed",
+                }
+                for name in ("globals", "eval", "exec", "import")
+            },
+            observed=dangerous_builtin_results,
+        )
+
+        direct_import_invoked = {"value": False}
+
+        def direct_import_callback() -> None:
+            import fractions
+
+            direct_import_invoked["value"] = bool(fractions)
+            raise InputRefused("unreachable direct import callback")
+
+        nested_import_invoked = {"value": False}
+
+        def nested_import_callback() -> None:
+            def active_import() -> None:
+                import decimal
+
+                _ = decimal
+
+            active_import()
+            nested_import_invoked["value"] = True
+            raise InputRefused("unreachable nested import callback")
+
+        import_errors = [
+            expect_error(
+                EvidenceFailed,
+                lambda callback=callback: v2_callback_refusal_projection(
+                    callback,
+                    collector_rows=[],
+                ),
+                contains="import bytecode",
+            )
+            for callback in (direct_import_callback, nested_import_callback)
+        ]
+        checks.check(
+            "refusal-import-opcodes-fail-closed-before-callback",
+            direct_import_invoked["value"] is False
+            and nested_import_invoked["value"] is False
+            and [error.terminal for error in import_errors]
+            == ["EvidenceFailed", "EvidenceFailed"],
+            expected={
+                "direct_callback_invoked": False,
+                "nested_callback_invoked": False,
+                "terminals": ["EvidenceFailed", "EvidenceFailed"],
+            },
+            observed={
+                "direct_callback_invoked": direct_import_invoked["value"],
+                "nested_callback_invoked": nested_import_invoked["value"],
+                "terminals": [error.terminal for error in import_errors],
+            },
+        )
+
+        def benign_globals_template() -> None:
+            raise InputRefused("benign shadowed globals binding")
+
+        benign_globals_function = types.FunctionType(
+            benign_globals_template.__code__,
+            {"InputRefused": InputRefused},
+            "globals",
+        )
+
+        def shadowed_globals_callback_template() -> None:
+            globals()
+
+        shadowed_globals_callback = types.FunctionType(
+            shadowed_globals_callback_template.__code__,
+            {"globals": benign_globals_function},
+            "shadowed_globals_callback",
+        )
+        shadowed_globals_collector = V2CheckCollector(
+            "fixture-shadowed-globals-refusal-state",
+            "fixture.shadowed-globals-refusal-state",
+        )
+        shadowed_globals_collector.refuses(
+            "benign-shadowed-globals",
+            InputRefused,
+            shadowed_globals_callback,
+            contains="benign shadowed globals binding",
+        )
+        checks.check(
+            "refusal-benign-shadowed-globals-admitted",
+            len(shadowed_globals_collector.rows) == 1
+            and shadowed_globals_collector.rows[0]["passed"] is True,
+            expected={"collector_rows": 1, "passed": True},
+            observed={
+                "collector_rows": len(shadowed_globals_collector.rows),
+                "passed": shadowed_globals_collector.rows[0]["passed"],
+            },
+        )
+
+        custom_module = types.ModuleType("fixture_refusal_module")
+        custom_module.phase = "before"
+
+        def custom_module_helper_template() -> None:
+            _fixture_custom_module.phase = "after"
+
+        custom_module_helper = types.FunctionType(
+            custom_module_helper_template.__code__,
+            {"_fixture_custom_module": custom_module},
+            "custom_module_helper",
+        )
+
+        def custom_module_callback_template() -> None:
+            _fixture_custom_module_helper()
+            raise InputRefused("synthetic custom-module mutation")
+
+        custom_module_callback = types.FunctionType(
+            custom_module_callback_template.__code__,
+            {
+                "_fixture_custom_module_helper": custom_module_helper,
+                "InputRefused": InputRefused,
+            },
+            "custom_module_callback",
+        )
+        custom_module_collector = V2CheckCollector(
+            "fixture-custom-module-refusal-state",
+            "fixture.custom-module-refusal-state",
+        )
+        custom_module_error = expect_error(
+            EvidenceFailed,
+            lambda: custom_module_collector.refuses(
+                "custom-module-mutated",
+                InputRefused,
+                custom_module_callback,
+            ),
+            contains="custom-module-mutated failed",
+        )
+        checks.check(
+            "refusal-transitive-custom-module-mutation-detected",
+            custom_module.phase == "after"
+            and custom_module_error.terminal == "EvidenceFailed"
+            and len(custom_module_collector.rows) == 1,
+            expected={
+                "module_phase": "after",
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "module_phase": custom_module.phase,
+                "collector_rows": len(custom_module_collector.rows),
+                "collector_terminal": custom_module_error.terminal,
+            },
+        )
+
+        class SpoofedExternalType:
+            phase = "before"
+
+        SpoofedExternalType.__module__ = "fixture.external"
+
+        def mutate_spoofed_type_then_refuse() -> None:
+            SpoofedExternalType.phase = "after"
+            raise InputRefused("synthetic spoofed-type mutation")
+
+        spoofed_type_collector = V2CheckCollector(
+            "fixture-spoofed-type-refusal-state",
+            "fixture.spoofed-type-refusal-state",
+        )
+        spoofed_type_error = expect_error(
+            EvidenceFailed,
+            lambda: spoofed_type_collector.refuses(
+                "spoofed-type-mutated",
+                InputRefused,
+                mutate_spoofed_type_then_refuse,
+            ),
+            contains="spoofed-type-mutated failed",
+        )
+        checks.check(
+            "refusal-spoofed-external-type-mutation-detected",
+            SpoofedExternalType.phase == "after"
+            and SpoofedExternalType.__module__ == "fixture.external"
+            and spoofed_type_error.terminal == "EvidenceFailed"
+            and len(spoofed_type_collector.rows) == 1,
+            expected={
+                "declared_module": "fixture.external",
+                "phase": "after",
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "declared_module": SpoofedExternalType.__module__,
+                "phase": SpoofedExternalType.phase,
+                "collector_rows": len(spoofed_type_collector.rows),
+                "collector_terminal": spoofed_type_error.terminal,
+            },
+        )
+
+        callable_hidden_state = {"phase": "before"}
+
+        def callable_probe_template(_self: Any) -> None:
+            _fixture_callable_hidden_state["phase"] = "after"
+            raise InputRefused("synthetic callable-instance mutation")
+
+        callable_probe_function = types.FunctionType(
+            callable_probe_template.__code__,
+            {
+                "_fixture_callable_hidden_state": callable_hidden_state,
+                "InputRefused": InputRefused,
+            },
+            "callable_probe_function",
+        )
+
+        class CallableProbe:
+            pass
+
+        CallableProbe.__call__ = callable_probe_function
+        callable_probe = CallableProbe()
+        callable_probe_collector = V2CheckCollector(
+            "fixture-callable-instance-refusal-state",
+            "fixture.callable-instance-refusal-state",
+        )
+        callable_probe_error = expect_error(
+            EvidenceFailed,
+            lambda: callable_probe_collector.refuses(
+                "callable-instance-mutated",
+                InputRefused,
+                callable_probe,
+            ),
+            contains="callable-instance-mutated failed",
+        )
+        checks.check(
+            "refusal-callable-instance-hidden-state-mutation-detected",
+            callable_hidden_state["phase"] == "after"
+            and callable_probe_error.terminal == "EvidenceFailed"
+            and len(callable_probe_collector.rows) == 1,
+            expected={
+                "hidden_phase": "after",
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "hidden_phase": callable_hidden_state["phase"],
+                "collector_rows": len(callable_probe_collector.rows),
+                "collector_terminal": callable_probe_error.terminal,
+            },
+        )
+
+        unchanged_nan = struct.unpack(">d", bytes.fromhex("7ff8000000000001"))[0]
+
+        def unchanged_nan_callback(
+            _value: float = unchanged_nan,
+        ) -> None:
+            raise InputRefused("synthetic unchanged NaN refusal")
+
+        unchanged_nan_collector = V2CheckCollector(
+            "fixture-unchanged-nan-refusal-state",
+            "fixture.unchanged-nan-refusal-state",
+        )
+        unchanged_nan_collector.refuses(
+            "unchanged-nan",
+            InputRefused,
+            unchanged_nan_callback,
+            contains="unchanged NaN",
+        )
+        checks.check(
+            "refusal-unchanged-nan-state-stable",
+            math.isnan(unchanged_nan)
+            and len(unchanged_nan_collector.rows) == 1
+            and unchanged_nan_collector.rows[0]["passed"] is True,
+            expected={"is_nan": True, "collector_rows": 1, "passed": True},
+            observed={
+                "is_nan": math.isnan(unchanged_nan),
+                "collector_rows": len(unchanged_nan_collector.rows),
+                "passed": unchanged_nan_collector.rows[0]["passed"],
+            },
+        )
+
+        alternate_nan = struct.unpack(
+            ">d",
+            bytes.fromhex("7ff8000000000002"),
+        )[0]
+        nan_payload_state = [unchanged_nan]
+
+        def mutate_nan_payload_then_refuse() -> None:
+            nan_payload_state[0] = alternate_nan
+            raise InputRefused("synthetic NaN-payload mutation")
+
+        nan_payload_collector = V2CheckCollector(
+            "fixture-nan-payload-refusal-state",
+            "fixture.nan-payload-refusal-state",
+        )
+        nan_payload_error = expect_error(
+            EvidenceFailed,
+            lambda: nan_payload_collector.refuses(
+                "nan-payload-mutated",
+                InputRefused,
+                mutate_nan_payload_then_refuse,
+            ),
+            contains="nan-payload-mutated failed",
+        )
+        checks.check(
+            "refusal-nan-payload-mutation-detected",
+            math.isnan(nan_payload_state[0])
+            and struct.pack(">d", nan_payload_state[0]).hex()
+            == "7ff8000000000002"
+            and nan_payload_error.terminal == "EvidenceFailed"
+            and len(nan_payload_collector.rows) == 1,
+            expected={
+                "is_nan": True,
+                "payload": "7ff8000000000002",
+                "collector_rows": 1,
+                "collector_terminal": "EvidenceFailed",
+            },
+            observed={
+                "is_nan": math.isnan(nan_payload_state[0]),
+                "payload": struct.pack(">d", nan_payload_state[0]).hex(),
+                "collector_rows": len(nan_payload_collector.rows),
+                "collector_terminal": nan_payload_error.terminal,
+            },
+        )
+
+        default_factory_sentinel = getattr(
+            dataclasses,
+            "_HAS_DEFAULT_FACTORY",
+            None,
+        )
+
+        def dataclass_sentinel_callback(
+            _missing: Any = MISSING,
+            _kw_only: Any = KW_ONLY,
+            _default_factory: Any = default_factory_sentinel,
+        ) -> None:
+            raise InputRefused("synthetic dataclass-sentinel refusal")
+
+        sentinel_collector = V2CheckCollector(
+            "fixture-dataclass-sentinel-refusal-state",
+            "fixture.dataclass-sentinel-refusal-state",
+        )
+        sentinel_collector.refuses(
+            "dataclass-sentinels-stable",
+            InputRefused,
+            dataclass_sentinel_callback,
+            contains="dataclass-sentinel",
+        )
+        sentinel_projections = {
+            name: v2_state_projection_value(sentinel)
+            for name, sentinel in V2_DATACLASS_SENTINEL_IDENTITIES
+        }
+        sentinel_impostor_invoked = {"value": False}
+        if default_factory_sentinel is None:
+            sentinel_impostor_error: HarnessError | None = None
+        else:
+            sentinel_type = type(default_factory_sentinel)
+            try:
+                sentinel_impostor = sentinel_type()
+            except Exception:
+                sentinel_impostor = object.__new__(sentinel_type)
+
+            def sentinel_impostor_callback(
+                _impostor: Any = sentinel_impostor,
+            ) -> None:
+                sentinel_impostor_invoked["value"] = True
+                raise InputRefused("unreachable sentinel impostor refusal")
+
+            sentinel_impostor_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_callback_refusal_projection(
+                    sentinel_impostor_callback,
+                    collector_rows=[],
+                ),
+                contains="unprojectable opaque state",
+            )
+        checks.check(
+            "refusal-dataclass-sentinels-project-by-identity",
+            set(sentinel_projections)
+            == {"MISSING", "KW_ONLY", "_HAS_DEFAULT_FACTORY"}
+            and all(
+                projection == {"kind": f"dataclasses.{name}"}
+                for name, projection in sentinel_projections.items()
+            )
+            and len(sentinel_collector.rows) == 1
+            and sentinel_collector.rows[0]["passed"] is True
+            and sentinel_impostor_invoked["value"] is False
+            and sentinel_impostor_error is not None
+            and sentinel_impostor_error.terminal == "EvidenceFailed",
+            expected={
+                "sentinels": [
+                    "MISSING",
+                    "KW_ONLY",
+                    "_HAS_DEFAULT_FACTORY",
+                ],
+                "identity_projected": True,
+                "same_type_impostor": "fail-closed",
+                "impostor_callback_invoked": False,
+            },
+            observed={
+                "sentinels": sorted(sentinel_projections),
+                "projections": sentinel_projections,
+                "collector_rows": len(sentinel_collector.rows),
+                "impostor_callback_invoked": sentinel_impostor_invoked[
+                    "value"
+                ],
+                "impostor_terminal": (
+                    sentinel_impostor_error.terminal
+                    if sentinel_impostor_error is not None
+                    else None
+                ),
+            },
+        )
+
+        class HostileIteratorList(list[str]):
+            iterator_calls = 0
+
+            def __iter__(self) -> Iterator[str]:
+                type(self).iterator_calls += 1
+                raise RuntimeError("hostile iterator must not execute")
+
+        hostile_iterator_list = HostileIteratorList(["stable"])
+
+        def hostile_iterator_callback() -> None:
+            raise InputRefused("synthetic hostile-iterator refusal")
+
+        hostile_iterator_callback.__defaults__ = (hostile_iterator_list,)
+        hostile_iterator_collector = V2CheckCollector(
+            "fixture-hostile-iterator-refusal-state",
+            "fixture.hostile-iterator-refusal-state",
+        )
+        hostile_iterator_collector.refuses(
+            "hostile-list-iterator-bypassed",
+            InputRefused,
+            hostile_iterator_callback,
+            contains="hostile-iterator",
+        )
+        checks.check(
+            "refusal-list-subclass-projection-bypasses-hostile-iterator",
+            HostileIteratorList.iterator_calls == 0
+            and list(list.__iter__(hostile_iterator_list)) == ["stable"]
+            and len(hostile_iterator_collector.rows) == 1
+            and hostile_iterator_collector.rows[0]["passed"] is True,
+            expected={
+                "hostile_iterator_calls": 0,
+                "base_items": ["stable"],
+                "collector_rows": 1,
+                "passed": True,
+            },
+            observed={
+                "hostile_iterator_calls": HostileIteratorList.iterator_calls,
+                "base_items": list(list.__iter__(hostile_iterator_list)),
+                "collector_rows": len(hostile_iterator_collector.rows),
+                "passed": hostile_iterator_collector.rows[0]["passed"],
+            },
+        )
+
+        class HostileSlotProbe:
+            __slots__ = ("phase", "hook_calls")
+
+            def __init__(self) -> None:
+                object.__setattr__(self, "phase", "stable")
+                object.__setattr__(self, "hook_calls", 0)
+
+            def __getattribute__(self, name: str) -> Any:
+                if name == "phase":
+                    descriptor = type(self).__dict__["hook_calls"]
+                    prior = types.MemberDescriptorType.__get__(
+                        descriptor,
+                        self,
+                        type(self),
+                    )
+                    types.MemberDescriptorType.__set__(
+                        descriptor,
+                        self,
+                        prior + 1,
+                    )
+                    raise RuntimeError("hostile slot access must not execute")
+                return object.__getattribute__(self, name)
+
+        hostile_slot_probe = HostileSlotProbe()
+
+        def hostile_slot_callback() -> None:
+            raise InputRefused("synthetic hostile-slot refusal")
+
+        hostile_slot_callback.__defaults__ = (hostile_slot_probe,)
+        hostile_slot_collector = V2CheckCollector(
+            "fixture-hostile-slot-refusal-state",
+            "fixture.hostile-slot-refusal-state",
+        )
+        hostile_slot_collector.refuses(
+            "hostile-slot-getattribute-bypassed",
+            InputRefused,
+            hostile_slot_callback,
+            contains="hostile-slot",
+        )
+        hostile_phase_descriptor = HostileSlotProbe.__dict__["phase"]
+        hostile_calls_descriptor = HostileSlotProbe.__dict__["hook_calls"]
+        hostile_phase = types.MemberDescriptorType.__get__(
+            hostile_phase_descriptor,
+            hostile_slot_probe,
+            HostileSlotProbe,
+        )
+        hostile_calls = types.MemberDescriptorType.__get__(
+            hostile_calls_descriptor,
+            hostile_slot_probe,
+            HostileSlotProbe,
+        )
+        checks.check(
+            "refusal-slot-projection-bypasses-hostile-getattribute",
+            hostile_phase == "stable"
+            and hostile_calls == 0
+            and len(hostile_slot_collector.rows) == 1
+            and hostile_slot_collector.rows[0]["passed"] is True,
+            expected={
+                "phase": "stable",
+                "hostile_getattribute_calls": 0,
+                "collector_rows": 1,
+                "passed": True,
+            },
+            observed={
+                "phase": hostile_phase,
+                "hostile_getattribute_calls": hostile_calls,
+                "collector_rows": len(hostile_slot_collector.rows),
+                "passed": hostile_slot_collector.rows[0]["passed"],
+            },
+        )
+
+        class HostileMapping(Mapping[str, str]):
+            def __init__(self) -> None:
+                self.hook_calls = 0
+
+            def __getitem__(self, _key: str) -> str:
+                self.hook_calls += 1
+                raise RuntimeError("hostile mapping getitem")
+
+            def __iter__(self) -> Iterator[str]:
+                self.hook_calls += 1
+                raise RuntimeError("hostile mapping iterator")
+
+            def __len__(self) -> int:
+                self.hook_calls += 1
+                raise RuntimeError("hostile mapping length")
+
+            def items(self) -> Any:
+                self.hook_calls += 1
+                raise RuntimeError("hostile mapping items")
+
+        hostile_mapping = HostileMapping()
+        hostile_mapping_callback_invoked = {"value": False}
+
+        def hostile_mapping_callback(
+            _mapping: Mapping[str, str] = hostile_mapping,
+        ) -> None:
+            hostile_mapping_callback_invoked["value"] = True
+            raise InputRefused("unreachable hostile-mapping refusal")
+
+        hostile_mapping_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_callback_refusal_projection(
+                hostile_mapping_callback,
+                collector_rows=[],
+            ),
+            contains="arbitrary Mapping inspection is forbidden",
+        )
+        checks.check(
+            "refusal-arbitrary-mapping-fails-closed-without-user-code",
+            hostile_mapping.hook_calls == 0
+            and hostile_mapping_callback_invoked["value"] is False
+            and hostile_mapping_error.terminal == "EvidenceFailed",
+            expected={
+                "mapping_hook_calls": 0,
+                "callback_invoked": False,
+                "terminal": "EvidenceFailed",
+            },
+            observed={
+                "mapping_hook_calls": hostile_mapping.hook_calls,
+                "callback_invoked": hostile_mapping_callback_invoked["value"],
+                "terminal": hostile_mapping_error.terminal,
+            },
+        )
+
+        cap_node_value = [["left"], ["right"]]
+        node_measure_context = v2_new_refusal_projection_context()
+        v2_state_projection_value(
+            cap_node_value,
+            context=node_measure_context,
+        )
+        required_nodes = node_measure_context["counters"]["nodes"]
+        v2_state_projection_value(
+            cap_node_value,
+            context=v2_new_refusal_projection_context(
+                {"nodes": required_nodes}
+            ),
+        )
+        node_cap_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_state_projection_value(
+                cap_node_value,
+                context=v2_new_refusal_projection_context(
+                    {"nodes": required_nodes - 1}
+                ),
+            ),
+            contains="aggregate nodes cap",
+        )
+
+        cap_item_value = ["alpha", "beta", "gamma"]
+        item_measure_context = v2_new_refusal_projection_context()
+        v2_state_projection_value(
+            cap_item_value,
+            context=item_measure_context,
+        )
+        required_items = item_measure_context["counters"]["items"]
+        v2_state_projection_value(
+            cap_item_value,
+            context=v2_new_refusal_projection_context(
+                {"items": required_items}
+            ),
+        )
+        item_cap_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_state_projection_value(
+                cap_item_value,
+                context=v2_new_refusal_projection_context(
+                    {"items": required_items - 1}
+                ),
+            ),
+            contains="aggregate items cap",
+        )
+
+        cap_scalar_value = "four"
+        v2_state_projection_value(
+            cap_scalar_value,
+            context=v2_new_refusal_projection_context(
+                {"scalar_bytes": 4}
+            ),
+        )
+        scalar_cap_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_state_projection_value(
+                cap_scalar_value,
+                context=v2_new_refusal_projection_context(
+                    {"scalar_bytes": 3}
+                ),
+            ),
+            contains="aggregate scalar bytes cap",
+        )
+
+        def cap_instruction_callback() -> None:
+            raise InputRefused("synthetic cap refusal")
+
+        instruction_measure_context = v2_new_refusal_projection_context()
+        v2_code_access_analysis(
+            cap_instruction_callback.__code__,
+            context=instruction_measure_context,
+        )
+        required_instructions = instruction_measure_context["counters"][
+            "instructions"
+        ]
+        v2_code_access_analysis(
+            cap_instruction_callback.__code__,
+            context=v2_new_refusal_projection_context(
+                {"instructions": required_instructions}
+            ),
+        )
+        instruction_cap_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_code_access_analysis(
+                cap_instruction_callback.__code__,
+                context=v2_new_refusal_projection_context(
+                    {"instructions": required_instructions - 1}
+                ),
+            ),
+            contains="aggregate instructions cap",
+        )
+
+        baseline_cap_projection = v2_callback_refusal_projection(
+            cap_instruction_callback,
+            collector_rows=[],
+        )
+        required_projection_bytes = len(
+            canonical_bytes(baseline_cap_projection)
+        )
+        v2_callback_refusal_projection(
+            cap_instruction_callback,
+            collector_rows=[],
+            limits={"projection_bytes": required_projection_bytes},
+        )
+        projection_bytes_cap_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_callback_refusal_projection(
+                cap_instruction_callback,
+                collector_rows=[],
+                limits={
+                    "projection_bytes": required_projection_bytes - 1,
+                },
+            ),
+            contains="aggregate projection bytes cap",
+        )
+        cap_terminals = [
+            node_cap_error.terminal,
+            item_cap_error.terminal,
+            scalar_cap_error.terminal,
+            instruction_cap_error.terminal,
+            projection_bytes_cap_error.terminal,
+        ]
+        checks.check(
+            "refusal-projection-aggregate-caps-exact-and-plus-one",
+            required_nodes > 0
+            and required_items > 0
+            and required_instructions > 0
+            and required_projection_bytes > 0
+            and cap_terminals == ["EvidenceFailed"] * 5,
+            expected={
+                "exact_caps_admitted": [
+                    "nodes",
+                    "items",
+                    "scalar_bytes",
+                    "instructions",
+                    "projection_bytes",
+                ],
+                "plus_one_terminals": ["EvidenceFailed"] * 5,
+            },
+            observed={
+                "required": {
+                    "nodes": required_nodes,
+                    "items": required_items,
+                    "scalar_bytes": 4,
+                    "instructions": required_instructions,
+                    "projection_bytes": required_projection_bytes,
+                },
+                "plus_one_terminals": cap_terminals,
+            },
+        )
+
+        outcome_rows: dict[str, dict[str, Any]] = {}
+
+        return_mutation_state = {"phase": "before"}
+
+        def mutate_then_return() -> None:
+            return_mutation_state["phase"] = "after"
+
+        wrong_error_state = {"phase": "before"}
+
+        def mutate_then_wrong_error() -> None:
+            wrong_error_state["phase"] = "after"
+            raise NoData("synthetic wrong terminal")
+
+        diagnostic_mismatch_state = {"phase": "before"}
+
+        def mutate_then_wrong_diagnostic() -> None:
+            diagnostic_mismatch_state["phase"] = "after"
+            raise InputRefused("synthetic unmatched diagnostic")
+
+        outcome_fixtures = (
+            (
+                "returned",
+                mutate_then_return,
+                return_mutation_state,
+                None,
+            ),
+            (
+                "wrong-error",
+                mutate_then_wrong_error,
+                wrong_error_state,
+                None,
+            ),
+            (
+                "wrong-diagnostic",
+                mutate_then_wrong_diagnostic,
+                diagnostic_mismatch_state,
+                "required diagnostic",
+            ),
+        )
+        outcome_terminals: list[str] = []
+        for outcome_name, outcome_callback, outcome_state, required_text in (
+            outcome_fixtures
+        ):
+            outcome_collector = V2CheckCollector(
+                f"fixture-{outcome_name}-refusal-outcome",
+                f"fixture.{outcome_name}-refusal-outcome",
+            )
+            outcome_error = expect_error(
+                EvidenceFailed,
+                lambda collector=outcome_collector,
+                callback=outcome_callback,
+                contains=required_text: collector.refuses(
+                    f"{outcome_name}-outcome",
+                    InputRefused,
+                    callback,
+                    contains=contains,
+                ),
+                contains=f"{outcome_name}-outcome failed",
+            )
+            outcome_terminals.append(outcome_error.terminal)
+            row = outcome_collector.rows[0]
+            observed_evidence = row["observed"]
+            outcome_rows[outcome_name] = {
+                "state_phase": outcome_state["phase"],
+                "row_count": len(outcome_collector.rows),
+                "passed": row["passed"],
+                "first_divergence_retained": (
+                    isinstance(observed_evidence, dict)
+                    and observed_evidence.get("first_divergence") is not None
+                ),
+                "returned": (
+                    observed_evidence.get("returned")
+                    if isinstance(observed_evidence, dict)
+                    else None
+                ),
+                "caught_error_type": (
+                    observed_evidence.get("caught_error_type")
+                    if isinstance(observed_evidence, dict)
+                    else None
+                ),
+                "contains_match": (
+                    observed_evidence.get("contains_match")
+                    if isinstance(observed_evidence, dict)
+                    else None
+                ),
+            }
+        checks.check(
+            "refusal-outcome-mismatch-still-records-state-divergence",
+            outcome_terminals == ["EvidenceFailed"] * 3
+            and all(
+                row["state_phase"] == "after"
+                and row["row_count"] == 1
+                and row["passed"] is False
+                and row["first_divergence_retained"] is True
+                for row in outcome_rows.values()
+            )
+            and outcome_rows["returned"]["returned"] is True
+            and outcome_rows["wrong-error"]["caught_error_type"] == "NoData"
+            and outcome_rows["wrong-diagnostic"]["contains_match"] is False,
+            expected={
+                "terminals": ["EvidenceFailed"] * 3,
+                "one_failed_row_each": True,
+                "state_divergence_retained_each": True,
+                "returned_callback": True,
+                "wrong_error_type": "NoData",
+                "diagnostic_match": False,
+            },
+            observed={
+                "terminals": outcome_terminals,
+                "rows": outcome_rows,
             },
         )
     elif slug == "log-order-terminal":
