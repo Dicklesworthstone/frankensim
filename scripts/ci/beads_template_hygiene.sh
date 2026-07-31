@@ -27,11 +27,12 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -311,6 +312,7 @@ V2_COMMAND_ARGUMENT_BYTES_CAP = 4_096
 V2_LOG_EVENTS_CAP = 262_144
 V2_LOG_LINE_BYTES_CAP = 16_384
 V2_DIAGNOSTIC_SUMMARY_BYTES_CAP = 512
+V2_PERSISTENT_ATTEMPTS_CAP = 32
 
 RUN_ARTIFACTS = (
     "source.json",
@@ -736,19 +738,78 @@ def run_command(
     *,
     input_text: str | None = None,
     expected: Iterable[int] = (0,),
+    command_cwd: Path | None = None,
+    environment_overrides: Mapping[str, str] | None = None,
+    honor_cancel: bool = True,
+    record_global_receipt: bool = True,
+    receipt_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    check_cancel()
+    if honor_cancel:
+        check_cancel()
+    argv_values = [str(value) for value in argv]
+    if not argv_values:
+        raise InfrastructureFailed("bounded command capture received no argv")
+    sanitized_argv = v2_sanitized_argv(argv_values)
+    command_name = sanitized_argv[0]
     environment = os.environ.copy()
     for name in SANITIZED_ENV_NAMES:
         environment.pop(name, None)
+    if environment_overrides is not None:
+        environment.update(
+            {
+                str(name): str(value)
+                for name, value in environment_overrides.items()
+            }
+        )
     input_bytes = (
         input_text.encode("utf-8") if input_text is not None else None
     )
+    if (
+        input_bytes is not None
+        and len(input_bytes) > CAPS["subprocess_stdout_bytes"]
+    ):
+        raise EvidenceFailed("command stdin exceeds the bounded byte cap")
     expected_codes = set(expected)
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    cleanup_errors: list[str] = []
+
+    def append_receipt(*, category: str, exit_code: int) -> None:
+        stdout_bytes = bytes(stdout_buffer)
+        stderr_bytes = bytes(stderr_buffer)
+        receipt = {
+            "argv": sanitized_argv,
+            "exit_code": int(exit_code),
+            "category": category,
+            "stdout": {
+                "bytes": len(stdout_bytes),
+                "root": (
+                    "sha256-v1:"
+                    + hashlib.sha256(stdout_bytes).hexdigest()
+                ),
+                "body_retained": False,
+            },
+            "stderr": {
+                "bytes": len(stderr_bytes),
+                "root": (
+                    "sha256-v1:"
+                    + hashlib.sha256(stderr_bytes).hexdigest()
+                ),
+                "body_retained": False,
+            },
+            "cleanup_error_count": len(cleanup_errors),
+            "cleanup_error_kinds": list(cleanup_errors),
+            "redaction_verdict": "RAW_STREAM_BODIES_NOT_RETAINED",
+        }
+        if record_global_receipt:
+            _command_receipts.append(receipt)
+        if receipt_sink is not None:
+            receipt_sink(dict(receipt))
+
     try:
         process = subprocess.Popen(
-            list(argv),
-            cwd=REPO_ROOT,
+            argv_values,
+            cwd=command_cwd or REPO_ROOT,
             stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -756,60 +817,113 @@ def run_command(
             start_new_session=True,
         )
     except FileNotFoundError as error:
-        raise InfrastructureFailed(f"required tool not found: {argv[0]}") from error
-    except OSError as error:
+        append_receipt(category="START_FAILED", exit_code=-1)
         raise InfrastructureFailed(
-            f"required tool could not be started: {argv[0]}"
+            f"required tool not found: {command_name}"
+        ) from error
+    except OSError as error:
+        append_receipt(category="START_FAILED", exit_code=-1)
+        raise InfrastructureFailed(
+            f"required tool could not be started: {command_name}"
         ) from error
 
     def drain_process() -> None:
-        if process.poll() is None:
+        # Signal the process group even if the session leader has exited:
+        # descendants may still own the captured pipes.
+        group_observed = True
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            group_observed = False
+        except OSError as error:
+            cleanup_errors.append(
+                f"SIGTERM_PROCESS_GROUP_ERRNO_{error.errno}"
+            )
+        if group_observed:
+            # Escalate immediately. Waiting after a reaped session leader can
+            # allow its numeric process-group ID to be reused by an unrelated
+            # process before the second signal.
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # A successful TERM followed by ESRCH/EPERM means the original
+                # group retired before escalation; do not chase a reused ID.
                 pass
+            except OSError as error:
+                cleanup_errors.append(
+                    f"SIGKILL_PROCESS_GROUP_ERRNO_{error.errno}"
+                )
+        if process.poll() is None:
             try:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=1)
-        for stream in (process.stdin, process.stdout, process.stderr):
+                cleanup_errors.append("WAIT_AFTER_SIGKILL_TIMEOUT")
+            except OSError as error:
+                cleanup_errors.append(
+                    f"WAIT_AFTER_SIGKILL_ERRNO_{error.errno}"
+                )
+        for stream_name, stream in (
+            ("stdin", process.stdin),
+            ("stdout", process.stdout),
+            ("stderr", process.stderr),
+        ):
             if stream is not None and not stream.closed:
-                stream.close()
+                try:
+                    stream.close()
+                except OSError as error:
+                    cleanup_errors.append(
+                        f"CLOSE_{stream_name.upper()}_ERRNO_{error.errno}"
+                    )
 
-    streams = selectors.DefaultSelector()
-    stdout_buffer = bytearray()
-    stderr_buffer = bytearray()
-    input_offset = 0
-    assert process.stdout is not None
-    assert process.stderr is not None
-    for stream, name in (
-        (process.stdout, "stdout"),
-        (process.stderr, "stderr"),
-    ):
-        os.set_blocking(stream.fileno(), False)
-        streams.register(stream, selectors.EVENT_READ, name)
-    if input_bytes is not None:
-        assert process.stdin is not None
-        os.set_blocking(process.stdin.fileno(), False)
-        streams.register(process.stdin, selectors.EVENT_WRITE, "stdin")
-    deadline = time.monotonic() + CAPS["subprocess_timeout_seconds"]
+    streams: selectors.BaseSelector | None = None
+    failure_category = "CAPTURE_FAILED"
+
+    def close_selector() -> None:
+        nonlocal streams
+        selected = streams
+        streams = None
+        if selected is None:
+            return
+        try:
+            selected.close()
+        except OSError as error:
+            cleanup_errors.append(
+                f"CLOSE_SELECTOR_ERRNO_{error.errno}"
+            )
+
     try:
+        streams = selectors.DefaultSelector()
+        if process.stdout is None or process.stderr is None:
+            raise InfrastructureFailed(
+                "bounded command capture lacks required output pipes"
+            )
+        for stream, name in (
+            (process.stdout, "stdout"),
+            (process.stderr, "stderr"),
+        ):
+            os.set_blocking(stream.fileno(), False)
+            streams.register(stream, selectors.EVENT_READ, name)
+        if input_bytes is not None:
+            if process.stdin is None:
+                raise InfrastructureFailed(
+                    "bounded command capture lacks its requested input pipe"
+                )
+            os.set_blocking(process.stdin.fileno(), False)
+            streams.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        input_offset = 0
+        deadline = time.monotonic() + CAPS["subprocess_timeout_seconds"]
         while streams.get_map() or process.poll() is None:
-            if _cancel_requested:
-                drain_process()
+            if honor_cancel and _cancel_requested:
+                failure_category = "CANCELLED"
                 raise CancelledDrained(
                     "cancellation requested; subprocess group was drained"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                drain_process()
+                failure_category = "TIMEOUT"
                 raise InfrastructureFailed(
                     f"command exceeded "
-                    f"{CAPS['subprocess_timeout_seconds']}s: {argv[0]}"
+                    f"{CAPS['subprocess_timeout_seconds']}s: {command_name}"
                 )
             for key, _ in streams.select(timeout=min(0.05, remaining)):
                 stream = key.fileobj
@@ -820,6 +934,8 @@ def run_command(
                             stream.fileno(),
                             input_bytes[input_offset : input_offset + 65_536],
                         )
+                    except (BlockingIOError, InterruptedError):
+                        continue
                     except BrokenPipeError:
                         written = 0
                     input_offset += written
@@ -840,22 +956,47 @@ def run_command(
                     if key.data == "stdout"
                     else stderr_buffer
                 )
-                target.extend(chunk)
-                if len(target) > CAPS["subprocess_stdout_bytes"]:
-                    drain_process()
+                cap = CAPS["subprocess_stdout_bytes"]
+                available = max(0, cap - len(target))
+                target.extend(chunk[:available])
+                if len(chunk) > available:
+                    failure_category = (
+                        "STDOUT_LIMIT"
+                        if key.data == "stdout"
+                        else "STDERR_LIMIT"
+                    )
                     raise InfrastructureFailed(
-                        f"{argv[0]} {key.data} exceeded the bounded cap"
+                        f"{command_name} {key.data} exceeded the bounded cap"
                     )
         return_code = process.wait(timeout=1)
     except HarnessError:
-        raise
-    except OSError as error:
         drain_process()
+        close_selector()
+        append_receipt(
+            category=failure_category,
+            exit_code=(
+                process.returncode
+                if process.returncode is not None
+                else -1
+            ),
+        )
+        raise
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        drain_process()
+        close_selector()
+        append_receipt(
+            category="CAPTURE_FAILED",
+            exit_code=(
+                process.returncode
+                if process.returncode is not None
+                else -1
+            ),
+        )
         raise InfrastructureFailed(
-            f"{argv[0]} failed during bounded command capture"
+            f"{command_name} failed during bounded command capture"
         ) from error
     finally:
-        streams.close()
+        close_selector()
         if process.poll() is None:
             drain_process()
     stdout_bytes = bytes(stdout_buffer)
@@ -864,43 +1005,33 @@ def run_command(
         stdout = stdout_bytes.decode("utf-8")
         stderr = stderr_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
+        append_receipt(category="NON_UTF8", exit_code=return_code)
         raise InfrastructureFailed(
-            f"{argv[0]} emitted non-UTF-8 command output"
+            f"{command_name} emitted non-UTF-8 command output"
         ) from error
     completed = subprocess.CompletedProcess(
-        list(argv),
+        argv_values,
         return_code,
         stdout,
         stderr,
     )
-    _command_receipts.append(
-        {
-            "argv": [str(value) for value in argv],
-            "exit_code": completed.returncode,
-            "category": (
-                "SUCCESS"
-                if completed.returncode in expected_codes
-                else "UNEXPECTED_EXIT"
-            ),
-            "stdout": {
-                "bytes": len(stdout_bytes),
-                "root": "sha256-v1:" + hashlib.sha256(stdout_bytes).hexdigest(),
-                "body_retained": False,
-            },
-            "stderr": {
-                "bytes": len(stderr_bytes),
-                "root": "sha256-v1:" + hashlib.sha256(stderr_bytes).hexdigest(),
-                "body_retained": False,
-            },
-            "redaction_verdict": "RAW_STREAM_BODIES_NOT_RETAINED",
-        }
+    if honor_cancel and _cancel_requested:
+        drain_process()
+        append_receipt(category="CANCELLED_AFTER_EXIT", exit_code=return_code)
+        raise CancelledDrained(
+            "cancellation requested after subprocess exit; capture was drained"
+        )
+    category = (
+        "SUCCESS"
+        if completed.returncode in expected_codes
+        else "UNEXPECTED_EXIT"
     )
+    append_receipt(category=category, exit_code=return_code)
     if completed.returncode not in expected_codes:
         raise InfrastructureFailed(
-            f"{argv[0]} returned {completed.returncode}; "
+            f"{command_name} returned {completed.returncode}; "
             "raw diagnostic body withheld, inspect its retained stream root"
         )
-    check_cancel()
     return completed
 
 
@@ -1245,6 +1376,11 @@ V2_MANIFEST_TABLE_KEYS = {
         "unreviewed_action",
         "reviewed_no_change_requires_root_bound_receipt",
         "corrective_materialization",
+        "raw_enum_product_coverage",
+        "missing_collections_normalize_empty",
+        "malformed_falsey_collections",
+        "relation_row_validation",
+        "audit_capture_uses_bounded_runner",
     },
     "row_contract": {
         "required_fields",
@@ -1273,6 +1409,7 @@ V2_MANIFEST_TABLE_KEYS = {
         "manual_route_grants_conditional_write",
         "manual_route_claims_no_clobber",
         "manual_route_claims_exactly_once",
+        "undeclared_responsibility_assignments_remain_unresolved",
         "deferred_route",
         "deferred_authorization_override",
         "deferred_requires_owner_reviewed_reactivation_and_fresh_replan",
@@ -1410,6 +1547,12 @@ V2_MANIFEST_TABLE_KEYS = {
         "terminal_content_assignment",
         "partial_terminal",
         "retry_requires_fresh_run_dir",
+        "publication_topology_preflight",
+        "publication_addressing",
+        "reserved_prefix_membership",
+        "terminal_assignment_state_machine",
+        "terminal_readback",
+        "persistent_incomplete_prefix_retry",
     },
     "logging_contract": {
         "format",
@@ -1432,6 +1575,11 @@ V2_MANIFEST_TABLE_KEYS = {
         "semantic_refusal_first_divergence_required",
         "semantic_refusal_recovery_required",
         "semantic_refusal_terminal_fields_must_agree",
+        "subprocess_capture",
+        "subprocess_process_group",
+        "subprocess_failure_receipts",
+        "subprocess_stream_cap_accounting",
+        "subprocess_argv_redaction",
     },
     "replay_contract": {
         "artifact_only",
@@ -1478,6 +1626,11 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_diagnostic_summary_bytes",
         "max_synopsis_bytes",
         "max_synopsis_selected_ids",
+        "max_subprocess_stdin_bytes",
+        "max_subprocess_stdout_bytes",
+        "max_subprocess_stderr_bytes",
+        "subprocess_timeout_seconds",
+        "max_persistent_attempts",
         "max_cases",
         "exact_optimality_max_targets",
         "cap_exceeded_terminal",
@@ -1702,6 +1855,11 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_diagnostic_summary_bytes": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
         "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
         "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
+        "max_subprocess_stdin_bytes": CAPS["subprocess_stdout_bytes"],
+        "max_subprocess_stdout_bytes": CAPS["subprocess_stdout_bytes"],
+        "max_subprocess_stderr_bytes": CAPS["subprocess_stdout_bytes"],
+        "subprocess_timeout_seconds": CAPS["subprocess_timeout_seconds"],
+        "max_persistent_attempts": V2_PERSISTENT_ATTEMPTS_CAP,
         "max_cases": 96,
         "exact_optimality_max_targets": V2_EXACT_OPTIMALITY_MAX_TARGETS,
     }
@@ -1724,6 +1882,15 @@ def load_case_manifest_v2() -> dict[str, Any]:
         V2_REMEDIATION_ROUTES
     ):
         raise InputRefused("v2 remediation routes differ from the harness")
+    if (
+        document["authority_contract"][
+            "undeclared_responsibility_assignments_remain_unresolved"
+        ]
+        is not True
+    ):
+        raise InputRefused(
+            "v2 undeclared responsibility-assignment contract drifted"
+        )
     source_contract = document["source_contract"]
     expected_semantic_signals = dict(V2_SEMANTIC_SIGNAL_BY_DISPOSITION)
     if (
@@ -1777,6 +1944,14 @@ def load_case_manifest_v2() -> dict[str, Any]:
         is not True
         or source_contract["corrective_materialization"]
         != "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
+        or source_contract["raw_enum_product_coverage"]
+        != "ALL_DECLARED_TYPES_X_ALL_STATUSES_X_P0_P4"
+        or source_contract["missing_collections_normalize_empty"]
+        is not True
+        or source_contract["malformed_falsey_collections"] != "REFUSE"
+        or source_contract["relation_row_validation"]
+        != "NONEMPTY_ID_TYPE_VALID_OPTIONAL_STATUS_PRIORITY"
+        or source_contract["audit_capture_uses_bounded_runner"] is not True
     ):
         raise InputRefused("v2 semantic-review source contract differs")
     row_fields = document["row_contract"]["required_fields"]
@@ -1849,8 +2024,49 @@ def load_case_manifest_v2() -> dict[str, Any]:
         != "FORBIDDEN"
         or artifact_contract["semantic_refusal_requires_reserved_run"] is not True
         or artifact_contract["retry_requires_fresh_run_dir"] is not True
+        or artifact_contract["publication_topology_preflight"]
+        != "EXACT_FILE_DIRECTORY_SET_BEFORE_FIRST_PAYLOAD_WRITE"
+        or artifact_contract["publication_addressing"]
+        != "DESCRIPTOR_RELATIVE_O_NOFOLLOW"
+        or artifact_contract["reserved_prefix_membership"]
+        != "EMPTY_TERMINAL_ONLY"
+        or artifact_contract["terminal_assignment_state_machine"]
+        != [
+            "RESERVED_EMPTY",
+            "ASSIGNMENT_STARTED",
+            "DURABLY_COMMITTED",
+            "VERIFIED_SEALED",
+        ]
+        or artifact_contract["terminal_readback"]
+        != "SAME_DESCRIPTOR_AND_PATH_IDENTITY"
+        or artifact_contract["persistent_incomplete_prefix_retry"]
+        != "BOUNDED_FRESH_ATTEMPT_AFTER_INCOMPLETE_PREFIX"
     ):
         raise InputRefused("v2 semantic-refusal artifact contract differs")
+    logging_contract = document["logging_contract"]
+    if (
+        logging_contract["subprocess_capture"]
+        != "NONBLOCKING_SELECTOR_BOUNDED"
+        or logging_contract["subprocess_process_group"]
+        != "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
+        or logging_contract["subprocess_failure_receipts"]
+        != [
+            "START_FAILED",
+            "CAPTURE_FAILED",
+            "TIMEOUT",
+            "CANCELLED",
+            "CANCELLED_AFTER_EXIT",
+            "STDOUT_LIMIT",
+            "STDERR_LIMIT",
+            "NON_UTF8",
+            "UNEXPECTED_EXIT",
+        ]
+        or logging_contract["subprocess_stream_cap_accounting"]
+        != "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
+        or logging_contract["subprocess_argv_redaction"]
+        != "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
+    ):
+        raise InputRefused("v2 bounded subprocess logging contract differs")
     if (
         document["replay_contract"]["semantic_refusal_behavior"]
         != "VALIDATE_AND_REFUSE_WITHOUT_OUTPUT"
@@ -2021,21 +2237,47 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 f"v2 br issue {issue_id} has invalid {relation_field}"
             )
         for relation in relations:
+            relation_type = (
+                relation.get(
+                    "dependency_type",
+                    relation.get("type"),
+                )
+                if isinstance(relation, dict)
+                else None
+            )
+            relation_status = (
+                relation.get("status")
+                if isinstance(relation, dict)
+                else None
+            )
+            relation_priority = (
+                relation.get("priority")
+                if isinstance(relation, dict)
+                else None
+            )
             if (
                 not isinstance(relation, dict)
                 or not isinstance(relation.get("id"), str)
                 or not relation["id"]
-                or not isinstance(
-                    relation.get("dependency_type", relation.get("type")),
-                    str,
+                or not isinstance(relation_type, str)
+                or not relation_type
+                or (
+                    relation_status is not None
+                    and relation_status
+                    not in {
+                        "open",
+                        "in_progress",
+                        "blocked",
+                        "deferred",
+                        "closed",
+                    }
                 )
                 or (
-                    relation.get("status") is not None
-                    and not isinstance(relation.get("status"), str)
-                )
-                or (
-                    relation.get("priority") is not None
-                    and type(relation.get("priority")) is not int
+                    relation_priority is not None
+                    and (
+                        type(relation_priority) is not int
+                        or relation_priority not in range(5)
+                    )
                 )
             ):
                 raise InfrastructureFailed(
@@ -4681,27 +4923,13 @@ def _recovery_br_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run a bounded br recovery command even after cancellation was requested."""
 
-    environment = os.environ.copy()
-    for name in SANITIZED_ENV_NAMES:
-        environment.pop(name, None)
-    try:
-        completed = subprocess.run(
-            list(argv),
-            cwd=REPO_ROOT,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            env=environment,
-            timeout=CAPS["subprocess_timeout_seconds"],
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise InfrastructureFailed("required recovery tool not found: br") from error
-    except subprocess.TimeoutExpired as error:
-        raise InfrastructureFailed("br recovery command exceeded its bounded timeout") from error
-    if len(completed.stdout.encode("utf-8")) > CAPS["subprocess_stdout_bytes"]:
-        raise InfrastructureFailed("br recovery stdout exceeded the bounded cap")
-    return completed
+    return run_command(
+        argv,
+        input_text=input_text,
+        expected=range(-255, 256),
+        honor_cancel=False,
+        record_global_receipt=False,
+    )
 
 
 def _read_apply_issue(issue_id: str, *, recovery: bool = False) -> dict[str, Any]:
@@ -4710,10 +4938,9 @@ def _read_apply_issue(issue_id: str, *, recovery: bool = False) -> dict[str, Any
             ("br", "show", issue_id, "--json", *BR_READ_FLAGS)
         )
         if completed.returncode != 0:
-            detail = completed.stderr.strip().splitlines()
-            named = detail[0][:240] if detail else "no diagnostic"
             raise InfrastructureFailed(
-                f"br recovery show returned {completed.returncode}: {named}"
+                f"br recovery show returned {completed.returncode}; "
+                "raw diagnostic body withheld"
             )
         try:
             document = json.loads(completed.stdout)
@@ -5837,42 +6064,17 @@ def fixture_br_run(
     *arguments: str,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    check_cancel()
     fixture_root = resolve_safe(
         str(FIXTURE_BR_ROOT_REL),
         label="no-mock fixture root",
         must_exist=True,
     )
-    environment = os.environ.copy()
-    for name in SANITIZED_ENV_NAMES:
-        environment.pop(name, None)
-    try:
-        completed = subprocess.run(
-            list(fixture_br_argv(*arguments)),
-            cwd=fixture_root,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            env=environment,
-            timeout=CAPS["subprocess_timeout_seconds"],
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise InfrastructureFailed("required fixture tool not found: br") from error
-    except subprocess.TimeoutExpired as error:
-        raise InfrastructureFailed(
-            "fixture br command exceeded the bounded timeout"
-        ) from error
-    if len(completed.stdout.encode("utf-8")) > CAPS["subprocess_stdout_bytes"]:
-        raise InfrastructureFailed("fixture br stdout exceeded the bounded cap")
-    if completed.returncode != 0:
-        diagnostic = completed.stderr.strip() or completed.stdout.strip()
-        first = diagnostic.splitlines()[0][:240] if diagnostic else "no diagnostic"
-        raise InfrastructureFailed(
-            f"fixture br {arguments[0]} returned {completed.returncode}: {first}"
-        )
-    check_cancel()
-    return completed
+    return run_command(
+        fixture_br_argv(*arguments),
+        input_text=input_text,
+        command_cwd=fixture_root,
+        record_global_receipt=False,
+    )
 
 
 def fixture_br_json(
@@ -8081,51 +8283,31 @@ def v2_capture_one_audit(
     *,
     capture_ordinal: int,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    check_cancel()
     argv = ["br", "audit", "log", issue_id, "--json"]
-    environment = os.environ.copy()
-    for name in SANITIZED_ENV_NAMES:
-        environment.pop(name, None)
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=REPO_ROOT,
-            text=False,
-            capture_output=True,
-            env=environment,
-            timeout=CAPS["subprocess_timeout_seconds"],
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+    receipts: list[dict[str, Any]] = []
+    completed = run_command(
+        argv,
+        record_global_receipt=False,
+        receipt_sink=receipts.append,
+    )
+    if len(receipts) != 1:
         raise InfrastructureFailed(
-            f"bounded audit capture failed for {issue_id}"
-        ) from error
-    stdout = completed.stdout
-    stderr = completed.stderr
-    if (
-        len(stdout) > CAPS["subprocess_stdout_bytes"]
-        or len(stderr) > CAPS["subprocess_stdout_bytes"]
-    ):
-        raise InfrastructureFailed(f"bounded audit stream cap exceeded for {issue_id}")
+            "bounded audit capture did not retain exactly one command receipt"
+        )
+    command_receipt = receipts[0]
+    stdout = completed.stdout.encode("utf-8")
     receipt = {
         "capture_ordinal": capture_ordinal,
         "issue_id": issue_id,
-        "argv": argv,
+        "argv": command_receipt["argv"],
         "exit_code": completed.returncode,
-        "result_category": (
-            "SUCCESS" if completed.returncode == 0 else "UNEXPECTED_EXIT"
-        ),
-        "stdout_byte_length": len(stdout),
-        "stdout_root": "sha256-v1:" + hashlib.sha256(stdout).hexdigest(),
-        "stderr_byte_length": len(stderr),
-        "stderr_root": "sha256-v1:" + hashlib.sha256(stderr).hexdigest(),
+        "result_category": command_receipt["category"],
+        "stdout_byte_length": command_receipt["stdout"]["bytes"],
+        "stdout_root": command_receipt["stdout"]["root"],
+        "stderr_byte_length": command_receipt["stderr"]["bytes"],
+        "stderr_root": command_receipt["stderr"]["root"],
         "raw_stream_bodies_retained": False,
     }
-    if completed.returncode != 0:
-        raise InfrastructureFailed(
-            f"br audit log returned {completed.returncode} for {issue_id}; "
-            "raw diagnostic body withheld"
-        )
     document = strict_json_loads(stdout, label=f"audit log {issue_id}")
     return issue_id, v2_normalize_audit_document(document, issue_id=issue_id), receipt
 
@@ -10219,21 +10401,35 @@ def v2_derive_authority(
                 receipt["declared_domain_owner"] if receipt else ""
             ),
             "declared_acceptance_owner": (
-                receipt["declared_acceptance_owner"] if receipt else ""
+                receipt["declared_acceptance_owner"]
+                if authority_declared and receipt
+                else ""
             ),
             "implementation_owner": (
                 receipt["implementation_owner"]
-                if receipt and receipt["implementation_owner"]
+                if (
+                    authority_declared
+                    and receipt
+                    and receipt["implementation_owner"]
+                )
                 else "UNRESOLVED"
             ),
             "evidence_owner": (
                 receipt["evidence_owner"]
-                if receipt and receipt["evidence_owner"]
+                if (
+                    authority_declared
+                    and receipt
+                    and receipt["evidence_owner"]
+                )
                 else "UNRESOLVED"
             ),
             "terminal_consumer": (
                 receipt["terminal_consumer"]
-                if receipt and receipt["terminal_consumer"]
+                if (
+                    authority_declared
+                    and receipt
+                    and receipt["terminal_consumer"]
+                )
                 else "UNRESOLVED"
             ),
             "reviewer_provenance": {
@@ -10362,7 +10558,13 @@ def v2_derive_authority(
                     and receipt["manual_authorization"]
                 ),
                 "source": (
-                    receipt["manual_authorization_source"] if receipt else ""
+                    receipt["manual_authorization_source"]
+                    if (
+                        authority_declared
+                        and receipt
+                        and receipt["manual_authorization"]
+                    )
+                    else ""
                 ),
                 "mechanical_authority": False,
                 "no_cas_no_clobber_no_exactly_once": True,
@@ -13409,11 +13611,19 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
         raise EvidenceFailed(
             f"v2 overwrite is forbidden for {path.relative_to(REPO_ROOT)}"
         ) from error
+    except OSError as error:
+        raise InfrastructureFailed(
+            f"v2 exclusive writer could not create {path.relative_to(REPO_ROOT)}"
+        ) from error
     try:
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+    except OSError as error:
+        raise InfrastructureFailed(
+            f"v2 exclusive writer failed for {path.relative_to(REPO_ROOT)}"
+        ) from error
     except BaseException:
         # Repository policy forbids deletion; an incomplete prefix deliberately
         # remains without a valid terminal seal for manual recovery.
@@ -13423,11 +13633,21 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
 def v2_fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise InfrastructureFailed("v2 directory could not be opened for fsync") from error
     try:
         os.fsync(descriptor)
+    except OSError as error:
+        raise InfrastructureFailed("v2 directory fsync failed") from error
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            # The durability operation has already completed or raised its
+            # typed failure. A close error must not replace either outcome.
+            pass
 
 
 @dataclass
@@ -13436,7 +13656,12 @@ class V2BundleReservation:
     artifact_root: str
     artifact_dir: str
     terminal_descriptor: int | None
+    output_descriptor: int | None
+    parent_descriptor: int | None
     path_anchors: tuple[tuple[Path, int, int, int], ...]
+    written_identities: dict[str, dict[str, int]] = field(default_factory=dict)
+    terminal_assignment_started: bool = False
+    terminal_assignment_committed: bool = False
     sealed: bool = False
 
 
@@ -13478,8 +13703,14 @@ def v2_assert_reservation_anchors(
                 "v2 reserved publication path changed identity"
             )
     descriptor = reservation.terminal_descriptor
-    if descriptor is None:
-        raise EvidenceFailed("v2 terminal reservation is not open")
+    output_descriptor = reservation.output_descriptor
+    parent_descriptor = reservation.parent_descriptor
+    if (
+        descriptor is None
+        or output_descriptor is None
+        or parent_descriptor is None
+    ):
+        raise EvidenceFailed("v2 bundle reservation descriptors are not open")
     terminal_path, device, inode, file_type = reservation.path_anchors[-1]
     descriptor_stat = os.fstat(descriptor)
     if (
@@ -13493,12 +13724,50 @@ def v2_assert_reservation_anchors(
         raise InfrastructureFailed(
             "v2 reserved terminal descriptor lost its path identity"
         )
+    output_path_anchor = next(
+        anchor
+        for anchor in reservation.path_anchors
+        if anchor[0] == reservation.output
+    )
+    output_stat = os.fstat(output_descriptor)
+    if (
+        output_stat.st_dev != output_path_anchor[1]
+        or output_stat.st_ino != output_path_anchor[2]
+        or stat.S_IFMT(output_stat.st_mode) != output_path_anchor[3]
+        or not stat.S_ISDIR(output_stat.st_mode)
+    ):
+        raise InfrastructureFailed(
+            "v2 reserved output directory descriptor lost its path identity"
+        )
+    parent_stat = os.fstat(parent_descriptor)
+    parent_anchor = next(
+        anchor
+        for anchor in reservation.path_anchors
+        if anchor[0] == reservation.output.parent
+    )
+    if (
+        parent_stat.st_dev != parent_anchor[1]
+        or parent_stat.st_ino != parent_anchor[2]
+        or stat.S_IFMT(parent_stat.st_mode) != parent_anchor[3]
+        or not stat.S_ISDIR(parent_stat.st_mode)
+    ):
+        raise InfrastructureFailed(
+            "v2 reserved parent directory descriptor lost its path identity"
+        )
 
 
 def v2_close_reservation(reservation: V2BundleReservation) -> None:
-    descriptor = reservation.terminal_descriptor
+    descriptors = (
+        reservation.terminal_descriptor,
+        reservation.output_descriptor,
+        reservation.parent_descriptor,
+    )
     reservation.terminal_descriptor = None
-    if descriptor is not None:
+    reservation.output_descriptor = None
+    reservation.parent_descriptor = None
+    for descriptor in descriptors:
+        if descriptor is None:
+            continue
         try:
             os.close(descriptor)
         except OSError:
@@ -13540,49 +13809,74 @@ def _v2_reserve_bundle(
         raise EvidenceFailed("v2 artifact run directory already exists") from error
     v2_fsync_directory(output.parent)
     terminal_path = output / "terminal.json"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor: int | None = None
+    output_descriptor: int | None = None
+    terminal_descriptor: int | None = None
     try:
-        terminal_descriptor = os.open(terminal_path, flags, 0o644)
-    except OSError as error:
-        raise EvidenceFailed(
-            "v2 terminal reservation could not be created exclusively"
-        ) from error
-    try:
-        os.fsync(terminal_descriptor)
-        v2_fsync_directory(output)
-    except BaseException:
+        parent_descriptor = os.open(output.parent, directory_flags)
+        output_descriptor = os.open(output, directory_flags)
+        terminal_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        terminal_flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
-            os.close(terminal_descriptor)
-        except OSError:
-            pass
+            terminal_descriptor = os.open(
+                "terminal.json",
+                terminal_flags,
+                0o644,
+                dir_fd=output_descriptor,
+            )
+        except FileExistsError as error:
+            raise EvidenceFailed(
+                "v2 terminal reservation already exists"
+            ) from error
+        os.fsync(terminal_descriptor)
+        os.fsync(output_descriptor)
+        os.fsync(parent_descriptor)
+        anchor_paths: list[Path] = [root]
+        cursor = root
+        for part in output.relative_to(root).parts:
+            cursor = cursor / part
+            anchor_paths.append(cursor)
+        path_anchors = tuple(
+            [
+                *(
+                    v2_capture_path_anchor(path, expect_directory=True)
+                    for path in anchor_paths
+                ),
+                v2_capture_path_anchor(
+                    terminal_path,
+                    expect_directory=False,
+                ),
+            ]
+        )
+        reservation = V2BundleReservation(
+            output=output,
+            artifact_root=artifact_root,
+            artifact_dir=artifact_dir,
+            terminal_descriptor=terminal_descriptor,
+            output_descriptor=output_descriptor,
+            parent_descriptor=parent_descriptor,
+            path_anchors=path_anchors,
+        )
+        reservation.written_identities["terminal.json"] = v2_stat_identity(
+            os.fstat(terminal_descriptor)
+        )
+        v2_assert_reservation_anchors(reservation)
+        return reservation
+    except BaseException:
+        for descriptor in (
+            terminal_descriptor,
+            output_descriptor,
+            parent_descriptor,
+        ):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         raise
-    anchor_paths: list[Path] = [root]
-    cursor = root
-    for part in output.relative_to(root).parts:
-        cursor = cursor / part
-        anchor_paths.append(cursor)
-    path_anchors = tuple(
-        [
-            *(
-                v2_capture_path_anchor(path, expect_directory=True)
-                for path in anchor_paths
-            ),
-            v2_capture_path_anchor(
-                terminal_path,
-                expect_directory=False,
-            ),
-        ]
-    )
-    reservation = V2BundleReservation(
-        output=output,
-        artifact_root=artifact_root,
-        artifact_dir=artifact_dir,
-        terminal_descriptor=terminal_descriptor,
-        path_anchors=path_anchors,
-    )
-    v2_assert_reservation_anchors(reservation)
-    return reservation
 
 
 def v2_reserve_bundle(
@@ -13615,6 +13909,238 @@ def v2_expected_bundle_directories(
     return sorted(expected, key=lambda value: value.encode("utf-8"))
 
 
+def v2_preflight_publication_topology(
+    payloads: Mapping[str, bytes],
+) -> tuple[list[str], list[str]]:
+    names: list[str] = []
+    for raw_name, payload in payloads.items():
+        if not isinstance(raw_name, str) or not isinstance(payload, bytes):
+            raise EvidenceFailed(
+                "v2 publication payload keys and values must be strings and bytes"
+            )
+        try:
+            relative = safe_relative(raw_name, label="v2 artifact member")
+        except UsageRefused as error:
+            raise EvidenceFailed("v2 publication member path is unsafe") from error
+        if str(relative) != raw_name:
+            raise EvidenceFailed("v2 publication member path is noncanonical")
+        if len(payload) > RUN_ARTIFACT_CAP:
+            raise EvidenceFailed(
+                f"v2 publication member exceeds its artifact cap: {raw_name}"
+            )
+        names.append(raw_name)
+    names.sort(key=lambda value: value.encode("utf-8"))
+    if len(names) != len(set(names)) or "terminal.json" not in names:
+        raise EvidenceFailed(
+            "v2 publication topology lacks unique terminal membership"
+        )
+    directories = v2_expected_bundle_directories(names)
+    if set(names) & set(directories):
+        raise EvidenceFailed(
+            "v2 publication topology contains a file/directory prefix collision"
+        )
+    aliases: dict[str, str] = {}
+    for relative in [*directories, *names]:
+        alias = unicodedata.normalize("NFC", relative).casefold()
+        if alias in aliases and aliases[alias] != relative:
+            raise EvidenceFailed(
+                "v2 publication topology contains a Unicode/case alias"
+            )
+        aliases[alias] = relative
+    return names, directories
+
+
+def v2_open_reserved_directory(
+    reservation: V2BundleReservation,
+    relative: PurePosixPath,
+    *,
+    create: bool,
+) -> int:
+    output_descriptor = reservation.output_descriptor
+    if output_descriptor is None:
+        raise EvidenceFailed("v2 output directory descriptor is closed")
+    descriptor = os.dup(output_descriptor)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except FileExistsError:
+                    pass
+            next_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=descriptor,
+            )
+            value = os.fstat(next_descriptor)
+            if not stat.S_ISDIR(value.st_mode):
+                os.close(next_descriptor)
+                raise EvidenceFailed(
+                    "v2 publication path component is not a directory"
+                )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def v2_write_reserved_member(
+    reservation: V2BundleReservation,
+    *,
+    relative: PurePosixPath,
+    payload: bytes,
+) -> dict[str, int]:
+    if len(payload) > RUN_ARTIFACT_CAP:
+        raise EvidenceFailed("v2 writer received an over-cap payload")
+    parent_descriptor = v2_open_reserved_directory(
+        reservation,
+        relative.parent,
+        create=True,
+    )
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(
+                relative.name,
+                flags,
+                0o644,
+                dir_fd=parent_descriptor,
+            )
+        except FileExistsError as error:
+            raise EvidenceFailed(
+                f"v2 overwrite is forbidden for {relative}"
+            ) from error
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("short write to reserved v2 member")
+            written += count
+        os.fsync(descriptor)
+        identity = v2_stat_identity(os.fstat(descriptor))
+        os.fsync(parent_descriptor)
+        return identity
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise InfrastructureFailed(
+            f"v2 descriptor-relative write failed for {relative}"
+        ) from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.close(parent_descriptor)
+        except OSError:
+            pass
+
+
+def v2_read_descriptor_strict(
+    descriptor: int,
+    *,
+    label: str,
+    expected_identity: Mapping[str, int] | None = None,
+) -> bytes:
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise InputRefused(f"{label} is not a uniquely linked regular file")
+        identity = v2_stat_identity(before)
+        if expected_identity is not None and identity != dict(expected_identity):
+            raise InputRefused(f"{label} changed descriptor identity")
+        if before.st_size > RUN_ARTIFACT_CAP:
+            raise InputRefused(f"{label} exceeds the v2 artifact cap")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise InputRefused(f"{label} changed while being read")
+            chunks.append(chunk)
+            offset += len(chunk)
+        if os.pread(descriptor, 1, offset):
+            raise InputRefused(f"{label} grew while being read")
+        after = os.fstat(descriptor)
+        if after.st_nlink != 1 or v2_stat_identity(after) != identity:
+            raise InputRefused(f"{label} changed while being read")
+        return b"".join(chunks)
+    except InputRefused:
+        raise
+    except OSError as error:
+        raise InputRefused(f"{label} failed during strict descriptor read") from error
+
+
+def v2_read_reserved_member(
+    reservation: V2BundleReservation,
+    *,
+    name: str,
+    expected_identity: Mapping[str, int],
+) -> bytes:
+    if name == "terminal.json":
+        descriptor = reservation.terminal_descriptor
+        if descriptor is None:
+            raise EvidenceFailed("v2 terminal descriptor is closed")
+        return v2_read_descriptor_strict(
+            descriptor,
+            label="v2 reserved terminal",
+            expected_identity=expected_identity,
+        )
+    relative = PurePosixPath(name)
+    parent_descriptor = v2_open_reserved_directory(
+        reservation,
+        relative.parent,
+        create=False,
+    )
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            relative.name,
+            flags,
+            dir_fd=parent_descriptor,
+        )
+        return v2_read_descriptor_strict(
+            descriptor,
+            label=f"v2 reserved artifact {name}",
+            expected_identity=expected_identity,
+        )
+    except InputRefused:
+        raise
+    except OSError as error:
+        raise InputRefused(
+            f"v2 reserved artifact {name} cannot be opened safely"
+        ) from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.close(parent_descriptor)
+        except OSError:
+            pass
+
+
 def v2_verify_reserved_publication(
     reservation: V2BundleReservation,
     *,
@@ -13622,11 +14148,9 @@ def v2_verify_reserved_publication(
     terminal_sealed: bool,
 ) -> None:
     v2_assert_reservation_anchors(reservation)
-    expected_files = sorted(
-        payloads,
-        key=lambda value: value.encode("utf-8"),
+    expected_files, expected_directories = v2_preflight_publication_topology(
+        payloads
     )
-    expected_directories = v2_expected_bundle_directories(expected_files)
     try:
         observed_files, observed_directories, identities = v2_enumerate_bundle(
             reservation.output
@@ -13639,17 +14163,27 @@ def v2_verify_reserved_publication(
                 "v2 publication tree differs from its exact file/directory contract"
             )
         for name in expected_files:
-            observed = v2_read_file_strict(
+            path_observed = v2_read_file_strict(
                 reservation.output.joinpath(*PurePosixPath(name).parts),
                 label=f"v2 published artifact {name}",
                 expected_identity=identities[name],
+            )
+            writer_identity = reservation.written_identities.get(name)
+            if writer_identity != identities[name]:
+                raise InfrastructureFailed(
+                    f"v2 writer/enumerator identity differs for {name}"
+                )
+            descriptor_observed = v2_read_reserved_member(
+                reservation,
+                name=name,
+                expected_identity=writer_identity,
             )
             expected = (
                 payloads[name]
                 if name != "terminal.json" or terminal_sealed
                 else b""
             )
-            if observed != expected:
+            if path_observed != expected or descriptor_observed != expected:
                 raise InfrastructureFailed(
                     f"v2 published bytes differ for {name}"
                 )
@@ -13667,50 +14201,50 @@ def _v2_publish_reserved_bundle(
 ) -> dict[str, Any]:
     if reservation.sealed or reservation.terminal_descriptor is None:
         raise EvidenceFailed("v2 artifact reservation is already consumed")
-    if "terminal.json" not in payloads:
-        raise EvidenceFailed("v2 artifact payload lacks a terminal seal")
-    output = reservation.output
+    expected_files, _ = v2_preflight_publication_topology(payloads)
+    payload_map = {name: payloads[name] for name in expected_files}
+    output_descriptor = reservation.output_descriptor
+    descriptor = reservation.terminal_descriptor
+    if output_descriptor is None or descriptor is None:
+        raise EvidenceFailed("v2 artifact reservation descriptors are closed")
 
-    nonterminal = sorted(
-        (name for name in payloads if name != "terminal.json"),
-        key=lambda value: value.encode("utf-8"),
+    # The reservation owns a fresh directory containing only its empty
+    # terminal placeholder. Validate that exact prefix before writing any
+    # caller-provided byte.
+    v2_verify_reserved_publication(
+        reservation,
+        payloads={"terminal.json": payload_map["terminal.json"]},
+        terminal_sealed=False,
     )
+    nonterminal = [
+        name for name in expected_files if name != "terminal.json"
+    ]
     writes: list[str] = []
-    touched_directories: set[Path] = {output}
     for name in nonterminal:
         v2_assert_reservation_anchors(reservation)
         check_cancel()
-        relative = safe_relative(name, label="v2 artifact member")
-        destination = output.joinpath(*relative.parts)
-        cursor = output
-        for part in relative.parts[:-1]:
-            cursor = cursor / part
-            if not cursor.exists():
-                cursor.mkdir(exist_ok=False)
-                v2_fsync_directory(cursor.parent)
-            if cursor.is_symlink() or not cursor.is_dir():
-                raise EvidenceFailed("v2 artifact subdirectory is unsafe")
-            touched_directories.add(cursor)
-        v2_write_exclusive(destination, payloads[name])
+        relative = PurePosixPath(name)
+        reservation.written_identities[name] = v2_write_reserved_member(
+            reservation,
+            relative=relative,
+            payload=payload_map[name],
+        )
         writes.append(name)
         v2_assert_reservation_anchors(reservation)
-    for directory in sorted(
-        touched_directories,
-        key=lambda value: len(value.parts),
-        reverse=True,
-    ):
-        v2_fsync_directory(directory)
+    os.fsync(output_descriptor)
     v2_verify_reserved_publication(
         reservation,
-        payloads=payloads,
+        payloads=payload_map,
         terminal_sealed=False,
     )
-    descriptor = reservation.terminal_descriptor
-    terminal_payload = payloads["terminal.json"]
-    if len(terminal_payload) > RUN_ARTIFACT_CAP:
-        raise EvidenceFailed("v2 terminal payload exceeds its artifact cap")
-    check_cancel()
+
+    terminal_payload = payload_map["terminal.json"]
+    # This is the final cancellation boundary. Everything after
+    # terminal_assignment_started is a bounded, non-cancellable seal
+    # transaction whose exact state is reported to the caller.
     v2_assert_reservation_anchors(reservation)
+    check_cancel()
+    reservation.terminal_assignment_started = True
     try:
         os.lseek(descriptor, 0, os.SEEK_SET)
         written = 0
@@ -13721,14 +14255,29 @@ def _v2_publish_reserved_bundle(
             written += count
         os.ftruncate(descriptor, len(terminal_payload))
         os.fsync(descriptor)
-        v2_fsync_directory(output)
+        terminal_identity = v2_stat_identity(os.fstat(descriptor))
+        reservation.written_identities["terminal.json"] = terminal_identity
+        observed_terminal = v2_read_descriptor_strict(
+            descriptor,
+            label="v2 committed terminal descriptor",
+            expected_identity=terminal_identity,
+        )
+        if observed_terminal != terminal_payload:
+            raise InfrastructureFailed(
+                "v2 committed terminal descriptor differs from its payload"
+            )
+        reservation.terminal_assignment_committed = True
     except OSError as error:
         raise InfrastructureFailed(
             "v2 reserved terminal seal could not be finalized"
         ) from error
+    except InputRefused as error:
+        raise InfrastructureFailed(
+            "v2 reserved terminal seal could not be read back safely"
+        ) from error
     v2_verify_reserved_publication(
         reservation,
-        payloads=payloads,
+        payloads=payload_map,
         terminal_sealed=True,
     )
     reservation.sealed = True
@@ -14099,7 +14648,12 @@ def v2_execute_live_plan(
         return synopsis
     except HarnessError as error:
         if isinstance(error, CancelledDrained):
-            raise
+            if not reservation.terminal_assignment_started:
+                raise
+            raise InfrastructureFailed(
+                "v2 cancellation surfaced after terminal assignment began; "
+                "manual verification of the reserved bundle is required"
+            ) from error
         if (
             error.terminal in V2_SEMANTIC_REFUSAL_TERMINALS
             and not publication_started
@@ -14154,9 +14708,20 @@ def v2_execute_live_plan(
                 document=result,
             ) from error
         if publication_started:
+            if reservation.terminal_assignment_committed:
+                detail = (
+                    "terminal content was durably committed, but post-seal "
+                    "verification failed"
+                )
+            elif reservation.terminal_assignment_started:
+                detail = (
+                    "terminal assignment began but did not reach a verified "
+                    "durable commit"
+                )
+            else:
+                detail = "terminal assignment never began"
             raise InfrastructureFailed(
-                "v2 publication failed; the reserved terminal remains "
-                "empty or invalid and manual recovery is required"
+                f"v2 publication failed; {detail}; manual recovery is required"
             ) from error
         raise
     finally:
@@ -14214,8 +14779,17 @@ def v2_read_file_strict(
         if after.st_nlink != 1 or v2_stat_identity(after) != before_identity:
             raise InputRefused(f"{label} changed while being read")
         return b"".join(chunks)
+    except InputRefused:
+        raise
+    except OSError as error:
+        raise InputRefused(f"{label} failed during strict read") from error
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            # The strict read has already produced its typed result. Do not
+            # mask it with a descriptor-close failure.
+            pass
 
 
 def v2_safe_member(value: str, *, label: str) -> str:
@@ -16548,14 +17122,71 @@ def v2_execute_schema_cli_ux(
             expected=semantic_root(sorted(assertion_ids)),
             observed=semantic_root(sorted(registry)),
         )
+        probe_case = dict(manifest["case"][0])
+        probe_manifest = dict(manifest)
+        probe_manifest["case"] = [probe_case]
+        emitted: list[dict[str, Any]] = []
+        original_registry_builder = v2_build_executor_registry
+        original_json_stdout = json_stdout
+
+        def malformed_registry(
+            _manifest: Mapping[str, Any],
+        ) -> dict[str, Callable[..., dict[str, Any]]]:
+            return {
+                str(probe_case["assertion_id"]): (
+                    lambda _case, _accepted: {
+                        "schema": V2_ASSERTION_RESULT_SCHEMA,
+                        "terminal": "Pass",
+                    }
+                )
+            }
+
+        globals()["v2_build_executor_registry"] = malformed_registry
+        globals()["json_stdout"] = lambda document: emitted.append(
+            dict(document)
+        )
+        probe_exit: Any = None
+        try:
+            run_v2_self_tests(
+                probe_manifest,
+                selected=str(probe_case["id"]),
+            )
+        except SystemExit as error:
+            probe_exit = error.code
+        finally:
+            globals()[
+                "v2_build_executor_registry"
+            ] = original_registry_builder
+            globals()["json_stdout"] = original_json_stdout
+        checks.check(
+            "runner-fail-seals-malformed-assertion-result",
+            probe_exit == TERMINAL_EXIT["EvidenceFailed"]
+            and len(emitted) == 3
+            and emitted[-2]["terminal"] == "EvidenceFailed"
+            and emitted[-2]["result_category"] == "ASSERTION_FAILED"
+            and emitted[-1]["terminal"] == "EvidenceFailed"
+            and emitted[-1]["recovery"] == "FIX_ASSERTION_OR_SUBJECT"
+            and emitted[-1]["completed_case_roots"] == [],
+            expected={
+                "exit_code": TERMINAL_EXIT["EvidenceFailed"],
+                "events": 3,
+                "terminal": "EvidenceFailed",
+                "recovery": "FIX_ASSERTION_OR_SUBJECT",
+                "completed": [],
+            },
+            observed={
+                "exit_code": probe_exit,
+                "events": len(emitted),
+                "assertion_terminal": (
+                    emitted[-2] if len(emitted) >= 2 else None
+                ),
+                "suite_terminal": emitted[-1] if emitted else None,
+            },
+        )
     elif slug == "cli-help-modes":
-        completed = subprocess.run(
+        completed = run_command(
             [str(REPO_ROOT / SCRIPT_REL), "--help"],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=CAPS["subprocess_timeout_seconds"],
+            record_global_receipt=False,
         )
         expected_options = {
             "--review-plan",
@@ -17406,6 +18037,103 @@ def v2_execute_source_cases(
                 "types": sorted({row["type"] for row in rows}),
             },
         )
+        raw_rows = [
+            fixture_issue(
+                issue_id=(
+                    f"fixture-enum-{type_index:02d}-"
+                    f"{status_index:02d}-{priority}"
+                ),
+                issue_type=issue_type,
+                status=status,
+                priority=priority,
+            )
+            for type_index, issue_type in enumerate(types)
+            for status_index, status in enumerate(statuses)
+            for priority in range(5)
+        ]
+        full_issues, _, _, authentic_inventory = (
+            v2_authentic_projection_fixture(raw_rows)
+        )
+        checks.check(
+            "raw-source-cartesian-enum-coverage",
+            len(full_issues) == len(types) * len(statuses) * 5
+            and {row["type"] for row in full_issues} == set(types)
+            and {row["status"] for row in full_issues} == set(statuses)
+            and {row["priority"] for row in full_issues} == set(range(5))
+            and len({row["id"] for row in full_issues}) == len(full_issues)
+            and authentic_inventory["counts"]["targets"]
+            == len(authentic_inventory["rows"]),
+            expected={
+                "rows": len(types) * len(statuses) * 5,
+                "types": types,
+                "statuses": statuses,
+                "priorities": list(range(5)),
+            },
+            observed={
+                "rows": len(full_issues),
+                "types": sorted({row["type"] for row in full_issues}),
+                "statuses": sorted({row["status"] for row in full_issues}),
+                "priorities": sorted(
+                    {row["priority"] for row in full_issues}
+                ),
+            },
+        )
+        nullable_collections = fixture_issue(
+            issue_id="fixture-null-collections"
+        )
+        nullable_collections["labels"] = None
+        nullable_collections["dependencies"] = None
+        nullable_collections["dependents"] = None
+        nullable_projection = v2_full_issue_projection(
+            nullable_collections
+        )
+        checks.check(
+            "missing-null-collections-normalize-empty",
+            nullable_projection["labels"] == []
+            and nullable_projection["dependencies"] == []
+            and nullable_projection["dependents"] == [],
+            expected={"labels": [], "dependencies": [], "dependents": []},
+            observed={
+                "labels": nullable_projection["labels"],
+                "dependencies": nullable_projection["dependencies"],
+                "dependents": nullable_projection["dependents"],
+            },
+        )
+        for field in ("labels", "dependencies", "dependents"):
+            for index, malformed in enumerate((False, 0, "")):
+                candidate = fixture_issue(
+                    issue_id=f"fixture-falsey-{field}-{index}"
+                )
+                candidate[field] = malformed
+                checks.refuses(
+                    f"{field}-falsey-{index}-refused",
+                    InfrastructureFailed,
+                    lambda candidate=candidate: v2_full_issue_projection(
+                        candidate
+                    ),
+                    contains=f"invalid {field}",
+                )
+        malformed_relations = (
+            {"id": "", "type": "blocks"},
+            {"id": "other", "type": ""},
+            {"id": "other", "type": False},
+            {"id": "other", "type": "blocks", "status": ""},
+            {"id": "other", "type": "blocks", "priority": True},
+            {"id": "other", "type": "blocks", "priority": 5},
+        )
+        for index, relation in enumerate(malformed_relations):
+            candidate = fixture_issue(
+                issue_id=f"fixture-malformed-relation-{index}",
+                dependencies=(relation,),
+            )
+            checks.refuses(
+                f"relation-row-{index}-refused",
+                InfrastructureFailed,
+                lambda candidate=candidate: v2_full_issue_projection(
+                    candidate
+                ),
+                contains="invalid relation row",
+            )
     elif slug == "source-warning-partitions":
         combinations = [
             ("A",),
@@ -17930,30 +18658,26 @@ def v2_execute_authority_cases(
             max_targets=10,
         )
         child = plan["children"][0]
-        required = set(manifest["row_contract"]["planned_child_required_fields"])
-        aliases = {
-            "acceptance": child.get("acceptance"),
-            "target_implementation_estimated_minutes": child.get(
-                "target_implementation_estimated_minutes"
-            ),
-            "external_authority_receipt_root": child.get(
-                "external_authority_receipt_root"
-            ),
-            "external_authority_verdict": child.get(
-                "external_authority_verdict"
-            ),
-            "conditional_write_receipt_root": child.get(
-                "conditional_write_receipt_root"
-            ),
-            "conditional_write_verdict": child.get(
-                "conditional_write_verdict"
-            ),
-        }
+        required = set(
+            manifest["row_contract"]["planned_child_required_fields"]
+        )
         checks.check(
             "planned-child-required-fields",
-            required.issubset(set(child) | set(aliases)),
+            set(child) == required == V2_PLANNED_CHILD_FIELDS,
             expected=sorted(required),
-            observed=sorted(set(child) | set(aliases)),
+            observed=sorted(child),
+        )
+        normalized = authority["normalized_rows"][0]
+        expected_row_fields = set(
+            manifest["row_contract"]["required_fields"]
+        )
+        checks.check(
+            "normalized-authority-row-lossless",
+            set(normalized)
+            == expected_row_fields
+            == V2_NORMALIZED_ROW_FIELDS,
+            expected=sorted(expected_row_fields),
+            observed=sorted(normalized),
         )
         v2_validate_child_payload(child)
         checks.check(
@@ -17962,7 +18686,16 @@ def v2_execute_authority_cases(
             expected="valid",
             observed=child["semantic_root"],
         )
-        for field in ("title", "target_ids", "intended_generated_edges"):
+        for field in (
+            "title",
+            "target_ids",
+            "intended_generated_edges",
+            "semantic_review_disposition",
+            "semantic_review_receipt_state",
+            "semantic_review_action",
+            "semantic_review_receipt_roots",
+            "reviewed_no_change_receipt_roots",
+        ):
             mutated = dict(child)
             mutated.pop(field)
             mutated = v2_rooted(mutated)
@@ -17972,6 +18705,114 @@ def v2_execute_authority_cases(
                 lambda mutated=mutated: v2_validate_child_payload(mutated),
                 contains="non-closed schema",
             )
+
+        dispositions = list(V2_SEMANTIC_REVIEW_DISPOSITIONS)
+        mixed_inventory = v2_synthetic_inventory(
+            [
+                v2_synthetic_target(
+                    index,
+                    issue_id=f"semantic-{index:02d}",
+                )
+                for index in range(len(dispositions))
+            ]
+        )
+        mixed_receipts = v2_synthetic_receipts(
+            mixed_inventory,
+            semantic_reviewed=True,
+        )
+        mixed_receipts = dict(mixed_receipts)
+        mixed_receipts.pop("semantic_root", None)
+        mixed_rows: list[dict[str, Any]] = []
+        for receipt, disposition in zip(
+            mixed_receipts["receipts"],
+            dispositions,
+            strict=True,
+        ):
+            updated = dict(receipt)
+            updated.pop("semantic_root", None)
+            updated["semantic_review_disposition"] = disposition
+            signal = V2_SEMANTIC_SIGNAL_BY_DISPOSITION[disposition]
+            updated["semantic_review_dimensions"] = [
+                v2_semantic_dimension_receipt(
+                    target_root=updated["target_root"],
+                    dimension=dimension,
+                    verdict=signal if index == 0 else "SATISFIED",
+                    reason=f"mixed reviewed reason for {dimension}",
+                    falsifier=f"mixed reviewed falsifier for {dimension}",
+                )
+                for index, dimension in enumerate(
+                    V2_SEMANTIC_REVIEW_DIMENSIONS
+                )
+            ]
+            if disposition == "BLOCKED_AUTHORITY":
+                updated["declared_acceptance_owner"] = ""
+            mixed_rows.append(v2_rooted(updated))
+        mixed_receipts["receipts"] = mixed_rows
+        mixed_receipts = v2_rooted(mixed_receipts)
+        mixed_authority = v2_derive_authority(
+            mixed_inventory,
+            mixed_receipts,
+            current_br_version="0.2.19",
+        )
+        mixed_plan, _ = v2_build_review_plan(
+            mixed_inventory,
+            mixed_authority,
+            max_targets=10,
+        )
+        scheduled_ids = sorted(
+            target_id
+            for child_row in mixed_plan["children"]
+            for target_id in child_row["target_ids"]
+        )
+        retained_ids = sorted(
+            row["target_id"]
+            for row in mixed_plan["retained_without_direct_child"]
+        )
+        action_by_disposition = {
+            row["semantic_review_disposition"]: row[
+                "semantic_review_action"
+            ]
+            for row in mixed_authority["decisions"]
+        }
+        checks.check(
+            "semantic-plan-exact-scheduled-retained-partition",
+            action_by_disposition
+            == {
+                "REMEDIATION_REQUIRED": "REMEDIATION_CANDIDATE",
+                "REVIEWED_NO_CHANGE": "RETAINED_ADJUDICATION",
+                "ROLLUP_ONLY": "RETAINED_ADJUDICATION",
+                "CONTRIBUTION_ONLY": "RETAINED_ADJUDICATION",
+                "BLOCKED_AUTHORITY": "AUTHORITY_RESOLUTION_REQUIRED",
+                "TYPED_INAPPLICABLE": "RETAINED_ADJUDICATION",
+            }
+            and len(mixed_plan["semantic_adjudications"]) == 6
+            and len(mixed_plan["remediation_candidates"]) == 1
+            and len(scheduled_ids) == 2
+            and len(retained_ids) == 4
+            and sorted([*scheduled_ids, *retained_ids])
+            == sorted(row["id"] for row in mixed_inventory["rows"])
+            and all(
+                set(row) == V2_NORMALIZED_ROW_FIELDS
+                for row in mixed_authority["normalized_rows"]
+            ),
+            expected={
+                "adjudications": 6,
+                "scheduled": 2,
+                "retained": 4,
+                "remediation": 1,
+            },
+            observed={
+                "adjudications": len(
+                    mixed_plan["semantic_adjudications"]
+                ),
+                "scheduled": len(scheduled_ids),
+                "retained": len(retained_ids),
+                "remediation": len(
+                    mixed_plan["remediation_candidates"]
+                ),
+                "actions": action_by_disposition,
+            },
+        )
     elif slug == "row-dispositions-distinct":
         dispositions = [
             "MALFORMED_OR_WRONG_TYPE",
@@ -18339,6 +19180,36 @@ def v2_execute_packing_cases(
                 expected="different vector",
                 observed=v2_hard_vector(target, authority),
             )
+        changed_authority = dict(authority)
+        changed_authority["semantic_review_disposition"] = (
+            "BLOCKED_AUTHORITY"
+        )
+        checks.check(
+            "hard-key-semantic-review-disposition",
+            v2_hard_vector(base, changed_authority) != base_vector,
+            expected="different vector",
+            observed=v2_hard_vector(base, changed_authority),
+        )
+        changed_authority = dict(authority)
+        changed_authority["semantic_review_receipt_state"] = (
+            "ROOT_BOUND_REVIEWED"
+        )
+        checks.check(
+            "hard-key-semantic-review-receipt-state",
+            v2_hard_vector(base, changed_authority) != base_vector,
+            expected="different vector",
+            observed=v2_hard_vector(base, changed_authority),
+        )
+        changed_authority = dict(authority)
+        changed_authority["semantic_review_action"] = (
+            "AUTHORITY_RESOLUTION_REQUIRED"
+        )
+        checks.check(
+            "hard-key-semantic-review-action",
+            v2_hard_vector(base, changed_authority) != base_vector,
+            expected="different vector",
+            observed=v2_hard_vector(base, changed_authority),
+        )
         changed_authority = dict(authority)
         changed_authority["readiness"] = "DECLARED_READY"
         checks.check(
@@ -18739,6 +19610,57 @@ def v2_execute_packing_cases(
             expected=True,
             observed={"entry": entry, "full_root": full["semantic_root"]},
         )
+        for route_name, authority_kwargs, expected_route in (
+            (
+                "manual",
+                {"declared": True, "manual": True},
+                "MANUAL_BR_REVIEW",
+            ),
+            (
+                "future-automated",
+                {
+                    "declared": True,
+                    "external_verdict": "VALID",
+                    "conditional_verdict": "VALID",
+                    "gate_verdict": "VALID",
+                    "version": "0.3.0",
+                    "allow_mechanical_fixture": True,
+                },
+                "AUTOMATED_CONDITIONAL",
+            ),
+        ):
+            routed_authority = v2_synthetic_authority(
+                inventory,
+                **authority_kwargs,
+            )
+            routed_plan, _ = v2_build_review_plan(
+                inventory,
+                routed_authority,
+                max_targets=10,
+            )
+            routed_child = routed_plan["children"][0]
+            v2_validate_child_payload(routed_child)
+            checks.check(
+                f"oversize-{route_name}-route-preserved",
+                routed_child["disposition_workflow"]
+                == "OVERSIZE_REVIEW_REQUIRED"
+                and routed_child["remediation_route"] == expected_route
+                and routed_child["semantic_review_action"]
+                == routed_authority["decisions"][0][
+                    "semantic_review_action"
+                ],
+                expected={
+                    "workflow": "OVERSIZE_REVIEW_REQUIRED",
+                    "route": expected_route,
+                },
+                observed={
+                    "workflow": routed_child["disposition_workflow"],
+                    "route": routed_child["remediation_route"],
+                    "semantic_action": routed_child[
+                        "semantic_review_action"
+                    ],
+                },
+            )
     else:
         raise EvidenceFailed(f"no packing executor for {slug}")
     return checks.finish(parameters)
@@ -19425,9 +20347,19 @@ def v2_execute_history_cases(
             0,
             status=after_status,
             priority=after_priority,
+            missing_sections=(
+                ()
+                if slug == "movement-live-to-history"
+                else ("## Acceptance Criteria",)
+            ),
         )
-        inventory = v2_synthetic_inventory([current_target])
-        current = inventory["rows"][0]
+        current_universe = [current_target]
+        inventory = v2_synthetic_inventory(
+            []
+            if slug == "movement-live-to-history"
+            else [current_target]
+        )
+        current_id = current_target["id"]
         prior = v2_rooted(
             {
                 "state": "PROVIDED",
@@ -19439,10 +20371,10 @@ def v2_execute_history_cases(
                 ),
                 "rows": [
                     {
-                        "id": current["id"],
+                        "id": current_id,
                         "status": before_status,
                         "priority": before_priority,
-                        "target_root": semantic_root({"before": current["id"]}),
+                        "target_root": semantic_root({"before": current_id}),
                         "destination": (
                             "history-v2.json"
                             if before_status == "closed"
@@ -19457,14 +20389,38 @@ def v2_execute_history_cases(
             source_root=semantic_root({"fixture": slug}),
             inventory=inventory,
             prior_campaign=prior,
+            current_universe=current_universe,
         )
         movement = zero["movements"][0]
         checks.check(
             "movement-class-lineage",
             movement["class"] == expected_class
-            and movement["successor_lineage_root"].startswith("sha256-v1:"),
-            expected=expected_class,
-            observed=movement,
+            and movement["successor_lineage_root"].startswith("sha256-v1:")
+            and movement["current_universe_root"]
+            == zero["current_universe_root"]
+            and movement["destination_root_kind"]
+            == (
+                "FULL_UNIVERSE_SUCCESSOR"
+                if slug == "movement-live-to-history"
+                else "INVENTORY_TARGET"
+            )
+            and zero["current_universe_count"] == 1
+            and len(zero["scope_successors"])
+            == (1 if slug == "movement-live-to-history" else 0),
+            expected={
+                "class": expected_class,
+                "destination_root_kind": (
+                    "FULL_UNIVERSE_SUCCESSOR"
+                    if slug == "movement-live-to-history"
+                    else "INVENTORY_TARGET"
+                ),
+                "universe_count": 1,
+            },
+            observed={
+                "movement": movement,
+                "universe_count": zero["current_universe_count"],
+                "scope_successors": zero["scope_successors"],
+            },
         )
         malformed = json.loads(canonical_bytes(zero))
         malformed["movements"][0]["class"] = "MOVED_TO_LANE"
@@ -19482,11 +20438,70 @@ def v2_execute_history_cases(
                 source_root=zero["source_root"],
                 inventory=inventory,
                 prior_campaign=prior,
+                current_universe=current_universe,
             ),
             contains="independently reconstructed",
             projection=lambda: malformed,
             projection_label="MOVEMENT_ARTIFACT",
         )
+        for field, replacement in (
+            ("destination_root_kind", "INVENTORY_TARGET"),
+            (
+                "current_universe_root",
+                semantic_root({"forged": "universe"}),
+            ),
+        ):
+            if movement[field] == replacement:
+                replacement = (
+                    "FULL_UNIVERSE_SUCCESSOR"
+                    if field == "destination_root_kind"
+                    else semantic_root({"forged": "other-universe"})
+                )
+            tampered = json.loads(canonical_bytes(zero))
+            tampered["movements"][0][field] = replacement
+            tampered["movements"][0] = v2_rooted(
+                tampered["movements"][0]
+            )
+            tampered = v2_rooted(tampered)
+            checks.refuses(
+                f"rerooted-movement-{field}-refused",
+                EvidenceFailed,
+                lambda tampered=tampered: v2_validate_zero_sets(
+                    tampered,
+                    source_root=zero["source_root"],
+                    inventory=inventory,
+                    prior_campaign=prior,
+                    current_universe=current_universe,
+                ),
+                contains="independently reconstructed",
+            )
+        if slug == "movement-live-to-history":
+            checks.refuses(
+                "prior-target-absent-current-universe-refused",
+                InputRefused,
+                lambda: v2_build_zero_sets(
+                    source_root=zero["source_root"],
+                    inventory=inventory,
+                    prior_campaign=prior,
+                    current_universe=[],
+                ),
+                contains="absent from the current source universe",
+            )
+            nonclosed_successor = dict(current_target)
+            nonclosed_successor.pop("semantic_root", None)
+            nonclosed_successor["status"] = "open"
+            nonclosed_successor = v2_rooted(nonclosed_successor)
+            checks.refuses(
+                "prior-target-nonclosed-out-of-scope-refused",
+                InputRefused,
+                lambda: v2_build_zero_sets(
+                    source_root=zero["source_root"],
+                    inventory=inventory,
+                    prior_campaign=prior,
+                    current_universe=[nonclosed_successor],
+                ),
+                contains="without a clean closed successor",
+            )
     else:
         raise EvidenceFailed(f"no history executor for {slug}")
     return checks.finish(parameters)
@@ -20284,6 +21299,14 @@ def v2_execute_artifact_cases(
                 accepted_manifest=manifest,
             )
 
+        def bind_refusal_terminal(
+            candidate_payloads: Mapping[str, bytes],
+            candidate_terminal: Mapping[str, Any],
+        ) -> dict[str, bytes]:
+            bound = dict(candidate_payloads)
+            bound["terminal.json"] = canonical_bytes(candidate_terminal)
+            return bound
+
         forged_failure = dict(refusal_terminal["failure_evidence"])
         forged_failure["result_category"] = "PASS"
         forged_failure = v2_rooted(forged_failure)
@@ -20297,6 +21320,10 @@ def v2_execute_artifact_cases(
             "rerooted-failure-category-refused",
             EvidenceFailed,
             lambda: validate_refusal(
+                candidate_payloads=bind_refusal_terminal(
+                    refusal_payloads,
+                    forged_failure_terminal,
+                ),
                 candidate_terminal=forged_failure_terminal,
             ),
             contains="failure bindings disagree",
@@ -20307,7 +21334,13 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-refusal-terminal-contract-refused",
             EvidenceFailed,
-            lambda: validate_refusal(candidate_terminal=forged_terminal),
+            lambda: validate_refusal(
+                candidate_payloads=bind_refusal_terminal(
+                    refusal_payloads,
+                    forged_terminal,
+                ),
+                candidate_terminal=forged_terminal,
+            ),
             contains="terminal contract differs",
         )
         wrong_code_terminal = dict(refusal_terminal)
@@ -20317,6 +21350,10 @@ def v2_execute_artifact_cases(
             "refusal-terminal-exit-code-mismatch-refused",
             EvidenceFailed,
             lambda: validate_refusal(
+                candidate_payloads=bind_refusal_terminal(
+                    refusal_payloads,
+                    wrong_code_terminal,
+                ),
                 candidate_terminal=wrong_code_terminal,
             ),
             contains="terminal contract differs",
@@ -20348,6 +21385,10 @@ def v2_execute_artifact_cases(
         )
         forged_envelope_terminal["artifact_identities"] = forged_identities
         forged_envelope_terminal = v2_rooted(forged_envelope_terminal)
+        forged_envelope_payloads = bind_refusal_terminal(
+            forged_envelope_payloads,
+            forged_envelope_terminal,
+        )
         checks.refuses(
             "rerooted-refusal-envelope-binding-refused",
             EvidenceFailed,
@@ -20387,6 +21428,10 @@ def v2_execute_artifact_cases(
             "artifact_identities"
         ] = forged_event_identities
         forged_event_terminal = v2_rooted(forged_event_terminal)
+        forged_event_payloads = bind_refusal_terminal(
+            forged_event_payloads,
+            forged_event_terminal,
+        )
         checks.refuses(
             "rerooted-refusal-event-contract-refused",
             EvidenceFailed,
@@ -20395,8 +21440,163 @@ def v2_execute_artifact_cases(
                 candidate_terminal=forged_event_terminal,
                 candidate_events=forged_event_rows,
             ),
-            contains="event bindings disagree",
+            contains="exact reconstruction",
         )
+
+        def reroot_refusal_events(
+            mutation: Callable[[list[dict[str, Any]]], None],
+        ) -> tuple[dict[str, bytes], dict[str, Any], list[dict[str, Any]]]:
+            rows = json.loads(canonical_bytes(refusal_events))
+            mutation(rows)
+            event_payload = b"".join(
+                canonical_bytes(row) for row in rows
+            )
+            candidate_terminal = dict(refusal_terminal)
+            candidate_terminal["events_content_root"] = (
+                "sha256-v1:"
+                + hashlib.sha256(event_payload).hexdigest()
+            )
+            candidate_terminal["event_count"] = len(rows)
+            candidate_terminal["event_sequence"] = list(range(len(rows)))
+            candidate_terminal["event_roots"] = [
+                semantic_root(row) for row in rows
+            ]
+            candidate_terminal["terminal_event_root"] = semantic_root(
+                rows[-1]
+            )
+            identities = dict(
+                candidate_terminal["artifact_identities"]
+            )
+            identities["events.jsonl"] = v2_artifact_identity(
+                relative_path="events.jsonl",
+                schema_kind=V2_EVENT_SCHEMA,
+                payload=event_payload,
+            )
+            candidate_terminal["artifact_identities"] = identities
+            candidate_terminal = v2_rooted(candidate_terminal)
+            candidate_payloads = dict(refusal_payloads)
+            candidate_payloads["events.jsonl"] = event_payload
+            candidate_payloads = bind_refusal_terminal(
+                candidate_payloads,
+                candidate_terminal,
+            )
+            parsed_rows = v2_read_event_stream(
+                event_payload,
+                expected_terminal="InputRefused",
+            )
+            return candidate_payloads, candidate_terminal, parsed_rows
+
+        event_falsifiers: list[
+            tuple[str, Callable[[list[dict[str, Any]]], None]]
+        ] = [
+            (
+                "intermediate-first-divergence",
+                lambda rows: rows[1].__setitem__(
+                    "first_divergence",
+                    "$.forged.intermediate",
+                ),
+            ),
+            (
+                "intermediate-recovery",
+                lambda rows: rows[1].__setitem__(
+                    "recovery",
+                    "NOT_REQUIRED",
+                ),
+            ),
+            (
+                "case-id",
+                lambda rows: rows[1].__setitem__(
+                    "case_id",
+                    "template-lint-v2.forged",
+                ),
+            ),
+            (
+                "assertion-id",
+                lambda rows: rows[1].__setitem__(
+                    "assertion_id",
+                    "v2.case.forged",
+                ),
+            ),
+            (
+                "executor-id",
+                lambda rows: rows[1].__setitem__(
+                    "executor_id",
+                    "v2.case.forged",
+                ),
+            ),
+            (
+                "parameter-root",
+                lambda rows: rows[1].__setitem__(
+                    "parameter_root",
+                    semantic_root({"forged": "parameter"}),
+                ),
+            ),
+            (
+                "start-argv",
+                lambda rows: rows[0].__setitem__(
+                    "argv",
+                    [str(SCRIPT_REL), "--history-plan"],
+                ),
+            ),
+            (
+                "later-argv",
+                lambda rows: rows[1].__setitem__(
+                    "argv",
+                    ["forged"],
+                ),
+            ),
+            (
+                "prior-event-roots",
+                lambda rows: rows[-1]["semantic_projection"].__setitem__(
+                    "prior_event_roots",
+                    [semantic_root({"forged": "prior"})],
+                ),
+            ),
+        ]
+        for falsifier_name, mutation in event_falsifiers:
+            (
+                candidate_payloads,
+                candidate_terminal,
+                candidate_events,
+            ) = reroot_refusal_events(mutation)
+            checks.refuses(
+                f"rerooted-refusal-{falsifier_name}-refused",
+                EvidenceFailed,
+                lambda candidate_payloads=candidate_payloads,
+                candidate_terminal=candidate_terminal,
+                candidate_events=candidate_events: validate_refusal(
+                    candidate_payloads=candidate_payloads,
+                    candidate_terminal=candidate_terminal,
+                    candidate_events=candidate_events,
+                ),
+                contains="exact reconstruction",
+            )
+
+        for field, forged_value in (
+            ("artifact_root", "/absolute/forged"),
+            ("artifact_root", "target/other-root"),
+            ("artifact_dir", "../escape"),
+            ("artifact_dir", "other-run"),
+            ("replay_equivalence", {"forged": "equivalence"}),
+            ("recovery", "MANUAL_RECOVERY_REQUIRED"),
+        ):
+            candidate_terminal = dict(refusal_terminal)
+            candidate_terminal[field] = forged_value
+            candidate_terminal = v2_rooted(candidate_terminal)
+            candidate_payloads = bind_refusal_terminal(
+                refusal_payloads,
+                candidate_terminal,
+            )
+            checks.refuses(
+                f"rerooted-refusal-terminal-{field}-{text_root(str(forged_value))[-8:]}",
+                EvidenceFailed,
+                lambda candidate_payloads=candidate_payloads,
+                candidate_terminal=candidate_terminal: validate_refusal(
+                    candidate_payloads=candidate_payloads,
+                    candidate_terminal=candidate_terminal,
+                ),
+                contains="terminal contract differs",
+            )
         changed = payloads["inventory-v2.json"] + b" "
         observed_identity = v2_artifact_identity(
             relative_path="inventory-v2.json",
@@ -20544,11 +21744,18 @@ def v2_execute_fault_resource_cases(
             "undeclared-manual-route-refused",
             undeclared["remediation_route"] == "ANALYSIS_ONLY"
             and undeclared["implementation_owner"] == "UNRESOLVED"
+            and undeclared["evidence_owner"] == "UNRESOLVED"
             and undeclared["terminal_consumer"] == "UNRESOLVED",
-            expected=("ANALYSIS_ONLY", "UNRESOLVED", "UNRESOLVED"),
+            expected=(
+                "ANALYSIS_ONLY",
+                "UNRESOLVED",
+                "UNRESOLVED",
+                "UNRESOLVED",
+            ),
             observed=(
                 undeclared["remediation_route"],
                 undeclared["implementation_owner"],
+                undeclared["evidence_owner"],
                 undeclared["terminal_consumer"],
             ),
         )
@@ -20770,6 +21977,67 @@ def v2_execute_fault_resource_cases(
             ),
             contains="hard partition",
         )
+        mutable_bytes = bytearray(b"stable")
+        before_byte_root = v2_state_projection_value(mutable_bytes)
+        mutable_bytes[0] = ord("u")
+        after_byte_root = v2_state_projection_value(mutable_bytes)
+        mutable_bytes[0] = ord("s")
+        checks.check(
+            "bytearray-and-memoryview-state-is-content-bound",
+            before_byte_root != after_byte_root
+            and before_byte_root["byte_length"]
+            == v2_state_projection_value(memoryview(mutable_bytes))[
+                "byte_length"
+            ]
+            and before_byte_root["content_root"]
+            == v2_state_projection_value(memoryview(mutable_bytes))[
+                "content_root"
+            ],
+            expected="content mutation changes the projected root",
+            observed={
+                "before": before_byte_root,
+                "after": after_byte_root,
+                "restored_memoryview": v2_state_projection_value(
+                    memoryview(mutable_bytes)
+                ),
+            },
+        )
+        mutation_probe = V2CheckCollector(
+            "fixture-bytearray-mutation-probe",
+            "fixture.bytearray-mutation-probe",
+        )
+
+        def mutate_then_refuse() -> None:
+            mutable_bytes[0] = ord("u")
+            raise InputRefused("synthetic refusal after byte mutation")
+
+        try:
+            guard_error = expect_error(
+                EvidenceFailed,
+                lambda: mutation_probe.refuses(
+                    "mutation-must-not-pass",
+                    InputRefused,
+                    mutate_then_refuse,
+                ),
+                contains="failed",
+            )
+        finally:
+            mutable_bytes[0] = ord("s")
+        checks.check(
+            "refusal-guard-detects-bytearray-mutation",
+            guard_error.terminal == "EvidenceFailed"
+            and mutation_probe.rows[-1]["passed"] is False,
+            expected={
+                "terminal": "EvidenceFailed",
+                "mutation_detected": True,
+            },
+            observed={
+                "terminal": guard_error.terminal,
+                "mutation_detected": (
+                    mutation_probe.rows[-1]["passed"] is False
+                ),
+            },
+        )
 
     elif slug == "fault-output-lock-export":
         checks.refuses(
@@ -20805,10 +22073,153 @@ def v2_execute_fault_resource_cases(
                 failure["recovery"],
             ),
         )
+        checks.refuses(
+            "file-directory-prefix-collision-refused-before-write",
+            EvidenceFailed,
+            lambda: v2_preflight_publication_topology(
+                {
+                    "terminal.json": b"{}\n",
+                    "nested": b"file",
+                    "nested/member.json": b"{}\n",
+                }
+            ),
+            contains="file/directory prefix collision",
+        )
+        checks.refuses(
+            "case-alias-collision-refused-before-write",
+            EvidenceFailed,
+            lambda: v2_preflight_publication_topology(
+                {
+                    "terminal.json": b"{}\n",
+                    "Alias.json": b"{}\n",
+                    "alias.json": b"{}\n",
+                }
+            ),
+            contains="Unicode/case alias",
+        )
+        preflight_reservation = V2BundleReservation(
+            output=REPO_ROOT,
+            artifact_root="target",
+            artifact_dir="fixture",
+            terminal_descriptor=2,
+            output_descriptor=1,
+            parent_descriptor=0,
+            path_anchors=(),
+        )
+        preflight_calls = {"verify": 0, "write": 0}
+        original_verify = v2_verify_reserved_publication
+        original_writer = v2_write_reserved_member
+
+        def refuse_initial_prefix(
+            _reservation: V2BundleReservation,
+            *,
+            payloads: Mapping[str, bytes],
+            terminal_sealed: bool,
+        ) -> None:
+            del payloads, terminal_sealed
+            preflight_calls["verify"] += 1
+            raise InfrastructureFailed(
+                "synthetic exact-prefix verification failure"
+            )
+
+        def count_forbidden_write(
+            _reservation: V2BundleReservation,
+            *,
+            relative: PurePosixPath,
+            payload: bytes,
+        ) -> dict[str, int]:
+            del relative, payload
+            preflight_calls["write"] += 1
+            return {}
+
+        globals()["v2_verify_reserved_publication"] = refuse_initial_prefix
+        globals()["v2_write_reserved_member"] = count_forbidden_write
+        try:
+            preflight_error = expect_error(
+                InfrastructureFailed,
+                lambda: _v2_publish_reserved_bundle(
+                    preflight_reservation,
+                    payloads={
+                        "source-v2.json": b"{}\n",
+                        "terminal.json": b"{}\n",
+                    },
+                ),
+                contains="exact-prefix",
+            )
+        finally:
+            globals()["v2_verify_reserved_publication"] = original_verify
+            globals()["v2_write_reserved_member"] = original_writer
+        checks.check(
+            "exact-prefix-verification-precedes-every-payload-write",
+            preflight_error.terminal == "InfrastructureFailed"
+            and preflight_calls == {"verify": 1, "write": 0}
+            and preflight_reservation.terminal_assignment_started is False,
+            expected={"verify": 1, "write": 0, "terminal_started": False},
+            observed={
+                **preflight_calls,
+                "terminal_started": (
+                    preflight_reservation.terminal_assignment_started
+                ),
+            },
+        )
+
+        output_descriptor = os.open(
+            REPO_ROOT,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        assignment_reservation = V2BundleReservation(
+            output=REPO_ROOT,
+            artifact_root="target",
+            artifact_dir="fixture",
+            terminal_descriptor=-1,
+            output_descriptor=output_descriptor,
+            parent_descriptor=os.dup(output_descriptor),
+            path_anchors=(),
+        )
+        original_assert = v2_assert_reservation_anchors
+        globals()["v2_verify_reserved_publication"] = (
+            lambda *_args, **_kwargs: None
+        )
+        globals()["v2_assert_reservation_anchors"] = (
+            lambda _reservation: None
+        )
+        try:
+            assignment_error = expect_error(
+                InfrastructureFailed,
+                lambda: _v2_publish_reserved_bundle(
+                    assignment_reservation,
+                    payloads={"terminal.json": b"{}\n"},
+                ),
+                contains="could not be finalized",
+            )
+        finally:
+            globals()["v2_verify_reserved_publication"] = original_verify
+            globals()["v2_assert_reservation_anchors"] = original_assert
+            v2_close_reservation(assignment_reservation)
+        checks.check(
+            "terminal-assignment-failure-state-is-exact",
+            assignment_error.terminal == "InfrastructureFailed"
+            and assignment_reservation.terminal_assignment_started is True
+            and assignment_reservation.terminal_assignment_committed is False
+            and assignment_reservation.sealed is False,
+            expected={
+                "started": True,
+                "committed": False,
+                "sealed": False,
+            },
+            observed={
+                "started": assignment_reservation.terminal_assignment_started,
+                "committed": (
+                    assignment_reservation.terminal_assignment_committed
+                ),
+                "sealed": assignment_reservation.sealed,
+            },
+        )
 
     elif slug == "cancel-signals-drained":
         global _cancel_requested
         prior_cancel = _cancel_requested
+        prior_timeout = CAPS["subprocess_timeout_seconds"]
         try:
             for signum in (signal.SIGINT, signal.SIGTERM):
                 request_cancel(signum, None)
@@ -20826,8 +22237,107 @@ def v2_execute_fault_resource_cases(
                         contains="cancellation requested",
                     )
                 _cancel_requested = False
+            receipt_start = len(_command_receipts)
+            timer = threading.Timer(
+                0.05,
+                request_cancel,
+                args=(signal.SIGINT, None),
+            )
+            timer.start()
+            started = time.monotonic()
+            try:
+                live_cancel_error = expect_error(
+                    CancelledDrained,
+                    lambda: run_command(
+                        (
+                            sys.executable,
+                            "-c",
+                            "import time; time.sleep(10)",
+                        )
+                    ),
+                    contains="subprocess group was drained",
+                )
+            finally:
+                timer.cancel()
+                timer.join(timeout=1)
+            live_cancel_elapsed = time.monotonic() - started
+            live_cancel_receipt = _command_receipts[-1]
+            _cancel_requested = False
+            checks.check(
+                "live-subprocess-cancellation-drains-and-receipts",
+                live_cancel_error.terminal == "CancelledDrained"
+                and live_cancel_elapsed < 2.0
+                and len(_command_receipts) == receipt_start + 1
+                and live_cancel_receipt["category"] == "CANCELLED"
+                and live_cancel_receipt["cleanup_error_count"] == 0,
+                expected={
+                    "terminal": "CancelledDrained",
+                    "elapsed_lt_seconds": 2,
+                    "receipt": "CANCELLED",
+                    "cleanup_errors": 0,
+                },
+                observed={
+                    "terminal": live_cancel_error.terminal,
+                    "elapsed_seconds": round(live_cancel_elapsed, 3),
+                    "receipt": live_cancel_receipt["category"],
+                    "cleanup_errors": live_cancel_receipt[
+                        "cleanup_error_count"
+                    ],
+                },
+            )
+
+            CAPS["subprocess_timeout_seconds"] = 0.2
+            timeout_started = time.monotonic()
+            timeout_error = expect_error(
+                InfrastructureFailed,
+                lambda: run_command(
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import subprocess,sys; "
+                            "subprocess.Popen([sys.executable,'-c',"
+                            "'import time; time.sleep(10)'])"
+                        ),
+                    )
+                ),
+                contains="exceeded",
+            )
+            timeout_elapsed = time.monotonic() - timeout_started
+            timeout_receipt = _command_receipts[-1]
+            checks.check(
+                "descendant-drain-cleanup-diagnostics",
+                timeout_receipt["cleanup_error_kinds"] == [],
+                expected=[],
+                observed=timeout_receipt["cleanup_error_kinds"],
+            )
+            checks.check(
+                "exited-leader-descendant-pipes-time-out-and-drain",
+                timeout_error.terminal == "InfrastructureFailed"
+                and timeout_elapsed < 2.0
+                and timeout_receipt["category"] == "TIMEOUT"
+                and timeout_receipt["cleanup_error_count"] == 0,
+                expected={
+                    "terminal": "InfrastructureFailed",
+                    "elapsed_lt_seconds": 2,
+                    "receipt": "TIMEOUT",
+                    "cleanup_errors": 0,
+                },
+                observed={
+                    "terminal": timeout_error.terminal,
+                    "elapsed_seconds": round(timeout_elapsed, 3),
+                    "receipt": timeout_receipt["category"],
+                    "cleanup_errors": timeout_receipt[
+                        "cleanup_error_count"
+                    ],
+                    "cleanup_error_kinds": timeout_receipt[
+                        "cleanup_error_kinds"
+                    ],
+                },
+            )
         finally:
             _cancel_requested = prior_cancel
+            CAPS["subprocess_timeout_seconds"] = prior_timeout
         checks.check(
             "cancellation-state-restored",
             _cancel_requested == prior_cancel,
@@ -20868,6 +22378,44 @@ def v2_execute_fault_resource_cases(
             ),
             contains="already exists",
         )
+        attempt_states = {
+            "fixture": "INCOMPLETE",
+            "fixture-attempt-0002": "AVAILABLE",
+        }
+        selected_attempt = v2_select_persistent_attempt(
+            "fixture",
+            probe=lambda candidate: attempt_states.get(
+                candidate,
+                "INCOMPLETE",
+            ),
+        )
+        attempt_states["fixture-attempt-0002"] = "COMPLETE"
+        reused_attempt = v2_select_persistent_attempt(
+            "fixture",
+            probe=lambda candidate: attempt_states.get(
+                candidate,
+                "INCOMPLETE",
+            ),
+        )
+        checks.check(
+            "incomplete-prefix-selects-and-reuses-fresh-attempt",
+            selected_attempt == "fixture-attempt-0002"
+            and reused_attempt == selected_attempt,
+            expected="fixture-attempt-0002",
+            observed={
+                "selected": selected_attempt,
+                "reused": reused_attempt,
+            },
+        )
+        checks.refuses(
+            "bounded-incomplete-attempt-exhaustion",
+            EvidenceFailed,
+            lambda: v2_select_persistent_attempt(
+                "fixture",
+                probe=lambda _candidate: "INCOMPLETE",
+            ),
+            contains="bounded fresh-attempt budget",
+        )
 
     elif slug == "resource-all-caps":
         caps = {
@@ -20890,6 +22438,13 @@ def v2_execute_fault_resource_cases(
             "diagnostic_summary": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
             "synopsis": V2_SYNOPSIS_BYTES_CAP,
             "selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
+            "subprocess_stdin": CAPS["subprocess_stdout_bytes"],
+            "subprocess_stdout": CAPS["subprocess_stdout_bytes"],
+            "subprocess_stderr": CAPS["subprocess_stdout_bytes"],
+            "subprocess_timeout_seconds": CAPS[
+                "subprocess_timeout_seconds"
+            ],
+            "persistent_attempts": V2_PERSISTENT_ATTEMPTS_CAP,
         }
         checks.check(
             "manifest-cap-bindings",
@@ -20915,6 +22470,19 @@ def v2_execute_fault_resource_cases(
                 ),
                 "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
                 "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
+                "max_subprocess_stdin_bytes": CAPS[
+                    "subprocess_stdout_bytes"
+                ],
+                "max_subprocess_stdout_bytes": CAPS[
+                    "subprocess_stdout_bytes"
+                ],
+                "max_subprocess_stderr_bytes": CAPS[
+                    "subprocess_stdout_bytes"
+                ],
+                "subprocess_timeout_seconds": CAPS[
+                    "subprocess_timeout_seconds"
+                ],
+                "max_persistent_attempts": V2_PERSISTENT_ATTEMPTS_CAP,
             }.items()),
             expected="all manifest caps bound",
             observed=manifest["caps"],
@@ -20958,6 +22526,113 @@ def v2_execute_fault_resource_cases(
             ),
             contains="unsafe or over-cap",
         )
+        prior_stream_cap = CAPS["subprocess_stdout_bytes"]
+        try:
+            CAPS["subprocess_stdout_bytes"] = 16
+            for stream_fd, stream_name, category in (
+                (1, "stdout", "STDOUT_LIMIT"),
+                (2, "stderr", "STDERR_LIMIT"),
+            ):
+                receipt_start = len(_command_receipts)
+                error = expect_error(
+                    InfrastructureFailed,
+                    lambda stream_fd=stream_fd: run_command(
+                        (
+                            sys.executable,
+                            "-c",
+                            (
+                                "import os; "
+                                f"os.write({stream_fd}, b'x' * 17)"
+                            ),
+                        )
+                    ),
+                    contains="exceeded the bounded cap",
+                )
+                receipt = _command_receipts[-1]
+                checks.check(
+                    f"{stream_name}-capture-cap-is-exact",
+                    error.terminal == "InfrastructureFailed"
+                    and len(_command_receipts) == receipt_start + 1
+                    and receipt["category"] == category
+                    and receipt[stream_name]["bytes"] == 16
+                    and receipt["cleanup_error_count"] == 0,
+                    expected={
+                        "category": category,
+                        "retained_bytes": 16,
+                        "cleanup_errors": 0,
+                    },
+                    observed={
+                        "category": receipt["category"],
+                        "retained_bytes": receipt[stream_name]["bytes"],
+                        "cleanup_errors": receipt["cleanup_error_count"],
+                    },
+                )
+            non_utf_error = expect_error(
+                InfrastructureFailed,
+                lambda: run_command(
+                    (
+                        sys.executable,
+                        "-c",
+                        "import os; os.write(1, bytes([255]))",
+                    )
+                ),
+                contains="non-UTF-8",
+            )
+            non_utf_receipt = _command_receipts[-1]
+            checks.check(
+                "non-utf8-capture-retains-root-only-receipt",
+                non_utf_error.terminal == "InfrastructureFailed"
+                and non_utf_receipt["category"] == "NON_UTF8"
+                and non_utf_receipt["stdout"]["bytes"] == 1
+                and non_utf_receipt["stdout"]["body_retained"] is False,
+                expected={
+                    "category": "NON_UTF8",
+                    "bytes": 1,
+                    "body_retained": False,
+                },
+                observed={
+                    "category": non_utf_receipt["category"],
+                    **non_utf_receipt["stdout"],
+                },
+            )
+            missing_error = expect_error(
+                InfrastructureFailed,
+                lambda: run_command(("missing-password=topsecret",)),
+                contains="required tool not found",
+            )
+            missing_receipt = _command_receipts[-1]
+            checks.check(
+                "start-failure-receipt-redacts-sensitive-argv",
+                missing_error.terminal == "InfrastructureFailed"
+                and "topsecret" not in str(missing_error)
+                and missing_receipt["category"] == "START_FAILED"
+                and "topsecret"
+                not in canonical_bytes(missing_receipt["argv"]).decode(
+                    "utf-8"
+                ),
+                expected={
+                    "category": "START_FAILED",
+                    "raw_secret_retained": False,
+                },
+                observed={
+                    "category": missing_receipt["category"],
+                    "diagnostic": str(missing_error),
+                    "argv": missing_receipt["argv"],
+                },
+            )
+            checks.refuses(
+                "stdin-cap-plus-one-refused-before-start",
+                EvidenceFailed,
+                lambda: run_command(
+                    (sys.executable, "-c", "pass"),
+                    input_text="x" * 17,
+                ),
+                contains="stdin exceeds",
+                projection=lambda: len(_command_receipts),
+                projection_label="COMMAND_RECEIPT_COUNT",
+            )
+        finally:
+            CAPS["subprocess_stdout_bytes"] = prior_stream_cap
 
     elif slug == "mutation-truncation-oversize-root":
         components = v2_synthetic_bundle_components(
@@ -21289,6 +22964,29 @@ def v2_reconstruct_payload_map(
     )
 
 
+def v2_select_persistent_attempt(
+    base: str,
+    *,
+    probe: Callable[[str], str],
+) -> str:
+    for attempt in range(1, V2_PERSISTENT_ATTEMPTS_CAP + 1):
+        candidate = (
+            base
+            if attempt == 1
+            else f"{base}-attempt-{attempt:04d}"
+        )
+        state = probe(candidate)
+        if state not in {"AVAILABLE", "COMPLETE", "INCOMPLETE"}:
+            raise EvidenceFailed(
+                "persistent fixture attempt probe returned an unknown state"
+            )
+        if state in {"AVAILABLE", "COMPLETE"}:
+            return candidate
+    raise EvidenceFailed(
+        "persistent fixture exhausted its bounded fresh-attempt budget"
+    )
+
+
 def v2_persistent_e2e_location(
     manifest: Mapping[str, Any],
     *,
@@ -21309,9 +23007,29 @@ def v2_persistent_e2e_location(
             }
         )
     ).hexdigest()[:24]
+    artifact_root = "target/beads-template-hygiene/v2-e2e"
+    base = f"{label}-{identity}"
+
+    def probe(candidate: str) -> str:
+        output = resolve_run_dir(
+            artifact_root,
+            candidate,
+            label="persistent v2 fixture candidate",
+        )
+        if not output.exists():
+            return "AVAILABLE"
+        try:
+            v2_read_retained_bundle(
+                artifact_root=artifact_root,
+                input_dir=candidate,
+            )
+        except (InputRefused, EvidenceFailed):
+            return "INCOMPLETE"
+        return "COMPLETE"
+
     return (
-        "target/beads-template-hygiene/v2-e2e",
-        f"{label}-{identity}",
+        artifact_root,
+        v2_select_persistent_attempt(base, probe=probe),
     )
 
 
@@ -21331,23 +23049,44 @@ def v2_publish_and_read_persistent_fixture(
         artifact_dir,
         label="persistent v2 fixture",
     )
+    publication_error: EvidenceFailed | None = None
     if not output.exists():
-        publication = v2_publish_bundle(
-            artifact_root=artifact_root,
-            artifact_dir=artifact_dir,
-            payloads=payloads,
-        )
-        if (
-            publication["publication_order"][-1] != "terminal.json"
-            or publication["terminal_content_sealed_last"] is not True
-        ):
-            raise EvidenceFailed(
-                "persistent v2 fixture did not seal terminal content last"
+        try:
+            publication = v2_publish_bundle(
+                artifact_root=artifact_root,
+                artifact_dir=artifact_dir,
+                payloads=payloads,
             )
-    directory, retained, terminal, events = v2_read_retained_bundle(
-        artifact_root=artifact_root,
-        input_dir=artifact_dir,
-    )
+        except EvidenceFailed as error:
+            if not output.exists():
+                raise
+            publication_error = error
+        else:
+            if (
+                publication["publication_order"][-1] != "terminal.json"
+                or publication["terminal_content_sealed_last"] is not True
+            ):
+                raise EvidenceFailed(
+                    "persistent v2 fixture did not seal terminal content last"
+                )
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            directory, retained, terminal, events = (
+                v2_read_retained_bundle(
+                    artifact_root=artifact_root,
+                    input_dir=artifact_dir,
+                )
+            )
+            break
+        except (InputRefused, EvidenceFailed) as error:
+            if time.monotonic() >= deadline:
+                raise EvidenceFailed(
+                    "persistent fixture remained incomplete after the bounded "
+                    "concurrent-publication wait; rerun to select a fresh "
+                    "attempt directory"
+                ) from (publication_error or error)
+            time.sleep(0.05)
     if dict(retained) != dict(payloads):
         divergence = first_projection_divergence(
             {
@@ -22087,25 +23826,16 @@ def v2_execute_nomock_cases(
         )
 
     elif slug == "nomock-v1-regression":
-        environment = os.environ.copy()
-        environment["FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD"] = "1"
-        completed = subprocess.run(
+        completed = run_command(
             [str(REPO_ROOT / SCRIPT_REL), "--self-test"],
-            cwd=REPO_ROOT,
-            text=False,
-            capture_output=True,
-            env=environment,
-            timeout=CAPS["subprocess_timeout_seconds"],
-            check=False,
+            environment_overrides={
+                "FS_TEMPLATE_HYGIENE_FORBID_V2_LOAD": "1"
+            },
+            record_global_receipt=False,
         )
-        if (
-            len(completed.stdout) > CAPS["subprocess_stdout_bytes"]
-            or len(completed.stderr) > CAPS["subprocess_stdout_bytes"]
-        ):
-            raise InfrastructureFailed("frozen v1 regression output exceeds cap")
         rows = [
             strict_json_loads(
-                line + b"\n",
+                (line + "\n").encode("utf-8"),
                 label=f"v1 regression line {index}",
                 require_canonical=True,
             )
@@ -22138,7 +23868,9 @@ def v2_execute_nomock_cases(
                 "root": summary.get("case_manifest_root"),
                 "stderr_root": (
                     "sha256-v1:"
-                    + hashlib.sha256(completed.stderr).hexdigest()
+                    + hashlib.sha256(
+                        completed.stderr.encode("utf-8")
+                    ).hexdigest()
                 ),
             },
         )
@@ -22147,7 +23879,7 @@ def v2_execute_nomock_cases(
             "template-lint.artifact-replay"
             in summary.get("artifact_replay_cases", [])
             and "v2 manifest loading was forbidden"
-            not in completed.stderr.decode("utf-8", errors="replace"),
+            not in completed.stderr,
             expected=True,
             observed={
                 "artifact_replay_cases": summary.get(
@@ -22155,7 +23887,9 @@ def v2_execute_nomock_cases(
                 ),
                 "stderr_root": (
                     "sha256-v1:"
-                    + hashlib.sha256(completed.stderr).hexdigest()
+                    + hashlib.sha256(
+                        completed.stderr.encode("utf-8")
+                    ).hexdigest()
                 ),
             },
         )

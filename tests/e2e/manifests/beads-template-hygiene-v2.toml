@@ -234,6 +234,11 @@ non_remediation_dispositions_forbid_findings = true
 unreviewed_action = "SEMANTIC_REVIEW_REQUIRED"
 reviewed_no_change_requires_root_bound_receipt = true
 corrective_materialization = "ROOT_BOUND_REMEDIATION_REQUIRED_ONLY"
+raw_enum_product_coverage = "ALL_DECLARED_TYPES_X_ALL_STATUSES_X_P0_P4"
+missing_collections_normalize_empty = true
+malformed_falsey_collections = "REFUSE"
+relation_row_validation = "NONEMPTY_ID_TYPE_VALID_OPTIONAL_STATUS_PRIORITY"
+audit_capture_uses_bounded_runner = true
 
 [row_contract]
 required_fields = [
@@ -356,6 +361,7 @@ manual_route_grants_external_authority = false
 manual_route_grants_conditional_write = false
 manual_route_claims_no_clobber = false
 manual_route_claims_exactly_once = false
+undeclared_responsibility_assignments_remain_unresolved = true
 deferred_route = "ANALYSIS_ONLY"
 deferred_authorization_override = "FORBIDDEN"
 deferred_requires_owner_reviewed_reactivation_and_fresh_replan = true
@@ -569,6 +575,12 @@ terminal_slot_reservation = "EMPTY_O_EXCL_AND_DIRECTORY_FSYNC"
 terminal_content_assignment = "SINGLE_LOGICAL_ASSIGNMENT_LAST"
 partial_terminal = "ABSENT_EMPTY_OR_INVALID_NEVER_COMPLETE"
 retry_requires_fresh_run_dir = true
+publication_topology_preflight = "EXACT_FILE_DIRECTORY_SET_BEFORE_FIRST_PAYLOAD_WRITE"
+publication_addressing = "DESCRIPTOR_RELATIVE_O_NOFOLLOW"
+reserved_prefix_membership = "EMPTY_TERMINAL_ONLY"
+terminal_assignment_state_machine = ["RESERVED_EMPTY", "ASSIGNMENT_STARTED", "DURABLY_COMMITTED", "VERIFIED_SEALED"]
+terminal_readback = "SAME_DESCRIPTOR_AND_PATH_IDENTITY"
+persistent_incomplete_prefix_retry = "BOUNDED_FRESH_ATTEMPT_AFTER_INCOMPLETE_PREFIX"
 
 [logging_contract]
 format = "JSONL"
@@ -611,6 +623,11 @@ suite_terminal_binds_ordered_case_roots = true
 semantic_refusal_first_divergence_required = true
 semantic_refusal_recovery_required = true
 semantic_refusal_terminal_fields_must_agree = true
+subprocess_capture = "NONBLOCKING_SELECTOR_BOUNDED"
+subprocess_process_group = "NEW_SESSION_TERM_THEN_IMMEDIATE_KILL_AND_DRAIN"
+subprocess_failure_receipts = ["START_FAILED", "CAPTURE_FAILED", "TIMEOUT", "CANCELLED", "CANCELLED_AFTER_EXIT", "STDOUT_LIMIT", "STDERR_LIMIT", "NON_UTF8", "UNEXPECTED_EXIT"]
+subprocess_stream_cap_accounting = "RETAIN_AT_MOST_EXACT_CAP_AND_ROOT_RETAINED_PREFIX"
+subprocess_argv_redaction = "COUNT_AND_BYTES_BOUNDED_SECRET_AND_ABSOLUTE_PATH_REDACTED"
 forbidden_content = [
   "raw stdout body",
   "raw stderr body",
@@ -674,6 +691,11 @@ max_diagnostic_summary_bytes = 512
 max_artifact_bytes = 67108864
 max_synopsis_bytes = 8192
 max_synopsis_selected_ids = 12
+max_subprocess_stdin_bytes = 268435456
+max_subprocess_stdout_bytes = 268435456
+max_subprocess_stderr_bytes = 268435456
+subprocess_timeout_seconds = 180
+max_persistent_attempts = 32
 cap_exceeded_terminal = "EXPECTED_REFUSAL_OR_OVERSIZE_REVIEW_REQUIRED_AS_SPECIFIED"
 cap_exceeded_live_target_mutation = false
 
@@ -825,7 +847,7 @@ assertion_id = "v2.case.schema-executable-assertions"
 criterion_ids = ["AC15", "AC22"]
 kinds = ["schema", "logging"]
 fixture_engine = "PURE_PROJECTION"
-subject = "criterion, case, compiled executor, assertion-result, and evidence-root bijection; prose and aggregate counts cannot pass"
+subject = "criterion, case, compiled executor, assertion-result, and evidence-root bijection; prose and aggregate counts cannot pass, and malformed executor results fail-seal as typed EvidenceFailed assertion and suite terminals"
 
 [[case]]
 ordinal = 3
@@ -870,7 +892,7 @@ assertion_id = "v2.case.cli-review-receipts"
 criterion_ids = ["AC19"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "safe relative review-receipts input, closed receipt schema, missing declarations REVIEW_ONLY, and unsafe input refusal"
+subject = "safe-relative root-bound review receipts cover all six semantic dispositions and all twelve ordered dimensions with exact verdict, reason, falsifier, evidence roots, canonical target order, strict booleans, disposition signals, no-finding rules, stale-root refusal, and reviewer provenance that cannot mint missing acceptance authority"
 
 [[case]]
 ordinal = 8
@@ -924,7 +946,7 @@ assertion_id = "v2.case.source-zero-one"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "exact zero and one row source, inventory, partitions, zero receipts, and terminal evidence; every nonclosed zero-warning row remains explicitly UNREVIEWED and BLOCKED_AUTHORITY until a root-bound semantic receipt, while closed zero-finding rows stay outside the active remediation scope"
+subject = "exact empty and one-row source capture, inventory, partitions, zero receipts, and terminal evidence; every nonclosed zero-warning row retains the exact twelve-dimension NODATA UNREVIEWED contract and BLOCKED_AUTHORITY disposition until a root-bound semantic receipt, while closed zero-finding rows stay outside active remediation"
 
 [[case]]
 ordinal = 14
@@ -978,7 +1000,7 @@ assertion_id = "v2.case.source-all-types-statuses-priorities"
 criterion_ids = ["AC01", "AC10", "AC11"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "all P0-P4, statuses, issue types, dispositions, missing-section sets, readiness states, and routes"
+subject = "the raw-source Cartesian product covers every declared issue type, all five statuses, and P0-P4; absent or null labels and relations normalize empty, while falsey collection aliases and malformed relation IDs, types, statuses, booleans, and priorities refuse"
 
 [[case]]
 ordinal = 20
@@ -1032,7 +1054,7 @@ assertion_id = "v2.case.row-complete-planned-child"
 criterion_ids = ["AC02", "AC06", "AC11", "AC19"]
 kinds = ["schema", "unit"]
 fixture_engine = "PURE_PROJECTION"
-subject = "all source-row and planned-child fields, roots, edges, payloads, estimates, readiness, route, and falsifier are present and typed"
+subject = "the exact closed source-row and planned-child schemas include every semantic-review state, action, rationale, falsifier, receipt and no-change root alongside roots, edges, payloads, estimates, readiness, route, and exact adjudication, remediation, and retention partitions"
 
 [[case]]
 ordinal = 26
@@ -1140,7 +1162,7 @@ assertion_id = "v2.case.packing-hard-keys"
 criterion_ids = ["AC04"]
 kinds = ["unit", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "priority, status, disposition, type, exact missing-section set, and readiness differences always partition"
+subject = "all ten hard keys—priority, status, template disposition, issue type, exact missing-section set, semantic disposition, semantic receipt state, semantic action, readiness, and remediation route—partition deterministically"
 
 [[case]]
 ordinal = 38
@@ -1239,7 +1261,7 @@ assertion_id = "v2.case.packing-oversize-escalation"
 criterion_ids = ["AC05", "AC11", "AC19"]
 kinds = ["boundary", "resource", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "single-target over-cap escalation retains roots, incomplete bounded index, canonical br-show argv, full artifact, owner questions, and no-claim"
+subject = "single-target over-cap escalation retains complete roots, an explicitly incomplete bounded index, canonical br-show argv, full artifact, owner questions, no-claim, and the original manual or future-automated remediation route"
 
 [[case]]
 ordinal = 49
@@ -1329,7 +1351,7 @@ assertion_id = "v2.case.movement-cross-lane"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
 kinds = ["property", "state", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "priority or status movement invalidates source and destination, emits independently reconstructed MOVED_TO_LANE evidence, refuses rerooted movement classes, and retains one current mapping plus reviewed successor lineage"
+subject = "priority or status movement invalidates source and destination, emits independently reconstructed MOVED_TO_LANE evidence bound to the full current-universe root and count, refuses rerooted movement classes, and retains one exact current mapping plus reviewed successor lineage"
 
 [[case]]
 ordinal = 59
@@ -1338,7 +1360,7 @@ assertion_id = "v2.case.movement-live-to-history"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "coherent cross-campaign closure emits MOVED_TO_HISTORY with before/after status, roots, prior evidence, and exact successor"
+subject = "coherent cross-campaign closure emits MOVED_TO_HISTORY with before and after status and priority, full-universe root and count, immutable prior evidence, destination-root kind, and an exact successor; a clean closed no-finding successor moves to history rather than disappearing"
 
 [[case]]
 ordinal = 60
@@ -1347,7 +1369,7 @@ assertion_id = "v2.case.movement-history-to-live"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "coherent cross-campaign reopening emits MOVED_FROM_HISTORY; within-run close or reopen drift refuses and all-status partition remains exact"
+subject = "coherent cross-campaign reopening emits MOVED_FROM_HISTORY with full-universe lineage; within-run close or reopen drift, an absent prior target, and a nonclosed out-of-scope successor refuse while the all-status partition remains exact"
 
 [[case]]
 ordinal = 61
@@ -1392,7 +1414,7 @@ assertion_id = "v2.case.artifact-no-overwrite-partial"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["mutation", "fault", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "existing output and partial prefix refuse; each typed semantic refusal is reserved and terminal-sealed last as an exact persistent nine-file complete-non-green bundle, passes strict filesystem reading, replays with its original nonzero terminal and no output, while reservation failure claims no bundle"
+subject = "existing output and partial prefix refuse; each typed semantic refusal is descriptor-relatively reserved and terminal-sealed last as an exact persistent nine-file complete-non-green bundle, passes strict path-and-descriptor identity reading, replays with its original nonzero terminal and no output, while reservation failure claims no bundle"
 
 [[case]]
 ordinal = 66
@@ -1455,7 +1477,7 @@ assertion_id = "v2.case.replay-tamper-live-denied"
 criterion_ids = ["AC09", "AC12", "AC15"]
 kinds = ["replay", "mutation"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "live tracker and network denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse"
+subject = "live tracker and network are denied; missing, reordered, truncated, mutated, unsafe, extra, v1-confused, and stale-root artifacts refuse, including exact event bytes, sequence, roots, terminal location, terminal recovery, and empty replay-equivalence bindings"
 
 [[case]]
 ordinal = 73
@@ -1464,7 +1486,7 @@ assertion_id = "v2.case.mutation-forged-approval"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "fake, self-issued, wrong-reviewer, stale, count-only, root-mismatched, and aggregate approval refuse; authority-only mechanical labeling refuses"
+subject = "fake, self-issued, wrong-reviewer, stale, count-only, root-mismatched, and aggregate approval refuse; undeclared responsibility assignments remain unresolved; authority-only mechanical labeling refuses"
 
 [[case]]
 ordinal = 74
@@ -1500,7 +1522,7 @@ assertion_id = "v2.case.mutation-dropped-duplicate-target"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["mutation", "property"]
 fixture_engine = "PURE_PROJECTION"
-subject = "dropped, duplicated, substituted, cross-lane, and cross-status targets refuse despite equal counts"
+subject = "dropped, duplicated, substituted, cross-lane, and cross-status targets refuse despite equal counts; bytearray and memoryview state is content-bound so refusal callbacks cannot mutate byte-backed state invisibly"
 
 [[case]]
 ordinal = 78
@@ -1509,7 +1531,7 @@ assertion_id = "v2.case.fault-output-lock-export"
 criterion_ids = ["AC13", "AC22", "AC24"]
 kinds = ["fault", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "output reservation, open, write, parent identity, lock, export-status, and export-read faults retain typed non-green evidence and no complete-prefix claim"
+subject = "output reservation, open, descriptor-relative write, parent identity, lock, export-status, and export-read faults retain typed non-green evidence; file-directory and case aliases refuse before the first payload write, and terminal assignment distinguishes never-started from started-uncommitted state"
 
 [[case]]
 ordinal = 79
@@ -1518,7 +1540,7 @@ assertion_id = "v2.case.cancel-signals-drained"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["cancellation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "SIGINT and SIGTERM at source, audit, packing, publication, and replay boundaries drain and never leave a green prefix"
+subject = "SIGINT and SIGTERM at source, audit, packing, publication, and replay boundaries drain and never leave a green prefix; live subprocess cancellation and a leader-exit descendant-pipe timeout kill and drain the whole new-session process group with typed bounded receipts"
 
 [[case]]
 ordinal = 80
@@ -1527,7 +1549,7 @@ assertion_id = "v2.case.restart-deterministic"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["restart", "property"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "fresh-run restart after cancellation or fault reconstructs the same logical keys, deterministic errors, and no-overwrite behavior"
+subject = "fresh-run restart after cancellation or fault reconstructs the same logical keys and deterministic errors without overwrite; incomplete persistent prefixes are skipped for a bounded fresh attempt and the first complete attempt is reused"
 
 [[case]]
 ordinal = 81
@@ -1536,7 +1558,7 @@ assertion_id = "v2.case.resource-all-caps"
 criterion_ids = ["AC05", "AC11", "AC13", "AC22"]
 kinds = ["resource", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "independent n-1, n, n+1 assertions for row, warning, field, payload, argv, path, artifact, event, log-line, synopsis, and selected-ID caps"
+subject = "independent n-1, n, n+1 assertions cover row, warning, field, payload, argv, path, artifact, event, log-line, synopsis, selected-ID, subprocess stream, input, timeout, and persistent-attempt caps; exact output prefixes, non-UTF8, start failure, cleanup diagnostics, and sensitive argv receipts are bounded and redacted"
 
 [[case]]
 ordinal = 82
@@ -1653,7 +1675,7 @@ assertion_id = "v2.case.nomock-offline-replay"
 criterion_ids = ["AC09", "AC13"]
 kinds = ["no_mock_e2e", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "persistent retained review and history bundles are terminal-sealed last, pass strict filesystem identity reading, and reconstruct exact selected and NOT_REQUESTED projections; a released-br-derived review bundle replays into a disjoint persistent directory with live tracker writes, live tracker reads, and network denied"
+subject = "persistent retained review and history bundles are terminal-sealed last, pass strict path-and-descriptor identity reading, recover through bounded fresh attempts after incomplete prefixes, and reconstruct exact selected and NOT_REQUESTED projections; a released-br-derived review bundle replays into a disjoint persistent directory with live tracker writes, reads, and network denied"
 
 [[case]]
 ordinal = 95
@@ -1671,4 +1693,4 @@ assertion_id = "v2.case.nomock-v1-regression"
 criterion_ids = ["AC13", "AC14", "AC15", "AC23"]
 kinds = ["no_mock_e2e", "compatibility", "replay"]
 fixture_engine = "RELEASED_BR"
-subject = "frozen v1 21-case and 148-assertion suite, artifact replay, fixture-only mutation boundary, content identities, and v2-root independence remain exact"
+subject = "the frozen v1 21-case and 148-assertion suite runs through bounded group-draining capture; artifact replay, fixture-only mutation boundary, content identities, and v2-root independence remain exact"
