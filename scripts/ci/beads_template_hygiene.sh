@@ -28582,8 +28582,16 @@ def v2_project_module_value(
         for raw_path in module_paths:
             path = tuple(str(part) for part in raw_path)
             current: Any = value
-            for part in path:
-                current = v2_raw_attribute_without_user_code(current, part)
+            try:
+                for part in path:
+                    current = v2_raw_attribute_without_user_code(current, part)
+            except HarnessError as error:
+                path_text = ".".join(path)
+                raise EvidenceFailed(
+                    "refusal-state trusted module attribute path "
+                    f"{module_name}.{path_text} is not statically present: "
+                    f"{v2_bounded_diagnostic_summary(error)}"
+                ) from error
             if v2_is_dangerous_builtin(current):
                 raise EvidenceFailed(
                     "refusal callback reaches a dynamic namespace builtin; "
