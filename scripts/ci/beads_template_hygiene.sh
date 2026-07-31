@@ -28062,6 +28062,7 @@ V2_REFUSAL_TRUSTED_MODULES = (
     json,
     math,
     os,
+    os.path,
     re,
     selectors,
     signal,
