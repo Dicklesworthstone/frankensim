@@ -20488,6 +20488,14 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     br_version = observation.get("br_version")
     capture_contract = observation.get("capture_contract")
     source_files = observation.get("source_files")
+    normalized_capability_commands = v2_normalize_br_capability_commands(
+        (
+            observation.get("br_capabilities", {}).get("commands")
+            if isinstance(observation.get("br_capabilities"), dict)
+            else None
+        ),
+        error_type=InputRefused,
+    )
     if (
         observation["schema"] != V2_SOURCE_SCHEMA
         or not isinstance(capture_contract, dict)
@@ -20519,13 +20527,11 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         != {"commands", "contract_version", "operation_count"}
         or observation["br_capabilities"]["contract_version"]
         != "br.capabilities.v1"
-        or not isinstance(observation["br_capabilities"]["commands"], dict)
-        or any(
-            not isinstance(name, str) or not name
-            for name in observation["br_capabilities"]["commands"]
-        )
+        or observation["br_capabilities"]["commands"]
+        != normalized_capability_commands
         or type(observation["br_capabilities"]["operation_count"]) is not int
-        or observation["br_capabilities"]["operation_count"] < 0
+        or observation["br_capabilities"]["operation_count"]
+        != len(normalized_capability_commands)
         or any(
             not isinstance(observation[field], dict)
             for field in ("tracker_status", "sync_status", "export_witness")
