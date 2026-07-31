@@ -29268,24 +29268,31 @@ def v2_state_projection_value(
                             "builtin; provide an explicit bounded external-state "
                             "projection"
                         )
-                    if isinstance(global_value, types.ModuleType):
-                        row["state"] = v2_state_projection_value(
-                            global_value,
-                            seen=seen,
-                            context=context,
-                            module_paths=analysis["module_paths"].get(name),
-                            bare_module_reference=(
-                                name in analysis["bare_global_names"]
-                            ),
-                            depth=depth + 1,
-                        )
-                    else:
-                        row["state"] = v2_state_projection_value(
-                            global_value,
-                            seen=seen,
-                            context=context,
-                            depth=depth + 1,
-                        )
+                    try:
+                        if isinstance(global_value, types.ModuleType):
+                            row["state"] = v2_state_projection_value(
+                                global_value,
+                                seen=seen,
+                                context=context,
+                                module_paths=analysis["module_paths"].get(name),
+                                bare_module_reference=(
+                                    name in analysis["bare_global_names"]
+                                ),
+                                depth=depth + 1,
+                            )
+                        else:
+                            row["state"] = v2_state_projection_value(
+                                global_value,
+                                seen=seen,
+                                context=context,
+                                depth=depth + 1,
+                            )
+                    except HarnessError as error:
+                        raise EvidenceFailed(
+                            "refusal-state function global "
+                            f"{value.__qualname__}.{name} is not bounded: "
+                            f"{v2_bounded_diagnostic_summary(error)}"
+                        ) from error
                 global_rows[name] = row
             function_attributes = object.__getattribute__(value, "__dict__")
             if type(function_attributes) is not dict:
