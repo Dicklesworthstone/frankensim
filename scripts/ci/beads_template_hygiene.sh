@@ -67,7 +67,7 @@ CASE_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v1"
 
 V2_MANIFEST_SCHEMA = "frankensim.beads-template-hygiene-manifest.v2"
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY = (
-    "sha256-v1:ae52653f846df7806713eb1b8a1e8a8d4fe6d903ca56e3bfdd99971d9063ff21"
+    "sha256-v1:91fe894cf73f81fedde91f3c12456b0a7fdcacf1b89b1353ddbaa743c6210cba"
 )
 V2_ACCEPTED_MANIFEST_CONTENT_IDENTITY_POLICY = (
     "HARNESS_PINNED_SHA256_OF_EXACT_MANIFEST_BYTES"
@@ -285,6 +285,7 @@ V2_PACKING_HARD_KEYS = (
     "semantic_review_action",
     "readiness",
     "remediation_route",
+    "generated_child_desired_status",
 )
 V2_NORMALIZED_ROW_FIELDS = frozenset(
     {
@@ -1251,6 +1252,9 @@ V2_RELEASED_KNOWN_STATUSES = (
 )
 V2_TERMINAL_STATUSES = frozenset({"closed", "tombstone"})
 V2_STATUS_BYTES_CAP = 128
+V2_BLOCKING_DEPENDENCY_TYPES = frozenset(
+    {"blocks", "conditional-blocks", "waits-for"}
+)
 REQUIRED_SECTIONS_BY_TYPE = {
     "bug": ("## Steps to Reproduce", "## Acceptance Criteria"),
     "task": ("## Acceptance Criteria",),
@@ -3516,6 +3520,8 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_log_line_bytes",
         "max_assertion_checks",
         "max_check_id_bytes",
+        "max_local_issue_id_bytes",
+        "max_external_relation_id_bytes",
         "max_diagnostic_summary_bytes",
         "max_synopsis_bytes",
         "max_synopsis_selected_ids",
@@ -8184,6 +8190,11 @@ def v2_capture_state(
         raise EvidenceFailed(
             "v2 capture ready membership is noncanonical or outside source"
         )
+    v2_validate_tracker_ready_membership(
+        normalized_issues,
+        normalized_ready_ids,
+        error_type=EvidenceFailed,
+    )
     document = {
         "issue_ids": normalized_ids,
         "issue_count": len(normalized_ids),
@@ -13275,7 +13286,111 @@ def v2_parse_target_set(
     return set(members)
 
 
+def v2_non_actionable_reasons(
+    issue: Mapping[str, Any],
+    *,
+    tracker_ready: bool,
+) -> list[str]:
+    if tracker_ready:
+        return []
+    issue_id = str(issue.get("id") or "")
+    status = str(issue.get("status") or "")
+    reasons: list[str] = []
+    if v2_is_terminal_status(status):
+        reasons.append(f"terminal-status:{status}")
+    elif status != "open":
+        reasons.append(f"tracker-status-not-ready:{status}")
+    if issue.get("pinned") is True or status == "pinned":
+        reasons.append("pinned")
+    if issue.get("is_template") is True:
+        reasons.append("template")
+    if issue.get("ephemeral") is True:
+        reasons.append("ephemeral")
+    if "-wisp-" in issue_id:
+        reasons.append("wisp")
+    if str(issue.get("defer_until") or ""):
+        reasons.append("defer-metadata-present")
+    if any(
+        isinstance(relation, Mapping)
+        and str(
+            relation.get("type") or relation.get("dependency_type") or ""
+        )
+        in V2_BLOCKING_DEPENDENCY_TYPES
+        and not v2_is_terminal_status(str(relation.get("status") or ""))
+        for relation in (issue.get("dependencies") or ())
+    ):
+        reasons.append("nonterminal-blocking-dependency-present")
+    if not reasons:
+        reasons.append("tracker-ready-policy-exclusion")
+    return reasons
+
+
+def v2_bind_tracker_actionability(
+    issue: Mapping[str, Any],
+    *,
+    tracker_ready: bool,
+) -> dict[str, Any]:
+    bound = dict(issue)
+    bound["tracker_ready"] = tracker_ready
+    bound["non_actionable_reasons"] = v2_non_actionable_reasons(
+        issue,
+        tracker_ready=tracker_ready,
+    )
+    return bound
+
+
+def v2_validate_tracker_ready_membership(
+    issues: Sequence[Mapping[str, Any]],
+    tracker_ready_issue_ids: Sequence[str],
+    *,
+    error_type: type[HarnessError],
+) -> None:
+    issue_by_id = {str(issue.get("id") or ""): issue for issue in issues}
+    ready_ids = [str(issue_id) for issue_id in tracker_ready_issue_ids]
+    if (
+        ready_ids != sorted(ready_ids)
+        or len(ready_ids) != len(set(ready_ids))
+        or not set(ready_ids).issubset(issue_by_id)
+    ):
+        raise error_type(
+            "tracker ready membership is noncanonical or outside source"
+        )
+    for issue_id in ready_ids:
+        issue = issue_by_id[issue_id]
+        status = str(issue.get("status") or "")
+        if (
+            v2_is_terminal_status(status)
+            or issue.get("pinned") is True
+            or status == "pinned"
+            or issue.get("ephemeral") is True
+            or issue.get("is_template") is True
+            or "-wisp-" in issue_id
+        ):
+            raise error_type(
+                "tracker ready membership contains an absolute non-actionable "
+                f"issue: {issue_id}"
+            )
+
+
 def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
+    active_context = issue.get("active_work_context")
+    context = active_context if isinstance(active_context, Mapping) else {}
+    tracker_ready = (
+        issue.get("tracker_ready") is True
+        or context.get("tracker_ready") is True
+    )
+    reasons_value = issue.get(
+        "non_actionable_reasons",
+        context.get("non_actionable_reasons"),
+    )
+    non_actionable_reasons = (
+        [str(value) for value in reasons_value]
+        if isinstance(reasons_value, list)
+        else v2_non_actionable_reasons(
+            issue,
+            tracker_ready=tracker_ready,
+        )
+    )
     return {
         "source_issue_projection_root": str(
             issue.get("source_issue_projection_root") or ""
@@ -13291,6 +13406,8 @@ def v2_stable_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "labels": sorted(str(value) for value in (issue.get("labels") or [])),
         "estimated_minutes": issue.get("estimated_minutes"),
         "actionability": {
+            "tracker_ready": tracker_ready,
+            "non_actionable_reasons": non_actionable_reasons,
             "ephemeral": issue.get("ephemeral") is True,
             "pinned": issue.get("pinned") is True,
             "is_template": issue.get("is_template") is True,
@@ -13635,23 +13752,36 @@ def v2_review_minutes(issue: Mapping[str, Any]) -> int:
 def v2_active_work_context(issue: Mapping[str, Any]) -> dict[str, Any]:
     assignee = str(issue.get("assignee") or "")
     status = str(issue.get("status") or "")
+    tracker_ready = issue.get("tracker_ready", status == "open") is True
+    non_actionable_reasons = list(
+        issue.get("non_actionable_reasons")
+        or v2_non_actionable_reasons(
+            issue,
+            tracker_ready=tracker_ready,
+        )
+    )
     conflict = status == "in_progress" or bool(assignee)
     generated_child_desired_status = (
         "deferred"
-        if conflict or status in {"blocked", "deferred"}
+        if conflict or not tracker_ready
         else "open"
     )
     document = {
         "status": status,
         "tracker_assignee": assignee,
+        "tracker_ready": tracker_ready,
+        "non_actionable_reasons": non_actionable_reasons,
         "conflict": conflict,
         "generated_child_desired_status": generated_child_desired_status,
         "coordination_acknowledgement_required": conflict,
+        "actionability_review_required": not tracker_ready,
         "agent_mail_hint": None,
         "agent_mail_hint_authoritative": False,
         "no_claim": (
-            "tracker state is deterministic operational context only; optional "
-            "Agent Mail or reservation observations never enter replay roots"
+            "tracker state and exact br-ready membership are deterministic "
+            "operational context only; explanatory reasons do not independently "
+            "prove scheduler policy, and optional Agent Mail or reservation "
+            "observations never enter replay roots"
         ),
     }
     return v2_rooted(document)
@@ -13682,6 +13812,17 @@ def v2_build_inventory(
         ),
     )
     full_by_id = {row["id"]: row for row in snapshot.all_issues}
+    ready_values = snapshot.source.get("tracker_ready_issue_ids")
+    if not isinstance(ready_values, list):
+        raise EvidenceFailed(
+            "v2 inventory source lacks exact tracker-ready membership"
+        )
+    tracker_ready_ids = {str(value) for value in ready_values}
+    v2_validate_tracker_ready_membership(
+        snapshot.all_issues,
+        sorted(tracker_ready_ids),
+        error_type=EvidenceFailed,
+    )
     source_inventory_ids = {
         str(row["id"]) for row in snapshot.inventory["rows"]
     }
@@ -13699,13 +13840,16 @@ def v2_build_inventory(
             raise EvidenceFailed(
                 f"v2 full source lacks target {source_row['id']}"
             )
-        joined = {
-            **full_issue,
-            **source_row,
-            "labels": list(full_issue.get("labels") or []),
-            "dependencies": list(full_issue.get("dependencies") or []),
-            "dependents": list(full_issue.get("dependents") or []),
-        }
+        joined = v2_bind_tracker_actionability(
+            {
+                **full_issue,
+                **source_row,
+                "labels": list(full_issue.get("labels") or []),
+                "dependencies": list(full_issue.get("dependencies") or []),
+                "dependents": list(full_issue.get("dependents") or []),
+            },
+            tracker_ready=source_row["id"] in tracker_ready_ids,
+        )
         priority_name = f"P{source_row['priority']}"
         status = str(source_row["status"])
         if priority_filter is not None and priority_name not in priority_filter:
@@ -13935,11 +14079,26 @@ def v2_validate_source_limits(
 
 
 def v2_campaign_epoch(snapshot: LiveSnapshot) -> tuple[str, dict[str, Any]]:
+    ready_values = snapshot.source.get("tracker_ready_issue_ids")
+    if not isinstance(ready_values, list):
+        raise EvidenceFailed(
+            "v2 campaign source lacks exact tracker-ready membership"
+        )
+    tracker_ready_ids = {str(value) for value in ready_values}
+    source_issues = tuple(snapshot.all_issues or tuple(snapshot.issues))
+    v2_validate_tracker_ready_membership(
+        source_issues,
+        sorted(tracker_ready_ids),
+        error_type=EvidenceFailed,
+    )
     nonclosed_issues = sorted(
         (
-            row
-            for row in (snapshot.all_issues or tuple(snapshot.issues))
-            if row["status"] != "closed"
+            v2_bind_tracker_actionability(
+                row,
+                tracker_ready=row["id"] in tracker_ready_ids,
+            )
+            for row in source_issues
+            if not v2_is_terminal_status(row["status"])
         ),
         key=lambda row: row["id"],
     )
@@ -17693,9 +17852,21 @@ def v2_derive_authority(
         else:
             readiness = "REVIEW_ONLY"
         active_context = target["active_work_context"]
-        if target["status"] == "deferred" or active_context["conflict"]:
+        if (
+            not active_context["tracker_ready"]
+            or target["status"] == "deferred"
+        ):
+            readiness = "REVIEW_ONLY"
+        if (
+            not active_context["tracker_ready"]
+            or target["status"] == "deferred"
+            or active_context["conflict"]
+        ):
             route = "ANALYSIS_ONLY"
-            deferred_prohibition = target["status"] == "deferred"
+            deferred_prohibition = (
+                not active_context["tracker_ready"]
+                or target["status"] == "deferred"
+            )
         elif mechanically_eligible:
             route = "AUTOMATED_CONDITIONAL"
             deferred_prohibition = False
@@ -18132,6 +18303,11 @@ def v2_hard_vector(
         str(authority["semantic_review_action"]),
         str(authority["readiness"]),
         str(authority["remediation_route"]),
+        str(
+            authority["active_work_context"][
+                "generated_child_desired_status"
+            ]
+        ),
     )
 
 
@@ -19160,6 +19336,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             "responsibility_assignments",
             "readiness",
             "remediation_route",
+            "desired_status",
             "target_ids",
             "target_roots",
             "authority_decision_roots",
@@ -19200,6 +19377,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         != child["semantic_review_receipt_roots"]
         or key_inputs["responsibility_assignments"]
         != child["responsibility_assignments"]
+        or key_inputs["desired_status"] != child["desired_status"]
         or key_inputs["compatibility"] != compatibility
         or semantic_root(key_inputs).split(":", 1)[1] != child_key
     ):
@@ -19260,6 +19438,17 @@ def v2_make_child(
         }
         for authority in ordered_authorities
     ]
+    desired_statuses = {
+        authority["active_work_context"][
+            "generated_child_desired_status"
+        ]
+        for authority in ordered_authorities
+    }
+    if len(desired_statuses) != 1:
+        raise EvidenceFailed(
+            "planned child crosses an actionability-status partition"
+        )
+    desired_status = next(iter(desired_statuses))
     stable_key_inputs = {
         "schema": V2_REVIEW_PLAN_SCHEMA,
         "priority": priority,
@@ -19290,6 +19479,7 @@ def v2_make_child(
         "responsibility_assignments": responsibility_assignments,
         "readiness": ordered_authorities[0]["readiness"],
         "remediation_route": ordered_authorities[0]["remediation_route"],
+        "desired_status": desired_status,
         "target_ids": target_ids,
         "target_roots": [target["target_root"] for target in ordered_targets],
         "authority_decision_roots": [
@@ -19309,15 +19499,6 @@ def v2_make_child(
         min(actual_review_minutes, V2_REVIEW_MINUTES_CAP)
         if oversize
         else actual_review_minutes
-    )
-    desired_status = (
-        "deferred"
-        if any(
-            target["status"] in {"blocked", "deferred", "in_progress"}
-            or authority["active_work_context"]["conflict"]
-            for target, authority in zip(ordered_targets, ordered_authorities)
-        )
-        else "open"
     )
     coordination_assignees = sorted(
         {
@@ -24590,16 +24771,10 @@ def v2_validate_source_graph(
                         "v2 source graph relation lacks exact reciprocal edge: "
                         f"{issue_id}.{relation_field}->{neighbor_id}"
                     )
-    blocking_types = {
-        "blocks",
-        "conditional-blocks",
-        "waits-for",
-    }
-
     def blocking_neighbors(issue_id: str) -> Iterable[str]:
         for relation in issue_by_id[issue_id]["dependencies"]:
             if (
-                relation["type"] in blocking_types
+                relation["type"] in V2_BLOCKING_DEPENDENCY_TYPES
                 and not relation["id"].startswith("external:")
             ):
                 yield relation["id"]
@@ -25827,8 +26002,23 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
     }
     if roots != expected:
         raise EvidenceFailed("v2 source captured-input roots disagree")
+    campaign_ready_values = captured["observation"].get(
+        "tracker_ready_issue_ids"
+    )
+    if not isinstance(campaign_ready_values, list):
+        raise InputRefused(
+            "v2 source campaign lacks exact tracker-ready membership"
+        )
+    campaign_ready_ids = set(campaign_ready_values)
     campaign_issues = sorted(
-        (row for row in all_issues if row["status"] != "closed"),
+        (
+            v2_bind_tracker_actionability(
+                row,
+                tracker_ready=row["id"] in campaign_ready_ids,
+            )
+            for row in all_issues
+            if not v2_is_terminal_status(row["status"])
+        ),
         key=lambda row: row["id"],
     )
     if (
@@ -26142,6 +26332,11 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
             "v2 source observation ready membership is noncanonical, "
             "unrooted, or inconsistent with tracker status"
         )
+    v2_validate_tracker_ready_membership(
+        all_issues,
+        tracker_ready_issue_ids,
+        error_type=InputRefused,
+    )
     normalized_sync_status = v2_normalize_br_sync_status(
         observation["sync_status"],
         error_type=InputRefused,
@@ -27673,6 +27868,8 @@ def v2_synthetic_source_issue(
     target: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Reconstruct the production source shape from a normalized test row."""
+    active_context = target.get("active_work_context")
+    context = active_context if isinstance(active_context, Mapping) else {}
     return {
         "source_issue_projection_root": str(
             target.get("source_issue_projection_root") or ""
@@ -27690,6 +27887,10 @@ def v2_synthetic_source_issue(
         "labels": list(target.get("labels") or []),
         "estimated_minutes": target.get(
             "target_implementation_estimated_minutes"
+        ),
+        "tracker_ready": context.get("tracker_ready") is True,
+        "non_actionable_reasons": list(
+            context.get("non_actionable_reasons") or []
         ),
         "field_roots": dict(target.get("field_roots") or {}),
         "missing_sections": list(target.get("missing_sections") or []),
@@ -27735,14 +27936,21 @@ def v2_synthetic_target(
     review_minutes: int = 1,
     retained_payload_bytes: int = 512,
     assignee: str = "",
+    tracker_ready: bool | None = None,
 ) -> dict[str, Any]:
     issue_id = issue_id or f"synthetic-{index:04d}"
     field_roots = {
         field: text_root(f"{issue_id}:{field}")
         for field in ("description", "acceptance_criteria", "design", "notes")
     }
+    resolved_tracker_ready = (
+        status == "open" if tracker_ready is None else tracker_ready
+    )
     active_context = v2_active_work_context(
-        {"status": status, "assignee": assignee}
+        v2_bind_tracker_actionability(
+            {"id": issue_id, "status": status, "assignee": assignee},
+            tracker_ready=resolved_tracker_ready,
+        )
     )
     target = {
             "id": issue_id,
@@ -28185,7 +28393,19 @@ def v2_fixture_br_envelopes(
         and full_issue.get("is_template") is not True
         and "-wisp-" not in str(full_issue["id"])
         and not str(full_issue.get("defer_until") or "")
-        and not list(full_issue.get("dependencies") or ())
+        and not any(
+            str(
+                relation.get("type")
+                or relation.get("dependency_type")
+                or ""
+            )
+            in V2_BLOCKING_DEPENDENCY_TYPES
+            and not v2_is_terminal_status(
+                str(relation.get("status") or "")
+            )
+            for relation in (full_issue.get("dependencies") or ())
+            if isinstance(relation, Mapping)
+        )
     )
     tracker_status = v2_normalize_br_status(
         {
@@ -28924,7 +29144,18 @@ def v2_authentic_projection_fixture(
         for row in full_issues
         if row["status"] != "closed" or normalized_missing[row["id"]]
     ]
+    tracker_ready_issue_ids = sorted(
+        row["id"]
+        for row in full_issues
+        if v2_fixture_br_envelopes(row)[0]["summary"]["ready_issues"] == 1
+    )
     source = fixture_source(full_issues)
+    source.pop("semantic_root", None)
+    source["tracker_ready_issue_ids"] = tracker_ready_issue_ids
+    source["tracker_ready_issue_ids_root"] = semantic_root(
+        tracker_ready_issue_ids
+    )
+    source = v2_rooted(source)
     v1_inventory = assemble_inventory(
         lint,
         selected,
