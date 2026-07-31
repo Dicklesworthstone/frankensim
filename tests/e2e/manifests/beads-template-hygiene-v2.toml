@@ -13,7 +13,7 @@ suite_status = "EXECUTABLE_CONTRACT_WITH_LOCAL_RETAINED_FULL_RUNS_NONPORTABLE"
 harness_contract_identity = "sha256-v1:baa4e03f6ff053289a87fcafb7bfd715a5d10337ea67ef70f5d2363c2172c312"
 authority = "TEST_CONTRACT_ONLY"
 tracker_authority = "READ_ONLY"
-no_claim = "This manifest specifies deterministic review and history planning evidence. It does not mutate or repair a Bead, approve target semantics, authenticate a reviewer, admit a conditional-write capability, complete target implementation, validate scientific or performance claims, authorize product or promotion state, or authorize release."
+no_claim = "This manifest specifies deterministic review and history planning evidence. It does not mutate or repair a live target Bead. Bounded no-mock tests may initialize and mutate an isolated released-br fixture; exercised issue semantic fields are restored, while fixture initialization, export state, and append-only audit history may persist. It does not approve target semantics, authenticate a reviewer, admit a conditional-write capability, complete target implementation, validate scientific or performance claims, authorize product or promotion state, or authorize release."
 
 case_order = [
   "template-lint-v2.schema-closed-manifest",
@@ -267,7 +267,7 @@ case_order = [
 "v2.case.artifact-no-overwrite-partial" = { case_id = "template-lint-v2.artifact-no-overwrite-partial", check_count = 8, ordered_check_ids = ["existing-output-refused", "partial-prefix-not-complete", "complete-non-green-inputrefused", "filesystem-replay-preserves-inputrefused", "complete-non-green-nodata", "filesystem-replay-preserves-nodata", "complete-non-green-evidencefailed", "filesystem-replay-preserves-evidencefailed"] }
 "v2.case.artifact-membership-path-safety" = { case_id = "template-lint-v2.artifact-membership-path-safety", check_count = 18, ordered_check_ids = ["unsafe-member-0", "unsafe-member-1", "unsafe-member-2", "unsafe-member-3", "unsafe-member-4", "unsafe-member-5", "extra-membership-detected", "inode-alias-refused", "external-hardlink-refused", "retained-missing-member-production-refusal", "retained-changed-member-production-refusal", "retained-symlink-member-production-refusal", "retained-over-cap-member-production-refusal", "retained-no-overwrite-production-refusal", "retained-replay-same-path-refused", "retained-replay-descendant-path-refused", "retained-replay-ancestor-path-refused", "retained-artifact-fixture-root"] }
 "v2.case.log-assertion-argv-evidence" = { case_id = "template-lint-v2.log-assertion-argv-evidence", check_count = 1, ordered_check_ids = ["events-have-required-evidence"] }
-"v2.case.log-raw-result-redaction" = { case_id = "template-lint-v2.log-raw-result-redaction", check_count = 41, ordered_check_ids = ["sensitive-argv-redacted", "sensitive-key-boundary-controls", "split-redaction-deterministic-and-count-preserving", "embedded-argv-sensitive-tail-redacted", "whole-refusal-bundle-redacts-split-secrets", "raw-stream-root-only", "diagnostic-summary-redacted-bounded", "production-retention-boundaries-redacted", "assertion-evidence-sensitive-metadata-projected", "refusal-closure-custom-object-function-type-mutation-detected", "refusal-positional-keyword-default-mutation-detected", "refusal-function-code-semantics-mutation-detected", "refusal-container-subclass-and-defaultdict-state-detected", "refusal-hybrid-private-slot-state-detected", "refusal-cycle-topology-mutation-detected", "refusal-referenced-global-memoryview-mutation-detected", "refusal-referenced-global-custom-object-mutation-detected", "refusal-referenced-global-tuple-nested-mutation-detected", "refusal-referenced-global-deque-mutation-detected", "refusal-global-rebinding-and-deletion-detected", "refusal-transitive-helper-global-mutation-detected", "refusal-dynamic-global-access-fails-closed-before-callback", "refusal-opaque-state-fails-closed-before-callback", "refusal-shared-alias-split-detected", "refusal-shared-cycle-alias-split-detected", "refusal-aliased-helper-call-mutation-detected", "refusal-helper-globals-access-fails-closed-before-callback", "refusal-dangerous-builtin-aliases-fail-closed-before-callback", "refusal-import-opcodes-fail-closed-before-callback", "refusal-benign-shadowed-globals-admitted", "refusal-transitive-custom-module-mutation-detected", "refusal-spoofed-external-type-mutation-detected", "refusal-callable-instance-hidden-state-mutation-detected", "refusal-unchanged-nan-state-stable", "refusal-nan-payload-mutation-detected", "refusal-dataclass-sentinels-project-by-identity", "refusal-list-subclass-projection-bypasses-hostile-iterator", "refusal-slot-projection-bypasses-hostile-getattribute", "refusal-arbitrary-mapping-fails-closed-without-user-code", "refusal-projection-aggregate-caps-exact-and-plus-one", "refusal-outcome-mismatch-still-records-state-divergence"] }
+"v2.case.log-raw-result-redaction" = { case_id = "template-lint-v2.log-raw-result-redaction", check_count = 55, ordered_check_ids = ["sensitive-argv-redacted", "sensitive-key-boundary-controls", "split-redaction-deterministic-and-count-preserving", "embedded-argv-sensitive-tail-redacted", "whole-refusal-bundle-redacts-split-secrets", "raw-stream-root-only", "diagnostic-summary-redacted-bounded", "production-retention-boundaries-redacted", "assertion-evidence-sensitive-metadata-projected", "refusal-closure-custom-object-function-type-mutation-detected", "refusal-positional-keyword-default-mutation-detected", "refusal-bound-method-default-mutation-and-graph-closure", "refusal-function-code-semantics-mutation-detected", "refusal-structural-callable-attribute-mutations-detected", "refusal-staticmethod-classmethod-wrapper-swap-detected", "refusal-container-subclass-and-defaultdict-state-detected", "refusal-hybrid-private-slot-state-detected", "refusal-cycle-topology-mutation-detected", "refusal-referenced-global-memoryview-mutation-detected", "refusal-referenced-global-custom-object-mutation-detected", "refusal-referenced-global-tuple-nested-mutation-detected", "refusal-referenced-global-deque-mutation-detected", "refusal-global-rebinding-and-deletion-detected", "refusal-transitive-helper-global-mutation-detected", "refusal-dynamic-global-access-fails-closed-before-callback", "refusal-opaque-state-fails-closed-before-callback", "refusal-shared-alias-split-detected", "refusal-shared-cycle-alias-split-detected", "refusal-aliased-helper-call-mutation-detected", "refusal-helper-globals-access-fails-closed-before-callback", "refusal-dangerous-builtin-aliases-fail-closed-before-callback", "refusal-import-opcodes-fail-closed-before-callback", "refusal-process-global-mutators-require-explicit-projection", "refusal-benign-shadowed-globals-admitted", "refusal-transitive-custom-module-mutation-detected", "refusal-spoofed-external-type-mutation-detected", "refusal-callable-instance-hidden-state-mutation-detected", "refusal-unchanged-nan-state-stable", "refusal-nan-payload-mutation-detected", "refusal-dataclass-sentinels-project-by-identity", "refusal-list-subclass-projection-bypasses-hostile-iterator", "refusal-custom-getattribute-fails-closed-without-hook-execution", "refusal-hostile-introspection-hooks-never-invoked", "refusal-arbitrary-mapping-fails-closed-without-user-code", "refusal-recursive-executable-closure-covers-aliases-subscripts-and-runtime-defaults", "refusal-type-dispatch-uses-identity-and-custom-setattr-fails-closed", "refusal-code-constants-use-exact-type-dispatch-without-hooks", "refusal-path-cache-detected-without-string-hook-execution", "refusal-scalar-subclasses-order-and-bytearray-buffer-state-are-exact", "refusal-opaque-native-state-and-super-dispatch-fail-closed", "refusal-projector-purity-and-full-process-state-capabilities-are-enforced", "refusal-call-analysis-is-version-stable-and-capability-scoped", "refusal-rlock-leak-detected-and-test-cleanup-restores", "refusal-projection-aggregate-caps-exact-and-plus-one", "refusal-outcome-mismatch-still-records-state-divergence"] }
 "v2.case.log-order-terminal" = { case_id = "template-lint-v2.log-order-terminal", check_count = 2, ordered_check_ids = ["dense-unique-last-terminal", "terminal-binds-event-roots"] }
 "v2.case.replay-review-offline" = { case_id = "template-lint-v2.replay-review-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
 "v2.case.replay-history-offline" = { case_id = "template-lint-v2.replay-history-offline", check_count = 3, ordered_check_ids = ["artifact-only-reconstruction-exact", "selected-and-not-requested-projections", "offline-no-command-calls"] }
@@ -277,7 +277,7 @@ case_order = [
 "v2.case.mutation-missing-payload-edge" = { case_id = "template-lint-v2.mutation-missing-payload-edge", check_count = 6, ordered_check_ids = ["missing-required-payload-field", "duplicate-target-membership", "missing-edge", "reversed-edge", "duplicate-edge", "undeclared-edge"] }
 "v2.case.mutation-relation-neighbor-drift" = { case_id = "template-lint-v2.mutation-relation-neighbor-drift", check_count = 14, ordered_check_ids = ["only-affected-logical-key-moves", "source-graph-valid-reciprocal-and-parent-pairs", "source-graph-rollup-hierarchy-and-blocking-composition-admitted", "source-graph-absent-neighbor-refused", "source-graph-neighbor-status-refused", "source-graph-neighbor-priority-refused", "source-graph-missing-reciprocal-refused", "source-graph-parent-scalar-refused", "source-graph-self-edge-refused", "source-graph-duplicate-neighbor-refused", "source-graph-rollup-descendant-count-refused", "source-graph-external-parent-child-refused", "source-graph-blocking-cycle-refused", "source-graph-parent-hierarchy-cycle-refused"] }
 "v2.case.mutation-dropped-duplicate-target" = { case_id = "template-lint-v2.mutation-dropped-duplicate-target", check_count = 6, ordered_check_ids = ["dropped-target", "duplicated-target", "cross-lane-substitution", "cross-lane-construction-refused-at-hard-partition", "bytearray-and-memoryview-state-is-content-bound", "refusal-guard-detects-bytearray-mutation"] }
-"v2.case.fault-output-lock-export" = { case_id = "template-lint-v2.fault-output-lock-export", check_count = 10, ordered_check_ids = ["existing-output-reservation", "exclusive-writer-no-overwrite", "fault-is-non-green", "file-directory-prefix-collision-refused-before-write", "case-alias-collision-refused-before-write", "exact-prefix-verification-precedes-every-payload-write", "directory-entry-open-fstat-fsync-close-order", "directory-fstat-failure-closes-both-descriptors", "directory-fsync-failure-closes-both-descriptors", "terminal-assignment-failure-state-is-exact"] }
+"v2.case.fault-output-lock-export" = { case_id = "template-lint-v2.fault-output-lock-export", check_count = 11, ordered_check_ids = ["existing-output-reservation", "exclusive-writer-no-overwrite", "fault-is-non-green", "file-directory-prefix-collision-refused-before-write", "case-alias-collision-refused-before-write", "unicode-casefold-alias-collision-refused-before-write", "exact-prefix-verification-precedes-every-payload-write", "directory-entry-open-fstat-fsync-close-order", "directory-fstat-failure-closes-both-descriptors", "directory-fsync-failure-closes-both-descriptors", "terminal-assignment-failure-state-is-exact"] }
 "v2.case.cancel-signals-drained" = { case_id = "template-lint-v2.cancel-signals-drained", check_count = 23, ordered_check_ids = ["sigint-source", "sigint-audit", "sigint-packing", "sigint-publication", "sigint-replay", "sigterm-source", "sigterm-audit", "sigterm-packing", "sigterm-publication", "sigterm-replay", "live-subprocess-cancellation-drains-and-receipts", "descendant-drain-cleanup-diagnostics", "exited-leader-descendant-pipes-time-out-and-drain", "sigkill-permission-error-refuses-drained-claim", "publication-cancellation-before-publication-terminal-only", "publication-cancellation-publication-start-terminal-only", "publication-cancellation-partial-prefix", "publication-cancellation-assignment-started", "publication-cancellation-assignment-committed", "publication-cancellation-post-seal", "publication-cancellation-identity-loss", "post-seal-cancellation-wrapper-refuses-green-return", "cancellation-state-restored"] }
 "v2.case.restart-deterministic" = { case_id = "template-lint-v2.restart-deterministic", check_count = 11, ordered_check_ids = ["fresh-restart-same-logical-state", "restart-still-no-overwrite", "incomplete-prefix-selects-and-reuses-fresh-attempt", "bounded-incomplete-attempt-exhaustion", "nonempty-invalid-terminal-must-be-stable-before-recovery", "invalid-terminal-signature-shape-refused", "persistent-prefix-state-classification", "persistent-prefix-nondirectory-refused", "persistent-prefix-nonregular-terminal-refused", "persistent-partial-terminal-can-complete-during-grace", "persistent-stable-nonempty-invalid-terminal-refused"] }
 "v2.case.resource-all-caps" = { case_id = "template-lint-v2.resource-all-caps", check_count = 59, ordered_check_ids = ["manifest-cap-bindings", "status-byte-cap-exact-and-plus-one", "first-divergence-byte-cap-exact-and-plus-one", "check-id-byte-cap-exact-and-plus-one", "bounded-read-exact-cap-and-cap-plus-one", "bounded-read-stale-size-check-cannot-bypass-cap", "fault-fixture-content-addressed-reuse-beyond-attempt-cap", "fault-fixture-strict-descriptor-and-altered-projection-refused", "fault-fixture-rerooted-seal-refused", "fault-fixture-tree-caps-cover-all-member-kinds", "child-transport-cache-lru-cardinality-bounded", "bundle-enumeration-exact-caps-admitted", "bundle-file-cap-plus-one", "bundle-directory-cap-plus-one", "bundle-path-byte-cap-plus-one", "bundle-negative-counter", "publication-preflight-file-cap-exact", "publication-preflight-file-cap-plus-one", "source-cardinality-caps-exact", "inventory-row-cap-plus-one", "warning-row-cap-plus-one", "per-issue-warning-cap-plus-one", "source-cap-counter-wrong-type", "clause-streaming-line-boundaries-match-python", "complete-clause-membership-root-is-exact", "complete-clause-forged-membership-root-refused", "complete-clause-forged-maximum-refused", "complete-clause-forged-overflow-root-refused", "clause-row-cap-exact-and-plus-one", "clause-byte-cap-exact-and-plus-one", "label-cap-plus-one", "relation-cap-plus-one", "dependent-relation-cap-plus-one", "audit-event-cap-plus-one", "history-citation-cap-exact", "history-citation-cap-plus-one", "compatibility-target-cap-plus-one", "audit-capture-aggregate-cap-plus-one", "source-projection-aggregate-cap-plus-one", "audit-round-string-sequence-refused", "audit-round-empty-id-refused", "audit-round-non-string-id-refused", "audit-round-duplicate-id-refused", "audit-round-row-cap-plus-one-refused", "audit-round-invalid-membership-makes-zero-capture-calls", "retained-audit-capture-aggregate-n-minus-one-n-plus-one", "audit-capture-wires-distinct-stream-cap", "retained-audit-stream-cap-plus-one", "event-count-cap-plus-one-production-validator", "artifact-cap-plus-one-production-validator", "log-line-cap-plus-one-production-validator", "argv-count-cap-plus-one", "argv-byte-cap-plus-one", "path-component-cap-plus-one", "stdout-capture-cap-is-exact", "stderr-capture-cap-is-exact", "non-utf8-capture-retains-root-only-receipt", "start-failure-receipt-redacts-sensitive-argv", "stdin-cap-plus-one-refused-before-start"] }
@@ -296,7 +296,6 @@ case_order = [
 "v2.case.nomock-offline-replay" = { case_id = "template-lint-v2.nomock-offline-replay", check_count = 14, ordered_check_ids = ["review-plan-filesystem-read-reconstruct-exact", "review-plan-terminal-content-last-and-complete", "review-plan-disjoint-filesystem-replay-exact", "explicit-replay-v2-subprocess-success-rooted", "explicit-replay-v2-wrong-v1-refused-pre-manifest", "explicit-replay-v2-auxiliary-refused-pre-manifest", "explicit-replay-v2-path-refused-pre-manifest", "explicit-replay-v2-accepted-failure-classified", "legacy-replay-v2-autodetect-success", "legacy-replay-preclassification-asymmetry", "replay-subprocesses-prove-no-live-activity", "history-plan-filesystem-read-reconstruct-exact", "history-plan-terminal-content-last-and-complete", "offline-denies-live-reads"] }
 "v2.case.nomock-live-target-unchanged" = { case_id = "template-lint-v2.nomock-live-target-unchanged", check_count = 1, ordered_check_ids = ["read-only-modes-preserve-full-fixture-fingerprint"] }
 "v2.case.nomock-v1-regression" = { case_id = "template-lint-v2.nomock-v1-regression", check_count = 2, ordered_check_ids = ["frozen-v1-suite-exact", "v1-replay-and-v2-independence"] }
-
 
 [schema_contract]
 unknown_keys = "REFUSE_RECURSIVELY"
@@ -398,7 +397,7 @@ tracker_cli = "br"
 diagnostic_cli = "bv"
 diagnostic_mode = "robot flags only"
 network_access = "FORBIDDEN"
-tracker_mutation = "FORBIDDEN"
+tracker_mutation = "LIVE_TARGET_FORBIDDEN; ISOLATED_RELEASED_BR_FIXTURE_TEST_SCOPED; EXERCISED_ISSUE_SEMANTIC_FIELDS_RESTORED; FIXTURE_INITIALIZATION_EXPORT_AND_APPEND_ONLY_AUDIT_HISTORY_MAY_PERSIST"
 direct_tracker_file_access = "FORBIDDEN"
 capture_count = 2
 capture_drift = "REFUSE_ENTIRE_RUN"
@@ -922,7 +921,7 @@ self_test_schema = "frankensim.beads-template-hygiene.test-event.v2"
 self_test_terminal_schema = "frankensim.beads-template-hygiene.test-terminal.v2"
 preflight_terminal_schema = "frankensim.beads-template-hygiene.preflight-terminal.v2"
 execution_terminal_schema = "frankensim.beads-template-hygiene.execution-terminal.v2"
-deterministic = "CANONICAL_ORDER_FOR_ROOTED_INPUTS; LIVE_STATE_TIMING_AND_FRESH_ATTEMPT_EVIDENCE_MAY_CHANGE_ROOTS"
+deterministic = "CANONICAL_ORDER_FOR_ROOTED_INPUTS_ON_THE_SAME_CAPTURED_CPYTHON_RUNTIME; CAPTURED_RUNTIME, LIVE_STATE_TIMING, AND FRESH_ATTEMPT_EVIDENCE_MAY_CHANGE_ROOTS"
 redacted = true
 sequence = "dense unsigned integers starting at zero"
 required_fields = [
@@ -1327,7 +1326,7 @@ assertion_id = "v2.case.cli-artifact-grammar"
 criterion_ids = ["AC09", "AC24"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "exact artifact-root and fresh artifact-dir grammar; output alias, duplicate artifact roots, and duplicate output options refuse"
+subject = "artifact-root and artifact-dir are both required; --output is unsupported; duplicate --artifact-root refuses; one exact artifact root and directory pair is admitted"
 
 [[case]]
 ordinal = 6
@@ -1390,7 +1389,7 @@ assertion_id = "v2.case.compat-v1-immutable"
 criterion_ids = ["AC14", "AC15", "AC23"]
 kinds = ["compatibility", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "current v1 byte, semantic-root, 21-case, 148-assertion, replay, and no-v2-dependency invariants plus explicit NODATA boundaries for nonportable historical harness and ignored adoption-artifact provenance"
+subject = "current v1 manifest byte root, semantic root, 21-case count, declared 148-assertion baseline, retained adopted-manifest blob identity, and explicit NODATA boundaries for the unreachable historical harness and ignored adoption artifacts"
 
 [[case]]
 ordinal = 13
@@ -1399,7 +1398,7 @@ assertion_id = "v2.case.source-zero-one"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["unit", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "exact empty and one-row source capture, inventory, partitions, zero receipts, and terminal evidence; released sync status retains the PROBED, NOT_PROBED, and LEGACY_UNAVAILABLE git-export union, optional absent hashes, SHA-1 and SHA-256 widths without mixing, coherent committed, untracked-present, staged-add, staged-delete, and both-absent path states, typed refusal of impossible clean flags and empty optional timestamps, omitted-average and independent optional JSONL-hash semantics, and exact refusal of invented, reordered, health-incoherent, or impossible reliability anomalies; export-witness cardinality counts exactly non-ephemeral, non-wisp exportable source issues, including zero chunks/actions/batches for an ephemeral-only or wisp-only source, while live absolute and retained relative witness paths remain distinct and comparison bytes bind exact action kinds without claiming retained issue-identity membership; every nonterminal zero-warning row retains the exact twelve-dimension NODATA UNREVIEWED contract and BLOCKED_AUTHORITY disposition until a root-bound semantic receipt, while closed zero-finding rows stay outside active remediation"
+subject = "empty source capture, zero/one-row synthetic inventory cardinality, and one-row open/closed inventory semantics; released sync status retains the PROBED, NOT_PROBED, and LEGACY_UNAVAILABLE git-export union, optional absent hashes, SHA-1 and SHA-256 widths without mixing, coherent committed, untracked-present, staged-add, staged-delete, and both-absent path states, typed refusal of impossible clean flags and empty optional timestamps, omitted-average and independent optional JSONL-hash semantics, and exact refusal of invented, reordered, health-incoherent, or impossible reliability anomalies; export-witness cardinality counts exactly non-ephemeral, non-wisp exportable source issues, including zero chunks/actions/batches for an ephemeral-only or wisp-only source, while live absolute and retained relative witness paths remain distinct and comparison bytes bind exact action kinds without claiming retained issue-identity membership; every nonterminal zero-warning row retains the exact twelve-dimension NODATA UNREVIEWED contract and BLOCKED_AUTHORITY disposition until a root-bound semantic receipt, while closed zero-finding rows stay outside active remediation"
 
 [[case]]
 ordinal = 14
@@ -1426,7 +1425,7 @@ assertion_id = "v2.case.source-rows-24-25-26"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "24, 25, and 26 row hard-cap boundary; 26 rows split and configured cap 26 refuses"
+subject = "under max_targets 25, compatible populations of 24 and 25 yield one child and 26 yields two; flattened mapped target IDs have the expected population cardinality with no duplicates"
 
 [[case]]
 ordinal = 17
@@ -1435,7 +1434,7 @@ assertion_id = "v2.case.source-rows-4096"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["boundary", "resource"]
 fixture_engine = "PURE_PROJECTION"
-subject = "4096-row exact cap and 4097-row typed refusal with unchanged tracker"
+subject = "the source-limit validator admits row_count 4096 and produces typed InputRefused at row_count 4097"
 
 [[case]]
 ordinal = 18
@@ -1444,7 +1443,7 @@ assertion_id = "v2.case.source-warnings-8192"
 criterion_ids = ["AC01", "AC11"]
 kinds = ["boundary", "resource"]
 fixture_engine = "PURE_PROJECTION"
-subject = "8192-warning exact cap and 8193-warning typed refusal with exact warning membership"
+subject = "the source-limit validator admits 2731 rows, 8192 aggregate warnings, and a declared per-issue maximum of three, while 8193 aggregate warnings produce typed InputRefused"
 
 [[case]]
 ordinal = 19
@@ -1516,7 +1515,7 @@ assertion_id = "v2.case.row-dispositions-distinct"
 criterion_ids = ["AC07", "AC11"]
 kinds = ["unit", "property"]
 fixture_engine = "PURE_PROJECTION"
-subject = "malformed, rollup, owner questions, substantive proof, byte-preserving heading, immutable history, and oversize workflows never collapse to generic text"
+subject = "MALFORMED_OR_WRONG_TYPE, ROLLUP_CHILD_SET_GAP, OWNER_REVIEW_REQUIRED, SUBSTANTIVE_SEMANTIC_OMISSION, SECTION_NAME_ONLY, and HISTORICAL_IMMUTABLE_REVIEW produce six distinct synthetic roots: five child-description roots and one combined historical four-field text root"
 
 [[case]]
 ordinal = 27
@@ -1525,7 +1524,7 @@ assertion_id = "v2.case.authority-candidate-provenance"
 criterion_ids = ["AC02", "AC03", "AC11", "AC12"]
 kinds = ["unit", "property"]
 fixture_engine = "PURE_PROJECTION"
-subject = "label, path, parent, contract, and consumer candidates retain provenance and falsifiers but never self-approve"
+subject = "classification-hint, parent, qualifying-label, and mapped-path candidates retain provenance roots and falsifiers; a separate candidate-free synthetic authority baseline remains REVIEW_ONLY"
 
 [[case]]
 ordinal = 28
@@ -1561,7 +1560,7 @@ assertion_id = "v2.case.capability-lying-nonatomic-version"
 criterion_ids = ["AC02", "AC03", "AC11", "AC19"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "lying, ordinary-update, check-then-write, advisory-lock, non-atomic, and version-mismatched capability refusal"
+subject = "LYING, NON_ATOMIC, VERSION_MISMATCHED, CONFLICTED, and FAILED conditional-write verdicts never verify the capability"
 
 [[case]]
 ordinal = 32
@@ -1597,7 +1596,7 @@ assertion_id = "v2.case.route-active-owner-conflict"
 criterion_ids = ["AC02", "AC11", "AC19", "AC20"]
 kinds = ["unit", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "in-progress or assigned active work emits operational-conflict receipt and deferred coordination without semantic authority"
+subject = "an unassigned in-progress target and an assigned open target both remain ANALYSIS_ONLY and produce deferred desired child status"
 
 [[case]]
 ordinal = 36
@@ -1606,7 +1605,7 @@ assertion_id = "v2.case.route-no-target-mutation"
 criterion_ids = ["AC20"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "every planning, receipt, route, explanation, and failure path preserves target fields, comments, assignment, priority, status, and relations"
+subject = "the exercised successful receipt, route, plan, and explanation path, stale-receipt validation refusal, absent-target explanation refusal, and ANALYSIS_ONLY route preserve the exact synthetic inventory rows"
 
 [[case]]
 ordinal = 37
@@ -1642,7 +1641,7 @@ assertion_id = "v2.case.packing-rationale-falsifier"
 criterion_ids = ["AC04"]
 kinds = ["unit", "schema"]
 fixture_engine = "PURE_PROJECTION"
-subject = "every split, singleton, and merge has a nonempty root-bound rationale and falsifier"
+subject = "a singleton child has nonempty compatibility rationale and falsifier, and every packing witness in a two-target merged plan has nonempty rationale and falsifier"
 
 [[case]]
 ordinal = 41
@@ -1669,7 +1668,7 @@ assertion_id = "v2.case.packing-transport-cap-boundaries"
 criterion_ids = ["AC05", "AC06", "AC11", "AC18", "AC19"]
 kinds = ["boundary", "resource"]
 fixture_engine = "PURE_PROJECTION"
-subject = "n-1, n, n+1 for description, acceptance, design, notes, aggregate argv, retained payload, argument, path, log, and artifact caps"
+subject = "baseline and exact or cap-plus-one checks cover generated-child canonical payload bytes, planned-child target cardinality, description, acceptance, design, notes, aggregate non-description argv bytes, retained child payload bytes, six review-plan collection preflights, and aggregate review-plan bytes; compatible over-cap generated or retained payloads split or route to oversize as specified, and cap failures precede stale-root evaluation"
 
 [[case]]
 ordinal = 44
@@ -1705,7 +1704,7 @@ assertion_id = "v2.case.packing-refinement-imbalance"
 criterion_ids = ["AC04", "AC05", "AC12", "AC18"]
 kinds = ["property", "metamorphic"]
 fixture_engine = "PURE_PROJECTION"
-subject = "compatibility refinement never merges newly incompatible rows and objective compares sorted review-minute, byte, and target-count vectors deterministically"
+subject = "compatibility refinement from one compatible four-target group to four incompatible singletons never re-merges targets"
 
 [[case]]
 ordinal = 48
@@ -1741,7 +1740,7 @@ assertion_id = "v2.case.history-unknown-conflicted-closer"
 criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "unknown nonlegacy and conflicting actors refuse; creator, assignee, and self-report cannot substitute"
+subject = "conflicting current closer evidence refuses; an empty actor remains empty during audit normalization rather than being inferred; and a rerooted CONFLICTED row cannot masquerade as green history"
 
 [[case]]
 ordinal = 52
@@ -1759,7 +1758,7 @@ assertion_id = "v2.case.history-missing-audit-event"
 criterion_ids = ["AC08", "AC11", "AC22", "AC25"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "missing close event refuses unless exact rooted legacy-unavailable rule matches"
+subject = "a modern closed target with missing current close-audit evidence refuses"
 
 [[case]]
 ordinal = 54
@@ -1822,7 +1821,7 @@ assertion_id = "v2.case.movement-history-to-live"
 criterion_ids = ["AC12", "AC16", "AC17", "AC22", "AC25"]
 kinds = ["property", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "coherent cross-campaign reopening emits MOVED_FROM_HISTORY with full-universe lineage; within-run close or reopen drift, an absent prior target, and a nonclosed out-of-scope successor refuse while the all-status partition remains exact"
+subject = "a coherent closed-to-open synthetic transition emits MOVED_FROM_HISTORY with one-member full-universe lineage, an INVENTORY_TARGET destination, and a rooted successor; rerooting the movement class, destination_root_kind, or current_universe_root refuses"
 
 [[case]]
 ordinal = 61
@@ -1894,7 +1893,7 @@ assertion_id = "v2.case.log-raw-result-redaction"
 criterion_ids = ["AC09", "AC22"]
 kinds = ["logging", "mutation"]
 fixture_engine = "PURE_PROJECTION"
-subject = "contextual sensitive assignments, embedded argv sensitive tails, split options, Authorization and Proxy-Authorization headers, quoted and escaped-quote Bearer values, environment values, source and absolute paths, scalar/container assertion evidence, and path- or assignment-bearing mapping keys retain only allowlisted bounded projections and exact roots; refusal state is a capped graph that binds shared aliases and cycles, exact IEEE NaN payloads, all dataclass sentinels, closure/default/global/helper/module/type/callable-instance state, container-subclass metadata, defaultdict factories, public dictionaries and private slots, global rebinding and deletion, and callback outcome plus post-state evidence; dangerous builtin aliases, reflective helper globals, direct or nested import bytecode, arbitrary mappings, hostile introspection, opaque state, and every aggregate cap fail closed before user hooks or callbacks run, while a benign shadowed globals binding and unchanged NaN remain admitted"
+subject = "contextual sensitive values in argv, headers, environment, paths, assertion evidence, and mapping keys are retained only through bounded allowlisted projections and exact roots; refusal snapshots form capped reference-closed CPython graphs that preserve aliases and cycles and bind exact scalar-subclass and IEEE NaN payloads, dataclass sentinel and leaf-type state, Path cache and class state, current-thread and other-thread RLock state, closures, defaults, globals, recursive executable aliases, exact-type code constants, subscript and runtime-default reachability, custom modules and types, callable instances, descriptors, ordered and mutable containers, fully captured process-state capabilities, projector purity, and callback outcome plus post-state; dynamic reflection and namespace builtins, imports in nested code, opaque or arbitrary mappings, sentinel impostors, custom implicit hooks, custom-metaclass calls, unaudited native state, super dispatch, unsupported or incompletely captured external-runtime capabilities, dormant nested-code capability paths, control-flow-ambiguous local aliases, hook-bearing missing-key lookups, invalid static subscripts, and aggregate-cap breaches refuse before user hooks or callbacks, while exact base-descriptor reads, explicitly projected full cwd, Python-environment, and recursion-limit dimensions, a benign shadowed globals binding, unchanged NaN state, dual bound-method capabilities, and hook-free Path and bytearray reads are admitted; authorized cwd and recursion-limit mutations execute, are detected, and are restored, including restoration after projector-preflight failure"
 
 [[case]]
 ordinal = 69
@@ -1939,7 +1938,7 @@ assertion_id = "v2.case.mutation-forged-approval"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "fake, self-issued, wrong-reviewer, stale, count-only, root-mismatched, and aggregate approval refuse; undeclared responsibility assignments remain unresolved; authority-only mechanical labeling refuses"
+subject = "a stale target-root approval refuses; self-issued external-authority and conditional-capability receipts cannot exceed DECLARED_READY with MANUAL_BR_REVIEW or verify either gate; and manual authorization without the required declaration refuses"
 
 [[case]]
 ordinal = 74
@@ -1948,7 +1947,7 @@ assertion_id = "v2.case.mutation-forged-capability-deferred"
 criterion_ids = ["AC13", "AC19", "AC22"]
 kinds = ["mutation", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "forged, lying, non-atomic capability and any deferred-target apply or route upgrade refuse"
+subject = "LYING, NON_ATOMIC, and VERSION_MISMATCHED capability verdicts cannot produce mechanical readiness or an automated route; a deferred target remains ANALYSIS_ONLY with its apply prohibition set"
 
 [[case]]
 ordinal = 75
@@ -1957,7 +1956,7 @@ assertion_id = "v2.case.mutation-missing-payload-edge"
 criterion_ids = ["AC06", "AC13", "AC19", "AC22"]
 kinds = ["mutation", "schema"]
 fixture_engine = "PURE_PROJECTION"
-subject = "missing planned payload field, target, root, edge, reversed edge, duplicate edge, or undeclared edge refuses publication"
+subject = "a planned child missing notes, carrying duplicate target membership, or carrying missing, reversed, duplicate, or undeclared generated edges refuses payload validation"
 
 [[case]]
 ordinal = 76
@@ -1975,7 +1974,7 @@ assertion_id = "v2.case.mutation-dropped-duplicate-target"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["mutation", "property"]
 fixture_engine = "PURE_PROJECTION"
-subject = "dropped, duplicated, substituted, cross-lane, and cross-status targets refuse despite equal counts; bytearray and memoryview state is content-bound so refusal callbacks cannot mutate byte-backed state invisibly"
+subject = "dropped or duplicated child mappings, a rerooted child assigned to the wrong priority lane, and direct construction across priorities refuse; bytearray and memoryview content projections agree, and post-refusal bytearray mutation is detected"
 
 [[case]]
 ordinal = 78
@@ -1984,7 +1983,7 @@ assertion_id = "v2.case.fault-output-lock-export"
 criterion_ids = ["AC13", "AC22", "AC24"]
 kinds = ["fault", "state"]
 fixture_engine = "PURE_PROJECTION"
-subject = "output reservation, open, descriptor-relative write, parent identity, lock, export-status, and export-read faults retain typed non-green evidence; file-directory and case aliases refuse before the first payload write, and terminal assignment distinguishes never-started from started-uncommitted state"
+subject = "existing-output reservation and exclusive-overwrite attempts refuse; synthetic reservation failure remains non-green; file-directory-prefix and Unicode or case aliases refuse before writes; exact prefix verification precedes payload writes; directory open, fstat, fsync, close ordering and cleanup on fstat or fsync failure are exact; and terminal-assignment failure is started but uncommitted and unsealed"
 
 [[case]]
 ordinal = 79
@@ -2011,7 +2010,7 @@ assertion_id = "v2.case.resource-all-caps"
 criterion_ids = ["AC05", "AC11", "AC13", "AC22"]
 kinds = ["resource", "boundary"]
 fixture_engine = "PURE_PROJECTION"
-subject = "independent n-1, n, n+1 assertions cover row, warning, field, status, first-divergence, payload, argv, path, artifact, event, log-line, synopsis, selected-ID, subprocess stream, single-descriptor input reads, timeout, persistent-attempt, and bounded child-transport LRU-cache caps; content-addressed retained fault fixtures reuse beyond the old attempt cap with an exact final tree seal; output prefixes, non-UTF8, start failure, cleanup diagnostics, and sensitive argv receipts are bounded and redacted"
+subject = "manifest bindings cover every declared cap; focused exact, cap-plus-one, malformed-counter, and retained-fixture assertions exercise status, divergence, check-ID, descriptor-read, bundle, source, clause, label, relation, audit, history, compatibility, child-transport cache, event, artifact, log, argv, path, stdin, and subprocess-stream limits; retained fault fixtures have content-addressed bounded reuse and sealed tree membership, while non-UTF8, start-failure, cleanup, and sensitive-argv receipts remain typed, bounded, and redacted"
 
 [[case]]
 ordinal = 82
@@ -2020,7 +2019,7 @@ assertion_id = "v2.case.mutation-truncation-oversize-root"
 criterion_ids = ["AC05", "AC13", "AC22"]
 kinds = ["mutation", "resource", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "semantic truncation, bounded-index completeness claim, oversize path/root swap, omitted content, and aggregate-cap laundering refuse; exact invalid retained variants are content-addressed, final-sealed, and repeatably verified without overwrite"
+subject = "an oversize registry with a decremented byte length and omission of its optional payload refuse; retained truncated source JSON, same-length optional-content mutation, and a forged inventory semantic root refuse replay without output; all three retained variants are bound by one final fixture-tree root"
 
 [[case]]
 ordinal = 83
@@ -2029,7 +2028,7 @@ assertion_id = "v2.case.fault-partial-publication-conflict"
 criterion_ids = ["AC13", "AC22"]
 kinds = ["fault", "state", "replay"]
 fixture_engine = "ARTIFACT_ONLY"
-subject = "fail-sealed conflict artifact, partial publication, duplicate terminal, changed parent, and terminal disagreement remain non-green with recovery; the intentionally partial retained tree has a distinct content-addressed final fixture seal and is repeatably verified without overwrite"
+subject = "duplicate terminal events refuse; an intentionally incomplete source, inventory, and empty-terminal prefix produces exact manual-recovery evidence; an overwrite retry preserves that prefix; a retained duplicate-terminal stream produces manual recovery; and both retained variants are bound by one final fixture-tree root"
 
 [[case]]
 ordinal = 84
@@ -2056,7 +2055,7 @@ assertion_id = "v2.case.nomock-audit-known-legacy-conflict"
 criterion_ids = ["AC08", "AC13", "AC25"]
 kinds = ["no_mock_e2e", "state"]
 fixture_engine = "RELEASED_BR_AUDIT"
-subject = "released br audit fixture covers known closer, exact legacy unavailability, malformed, duplicate, conflicting, missing, and ordered close events"
+subject = "released-br evidence validates the pinned known close-event pair and exact legacy coverage count and root; a synthetic normalized audit retains two distinct close events for later conflict adjudication"
 
 [[case]]
 ordinal = 87
@@ -2137,7 +2136,7 @@ assertion_id = "v2.case.nomock-live-target-unchanged"
 criterion_ids = ["AC13", "AC20"]
 kinds = ["no_mock_e2e", "property", "state"]
 fixture_engine = "RELEASED_BR"
-subject = "before and after live semantic projections prove no issue, relation, assignment, status, priority, comment, dependency, DB, or export mutation by any v2 read-only mode"
+subject = "around construction of synthetic review-plan and history-plan replayable fixture bundles, an isolated released-br fixture fingerprint covering issue membership, shows, audits, status, sync status, and export witness remains unchanged"
 
 [[case]]
 ordinal = 96
