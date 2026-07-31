@@ -10440,6 +10440,12 @@ def v2_build_zero_sets(
     prior_campaign: Mapping[str, Any],
     current_universe: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if not isinstance(inventory, Mapping) or not isinstance(
+        prior_campaign, Mapping
+    ):
+        raise EvidenceFailed(
+            "zero-set inventory or prior campaign is not an object"
+        )
     inventory_rows = v2_preflight_zero_array(
         inventory.get("rows"),
         label="zero-set inventory rows",
@@ -14784,22 +14790,29 @@ def v2_preflight_review_plan_collections(
     collections: list[list[dict[str, Any]]] = []
     for field, label in bounded_fields:
         rows = review_plan.get(field)
-        if not isinstance(rows, list) or any(
-            not isinstance(row, dict) for row in rows
-        ):
+        if not isinstance(rows, list):
             raise EvidenceFailed(f"v2 review-plan {label} are malformed")
         if len(rows) > V2_INVENTORY_ROWS_CAP:
             raise EvidenceFailed(
                 f"v2 review-plan {label} exceed the "
                 f"{V2_INVENTORY_ROWS_CAP}-row cap"
             )
+        if any(not isinstance(row, dict) for row in rows):
+            raise EvidenceFailed(f"v2 review-plan {label} are malformed")
         collections.append(rows)
     v2_validate_canonical_byte_size(
         review_plan,
         cap=RUN_ARTIFACT_CAP,
         label="v2 review plan",
     )
-    return tuple(collections)  # type: ignore[return-value]
+    return (
+        collections[0],
+        collections[1],
+        collections[2],
+        collections[3],
+        collections[4],
+        collections[5],
+    )
 
 
 def v2_validate_review_plan(
@@ -24317,7 +24330,7 @@ def v2_execute_source_cases(
             lambda: v2_full_issue_projection(
                 duplicate_relation_issue
             ),
-            contains="duplicates a dependencies identity",
+            contains="duplicates a dependencies neighbor",
         )
     elif slug == "source-warning-partitions":
         sections = (
@@ -26856,6 +26869,16 @@ def v2_execute_packing_cases(
                 ),
                 contains="aggregate byte cap",
             )
+            checks.refuses(
+                "review-plan-builder-byte-cap-before-rooting",
+                EvidenceFailed,
+                lambda: v2_build_review_plan(
+                    inventory,
+                    authority,
+                    max_targets=10,
+                ),
+                contains="aggregate byte cap",
+            )
         finally:
             globals()["RUN_ARTIFACT_CAP"] = prior_run_artifact_cap
     elif slug == "packing-exact-small-optimum":
@@ -28182,6 +28205,16 @@ def v2_execute_history_cases(
                 ),
                 contains="aggregate byte cap",
             )
+            checks.refuses(
+                "zero-builder-byte-cap-before-rooting",
+                EvidenceFailed,
+                lambda: v2_build_zero_sets(
+                    source_root=sparse_source_root,
+                    inventory=sparse_inventory,
+                    prior_campaign=v2_empty_prior_campaign(),
+                ),
+                contains="aggregate byte cap",
+            )
         finally:
             globals()["RUN_ARTIFACT_CAP"] = prior_run_artifact_cap
     elif slug in {
@@ -29237,7 +29270,7 @@ def v2_execute_artifact_cases(
             lambda: v2_validate_source_document(
                 duplicate_relations
             ),
-            contains="duplicates a dependencies identity",
+            contains="duplicates a dependencies neighbor",
         )
 
         def reroot_observation_receipt(
