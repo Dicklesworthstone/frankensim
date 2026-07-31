@@ -9891,8 +9891,8 @@ def v2_validate_zero_sets(
             or prior_campaign["terminal_root"] is not None
             or prior_campaign["inventory_root"] is not None
             or prior_campaign["rows"] != []
-            or not isinstance(prior_campaign["no_claim"], str)
-            or not prior_campaign["no_claim"]
+            or prior_campaign["no_claim"]
+            != V2_PRIOR_CAMPAIGN_NOT_PROVIDED_NO_CLAIM
         ):
             raise EvidenceFailed(
                 "zero-set NOT_PROVIDED prior campaign carries evidence"
@@ -9933,8 +9933,8 @@ def v2_validate_zero_sets(
         ):
             require_root(value, label=label)
         if (
-            not isinstance(prior_campaign["no_claim"], str)
-            or not prior_campaign["no_claim"]
+            prior_campaign["no_claim"]
+            != V2_PRIOR_CAMPAIGN_PROVIDED_NO_CLAIM
         ):
             raise EvidenceFailed(
                 "zero-set PROVIDED prior campaign lacks a no-claim boundary"
@@ -10595,8 +10595,7 @@ def v2_load_review_receipts(
         or not isinstance(document["campaign_epoch_root"], str)
         or not isinstance(document["source"], str)
         or not document["source"].strip()
-        or not isinstance(document["no_claim"], str)
-        or not document["no_claim"].strip()
+        or document["no_claim"] != V2_REVIEW_RECEIPTS_NO_CLAIM
     ):
         raise InputRefused("review receipts contain invalid document scalars")
     if document["inventory_root"] != inventory["semantic_root"]:
@@ -10692,6 +10691,10 @@ def v2_load_review_receipts(
         if any(not isinstance(receipt[field], str) for field in string_fields):
             raise InputRefused(
                 f"review receipt contains a non-string scalar for {target_id}"
+            )
+        if receipt["no_claim"] != V2_REVIEW_RECEIPT_ROW_NO_CLAIM:
+            raise InputRefused(
+                f"review receipt no-claim boundary differs for {target_id}"
             )
         if type(receipt["manual_authorization"]) is not bool:
             raise InputRefused(
@@ -10908,8 +10911,8 @@ def v2_validate_receipt_bindings(
         != inventory.get("campaign_epoch_root")
         or not isinstance(receipt_document.get("source"), str)
         or not str(receipt_document.get("source")).strip()
-        or not isinstance(receipt_document.get("no_claim"), str)
-        or not str(receipt_document.get("no_claim")).strip()
+        or receipt_document.get("no_claim")
+        != V2_REVIEW_RECEIPTS_NO_CLAIM
     ):
         raise InputRefused("review receipts bind a different source or schema")
     source_identity = receipt_document.get("source_identity")
@@ -10979,6 +10982,10 @@ def v2_validate_receipt_bindings(
         if any(not isinstance(receipt[field], str) for field in string_fields):
             raise InputRefused(
                 f"review receipt contains a non-string scalar for {target_id}"
+            )
+        if receipt["no_claim"] != V2_REVIEW_RECEIPT_ROW_NO_CLAIM:
+            raise InputRefused(
+                f"review receipt no-claim boundary differs for {target_id}"
             )
         if type(receipt["manual_authorization"]) is not bool:
             raise InputRefused(
@@ -16654,7 +16661,7 @@ def v2_validate_source_full_issue(
         or issue["status"] not in STATUS_SCOPES
         or type(issue["priority"]) is not int
         or issue["priority"] not in range(5)
-        or not issue["no_claim"].strip()
+        or issue["no_claim"] != V2_SOURCE_ISSUE_NO_CLAIM
         or (
             issue["estimated_minutes"] is not None
             and (
@@ -17047,8 +17054,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         or source["tracker_authority"] != "READ_ONLY"
         or source["direct_tracker_file_access"] is not False
         or source["network_access"] is not False
-        or not isinstance(source["no_claim"], str)
-        or not source["no_claim"].strip()
+        or source["no_claim"] != V2_SOURCE_NO_CLAIM
     ):
         raise InputRefused("v2 source artifact has invalid identity or authority")
     manifest = source["manifest"]
@@ -17303,8 +17309,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         )
         or not isinstance(source_files, list)
         or len(source_files) != 3
-        or not isinstance(observation["no_claim"], str)
-        or not observation["no_claim"].strip()
+        or observation["no_claim"] != V2_SOURCE_OBSERVATION_NO_CLAIM
     ):
         raise InputRefused(
             "v2 source observation identity or capture contract is malformed"
@@ -19040,7 +19045,7 @@ def v2_synthetic_receipts(
                 else ""
             ),
             "gate_admission_verdict": gate_verdict,
-            "no_claim": "synthetic receipt grants no live authority",
+            "no_claim": V2_REVIEW_RECEIPT_ROW_NO_CLAIM,
         }
         receipts.append(v2_rooted(receipt))
     return v2_rooted(
@@ -19050,7 +19055,7 @@ def v2_synthetic_receipts(
             "campaign_epoch_root": inventory["campaign_epoch_root"],
             "receipts": receipts,
             "source": "SYNTHETIC_FIXTURE",
-            "no_claim": "synthetic review receipts are test inputs only",
+            "no_claim": V2_REVIEW_RECEIPTS_NO_CLAIM,
         }
     )
 
@@ -19408,10 +19413,7 @@ def v2_replayable_fixture_bundle(
             ),
             "status_cut": list(STATUS_SCOPES),
             "command_receipts": fixture_command_receipts,
-            "no_claim": (
-                "released-tool fixture observation is tracker-read-only and "
-                "contains no raw command streams"
-            ),
+            "no_claim": V2_SOURCE_OBSERVATION_NO_CLAIM,
         }
     )
     v1_inventory = assemble_inventory(
