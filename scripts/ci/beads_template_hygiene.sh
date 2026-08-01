@@ -30248,9 +30248,232 @@ def v2_external_capability_name(
 
 
 V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY = "fixture-selected-resources"
+V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CAPABILITY = (
+    "fixture-selected-resource-implementation"
+)
+V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CAPABILITY = (
+    "fixture-selected-resource-scope-control"
+)
+
+
+def v2_fixture_selected_resource_path_key(path: Path) -> str:
+    """Return one exact lexical repository-relative selected-resource key."""
+    if type(path) is not type(REPO_ROOT):
+        raise EvidenceFailed(
+            "selected fixture resource path must use the exact repository "
+            "path type"
+        )
+    root_parts = REPO_ROOT.parts
+    candidate_parts = path.parts
+    if (
+        len(candidate_parts) < len(root_parts)
+        or candidate_parts[:len(root_parts)] != root_parts
+    ):
+        raise EvidenceFailed(
+            "selected fixture resource path escapes the repository"
+        )
+    relative_parts = candidate_parts[len(root_parts):]
+    if any(part in {"", ".", ".."} for part in relative_parts):
+        raise EvidenceFailed(
+            "selected fixture resource path is not lexically canonical"
+        )
+    return "/".join(relative_parts) if relative_parts else "."
+
+
+def _v2_build_fixture_selected_resource_scope() -> tuple[
+    Callable[[Sequence[Path]], list[Any]],
+    Callable[[list[Any]], None],
+    Callable[[Path], str],
+]:
+    active_scopes: dict[int, tuple[list[Any], tuple[str, ...]]] = {}
+    scope_lock = threading.RLock()
+
+    def enter(paths: Sequence[Path]) -> list[Any]:
+        path_snapshot = v2_exact_fixture_resource_paths_snapshot(paths)
+        path_keys = tuple(
+            v2_fixture_selected_resource_path_key(path)
+            for path in path_snapshot
+        )
+        if len(path_keys) != len(set(path_keys)):
+            raise EvidenceFailed(
+                "selected fixture resource scope contains a duplicate path"
+            )
+        thread_id = threading.get_ident()
+        token: list[Any] = [thread_id, path_keys]
+        with scope_lock:
+            if thread_id in active_scopes:
+                raise EvidenceFailed(
+                    "selected fixture resource scope is already active"
+                )
+            dict.__setitem__(active_scopes, thread_id, (token, path_keys))
+        return token
+
+    def leave(token: list[Any]) -> None:
+        thread_id = threading.get_ident()
+        with scope_lock:
+            state = dict.get(active_scopes, thread_id)
+            if (
+                type(token) is not list
+                or state is None
+                or state[0] is not token
+            ):
+                raise EvidenceFailed(
+                    "selected fixture resource scope token is invalid"
+                )
+            dict.__delitem__(active_scopes, thread_id)
+
+    def require(path: Path) -> str:
+        path_key = v2_fixture_selected_resource_path_key(path)
+        thread_id = threading.get_ident()
+        with scope_lock:
+            state = dict.get(active_scopes, thread_id)
+            if state is None:
+                raise EvidenceFailed(
+                    "selected fixture resource access has no active scope"
+                )
+            if path_key not in state[1]:
+                raise EvidenceFailed(
+                    "fixture callback accessed an unselected resource path: "
+                    f"{path_key}"
+                )
+        return path_key
+
+    return enter, leave, require
+
+
+(
+    v2_fixture_selected_resource_scope_enter,
+    v2_fixture_selected_resource_scope_leave,
+    v2_fixture_require_selected_resource_path,
+) = _v2_build_fixture_selected_resource_scope()
+
+
+def v2_fixture_read_selected_repo_relative_file_strict(
+    path: Path,
+    *,
+    label: str,
+    cap: int = CAPS["input_artifact_bytes"],
+) -> bytes:
+    relative = v2_fixture_require_selected_resource_path(path)
+    return v2_read_repo_relative_file_strict(
+        relative,
+        label=label,
+        cap=cap,
+    )
+
+
+def v2_fixture_require_selected_fresh_run_dir(
+    path: Path,
+    *,
+    label: str,
+) -> None:
+    v2_fixture_require_selected_resource_path(path)
+    require_fresh_run_dir(path, label=label)
+
+
+def v2_fixture_write_selected_exclusive(path: Path, payload: bytes) -> None:
+    v2_fixture_require_selected_resource_path(path)
+    v2_write_exclusive(path, payload)
+
+
+def v2_fixture_open_selected_read_descriptor(path: Path) -> int:
+    v2_fixture_require_selected_resource_path(path)
+    return os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+
+
+V2_FIXTURE_ORIGINAL_OS_PREAD = os.pread
+_v2_fixture_mtime_race_lock = threading.RLock()
+_v2_fixture_mtime_race_state: dict[str, Any] = {
+    "path": None,
+    "touched": False,
+}
+
+
+def v2_fixture_selected_mtime_race_pread(
+    descriptor: int,
+    length: int,
+    offset: int,
+) -> bytes:
+    payload = V2_FIXTURE_ORIGINAL_OS_PREAD(descriptor, length, offset)
+    path = dict.__getitem__(_v2_fixture_mtime_race_state, "path")
+    if type(path) is not type(REPO_ROOT):
+        raise EvidenceFailed(
+            "selected fixture mtime-race helper has no active path"
+        )
+    v2_fixture_require_selected_resource_path(path)
+    if dict.__getitem__(_v2_fixture_mtime_race_state, "touched") is False:
+        dict.__setitem__(_v2_fixture_mtime_race_state, "touched", True)
+        state = os.stat(path, follow_symlinks=False)
+        os.utime(
+            path,
+            ns=(state.st_atime_ns, state.st_mtime_ns + 1_000_000_000),
+            follow_symlinks=False,
+        )
+    return payload
+
+
+def v2_fixture_read_selected_with_mtime_race(
+    path: Path,
+    *,
+    label: str,
+) -> bytes:
+    relative = v2_fixture_require_selected_resource_path(path)
+    with _v2_fixture_mtime_race_lock:
+        if (
+            os.pread is not V2_FIXTURE_ORIGINAL_OS_PREAD
+            or dict.__getitem__(_v2_fixture_mtime_race_state, "path")
+            is not None
+        ):
+            raise EvidenceFailed(
+                "selected fixture mtime-race helper is already active"
+            )
+        original_state = os.stat(path, follow_symlinks=False)
+        dict.__setitem__(_v2_fixture_mtime_race_state, "path", path)
+        dict.__setitem__(_v2_fixture_mtime_race_state, "touched", False)
+        os.pread = v2_fixture_selected_mtime_race_pread
+        try:
+            return v2_read_repo_relative_file_strict(
+                relative,
+                label=label,
+            )
+        finally:
+            os.pread = V2_FIXTURE_ORIGINAL_OS_PREAD
+            try:
+                os.utime(
+                    path,
+                    ns=(
+                        original_state.st_atime_ns,
+                        original_state.st_mtime_ns,
+                    ),
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise EvidenceFailed(
+                    "selected fixture mtime-race cleanup failed"
+                ) from error
+            finally:
+                dict.__setitem__(
+                    _v2_fixture_mtime_race_state,
+                    "path",
+                    None,
+                )
+                dict.__setitem__(
+                    _v2_fixture_mtime_race_state,
+                    "touched",
+                    False,
+                )
+
+
+def v2_fixture_selected_pread_is_pristine() -> bool:
+    return (
+        os.pread is V2_FIXTURE_ORIGINAL_OS_PREAD
+        and dict.__getitem__(_v2_fixture_mtime_race_state, "path") is None
+        and dict.__getitem__(_v2_fixture_mtime_race_state, "touched") is False
+    )
 
 
 def v2_fixture_set_process_cwd(path: Path) -> None:
+    v2_fixture_require_selected_resource_path(path)
     os.chdir(path)
 
 
@@ -30276,16 +30499,29 @@ def v2_fixture_set_process_recursion_limit(limit: int) -> None:
     sys.setrecursionlimit(limit)
 
 
-V2_FIXTURE_SELECTED_RESOURCE_CALLABLES = (
-    v2_read_repo_relative_file_strict,
-    require_fresh_run_dir,
-    v2_write_exclusive,
+V2_FIXTURE_SELECTED_RESOURCE_PUBLIC_CALLABLES = (
+    v2_fixture_read_selected_repo_relative_file_strict,
+    v2_fixture_require_selected_fresh_run_dir,
+    v2_fixture_write_selected_exclusive,
+    v2_fixture_open_selected_read_descriptor,
+    v2_fixture_read_selected_with_mtime_race,
+    v2_fixture_selected_pread_is_pristine,
     v2_fixture_set_process_cwd,
     v2_fixture_set_process_environment_bytes,
     v2_fixture_delete_process_environment_bytes,
     v2_fixture_mutate_process_environment_codec_views,
     v2_fixture_replace_process_environment_bindings,
     v2_fixture_set_process_recursion_limit,
+)
+V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CALLABLES = (
+    v2_read_repo_relative_file_strict,
+    require_fresh_run_dir,
+    v2_write_exclusive,
+    v2_collect_owned_descriptor_close_failure,
+    v2_close_owned_descriptors,
+    v2_raise_descriptor_close_failure,
+    v2_fixture_selected_mtime_race_pread,
+    V2_FIXTURE_ORIGINAL_OS_PREAD,
     os.close,
     os.fdopen,
     os.fstat,
@@ -30295,6 +30531,54 @@ V2_FIXTURE_SELECTED_RESOURCE_CALLABLES = (
     os.stat,
     os.utime,
     os.write,
+)
+V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CALLABLES = (
+    v2_fixture_selected_resource_path_key,
+    v2_fixture_selected_resource_scope_enter,
+    v2_fixture_selected_resource_scope_leave,
+    v2_fixture_require_selected_resource_path,
+    threading.get_ident,
+)
+V2_FIXTURE_EXECUTABLE_INTERNAL_CAPABILITIES = (
+    *(
+        (
+            candidate,
+            frozenset({
+                V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CAPABILITY,
+                V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CAPABILITY,
+            }),
+        )
+        for candidate in (
+            v2_fixture_read_selected_repo_relative_file_strict,
+            v2_fixture_require_selected_fresh_run_dir,
+            v2_fixture_write_selected_exclusive,
+            v2_fixture_open_selected_read_descriptor,
+            v2_fixture_read_selected_with_mtime_race,
+            v2_fixture_selected_pread_is_pristine,
+        )
+    ),
+    (
+        v2_fixture_set_process_cwd,
+        frozenset({V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CAPABILITY}),
+    ),
+    *(
+        (
+            candidate,
+            frozenset({
+                V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CAPABILITY,
+            }),
+        )
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CALLABLES
+    ),
+    *(
+        (
+            candidate,
+            frozenset({
+                V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CAPABILITY,
+            }),
+        )
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CALLABLES
+    ),
 )
 V2_REFUSAL_EXTERNAL_CALLABLE_CAPABILITIES = (
     tuple(
@@ -30317,9 +30601,34 @@ V2_REFUSAL_EXTERNAL_CALLABLE_CAPABILITIES = (
     )
     + tuple(
         (candidate, V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY)
-        for candidate in V2_FIXTURE_SELECTED_RESOURCE_CALLABLES
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_PUBLIC_CALLABLES
+    )
+    + tuple(
+        (
+            candidate,
+            V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CAPABILITY,
+        )
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_IMPLEMENTATION_CALLABLES
+    )
+    + tuple(
+        (
+            candidate,
+            V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CAPABILITY,
+        )
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_SCOPE_CONTROL_CALLABLES
     )
 )
+
+
+def v2_fixture_executable_internal_capabilities(
+    value: Any,
+) -> frozenset[str]:
+    return frozenset().union(*(
+        capabilities
+        for candidate, capabilities
+        in V2_FIXTURE_EXECUTABLE_INTERNAL_CAPABILITIES
+        if value is candidate
+    ))
 
 
 def v2_external_callable_capabilities(value: Any) -> frozenset[str]:
@@ -30811,14 +31120,17 @@ def v2_fast_origin_stack_effect(
 def v2_fast_local_origin_dataflow(
     instructions: Sequence[V2AnalysisInstruction],
     code: types.CodeType,
+    *,
+    parameter_origins: Mapping[str, tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Build a bounded reaching-origin graph over normalized CPython CFGs."""
     parameter_layout = dict(v2_code_parameter_layout(code))
     initial_bindings: dict[tuple[str, str], tuple[Any, ...]] = {}
     for name in parameter_layout:
-        initial_bindings[("fast", name)] = v2_fast_origin_binding(
-            "parameter",
-            name,
+        initial_bindings[("fast", name)] = (
+            parameter_origins[name]
+            if parameter_origins is not None and name in parameter_origins
+            else v2_fast_origin_binding("parameter", name)
         )
     for name in code.co_freevars:
         initial_bindings[("freevar", name)] = v2_fast_origin_binding(
@@ -30834,6 +31146,10 @@ def v2_fast_local_origin_dataflow(
     implicit_call_expressions: set[tuple[int, tuple[Any, ...]]] = set()
     dynamic_uses: set[tuple[str, tuple[Any, ...]]] = set()
     invoked_nested_codes: set[types.CodeType] = set()
+    invoked_nested_calls: defaultdict[
+        types.CodeType,
+        set[tuple[tuple[Any, ...], tuple[tuple[Any, ...], ...]]],
+    ] = defaultdict(set)
 
     for index, instruction in enumerate(instructions):
         source: tuple[Any, ...] | None = None
@@ -31336,6 +31652,14 @@ def v2_fast_local_origin_dataflow(
         if opname in {"LOAD_CONST", "LOAD_SMALL_INT"}:
             if type(instruction.argval) is types.CodeType:
                 list.append(stack, ("code", instruction.argval))
+            elif type(instruction.argval) is tuple and all(
+                type(item) in {str, int}
+                for item in instruction.argval
+            ):
+                list.append(
+                    stack,
+                    ("constant-tuple", tuple(instruction.argval)),
+                )
             elif type(instruction.argval) in {str, int}:
                 list.append(stack, ("constant", instruction.argval))
             else:
@@ -31463,8 +31787,18 @@ def v2_fast_local_origin_dataflow(
             arguments = (
                 list(prepared_arguments)
                 if prepared_arguments
-                else consumed[:argument_count]
+                else list(reversed(
+                    consumed[1:1 + argument_count]
+                ))
+                if opname == "CALL_KW"
+                else list(reversed(consumed[:argument_count]))
             )
+            for candidate in callable_options:
+                if candidate and candidate[0] == "nested-function":
+                    invoked_nested_calls[candidate[1]].add((
+                        candidate,
+                        tuple(arguments),
+                    ))
             protocol = any(
                 candidate[0] == "binding"
                 and candidate[1] == "global"
@@ -31493,7 +31827,12 @@ def v2_fast_local_origin_dataflow(
                 for argument in arguments:
                     for option in origin_options(argument):
                         if option and option[0] == "suspended-nested":
-                            invoked_nested_codes.add(option[1])
+                            nested_origin = option[1]
+                            invoked_nested_codes.add(nested_origin[1])
+                            invoked_nested_calls[nested_origin[1]].add((
+                                nested_origin,
+                                option[2],
+                            ))
             if any(
                 option and option[0] == "nested-function"
                 and option[1].co_flags & 0x20
@@ -31503,7 +31842,16 @@ def v2_fast_local_origin_dataflow(
                     option[1] for option in callable_options
                     if option and option[0] == "nested-function"
                 )
-                list.append(stack, ("suspended-nested", nested_code))
+                list.append(stack, (
+                    "suspended-nested",
+                    next(
+                        option for option in callable_options
+                        if option
+                        and option[0] == "nested-function"
+                        and option[1] is nested_code
+                    ),
+                    tuple(arguments),
+                ))
             elif scalar_module_call or protocol and all(
                 candidate[0] == "binding"
                 and candidate[1] == "global"
@@ -31714,7 +32062,12 @@ def v2_fast_local_origin_dataflow(
             iterator = stack[-1] if stack else V2_FAST_ORIGIN_UNKNOWN
             for option in origin_options(iterator):
                 if option and option[0] == "suspended-nested":
-                    invoked_nested_codes.add(option[1])
+                    nested_origin = option[1]
+                    invoked_nested_codes.add(nested_origin[1])
+                    invoked_nested_calls[nested_origin[1]].add((
+                        nested_origin,
+                        option[2],
+                    ))
                 elif option and option[0] == "derived":
                     for nested in option[2:]:
                         if (
@@ -31722,7 +32075,12 @@ def v2_fast_local_origin_dataflow(
                             and nested
                             and nested[0] == "suspended-nested"
                         ):
-                            invoked_nested_codes.add(nested[1])
+                            nested_origin = nested[1]
+                            invoked_nested_codes.add(nested_origin[1])
+                            invoked_nested_calls[nested_origin[1]].add((
+                                nested_origin,
+                                nested[2],
+                            ))
             custom_edges = [
                 (
                     index + 1,
@@ -31779,9 +32137,24 @@ def v2_fast_local_origin_dataflow(
                 ),
                 None,
             )
+            payloads = list(reversed([
+                candidate for candidate in consumed
+                if not candidate or candidate[0] != "code"
+            ]))
+            function_attributes: tuple[tuple[int, tuple[Any, ...]], ...] = ()
+            if type(instruction.arg) is int and instruction.arg:
+                flags = tuple(
+                    flag for flag in (1, 2, 4, 8)
+                    if instruction.arg & flag
+                )
+                function_attributes = tuple(zip(
+                    flags,
+                    payloads,
+                    strict=False,
+                ))
             list.append(
                 stack,
-                ("nested-function", nested_code, ())
+                ("nested-function", nested_code, function_attributes)
                 if type(nested_code) is types.CodeType
                 else ("static-callable",),
             )
@@ -31987,6 +32360,10 @@ def v2_fast_local_origin_dataflow(
             key=lambda row: (row[0], repr(row[1])),
         )),
         "invoked_nested_codes": frozenset(invoked_nested_codes),
+        "invoked_nested_calls": {
+            nested_code: tuple(calls)
+            for nested_code, calls in invoked_nested_calls.items()
+        },
         "parameter_layout": parameter_layout,
     }
 
