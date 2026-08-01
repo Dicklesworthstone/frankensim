@@ -3787,82 +3787,9 @@ V2_MANIFEST_TABLE_KEYS = {
         "reproduction_mode",
         "explicit_cli_subprocess_proof",
     },
-    "caps": {
-        "max_inventory_rows",
-        "max_warning_rows",
-        "max_warnings_per_issue",
-        "default_targets_per_child",
-        "hard_max_targets_per_child",
-        "max_review_minutes_per_child",
-        "max_retained_child_payload_bytes",
-        "max_generated_child_payload_bytes",
-        "max_description_bytes",
-        "max_acceptance_bytes",
-        "max_design_bytes",
-        "max_notes_bytes",
-        "max_aggregate_non_description_argv_bytes",
-        "max_child_transport_cache_entries",
-        "max_clause_bytes",
-        "max_clause_rows_per_issue",
-        "max_labels_per_issue",
-        "max_relations_per_direction",
-        "max_audit_events_per_issue",
-        "max_audit_stream_bytes",
-        "max_audit_capture_bytes",
-        "max_source_projection_bytes",
-        "max_exact_json_integer_decimal_digits",
-        "max_exact_json_integer_bits",
-        "max_source_exact_wire_items",
-        "max_source_exact_wire_nodes",
-        "max_source_exact_wire_depth",
-        "max_source_exact_wire_snapshot_bytes",
-        "max_fixture_resource_paths",
-        "max_fixture_resource_path_bytes",
-        "max_fixture_resource_file_bytes",
-        "max_fixture_resource_total_file_bytes",
-        "max_fixture_resource_symlink_bytes",
-        "max_fixture_resource_descriptor_candidates",
-        "max_fixture_resource_descriptor_candidate_path_bytes",
-        "max_fixture_resource_descriptor_entries",
-        "max_fixture_resource_descriptor",
-        "max_fixture_resource_environment_entries",
-        "max_fixture_resource_environment_bytes",
-        "max_fixture_resource_additional_state_bytes",
-        "max_fixture_resource_additional_state_snapshot_bytes",
-        "max_fixture_resource_projection_bytes",
-        "max_history_citations_per_issue",
-        "max_compatibility_targets_per_receipt",
-        "max_command_arguments",
-        "max_command_argument_bytes",
-        "max_authority_identity_bytes",
-        "max_relative_path_bytes",
-        "max_path_component_bytes",
-        "max_path_depth",
-        "max_artifact_bytes",
-        "max_log_events",
-        "max_log_line_bytes",
-        "max_assertion_checks",
-        "max_check_id_bytes",
-        "max_status_bytes",
-        "max_first_divergence_bytes",
-        "max_local_issue_id_bytes",
-        "max_external_relation_id_bytes",
-        "max_diagnostic_summary_bytes",
-        "max_synopsis_bytes",
-        "max_synopsis_selected_ids",
-        "max_subprocess_stdin_bytes",
-        "max_subprocess_stdout_bytes",
-        "max_subprocess_stderr_bytes",
-        "subprocess_timeout_seconds",
-        "max_persistent_attempts",
-        "max_bundle_files",
-        "max_bundle_directories",
-        "max_bundle_enumerated_path_bytes",
-        "max_cases",
-        "exact_optimality_max_targets",
-        "cap_exceeded_terminal",
-        "cap_exceeded_live_target_mutation",
-    },
+    # Populated from V2_RUNTIME_MANIFEST_CAP_BINDINGS after every derived cap
+    # has been defined.
+    "caps": set(),
     "case_contract": {
         "required_fields",
         "allowed_kinds",
@@ -3924,6 +3851,33 @@ def v2_validate_cap_terminal_contract(caps: Mapping[str, Any]) -> None:
         or caps["cap_exceeded_live_target_mutation"] is not False
     ):
         raise InputRefused("v2 manifest cap terminal contract is malformed")
+
+
+def v2_runtime_manifest_caps() -> dict[str, Any]:
+    names = [
+        name for name, _value in V2_RUNTIME_MANIFEST_CAP_BINDINGS
+    ]
+    if len(names) != len(set(names)):
+        raise InfrastructureFailed(
+            "runtime manifest cap bindings contain duplicate names"
+        )
+    return dict(V2_RUNTIME_MANIFEST_CAP_BINDINGS)
+
+
+def v2_validate_manifest_caps(caps: Any) -> None:
+    if type(caps) is not dict:
+        raise InputRefused("v2 manifest caps must be an exact table")
+    expected_caps = v2_runtime_manifest_caps()
+    v2_exact_keys(caps, set(expected_caps), label="v2 manifest caps")
+    for name, expected_value in expected_caps.items():
+        observed = dict.__getitem__(caps, name)
+        if (
+            type(observed) is not type(expected_value)
+            or observed != expected_value
+        ):
+            raise InputRefused(
+                f"v2 manifest cap {name} differs from the harness"
+            )
 
 
 def v2_validate_accepted_manifest_payload(payload: bytes) -> str:
@@ -4207,6 +4161,8 @@ def load_case_manifest_v2() -> dict[str, Any]:
         document["harness_contract_identity"],
     )
     for table_name, expected_keys in V2_MANIFEST_TABLE_KEYS.items():
+        if table_name == "caps":
+            expected_keys = set(v2_runtime_manifest_caps())
         table = document.get(table_name)
         if not isinstance(table, dict):
             raise InputRefused(f"v2 manifest lacks table {table_name}")
@@ -4380,128 +4336,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
         raise InputRefused(f"v2 cases reference unknown criteria {unknown_criteria}")
 
     caps = document["caps"]
-    expected_caps = {
-        "max_inventory_rows": V2_INVENTORY_ROWS_CAP,
-        "max_warning_rows": V2_WARNING_ROWS_CAP,
-        "max_warnings_per_issue": V2_WARNINGS_PER_ISSUE_CAP,
-        "default_targets_per_child": V2_REVIEW_TARGET_DEFAULT,
-        "hard_max_targets_per_child": V2_REVIEW_TARGET_HARD_MAX,
-        "max_review_minutes_per_child": V2_REVIEW_MINUTES_CAP,
-        "max_retained_child_payload_bytes": V2_CHILD_PAYLOAD_CAP,
-        "max_generated_child_payload_bytes": (
-            V2_GENERATED_CHILD_PAYLOAD_CAP
-        ),
-        "max_description_bytes": V2_CHILD_DESCRIPTION_CAP,
-        "max_acceptance_bytes": V2_CHILD_ACCEPTANCE_CAP,
-        "max_design_bytes": V2_CHILD_DESIGN_CAP,
-        "max_notes_bytes": V2_CHILD_NOTES_CAP,
-        "max_aggregate_non_description_argv_bytes": (
-            V2_CHILD_ARGV_AGGREGATE_CAP
-        ),
-        "max_child_transport_cache_entries": (
-            V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
-        ),
-        "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
-        "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
-        "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
-        "max_relations_per_direction": V2_RELATIONS_PER_DIRECTION_CAP,
-        "max_audit_events_per_issue": V2_AUDIT_EVENTS_PER_ISSUE_CAP,
-        "max_audit_stream_bytes": V2_AUDIT_STREAM_BYTES_CAP,
-        "max_audit_capture_bytes": V2_AUDIT_CAPTURE_BYTES_CAP,
-        "max_source_projection_bytes": V2_SOURCE_PROJECTION_BYTES_CAP,
-        "max_exact_json_integer_decimal_digits": (
-            V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
-        ),
-        "max_exact_json_integer_bits": V2_EXACT_JSON_INTEGER_BITS_CAP,
-        "max_source_exact_wire_items": V2_SOURCE_EXACT_WIRE_ITEM_CAP,
-        "max_source_exact_wire_nodes": V2_SOURCE_EXACT_WIRE_NODE_CAP,
-        "max_source_exact_wire_depth": V2_SOURCE_EXACT_WIRE_DEPTH_CAP,
-        "max_source_exact_wire_snapshot_bytes": (
-            V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
-        ),
-        "max_fixture_resource_paths": V2_FIXTURE_RESOURCE_PATHS_CAP,
-        "max_fixture_resource_path_bytes": (
-            V2_FIXTURE_RESOURCE_PATH_BYTES_CAP
-        ),
-        "max_fixture_resource_file_bytes": (
-            V2_FIXTURE_RESOURCE_FILE_BYTES_CAP
-        ),
-        "max_fixture_resource_total_file_bytes": (
-            V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP
-        ),
-        "max_fixture_resource_symlink_bytes": (
-            V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP
-        ),
-        "max_fixture_resource_descriptor_candidates": (
-            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP
-        ),
-        "max_fixture_resource_descriptor_candidate_path_bytes": (
-            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
-        ),
-        "max_fixture_resource_descriptor_entries": (
-            V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
-        ),
-        "max_fixture_resource_descriptor": (
-            V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX
-        ),
-        "max_fixture_resource_environment_entries": (
-            V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
-        ),
-        "max_fixture_resource_environment_bytes": (
-            V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP
-        ),
-        "max_fixture_resource_additional_state_bytes": (
-            V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
-        ),
-        "max_fixture_resource_additional_state_snapshot_bytes": (
-            V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
-        ),
-        "max_fixture_resource_projection_bytes": (
-            V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP
-        ),
-        "max_history_citations_per_issue": (
-            V2_HISTORY_CITATIONS_PER_ISSUE_CAP
-        ),
-        "max_compatibility_targets_per_receipt": (
-            V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
-        ),
-        "max_command_arguments": V2_COMMAND_ARGUMENTS_CAP,
-        "max_command_argument_bytes": V2_COMMAND_ARGUMENT_BYTES_CAP,
-        "max_authority_identity_bytes": V2_AUTHORITY_IDENTITY_BYTES_CAP,
-        "max_relative_path_bytes": CAPS["relative_path_bytes"],
-        "max_path_component_bytes": CAPS["path_component_bytes"],
-        "max_path_depth": CAPS["path_depth"],
-        "max_artifact_bytes": RUN_ARTIFACT_CAP,
-        "max_log_events": V2_LOG_EVENTS_CAP,
-        "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
-        "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
-        "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
-        "max_status_bytes": V2_STATUS_BYTES_CAP,
-        "max_first_divergence_bytes": V2_FIRST_DIVERGENCE_BYTES_CAP,
-        "max_local_issue_id_bytes": V2_LOCAL_ISSUE_ID_BYTES_CAP,
-        "max_external_relation_id_bytes": (
-            V2_EXTERNAL_RELATION_ID_BYTES_CAP
-        ),
-        "max_diagnostic_summary_bytes": V2_DIAGNOSTIC_SUMMARY_BYTES_CAP,
-        "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
-        "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
-        "max_subprocess_stdin_bytes": CAPS["subprocess_stdout_bytes"],
-        "max_subprocess_stdout_bytes": CAPS["subprocess_stdout_bytes"],
-        "max_subprocess_stderr_bytes": CAPS["subprocess_stdout_bytes"],
-        "subprocess_timeout_seconds": CAPS["subprocess_timeout_seconds"],
-        "max_persistent_attempts": V2_PERSISTENT_ATTEMPTS_CAP,
-        "max_bundle_files": V2_BUNDLE_FILES_CAP,
-        "max_bundle_directories": V2_BUNDLE_DIRECTORIES_CAP,
-        "max_bundle_enumerated_path_bytes": (
-            V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP
-        ),
-        "max_cases": 96,
-        "exact_optimality_max_targets": V2_EXACT_OPTIMALITY_MAX_TARGETS,
-    }
-    for name, expected in expected_caps.items():
-        if type(caps[name]) is not int or caps[name] != expected:
-            raise InputRefused(f"v2 manifest cap {name} differs from the harness")
-    v2_validate_cap_terminal_contract(caps)
+    v2_validate_manifest_caps(caps)
     if document["case_contract"]["exact_check_obligation_required"] is not True:
         raise InputRefused(
             "v2 case contract does not require exact check obligations"
@@ -23934,9 +23769,13 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
     try:
         while written < len(payload):
             count = os.write(descriptor, payload[written:])
-            if type(count) is not int or count <= 0:
+            if (
+                type(count) is not int
+                or count <= 0
+                or count > len(payload) - written
+            ):
                 raise InfrastructureFailed(
-                    "v2 exclusive writer observed a non-positive write"
+                    "v2 exclusive writer observed an invalid write count"
                 )
             written += count
         os.fsync(descriptor)
@@ -24560,8 +24399,14 @@ def v2_write_reserved_member(
         written = 0
         while written < len(payload):
             count = os.write(descriptor, payload[written:])
-            if count <= 0:
-                raise OSError("short write to reserved v2 member")
+            if (
+                type(count) is not int
+                or count <= 0
+                or count > len(payload) - written
+            ):
+                raise InfrastructureFailed(
+                    "v2 reserved member observed an invalid write count"
+                )
             written += count
         os.fsync(descriptor)
         identity = v2_stat_identity(os.fstat(descriptor))
@@ -30907,6 +30752,29 @@ V2_FAST_ORIGIN_STATIC = ("static",)
 V2_FAST_ORIGIN_UNBOUND = ("unbound",)
 V2_FAST_ORIGIN_NULL = ("null",)
 V2_FAST_ORIGIN_RESOLUTION_CAP = 32
+V2_SCALAR_PROTOCOL_RESULTS = frozenset({
+    "all",
+    "any",
+    "bool",
+    "hash",
+    "isinstance",
+    "issubclass",
+    "len",
+    "repr",
+    "str",
+    "type",
+})
+V2_SCALAR_MODULE_CALL_PATHS = frozenset({
+    ("stat", ("S_IFMT",)),
+    ("stat", ("S_IMODE",)),
+    ("stat", ("S_ISBLK",)),
+    ("stat", ("S_ISCHR",)),
+    ("stat", ("S_ISDIR",)),
+    ("stat", ("S_ISFIFO",)),
+    ("stat", ("S_ISLNK",)),
+    ("stat", ("S_ISREG",)),
+    ("stat", ("S_ISSOCK",)),
+})
 
 
 def v2_fast_origin_binding(
@@ -31009,11 +30877,16 @@ def v2_fast_local_origin_dataflow(
             return depth
         if depth > V2_REFUSAL_STATE_DEPTH_CAP:
             return depth
+        nested_parts = (
+            value[1:]
+            if type(value[0]) is str
+            else value
+        )
         return max(
             [depth]
             + [
                 origin_depth(part, depth + 1)
-                for part in value[1:]
+                for part in nested_parts
                 if type(part) is tuple
             ]
         )
@@ -31024,6 +30897,24 @@ def v2_fast_local_origin_dataflow(
     ) -> tuple[Any, ...]:
         if left == right:
             return left
+        if (
+            left
+            and right
+            and left[0] == right[0] == "prepared-call"
+            and len(left[2]) == len(right[2])
+        ):
+            return (
+                "prepared-call",
+                merge_origin(left[1], right[1]),
+                tuple(
+                    merge_origin(left_arg, right_arg)
+                    for left_arg, right_arg in zip(
+                        left[2],
+                        right[2],
+                        strict=True,
+                    )
+                ),
+            )
         if max(origin_depth(left), origin_depth(right)) > (
             V2_REFUSAL_STATE_DEPTH_CAP
         ):
@@ -31047,6 +30938,18 @@ def v2_fast_local_origin_dataflow(
             )
         return merged
 
+    def merge_origins(
+        values: Iterable[tuple[Any, ...]],
+    ) -> tuple[Any, ...]:
+        iterator = iter(values)
+        try:
+            merged = next(iterator)
+        except StopIteration:
+            return V2_FAST_ORIGIN_UNKNOWN
+        for value in iterator:
+            merged = merge_origin(merged, value)
+        return merged
+
     def merge_states(
         prior: tuple[
             tuple[tuple[Any, ...], ...],
@@ -31066,9 +30969,29 @@ def v2_fast_local_origin_dataflow(
         prior_stack, prior_bindings, prior_invalidations = prior
         next_stack, next_bindings, next_invalidations = incoming
         if len(prior_stack) != len(next_stack):
+            aligned_height = min(
+                code.co_stacksize,
+                max(len(prior_stack), len(next_stack)),
+            )
+            padded_prior = (
+                (V2_FAST_ORIGIN_UNKNOWN,) * (
+                    aligned_height - min(aligned_height, len(prior_stack))
+                )
+                + prior_stack[-aligned_height:]
+            )
+            padded_next = (
+                (V2_FAST_ORIGIN_UNKNOWN,) * (
+                    aligned_height - min(aligned_height, len(next_stack))
+                )
+                + next_stack[-aligned_height:]
+            )
             merged_stack = tuple(
-                V2_FAST_ORIGIN_UNKNOWN
-                for _index in range(max(len(prior_stack), len(next_stack)))
+                merge_origin(left, right)
+                for left, right in zip(
+                    padded_prior,
+                    padded_next,
+                    strict=True,
+                )
             )
         else:
             merged_stack = tuple(
@@ -31179,6 +31102,99 @@ def v2_fast_local_origin_dataflow(
             for candidate in origin_options(base)
         )
 
+    expected_stack_heights: dict[int, int] = {0: 0}
+    height_worklist: deque[int] = deque([0])
+
+    def record_expected_height(target: int | None, height: int) -> None:
+        if target is None or not 0 <= target < len(instructions):
+            return
+        bounded_height = min(code.co_stacksize, max(0, height))
+        prior_height = expected_stack_heights.get(target)
+        if prior_height is None:
+            expected_stack_heights[target] = bounded_height
+            height_worklist.append(target)
+        elif prior_height != bounded_height:
+            # Valid CPython control-flow joins have one concrete height.  A
+            # disagreement can arise only at a normalized adaptive opcode or
+            # conservative exception edge, so retain the shallower verified
+            # suffix instead of allowing a fictitious stack-growth cycle.
+            merged_height = min(prior_height, bounded_height)
+            if merged_height != prior_height:
+                expected_stack_heights[target] = merged_height
+                height_worklist.append(target)
+
+    while height_worklist:
+        height_index = height_worklist.popleft()
+        height_instruction = instructions[height_index]
+        input_height = expected_stack_heights[height_index]
+        height_opname = height_instruction.opname
+        if height_opname.startswith("POP_JUMP"):
+            record_expected_height(
+                jump_target_index(height_instruction),
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=True) or 0
+                ),
+            )
+            record_expected_height(
+                height_index + 1,
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=False) or 0
+                ),
+            )
+        elif height_opname.startswith("JUMP_IF"):
+            record_expected_height(
+                jump_target_index(height_instruction),
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=True) or 0
+                ),
+            )
+            record_expected_height(
+                height_index + 1,
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=False) or 0
+                ),
+            )
+        elif height_opname in {"FOR_ITER", "SEND"}:
+            record_expected_height(
+                jump_target_index(height_instruction),
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=True) or 0
+                ),
+            )
+            record_expected_height(
+                height_index + 1,
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=False) or 0
+                ),
+            )
+        elif height_opname.startswith("JUMP"):
+            record_expected_height(
+                jump_target_index(height_instruction),
+                input_height + (
+                    edge_stack_effect(height_instruction, jump=True) or 0
+                ),
+            )
+        elif height_opname not in {
+            "RAISE_VARARGS",
+            "RERAISE",
+            "RETURN_CONST",
+            "RETURN_VALUE",
+        }:
+            record_expected_height(
+                height_index + 1,
+                input_height + (
+                    v2_fast_origin_stack_effect(height_instruction) or 0
+                ),
+            )
+        for target, handler_depth, handler_lasti in exception_successors.get(
+            height_index,
+            (),
+        ):
+            record_expected_height(
+                target,
+                handler_depth + 1 + int(handler_lasti),
+            )
+
     states: dict[
         int,
         tuple[
@@ -31203,6 +31219,19 @@ def v2_fast_local_origin_dataflow(
         nonlocal updates
         if target is None or not 0 <= target < len(instructions):
             return
+        expected_height = expected_stack_heights.get(target)
+        if expected_height is not None and len(state[0]) != expected_height:
+            retained = state[0][-expected_height:] if expected_height else ()
+            state = (
+                (
+                    (V2_FAST_ORIGIN_UNKNOWN,) * (
+                        expected_height - len(retained)
+                    )
+                    + retained
+                ),
+                state[1],
+                state[2],
+            )
         prior = states.get(target)
         merged = state if prior is None else merge_states(prior, state)
         if prior == merged:
@@ -31210,9 +31239,23 @@ def v2_fast_local_origin_dataflow(
         states[target] = merged
         updates += 1
         if updates > update_cap:
+            changed_bindings = sorted(
+                f"{kind}:{name}"
+                for kind, name in set(prior[1]) | set(merged[1])
+                if prior[1].get((kind, name))
+                != merged[1].get((kind, name))
+            ) if prior is not None else []
             raise EvidenceFailed(
                 "refusal-state fast-local CFG exceeds its convergence cap "
-                f"in {code.co_qualname} at instruction {target}"
+                f"in {code.co_qualname} on edge {index}->{target}; "
+                f"stack_changed={prior is None or prior[0] != merged[0]}, "
+                f"stack_heights={None if prior is None else len(prior[0])}"
+                f"->{len(merged[0])}, "
+                "stack_shapes="
+                f"{[(item[0] if item else 'empty', origin_depth(item)) for item in merged[0]][:8]}, "
+                f"binding_changes={changed_bindings[:8]}, "
+                "invalidation_changed="
+                f"{prior is None or prior[2] != merged[2]}"
             )
         if target not in queued:
             queued.add(target)
@@ -31223,11 +31266,14 @@ def v2_fast_local_origin_dataflow(
         "any",
         "bool",
         "hash",
+        "isinstance",
+        "issubclass",
         "iter",
         "len",
         "next",
         "repr",
         "str",
+        "type",
     })
     generator_consumers = frozenset({
         "all",
@@ -31326,6 +31372,29 @@ def v2_fast_local_origin_dataflow(
             if effect == 1:
                 list.append(stack, V2_FAST_ORIGIN_NULL)
             list.append(stack, expression)
+        if opname == "LOAD_SPECIAL":
+            base = pop_origin()
+            special_name = (
+                (instruction.argval,)
+                if type(instruction.argval) is str
+                else (instruction.argrepr,)
+                if instruction.argrepr in {"__enter__", "__exit__"}
+                else ("<unknown-special>",)
+            )
+            list.append(
+                stack,
+                v2_fast_origin_with_path(base, special_name),
+            )
+            list.append(stack, base)
+        if opname == "BEFORE_WITH":
+            base = pop_origin()
+            enter_callable = v2_fast_origin_with_path(base, ("__enter__",))
+            dynamic_uses.add(("context-enter", base))
+            list.append(
+                stack,
+                v2_fast_origin_with_path(base, ("__exit__",)),
+            )
+            list.append(stack, ("call-result", enter_callable))
         if opname == "COPY":
             depth = instruction.arg
             list.append(
@@ -31352,9 +31421,28 @@ def v2_fast_local_origin_dataflow(
                 V2_FAST_ORIGIN_UNKNOWN,
             )
             prepared_arguments: tuple[tuple[Any, ...], ...] = ()
-            if simulated and simulated[0] == "prepared-call":
-                prepared_arguments = simulated[2]
-                simulated = simulated[1]
+            simulated_options = origin_options(simulated)
+            if simulated_options and all(
+                option and option[0] == "prepared-call"
+                for option in simulated_options
+            ):
+                prepared_rows = tuple(simulated_options)
+                argument_lengths = {
+                    len(option[2]) for option in prepared_rows
+                }
+                if len(argument_lengths) == 1:
+                    prepared_arguments = tuple(
+                        merge_origins(
+                            (option[2][argument_index]
+                             for option in prepared_rows),
+                        )
+                        for argument_index in range(
+                            next(iter(argument_lengths))
+                        )
+                    )
+                simulated = merge_origins(
+                    (option[1] for option in prepared_rows),
+                )
             # Source spans are only corroboration.  In particular, one span
             # can cover nested calls on 3.14 and a subscript expression on
             # 3.11; it must never replace or invalidate the simulated
@@ -31384,6 +31472,13 @@ def v2_fast_local_origin_dataflow(
                 and candidate[2] in protocol_callables
                 for candidate in callable_options
             )
+            scalar_module_call = bool(callable_options) and all(
+                candidate[0] == "binding"
+                and candidate[1] == "global"
+                and (candidate[2], candidate[3])
+                in V2_SCALAR_MODULE_CALL_PATHS
+                for candidate in callable_options
+            )
             consumes_generator = any(
                 candidate[0] == "binding"
                 and candidate[1] == "global"
@@ -31391,7 +31486,7 @@ def v2_fast_local_origin_dataflow(
                 and candidate[2] in generator_consumers
                 for candidate in callable_options
             )
-            if protocol:
+            if protocol or scalar_module_call:
                 for argument in arguments:
                     dynamic_uses.add(("call-protocol", argument))
             if consumes_generator:
@@ -31409,6 +31504,30 @@ def v2_fast_local_origin_dataflow(
                     if option and option[0] == "nested-function"
                 )
                 list.append(stack, ("suspended-nested", nested_code))
+            elif scalar_module_call or protocol and all(
+                candidate[0] == "binding"
+                and candidate[1] == "global"
+                and not candidate[3]
+                and candidate[2] in protocol_callables
+                for candidate in callable_options
+            ):
+                protocol_names = tuple(sorted({
+                    (
+                        f"{candidate[2]}.{'.'.join(candidate[3])}"
+                        if candidate[3]
+                        else candidate[2]
+                    )
+                    for candidate in callable_options
+                }))
+                list.append(stack, (
+                    "protocol-result",
+                    protocol_names,
+                    tuple(arguments),
+                    scalar_module_call or all(
+                        name in V2_SCALAR_PROTOCOL_RESULTS
+                        for name in protocol_names
+                    ),
+                ))
             else:
                 list.append(stack, ("call-result", callable_origin))
         if opname == "PRECALL":
@@ -31503,6 +31622,28 @@ def v2_fast_local_origin_dataflow(
             )
             dynamic_uses.add(("subscript", source))
             list.append(stack, expression)
+        if opname == "BINARY_SLICE":
+            stop_origin = pop_origin()
+            start_origin = pop_origin()
+            source = pop_origin()
+            dynamic_uses.add((
+                "slice",
+                (
+                    "aggregate",
+                    "BINARY_SLICE",
+                    (source, start_origin, stop_origin),
+                ),
+            ))
+            list.append(
+                stack,
+                (
+                    "derived",
+                    "BINARY_SLICE",
+                    source,
+                    start_origin,
+                    stop_origin,
+                ),
+            )
         if opname == "STORE_ATTR":
             receiver = pop_origin()
             pop_origin()
@@ -31665,7 +31806,7 @@ def v2_fast_local_origin_dataflow(
             list.append(stack, ("derived", opname, source))
         if (
             opname.startswith("BINARY_")
-            and opname != "BINARY_SUBSCR"
+            and opname not in {"BINARY_SLICE", "BINARY_SUBSCR"}
             and not (opname == "BINARY_OP" and instruction.argrepr == "[]")
             or opname in {"COMPARE_OP", "CONTAINS_OP", "IS_OP"}
         ):
@@ -31700,8 +31841,10 @@ def v2_fast_local_origin_dataflow(
         elif opname.startswith("JUMP") and custom_edges is None:
             custom_edges = [(jump_target_index(instruction), tuple(stack))]
         elif custom_edges is None and opname not in {
+            *V2_ATTRIBUTE_ACCESS_OPS,
             *V2_FAST_LOCAL_LOAD_OPS,
             "BINARY_SUBSCR",
+            "BINARY_SLICE",
             "BUILD_CONST_KEY_MAP",
             "BUILD_LIST",
             "BUILD_MAP",
@@ -31730,6 +31873,7 @@ def v2_fast_local_origin_dataflow(
             "LOAD_GLOBAL",
             "LOAD_NAME",
             "LOAD_SMALL_INT",
+            "LOAD_SPECIAL",
             "MAKE_FUNCTION",
             "POP_TOP",
             "PRECALL",
@@ -31747,6 +31891,7 @@ def v2_fast_local_origin_dataflow(
             "TO_BOOL",
             "UNPACK_EX",
             "UNPACK_SEQUENCE",
+            "BEFORE_WITH",
         } and not opname.startswith(("BINARY_", "UNARY_")):
             effect = v2_fast_origin_stack_effect(instruction)
             if effect is None:
@@ -31973,6 +32118,7 @@ def v2_fast_origin_call_result_roots(
             "derived",
             "maybe-unbound",
             "mutated-member",
+            "protocol-result",
             "result-access",
             "subscript",
             "unpack",
@@ -32013,6 +32159,8 @@ def v2_fast_origin_is_static(expression: tuple[Any, ...]) -> bool:
             type(part) is not tuple or v2_fast_origin_is_static(part)
             for part in expression[2:]
         )
+    if kind == "protocol-result":
+        return expression[3] is True
     return False
 
 
@@ -32129,6 +32277,16 @@ def v2_code_access_analysis(
         if not result_path or root[0] != "binding":
             return
         source_kind, source_name, source_path = root[1], root[2], root[3]
+        if (
+            source_kind == "global"
+            and (
+                not source_path
+                and source_name in V2_SCALAR_PROTOCOL_RESULTS
+                or (source_name, source_path)
+                in V2_SCALAR_MODULE_CALL_PATHS
+            )
+        ):
+            return
         if source_kind == "global":
             if source_path:
                 paths = global_path_call_result_paths[source_name][source_path]
@@ -32166,19 +32324,31 @@ def v2_code_access_analysis(
             if call_index is not None
             else ()
         )
+        scalar_call = (
+            call_index is not None
+            and source_kind == "global"
+            and (
+                not source_path
+                and source_name in V2_SCALAR_PROTOCOL_RESULTS
+                or (source_name, source_path)
+                in V2_SCALAR_MODULE_CALL_PATHS
+            )
+        )
         if source_kind == "global":
             if source_path:
                 module_paths[source_name].add(source_path)
                 if call_index is not None:
                     called_global_paths[source_name].add(source_path)
-                    global_path_call_result_paths[source_name][
-                        source_path
-                    ].add(result_path)
+                    if not scalar_call:
+                        global_path_call_result_paths[source_name][
+                            source_path
+                        ].add(result_path)
             else:
                 bare_global_names.add(source_name)
                 if call_index is not None:
                     called_global_names.add(source_name)
-                    call_result_paths[source_name].add(result_path)
+                    if not scalar_call:
+                        call_result_paths[source_name].add(result_path)
         elif source_kind == "freevar":
             if source_path:
                 freevar_paths[source_name].add(source_path)
@@ -37297,16 +37467,16 @@ def v2_fixture_resource_state(
                     f"fixture resource fingerprint read failed: {relative}"
                 ) from error
             finally:
-                resource_close_failure = (
-                    v2_collect_owned_descriptor_close_failure((
+                resource_close_failure = v2_collect_owned_descriptor_close_failure(
                     (
-                        descriptor,
-                        EvidenceFailed(
-                            "fixture resource descriptor close failed: "
-                            f"{relative}"
+                        (
+                            descriptor,
+                            EvidenceFailed(
+                                "fixture resource descriptor close failed: "
+                                f"{relative}"
+                            ),
                         ),
-                    ),
-                    ))
+                    )
                 )
             if (
                 len(payload) != state.st_size
@@ -37793,6 +37963,155 @@ def v2_check_fixture_resource_refusal(
             ),
         },
     )
+
+
+# This is the single runtime-to-manifest cap binding. It lives after the
+# additional-state snapshot formula so every value is already defined when the
+# immutable tuple is constructed; schema membership, loader validation, and
+# E2E drift checks all derive from this same ordered representation.
+V2_RUNTIME_MANIFEST_CAP_BINDINGS: tuple[tuple[str, Any], ...] = (
+    ("max_cases", 96),
+    ("max_inventory_rows", V2_INVENTORY_ROWS_CAP),
+    ("max_warning_rows", V2_WARNING_ROWS_CAP),
+    ("max_warnings_per_issue", V2_WARNINGS_PER_ISSUE_CAP),
+    ("default_targets_per_child", V2_REVIEW_TARGET_DEFAULT),
+    ("hard_max_targets_per_child", V2_REVIEW_TARGET_HARD_MAX),
+    ("max_retained_child_payload_bytes", V2_CHILD_PAYLOAD_CAP),
+    (
+        "max_generated_child_payload_bytes",
+        V2_GENERATED_CHILD_PAYLOAD_CAP,
+    ),
+    ("max_description_bytes", V2_CHILD_DESCRIPTION_CAP),
+    ("max_acceptance_bytes", V2_CHILD_ACCEPTANCE_CAP),
+    ("max_design_bytes", V2_CHILD_DESIGN_CAP),
+    ("max_notes_bytes", V2_CHILD_NOTES_CAP),
+    (
+        "max_aggregate_non_description_argv_bytes",
+        V2_CHILD_ARGV_AGGREGATE_CAP,
+    ),
+    (
+        "max_child_transport_cache_entries",
+        V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP,
+    ),
+    ("max_review_minutes_per_child", V2_REVIEW_MINUTES_CAP),
+    ("exact_optimality_max_targets", V2_EXACT_OPTIMALITY_MAX_TARGETS),
+    ("max_clause_bytes", V2_CLAUSE_BYTES_CAP),
+    ("max_clause_rows_per_issue", V2_CLAUSE_ROWS_CAP),
+    ("max_labels_per_issue", V2_LABELS_PER_ISSUE_CAP),
+    ("max_relations_per_direction", V2_RELATIONS_PER_DIRECTION_CAP),
+    ("max_audit_events_per_issue", V2_AUDIT_EVENTS_PER_ISSUE_CAP),
+    ("max_audit_stream_bytes", V2_AUDIT_STREAM_BYTES_CAP),
+    ("max_audit_capture_bytes", V2_AUDIT_CAPTURE_BYTES_CAP),
+    ("max_source_projection_bytes", V2_SOURCE_PROJECTION_BYTES_CAP),
+    (
+        "max_exact_json_integer_decimal_digits",
+        V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP,
+    ),
+    ("max_exact_json_integer_bits", V2_EXACT_JSON_INTEGER_BITS_CAP),
+    ("max_source_exact_wire_items", V2_SOURCE_EXACT_WIRE_ITEM_CAP),
+    ("max_source_exact_wire_nodes", V2_SOURCE_EXACT_WIRE_NODE_CAP),
+    ("max_source_exact_wire_depth", V2_SOURCE_EXACT_WIRE_DEPTH_CAP),
+    (
+        "max_source_exact_wire_snapshot_bytes",
+        V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP,
+    ),
+    ("max_fixture_resource_paths", V2_FIXTURE_RESOURCE_PATHS_CAP),
+    (
+        "max_fixture_resource_path_bytes",
+        V2_FIXTURE_RESOURCE_PATH_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_file_bytes",
+        V2_FIXTURE_RESOURCE_FILE_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_total_file_bytes",
+        V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_symlink_bytes",
+        V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_descriptor_candidates",
+        V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP,
+    ),
+    (
+        "max_fixture_resource_descriptor_candidate_path_bytes",
+        V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_descriptor_entries",
+        V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP,
+    ),
+    (
+        "max_fixture_resource_descriptor",
+        V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX,
+    ),
+    (
+        "max_fixture_resource_environment_entries",
+        V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP,
+    ),
+    (
+        "max_fixture_resource_environment_bytes",
+        V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_additional_state_bytes",
+        V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_additional_state_snapshot_bytes",
+        V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP,
+    ),
+    (
+        "max_fixture_resource_projection_bytes",
+        V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
+    ),
+    (
+        "max_history_citations_per_issue",
+        V2_HISTORY_CITATIONS_PER_ISSUE_CAP,
+    ),
+    (
+        "max_compatibility_targets_per_receipt",
+        V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP,
+    ),
+    ("max_relative_path_bytes", CAPS["relative_path_bytes"]),
+    ("max_path_depth", CAPS["path_depth"]),
+    ("max_path_component_bytes", CAPS["path_component_bytes"]),
+    ("max_command_arguments", V2_COMMAND_ARGUMENTS_CAP),
+    ("max_command_argument_bytes", V2_COMMAND_ARGUMENT_BYTES_CAP),
+    ("max_authority_identity_bytes", V2_AUTHORITY_IDENTITY_BYTES_CAP),
+    ("max_log_events", V2_LOG_EVENTS_CAP),
+    ("max_log_line_bytes", V2_LOG_LINE_BYTES_CAP),
+    ("max_assertion_checks", V2_ASSERTION_CHECKS_CAP),
+    ("max_check_id_bytes", V2_CHECK_ID_BYTES_CAP),
+    ("max_status_bytes", V2_STATUS_BYTES_CAP),
+    ("max_first_divergence_bytes", V2_FIRST_DIVERGENCE_BYTES_CAP),
+    ("max_local_issue_id_bytes", V2_LOCAL_ISSUE_ID_BYTES_CAP),
+    (
+        "max_external_relation_id_bytes",
+        V2_EXTERNAL_RELATION_ID_BYTES_CAP,
+    ),
+    ("max_diagnostic_summary_bytes", V2_DIAGNOSTIC_SUMMARY_BYTES_CAP),
+    ("max_artifact_bytes", RUN_ARTIFACT_CAP),
+    ("max_synopsis_bytes", V2_SYNOPSIS_BYTES_CAP),
+    ("max_synopsis_selected_ids", V2_SYNOPSIS_ID_PREVIEW_CAP),
+    ("max_subprocess_stdin_bytes", CAPS["subprocess_stdout_bytes"]),
+    ("max_subprocess_stdout_bytes", CAPS["subprocess_stdout_bytes"]),
+    ("max_subprocess_stderr_bytes", CAPS["subprocess_stdout_bytes"]),
+    ("subprocess_timeout_seconds", CAPS["subprocess_timeout_seconds"]),
+    ("max_persistent_attempts", V2_PERSISTENT_ATTEMPTS_CAP),
+    ("max_bundle_files", V2_BUNDLE_FILES_CAP),
+    ("max_bundle_directories", V2_BUNDLE_DIRECTORIES_CAP),
+    (
+        "max_bundle_enumerated_path_bytes",
+        V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP,
+    ),
+    ("cap_exceeded_terminal", V2_CAP_EXCEEDED_TERMINAL),
+    ("cap_exceeded_live_target_mutation", False),
+)
+V2_MANIFEST_TABLE_KEYS["caps"] = set(v2_runtime_manifest_caps())
 
 
 def v2_synthetic_source_issue(
@@ -65277,6 +65596,7 @@ def v2_execute_fault_resource_cases(
         original_descriptor_name_provider = v2_fixture_descriptor_names
         resource_read_error_terminals: dict[str, str] = {}
         resource_close_calls: list[int] = []
+        resource_failed_close_calls: list[int] = []
 
         def record_resource_error(
             label: str,
@@ -65377,6 +65697,7 @@ def v2_execute_fault_resource_cases(
             os.pread = original_resource_pread
 
             def failed_selected_close(descriptor: int) -> None:
+                list.append(resource_failed_close_calls, descriptor)
                 original_resource_close(descriptor)
                 raise OSError(errno.EIO, "synthetic selected close")
 
@@ -65388,6 +65709,37 @@ def v2_execute_fault_resource_cases(
                 ]),
                 "descriptor close failed",
             )
+            os.close = original_resource_close
+
+            os.fstat = failed_selected_fstat
+            os.close = failed_selected_close
+            record_resource_error(
+                "selected-fstat-and-close",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "fingerprint read failed",
+            )
+            os.fstat = original_resource_fstat
+            os.close = original_resource_close
+
+            def early_eof_selected_pread(
+                _descriptor: int,
+                _length: int,
+                _offset: int,
+            ) -> bytes:
+                return b""
+
+            os.pread = early_eof_selected_pread
+            os.close = failed_selected_close
+            record_resource_error(
+                "selected-early-eof-and-close",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "changed while fingerprinting",
+            )
+            os.pread = original_resource_pread
             os.close = original_resource_close
 
             synthetic_recheck_link = (
@@ -65490,10 +65842,13 @@ def v2_execute_fault_resource_cases(
                 "selected-fstat": "EvidenceFailed",
                 "selected-pread": "EvidenceFailed",
                 "selected-close": "EvidenceFailed",
+                "selected-fstat-and-close": "EvidenceFailed",
+                "selected-early-eof-and-close": "EvidenceFailed",
                 "symlink-recheck-lstat": "EvidenceFailed",
                 "descriptor-fcntl": "EvidenceFailed",
             }
-            and len(resource_close_calls) == 1,
+            and len(resource_close_calls) == 1
+            and len(resource_failed_close_calls) == 3,
             expected={
                 "terminals": {
                     "root-initial-lstat": "EvidenceFailed",
@@ -65501,15 +65856,21 @@ def v2_execute_fault_resource_cases(
                     "selected-fstat": "EvidenceFailed",
                     "selected-pread": "EvidenceFailed",
                     "selected-close": "EvidenceFailed",
+                    "selected-fstat-and-close": "EvidenceFailed",
+                    "selected-early-eof-and-close": "EvidenceFailed",
                     "symlink-recheck-lstat": "EvidenceFailed",
                     "descriptor-fcntl": "EvidenceFailed",
                 },
                 "selected-fstat-cleanup-close-calls": 1,
+                "selected-failed-close-calls": 3,
             },
             observed={
                 "terminals": resource_read_error_terminals,
                 "selected-fstat-cleanup-close-calls": len(
                     resource_close_calls
+                ),
+                "selected-failed-close-calls": len(
+                    resource_failed_close_calls
                 ),
             },
         )
@@ -66892,6 +67253,8 @@ def v2_execute_fault_resource_cases(
         def exercise_exclusive_writer_cleanup(
             *,
             fail_primary: bool,
+            invalid_count: Any = None,
+            count_case: str | None = None,
         ) -> None:
             original_open = os.open
             original_write = os.write
@@ -66903,10 +67266,12 @@ def v2_execute_fault_resource_cases(
                 operations.append("open")
                 return 302
 
-            def fake_write(_descriptor: int, payload: bytes) -> int:
+            def fake_write(_descriptor: int, payload: bytes) -> Any:
                 operations.append("write")
                 if fail_primary:
                     raise OSError(errno.EIO, "synthetic write primary")
+                if invalid_count is not None:
+                    return invalid_count
                 return len(payload)
 
             def fake_fsync(_descriptor: int) -> None:
@@ -66923,7 +67288,14 @@ def v2_execute_fault_resource_cases(
             expected_diagnostic = (
                 "v2 exclusive writer failed for reserved artifact"
                 if fail_primary
-                else "v2 exclusive writer could not close reserved artifact"
+                else (
+                    "v2 exclusive writer observed an invalid write count"
+                    if count_case is not None
+                    else (
+                        "v2 exclusive writer could not close reserved "
+                        "artifact"
+                    )
+                )
             )
             try:
                 error = expect_error(
@@ -66943,7 +67315,11 @@ def v2_execute_fault_resource_cases(
                 "case": (
                     "exclusive-primary-and-close"
                     if fail_primary
-                    else "exclusive-close-only"
+                    else (
+                        f"exclusive-invalid-{count_case}-and-close"
+                        if count_case is not None
+                        else "exclusive-close-only"
+                    )
                 ),
                 "terminal": error.terminal,
                 "diagnostic": str(error),
@@ -66954,6 +67330,9 @@ def v2_execute_fault_resource_cases(
             *,
             operation: str,
             fail_primary: bool,
+            invalid_count: Any = None,
+            count_case: str | None = None,
+            parent_close_only: bool = False,
         ) -> None:
             original_open_reserved_directory = v2_open_reserved_directory
             original_read_descriptor_strict = v2_read_descriptor_strict
@@ -66979,10 +67358,12 @@ def v2_execute_fault_resource_cases(
                 operations.append("open-member")
                 return member_descriptor
 
-            def fake_write(_descriptor: int, payload: bytes) -> int:
+            def fake_write(_descriptor: int, payload: bytes) -> Any:
                 operations.append("write")
                 if fail_primary:
                     raise OSError(errno.EIO, "synthetic reserved write")
+                if invalid_count is not None:
+                    return invalid_count
                 return len(payload)
 
             def fake_fsync(descriptor: int) -> None:
@@ -67014,6 +67395,8 @@ def v2_execute_fault_resource_cases(
 
             def fake_close(descriptor: int) -> None:
                 operations.append(f"close:{descriptor}")
+                if parent_close_only and descriptor == member_descriptor:
+                    return
                 raise OSError(errno.EIO, "synthetic reserved close")
 
             globals()["v2_open_reserved_directory"] = (
@@ -67049,8 +67432,17 @@ def v2_execute_fault_resource_cases(
                     "v2 descriptor-relative write failed for member.json"
                     if fail_primary
                     else (
-                        "v2 reserved member descriptor close failed: "
-                        "member.json"
+                        "v2 reserved member observed an invalid write count"
+                        if count_case is not None
+                        else (
+                            "v2 reserved member parent descriptor close "
+                            "failed: member.json"
+                            if parent_close_only
+                            else (
+                                "v2 reserved member descriptor close failed: "
+                                "member.json"
+                            )
+                        )
                     )
                 )
             else:
@@ -67089,8 +67481,22 @@ def v2_execute_fault_resource_cases(
                 os.fstat = original_fstat
                 os.close = original_close
             cleanup_rows.append({
-                "case": f"reserved-{operation}-"
-                + ("primary-and-close" if fail_primary else "close-only"),
+                "case": (
+                    f"reserved-{operation}-"
+                    + (
+                        "primary-and-close"
+                        if fail_primary
+                        else (
+                            f"invalid-{count_case}-and-close"
+                            if count_case is not None
+                            else (
+                                "parent-close-failure"
+                                if parent_close_only
+                                else "close-only"
+                            )
+                        )
+                    )
+                ),
                 "terminal": error.terminal,
                 "diagnostic": str(error),
                 "operations": operations,
@@ -67245,6 +67651,66 @@ def v2_execute_fault_resource_cases(
                 "operations": operations,
             })
 
+        def exercise_non_oserror_cleanup() -> None:
+            original_close = os.close
+            operations: list[str] = []
+            raw_cause = RuntimeError(
+                "synthetic non-OSError close failure"
+            )
+
+            def fake_close(descriptor: int) -> None:
+                operations.append(f"close:{descriptor}")
+                if descriptor == 701:
+                    raise raw_cause
+                if descriptor == 702:
+                    raise OSError(
+                        errno.EIO,
+                        "synthetic later OSError close failure",
+                    )
+
+            caught: BaseException | None = None
+            os.close = fake_close
+            try:
+                try:
+                    v2_close_owned_descriptors(
+                        (
+                            (
+                                701,
+                                InfrastructureFailed(
+                                    "synthetic first close failure"
+                                ),
+                            ),
+                            (
+                                702,
+                                InfrastructureFailed(
+                                    "synthetic second close failure"
+                                ),
+                            ),
+                            (
+                                703,
+                                InfrastructureFailed(
+                                    "synthetic third close failure"
+                                ),
+                            ),
+                        ),
+                        surface_failure=True,
+                    )
+                except BaseException as error:
+                    caught = error
+            finally:
+                os.close = original_close
+            cleanup_rows.append({
+                "case": "non-oserror-first-cleanup",
+                "terminal": (
+                    type(caught).__name__
+                    if caught is not None
+                    else None
+                ),
+                "diagnostic": str(caught) if caught is not None else None,
+                "cause_preserved": caught is raw_cause,
+                "operations": operations,
+            })
+
         for cleanup_primary_failure in (False, True):
             exercise_directory_cleanup(
                 fail_primary=cleanup_primary_failure,
@@ -67260,21 +67726,43 @@ def v2_execute_fault_resource_cases(
                 operation="read",
                 fail_primary=cleanup_primary_failure,
             )
+        for invalid_count_case, invalid_write_count in (
+            ("bool", True),
+            ("overreported", 2),
+        ):
+            exercise_exclusive_writer_cleanup(
+                fail_primary=False,
+                invalid_count=invalid_write_count,
+                count_case=invalid_count_case,
+            )
+            exercise_reserved_member_cleanup(
+                operation="write",
+                fail_primary=False,
+                invalid_count=invalid_write_count,
+                count_case=invalid_count_case,
+            )
+        exercise_reserved_member_cleanup(
+            operation="write",
+            fail_primary=False,
+            parent_close_only=True,
+        )
         exercise_strict_directory_registration(non_directory=False)
         exercise_strict_directory_registration(non_directory=True)
         exercise_bounded_read_semantic_precedence(identity_change=False)
         exercise_bounded_read_semantic_precedence(identity_change=True)
+        exercise_non_oserror_cleanup()
 
         cleanup_by_case = {
             row["case"]: row for row in cleanup_rows
         }
         checks.check(
             "descriptor-cleanup-primary-precedence-matrix",
-            len(cleanup_rows) == 12
+            len(cleanup_rows) == 18
             and all(
                 row["terminal"]
                 in {"InfrastructureFailed", "InputRefused"}
                 for row in cleanup_rows
+                if row["case"] != "non-oserror-first-cleanup"
             )
             and cleanup_by_case["directory-close-only"]["operations"]
             == ["open", "fsync", "close"]
@@ -67288,12 +67776,36 @@ def v2_execute_fault_resource_cases(
                 "diagnostic"
             ]
             == "v2 exclusive writer failed for reserved artifact"
+            and cleanup_by_case[
+                "exclusive-invalid-bool-and-close"
+            ]["operations"] == ["open", "write", "close"]
+            and cleanup_by_case[
+                "exclusive-invalid-overreported-and-close"
+            ]["diagnostic"]
+            == "v2 exclusive writer observed an invalid write count"
             and cleanup_by_case["reserved-write-close-only"][
                 "operations"
             ][-2:] == ["close:502", "close:501"]
             and cleanup_by_case["reserved-write-primary-and-close"][
                 "diagnostic"
             ] == "v2 descriptor-relative write failed for member.json"
+            and cleanup_by_case[
+                "reserved-write-invalid-bool-and-close"
+            ]["operations"][-2:] == ["close:502", "close:501"]
+            and cleanup_by_case[
+                "reserved-write-invalid-overreported-and-close"
+            ]["diagnostic"]
+            == "v2 reserved member observed an invalid write count"
+            and cleanup_by_case[
+                "reserved-write-parent-close-failure"
+            ]["operations"][-2:] == ["close:502", "close:501"]
+            and cleanup_by_case[
+                "reserved-write-parent-close-failure"
+            ]["diagnostic"]
+            == (
+                "v2 reserved member parent descriptor close failed: "
+                "member.json"
+            )
             and cleanup_by_case["reserved-read-close-only"][
                 "operations"
             ][-2:] == ["close:602", "close:601"]
@@ -67317,12 +67829,36 @@ def v2_execute_fault_resource_cases(
             ] == "InputRefused"
             and "changed during bounded read" in cleanup_by_case[
                 "bounded-read-identity-and-close"
-            ]["diagnostic"],
+            ]["diagnostic"]
+            and cleanup_by_case["non-oserror-first-cleanup"][
+                "terminal"
+            ] == "RuntimeError"
+            and cleanup_by_case["non-oserror-first-cleanup"][
+                "diagnostic"
+            ] == "synthetic non-OSError close failure"
+            and cleanup_by_case["non-oserror-first-cleanup"][
+                "cause_preserved"
+            ] is True
+            and cleanup_by_case["non-oserror-first-cleanup"][
+                "operations"
+            ] == ["close:701", "close:702", "close:703"],
             expected={
-                "rows": 12,
+                "rows": 18,
                 "all_closes_attempted": True,
                 "close_only": "first deterministic close failure",
                 "dual_failure": "primary operation failure",
+                "parent_only_failure": (
+                    "reserved member parent descriptor close failure"
+                ),
+                "non_oserror_first": {
+                    "terminal": "RuntimeError",
+                    "cause_preserved": True,
+                    "operations": [
+                        "close:701",
+                        "close:702",
+                        "close:703",
+                    ],
+                },
             },
             observed={"rows": cleanup_rows},
         )
@@ -68232,131 +68768,162 @@ def v2_execute_fault_resource_cases(
             os.lstat = original_lstat
 
     elif slug == "resource-all-caps":
+        runtime_manifest_caps = v2_runtime_manifest_caps()
+        manifest_caps = manifest["caps"]
+        manifest_cap_names = set(manifest_caps)
+        runtime_cap_names = set(runtime_manifest_caps)
+        missing_manifest_caps = sorted(
+            runtime_cap_names - manifest_cap_names
+        )
+        extra_manifest_caps = sorted(
+            manifest_cap_names - runtime_cap_names
+        )
+        type_mismatched_manifest_caps = sorted(
+            name
+            for name in runtime_cap_names.intersection(
+                manifest_cap_names
+            )
+            if type(manifest_caps[name])
+            is not type(runtime_manifest_caps[name])
+        )
+        value_mismatched_manifest_caps = sorted(
+            name
+            for name in runtime_cap_names.intersection(
+                manifest_cap_names
+            )
+            if type(manifest_caps[name])
+            is type(runtime_manifest_caps[name])
+            and manifest_caps[name] != runtime_manifest_caps[name]
+        )
+        runtime_cap_type_counts = {
+            "integer": sum(
+                type(value) is int
+                for value in runtime_manifest_caps.values()
+            ),
+            "string": sum(
+                type(value) is str
+                for value in runtime_manifest_caps.values()
+            ),
+            "boolean": sum(
+                type(value) is bool
+                for value in runtime_manifest_caps.values()
+            ),
+        }
         checks.check(
-            "manifest-cap-bindings",
-            all(manifest["caps"].get(name) == cap for name, cap in {
-                "max_inventory_rows": V2_INVENTORY_ROWS_CAP,
-                "max_warning_rows": V2_WARNING_ROWS_CAP,
-                "max_warnings_per_issue": V2_WARNINGS_PER_ISSUE_CAP,
-                "max_description_bytes": V2_CHILD_DESCRIPTION_CAP,
-                "max_acceptance_bytes": V2_CHILD_ACCEPTANCE_CAP,
-                "max_design_bytes": V2_CHILD_DESIGN_CAP,
-                "max_notes_bytes": V2_CHILD_NOTES_CAP,
-                "max_retained_child_payload_bytes": V2_CHILD_PAYLOAD_CAP,
-                "max_generated_child_payload_bytes": (
-                    V2_GENERATED_CHILD_PAYLOAD_CAP
-                ),
-                "max_child_transport_cache_entries": (
-                    V2_CHILD_TRANSPORT_CACHE_ENTRIES_CAP
-                ),
-                "max_clause_bytes": V2_CLAUSE_BYTES_CAP,
-                "max_clause_rows_per_issue": V2_CLAUSE_ROWS_CAP,
-                "max_labels_per_issue": V2_LABELS_PER_ISSUE_CAP,
-                "max_relations_per_direction": (
-                    V2_RELATIONS_PER_DIRECTION_CAP
-                ),
-                "max_audit_events_per_issue": (
-                    V2_AUDIT_EVENTS_PER_ISSUE_CAP
-                ),
-                "max_audit_stream_bytes": V2_AUDIT_STREAM_BYTES_CAP,
-                "max_audit_capture_bytes": V2_AUDIT_CAPTURE_BYTES_CAP,
-                "max_source_projection_bytes": (
-                    V2_SOURCE_PROJECTION_BYTES_CAP
-                ),
-                "max_exact_json_integer_decimal_digits": (
-                    V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
-                ),
-                "max_exact_json_integer_bits": (
-                    V2_EXACT_JSON_INTEGER_BITS_CAP
-                ),
-                "max_source_exact_wire_items": (
-                    V2_SOURCE_EXACT_WIRE_ITEM_CAP
-                ),
-                "max_source_exact_wire_nodes": (
-                    V2_SOURCE_EXACT_WIRE_NODE_CAP
-                ),
-                "max_source_exact_wire_depth": (
-                    V2_SOURCE_EXACT_WIRE_DEPTH_CAP
-                ),
-                "max_fixture_resource_paths": (
-                    V2_FIXTURE_RESOURCE_PATHS_CAP
-                ),
-                "max_fixture_resource_path_bytes": (
-                    V2_FIXTURE_RESOURCE_PATH_BYTES_CAP
-                ),
-                "max_fixture_resource_file_bytes": (
-                    V2_FIXTURE_RESOURCE_FILE_BYTES_CAP
-                ),
-                "max_fixture_resource_total_file_bytes": (
-                    V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP
-                ),
-                "max_fixture_resource_symlink_bytes": (
-                    V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP
-                ),
-                "max_fixture_resource_descriptor_entries": (
-                    V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
-                ),
-                "max_fixture_resource_environment_entries": (
-                    V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
-                ),
-                "max_fixture_resource_environment_bytes": (
-                    V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP
-                ),
-                "max_fixture_resource_additional_state_bytes": (
-                    V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
-                ),
-                "max_fixture_resource_projection_bytes": (
-                    V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP
-                ),
-                "max_history_citations_per_issue": (
-                    V2_HISTORY_CITATIONS_PER_ISSUE_CAP
-                ),
-                "max_compatibility_targets_per_receipt": (
-                    V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP
-                ),
-                "max_command_arguments": V2_COMMAND_ARGUMENTS_CAP,
-                "max_command_argument_bytes": V2_COMMAND_ARGUMENT_BYTES_CAP,
-                "max_authority_identity_bytes": (
-                    V2_AUTHORITY_IDENTITY_BYTES_CAP
-                ),
-                "max_relative_path_bytes": CAPS["relative_path_bytes"],
-                "max_path_component_bytes": CAPS["path_component_bytes"],
-                "max_path_depth": CAPS["path_depth"],
-                "max_artifact_bytes": RUN_ARTIFACT_CAP,
-                "max_log_events": V2_LOG_EVENTS_CAP,
-                "max_log_line_bytes": V2_LOG_LINE_BYTES_CAP,
-                "max_assertion_checks": V2_ASSERTION_CHECKS_CAP,
-                "max_check_id_bytes": V2_CHECK_ID_BYTES_CAP,
-                "max_status_bytes": V2_STATUS_BYTES_CAP,
-                "max_first_divergence_bytes": (
-                    V2_FIRST_DIVERGENCE_BYTES_CAP
-                ),
-                "max_diagnostic_summary_bytes": (
-                    V2_DIAGNOSTIC_SUMMARY_BYTES_CAP
-                ),
-                "max_synopsis_bytes": V2_SYNOPSIS_BYTES_CAP,
-                "max_synopsis_selected_ids": V2_SYNOPSIS_ID_PREVIEW_CAP,
-                "max_subprocess_stdin_bytes": CAPS[
-                    "subprocess_stdout_bytes"
-                ],
-                "max_subprocess_stdout_bytes": CAPS[
-                    "subprocess_stdout_bytes"
-                ],
-                "max_subprocess_stderr_bytes": CAPS[
-                    "subprocess_stdout_bytes"
-                ],
-                "subprocess_timeout_seconds": CAPS[
-                    "subprocess_timeout_seconds"
-                ],
-                "max_persistent_attempts": V2_PERSISTENT_ATTEMPTS_CAP,
-                "max_bundle_files": V2_BUNDLE_FILES_CAP,
-                "max_bundle_directories": V2_BUNDLE_DIRECTORIES_CAP,
-                "max_bundle_enumerated_path_bytes": (
-                    V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP
-                ),
-            }.items()),
-            expected="all manifest caps bound",
-            observed=manifest["caps"],
+            "manifest-cap-bindings-exact-authoritative-map",
+            len(runtime_manifest_caps) == 74
+            and runtime_cap_type_counts
+            == {"integer": 72, "string": 1, "boolean": 1}
+            and not missing_manifest_caps
+            and not extra_manifest_caps
+            and not type_mismatched_manifest_caps
+            and not value_mismatched_manifest_caps,
+            expected={
+                "binding_count": 74,
+                "type_counts": {
+                    "integer": 72,
+                    "string": 1,
+                    "boolean": 1,
+                },
+                "missing": [],
+                "extra": [],
+                "type_mismatches": [],
+                "value_mismatches": [],
+            },
+            observed={
+                "binding_count": len(runtime_manifest_caps),
+                "type_counts": runtime_cap_type_counts,
+                "missing": missing_manifest_caps,
+                "extra": extra_manifest_caps,
+                "type_mismatches": type_mismatched_manifest_caps,
+                "value_mismatches": value_mismatched_manifest_caps,
+            },
+        )
+
+        v2_validate_manifest_caps(dict(runtime_manifest_caps))
+        new_manifest_integer_caps = (
+            "max_source_exact_wire_snapshot_bytes",
+            "max_fixture_resource_descriptor_candidates",
+            "max_fixture_resource_descriptor_candidate_path_bytes",
+            "max_fixture_resource_descriptor",
+            "max_fixture_resource_additional_state_snapshot_bytes",
+        )
+        manifest_cap_refusal_rows: list[dict[str, Any]] = []
+
+        def record_manifest_cap_refusal(
+            case: str,
+            candidate: dict[str, Any],
+            *,
+            contains: str,
+        ) -> None:
+            error = expect_error(
+                InputRefused,
+                lambda: v2_validate_manifest_caps(candidate),
+                contains=contains,
+            )
+            manifest_cap_refusal_rows.append({
+                "case": case,
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+            })
+
+        for cap_name in new_manifest_integer_caps:
+            missing_candidate = dict(runtime_manifest_caps)
+            del missing_candidate[cap_name]
+            record_manifest_cap_refusal(
+                f"missing:{cap_name}",
+                missing_candidate,
+                contains="non-closed schema",
+            )
+        extra_candidate = dict(runtime_manifest_caps)
+        extra_candidate["synthetic_unknown_cap"] = 1
+        record_manifest_cap_refusal(
+            "extra:synthetic_unknown_cap",
+            extra_candidate,
+            contains="non-closed schema",
+        )
+        integer_type_candidate = dict(runtime_manifest_caps)
+        integer_type_candidate[
+            "max_source_exact_wire_snapshot_bytes"
+        ] = True
+        record_manifest_cap_refusal(
+            "wrong-type:integer-as-boolean",
+            integer_type_candidate,
+            contains="differs from the harness",
+        )
+        boolean_type_candidate = dict(runtime_manifest_caps)
+        boolean_type_candidate[
+            "cap_exceeded_live_target_mutation"
+        ] = 0
+        record_manifest_cap_refusal(
+            "wrong-type:boolean-as-integer",
+            boolean_type_candidate,
+            contains="differs from the harness",
+        )
+        for cap_name in new_manifest_integer_caps:
+            for delta in (-1, 1):
+                value_candidate = dict(runtime_manifest_caps)
+                value_candidate[cap_name] += delta
+                record_manifest_cap_refusal(
+                    f"value:{cap_name}:{delta:+d}",
+                    value_candidate,
+                    contains="differs from the harness",
+                )
+        checks.check(
+            "manifest-cap-map-missing-extra-wrong-type-refused",
+            len(manifest_cap_refusal_rows) == 18
+            and all(
+                row["terminal"] == "InputRefused"
+                for row in manifest_cap_refusal_rows
+            ),
+            expected={
+                "rows": 18,
+                "terminal": "InputRefused",
+                "new_integer_caps": list(new_manifest_integer_caps),
+            },
+            observed={
+                "rows": manifest_cap_refusal_rows,
+            },
         )
         fixture_resource_caps = {
             "paths": V2_FIXTURE_RESOURCE_PATHS_CAP,
@@ -69133,6 +69700,475 @@ def v2_execute_fault_resource_cases(
             )
             _v2_child_transport_cache.clear()
             _v2_child_transport_cache.update(prior_transport_cache)
+        original_review_plan_uncommitted = (
+            v2_build_review_plan_uncommitted
+        )
+        with _v2_child_transport_cache_lock:
+            original_transport_cache_entries = list(
+                _v2_child_transport_cache.items()
+            )
+
+        cache_fixture_keys: dict[str, tuple[Any, ...]] = {
+            label: ("case-72-child-transport", label)
+            for label in (
+                "seed",
+                "success",
+                "harness-refusal",
+                "base-exception",
+                "thread-a",
+                "thread-b",
+            )
+        }
+        cache_fixture_key_names = {
+            key: label for label, key in cache_fixture_keys.items()
+        }
+        cache_fixture_values: dict[str, dict[str, int]] = {
+            label: {
+                "description_bytes": ordinal,
+                "acceptance_bytes": ordinal + 1,
+                "design_bytes": ordinal + 2,
+                "notes_bytes": ordinal + 3,
+                "aggregate_non_description_argv_bytes": ordinal + 6,
+                "generated_child_payload_bytes": ordinal + 7,
+            }
+            for ordinal, label in enumerate(
+                cache_fixture_keys,
+                start=1,
+            )
+        }
+        cache_mode_by_max_targets = {
+            901: "success",
+            902: "harness-refusal",
+            903: "base-exception",
+            904: "thread-a",
+            905: "thread-b",
+        }
+        cache_trace: list[str] = []
+        cache_nested_recursion_counts: dict[str, int] = {}
+        thread_a_inserted = threading.Event()
+        thread_b_call_started = threading.Event()
+        thread_a_release = threading.Event()
+        thread_b_entered = threading.Event()
+        cache_thread_results: dict[str, str] = {}
+        cache_thread_errors: dict[str, str] = {}
+        cache_thread_a: threading.Thread | None = None
+        cache_thread_b: threading.Thread | None = None
+
+        def cache_order_projection() -> list[str]:
+            return [
+                cache_fixture_key_names.get(key, "unexpected")
+                for key in _v2_child_transport_cache
+            ]
+
+        def capture_cache_identity_state() -> list[
+            tuple[tuple[Any, ...], dict[str, int], dict[str, int]]
+        ]:
+            return [
+                (key, value, dict(value))
+                for key, value in _v2_child_transport_cache.items()
+            ]
+
+        def cache_identity_state_matches(
+            expected: Sequence[
+                tuple[tuple[Any, ...], dict[str, int], dict[str, int]]
+            ],
+        ) -> bool:
+            observed = list(_v2_child_transport_cache.items())
+            return len(observed) == len(expected) and all(
+                observed_key == expected_key
+                and observed_value is expected_value
+                and observed_value == expected_value_copy
+                for (
+                    observed_key,
+                    observed_value,
+                ), (
+                    expected_key,
+                    expected_value,
+                    expected_value_copy,
+                ) in zip(observed, expected)
+            )
+
+        def released_lock_projection(
+            observation: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            return {
+                "locked_by_any_thread": observation[
+                    "locked_by_any_thread"
+                ],
+                "owned_by_current_thread": observation[
+                    "owned_by_current_thread"
+                ],
+                "current_thread_recursion_count": observation[
+                    "current_thread_recursion_count"
+                ],
+            }
+
+        def case72_cache_probe_builder(
+            _inventory: Mapping[str, Any],
+            _authority: Mapping[str, Any],
+            *,
+            max_targets: int,
+        ) -> tuple[dict[str, Any], dict[str, bytes]]:
+            label = cache_mode_by_max_targets.get(max_targets)
+            if label is None:
+                raise EvidenceFailed(
+                    "case-72 child transport cache probe mode is unknown"
+                )
+            cache_trace.append(f"{label}:enter")
+            with _v2_child_transport_cache_lock:
+                nested_observation = v2_rlock_observation(
+                    _v2_child_transport_cache_lock
+                )
+                cache_nested_recursion_counts[label] = int(
+                    nested_observation[
+                        "current_thread_recursion_count"
+                    ]
+                )
+                if label == "harness-refusal":
+                    _v2_child_transport_cache.move_to_end(
+                        cache_fixture_keys["seed"]
+                    )
+                elif label == "base-exception":
+                    _v2_child_transport_cache.move_to_end(
+                        cache_fixture_keys["success"],
+                        last=False,
+                    )
+                _v2_child_transport_cache[cache_fixture_keys[label]] = (
+                    cache_fixture_values[label]
+                )
+            cache_trace.append(f"{label}:insert")
+            if label == "harness-refusal":
+                cache_trace.append(f"{label}:refuse")
+                raise InputRefused(
+                    "synthetic child transport HarnessError refusal"
+                )
+            if label == "base-exception":
+                cache_trace.append(f"{label}:raise")
+                raise KeyboardInterrupt(
+                    "synthetic child transport BaseException"
+                )
+            if label == "thread-a":
+                thread_a_inserted.set()
+                if not thread_b_call_started.wait(5.0):
+                    raise EvidenceFailed(
+                        "child transport thread B did not start"
+                    )
+                if not thread_a_release.wait(5.0):
+                    raise EvidenceFailed(
+                        "child transport thread A was not released"
+                    )
+            elif label == "thread-b":
+                thread_b_entered.set()
+            cache_trace.append(f"{label}:return")
+            return {"fixture": label}, {}
+
+        def run_cache_thread(label: str, max_targets: int) -> None:
+            if label == "thread-b":
+                cache_trace.append("thread-b:call")
+                thread_b_call_started.set()
+            else:
+                cache_trace.append("thread-a:call")
+            try:
+                result, _ = v2_build_review_plan(
+                    {},
+                    {},
+                    max_targets=max_targets,
+                )
+                cache_thread_results[label] = str(result["fixture"])
+            except BaseException as error:
+                cache_thread_errors[label] = v2_raw_type_name(
+                    type(error)
+                )
+
+        try:
+            with _v2_child_transport_cache_lock:
+                _v2_child_transport_cache.clear()
+                _v2_child_transport_cache[
+                    cache_fixture_keys["seed"]
+                ] = cache_fixture_values["seed"]
+            globals()["v2_build_review_plan_uncommitted"] = (
+                case72_cache_probe_builder
+            )
+
+            success_result, success_payloads = v2_build_review_plan(
+                {},
+                {},
+                max_targets=901,
+            )
+            success_cache_order = cache_order_projection()
+            success_cache_state = capture_cache_identity_state()
+            success_cache_identity = (
+                _v2_child_transport_cache.get(
+                    cache_fixture_keys["seed"]
+                )
+                is cache_fixture_values["seed"]
+                and _v2_child_transport_cache.get(
+                    cache_fixture_keys["success"]
+                )
+                is cache_fixture_values["success"]
+            )
+            success_lock = released_lock_projection(
+                v2_rlock_observation(_v2_child_transport_cache_lock)
+            )
+
+            harness_refusal_error = expect_error(
+                InputRefused,
+                lambda: v2_build_review_plan(
+                    {},
+                    {},
+                    max_targets=902,
+                ),
+                contains="HarnessError refusal",
+            )
+            harness_refusal_cache_order = cache_order_projection()
+            harness_refusal_restored = cache_identity_state_matches(
+                success_cache_state
+            )
+            harness_refusal_lock = released_lock_projection(
+                v2_rlock_observation(_v2_child_transport_cache_lock)
+            )
+
+            base_exception_type: str | None = None
+            try:
+                v2_build_review_plan(
+                    {},
+                    {},
+                    max_targets=903,
+                )
+            except BaseException as error:
+                base_exception_type = v2_raw_type_name(type(error))
+            base_exception_cache_order = cache_order_projection()
+            base_exception_restored = cache_identity_state_matches(
+                success_cache_state
+            )
+            base_exception_lock = released_lock_projection(
+                v2_rlock_observation(_v2_child_transport_cache_lock)
+            )
+
+            cache_thread_a = threading.Thread(
+                target=run_cache_thread,
+                args=("thread-a", 904),
+                name="case-72-child-transport-a",
+                daemon=True,
+            )
+            cache_thread_a.start()
+            if not thread_a_inserted.wait(5.0):
+                raise EvidenceFailed(
+                    "child transport thread A did not insert"
+                )
+            cache_thread_b = threading.Thread(
+                target=run_cache_thread,
+                args=("thread-b", 905),
+                name="case-72-child-transport-b",
+                daemon=True,
+            )
+            cache_thread_b.start()
+            if not thread_b_call_started.wait(5.0):
+                raise EvidenceFailed(
+                    "child transport thread B did not reach its call"
+                )
+            thread_b_entered_before_a_release = (
+                thread_b_entered.is_set()
+            )
+            thread_a_release.set()
+            cache_thread_a.join(6.0)
+            cache_thread_b.join(6.0)
+            cache_thread_alive = {
+                "thread-a": cache_thread_a.is_alive(),
+                "thread-b": cache_thread_b.is_alive(),
+            }
+            serialized_cache_order = cache_order_projection()
+            serialized_cache_identity = (
+                _v2_child_transport_cache.get(
+                    cache_fixture_keys["thread-a"]
+                )
+                is cache_fixture_values["thread-a"]
+                and _v2_child_transport_cache.get(
+                    cache_fixture_keys["thread-b"]
+                )
+                is cache_fixture_values["thread-b"]
+            )
+            serialized_lock = released_lock_projection(
+                v2_rlock_observation(_v2_child_transport_cache_lock)
+            )
+        finally:
+            thread_a_release.set()
+            thread_b_call_started.set()
+            for cache_thread in (cache_thread_a, cache_thread_b):
+                if cache_thread is not None:
+                    cache_thread.join(6.0)
+            globals()["v2_build_review_plan_uncommitted"] = (
+                original_review_plan_uncommitted
+            )
+            with _v2_child_transport_cache_lock:
+                _v2_child_transport_cache.clear()
+                _v2_child_transport_cache.update(
+                    original_transport_cache_entries
+                )
+
+        released_lock = {
+            "locked_by_any_thread": False,
+            "owned_by_current_thread": False,
+            "current_thread_recursion_count": 0,
+        }
+        expected_cache_rows = [
+            {
+                "mode": "success",
+                "terminal": "Pass",
+                "nested_recursion_count": 2,
+                "cache_order": ["seed", "success"],
+                "cache_effect": "insertion-retained",
+                "lock_after": released_lock,
+            },
+            {
+                "mode": "HarnessError-refusal",
+                "terminal": "InputRefused",
+                "nested_recursion_count": 2,
+                "cache_order": ["seed", "success"],
+                "cache_effect": "identity-and-order-restored",
+                "lock_after": released_lock,
+            },
+            {
+                "mode": "BaseException",
+                "terminal": "KeyboardInterrupt",
+                "nested_recursion_count": 2,
+                "cache_order": ["seed", "success"],
+                "cache_effect": "identity-and-order-restored",
+                "lock_after": released_lock,
+            },
+            {
+                "mode": "two-thread-serialization",
+                "terminal": "Pass",
+                "nested_recursion_counts": {
+                    "thread-a": 2,
+                    "thread-b": 2,
+                },
+                "cache_order": [
+                    "seed",
+                    "success",
+                    "thread-a",
+                    "thread-b",
+                ],
+                "thread_b_entered_before_a_release": False,
+                "both_insertions_survive_by_identity": True,
+                "thread_results": {
+                    "thread-a": "thread-a",
+                    "thread-b": "thread-b",
+                },
+                "thread_errors": {},
+                "threads_alive": {
+                    "thread-a": False,
+                    "thread-b": False,
+                },
+                "lock_after": released_lock,
+            },
+        ]
+        observed_cache_rows = [
+            {
+                "mode": "success",
+                "terminal": "Pass",
+                "nested_recursion_count": (
+                    cache_nested_recursion_counts.get("success")
+                ),
+                "cache_order": success_cache_order,
+                "cache_effect": (
+                    "insertion-retained"
+                    if success_result == {"fixture": "success"}
+                    and success_payloads == {}
+                    and success_cache_identity
+                    else "unexpected"
+                ),
+                "lock_after": success_lock,
+            },
+            {
+                "mode": "HarnessError-refusal",
+                "terminal": harness_refusal_error.terminal,
+                "nested_recursion_count": (
+                    cache_nested_recursion_counts.get(
+                        "harness-refusal"
+                    )
+                ),
+                "cache_order": harness_refusal_cache_order,
+                "cache_effect": (
+                    "identity-and-order-restored"
+                    if harness_refusal_restored
+                    else "unexpected"
+                ),
+                "lock_after": harness_refusal_lock,
+            },
+            {
+                "mode": "BaseException",
+                "terminal": base_exception_type,
+                "nested_recursion_count": (
+                    cache_nested_recursion_counts.get(
+                        "base-exception"
+                    )
+                ),
+                "cache_order": base_exception_cache_order,
+                "cache_effect": (
+                    "identity-and-order-restored"
+                    if base_exception_restored
+                    else "unexpected"
+                ),
+                "lock_after": base_exception_lock,
+            },
+            {
+                "mode": "two-thread-serialization",
+                "terminal": (
+                    "Pass"
+                    if not cache_thread_errors
+                    and not any(cache_thread_alive.values())
+                    else "InternalFault"
+                ),
+                "nested_recursion_counts": {
+                    label: cache_nested_recursion_counts.get(label)
+                    for label in ("thread-a", "thread-b")
+                },
+                "cache_order": serialized_cache_order,
+                "thread_b_entered_before_a_release": (
+                    thread_b_entered_before_a_release
+                ),
+                "both_insertions_survive_by_identity": (
+                    serialized_cache_identity
+                ),
+                "thread_results": dict(sorted(cache_thread_results.items())),
+                "thread_errors": dict(sorted(cache_thread_errors.items())),
+                "threads_alive": cache_thread_alive,
+                "lock_after": serialized_lock,
+            },
+        ]
+        expected_cache_trace = [
+            "success:enter",
+            "success:insert",
+            "success:return",
+            "harness-refusal:enter",
+            "harness-refusal:insert",
+            "harness-refusal:refuse",
+            "base-exception:enter",
+            "base-exception:insert",
+            "base-exception:raise",
+            "thread-a:call",
+            "thread-a:enter",
+            "thread-a:insert",
+            "thread-b:call",
+            "thread-a:return",
+            "thread-b:enter",
+            "thread-b:insert",
+            "thread-b:return",
+        ]
+        checks.check(
+            "child-transport-cache-lock-restoration-and-serialization",
+            observed_cache_rows == expected_cache_rows
+            and cache_trace == expected_cache_trace,
+            expected={
+                "rows": expected_cache_rows,
+                "trace": expected_cache_trace,
+            },
+            observed={
+                "rows": observed_cache_rows,
+                "trace": cache_trace,
+            },
+        )
         v2_validate_bundle_enumeration_budget(
             file_count=V2_BUNDLE_FILES_CAP,
             directory_count=V2_BUNDLE_DIRECTORIES_CAP,
@@ -70070,6 +71106,132 @@ def v2_execute_fault_resource_cases(
                 ["x" * (V2_COMMAND_ARGUMENT_BYTES_CAP + 1)]
             ),
             contains="argument-byte",
+        )
+        exact_count_argv = [
+            f"argument-{index:02d}"
+            for index in range(V2_COMMAND_ARGUMENTS_CAP)
+        ]
+        count_plus_one_argv = [
+            *exact_count_argv,
+            f"argument-{V2_COMMAND_ARGUMENTS_CAP:02d}",
+        ]
+        utf8_boundary_unit = "é"
+        utf8_unit_bytes = len(utf8_boundary_unit.encode("utf-8"))
+        if V2_COMMAND_ARGUMENT_BYTES_CAP % utf8_unit_bytes != 0:
+            raise EvidenceFailed(
+                "command argument byte cap cannot express the UTF-8 fixture"
+            )
+        exact_utf8_argument = utf8_boundary_unit * (
+            V2_COMMAND_ARGUMENT_BYTES_CAP // utf8_unit_bytes
+        )
+        utf8_plus_one_argument = exact_utf8_argument + "x"
+        retained_argv_boundary_cases = (
+            (
+                "argument-count",
+                "exact",
+                exact_count_argv,
+                "Pass",
+            ),
+            (
+                "argument-count",
+                "plus-one",
+                count_plus_one_argv,
+                "InputRefused",
+            ),
+            (
+                "argument-utf8-bytes",
+                "exact",
+                [exact_utf8_argument],
+                "Pass",
+            ),
+            (
+                "argument-utf8-bytes",
+                "plus-one",
+                [utf8_plus_one_argument],
+                "InputRefused",
+            ),
+        )
+
+        def retained_argv_measurement(
+            boundary: str,
+            relation: str,
+            arguments: Sequence[str],
+        ) -> dict[str, Any]:
+            argument_bytes = [
+                len(argument.encode("utf-8"))
+                for argument in arguments
+            ]
+            return {
+                "boundary": boundary,
+                "relation": relation,
+                "argument_count": len(arguments),
+                "maximum_argument_utf8_bytes": max(argument_bytes),
+                "aggregate_argument_utf8_bytes": sum(argument_bytes),
+                "boundary_argument_code_points": max(
+                    len(argument) for argument in arguments
+                ),
+            }
+
+        observed_retained_argv_rows: list[dict[str, Any]] = []
+        expected_retained_argv_rows: list[dict[str, Any]] = []
+        for (
+            boundary,
+            relation,
+            arguments,
+            expected_terminal,
+        ) in retained_argv_boundary_cases:
+            label = f"case-72 retained {boundary} {relation}"
+            measurement = retained_argv_measurement(
+                boundary,
+                relation,
+                arguments,
+            )
+            arguments_before = list(arguments)
+            try:
+                retained_result = v2_validate_retained_argv(
+                    arguments,
+                    label=label,
+                )
+            except HarnessError as error:
+                terminal = error.terminal
+                admitted = False
+                returned_same_value = False
+                diagnostic = str(error)
+            else:
+                terminal = "Pass"
+                admitted = True
+                returned_same_value = retained_result == arguments
+                diagnostic = None
+            observed_retained_argv_rows.append(
+                {
+                    **measurement,
+                    "terminal": terminal,
+                    "admitted": admitted,
+                    "input_unchanged": arguments == arguments_before,
+                    "returned_same_value": returned_same_value,
+                    "diagnostic": diagnostic,
+                }
+            )
+            expected_retained_argv_rows.append(
+                {
+                    **measurement,
+                    "terminal": expected_terminal,
+                    "admitted": expected_terminal == "Pass",
+                    "input_unchanged": True,
+                    "returned_same_value": expected_terminal == "Pass",
+                    "diagnostic": (
+                        None
+                        if expected_terminal == "Pass"
+                        else f"{label} argv exceeds its bounded contract"
+                    ),
+                }
+            )
+        checks.check(
+            "retained-argv-count-and-utf8-byte-boundaries",
+            observed_retained_argv_rows
+            == expected_retained_argv_rows,
+            expected=expected_retained_argv_rows,
+            observed=observed_retained_argv_rows,
         )
         safe_relative(
             "x" * CAPS["path_component_bytes"],
