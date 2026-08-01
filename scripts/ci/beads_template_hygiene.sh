@@ -24542,7 +24542,7 @@ def v2_write_reserved_member(
     )
     descriptor: int | None = None
     identity: dict[str, int] | None = None
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= os.O_NOFOLLOW
@@ -24566,6 +24566,7 @@ def v2_write_reserved_member(
         os.fsync(descriptor)
         identity = v2_stat_identity(os.fstat(descriptor))
         os.fsync(parent_descriptor)
+        operation_succeeded = True
     except HarnessError:
         raise
     except OSError as error:
@@ -24573,7 +24574,7 @@ def v2_write_reserved_member(
             f"v2 descriptor-relative write failed for {relative}"
         ) from error
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
@@ -24588,8 +24589,7 @@ def v2_write_reserved_member(
                     f"{relative}"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
     if identity is None:
         raise InfrastructureFailed(
             f"v2 descriptor-relative write produced no identity for {relative}"
@@ -24659,7 +24659,7 @@ def v2_read_reserved_member(
     )
     descriptor: int | None = None
     payload: bytes | None = None
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW
         descriptor = os.open(
@@ -24672,6 +24672,7 @@ def v2_read_reserved_member(
             label=f"v2 reserved artifact {name}",
             expected_identity=expected_identity,
         )
+        operation_succeeded = True
     except InputRefused:
         raise
     except OSError as error:
@@ -24679,7 +24680,7 @@ def v2_read_reserved_member(
             f"v2 reserved artifact {name} cannot be opened safely"
         ) from error
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
@@ -24694,8 +24695,7 @@ def v2_read_reserved_member(
                     f"{name}"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
     if payload is None:
         raise InfrastructureFailed(
             f"v2 reserved artifact {name} produced no payload"
@@ -25513,7 +25513,7 @@ def v2_read_file_strict(
     except OSError as error:
         raise InputRefused(f"{label} cannot be opened safely") from error
     payload: bytes | None = None
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -25542,20 +25542,20 @@ def v2_read_file_strict(
         if after.st_nlink != 1 or v2_stat_identity(after) != before_identity:
             raise InputRefused(f"{label} changed while being read")
         payload = b"".join(chunks)
+        operation_succeeded = True
     except InputRefused:
         raise
     except OSError as error:
         raise InputRefused(f"{label} failed during strict read") from error
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
                     f"{label} descriptor close failed"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
     if payload is None:
         raise InfrastructureFailed(f"{label} strict read produced no payload")
     return payload
@@ -31004,12 +31004,30 @@ def v2_fast_local_origin_dataflow(
             return set(expression[1])
         return {expression}
 
+    def origin_depth(value: Any, depth: int = 0) -> int:
+        if type(value) is not tuple or not value:
+            return depth
+        if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+            return depth
+        return max(
+            [depth]
+            + [
+                origin_depth(part, depth + 1)
+                for part in value[1:]
+                if type(part) is tuple
+            ]
+        )
+
     def merge_origin(
         left: tuple[Any, ...],
         right: tuple[Any, ...],
     ) -> tuple[Any, ...]:
         if left == right:
             return left
+        if max(origin_depth(left), origin_depth(right)) > (
+            V2_REFUSAL_STATE_DEPTH_CAP
+        ):
+            return V2_FAST_ORIGIN_UNKNOWN
         options = origin_options(left) | origin_options(right)
         if V2_FAST_ORIGIN_UNKNOWN in options or len(
             options
@@ -37279,7 +37297,8 @@ def v2_fixture_resource_state(
                     f"fixture resource fingerprint read failed: {relative}"
                 ) from error
             finally:
-                resource_close_failure = v2_close_owned_descriptors((
+                resource_close_failure = (
+                    v2_collect_owned_descriptor_close_failure((
                     (
                         descriptor,
                         EvidenceFailed(
@@ -37287,7 +37306,8 @@ def v2_fixture_resource_state(
                             f"{relative}"
                         ),
                     ),
-                ))
+                    ))
+                )
             if (
                 len(payload) != state.st_size
                 or identity_after != identity_before
