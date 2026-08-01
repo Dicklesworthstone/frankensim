@@ -57,14 +57,20 @@ try:
 except ModuleNotFoundError as error:  # pragma: no cover - pinned Python has tomllib
     raise SystemExit(f"CPython 3.11+ with tomllib is required: {error}")
 
-if sys.implementation.name != "cpython" or sys.version_info < (3, 11):
+if (
+    sys.implementation.name != "cpython"
+    or sys.version_info < (3, 11)
+    or sys.version_info >= (3, 15)
+):
     raise SystemExit(
-        "CPython 3.11+ is required by the refusal-state descriptor and "
-        "RLock capability contract"
+        "CPython 3.11 through 3.14 is required by the version-audited "
+        "refusal-state descriptor, bytecode, and RLock capability contract"
     )
 
 
 REPO_ROOT = Path.cwd().resolve()
+V2_INITIAL_PROCESS_ENVIRONMENT = os.environ
+V2_INITIAL_PROCESS_ENVIRONMENT_BYTES = os.environb
 CASE_MANIFEST_REL = PurePosixPath("tests/e2e/manifests/beads-template-hygiene.toml")
 CASE_MANIFEST_V2_REL = PurePosixPath(
     "tests/e2e/manifests/beads-template-hygiene-v2.toml"
@@ -201,6 +207,12 @@ V2_REPLAY_RESULT_NO_CLAIM = (
 )
 V2_REFUSAL_PROJECTION_SCHEMA = (
     "frankensim.beads-template-hygiene.refusal-projection.v2"
+)
+V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM = (
+    "the executable overlay binds code, closed globals, closures, and default "
+    "arguments; transitive helper calls through required runtime parameters "
+    "are not input-purity proof unless exact bound inputs are separately "
+    "projected and the behavior is executed"
 )
 V2_FAILURE_EVIDENCE_SCHEMA = (
     "frankensim.beads-template-hygiene.failure-evidence.v2"
@@ -454,6 +466,13 @@ V2_LABELS_PER_ISSUE_CAP = 4_096
 V2_RELATIONS_PER_DIRECTION_CAP = 4_096
 V2_AUDIT_EVENTS_PER_ISSUE_CAP = 8_192
 V2_HISTORY_CITATIONS_PER_ISSUE_CAP = 4_096
+V2_HISTORY_CITATION_PATTERN = re.compile(
+    r"\bfrankensim-[A-Za-z0-9][A-Za-z0-9._-]*\b"
+)
+V2_SEMANTIC_ROOT_PATTERN = re.compile(r"sha256-v1:[0-9a-f]{64}")
+V2_SHA256_OBJECT_TYPE = type(hashlib.sha256())
+V2_SHA256_UPDATE = V2_SHA256_OBJECT_TYPE.update
+V2_SHA256_HEXDIGEST = V2_SHA256_OBJECT_TYPE.hexdigest
 V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP = 4_096
 V2_COMMAND_ARGUMENTS_CAP = 64
 V2_COMMAND_ARGUMENT_BYTES_CAP = 4_096
@@ -1140,6 +1159,17 @@ V2_BUNDLE_DIRECTORIES_CAP = 32
 V2_BUNDLE_ENUMERATED_PATH_BYTES_CAP = (
     V2_BUNDLE_FILES_CAP + V2_BUNDLE_DIRECTORIES_CAP
 ) * 512
+V2_FIXTURE_RESOURCE_PATHS_CAP = 64
+V2_FIXTURE_RESOURCE_PATH_BYTES_CAP = 1_024
+V2_FIXTURE_RESOURCE_FILE_BYTES_CAP = 8 * 1024 * 1024
+V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP = 32 * 1024 * 1024
+V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP = 4_096
+V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP = 4_096
+V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP = 4_096
+V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP = 1024 * 1024
+V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP = 1024 * 1024
+V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP = 16 * 1024 * 1024
+V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX = (1 << 31) - 1
 V2_FIRST_DIVERGENCE_BYTES_CAP = 256
 V2_SOURCE_NO_CLAIM = (
     "source-v2 retains complete reconstruction inputs and roots; it does not "
@@ -1251,6 +1281,30 @@ RUN_ARTIFACT_CAP = 67_108_864
 V2_AUDIT_STREAM_BYTES_CAP = RUN_ARTIFACT_CAP
 V2_AUDIT_CAPTURE_BYTES_CAP = RUN_ARTIFACT_CAP
 V2_SOURCE_PROJECTION_BYTES_CAP = RUN_ARTIFACT_CAP
+# Exact JSON integers are counters and ordinals, not arbitrary-precision
+# payloads.  A 1,700-bit magnitude has at most 512 decimal digits, keeping
+# conversion below CPython's minimum configurable decimal-conversion limit.
+V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP = 512
+V2_EXACT_JSON_INTEGER_BITS_CAP = 1_700
+# A flat array of one-byte scalars is the densest counted exact-wire shape and
+# costs at least two canonical bytes per item plus its container delimiters.
+# This is a traversal-work ceiling; the independent canonical-byte and
+# conservative snapshot-allocation ceilings below are both enforced as well.
+V2_SOURCE_EXACT_WIRE_ITEM_CAP = (
+    V2_SOURCE_PROJECTION_BYTES_CAP - 1
+) // 2
+# A flat array at the item cap has one additional root container node.
+V2_SOURCE_EXACT_WIRE_NODE_CAP = V2_SOURCE_EXACT_WIRE_ITEM_CAP + 1
+V2_SOURCE_EXACT_WIRE_DEPTH_CAP = 64
+V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP = RUN_ARTIFACT_CAP
+# These fixed logical charges conservatively cover the shallow list/dict copy,
+# snapshot index, identity maps, and tracking tuple without relying on
+# interpreter-specific getsizeof values. They are accounting constants, not
+# claims about a particular allocator's exact peak resident memory.
+V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES = 512
+V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES = 16
+V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES = 1_024
+V2_EXACT_WIRE_DICT_SNAPSHOT_ITEM_BYTES = 256
 EVENT_COUNT_CAP = 262_144
 EVENT_LINE_CAP = 16_384
 
@@ -1479,6 +1533,46 @@ class InfrastructureFailed(HarnessError):
     terminal = "InfrastructureFailed"
 
 
+@dataclass(frozen=True)
+class V2DescriptorCloseFailure:
+    error: HarnessError
+    cause: BaseException
+
+
+def v2_close_owned_descriptors(
+    specifications: Sequence[tuple[int | None, HarnessError]],
+) -> V2DescriptorCloseFailure | None:
+    """Attempt every owned close and retain the first cleanup failure.
+
+    This helper never raises. An active primary exception therefore remains
+    authoritative, while a successful operation can surface a close-only
+    failure after its ``finally`` block.
+    """
+    first_failure: V2DescriptorCloseFailure | None = None
+    for descriptor, typed_error in specifications:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except BaseException as cause:
+            if first_failure is None:
+                first_failure = V2DescriptorCloseFailure(
+                    error=typed_error,
+                    cause=cause,
+                )
+    return first_failure
+
+
+def v2_raise_descriptor_close_failure(
+    failure: V2DescriptorCloseFailure | None,
+) -> None:
+    if failure is None:
+        return
+    if isinstance(failure.cause, OSError):
+        raise failure.error from failure.cause
+    raise failure.cause
+
+
 class OutputPublicationFailed(InfrastructureFailed):
     def __init__(
         self,
@@ -1500,6 +1594,29 @@ class PublishedV2Refusal(HarnessError):
         super().__init__(terminal)
         self.terminal = terminal
         self.document = dict(document)
+
+
+def v2_bounded_exact_integer_text(
+    value: Any,
+    *,
+    label: str,
+    error_type: type[HarnessError],
+) -> str:
+    if type(value) is not int:
+        raise error_type(f"{label} is not an exact integer")
+    integer_bits = int.bit_length(value)
+    if integer_bits > V2_EXACT_JSON_INTEGER_BITS_CAP:
+        raise error_type(
+            f"{label} contains an oversized integer (bit budget exceeded)"
+        )
+    integer_text = str(value)
+    integer_digits = len(integer_text) - (1 if value < 0 else 0)
+    if integer_digits > V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP:
+        raise error_type(
+            f"{label} contains an oversized integer "
+            "(decimal-digit budget exceeded)"
+        )
+    return integer_text
 
 
 def check_cancel() -> None:
@@ -1539,11 +1656,13 @@ def strict_json_loads(
     label: str,
     require_canonical: bool = False,
 ) -> Any:
+    if type(payload) not in {bytes, str}:
+        raise InputRefused(f"{label} must be exact bytes or exact text")
     try:
-        text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        text = bytes.decode(payload, "utf-8") if type(payload) is bytes else payload
     except UnicodeDecodeError as error:
         raise InputRefused(f"{label} is not valid UTF-8") from error
-    if text.startswith("\ufeff"):
+    if str.startswith(text, "\ufeff"):
         raise InputRefused(f"{label} contains a forbidden UTF-8 BOM")
 
     def closed_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1557,18 +1676,63 @@ def strict_json_loads(
     def reject_constant(value: str) -> Any:
         raise InputRefused(f"{label} contains non-finite number {value}")
 
+    def bounded_integer(value: str) -> int:
+        digit_count = len(value) - (1 if str.startswith(value, "-") else 0)
+        if digit_count > V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP:
+            raise InputRefused(
+                f"{label} contains an oversized integer "
+                "(decimal-digit budget exceeded)"
+            )
+        try:
+            parsed = int(value, 10)
+        except ValueError as error:
+            raise InputRefused(f"{label} contains a malformed integer") from error
+        if int.bit_length(parsed) > V2_EXACT_JSON_INTEGER_BITS_CAP:
+            raise InputRefused(
+                f"{label} contains an oversized integer "
+                "(bit budget exceeded)"
+            )
+        return parsed
+
+    def finite_float(value: str) -> float:
+        try:
+            parsed = float(value)
+        except ValueError as error:
+            raise InputRefused(f"{label} contains a malformed float") from error
+        if not math.isfinite(parsed):
+            raise InputRefused(f"{label} contains a non-finite number")
+        return parsed
+
     try:
         document = json.loads(
             text,
             object_pairs_hook=closed_object,
             parse_constant=reject_constant,
+            parse_int=bounded_integer,
+            parse_float=finite_float,
         )
     except InputRefused:
         raise
     except json.JSONDecodeError as error:
         raise InputRefused(f"{label} is malformed JSON") from error
-    if require_canonical and canonical_bytes(document) != text.encode("utf-8"):
-        raise InputRefused(f"{label} is not canonical JSON with one terminal newline")
+    except RecursionError as error:
+        raise InputRefused(f"{label} exceeds the JSON parser depth") from error
+    if require_canonical:
+        try:
+            canonical_payload = canonical_bytes(document)
+            source_payload = str.encode(text, "utf-8")
+        except UnicodeEncodeError as error:
+            raise InputRefused(
+                f"{label} contains Unicode that cannot be encoded as UTF-8"
+            ) from error
+        except RecursionError as error:
+            raise InputRefused(
+                f"{label} exceeds the canonical JSON depth"
+            ) from error
+        if canonical_payload != source_payload:
+            raise InputRefused(
+                f"{label} is not canonical JSON with one terminal newline"
+            )
     return document
 
 
@@ -1631,8 +1795,27 @@ def terminal_row(
     return row
 
 
+def v2_exact_normalized_casefold(
+    value: Any,
+    *,
+    normalization: str,
+    label: str,
+    error_type: type[HarnessError],
+) -> str:
+    if (
+        type(value) is not str
+        or type(normalization) is not str
+        or normalization not in {"NFC", "NFKC"}
+    ):
+        raise error_type(f"{label} is not an exact normalizable string")
+    normalized = unicodedata.normalize(normalization, value)
+    if type(normalized) is not str:
+        raise error_type(f"{label} normalization did not return an exact string")
+    return str.casefold(normalized)
+
+
 def safe_relative(value: str, *, label: str) -> PurePosixPath:
-    if not value:
+    if type(value) is not str or not value:
         raise UsageRefused(f"{label} must be a non-empty repository-relative path")
     if value != unicodedata.normalize("NFC", value):
         raise UsageRefused(f"{label} must use NFC Unicode normalization")
@@ -1652,10 +1835,10 @@ def safe_relative(value: str, *, label: str) -> PurePosixPath:
         )
     ):
         raise UsageRefused(f"{label} has an unsafe or over-cap component")
-    candidate = PurePosixPath(value)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        raise UsageRefused(f"{label} must be repository-relative without '..'")
-    return candidate
+    # The exact lexical checks above already reject absolute, empty, dot, and
+    # parent components before construction, so no dynamic path method call is
+    # needed to admit this normalized repository-relative value.
+    return PurePosixPath(value)
 
 
 def resolve_safe(value: str, *, label: str, must_exist: bool = False) -> Path:
@@ -1704,6 +1887,7 @@ def bounded_read(
         raise InputRefused(
             f"expected readable regular file: {display_path}"
         ) from error
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -1722,7 +1906,15 @@ def bounded_read(
             f"bounded input read failed: {display_path}"
         ) from error
     finally:
-        os.close(descriptor)
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    f"bounded input descriptor close failed: {display_path}"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
     if len(payload) > cap:
         raise InputRefused(
             f"input artifact exceeds {cap} byte cap: {display_path}"
@@ -1772,6 +1964,8 @@ def v2_read_repo_relative_file_strict(
     directory_descriptors: list[int] = []
     directory_links: list[tuple[int, str, int, int, int]] = []
     file_descriptor: int | None = None
+    payload: bytes | None = None
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         root_descriptor = os.open(REPO_ROOT, directory_flags)
         directory_descriptors.append(root_descriptor)
@@ -1884,22 +2078,32 @@ def v2_read_repo_relative_file_strict(
                 raise InputRefused(
                     f"{label} path identity changed while being read"
                 )
-        return b"".join(chunks)
+        payload = b"".join(chunks)
     except HarnessError:
         raise
     except OSError as error:
         raise InputRefused(f"{label} cannot be opened safely") from error
     finally:
-        if file_descriptor is not None:
-            try:
-                os.close(file_descriptor)
-            except OSError:
-                pass
+        close_specs: list[tuple[int | None, HarnessError]] = [
+            (
+                file_descriptor,
+                InfrastructureFailed(
+                    f"{label} file descriptor close failed"
+                ),
+            )
+        ]
         for descriptor in reversed(directory_descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+            close_specs.append((
+                descriptor,
+                InfrastructureFailed(
+                    f"{label} directory descriptor close failed"
+                ),
+            ))
+        close_failure = v2_close_owned_descriptors(close_specs)
+    v2_raise_descriptor_close_failure(close_failure)
+    if payload is None:
+        raise InfrastructureFailed(f"{label} strict read produced no payload")
+    return payload
 
 
 def write_once(path: Path, payload: bytes) -> str:
@@ -2742,7 +2946,7 @@ def v2_validate_external_relation_id(
     error_type: type[HarnessError],
 ) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value.startswith("external:")
         or not value.removeprefix("external:")
         or len(value.encode("utf-8")) > V2_EXTERNAL_RELATION_ID_BYTES_CAP
@@ -2765,7 +2969,7 @@ def v2_validate_status(
     error_type: type[HarnessError],
 ) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value
         or value != value.strip()
         or value != value.lower()
@@ -3578,6 +3782,21 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_audit_stream_bytes",
         "max_audit_capture_bytes",
         "max_source_projection_bytes",
+        "max_exact_json_integer_decimal_digits",
+        "max_exact_json_integer_bits",
+        "max_source_exact_wire_items",
+        "max_source_exact_wire_nodes",
+        "max_source_exact_wire_depth",
+        "max_fixture_resource_paths",
+        "max_fixture_resource_path_bytes",
+        "max_fixture_resource_file_bytes",
+        "max_fixture_resource_total_file_bytes",
+        "max_fixture_resource_symlink_bytes",
+        "max_fixture_resource_descriptor_entries",
+        "max_fixture_resource_environment_entries",
+        "max_fixture_resource_environment_bytes",
+        "max_fixture_resource_additional_state_bytes",
+        "max_fixture_resource_projection_bytes",
         "max_history_citations_per_issue",
         "max_compatibility_targets_per_receipt",
         "max_command_arguments",
@@ -4031,7 +4250,7 @@ def load_case_manifest_v2() -> dict[str, Any]:
     allowed_engines = set(V2_FIXTURE_ENGINES)
     case_ids: list[str] = []
     assertion_ids: list[str] = []
-    calculated_criteria: dict[str, list[str]] = defaultdict(list)
+    calculated_criteria: dict[str, list[str]] = {}
     for index, row in enumerate(cases):
         if not isinstance(row, dict):
             raise InputRefused(f"v2 case row {index} is not a table")
@@ -4078,7 +4297,9 @@ def load_case_manifest_v2() -> dict[str, Any]:
         ):
             raise InputRefused(f"{case_id} has malformed criterion IDs")
         for criterion_id in row_criteria:
-            calculated_criteria[criterion_id].append(assertion_id)
+            if criterion_id not in calculated_criteria:
+                calculated_criteria[criterion_id] = []
+            list.append(calculated_criteria[criterion_id], assertion_id)
         case_ids.append(case_id)
         assertion_ids.append(assertion_id)
     v2_assert_unique(case_ids, label="v2 case IDs")
@@ -4155,6 +4376,41 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_audit_stream_bytes": V2_AUDIT_STREAM_BYTES_CAP,
         "max_audit_capture_bytes": V2_AUDIT_CAPTURE_BYTES_CAP,
         "max_source_projection_bytes": V2_SOURCE_PROJECTION_BYTES_CAP,
+        "max_exact_json_integer_decimal_digits": (
+            V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
+        ),
+        "max_exact_json_integer_bits": V2_EXACT_JSON_INTEGER_BITS_CAP,
+        "max_source_exact_wire_items": V2_SOURCE_EXACT_WIRE_ITEM_CAP,
+        "max_source_exact_wire_nodes": V2_SOURCE_EXACT_WIRE_NODE_CAP,
+        "max_source_exact_wire_depth": V2_SOURCE_EXACT_WIRE_DEPTH_CAP,
+        "max_fixture_resource_paths": V2_FIXTURE_RESOURCE_PATHS_CAP,
+        "max_fixture_resource_path_bytes": (
+            V2_FIXTURE_RESOURCE_PATH_BYTES_CAP
+        ),
+        "max_fixture_resource_file_bytes": (
+            V2_FIXTURE_RESOURCE_FILE_BYTES_CAP
+        ),
+        "max_fixture_resource_total_file_bytes": (
+            V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP
+        ),
+        "max_fixture_resource_symlink_bytes": (
+            V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP
+        ),
+        "max_fixture_resource_descriptor_entries": (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
+        ),
+        "max_fixture_resource_environment_entries": (
+            V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
+        ),
+        "max_fixture_resource_environment_bytes": (
+            V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP
+        ),
+        "max_fixture_resource_additional_state_bytes": (
+            V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+        ),
+        "max_fixture_resource_projection_bytes": (
+            V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP
+        ),
         "max_history_citations_per_issue": (
             V2_HISTORY_CITATIONS_PER_ISSUE_CAP
         ),
@@ -5071,7 +5327,6 @@ def canonical_issue_projection(issue: Mapping[str, Any]) -> dict[str, Any]:
         "acceptance_criteria": str(issue.get("acceptance_criteria") or ""),
         "design": str(issue.get("design") or ""),
         "notes": str(issue.get("notes") or ""),
-        "estimated_minutes": issue.get("estimated_minutes"),
         "updated_at": str(issue.get("updated_at") or ""),
         "dependencies": dependencies,
         "dependents": dependents,
@@ -5194,7 +5449,7 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
             f"v2 br issue {issue_id} has invalid comments"
         )
     previous_comment_order: tuple[datetime, int] | None = None
-    comment_ids: set[int] = set()
+    comment_ids: dict[int, None] = {}
     for comment_index, comment in enumerate(comments):
         if (
             not isinstance(comment, dict)
@@ -5225,27 +5480,27 @@ def v2_validate_raw_br_issue(issue: Mapping[str, Any]) -> None:
                 "created_at then ID ascending"
             )
         previous_comment_order = comment_order
-        comment_ids.add(comment["id"])
+        comment_ids[comment["id"]] = None
     events = issue.get("events")
     if events is not None and events != []:
         raise InfrastructureFailed(
             f"v2 br show unexpectedly returned events for {issue_id}"
         )
-    rollup = issue.get("rollup")
+    rollup = dict.get(issue, "rollup")
     if rollup is not None:
         if (
-            not isinstance(rollup, dict)
+            type(rollup) is not dict
             or set(rollup) != V2_SOURCE_ROLLUP_FIELDS
-            or not isinstance(rollup.get("status"), str)
+            or not isinstance(dict.get(rollup, "status"), str)
             or not rollup["status"]
-            or not isinstance(rollup.get("descendants"), dict)
+            or not isinstance(dict.get(rollup, "descendants"), dict)
             or len(rollup["descendants"]) > V2_INVENTORY_ROWS_CAP
             or any(
                 not isinstance(status, str)
                 or not status
                 or type(count) is not int
                 or count < 0
-                for status, count in rollup["descendants"].items()
+                for status, count in dict.items(rollup["descendants"])
             )
         ):
             raise InfrastructureFailed(
@@ -5789,8 +6044,10 @@ def section_present(text: str, section: str) -> bool:
 
 
 def visible_markdown_lines(text: str) -> list[str] | None:
-    encoded = text.encode("utf-8")
-    lines = text.splitlines()
+    if type(text) is not str:
+        raise EvidenceFailed("markdown source is not an exact string")
+    encoded = str.encode(text, "utf-8")
+    lines = str.splitlines(text)
     if (
         len(encoded) > CAPS["semantic_field_bytes"]
         or len(lines) > CAPS["semantic_field_lines"]
@@ -5801,16 +6058,16 @@ def visible_markdown_lines(text: str) -> list[str] | None:
     fence_marker = ""
     in_comment = False
     for line in lines:
-        stripped = line.lstrip()
+        stripped = str.lstrip(line)
         if in_comment:
             if "-->" in stripped:
                 in_comment = False
             continue
-        if stripped.startswith("<!--"):
+        if str.startswith(stripped, "<!--"):
             if "-->" not in stripped:
                 in_comment = True
             continue
-        if stripped.startswith(("```", "~~~")):
+        if str.startswith(stripped, ("```", "~~~")):
             marker = stripped[:3]
             if not fenced:
                 fenced = True
@@ -5819,19 +6076,21 @@ def visible_markdown_lines(text: str) -> list[str] | None:
                 fenced = False
                 fence_marker = ""
             continue
-        if fenced or stripped.startswith(">"):
+        if fenced or str.startswith(stripped, ">"):
             continue
         visible.append(line)
     return visible
 
 
 def section_body(text: str, section: str) -> str | None:
+    if type(section) is not str:
+        raise EvidenceFailed("markdown section is not an exact string")
     lines = visible_markdown_lines(text)
     if lines is None:
         return None
     start: int | None = None
     for index, line in enumerate(lines):
-        if line.strip() == section:
+        if str.strip(line) == section:
             start = index + 1
             break
     if start is None:
@@ -5841,11 +6100,16 @@ def section_body(text: str, section: str) -> str | None:
         if re.match(r"^\s*#{1,6}\s+\S", line):
             break
         body.append(line)
-    return "\n".join(body).strip()
+    return str.strip("\n".join(body))
 
 
 def placeholder_body(text: str) -> bool:
-    normalized = " ".join(text.split()).casefold().strip(" .:-")
+    if type(text) is not str:
+        raise EvidenceFailed("placeholder source is not an exact string")
+    normalized = str.strip(
+        str.casefold(" ".join(str.split(text))),
+        " .:-",
+    )
     if not normalized:
         return True
     placeholder_terms = {
@@ -5872,8 +6136,24 @@ def placeholder_body(text: str) -> bool:
 def independent_template_findings(
     issue: Mapping[str, Any],
 ) -> dict[str, str]:
-    issue_type = str(issue.get("type") or issue.get("issue_type") or "")
-    description = str(issue.get("description") or "")
+    if type(issue) is not dict:
+        raise EvidenceFailed("template finding source is not an exact object")
+    raw_issue_type = dict.get(issue, "type") or dict.get(issue, "issue_type")
+    raw_description = dict.get(issue, "description")
+    if raw_issue_type is None:
+        issue_type = ""
+    elif type(raw_issue_type) is str:
+        issue_type = raw_issue_type
+    else:
+        raise EvidenceFailed("template finding type is not an exact string")
+    if raw_description is None:
+        description = ""
+    elif type(raw_description) is str:
+        description = raw_description
+    else:
+        raise EvidenceFailed(
+            "template finding description is not an exact string"
+        )
     required = REQUIRED_SECTIONS_BY_TYPE.get(issue_type, ())
     if visible_markdown_lines(description) is None:
         return {
@@ -5891,35 +6171,56 @@ def independent_template_findings(
 
 
 def malformed_section_present(text: str, section: str) -> bool:
+    if type(text) is not str or type(section) is not str:
+        raise EvidenceFailed("section classifier inputs are not exact strings")
     visible = visible_markdown_lines(text)
     if visible is None:
         return False
-    lowered_lines = [line.strip().casefold() for line in visible]
-    canonical = section.casefold()
+    lowered_lines = [
+        str.casefold(str.strip(line)) for line in visible
+    ]
+    canonical = str.casefold(section)
     terms = HEADING_WORDS.get(section, ())
     for line in lowered_lines:
         if line == canonical:
             continue
-        stripped = line.lstrip("#*-: ").strip()
-        if any(stripped == term or stripped.startswith(term + ":") for term in terms):
-            return True
+        stripped = str.strip(str.lstrip(line, "#*-: "))
+        for term in terms:
+            if stripped == term or str.startswith(stripped, term + ":"):
+                return True
     return False
 
 
 def relevant_clauses(issue: Mapping[str, Any]) -> list[dict[str, str]]:
+    if type(issue) is not dict:
+        raise EvidenceFailed("clause source issue is not an exact object")
     rows: list[dict[str, str]] = []
     for field in ("description", "acceptance_criteria", "design", "notes"):
-        text = str(issue.get(field) or "")
-        for line in text.splitlines():
-            stripped = " ".join(line.split())
+        raw_text = dict.get(issue, field)
+        if raw_text is None:
+            text = ""
+        elif type(raw_text) is str:
+            text = raw_text
+        else:
+            raise EvidenceFailed(
+                f"clause source field {field} is not an exact string"
+            )
+        for line in str.splitlines(text):
+            stripped = " ".join(str.split(line))
             if not stripped:
                 continue
-            lowered = stripped.casefold()
-            if stripped.startswith("#") or any(term in lowered for term in CLAUSE_TERMS):
-                encoded = stripped.encode("utf-8")
+            lowered = str.casefold(stripped)
+            if str.startswith(stripped, "#") or any(
+                term in lowered for term in CLAUSE_TERMS
+            ):
+                encoded = str.encode(stripped, "utf-8")
                 if len(encoded) > CAPS["clause_bytes"]:
                     encoded = encoded[: CAPS["clause_bytes"]]
-                    stripped = encoded.decode("utf-8", errors="ignore") + "…"
+                    stripped = bytes.decode(
+                        encoded,
+                        "utf-8",
+                        errors="ignore",
+                    ) + "…"
                 rows.append({"field": field, "text": stripped})
                 if len(rows) >= CAPS["clauses_per_issue"]:
                     return rows
@@ -5927,11 +6228,21 @@ def relevant_clauses(issue: Mapping[str, Any]) -> list[dict[str, str]]:
 
 
 def obligation_mapping(issue: Mapping[str, Any]) -> dict[str, Any]:
-    text = "\n".join(
-        str(issue.get(field) or "")
-        for field in ("description", "acceptance_criteria", "design", "notes")
-    )
-    lowered = text.casefold()
+    if type(issue) is not dict:
+        raise EvidenceFailed("obligation source issue is not an exact object")
+    text_fields: list[str] = []
+    for field in ("description", "acceptance_criteria", "design", "notes"):
+        raw_text = dict.get(issue, field)
+        if raw_text is None:
+            text_fields.append("")
+        elif type(raw_text) is str:
+            text_fields.append(raw_text)
+        else:
+            raise EvidenceFailed(
+                f"obligation source field {field} is not an exact string"
+            )
+    text = "\n".join(text_fields)
+    lowered = str.casefold(text)
     paths = sorted(set(PATH_PATTERN.findall(text)))[:64]
     return {
         "paths": paths,
@@ -5947,16 +6258,24 @@ def obligation_mapping(issue: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def strong_structured_acceptance(issue: Mapping[str, Any]) -> bool:
-    text = str(issue.get("acceptance_criteria") or "").strip()
-    if len(text.encode("utf-8")) < 240:
+    if type(issue) is not dict:
+        raise EvidenceFailed("acceptance source issue is not an exact object")
+    raw_text = dict.get(issue, "acceptance_criteria")
+    if raw_text is None:
+        text = ""
+    elif type(raw_text) is str:
+        text = str.strip(raw_text)
+    else:
+        raise EvidenceFailed("acceptance source field is not an exact string")
+    if len(str.encode(text, "utf-8")) < 240:
         return False
-    lowered = text.casefold()
+    lowered = str.casefold(text)
     term_count = sum(term in lowered for term in CONTRACT_TERMS)
     structure_count = sum(
         1
-        for line in text.splitlines()
+        for line in str.splitlines(text)
         if re.match(r"^\s*(?:[-*]|\d+[.)])\s+", line)
-        or line.strip().startswith("##")
+        or str.startswith(str.strip(line), "##")
     )
     literal_specificity = bool(PATH_PATTERN.search(text)) or bool(
         re.search(r"\b(?:P[0-4]|G[0-5]|NoData|Pass|Refused|[a-z]+-[a-z0-9.]+)\b", text)
@@ -5965,11 +6284,21 @@ def strong_structured_acceptance(issue: Mapping[str, Any]) -> bool:
 
 
 def existing_reproduction(issue: Mapping[str, Any]) -> bool:
-    text = "\n".join(
-        str(issue.get(field) or "")
-        for field in ("description", "acceptance_criteria", "notes")
-    )
-    lowered = text.casefold()
+    if type(issue) is not dict:
+        raise EvidenceFailed("reproduction source issue is not an exact object")
+    text_fields: list[str] = []
+    for field in ("description", "acceptance_criteria", "notes"):
+        raw_text = dict.get(issue, field)
+        if raw_text is None:
+            text_fields.append("")
+        elif type(raw_text) is str:
+            text_fields.append(raw_text)
+        else:
+            raise EvidenceFailed(
+                f"reproduction source field {field} is not an exact string"
+            )
+    text = "\n".join(text_fields)
+    lowered = str.casefold(text)
     has_repro = "repro" in lowered or "reproduce" in lowered
     has_observation = any(
         marker in lowered
@@ -5987,11 +6316,26 @@ def classify_issue(
     duplicate_acceptance: bool = False,
     section_only_reviewed: bool = False,
 ) -> tuple[str, str, str]:
-    status = str(issue.get("status") or "")
-    issue_type = str(issue.get("type") or issue.get("issue_type") or "")
-    description = str(issue.get("description") or "")
-    acceptance = str(issue.get("acceptance_criteria") or "")
-    missing = tuple(sorted(str(section) for section in missing_sections))
+    if type(issue) is not dict:
+        raise EvidenceFailed("classification issue is not an exact object")
+
+    def optional_text(field: str) -> str:
+        raw_value = dict.get(issue, field)
+        if raw_value is None:
+            return ""
+        if type(raw_value) is not str:
+            raise EvidenceFailed(
+                f"classification field {field} is not an exact string"
+            )
+        return raw_value
+
+    status = optional_text("status")
+    issue_type = optional_text("type") or optional_text("issue_type")
+    description = optional_text("description")
+    acceptance = optional_text("acceptance_criteria")
+    if any(type(section) is not str for section in missing_sections):
+        raise EvidenceFailed("classification sections are not exact strings")
+    missing = tuple(sorted(missing_sections))
     findings = dict(independent_findings or {})
 
     if status == "closed":
@@ -6008,14 +6352,14 @@ def classify_issue(
             "falsified by an explicit owner transition plus a review bound to the new root",
         )
 
-    if "empty-or-placeholder-body" in findings.values():
+    if "empty-or-placeholder-body" in dict.values(findings):
         return (
             "SUBSTANTIVE_SEMANTIC_OMISSION",
             "a required literal heading has an empty or explicit placeholder body",
             "falsified by issue-specific non-placeholder obligations under the heading",
         )
 
-    if "semantic-field-cap-exceeded" in findings.values():
+    if "semantic-field-cap-exceeded" in dict.values(findings):
         return (
             "OWNER_REVIEW_REQUIRED",
             "semantic field exceeds the bounded parser cap and cannot be auto-classified",
@@ -6031,11 +6375,12 @@ def classify_issue(
 
     children = sorted(
         edge["id"]
-        for edge in (issue.get("dependents") or [])
-        if edge.get("type") == "parent-child"
+        for edge in (dict.get(issue, "dependents") or [])
+        if type(edge) is dict
+        and dict.get(edge, "type") == "parent-child"
     )
     rollup_text = f"{description}\n{acceptance}"
-    lowered_rollup = rollup_text.casefold()
+    lowered_rollup = str.casefold(rollup_text)
     mentions_child_contract = any(
         term in lowered_rollup
         for term in ("child", "children", "descendant", "rollup", "roll-up")
@@ -6092,7 +6437,7 @@ def classify_issue(
 
     if (
         "## Acceptance Criteria" in missing
-        and len(acceptance.strip().encode("utf-8")) < 120
+        and len(str.encode(str.strip(acceptance), "utf-8")) < 120
     ):
         return (
             "SUBSTANTIVE_SEMANTIC_OMISSION",
@@ -6114,7 +6459,11 @@ def classify_issue(
             "falsified if semantic review finds any missing obligation beyond the heading",
         )
 
-    if issue.get("assignee") or issue.get("owner") or status == "in_progress":
+    if (
+        dict.get(issue, "assignee")
+        or dict.get(issue, "owner")
+        or status == "in_progress"
+    ):
         return (
             "OWNER_REVIEW_REQUIRED",
             "substantive prose exists but the active owner must adjudicate completeness",
@@ -6156,31 +6505,38 @@ def lint_result_map(lint: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
 
 def validate_scope_partitions(lint: Mapping[str, Any]) -> None:
     all_rows = lint_result_map(lint)
+    if type(all_rows) is not dict:
+        raise EvidenceFailed("lint all-result map is not an exact object")
     union_rows: dict[str, tuple[str, ...]] = {}
     status_scopes = v2_canonical_status_scopes(
         (scope for scope in lint if scope != "all")
     )
     for scope in status_scopes:
-        scope_ids: set[str] = set()
+        scope_ids: dict[str, None] = {}
         for row in lint[scope]["results"]:
-            issue_id = str(row.get("id", ""))
+            if type(row) is not dict:
+                raise EvidenceFailed(
+                    f"lint scope {scope} row is not an exact object"
+                )
+            issue_id = str(dict.get(row, "id", ""))
             raw_sections = tuple(
-                str(section) for section in (row.get("missing") or [])
+                str(section)
+                for section in (dict.get(row, "missing") or [])
             )
             if len(raw_sections) != len(set(raw_sections)):
                 raise EvidenceFailed(
                     f"lint scope {scope} duplicates a section for {issue_id}"
                 )
             sections = v2_canonical_missing_sections(
-                str(row.get("type") or ""),
+                str(dict.get(row, "type") or ""),
                 raw_sections,
             )
             if issue_id in scope_ids:
                 raise EvidenceFailed(
                     f"lint scope {scope} contains duplicate issue {issue_id}"
                 )
-            scope_ids.add(issue_id)
-            if all_rows.get(issue_id) != sections:
+            scope_ids[issue_id] = None
+            if dict.get(all_rows, issue_id) != sections:
                 raise EvidenceFailed(
                     f"lint scope {scope} is not an exact projection of all for {issue_id}"
                 )
@@ -6190,7 +6546,8 @@ def validate_scope_partitions(lint: Mapping[str, Any]) -> None:
                 )
             union_rows[issue_id] = sections
         warning_count = sum(
-            len(row.get("missing") or []) for row in lint[scope]["results"]
+            len(dict.get(row, "missing") or [])
+            for row in lint[scope]["results"]
         )
         if warning_count != lint[scope]["total"]:
             raise EvidenceFailed(f"lint scope {scope} warning arithmetic disagrees")
@@ -6204,7 +6561,9 @@ def validate_scope_partitions(lint: Mapping[str, Any]) -> None:
             "lint all is not the exact union of status cuts; "
             f"first divergent issue {first}"
         )
-    if sum(len(sections) for sections in all_rows.values()) != lint["all"]["total"]:
+    if sum(
+        len(sections) for sections in dict.values(all_rows)
+    ) != lint["all"]["total"]:
         raise EvidenceFailed("lint all warning arithmetic disagrees")
     if len(all_rows) != lint["all"]["issues"]:
         raise EvidenceFailed("lint all issue arithmetic disagrees")
@@ -6219,46 +6578,81 @@ def assemble_inventory(
     include_issue_rows_without_findings: bool = False,
 ) -> dict[str, Any]:
     validate_scope_partitions(lint)
-    status_scopes = v2_canonical_status_scopes(
-        (scope for scope in lint if scope != "all")
-    )
+    non_all_status_scopes: list[str] = []
+    for scope in lint:
+        if scope != "all":
+            non_all_status_scopes.append(scope)
+    status_scopes = v2_canonical_status_scopes(non_all_status_scopes)
     br_missing_by_id = lint_result_map(lint)
-    independent = {
-        str(issue_id): {
-            str(section): str(reason) for section, reason in findings.items()
-        }
-        for issue_id, findings in (independent_findings_by_id or {}).items()
-        if findings
-    }
+    if type(br_missing_by_id) is not dict:
+        raise EvidenceFailed("lint result map is not an exact object")
+    independent: dict[str, dict[str, str]] = {}
+    raw_independent_findings = (
+        {} if independent_findings_by_id is None else independent_findings_by_id
+    )
+    if type(raw_independent_findings) is not dict:
+        raise EvidenceFailed("independent findings are not an exact object")
+    for raw_issue_id, findings in dict.items(raw_independent_findings):
+        if not findings:
+            continue
+        if type(findings) is not dict:
+            raise EvidenceFailed(
+                "independent findings row is not an exact object"
+            )
+        normalized_findings: dict[str, str] = {}
+        for section, reason in dict.items(findings):
+            normalized_findings[str(section)] = str(reason)
+        independent[str(raw_issue_id)] = normalized_findings
     finding_ids = set(br_missing_by_id) | set(independent)
     selected_ids = set(finding_ids)
     if include_issue_rows_without_findings:
-        selected_ids.update(str(issue["id"]) for issue in issue_rows)
-    missing_by_id = {
-        issue_id: tuple(
-            sorted(
-                set(br_missing_by_id.get(issue_id, ()))
-                | set(independent.get(issue_id, ()))
-            )
+        selected_ids = selected_ids | {
+            str(issue["id"]) for issue in issue_rows
+        }
+    missing_by_id: dict[str, tuple[str, ...]] = {}
+    for issue_id in sorted(selected_ids):
+        br_missing_sections = set(
+            dict.get(br_missing_by_id, issue_id, ())
         )
-        for issue_id in sorted(selected_ids)
-    }
-    issue_map = {str(issue["id"]): issue for issue in issue_rows}
+        independent_missing_sections = set(
+            dict.get(independent, issue_id, ())
+        )
+        combined_missing_sections = (
+            br_missing_sections | independent_missing_sections
+        )
+        missing_by_id[issue_id] = tuple(
+            sorted(combined_missing_sections)
+        )
+    issue_map: dict[str, Mapping[str, Any]] = {}
+    for issue in issue_rows:
+        if type(issue) is not dict:
+            raise EvidenceFailed("show issue row is not an exact object")
+        issue_map[str(issue["id"])] = issue
     if len(issue_map) != len(issue_rows):
         raise EvidenceFailed("show issue set contains duplicate IDs")
     if set(issue_map) != set(missing_by_id):
         raise EvidenceFailed(
             "show issue set differs from the combined br and independent issue set"
         )
-    acceptance_counts = Counter(
-        text_root(text)
-        for issue in issue_rows
-        if (text := str(issue.get("acceptance_criteria") or "").strip())
-    )
+    acceptance_counts: Counter[str] = Counter()
+    for issue in issue_rows:
+        raw_acceptance_text = dict.get(issue, "acceptance_criteria")
+        if raw_acceptance_text is None:
+            acceptance_text = ""
+        elif type(raw_acceptance_text) is str:
+            acceptance_text = str.strip(raw_acceptance_text)
+        else:
+            raise EvidenceFailed(
+                "show issue acceptance criteria is not an exact string"
+            )
+        if acceptance_text:
+            acceptance_counts[text_root(acceptance_text)] += 1
     lint_status_by_id: dict[str, str] = {}
     for status in status_scopes:
         for lint_row in lint[status]["results"]:
-            issue_id = str(lint_row.get("id", ""))
+            if type(lint_row) is not dict:
+                raise EvidenceFailed("lint result row is not an exact object")
+            issue_id = str(dict.get(lint_row, "id", ""))
             lint_status_by_id[issue_id] = status
     for issue_id, expected_status in lint_status_by_id.items():
         if issue_map[issue_id]["status"] != expected_status:
@@ -6271,8 +6665,16 @@ def assemble_inventory(
     for issue_id in sorted(missing_by_id):
         issue = issue_map[issue_id]
         missing = missing_by_id[issue_id]
-        finding_reasons = independent.get(issue_id, {})
-        acceptance_text = str(issue.get("acceptance_criteria") or "").strip()
+        finding_reasons = dict.get(independent, issue_id, {})
+        raw_acceptance_text = dict.get(issue, "acceptance_criteria")
+        if raw_acceptance_text is None:
+            acceptance_text = ""
+        elif type(raw_acceptance_text) is str:
+            acceptance_text = str.strip(raw_acceptance_text)
+        else:
+            raise EvidenceFailed(
+                "show issue acceptance criteria is not an exact string"
+            )
         duplicate_acceptance = bool(acceptance_text) and (
             acceptance_counts[text_root(acceptance_text)] > 1
         )
@@ -6303,15 +6705,31 @@ def assemble_inventory(
             )
         if disposition not in DISPOSITIONS:
             raise EvidenceFailed(f"unknown disposition for {issue_id}")
-        fields = {
-            field: text_root(str(issue.get(field) or ""))
-            for field in ("description", "acceptance_criteria", "design", "notes")
-        }
-        domain_labels = [
-            label
-            for label in issue.get("labels", [])
-            if label.startswith(("crate:", "area:", "layer:", "authority:"))
-        ]
+        fields: dict[str, str] = {}
+        for field in (
+            "description",
+            "acceptance_criteria",
+            "design",
+            "notes",
+        ):
+            raw_field_text = dict.get(issue, field)
+            if raw_field_text is None:
+                field_text = ""
+            elif type(raw_field_text) is str:
+                field_text = raw_field_text
+            else:
+                raise EvidenceFailed(
+                    f"show issue field {field} is not an exact string"
+                )
+            fields[field] = text_root(field_text)
+        domain_labels: list[str] = []
+        for label in dict.get(issue, "labels", []):
+            if type(label) is not str:
+                raise EvidenceFailed("show issue label is not an exact string")
+            if str.startswith(label,
+                ("crate:", "area:", "layer:", "authority:")
+            ):
+                domain_labels.append(label)
         mapping = obligation_mapping(issue)
         row = {
             "id": issue_id,
@@ -6333,14 +6751,19 @@ def assemble_inventory(
             "evidence_owner": "UNRESOLVED",
             "terminal_owner": "UNRESOLVED",
             "missing_sections": list(missing),
-            "br_lint_missing_sections": list(br_missing_by_id.get(issue_id, ())),
-            "independent_findings": dict(sorted(finding_reasons.items())),
+            "br_lint_missing_sections": list(
+                dict.get(br_missing_by_id, issue_id, ())
+            ),
+            "independent_findings": dict(
+                sorted(dict.items(finding_reasons))
+            ),
             "semantic_flags": {
                 "duplicate_structured_acceptance": duplicate_acceptance,
                 "section_only_review_bound": False,
             },
             "lint_disagreement": (
-                set(br_missing_by_id.get(issue_id, ())) != set(finding_reasons)
+                set(dict.get(br_missing_by_id, issue_id, ()))
+                != set(finding_reasons)
             ),
             "overlap": len(missing) > 1,
             "disposition": disposition,
@@ -6406,13 +6829,20 @@ def assemble_inventory(
     if len(rows) > CAPS["issues"] or len(warning_rows) > CAPS["warnings"]:
         raise EvidenceFailed("assembled inventory exceeds declared caps")
 
-    section_counts = Counter(row["section"] for row in warning_rows)
-    status_counts = Counter(row["status"] for row in rows)
-    priority_counts = Counter(f"P{row['priority']}" for row in rows)
-    type_counts = Counter(row["type"] for row in rows)
-    disposition_counts = Counter(row["disposition"] for row in rows)
-    overlap_counts = Counter(
-        (
+    section_counts: Counter[str] = Counter()
+    for warning_row in warning_rows:
+        section_counts[warning_row["section"]] += 1
+    status_counts: Counter[str] = Counter()
+    priority_counts: Counter[str] = Counter()
+    type_counts: Counter[str] = Counter()
+    disposition_counts: Counter[str] = Counter()
+    overlap_counts: Counter[str] = Counter()
+    for row in rows:
+        status_counts[row["status"]] += 1
+        priority_counts[f"P{row['priority']}"] += 1
+        type_counts[row["type"]] += 1
+        disposition_counts[row["disposition"]] += 1
+        overlap_key = (
             "NO_TEMPLATE_WARNING"
             if not row["missing_sections"]
             else (
@@ -6421,14 +6851,15 @@ def assemble_inventory(
                 else row["missing_sections"][0]
             )
         )
-        for row in rows
-    )
+        overlap_counts[overlap_key] += 1
     partition_keys = (
         (*PARTITION_KEYS, "NO_TEMPLATE_WARNING")
         if include_issue_rows_without_findings
         else PARTITION_KEYS
     )
-    partitions = {key: [] for key in partition_keys}
+    partitions: dict[str, list[str]] = {}
+    for key in partition_keys:
+        partitions[key] = []
     partition_name_by_codes = {
         ("A",): "A_only",
         ("S",): "S_only",
@@ -6440,9 +6871,12 @@ def assemble_inventory(
     }
     for row in rows:
         try:
+            unsorted_codes: list[str] = []
+            for section in row["missing_sections"]:
+                unsorted_codes.append(SECTION_CODES[section])
             codes = tuple(
                 sorted(
-                    (SECTION_CODES[section] for section in row["missing_sections"]),
+                    unsorted_codes,
                     key=SECTION_CODE_ORDER.__getitem__,
                 )
             )
@@ -6456,24 +6890,63 @@ def assemble_inventory(
         if partition_name is None:
             raise EvidenceFailed(f"unpartitioned warning overlap for {row['id']}")
         partitions[partition_name].append(row["id"])
-    partition_union = sum(len(issue_ids) for issue_ids in partitions.values())
+    partition_union = 0
+    for issue_ids in partitions.values():
+        partition_union += len(issue_ids)
     if partition_union != len(rows):
         raise EvidenceFailed("exclusive partition arithmetic differs from issue union")
-    combined_status_cuts = {
-        status: {
-            "issues": sum(row["status"] == status for row in rows),
-            "warnings": sum(
-                len(row["missing_sections"])
-                for row in rows
-                if row["status"] == status
-            ),
-            "issue_ids": [row["id"] for row in rows if row["status"] == status],
+    combined_status_cuts: dict[str, dict[str, Any]] = {}
+    for status in status_scopes:
+        status_issue_ids: list[str] = []
+        status_warning_count = 0
+        for row in rows:
+            if row["status"] != status:
+                continue
+            status_issue_ids.append(row["id"])
+            status_warning_count += len(row["missing_sections"])
+        combined_status_cuts[status] = {
+            "issues": len(status_issue_ids),
+            "warnings": status_warning_count,
+            "issue_ids": status_issue_ids,
         }
-        for status in status_scopes
-    }
-    warning_count_by_id = {
-        row["id"]: len(row["missing_sections"]) for row in rows
-    }
+    warning_count_by_id: dict[str, int] = {}
+    for row in rows:
+        warning_count_by_id[row["id"]] = len(row["missing_sections"])
+
+    br_lint_warning_count = 0
+    for missing_sections in dict.values(br_missing_by_id):
+        br_lint_warning_count += len(missing_sections)
+    independent_warning_count = 0
+    for findings in dict.values(independent):
+        independent_warning_count += len(findings)
+    lint_disagreement_count = 0
+    for row in rows:
+        if row["lint_disagreement"]:
+            lint_disagreement_count += 1
+
+    status_cuts: dict[str, dict[str, Any]] = {}
+    for scope in (*status_scopes, "all"):
+        scope_issue_ids: list[str] = []
+        for lint_row in lint[scope]["results"]:
+            if type(lint_row) is not dict:
+                raise EvidenceFailed("lint result row is not an exact object")
+            scope_issue_ids.append(str(dict.get(lint_row, "id", "")))
+        status_cuts[scope] = {
+            "warnings": lint[scope]["total"],
+            "issues": lint[scope]["issues"],
+            "issue_ids": scope_issue_ids,
+        }
+
+    partition_documents: dict[str, dict[str, Any]] = {}
+    for key in partition_keys:
+        partition_warning_count = 0
+        for issue_id in partitions[key]:
+            partition_warning_count += warning_count_by_id[issue_id]
+        partition_documents[key] = {
+            "issue_ids": partitions[key],
+            "issues": len(partitions[key]),
+            "warnings": partition_warning_count,
+        }
 
     inventory: dict[str, Any] = {
         "schema": INVENTORY_SCHEMA,
@@ -6489,39 +6962,24 @@ def assemble_inventory(
             "issues": len(rows),
             "warnings": len(warning_rows),
             "br_lint_issues": len(br_missing_by_id),
-            "br_lint_warnings": sum(len(value) for value in br_missing_by_id.values()),
+            "br_lint_warnings": br_lint_warning_count,
             "independent_issues": len(independent),
-            "independent_warnings": sum(len(value) for value in independent.values()),
-            "lint_disagreements": sum(bool(row["lint_disagreement"]) for row in rows),
-            "by_section": dict(sorted(section_counts.items())),
-            "by_status": dict(sorted(status_counts.items())),
-            "by_priority": dict(sorted(priority_counts.items())),
-            "by_type": dict(sorted(type_counts.items())),
-            "by_disposition": dict(sorted(disposition_counts.items())),
-            "overlap_partitions": dict(sorted(overlap_counts.items())),
+            "independent_warnings": independent_warning_count,
+            "lint_disagreements": lint_disagreement_count,
+            "by_section": dict(sorted(dict.items(section_counts))),
+            "by_status": dict(sorted(dict.items(status_counts))),
+            "by_priority": dict(sorted(dict.items(priority_counts))),
+            "by_type": dict(sorted(dict.items(type_counts))),
+            "by_disposition": dict(
+                sorted(dict.items(disposition_counts))
+            ),
+            "overlap_partitions": dict(
+                sorted(dict.items(overlap_counts))
+            ),
         },
-        "status_cuts": {
-            scope: {
-                "warnings": lint[scope]["total"],
-                "issues": lint[scope]["issues"],
-                "issue_ids": [
-                    str(row.get("id", "")) for row in lint[scope]["results"]
-                ],
-            }
-            for scope in (*status_scopes, "all")
-        },
+        "status_cuts": status_cuts,
         "combined_status_cuts": combined_status_cuts,
-        "partitions": {
-            key: {
-                "issue_ids": partitions[key],
-                "issues": len(partitions[key]),
-                "warnings": sum(
-                    warning_count_by_id[issue_id]
-                    for issue_id in partitions[key]
-                ),
-            }
-            for key in partition_keys
-        },
+        "partitions": partition_documents,
         "rows": rows,
         "warning_rows": warning_rows,
         "no_claim": (
@@ -6530,26 +6988,36 @@ def assemble_inventory(
         ),
     }
     if include_issue_rows_without_findings:
-        inventory["counts"].update(
+        template_warning_issue_count = 0
+        no_template_warning_issue_count = 0
+        unreviewed_semantic_receipt_count = 0
+        review_scope_issue_ids: list[str] = []
+        for row in rows:
+            review_scope_issue_ids.append(row["id"])
+            if row["missing_sections"]:
+                template_warning_issue_count += 1
+            else:
+                no_template_warning_issue_count += 1
+            if row["semantic_review_receipt_state"] == "UNREVIEWED":
+                unreviewed_semantic_receipt_count += 1
+        dict.update(
+            inventory["counts"],
             {
                 "complete_review_scope_issues": len(rows),
-                "template_warning_issues": sum(
-                    bool(row["missing_sections"]) for row in rows
+                "template_warning_issues": template_warning_issue_count,
+                "no_template_warning_issues": (
+                    no_template_warning_issue_count
                 ),
-                "no_template_warning_issues": sum(
-                    not row["missing_sections"] for row in rows
+                "unreviewed_semantic_receipts": (
+                    unreviewed_semantic_receipt_count
                 ),
-                "unreviewed_semantic_receipts": sum(
-                    row["semantic_review_receipt_state"] == "UNREVIEWED"
-                    for row in rows
-                ),
-            }
+            },
         )
         inventory["review_scope"] = {
             "nonclosed_complete": True,
             "closed_rows": "WARNING_OR_INDEPENDENT_FINDING_ONLY",
-            "issue_ids": [row["id"] for row in rows],
-            "issue_ids_root": semantic_root([row["id"] for row in rows]),
+            "issue_ids": review_scope_issue_ids,
+            "issue_ids_root": semantic_root(review_scope_issue_ids),
             "allowed_semantic_review_dispositions": list(
                 V2_SEMANTIC_REVIEW_DISPOSITIONS
             ),
@@ -6629,7 +7097,7 @@ def build_plan(
     groups: dict[
         tuple[int, str, int, str, str, str, str],
         list[Mapping[str, Any]],
-    ] = defaultdict(list)
+    ] = {}
     for row in inventory["rows"]:
         if row["status"] == "closed":
             continue
@@ -6643,7 +7111,9 @@ def build_plan(
             row["authority_domain"],
             row["disposition"],
         )
-        groups[key].append(row)
+        if key not in groups:
+            groups[key] = []
+        list.append(groups[key], row)
 
     shards: list[dict[str, Any]] = []
     sequence = 0
@@ -6730,6 +7200,36 @@ class LiveSnapshot:
     inventory: dict[str, Any]
     plan: dict[str, Any]
     all_issues: tuple[dict[str, Any], ...] = ()
+
+
+class V2RetainedSnapshot:
+    """Minimal reconstruction carrier with no generated or ambient hooks."""
+
+    __slots__ = (
+        "lint",
+        "issues",
+        "source",
+        "inventory",
+        "plan",
+        "all_issues",
+    )
+
+    def __init__(
+        self,
+        *,
+        lint: dict[str, Any],
+        issues: list[dict[str, Any]],
+        source: dict[str, Any],
+        inventory: dict[str, Any],
+        plan: dict[str, Any],
+        all_issues: tuple[dict[str, Any], ...],
+    ) -> None:
+        self.lint = lint
+        self.issues = issues
+        self.source = source
+        self.inventory = inventory
+        self.plan = plan
+        self.all_issues = all_issues
 
 
 @dataclass(frozen=True)
@@ -7088,7 +7588,8 @@ def v2_normalize_br_status(
     ):
         raise error_type("br status summary has a non-closed released schema")
     summary = dict(raw_summary)
-    summary.setdefault("average_lead_time_hours", None)
+    if "average_lead_time_hours" not in summary:
+        summary["average_lead_time_hours"] = None
     for field in V2_BR_STATUS_SUMMARY_FIELDS - {"average_lead_time_hours"}:
         v2_br_nonnegative_int(
             summary[field],
@@ -7128,13 +7629,13 @@ def v2_normalize_br_sync_status(
         "last_export_time",
         "last_import_time",
     }
-    if not isinstance(document, dict):
+    if type(document) is not dict:
         raise error_type("br sync status has a non-closed schema")
     document_fields = set(document)
     if input_kind == "released_live":
         valid_outer_schema = (
-            (V2_BR_SYNC_FIELDS - optional_fields).issubset(document_fields)
-            and document_fields.issubset(V2_BR_SYNC_FIELDS)
+            (V2_BR_SYNC_FIELDS - optional_fields) <= document_fields
+            and document_fields <= V2_BR_SYNC_FIELDS
         )
     else:
         valid_outer_schema = document_fields == V2_BR_SYNC_FIELDS
@@ -7142,7 +7643,8 @@ def v2_normalize_br_sync_status(
         raise error_type("br sync status has a non-closed schema")
     normalized = dict(document)
     for field in optional_fields:
-        normalized.setdefault(field, None)
+        if field not in normalized:
+            normalized[field] = None
     for field in ("db_newer", "jsonl_exists", "jsonl_newer"):
         if type(normalized[field]) is not bool:
             raise error_type(f"br sync status {field} is not an exact boolean")
@@ -7272,8 +7774,10 @@ def v2_normalize_br_sync_status(
             "reason": None,
             "diagnostic_command": None,
         }
-        normalized_git_export.setdefault("head_hash", None)
-        normalized_git_export.setdefault("worktree_hash", None)
+        if "head_hash" not in normalized_git_export:
+            normalized_git_export["head_hash"] = None
+        if "worktree_hash" not in normalized_git_export:
+            normalized_git_export["worktree_hash"] = None
     elif (
         input_kind == "released_live"
         and git_export_fields == V2_BR_GIT_EXPORT_NOT_PROBED_RAW_FIELDS
@@ -7320,7 +7824,7 @@ def v2_normalize_br_sync_status(
             for field in ("reason", "diagnostic_command")
         ):
             raise error_type("br sync probed git export is malformed")
-        hash_widths: set[int] = set()
+        hash_widths: dict[int, None] = {}
         for hash_field in ("head_hash", "worktree_hash"):
             hash_value = normalized_git_export[hash_field]
             if hash_value is None:
@@ -7334,7 +7838,7 @@ def v2_normalize_br_sync_status(
                     f"br sync git export {hash_field} is not a canonical "
                     "SHA-1 or SHA-256 object ID"
                 )
-            hash_widths.add(len(hash_value))
+            hash_widths[len(hash_value)] = None
         if len(hash_widths) > 1:
             raise error_type("br sync git export mixes Git object formats")
         if normalized["jsonl_exists"] != (
@@ -7558,26 +8062,29 @@ def v2_br_witness_root(
 ) -> str:
 
     digest = hashlib.sha256()
-    digest.update(b"br:jsonl-witness:root:v1\0")
-    digest.update(v2_br_witness_framed(schema_version))
-    digest.update(v2_br_witness_u64(chunk_size_lines))
-    digest.update(v2_br_witness_u64(line_count))
-    digest.update(v2_br_witness_u64(byte_count))
-    digest.update(v2_br_witness_u64(len(chunks)))
+    V2_SHA256_UPDATE(digest, b"br:jsonl-witness:root:v1\0")
+    V2_SHA256_UPDATE(digest, v2_br_witness_framed(schema_version))
+    V2_SHA256_UPDATE(digest, v2_br_witness_u64(chunk_size_lines))
+    V2_SHA256_UPDATE(digest, v2_br_witness_u64(line_count))
+    V2_SHA256_UPDATE(digest, v2_br_witness_u64(byte_count))
+    V2_SHA256_UPDATE(digest, v2_br_witness_u64(len(chunks)))
     for chunk in chunks:
-        digest.update(v2_br_witness_u64(chunk["index"]))
-        digest.update(v2_br_witness_u64(chunk["start_line"]))
-        digest.update(v2_br_witness_u64(chunk["line_count"]))
-        digest.update(v2_br_witness_u64(chunk["byte_count"]))
-        digest.update(v2_br_witness_framed(chunk["hash"]))
+        V2_SHA256_UPDATE(digest, v2_br_witness_u64(chunk["index"]))
+        V2_SHA256_UPDATE(digest, v2_br_witness_u64(chunk["start_line"]))
+        V2_SHA256_UPDATE(digest, v2_br_witness_u64(chunk["line_count"]))
+        V2_SHA256_UPDATE(digest, v2_br_witness_u64(chunk["byte_count"]))
+        V2_SHA256_UPDATE(digest, v2_br_witness_framed(chunk["hash"]))
         for field in ("first_line_hash", "last_line_hash"):
             optional_hash = chunk[field]
             if optional_hash is None:
-                digest.update(b"\0")
+                V2_SHA256_UPDATE(digest, b"\0")
             else:
-                digest.update(b"\x01")
-                digest.update(v2_br_witness_framed(optional_hash))
-    return digest.hexdigest()
+                V2_SHA256_UPDATE(digest, b"\x01")
+                V2_SHA256_UPDATE(
+                    digest,
+                    v2_br_witness_framed(optional_hash),
+                )
+    return V2_SHA256_HEXDIGEST(digest)
 
 
 def v2_normalize_br_export_witness(
@@ -7649,8 +8156,9 @@ def v2_normalize_br_export_witness(
         )
         if input_kind == "released_live" and live_root is not None:
             resolved_path = (live_root / relative).resolve(strict=False)
-            if resolved_path != live_root and not resolved_path.is_relative_to(
-                live_root
+            if resolved_path != live_root and not Path.is_relative_to(
+                resolved_path,
+                live_root,
             ):
                 raise error_type(
                     f"br export witness {field} resolves outside its workspace"
@@ -9628,6 +10136,19 @@ def verify_semantic_root(document: Mapping[str, Any], *, label: str) -> None:
         raise EvidenceFailed(
             f"artifact replay first divergence: {label}.semantic_root"
         )
+
+
+def v2_is_semantic_root(value: Any) -> bool:
+    return (
+        type(value) is str
+        and re.fullmatch(r"sha256-v1:[0-9a-f]{64}", value) is not None
+    )
+
+
+def v2_require_semantic_root(value: Any, *, label: str) -> str:
+    if not v2_is_semantic_root(value):
+        raise EvidenceFailed(f"{label} is not a canonical semantic root")
+    return value
 
 
 def first_projection_divergence(
@@ -13367,7 +13888,7 @@ def run_self_tests(
 
 def v2_rooted(document: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(document)
-    result.pop("semantic_root", None)
+    dict.pop(result, "semantic_root", None)
     result["semantic_root"] = semantic_root(result)
     return result
 
@@ -13838,7 +14359,7 @@ def v2_dependency_neighborhood_root(issue: Mapping[str, Any]) -> str:
 
 
 def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
-    if not isinstance(index, dict):
+    if type(index) is not dict:
         raise InputRefused("v2 clause index is not an object")
     v2_exact_keys(index, V2_CLAUSE_INDEX_FIELDS, label="v2 clause index")
     rows = index["rows"]
@@ -13846,28 +14367,34 @@ def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
     over_count = index["over_byte_cap_count"]
     over_row_count = index["over_row_cap_count"]
     maximum = index["maximum_clause_bytes"]
-    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
     if (
         index["schema"] != V2_CLAUSE_INDEX_SCHEMA
-        or not isinstance(rows, list)
+        or type(rows) is not list
         or len(rows) > V2_CLAUSE_ROWS_CAP
         or type(row_count) is not int
         or row_count < 0
         or len(rows) != min(row_count, V2_CLAUSE_ROWS_CAP)
         or type(index["rows_complete"]) is not bool
         or index["rows_complete"] is not (row_count <= V2_CLAUSE_ROWS_CAP)
-        or not isinstance(index["membership_root"], str)
-        or root_pattern.fullmatch(index["membership_root"]) is None
+        or type(index["membership_root"]) is not str
+        or V2_SEMANTIC_ROOT_PATTERN.fullmatch(index["membership_root"])
+        is None
         or type(maximum) is not int
         or maximum < 0
         or type(over_count) is not int
         or not 0 <= over_count <= row_count
         or type(over_row_count) is not int
         or over_row_count != max(0, row_count - V2_CLAUSE_ROWS_CAP)
-        or not isinstance(index["over_row_cap_membership_root"], str)
-        or root_pattern.fullmatch(index["over_row_cap_membership_root"]) is None
-        or not isinstance(index["over_byte_cap_membership_root"], str)
-        or root_pattern.fullmatch(index["over_byte_cap_membership_root"]) is None
+        or type(index["over_row_cap_membership_root"]) is not str
+        or V2_SEMANTIC_ROOT_PATTERN.fullmatch(
+            index["over_row_cap_membership_root"]
+        )
+        is None
+        or type(index["over_byte_cap_membership_root"]) is not str
+        or V2_SEMANTIC_ROOT_PATTERN.fullmatch(
+            index["over_byte_cap_membership_root"]
+        )
+        is None
         or index["no_claim"] != V2_CLAUSE_INDEX_NO_CLAIM
     ):
         raise InputRefused("v2 clause index scalar or cap contract differs")
@@ -13881,7 +14408,7 @@ def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
         "notes": 3,
     }
     for row_index, row in enumerate(rows):
-        if not isinstance(row, dict):
+        if type(row) is not dict:
             raise InputRefused(
                 f"v2 clause index row {row_index} is not an object"
             )
@@ -13893,7 +14420,7 @@ def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
         field_name = row["field"]
         position = (
             field_ordinals.get(field_name, -1)
-            if isinstance(field_name, str)
+            if type(field_name) is str
             else -1,
             row["line_index"] if type(row["line_index"]) is int else -1,
         )
@@ -13903,8 +14430,8 @@ def v2_validate_clause_index(index: Mapping[str, Any]) -> None:
             or row["line_index"] < 0
             or type(row["byte_length"]) is not int
             or row["byte_length"] < 0
-            or not isinstance(row["text_root"], str)
-            or root_pattern.fullmatch(row["text_root"]) is None
+            or type(row["text_root"]) is not str
+            or V2_SEMANTIC_ROOT_PATTERN.fullmatch(row["text_root"]) is None
             or row["truncated"] is not False
             or (prior_position is not None and position <= prior_position)
         ):
@@ -13963,29 +14490,40 @@ def v2_iter_splitlines(text: str) -> Iterable[tuple[int, str]]:
 
 
 def v2_complete_clause_roots(issue: Mapping[str, Any]) -> dict[str, Any]:
+    if type(issue) is not dict:
+        raise EvidenceFailed("v2 clause source is not an exact object")
     retained_rows: list[dict[str, Any]] = []
     membership_hasher = hashlib.sha256()
-    membership_hasher.update(b"[")
+    V2_SHA256_UPDATE(membership_hasher, b"[")
     over_hasher = hashlib.sha256()
-    over_hasher.update(b"[")
+    V2_SHA256_UPDATE(over_hasher, b"[")
     over_row_hasher = hashlib.sha256()
-    over_row_hasher.update(b"[")
+    V2_SHA256_UPDATE(over_row_hasher, b"[")
     row_count = 0
     over_count = 0
     maximum_clause_bytes = 0
     for field in ("description", "acceptance_criteria", "design", "notes"):
-        text = str(issue.get(field) or "")
+        raw_text = dict.get(issue, field)
+        if raw_text is None:
+            text = ""
+        elif type(raw_text) is str:
+            text = raw_text
+        else:
+            raise EvidenceFailed(
+                f"v2 clause field {field} is not an exact string"
+            )
         for line_index, line in v2_iter_splitlines(text):
             if line_index % 256 == 0:
                 check_cancel()
-            normalized = re.sub(r"\s+", " ", line).strip()
+            whitespace_normalized = re.sub(r"\s+", " ", line)
+            normalized = str.strip(whitespace_normalized)
             if not normalized:
                 continue
-            lowered = normalized.casefold()
-            if normalized.startswith("#") or any(
+            lowered = str.casefold(normalized)
+            if str.startswith(normalized, "#") or any(
                 term in lowered for term in CLAUSE_TERMS
             ):
-                encoded = normalized.encode("utf-8")
+                encoded = str.encode(normalized, "utf-8")
                 row = {
                     "field": field,
                     "line_index": line_index,
@@ -13995,8 +14533,8 @@ def v2_complete_clause_roots(issue: Mapping[str, Any]) -> dict[str, Any]:
                 }
                 row_bytes = canonical_bytes(row)[:-1]
                 if row_count:
-                    membership_hasher.update(b",")
-                membership_hasher.update(row_bytes)
+                    V2_SHA256_UPDATE(membership_hasher, b",")
+                V2_SHA256_UPDATE(membership_hasher, row_bytes)
                 row_count += 1
                 maximum_clause_bytes = max(
                     maximum_clause_bytes,
@@ -14006,30 +14544,32 @@ def v2_complete_clause_roots(issue: Mapping[str, Any]) -> dict[str, Any]:
                     retained_rows.append(row)
                 else:
                     if row_count > V2_CLAUSE_ROWS_CAP + 1:
-                        over_row_hasher.update(b",")
-                    over_row_hasher.update(row_bytes)
+                        V2_SHA256_UPDATE(over_row_hasher, b",")
+                    V2_SHA256_UPDATE(over_row_hasher, row_bytes)
                 if len(encoded) > V2_CLAUSE_BYTES_CAP:
                     if over_count:
-                        over_hasher.update(b",")
-                    over_hasher.update(row_bytes)
+                        V2_SHA256_UPDATE(over_hasher, b",")
+                    V2_SHA256_UPDATE(over_hasher, row_bytes)
                     over_count += 1
-    membership_hasher.update(b"]\n")
-    over_hasher.update(b"]\n")
-    over_row_hasher.update(b"]\n")
+    V2_SHA256_UPDATE(membership_hasher, b"]\n")
+    V2_SHA256_UPDATE(over_hasher, b"]\n")
+    V2_SHA256_UPDATE(over_row_hasher, b"]\n")
     result = {
         "schema": V2_CLAUSE_INDEX_SCHEMA,
         "rows": retained_rows,
         "row_count": row_count,
         "rows_complete": row_count <= V2_CLAUSE_ROWS_CAP,
-        "membership_root": "sha256-v1:" + membership_hasher.hexdigest(),
+        "membership_root": (
+            "sha256-v1:" + V2_SHA256_HEXDIGEST(membership_hasher)
+        ),
         "maximum_clause_bytes": maximum_clause_bytes,
         "over_row_cap_count": max(0, row_count - V2_CLAUSE_ROWS_CAP),
         "over_row_cap_membership_root": (
-            "sha256-v1:" + over_row_hasher.hexdigest()
+            "sha256-v1:" + V2_SHA256_HEXDIGEST(over_row_hasher)
         ),
         "over_byte_cap_count": over_count,
         "over_byte_cap_membership_root": (
-            "sha256-v1:" + over_hasher.hexdigest()
+            "sha256-v1:" + V2_SHA256_HEXDIGEST(over_hasher)
         ),
         "no_claim": V2_CLAUSE_INDEX_NO_CLAIM,
     }
@@ -14149,7 +14689,7 @@ def v2_active_work_context(issue: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def v2_build_inventory(
-    snapshot: LiveSnapshot,
+    snapshot: Any,
     *,
     campaign_epoch_root: str,
     priority_filter: set[str] | None,
@@ -14197,7 +14737,7 @@ def v2_build_inventory(
     rows: list[dict[str, Any]] = []
     for source_row in snapshot.inventory["rows"]:
         full_issue = full_by_id.get(source_row["id"])
-        if full_issue is None:
+        if type(full_issue) is not dict:
             raise EvidenceFailed(
                 f"v2 full source lacks target {source_row['id']}"
             )
@@ -14205,12 +14745,20 @@ def v2_build_inventory(
             {
                 **full_issue,
                 **source_row,
-                "labels": list(full_issue.get("labels") or []),
-                "dependencies": list(full_issue.get("dependencies") or []),
-                "dependents": list(full_issue.get("dependents") or []),
+                "labels": list(dict.get(full_issue, "labels") or []),
+                "dependencies": list(
+                    dict.get(full_issue, "dependencies") or []
+                ),
+                "dependents": list(
+                    dict.get(full_issue, "dependents") or []
+                ),
             },
             tracker_ready=source_row["id"] in tracker_ready_ids,
         )
+        if type(joined) is not dict:
+            raise EvidenceFailed(
+                f"v2 joined source is malformed for {source_row['id']}"
+            )
         priority_name = f"P{source_row['priority']}"
         status = str(source_row["status"])
         if priority_filter is not None and priority_name not in priority_filter:
@@ -14238,6 +14786,24 @@ def v2_build_inventory(
         )
         domain_candidates = v2_domain_candidates(joined)
         active_context = v2_active_work_context(joined)
+        field_byte_lengths: dict[str, int] = {}
+        for field in (
+            "description",
+            "acceptance_criteria",
+            "design",
+            "notes",
+        ):
+            raw_field_text = dict.get(full_issue, field)
+            if raw_field_text is None:
+                field_text = ""
+            elif type(raw_field_text) is str:
+                field_text = raw_field_text
+            else:
+                raise EvidenceFailed(
+                    f"v2 source field {field} is not an exact string"
+                )
+            field_bytes = str.encode(field_text, "utf-8")
+            field_byte_lengths[field] = len(field_bytes)
         row = {
             "id": source_row["id"],
             "issue_id": source_row["id"],
@@ -14260,7 +14826,7 @@ def v2_build_inventory(
             "coordination_assignee": source_row["assignee"],
             "tracker_owner": source_row["owner"],
             "parent": source_row["parent"],
-            "labels": sorted(joined.get("labels") or []),
+            "labels": sorted(dict.get(joined, "labels") or []),
             "missing_sections": missing_sections,
             "disposition": source_row["disposition"],
             "template_warning_state": source_row.get(
@@ -14292,15 +14858,7 @@ def v2_build_inventory(
             "disposition_rationale": source_row["rationale"],
             "disposition_falsifier": source_row["falsifier"],
             "field_roots": dict(sorted(source_row["field_roots"].items())),
-            "field_byte_lengths": {
-                field: len(str(full_issue.get(field) or "").encode("utf-8"))
-                for field in (
-                    "description",
-                    "acceptance_criteria",
-                    "design",
-                    "notes",
-                )
-            },
+            "field_byte_lengths": field_byte_lengths,
             "clause_roots": v2_complete_clause_roots(full_issue),
             "target_root": stable_root,
             "source_issue_projection_root": full_issue[
@@ -14310,8 +14868,8 @@ def v2_build_inventory(
             "dependency_neighborhood_root": v2_dependency_neighborhood_root(
                 joined
             ),
-            "dependencies": list(joined.get("dependencies") or []),
-            "dependents": list(joined.get("dependents") or []),
+            "dependencies": list(dict.get(joined, "dependencies") or []),
+            "dependents": list(dict.get(joined, "dependents") or []),
             "domain_candidates": domain_candidates,
             "domain_candidate": domain_candidates,
             "declared_domain_owner": "",
@@ -14439,7 +14997,7 @@ def v2_validate_source_limits(
         )
 
 
-def v2_campaign_epoch(snapshot: LiveSnapshot) -> tuple[str, dict[str, Any]]:
+def v2_campaign_epoch(snapshot: Any) -> tuple[str, dict[str, Any]]:
     ready_values = snapshot.source.get("tracker_ready_issue_ids")
     if not isinstance(ready_values, list):
         raise EvidenceFailed(
@@ -14551,7 +15109,7 @@ V2_CANONICAL_TIMESTAMP_PATTERN = re.compile(
 
 
 def v2_parse_timestamp(value: Any, *, label: str) -> datetime:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise EvidenceFailed(f"{label} lacks a timestamp")
     if any(
         len(component) > 6
@@ -14566,11 +15124,11 @@ def v2_parse_timestamp(value: Any, *, label: str) -> datetime:
         )
     try:
         parsed = datetime.fromisoformat(
-            value[:-1] + "+00:00" if value.endswith("Z") else value
+            value[:-1] + "+00:00" if str.endswith(value, "Z") else value
         )
     except ValueError as error:
         raise EvidenceFailed(f"{label} has a malformed timestamp") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    if parsed.tzinfo is None:
         raise EvidenceFailed(f"{label} timestamp lacks an explicit UTC offset")
     return parsed
 
@@ -14682,7 +15240,7 @@ def v2_normalize_audit_document(
     normalized_events: list[dict[str, Any]] = []
     previous_id: int | None = None
     previous_timestamp: datetime | None = None
-    seen_ids: set[int] = set()
+    seen_ids: dict[int, None] = {}
     for index, event in enumerate(document["events"]):
         if not isinstance(event, dict):
             raise EvidenceFailed(f"audit event {issue_id}/{index} is not an object")
@@ -14727,22 +15285,30 @@ def v2_normalize_audit_document(
             )
         previous_id = event_id
         previous_timestamp = event_timestamp
-        seen_ids.add(event_id)
-        normalized = {
-            key: event.get(key)
-            for key in sorted(V2_AUDIT_EVENT_KEYS)
-            if key in event
-        }
+        seen_ids[event_id] = None
+        normalized: dict[str, Any] = {}
+        for key in sorted(V2_AUDIT_EVENT_KEYS):
+            if key in event:
+                normalized[key] = dict.get(event, key)
+        normalized_event_type = normalized["event_type"]
+        event_type_has_valid_scalar_shape = (
+            isinstance(normalized_event_type, str)
+            and bool(normalized_event_type)
+            and normalized_event_type == str.lower(normalized_event_type)
+        )
+        event_type_has_disallowed_character = False
+        if event_type_has_valid_scalar_shape:
+            for character in normalized_event_type:
+                unicode_category = unicodedata.category(character)
+                if str.startswith(unicode_category, "C") or unicode_category in {
+                    "Zl",
+                    "Zp",
+                }:
+                    event_type_has_disallowed_character = True
+                    break
         if (
-            not isinstance(normalized["event_type"], str)
-            or not normalized["event_type"]
-            or normalized["event_type"]
-            != normalized["event_type"].lower()
-            or any(
-                unicodedata.category(character).startswith("C")
-                or unicodedata.category(character) in {"Zl", "Zp"}
-                for character in normalized["event_type"]
-            )
+            not event_type_has_valid_scalar_shape
+            or event_type_has_disallowed_character
         ):
             raise EvidenceFailed(f"audit event type is malformed for {issue_id}")
         if not isinstance(normalized["actor"], str):
@@ -14761,11 +15327,11 @@ def v2_normalize_audit_document(
                 | V2_AUDIT_EVENT_AGENT_KEYS
                 | {"old_value", "new_value"}
             )
-            old_value = normalized.get("old_value")
-            new_value = normalized.get("new_value")
+            old_value = dict.get(normalized, "old_value")
+            new_value = dict.get(normalized, "new_value")
             if (
-                not {"old_value", "new_value"}.issubset(event_keys)
-                or not event_keys.issubset(allowed)
+                not {"old_value", "new_value"} <= event_keys
+                or not event_keys <= allowed
                 or not isinstance(old_value, str)
                 or not old_value
                 or not isinstance(new_value, str)
@@ -14787,20 +15353,24 @@ def v2_normalize_audit_document(
             )
             if (
                 "comment" not in event_keys
-                or not event_keys.issubset(allowed)
-                or not isinstance(normalized.get("comment"), str)
+                or not event_keys <= allowed
+                or not isinstance(dict.get(normalized, "comment"), str)
                 or not normalized["comment"]
             ):
                 raise EvidenceFailed(
                     f"closed audit event has a malformed released shape "
                     f"for {issue_id}"
                 )
-        utc_timestamp = event_timestamp.astimezone(timezone.utc)
-        normalized["timestamp"] = utc_timestamp.isoformat(
+        utc_timestamp = datetime.astimezone(event_timestamp, timezone.utc)
+        normalized_timestamp = datetime.isoformat(
+            utc_timestamp,
             timespec=(
                 "microseconds" if utc_timestamp.microsecond else "seconds"
-            )
-        ).removesuffix("+00:00") + "Z"
+            ),
+        )
+        normalized["timestamp"] = (
+            str.removesuffix(normalized_timestamp, "+00:00") + "Z"
+        )
         normalized_events.append(normalized)
     return v2_rooted(
         {
@@ -14865,11 +15435,12 @@ def v2_capture_audit_round(
     capture_ordinal: int,
     br_cwd: Path = REPO_ROOT,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    if (
-        not isinstance(issue_ids, Sequence)
-        or isinstance(issue_ids, (str, bytes, bytearray))
-    ):
+    if type(issue_ids) not in {list, tuple}:
         raise InputRefused("v2 audit capture issue IDs are not a sequence")
+    if type(capture_ordinal) is not int or capture_ordinal not in {1, 2}:
+        raise InputRefused(
+            "v2 audit capture ordinal must be exact round 1 or 2"
+        )
     if len(issue_ids) > V2_INVENTORY_ROWS_CAP:
         raise InputRefused(
             "v2 audit capture issue IDs exceed the inventory row cap"
@@ -15032,16 +15603,30 @@ def v2_capture_histories(
 
 
 def v2_extract_citations(issue: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if type(issue) is not dict:
+        raise EvidenceFailed("v2 history citation source is not an exact object")
     values: dict[str, dict[str, Any]] = {}
-    pattern = re.compile(r"\bfrankensim-[A-Za-z0-9][A-Za-z0-9._-]*\b")
     match_count = 0
     for field in ("description", "acceptance_criteria", "design", "notes"):
-        text = str(issue.get(field) or "")
-        for match in pattern.finditer(text):
+        raw_text = dict.get(issue, field)
+        if raw_text is None:
+            text = ""
+        elif type(raw_text) is str:
+            text = raw_text
+        else:
+            raise EvidenceFailed(
+                f"v2 history citation field {field} is not an exact string"
+            )
+        for match in V2_HISTORY_CITATION_PATTERN.finditer(text):
             match_count += 1
             if match_count % 256 == 0:
                 check_cancel()
-            cited = match.group(0).rstrip(".,;:)")
+            matched_text = match.group(0)
+            if type(matched_text) is not str:
+                raise EvidenceFailed(
+                    "v2 history citation match is not an exact string"
+                )
+            cited = str.rstrip(matched_text, ".,;:)")
             key = f"{field}:{cited}"
             if (
                 key not in values
@@ -15597,12 +16182,12 @@ def v2_build_history(
         int(history_contract["legacy_coverage_anchor_close_event_id"])
     )
     if (
-        anchor_status is None
+        type(anchor_status) is not dict
         or anchor_status["event_type"] != "status_changed"
-        or anchor_status.get("new_value") != "closed"
-        or anchor_close is None
+        or dict.get(anchor_status, "new_value") != "closed"
+        or type(anchor_close) is not dict
         or anchor_close["event_type"] != "closed"
-        or anchor_close.get("comment") != anchor_issue["close_reason"]
+        or dict.get(anchor_close, "comment") != anchor_issue["close_reason"]
     ):
         raise EvidenceFailed("legacy audit-coverage anchor events drifted")
     anchor_timestamp = v2_parse_timestamp(
@@ -15641,11 +16226,18 @@ def v2_build_history(
         issue = issue_by_id.get(issue_id)
         audit = audit_by_id.get(issue_id)
         decision = authority_by_id[issue_id]
-        if issue is None or audit is None:
+        if type(issue) is not dict or type(audit) is not dict:
             raise EvidenceFailed(f"history source is incomplete for {issue_id}")
-        closed_at = str(issue["closed_at"])
-        close_reason = str(issue["close_reason"])
-        if not closed_at or not close_reason.strip():
+        if (
+            type(issue["closed_at"]) is not str
+            or type(issue["close_reason"]) is not str
+        ):
+            raise EvidenceFailed(
+                f"closed source has non-string close metadata for {issue_id}"
+            )
+        closed_at = issue["closed_at"]
+        close_reason = issue["close_reason"]
+        if not closed_at or not str.strip(close_reason):
             raise EvidenceFailed(f"closed source lacks close metadata for {issue_id}")
         show_timestamp = v2_parse_timestamp(
             closed_at,
@@ -15705,8 +16297,8 @@ def v2_build_history(
         candidate_consumers = sorted(
             {
                 str(edge["id"])
-                for edge in issue.get("dependents") or []
-                if isinstance(edge, dict) and edge.get("id")
+                for edge in dict.get(issue, "dependents") or []
+                if type(edge) is dict and dict.get(edge, "id")
             }
             | {
                 str(citation["candidate_issue_id"]) for citation in citations
@@ -15872,7 +16464,7 @@ def v2_current_finding_ids(
     return normalized
 
 
-def v2_snapshot_current_finding_ids(snapshot: LiveSnapshot) -> list[str]:
+def v2_snapshot_current_finding_ids(snapshot: Any) -> list[str]:
     lint_ids = set(lint_result_map(snapshot.lint))
     independent_ids = {
         str(row["id"])
@@ -16078,7 +16670,8 @@ def v2_build_zero_sets(
     destination_reason = {
         row["id"]: "SELECTED_INVENTORY" for row in inventory_rows
     }
-    current_for_movement.update(
+    dict.update(
+        current_for_movement,
         {
             row["issue_id"]: {
                 "id": row["issue_id"],
@@ -16089,7 +16682,8 @@ def v2_build_zero_sets(
             for row in scope_successors
         }
     )
-    destination_root_kind.update(
+    dict.update(
+        destination_root_kind,
         {
             row["issue_id"]: (
                 "FULL_UNIVERSE_FILTERED_FINDING"
@@ -16099,10 +16693,12 @@ def v2_build_zero_sets(
             for row in scope_successors
         }
     )
-    destination_finding_state.update(
+    dict.update(
+        destination_finding_state,
         {row["issue_id"]: row["finding_state"] for row in scope_successors}
     )
-    destination_reason.update(
+    dict.update(
+        destination_reason,
         {row["issue_id"]: row["reason"] for row in scope_successors}
     )
     current_finding_issue_ids_root = semantic_root(normalized_finding_ids)
@@ -16231,13 +16827,6 @@ def v2_validate_zero_sets(
     current_universe: Sequence[Mapping[str, Any]] | None = None,
     current_finding_ids: Sequence[str] | None = None,
 ) -> None:
-    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
-
-    def require_root(value: Any, *, label: str) -> str:
-        if not isinstance(value, str) or root_pattern.fullmatch(value) is None:
-            raise EvidenceFailed(f"{label} is not a canonical semantic root")
-        return value
-
     if not isinstance(zero_sets, Mapping):
         raise EvidenceFailed("zero-set document is not an object")
     if not isinstance(inventory, Mapping) or not isinstance(
@@ -16350,7 +16939,7 @@ def v2_validate_zero_sets(
             prior_campaign.get("semantic_root"),
         ),
     ):
-        require_root(value, label=label)
+        v2_require_semantic_root(value, label=label)
 
     inventory_by_id: dict[str, Mapping[str, Any]] = {}
     for index, row in enumerate(inventory_rows):
@@ -16374,7 +16963,7 @@ def v2_validate_zero_sets(
             )
         if issue_id in inventory_by_id:
             raise EvidenceFailed("zero-set inventory IDs are not unique")
-        require_root(
+        v2_require_semantic_root(
             row.get("target_root"),
             label=f"zero-set target root for {issue_id}",
         )
@@ -16408,7 +16997,7 @@ def v2_validate_zero_sets(
             if current_universe is not None
             else row.get("target_root")
         )
-        require_root(
+        v2_require_semantic_root(
             target_root,
             label=f"zero-set current universe target root for {issue_id}",
         )
@@ -16613,7 +17202,7 @@ def v2_validate_zero_sets(
                 prior_campaign["campaign_epoch_root"],
             ),
         ):
-            require_root(value, label=label)
+            v2_require_semantic_root(value, label=label)
         if (
             prior_campaign["no_claim"]
             != V2_PRIOR_CAMPAIGN_PROVIDED_NO_CLAIM
@@ -16667,7 +17256,7 @@ def v2_validate_zero_sets(
             raise EvidenceFailed(
                 f"zero-set prior row {index} has an invalid destination"
             )
-        require_root(
+        v2_require_semantic_root(
             row.get("target_root"),
             label=f"zero-set prior target root for {issue_id}",
         )
@@ -16732,7 +17321,8 @@ def v2_validate_zero_sets(
     destination_reason = {
         issue_id: "SELECTED_INVENTORY" for issue_id in inventory_by_id
     }
-    current_for_movement.update(
+    dict.update(
+        current_for_movement,
         {
             row["issue_id"]: {
                 "id": row["issue_id"],
@@ -16743,7 +17333,8 @@ def v2_validate_zero_sets(
             for row in expected_scope_successors
         }
     )
-    destination_root_kind.update(
+    dict.update(
+        destination_root_kind,
         {
             row["issue_id"]: (
                 "FULL_UNIVERSE_FILTERED_FINDING"
@@ -16753,13 +17344,15 @@ def v2_validate_zero_sets(
             for row in expected_scope_successors
         }
     )
-    destination_finding_state.update(
+    dict.update(
+        destination_finding_state,
         {
             row["issue_id"]: row["finding_state"]
             for row in expected_scope_successors
         }
     )
-    destination_reason.update(
+    dict.update(
+        destination_reason,
         {
             row["issue_id"]: row["reason"]
             for row in expected_scope_successors
@@ -16782,7 +17375,7 @@ def v2_validate_zero_sets(
             and before_priority == after_priority
         ):
             continue
-        prior_terminal_root = require_root(
+        prior_terminal_root = v2_require_semantic_root(
             prior_campaign.get("terminal_root"),
             label="zero-set prior terminal root",
         )
@@ -16882,7 +17475,12 @@ def v2_validate_zero_sets(
         raise EvidenceFailed("zero-set counts differ")
 
 
-def v2_load_prior_campaign(relative: str | None) -> dict[str, Any]:
+def v2_load_prior_campaign(
+    relative: str | None,
+    *,
+    accepted_manifest: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
+) -> dict[str, Any]:
     if relative is None:
         return v2_rooted(
             {
@@ -16911,7 +17509,8 @@ def v2_load_prior_campaign(relative: str | None) -> dict[str, Any]:
         payloads=payloads,
         terminal=terminal,
         events=events,
-        accepted_manifest=load_case_manifest_v2(),
+        accepted_manifest=accepted_manifest,
+        current_source_files=current_source_files,
     )
     inventory = reconstructed[1]
     if terminal.get("terminal") != "Pass":
@@ -17027,7 +17626,7 @@ def v2_build_source_document(
     )
 
 
-def v2_snapshot_from_source(source: Mapping[str, Any]) -> LiveSnapshot:
+def v2_snapshot_from_source(source: Mapping[str, Any]) -> Any:
     captured = source.get("captured")
     if not isinstance(captured, dict):
         raise EvidenceFailed("source-v2 lacks captured reconstruction inputs")
@@ -17058,13 +17657,13 @@ def v2_snapshot_from_source(source: Mapping[str, Any]) -> LiveSnapshot:
     ]
     if len(selected) != len(v1_inventory.get("rows", [])):
         raise EvidenceFailed("source-v2 captured inventory loses full issue rows")
-    return LiveSnapshot(
-        captured["v1_lint_projection"],
-        selected,
-        captured["observation"],
-        v1_inventory,
-        {},
-        tuple(all_issues),
+    return V2RetainedSnapshot(
+        lint=captured["v1_lint_projection"],
+        issues=selected,
+        source=captured["observation"],
+        inventory=v1_inventory,
+        plan={},
+        all_issues=tuple(all_issues),
     )
 
 
@@ -17246,13 +17845,16 @@ def v2_validate_receipt_authority_identities(
     *,
     target_id: str,
 ) -> None:
+    if type(receipt) is not dict:
+        raise InputRefused("review receipt authority row is not an exact object")
     for field_name in V2_AUTHORITY_IDENTITY_FIELDS:
-        value = receipt.get(field_name)
+        value = dict.get(receipt, field_name)
         if (
-            not isinstance(value, str)
-            or value != value.strip()
+            type(value) is not str
+            or value != str.strip(value)
             or value != unicodedata.normalize("NFC", value)
-            or len(value.encode("utf-8")) > V2_AUTHORITY_IDENTITY_BYTES_CAP
+            or len(str.encode(value, "utf-8"))
+            > V2_AUTHORITY_IDENTITY_BYTES_CAP
             or any(
                 unicodedata.category(character) in {"Cc", "Cf", "Cs"}
                 for character in value
@@ -17283,10 +17885,15 @@ def v2_validate_receipt_authority_identities(
     }
     for field_name in V2_AUTHORITY_IDENTITY_FIELDS:
         value = receipt[field_name]
-        compatibility_normalized = unicodedata.normalize(
-            "NFKC",
+        compatibility_normalized = v2_exact_normalized_casefold(
             value,
-        ).casefold()
+            normalization="NFKC",
+            label=(
+                "review receipt authority identity "
+                f"{target_id}: {field_name}"
+            ),
+            error_type=InputRefused,
+        )
         normalized_presence = "".join(
             character
             for character in compatibility_normalized
@@ -17654,20 +18261,25 @@ def v2_validate_compatibility_receipts(
     inventory: Mapping[str, Any],
 ) -> None:
     inventory_by_id = {row["id"]: row for row in inventory["rows"]}
-    groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    groups: dict[str, list[Mapping[str, Any]]] = {}
     for receipt in receipts.values():
         key = str(receipt.get("compatibility_key") or "")
         if key:
-            groups[key].append(receipt)
-        elif any(
-            receipt.get(field)
-            for field in (
-                "compatibility_target_ids",
-                "compatibility_receipt_root",
-                "compatibility_rationale",
-                "compatibility_falsifier",
-            )
+            if key not in groups:
+                groups[key] = []
+            list.append(groups[key], receipt)
+            continue
+        has_unkeyed_compatibility_data = False
+        for field in (
+            "compatibility_target_ids",
+            "compatibility_receipt_root",
+            "compatibility_rationale",
+            "compatibility_falsifier",
         ):
+            if receipt.get(field):
+                has_unkeyed_compatibility_data = True
+                break
+        if has_unkeyed_compatibility_data:
             raise InputRefused(
                 f"target {receipt['target_id']} has compatibility data without a key"
             )
@@ -17829,14 +18441,14 @@ def v2_validate_compatibility_target_ids(
     label: str,
     error_type: type[HarnessError] = InputRefused,
 ) -> list[str]:
-    if not isinstance(value, list):
+    if type(value) is not list:
         raise error_type(f"{label} must be an array")
     if len(value) > V2_COMPATIBILITY_TARGETS_PER_RECEIPT_CAP:
         raise error_type(f"{label} exceed their cap")
     if any(
-        not isinstance(target_id, str)
+        type(target_id) is not str
         or not target_id
-        or target_id != target_id.strip()
+        or target_id != str.strip(target_id)
         for target_id in value
     ):
         raise error_type(f"{label} are malformed")
@@ -18615,6 +19227,25 @@ def v2_derive_authority(
             V2_NORMALIZED_ROW_FIELDS,
             label=f"normalized authority row {index}",
         )
+    readiness_counts: dict[str, int] = {}
+    route_counts: dict[str, int] = {}
+    semantic_review_state_counts: dict[str, int] = {}
+    semantic_review_disposition_counts: dict[str, int] = {}
+    semantic_review_action_counts: dict[str, int] = {}
+    count_maps_and_fields = (
+        (readiness_counts, "readiness"),
+        (route_counts, "remediation_route"),
+        (semantic_review_state_counts, "semantic_review_receipt_state"),
+        (
+            semantic_review_disposition_counts,
+            "semantic_review_disposition",
+        ),
+        (semantic_review_action_counts, "semantic_review_action"),
+    )
+    for row in decisions:
+        for count_map, field_name in count_maps_and_fields:
+            field_value = row[field_name]
+            count_map[field_value] = dict.get(count_map, field_value, 0) + 1
     document = {
         "schema": V2_AUTHORITY_SCHEMA,
         "inventory_root": inventory["semantic_root"],
@@ -18628,41 +19259,27 @@ def v2_derive_authority(
         "decisions": decisions,
         "normalized_rows": normalized_rows,
         "counts": {
-            "readiness": dict(
-                sorted(Counter(row["readiness"] for row in decisions).items())
-            ),
-            "routes": dict(
-                sorted(
-                    Counter(row["remediation_route"] for row in decisions).items()
-                )
-            ),
+            "readiness": {
+                key: readiness_counts[key] for key in sorted(readiness_counts)
+            },
+            "routes": {
+                key: route_counts[key] for key in sorted(route_counts)
+            },
             "active_conflicts": sum(
                 bool(row["active_work_context"]["conflict"]) for row in decisions
             ),
-            "semantic_review_states": dict(
-                sorted(
-                    Counter(
-                        row["semantic_review_receipt_state"]
-                        for row in decisions
-                    ).items()
-                )
-            ),
-            "semantic_review_dispositions": dict(
-                sorted(
-                    Counter(
-                        row["semantic_review_disposition"]
-                        for row in decisions
-                    ).items()
-                )
-            ),
-            "semantic_review_actions": dict(
-                sorted(
-                    Counter(
-                        row["semantic_review_action"]
-                        for row in decisions
-                    ).items()
-                )
-            ),
+            "semantic_review_states": {
+                key: semantic_review_state_counts[key]
+                for key in sorted(semantic_review_state_counts)
+            },
+            "semantic_review_dispositions": {
+                key: semantic_review_disposition_counts[key]
+                for key in sorted(semantic_review_disposition_counts)
+            },
+            "semantic_review_actions": {
+                key: semantic_review_action_counts[key]
+                for key in sorted(semantic_review_action_counts)
+            },
         },
         "no_claim": (
             "self-report, assignment, labels, and repository data cannot mint "
@@ -18823,36 +19440,37 @@ def v2_exact_partition(
     count = len(ordered)
     if count > V2_EXACT_OPTIMALITY_MAX_TARGETS:
         raise EvidenceFailed("exact partition called above its frozen target cutoff")
-    feasible_masks: dict[int, list[int]] = defaultdict(list)
+    feasible_masks: dict[int, list[int]] = {}
     for mask in range(1, 1 << count):
         selected = [ordered[index] for index in range(count) if mask & (1 << index)]
         if v2_bin_feasible(selected, max_targets=max_targets):
             pivot = (mask & -mask).bit_length() - 1
-            feasible_masks[pivot].append(mask)
+            if pivot not in feasible_masks:
+                feasible_masks[pivot] = []
+            list.append(feasible_masks[pivot], mask)
     memo: dict[int, list[list[tuple[Mapping[str, Any], Mapping[str, Any]]]]] = {
         0: []
     }
-
-    def solve(mask: int) -> list[list[tuple[Mapping[str, Any], Mapping[str, Any]]]]:
-        if mask in memo:
-            return memo[mask]
+    for mask in range(1, 1 << count):
         pivot = (mask & -mask).bit_length() - 1
         best: list[list[tuple[Mapping[str, Any], Mapping[str, Any]]]] | None = None
-        for subset in feasible_masks[pivot]:
+        for subset in dict.get(feasible_masks, pivot, ()):
             if subset & mask != subset:
                 continue
             selected = [
                 ordered[index] for index in range(count) if subset & (1 << index)
             ]
-            candidate = [selected, *solve(mask ^ subset)]
+            # Every candidate removes a non-empty subset from ``mask``, so its
+            # remainder has already been solved by this ascending-mask dynamic
+            # program.  This is the same recurrence and first-winner tie rule
+            # as the former recursive closure, without hidden closure state.
+            candidate = [selected, *memo[mask ^ subset]]
             if best is None or v2_partition_objective(candidate) < v2_partition_objective(best):
                 best = candidate
         if best is None:
             raise EvidenceFailed("no feasible exact review partition exists")
         memo[mask] = best
-        return best
-
-    return solve((1 << count) - 1)
+    return memo[(1 << count) - 1]
 
 
 def v2_large_partition(
@@ -19133,7 +19751,6 @@ def v2_child_text(
 def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
     if not isinstance(child, dict):
         raise EvidenceFailed("planned child is not an object")
-    root_pattern = re.compile(r"sha256-v1:[0-9a-f]{64}")
     v2_exact_keys(
         child,
         V2_PLANNED_CHILD_FIELDS,
@@ -19168,11 +19785,16 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         "conditional_write_receipt_root",
         "conditional_write_verdict",
     )
-    if any(
-        not isinstance(child[field], list)
-        or len(child[field]) != target_count
-        for field in target_indexed_fields
-    ):
+    target_indexed_cardinality_differs = False
+    for field in target_indexed_fields:
+        indexed_value = child[field]
+        if (
+            not isinstance(indexed_value, list)
+            or len(indexed_value) != target_count
+        ):
+            target_indexed_cardinality_differs = True
+            break
+    if target_indexed_cardinality_differs:
         raise EvidenceFailed(
             "planned child target-indexed collection cardinality differs"
         )
@@ -19193,14 +19815,20 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         "responsibility_assignments",
         "authority_decision_roots",
     )
-    if (
-        not isinstance(key_inputs_preflight, dict)
-        or any(
-            not isinstance(key_inputs_preflight.get(field), list)
-            or len(key_inputs_preflight[field]) != target_count
-            for field in key_input_target_fields
-        )
-    ):
+    key_input_cardinality_differs = not isinstance(
+        key_inputs_preflight,
+        dict,
+    )
+    if not key_input_cardinality_differs:
+        for field in key_input_target_fields:
+            indexed_value = key_inputs_preflight.get(field)
+            if (
+                not isinstance(indexed_value, list)
+                or len(indexed_value) != target_count
+            ):
+                key_input_cardinality_differs = True
+                break
+    if key_input_cardinality_differs:
         raise EvidenceFailed(
             "planned child external identity collection cardinality differs"
         )
@@ -19272,7 +19900,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         or child["disposition_workflow"]
         not in {*DISPOSITIONS, "OVERSIZE_REVIEW_REQUIRED"}
         or child["no_claim"] != V2_PLANNED_CHILD_NO_CLAIM
-        or root_pattern.fullmatch(child["packing_witness_root"]) is None
+        or not v2_is_semantic_root(child["packing_witness_root"])
     ):
         raise EvidenceFailed("planned child scalar or enum contract differs")
     description = child["description_file_artifact"]
@@ -19333,33 +19961,40 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
     ):
         raise EvidenceFailed("planned child review-minute aliases disagree")
     target_roots = child["target_roots"]
-    if (
+    target_roots_malformed = (
         not isinstance(target_roots, list)
         or len(target_roots) != len(target_ids)
-        or not all(
-            isinstance(value, str)
-            and root_pattern.fullmatch(value) is not None
-            for value in target_roots
-        )
+    )
+    if not target_roots_malformed:
+        for value in target_roots:
+            if not v2_is_semantic_root(value):
+                target_roots_malformed = True
+                break
+    if (
+        target_roots_malformed
         or len(target_roots) != len(set(target_roots))
     ):
         raise EvidenceFailed("planned child target membership or roots are malformed")
     dependency_snapshot = child["source_dependency_snapshot"]
-    if (
+    dependency_snapshot_malformed = (
         not isinstance(dependency_snapshot, list)
         or len(dependency_snapshot) != len(target_ids)
-        or not all(isinstance(row, dict) for row in dependency_snapshot)
-        or any(
-            set(row)
-            != {"target_id", "dependency_neighborhood_root"}
-            or not isinstance(row["target_id"], str)
-            or not isinstance(row["dependency_neighborhood_root"], str)
-            or root_pattern.fullmatch(
-                row["dependency_neighborhood_root"]
-            )
-            is None
-            for row in dependency_snapshot
-        )
+    )
+    if not dependency_snapshot_malformed:
+        for row in dependency_snapshot:
+            if (
+                not isinstance(row, dict)
+                or set(row)
+                != {"target_id", "dependency_neighborhood_root"}
+                or not isinstance(row["target_id"], str)
+                or not v2_is_semantic_root(
+                    row["dependency_neighborhood_root"]
+                )
+            ):
+                dependency_snapshot_malformed = True
+                break
+    if (
+        dependency_snapshot_malformed
         or [row["target_id"] for row in dependency_snapshot] != target_ids
     ):
         raise EvidenceFailed(
@@ -19413,11 +20048,20 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         expected_fields: set[str],
     ) -> list[Mapping[str, Any]]:
         rows = child[field]
-        if (
+        rows_malformed = (
             not isinstance(rows, list)
             or len(rows) != len(target_ids)
-            or not all(isinstance(row, dict) for row in rows)
-            or any(set(row) != expected_fields for row in rows)
+        )
+        if not rows_malformed:
+            for row in rows:
+                if (
+                    not isinstance(row, dict)
+                    or set(row) != expected_fields
+                ):
+                    rows_malformed = True
+                    break
+        if (
+            rows_malformed
             or [row["target_id"] for row in rows] != target_ids
         ):
             raise EvidenceFailed(
@@ -19443,16 +20087,21 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         },
     )
     for row in responsibility_rows:
-        if any(
-            not isinstance(row[field], str)
-            or not row[field]
-            or row[field] != row[field].strip()
-            for field in (
-                "implementation_owner",
-                "evidence_owner",
-                "terminal_consumer",
-            )
+        assignment_is_noncanonical = False
+        for field in (
+            "implementation_owner",
+            "evidence_owner",
+            "terminal_consumer",
         ):
+            value = row[field]
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+            ):
+                assignment_is_noncanonical = True
+                break
+        if assignment_is_noncanonical:
             raise EvidenceFailed(
                 "planned child responsibility assignment is noncanonical"
             )
@@ -19466,8 +20115,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         if (
             semantic_receipt_root is not None
             and (
-                not isinstance(semantic_receipt_root, str)
-                or root_pattern.fullmatch(semantic_receipt_root) is None
+                not v2_is_semantic_root(semantic_receipt_root)
             )
         ):
             raise EvidenceFailed(
@@ -19476,8 +20124,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         if (
             no_change_root is not None
             and (
-                not isinstance(no_change_root, str)
-                or root_pattern.fullmatch(no_change_root) is None
+                not v2_is_semantic_root(no_change_root)
             )
         ):
             raise EvidenceFailed(
@@ -19563,8 +20210,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             or not isinstance(external["receipt_root"], str)
             or (
                 external["receipt_root"] != ""
-                and root_pattern.fullmatch(external["receipt_root"])
-                is None
+                and not v2_is_semantic_root(external["receipt_root"])
             )
             or conditional["receipt_root"]
             != conditional_root_rows[index]["receipt_root"]
@@ -19585,8 +20231,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
             or not isinstance(conditional["receipt_root"], str)
             or (
                 conditional["receipt_root"] != ""
-                and root_pattern.fullmatch(conditional["receipt_root"])
-                is None
+                and not v2_is_semantic_root(conditional["receipt_root"])
             )
             or not all(
                 isinstance(external[field], str)
@@ -19639,10 +20284,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         or type(compatibility["target_complete"]) is not bool
         or (
             compatibility["receipt_root"] != ""
-            and root_pattern.fullmatch(
-                compatibility["receipt_root"]
-            )
-            is None
+            and not v2_is_semantic_root(compatibility["receipt_root"])
         )
     ):
         raise EvidenceFailed("planned child compatibility scalars are malformed")
@@ -19652,22 +20294,20 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         error_type=EvidenceFailed,
     )
     if compatibility["target_complete"]:
+        compatibility_text_is_incomplete = False
+        for field in (
+            "key",
+            "receipt_root",
+            "rationale",
+            "falsifier",
+        ):
+            value = compatibility[field]
+            if not value or value != value.strip():
+                compatibility_text_is_incomplete = True
+                break
         if (
-            any(
-                not compatibility[field]
-                or compatibility[field]
-                != compatibility[field].strip()
-                for field in (
-                    "key",
-                    "receipt_root",
-                    "rationale",
-                    "falsifier",
-                )
-            )
-            or root_pattern.fullmatch(
-                compatibility["receipt_root"]
-            )
-            is None
+            compatibility_text_is_incomplete
+            or not v2_is_semantic_root(compatibility["receipt_root"])
             or not set(target_ids).issubset(
                 compatibility_target_ids
             )
@@ -19738,22 +20378,32 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         label="planned child external identity inputs",
     )
     decision_roots = key_inputs["authority_decision_roots"]
-    if (
+    decision_roots_malformed = (
         not isinstance(decision_roots, list)
         or len(decision_roots) != len(target_ids)
-        or not all(isinstance(row, dict) for row in decision_roots)
-        or any(
-            set(row) != {"target_id", "decision_root"}
-            or not isinstance(row["target_id"], str)
-            or not isinstance(row["decision_root"], str)
-            or root_pattern.fullmatch(row["decision_root"]) is None
-            for row in decision_roots
-        )
+    )
+    if not decision_roots_malformed:
+        for row in decision_roots:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"target_id", "decision_root"}
+                or not isinstance(row["target_id"], str)
+                or not v2_is_semantic_root(row["decision_root"])
+            ):
+                decision_roots_malformed = True
+                break
+    if (
+        decision_roots_malformed
         or [row["target_id"] for row in decision_roots] != target_ids
     ):
         raise EvidenceFailed(
             "planned child authority-decision identity roots are malformed"
         )
+    key_inputs_root = semantic_root(key_inputs)
+    v2_require_semantic_root(
+        key_inputs_root,
+        label="planned child external identity inputs root",
+    )
     if (
         child["external_ref"] != f"fs-template-hygiene:v2:{child_key}"
         or key_inputs["lane_parent"] != child["lane_parent"]
@@ -19772,7 +20422,7 @@ def v2_validate_child_payload(child: Mapping[str, Any]) -> None:
         != child["responsibility_assignments"]
         or key_inputs["desired_status"] != child["desired_status"]
         or key_inputs["compatibility"] != compatibility
-        or semantic_root(key_inputs).split(":", 1)[1] != child_key
+        or key_inputs_root[10:] != child_key
     ):
         raise EvidenceFailed("planned child external identity inputs disagree")
 
@@ -19884,7 +20534,12 @@ def v2_make_child(
         ],
         "compatibility": compatibility,
     }
-    child_key = semantic_root(stable_key_inputs).split(":", 1)[1]
+    stable_key_inputs_root = semantic_root(stable_key_inputs)
+    v2_require_semantic_root(
+        stable_key_inputs_root,
+        label="planned child stable external identity inputs root",
+    )
+    child_key = stable_key_inputs_root[10:]
     actual_review_minutes = sum(
         int(authority["review_minutes"]) for authority in ordered_authorities
     )
@@ -20108,9 +20763,10 @@ _v2_child_transport_cache: OrderedDict[
     tuple[Any, ...],
     dict[str, int],
 ] = OrderedDict()
+_v2_child_transport_cache_lock = threading.RLock()
 
 
-def v2_child_transport_observations(
+def _v2_child_transport_observations_locked(
     rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
     *,
     oversize: bool = False,
@@ -20172,6 +20828,20 @@ def v2_child_transport_observations(
     ):
         _v2_child_transport_cache.popitem(last=False)
     return observations
+
+
+def v2_child_transport_observations(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    *,
+    oversize: bool = False,
+    oversize_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
+    with _v2_child_transport_cache_lock:
+        return _v2_child_transport_observations_locked(
+            rows,
+            oversize=oversize,
+            oversize_artifact=oversize_artifact,
+        )
 
 
 def v2_child_transport_violations(
@@ -20272,6 +20942,154 @@ def v2_partition_transport_constraint_root(
     )
 
 
+def v2_independent_membership_load(
+    membership: Sequence[str],
+    load_by_id: Mapping[str, tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    review_minutes = 0
+    retained_payload_bytes = 0
+    for target_id in membership:
+        load_vector = load_by_id[target_id]
+        review_minutes += load_vector[0]
+        retained_payload_bytes += load_vector[1]
+    return review_minutes, retained_payload_bytes, len(membership)
+
+
+def v2_independent_partition_objective(
+    partition: Sequence[Sequence[str]],
+    load_by_id: Mapping[str, tuple[int, int, int]],
+) -> tuple[Any, ...]:
+    loads: list[tuple[int, int, int]] = []
+    memberships: list[tuple[str, ...]] = []
+    for membership in partition:
+        load_vector = v2_independent_membership_load(
+            membership,
+            load_by_id,
+        )
+        loads.append(load_vector)
+        memberships.append(tuple(sorted(membership)))
+    if loads:
+        maximum_review_minutes = loads[0][0]
+        maximum_retained_payload_bytes = loads[0][1]
+        maximum_target_count = loads[0][2]
+        for load_vector in loads[1:]:
+            maximum_review_minutes = max(
+                maximum_review_minutes,
+                load_vector[0],
+            )
+            maximum_retained_payload_bytes = max(
+                maximum_retained_payload_bytes,
+                load_vector[1],
+            )
+            maximum_target_count = max(
+                maximum_target_count,
+                load_vector[2],
+            )
+    else:
+        maximum_review_minutes = 0
+        maximum_retained_payload_bytes = 0
+        maximum_target_count = 0
+    return (
+        len(partition),
+        maximum_review_minutes,
+        maximum_retained_payload_bytes,
+        maximum_target_count,
+        tuple(sorted(loads, reverse=True)),
+        tuple(sorted(memberships)),
+    )
+
+
+def v2_independent_objective_document(
+    partition: Sequence[Sequence[str]],
+    load_by_id: Mapping[str, tuple[int, int, int]],
+) -> dict[str, Any]:
+    key = v2_independent_partition_objective(partition, load_by_id)
+    descending_load_vectors: list[list[int]] = []
+    for value in key[4]:
+        descending_load_vectors.append(list(value))
+    lexicographic_memberships: list[list[str]] = []
+    for value in key[5]:
+        lexicographic_memberships.append(list(value))
+    return {
+        "child_count": key[0],
+        "maximum_review_minutes": key[1],
+        "maximum_retained_payload_bytes": key[2],
+        "maximum_target_count": key[3],
+        "descending_load_vectors": descending_load_vectors,
+        "lexicographic_memberships": lexicographic_memberships,
+    }
+
+
+def v2_independent_exact_optimum(
+    *,
+    expected_ids: Sequence[str],
+    load_by_id: Mapping[str, tuple[int, int, int]],
+    row_by_id: Mapping[
+        str,
+        tuple[Mapping[str, Any], Mapping[str, Any]],
+    ],
+    max_targets: int,
+) -> tuple[tuple[str, ...], ...]:
+    count = len(expected_ids)
+    feasible_masks: dict[int, list[int]] = {}
+    for mask in range(1, 1 << count):
+        membership: list[str] = []
+        selected_rows: list[
+            tuple[Mapping[str, Any], Mapping[str, Any]]
+        ] = []
+        for index in range(count):
+            if mask & (1 << index):
+                target_id = expected_ids[index]
+                membership.append(target_id)
+                selected_rows.append(row_by_id[target_id])
+        minutes, retained_bytes, target_count = (
+            v2_independent_membership_load(membership, load_by_id)
+        )
+        if (
+            target_count <= max_targets
+            and minutes <= V2_REVIEW_MINUTES_CAP
+            and retained_bytes <= V2_CHILD_PAYLOAD_CAP
+            and v2_bin_feasible(
+                selected_rows,
+                max_targets=max_targets,
+            )
+        ):
+            pivot = (mask & -mask).bit_length() - 1
+            if pivot not in feasible_masks:
+                feasible_masks[pivot] = []
+            list.append(feasible_masks[pivot], mask)
+
+    memo: dict[int, tuple[tuple[str, ...], ...]] = {0: ()}
+    for mask in range(1, 1 << count):
+        pivot = (mask & -mask).bit_length() - 1
+        best: tuple[tuple[str, ...], ...] | None = None
+        best_key: tuple[Any, ...] | None = None
+        for subset in dict.get(feasible_masks, pivot, ()):
+            if subset & mask != subset:
+                continue
+            membership_values: list[str] = []
+            for index in range(count):
+                if subset & (1 << index):
+                    membership_values.append(expected_ids[index])
+            membership = tuple(membership_values)
+            candidate = tuple(
+                sorted((membership, *memo[mask ^ subset]))
+            )
+            candidate_key = v2_independent_partition_objective(
+                candidate,
+                load_by_id,
+            )
+            if best_key is None or candidate_key < best_key:
+                best = candidate
+                best_key = candidate_key
+        if best is None:
+            raise EvidenceFailed(
+                "independent exact verifier found no feasible partition"
+            )
+        memo[mask] = best
+    return memo[(1 << count) - 1]
+
+
 def v2_verify_packing_witness_independent(
     *,
     rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
@@ -20287,24 +21105,30 @@ def v2_verify_packing_witness_independent(
         or witness.get("ordered_load_rows_root") != ordered_load_rows_root
     ):
         raise EvidenceFailed("packing witness input bindings differ")
-    load_by_id = {
-        str(target["id"]): (
+    load_by_id: dict[str, tuple[int, int, int]] = {}
+    row_by_id: dict[
+        str,
+        tuple[Mapping[str, Any], Mapping[str, Any]],
+    ] = {}
+    for target, authority in rows:
+        target_id = str(target["id"])
+        load_by_id[target_id] = (
             int(authority["review_minutes"]),
             int(target["retained_payload_bytes"]),
             1,
         )
-        for target, authority in rows
-    }
-    row_by_id = {
-        str(target["id"]): (target, authority)
-        for target, authority in rows
-    }
+        row_by_id[target_id] = (target, authority)
     expected_ids = sorted(load_by_id)
-    memberships = sorted(
-        sorted(str(value) for value in child["target_ids"])
-        for child in grouped_children
-    )
-    flattened = [target_id for group in memberships for target_id in group]
+    memberships: list[list[str]] = []
+    for child in grouped_children:
+        membership: list[str] = []
+        for value in child["target_ids"]:
+            membership.append(str(value))
+        memberships.append(sorted(membership))
+    memberships.sort()
+    flattened: list[str] = []
+    for membership in memberships:
+        flattened.extend(membership)
     if (
         sorted(flattened) != expected_ids
         or len(flattened) != len(set(flattened))
@@ -20314,59 +21138,34 @@ def v2_verify_packing_witness_independent(
             f"expected={expected_ids!r} observed={memberships!r}"
         )
 
-    def load(membership: Sequence[str]) -> tuple[int, int, int]:
-        return (
-            sum(load_by_id[target_id][0] for target_id in membership),
-            sum(load_by_id[target_id][1] for target_id in membership),
-            len(membership),
-        )
-
-    def objective_key(
-        partition: Sequence[Sequence[str]],
-    ) -> tuple[Any, ...]:
-        loads = [load(membership) for membership in partition]
-        return (
-            len(partition),
-            max((value[0] for value in loads), default=0),
-            max((value[1] for value in loads), default=0),
-            max((value[2] for value in loads), default=0),
-            tuple(sorted(loads, reverse=True)),
-            tuple(
-                sorted(tuple(sorted(membership)) for membership in partition)
-            ),
-        )
-
-    def objective_document(
-        partition: Sequence[Sequence[str]],
-    ) -> dict[str, Any]:
-        key = objective_key(partition)
-        return {
-            "child_count": key[0],
-            "maximum_review_minutes": key[1],
-            "maximum_retained_payload_bytes": key[2],
-            "maximum_target_count": key[3],
-            "descending_load_vectors": [
-                list(value) for value in key[4]
-            ],
-            "lexicographic_memberships": [
-                list(value) for value in key[5]
-            ],
-        }
-
+    partition_rows: list[
+        list[tuple[Mapping[str, Any], Mapping[str, Any]]]
+    ] = []
     for membership in memberships:
-        minutes, retained_bytes, target_count = load(membership)
+        minutes, retained_bytes, target_count = (
+            v2_independent_membership_load(membership, load_by_id)
+        )
+        selected_rows: list[
+            tuple[Mapping[str, Any], Mapping[str, Any]]
+        ] = []
+        for target_id in membership:
+            selected_rows.append(row_by_id[target_id])
+        partition_rows.append(selected_rows)
         if (
             not membership
             or target_count > max_targets
             or minutes > V2_REVIEW_MINUTES_CAP
             or retained_bytes > V2_CHILD_PAYLOAD_CAP
             or not v2_bin_feasible(
-                [row_by_id[target_id] for target_id in membership],
+                selected_rows,
                 max_targets=max_targets,
             )
         ):
             raise EvidenceFailed("packing witness contains an infeasible child")
-    observed_objective = objective_document(memberships)
+    observed_objective = v2_independent_objective_document(
+        memberships,
+        load_by_id,
+    )
     algorithm = witness.get("algorithm")
     if algorithm == "EXACT_SUBSET_PARTITION":
         v2_exact_keys(
@@ -20393,13 +21192,7 @@ def v2_verify_packing_witness_independent(
             or witness["exact_optimality_claim"] is not True
             or witness["transport_constraint_root"]
             != v2_partition_transport_constraint_root(
-                [
-                    [
-                        row_by_id[target_id]
-                        for target_id in membership
-                    ]
-                    for membership in memberships
-                ]
+                partition_rows
             )
             or witness["max_targets_per_child"] != max_targets
             or not isinstance(witness["rationale"], str)
@@ -20408,59 +21201,15 @@ def v2_verify_packing_witness_independent(
             or not witness["falsifier"]
         ):
             raise EvidenceFailed("exact packing witness scalar contract differs")
-        count = len(expected_ids)
-        feasible_masks: dict[int, list[int]] = defaultdict(list)
-        for mask in range(1, 1 << count):
-            membership = [
-                expected_ids[index]
-                for index in range(count)
-                if mask & (1 << index)
-            ]
-            minutes, retained_bytes, target_count = load(membership)
-            if (
-                target_count <= max_targets
-                and minutes <= V2_REVIEW_MINUTES_CAP
-                and retained_bytes <= V2_CHILD_PAYLOAD_CAP
-                and v2_bin_feasible(
-                    [row_by_id[target_id] for target_id in membership],
-                    max_targets=max_targets,
-                )
-            ):
-                pivot = (mask & -mask).bit_length() - 1
-                feasible_masks[pivot].append(mask)
-        memo: dict[int, tuple[tuple[str, ...], ...]] = {0: ()}
-
-        def solve(mask: int) -> tuple[tuple[str, ...], ...]:
-            if mask in memo:
-                return memo[mask]
-            pivot = (mask & -mask).bit_length() - 1
-            best: tuple[tuple[str, ...], ...] | None = None
-            best_key: tuple[Any, ...] | None = None
-            for subset in feasible_masks[pivot]:
-                if subset & mask != subset:
-                    continue
-                membership = tuple(
-                    expected_ids[index]
-                    for index in range(count)
-                    if subset & (1 << index)
-                )
-                candidate = tuple(
-                    sorted((membership, *solve(mask ^ subset)))
-                )
-                candidate_key = objective_key(candidate)
-                if best_key is None or candidate_key < best_key:
-                    best = candidate
-                    best_key = candidate_key
-            if best is None:
-                raise EvidenceFailed(
-                    "independent exact verifier found no feasible partition"
-                )
-            memo[mask] = best
-            return best
-
-        optimum = solve((1 << count) - 1)
+        optimum = v2_independent_exact_optimum(
+            expected_ids=expected_ids,
+            load_by_id=load_by_id,
+            row_by_id=row_by_id,
+            max_targets=max_targets,
+        )
         if (
-            objective_key(memberships) != objective_key(optimum)
+            v2_independent_partition_objective(memberships, load_by_id)
+            != v2_independent_partition_objective(optimum, load_by_id)
             or witness["objective"] != observed_objective
         ):
             raise EvidenceFailed(
@@ -20489,8 +21238,11 @@ def v2_verify_packing_witness_independent(
             },
             label="large packing witness",
         )
-        total_minutes = sum(value[0] for value in load_by_id.values())
-        total_bytes = sum(value[1] for value in load_by_id.values())
+        total_minutes = 0
+        total_bytes = 0
+        for value in load_by_id.values():
+            total_minutes += value[0]
+            total_bytes += value[1]
         lower_bound_vector = {
             "targets": math.ceil(len(expected_ids) / max_targets),
             "review_minutes": math.ceil(
@@ -20519,13 +21271,7 @@ def v2_verify_packing_witness_independent(
             or witness["lower_bound_vector"] != lower_bound_vector
             or witness["transport_constraint_root"]
             != v2_partition_transport_constraint_root(
-                [
-                    [
-                        row_by_id[target_id]
-                        for target_id in membership
-                    ]
-                    for membership in memberships
-                ]
+                partition_rows
             )
             or witness["lower_bound_children"] != lower_bound
             or witness["observed_children"] != observed_children
@@ -20535,7 +21281,7 @@ def v2_verify_packing_witness_independent(
             or witness["exact_optimality_claim"] is not False
             or witness["max_targets_per_child"] != max_targets
             or gap < 0
-            or any(value < 0 for value in expected_gap.values())
+            or min(expected_gap.values()) < 0
             or not isinstance(witness["rationale"], str)
             or not witness["rationale"]
             or not isinstance(witness["falsifier"], str)
@@ -20550,32 +21296,52 @@ def v2_review_plan_universe(
     inventory: Mapping[str, Any],
     authority: Mapping[str, Any],
 ) -> tuple[dict[str, Mapping[str, Any]], dict[str, Mapping[str, Any]]]:
+    if type(inventory) is not dict or type(authority) is not dict:
+        raise EvidenceFailed(
+            "v2 review-plan inventory and authority roots must be exact objects"
+        )
+    inventory_rows = dict.get(inventory, "rows")
+    authority_decisions = dict.get(authority, "decisions")
+    if type(inventory_rows) is not list or type(authority_decisions) is not list:
+        raise EvidenceFailed(
+            "v2 review-plan inventory rows and authority decisions must be arrays"
+        )
+    if any(type(row) is not dict for row in inventory_rows) or any(
+        type(row) is not dict for row in authority_decisions
+    ):
+        raise EvidenceFailed(
+            "v2 review-plan inventory rows and authority decisions must contain "
+            "exact objects"
+        )
     upstream_targets = {
         row["id"]: row
-        for row in inventory["rows"]
+        for row in inventory_rows
         if row["status"] != "closed"
     }
     upstream_authority = {
         row["target_id"]: row
-        for row in authority["decisions"]
+        for row in authority_decisions
         if row["target_id"] in upstream_targets
     }
     if set(upstream_authority) != set(upstream_targets):
         raise EvidenceFailed(
             "v2 review-plan lacks an authority decision for its upstream universe"
         )
-    filters = inventory.get("filters")
-    if not isinstance(filters, dict):
+    filters = dict.get(inventory, "filters")
+    if type(filters) is not dict:
         raise EvidenceFailed("v2 review-plan inventory filters are malformed")
-    readiness = set(filters.get("readiness") or [])
-    routes = set(filters.get("routes") or [])
+    readiness = set(dict.get(filters, "readiness") or [])
+    routes = set(dict.get(filters, "routes") or [])
     selected_ids = sorted(
         target_id
-        for target_id, decision in upstream_authority.items()
-        if (not readiness or decision["readiness"] in readiness)
+        for target_id in upstream_authority
+        if (
+            not readiness
+            or upstream_authority[target_id]["readiness"] in readiness
+        )
         and (
             not routes
-            or decision["remediation_route"] in routes
+            or upstream_authority[target_id]["remediation_route"] in routes
         )
     )
     return (
@@ -20844,14 +21610,16 @@ def v2_validate_review_plan(
         != len(expected_remediation)
     ):
         raise EvidenceFailed("v2 review-plan target counts disagree with membership")
-    children_by_witness: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    children_by_witness: dict[str, list[Mapping[str, Any]]] = {}
     for child in children:
         witness_root = str(child["packing_witness_root"])
         if witness_root not in witness_by_root:
             raise EvidenceFailed(
                 "v2 review-plan child references an unknown packing witness"
             )
-        children_by_witness[witness_root].append(child)
+        if witness_root not in children_by_witness:
+            children_by_witness[witness_root] = []
+        list.append(children_by_witness[witness_root], child)
     if set(children_by_witness) != set(witness_by_root):
         raise EvidenceFailed("v2 review-plan retains an unused packing witness")
     max_targets = review_plan.get("max_targets_per_child")
@@ -20861,7 +21629,7 @@ def v2_validate_review_plan(
     ):
         raise EvidenceFailed("v2 review-plan target cap is malformed")
     oversize_by_target: dict[str, Mapping[str, Any]] = {}
-    oversize_paths: set[str] = set()
+    oversize_paths: dict[str, None] = {}
     for index, entry in enumerate(oversize_content):
         if not isinstance(entry, dict):
             raise EvidenceFailed(
@@ -20900,9 +21668,14 @@ def v2_validate_review_plan(
                 label=f"v2 review-plan oversize row {index}",
             )
         )
+        target_root_text = target_root
+        if V2_SEMANTIC_ROOT_PATTERN.fullmatch(target_root_text) is None:
+            raise EvidenceFailed(
+                f"v2 review-plan oversize row {index} target root is malformed"
+            )
         expected_relative = (
             "oversize/"
-            f"{str(target_root).split(':', 1)[-1]}.json"
+            f"{target_root_text[len('sha256-v1:'):]}.json"
         )
         if (
             target_root in oversize_by_target
@@ -20930,7 +21703,7 @@ def v2_validate_review_plan(
                 f"v2 review-plan oversize row {index} differs from its target"
             )
         oversize_by_target[target_root] = entry
-        oversize_paths.add(relative)
+        oversize_paths[relative] = None
     expected_oversize_roots = {
         target_by_id[target_id]["target_root"]
         for target_id in expected_scheduled_ids
@@ -20988,7 +21761,7 @@ def v2_validate_review_plan(
                     "v2 oversize witness membership or disposition disagrees"
                 )
             target_root = target_by_id[grouped_ids[0]]["target_root"]
-            entry = oversize_by_target.get(target_root)
+            entry = dict.get(oversize_by_target, target_root)
             oversize_rows = [
                 (
                     target_by_id[grouped_ids[0]],
@@ -21004,14 +21777,17 @@ def v2_validate_review_plan(
             )
             if (
                 entry is None
-                or witness.get("full_artifact_root")
-                != entry.get("semantic_root")
-                or witness.get("group_key_root") != group_key_root
-                or witness.get("ordered_load_rows_root")
+                or type(entry) is not dict
+                or dict.get(witness, "full_artifact_root")
+                != dict.get(entry, "semantic_root")
+                or dict.get(witness, "group_key_root") != group_key_root
+                or dict.get(witness, "ordered_load_rows_root")
                 != ordered_load_rows_root
-                or witness.get("exceeded_caps") != expected_exceeded_caps
-                or entry.get("exceeded_caps") != expected_exceeded_caps
-                or witness.get("reason")
+                or dict.get(witness, "exceeded_caps")
+                != expected_exceeded_caps
+                or dict.get(entry, "exceeded_caps")
+                != expected_exceeded_caps
+                or dict.get(witness, "reason")
                 != (
                     "single target exceeds "
                     + ", ".join(
@@ -21067,6 +21843,18 @@ def v2_validate_review_plan(
                 "v2 review-plan child differs from its exact source-derived "
                 f"projection at {divergence or '$'}"
             )
+    expected_readiness_counts: dict[str, int] = {}
+    expected_route_counts: dict[str, int] = {}
+    for target_id in authority_by_id:
+        decision = authority_by_id[target_id]
+        readiness_value = decision["readiness"]
+        route_value = decision["remediation_route"]
+        expected_readiness_counts[readiness_value] = (
+            dict.get(expected_readiness_counts, readiness_value, 0) + 1
+        )
+        expected_route_counts[route_value] = (
+            dict.get(expected_route_counts, route_value, 0) + 1
+        )
     expected_counts = {
         "targets": len(target_by_id),
         "scheduled_targets": len(expected_ids),
@@ -21075,22 +21863,14 @@ def v2_validate_review_plan(
         "remediation_candidates": len(expected_remediation),
         "children": len(children),
         "oversize_targets": len(expected_oversize_roots),
-        "readiness": dict(
-            sorted(
-                Counter(
-                    decision["readiness"]
-                    for decision in authority_by_id.values()
-                ).items()
-            )
-        ),
-        "routes": dict(
-            sorted(
-                Counter(
-                    decision["remediation_route"]
-                    for decision in authority_by_id.values()
-                ).items()
-            )
-        ),
+        "readiness": {
+            key: expected_readiness_counts[key]
+            for key in sorted(expected_readiness_counts)
+        },
+        "routes": {
+            key: expected_route_counts[key]
+            for key in sorted(expected_route_counts)
+        },
     }
     expected_work = {
         "total_review_minutes": sum(
@@ -21235,7 +22015,7 @@ def v2_oversize_exceeded_caps(
     return exceeded
 
 
-def v2_build_review_plan(
+def v2_build_review_plan_uncommitted(
     inventory: Mapping[str, Any],
     authority: Mapping[str, Any],
     *,
@@ -21305,9 +22085,10 @@ def v2_build_review_plan(
         for row in semantic_adjudications
         if row["future_corrective_materialization_eligible"]
     ]
-    groups: dict[tuple[Any, ...], list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = (
-        defaultdict(list)
-    )
+    groups: dict[
+        tuple[Any, ...],
+        list[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    ] = {}
     oversize_rows: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     for target_id in scheduled_ids:
         target = target_by_id[target_id]
@@ -21316,7 +22097,9 @@ def v2_build_review_plan(
             oversize_rows.append((target, decision))
             continue
         key = v2_packing_group_key(target, decision)
-        groups[key].append((target, decision))
+        if key not in groups:
+            groups[key] = []
+        list.append(groups[key], (target, decision))
 
     children: list[dict[str, Any]] = []
     packing_witnesses: list[dict[str, Any]] = []
@@ -21337,9 +22120,15 @@ def v2_build_review_plan(
             raise EvidenceFailed(
                 "v2 oversize routing lacks an independently exceeded cap"
             )
+        target_root_text = target["target_root"]
+        if (
+            type(target_root_text) is not str
+            or V2_SEMANTIC_ROOT_PATTERN.fullmatch(target_root_text) is None
+        ):
+            raise EvidenceFailed("v2 oversize target root is malformed")
         relative = (
             "oversize/"
-            f"{str(target['target_root']).split(':', 1)[-1]}.json"
+            f"{target_root_text[len('sha256-v1:'):]}.json"
         )
         complete_plan = {
             "target": target,
@@ -21486,22 +22275,14 @@ def v2_build_review_plan(
             "remediation_candidates": len(remediation_candidates),
             "children": len(children),
             "oversize_targets": len(oversize_rows),
-            "readiness": dict(
-                sorted(
-                    Counter(
-                        decision["readiness"]
-                        for decision in all_authority_by_id.values()
-                    ).items()
-                )
-            ),
-            "routes": dict(
-                sorted(
-                    Counter(
-                        decision["remediation_route"]
-                        for decision in all_authority_by_id.values()
-                    ).items()
-                )
-            ),
+            "readiness": dict(sorted(Counter(
+                decision["readiness"]
+                for decision in all_authority_by_id.values()
+            ).items())),
+            "routes": dict(sorted(Counter(
+                decision["remediation_route"]
+                for decision in all_authority_by_id.values()
+            ).items())),
         },
         "work": {
             "total_review_minutes": sum(
@@ -21534,6 +22315,33 @@ def v2_build_review_plan(
     rooted = v2_rooted(document)
     v2_validate_review_plan(rooted, inventory, authority)
     return rooted, oversize_payloads
+
+
+def v2_build_review_plan(
+    inventory: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    *,
+    max_targets: int,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    # Transport observations are a successful-call performance cache, not a
+    # side effect that a refused plan is allowed to retain.  Preserve both
+    # entry values and LRU order across every exceptional exit.
+    with _v2_child_transport_cache_lock:
+        prior_transport_cache: list[
+            tuple[tuple[Any, ...], dict[str, int]]
+        ] = []
+        for key, value in _v2_child_transport_cache.items():
+            prior_transport_cache.append((key, value))
+        try:
+            return v2_build_review_plan_uncommitted(
+                inventory,
+                authority,
+                max_targets=max_targets,
+            )
+        except BaseException:
+            _v2_child_transport_cache.clear()
+            _v2_child_transport_cache.update(prior_transport_cache)
+            raise
 
 
 def v2_reproduction_argv(
@@ -21630,18 +22438,23 @@ V2_SENSITIVE_COMPOUND_KEYS = frozenset(
 
 
 def v2_is_sensitive_key(value: Any) -> bool:
-    normalized = re.sub(
+    if type(value) is not str:
+        raise EvidenceFailed("sensitive-key classification requires exact text")
+    stripped_value = value.strip()
+    first_boundary_normalized = re.sub(
         r"(?<=[A-Z])(?=[A-Z][a-z])",
         "_",
-        str(value).strip(),
+        stripped_value,
     )
-    normalized = re.sub(
+    second_boundary_normalized = re.sub(
         r"(?<=[a-z0-9])(?=[A-Z])",
         "_",
-        normalized,
-    ).lower().replace("-", "_")
-    normalized = re.sub(r"\s+", "_", normalized)
-    normalized = normalized.lstrip("_")
+        first_boundary_normalized,
+    )
+    lowered = str.lower(second_boundary_normalized)
+    hyphen_normalized = str.replace(lowered, "-", "_")
+    whitespace_normalized = re.sub(r"\s+", "_", hyphen_normalized)
+    normalized = str.lstrip(whitespace_normalized, "_")
     segments = [
         segment
         for segment in re.split(r"[./:\[\]]+", normalized)
@@ -21649,24 +22462,29 @@ def v2_is_sensitive_key(value: Any) -> bool:
     ]
     if not segments:
         return False
-    def sensitive_segment(segment: str) -> bool:
-        return (
-            segment in V2_SENSITIVE_KEYS
-            or segment in V2_SENSITIVE_COMPOUND_KEYS
-            or segment.replace("_", "") in V2_SENSITIVE_COMPACT_KEYS
-            or any(
-                segment.endswith("_" + sensitive_key)
-                for sensitive_key in V2_SENSITIVE_KEYS
-            )
-            or segment.split("_")[-1]
-            in V2_SENSITIVE_KEY_TERMINALS
-            or (
-                segment.endswith("_value")
-                and sensitive_segment(segment.removesuffix("_value"))
-            )
-        )
 
-    return any(sensitive_segment(segment) for segment in segments)
+    for segment in segments:
+        candidate = segment
+        while True:
+            compact_candidate = str.replace(candidate, "_", "")
+            candidate_parts = str.split(candidate, "_")
+            sensitive_suffix = False
+            for sensitive_key in V2_SENSITIVE_KEYS:
+                if str.endswith(candidate, "_" + sensitive_key):
+                    sensitive_suffix = True
+                    break
+            if (
+                candidate in V2_SENSITIVE_KEYS
+                or candidate in V2_SENSITIVE_COMPOUND_KEYS
+                or compact_candidate in V2_SENSITIVE_COMPACT_KEYS
+                or sensitive_suffix
+                or candidate_parts[-1] in V2_SENSITIVE_KEY_TERMINALS
+            ):
+                return True
+            if not str.endswith(candidate, "_value"):
+                break
+            candidate = str.removesuffix(candidate, "_value")
+    return False
 
 
 def v2_contains_sensitive_context_start(value: str) -> bool:
@@ -21693,7 +22511,7 @@ def v2_contains_sensitive_context_start(value: str) -> bool:
                 r"(?<![A-Za-z0-9_-])"
                 r"(?P<key>--?[A-Za-z][-A-Za-z0-9_.\[\]]{0,127})\s+"
             ),
-            lambda key: v2_is_sensitive_key(key.lstrip("-")),
+            lambda key: v2_is_sensitive_key(str.lstrip(key, "-")),
         ),
         (
             re.compile(r"(?i)\b(?P<key>Bearer)\s+"),
@@ -21701,26 +22519,26 @@ def v2_contains_sensitive_context_start(value: str) -> bool:
         ),
     )
     return any(
-        sensitive_key(match.group("key"))
+        sensitive_key(re.Match.group(match, "key"))
         for pattern, sensitive_key in start_patterns
-        for match in pattern.finditer(value)
+        for match in re.Pattern.finditer(pattern, value)
     )
 
 
 def v2_is_sensitive_mapping_key(value: str) -> bool:
-    assignment_name = value.split("=", 1)[0]
+    assignment_name = str.split(value, "=", 1)[0]
     if assignment_name != value and v2_is_sensitive_key(assignment_name):
         return True
-    header_name = value.split(":", 1)[0]
+    header_name = str.split(value, ":", 1)[0]
     if header_name != value and v2_is_sensitive_key(header_name):
         return True
-    split_option = re.match(
-        r"^--?(?P<key>[A-Za-z][-A-Za-z0-9_.\[\]]{0,127})\s+",
+    split_option_keys = re.findall(
+        r"^--?([A-Za-z][-A-Za-z0-9_.\[\]]{0,127})\s+",
         value,
     )
     return v2_contains_sensitive_context_start(value) or bool(
-        split_option
-        and v2_is_sensitive_key(split_option.group("key"))
+        split_option_keys
+        and v2_is_sensitive_key(split_option_keys[0])
     ) or re.match(r"(?i)^Bearer\s+\S+", value) is not None
 
 
@@ -21749,7 +22567,11 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
     result: list[str] = []
     sensitive_value_pending = False
     for raw in argv:
-        value = str(raw)
+        if type(raw) is not str:
+            raise EvidenceFailed(
+                "v2 command receipt argument is not an exact string"
+            )
+        value = raw
         if len(value.encode("utf-8")) > V2_COMMAND_ARGUMENT_BYTES_CAP:
             raise EvidenceFailed("v2 command receipt exceeds its argument-byte cap")
         already_redacted = re.fullmatch(
@@ -21759,25 +22581,26 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
             result.append(value if already_redacted else v2_redacted_value(value))
             sensitive_value_pending = False
             continue
-        option_name = value.split("=", 1)[0]
+        option_name = str.split(value, "=", 1)[0]
         sensitive_flag = (
-            option_name.startswith("-")
+            str.startswith(option_name, "-")
             and "=" not in value
-            and v2_is_sensitive_key(option_name.lstrip("-"))
-        )
-        assignment_match = re.match(
-            r"^(?P<key>--?[A-Za-z][-A-Za-z0-9_.:\[\]]{0,127}"
-            r"|[A-Za-z_][-A-Za-z0-9_.:\[\]]{0,127})=",
-            value,
+            and v2_is_sensitive_key(str.lstrip(option_name, "-"))
         )
         assignment_key = (
-            assignment_match.group("key")
-            if assignment_match is not None
+            option_name
+            if "=" in value
+            and re.fullmatch(
+                r"(?:--?[A-Za-z][-A-Za-z0-9_.:\[\]]{0,127}"
+                r"|[A-Za-z_][-A-Za-z0-9_.:\[\]]{0,127})",
+                option_name,
+            )
+            is not None
             else ""
         )
         sensitive_assignment = bool(
             assignment_key
-            and v2_is_sensitive_key(assignment_key.lstrip("-"))
+            and v2_is_sensitive_key(str.lstrip(assignment_key, "-"))
         )
         authorization_header = bool(
             re.match(r"(?i)^(?:proxy-)?authorization\s*:", value)
@@ -21803,18 +22626,34 @@ def v2_sanitized_argv(argv: Sequence[Any]) -> list[str]:
     return result
 
 
+def v2_validate_retained_reproduction_argv(
+    value: Any,
+    *,
+    label: str,
+) -> list[str]:
+    """Validate one retained argv against the released count/byte contract."""
+    if type(value) is not list:
+        raise EvidenceFailed(f"{label} is not an exact argv array")
+    sanitized = v2_sanitized_argv(value)
+    if sanitized != value:
+        raise EvidenceFailed(f"{label} contains an unsanitized argument")
+    return value
+
+
 def v2_redact_contextual_text(value: str) -> str:
-    stripped = value.strip()
-    if stripped.startswith(("{", "[")):
+    stripped = str.strip(value)
+    if str.startswith(stripped, ("{", "[")):
         try:
             structured = json.loads(stripped)
         except (json.JSONDecodeError, UnicodeDecodeError):
             structured = None
         if isinstance(structured, (dict, list)):
-            return canonical_bytes(
+            structured_payload = canonical_bytes(
                 v2_assertion_evidence_projection(structured)
-            ).decode("utf-8").rstrip("\n")
-    text = value.replace(str(REPO_ROOT), "<repo>")
+            )
+            structured_text = bytes.decode(structured_payload, "utf-8")
+            return str.rstrip(structured_text, "\n")
+    text = str.replace(value, str(REPO_ROOT), "<repo>")
 
     authorization_header = re.compile(
         r"(?im)(?P<prefix>\b(?:Proxy-)?Authorization\s*:\s*)"
@@ -21822,9 +22661,13 @@ def v2_redact_contextual_text(value: str) -> str:
     )
 
     def redact_authorization(match: re.Match[str]) -> str:
-        return match.group("prefix") + "<redacted>"
+        return re.Match.group(match, "prefix") + "<redacted>"
 
-    text = authorization_header.sub(redact_authorization, text)
+    text = re.Pattern.sub(
+        authorization_header,
+        redact_authorization,
+        text,
+    )
 
     def redact_quoted_values(
         source: str,
@@ -21834,12 +22677,12 @@ def v2_redact_contextual_text(value: str) -> str:
     ) -> str:
         replacements: list[tuple[int, int, str]] = []
         consumed_until = -1
-        for match in start_pattern.finditer(source):
-            if match.start() < consumed_until:
+        for match in re.Pattern.finditer(start_pattern, source):
+            if re.Match.start(match) < consumed_until:
                 continue
-            if not sensitive_key(match.group("key")):
+            if not sensitive_key(re.Match.group(match, "key")):
                 continue
-            value_start = match.end()
+            value_start = re.Match.end(match)
             if (
                 value_start >= len(source)
                 or source[value_start] not in {'"', "'"}
@@ -21898,7 +22741,9 @@ def v2_redact_contextual_text(value: str) -> str:
     text = redact_quoted_values(
         text,
         split_option_start,
-        sensitive_key=lambda key: v2_is_sensitive_key(key.lstrip("-")),
+        sensitive_key=lambda key: v2_is_sensitive_key(
+            str.lstrip(key, "-")
+        ),
     )
     bearer_start = re.compile(
         r"(?i)\b(?P<key>Bearer)(?P<sep>\s+)"
@@ -21916,10 +22761,10 @@ def v2_redact_contextual_text(value: str) -> str:
         sensitive_key: Callable[[str], bool],
     ) -> list[tuple[int, int]]:
         replacements: list[tuple[int, int]] = []
-        for match in start_pattern.finditer(source):
-            if not sensitive_key(match.group("key")):
+        for match in re.Pattern.finditer(start_pattern, source):
+            if not sensitive_key(re.Match.group(match, "key")):
                 continue
-            value_start = match.end()
+            value_start = re.Match.end(match)
             if (
                 value_start >= len(source)
                 or source[value_start] in {'"', "'", "\r", "\n"}
@@ -21927,7 +22772,7 @@ def v2_redact_contextual_text(value: str) -> str:
                 continue
             line_end = len(source)
             for separator in ("\r", "\n"):
-                position = source.find(separator, value_start)
+                position = str.find(source, separator, value_start)
                 if position >= 0:
                     line_end = min(line_end, position)
             replacements.append((value_start, line_end))
@@ -21948,7 +22793,7 @@ def v2_redact_contextual_text(value: str) -> str:
             text,
             split_option_start,
             sensitive_key=lambda key: v2_is_sensitive_key(
-                key.lstrip("-")
+                str.lstrip(key, "-")
             ),
         ),
         *sensitive_line_tail_replacements(
@@ -21984,15 +22829,19 @@ def v2_redact_contextual_text(value: str) -> str:
 
 def v2_bounded_diagnostic_summary(value: Any) -> str:
     text = v2_redact_contextual_text(str(value))
-    text = " ".join(text.split())
-    encoded = text.encode("utf-8")
+    text = " ".join(str.split(text))
+    encoded = str.encode(text, "utf-8")
     if len(encoded) <= V2_DIAGNOSTIC_SUMMARY_BYTES_CAP:
         return text
     suffix = "...<truncated:" + text_root(text) + ">"
     prefix_budget = (
         V2_DIAGNOSTIC_SUMMARY_BYTES_CAP - len(suffix.encode("utf-8"))
     )
-    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    prefix = bytes.decode(
+        encoded[:prefix_budget],
+        "utf-8",
+        errors="ignore",
+    )
     return prefix + suffix
 
 
@@ -22006,7 +22855,7 @@ def v2_assertion_evidence_projection(
         raise EvidenceFailed("assertion evidence exceeds its projection depth cap")
     if sensitive:
         projection = {
-            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "type": v2_type_identity(type(value)),
             "value": v2_state_projection_value(value),
         }
         return {
@@ -22014,24 +22863,48 @@ def v2_assertion_evidence_projection(
             "content_root": "sha256-v1:"
             + hashlib.sha256(canonical_bytes(projection)).hexdigest(),
         }
-    if value is None or type(value) in {bool, int, float}:
+    if value is None or type(value) is bool:
         return value
-    if isinstance(value, str):
-        if sensitive or v2_contains_absolute_path(value):
+    if type(value) is int:
+        v2_bounded_exact_integer_text(
+            value,
+            label="assertion evidence integer",
+            error_type=EvidenceFailed,
+        )
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise EvidenceFailed(
+                "assertion evidence contains a non-finite float"
+            )
+        return value
+    if type(value) is str:
+        if v2_contains_absolute_path(value):
             return v2_redacted_value(value)
         redacted = v2_redact_contextual_text(value)
         return redacted
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        payload = value.tobytes() if isinstance(value, memoryview) else bytes(value)
+    if type(value) in {bytes, bytearray, memoryview}:
+        payload = value.tobytes() if type(value) is memoryview else bytes(value)
         return {
             "kind": "bytes",
             "byte_length": len(payload),
             "content_root": "sha256-v1:" + hashlib.sha256(payload).hexdigest(),
         }
-    if isinstance(value, Mapping):
+    if type(value) in {dict, OrderedDict, Counter}:
+        raw_items = (
+            list(dict.items(value))
+            if type(value) is dict
+            else list(OrderedDict.items(value))
+            if type(value) is OrderedDict
+            else list(Counter.items(value))
+        )
         projected: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
+        if any(type(key) is not str for key, _item in raw_items):
+            raise EvidenceFailed(
+                "assertion evidence mapping keys must be exact strings"
+            )
+        for key, item in raw_items:
+            if type(key) is not str:
                 raise EvidenceFailed(
                     "assertion evidence mapping keys must be exact strings"
                 )
@@ -22046,7 +22919,7 @@ def v2_assertion_evidence_projection(
                 and not mapping_key_sensitive
                 and not v2_contains_absolute_path(key)
                 else "<redacted-key:"
-                + hashlib.sha256(key.encode("utf-8")).hexdigest()
+                + hashlib.sha256(str.encode(key, "utf-8")).hexdigest()
                 + ">"
             )
             if projected_key in projected:
@@ -22059,29 +22932,39 @@ def v2_assertion_evidence_projection(
                 depth=depth + 1,
             )
         return projected
-    if isinstance(value, (list, tuple)):
+    if type(value) in {list, tuple}:
+        items = (
+            list.__iter__(value)
+            if type(value) is list
+            else tuple.__iter__(value)
+        )
         return [
             v2_assertion_evidence_projection(
                 item,
                 sensitive=sensitive,
                 depth=depth + 1,
             )
-            for item in value
+            for item in items
         ]
-    if isinstance(value, (set, frozenset)):
+    if type(value) in {set, frozenset}:
+        items = (
+            set.__iter__(value)
+            if type(value) is set
+            else frozenset.__iter__(value)
+        )
         projected = [
             v2_assertion_evidence_projection(
                 item,
                 sensitive=sensitive,
                 depth=depth + 1,
             )
-            for item in value
+            for item in items
         ]
         projected.sort(key=canonical_bytes)
         return projected
     return {
         "kind": "opaque",
-        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "type": v2_type_identity(type(value)),
     }
 
 
@@ -22155,6 +23038,66 @@ def v2_validate_log_event_count(
         raise error_type("v2 event count exceeds its cap")
 
 
+def v2_build_event_row(
+    *,
+    mode: str,
+    subject_mode: str,
+    case_id: str,
+    assertion_id: str,
+    safe_artifact_projection: Mapping[str, Any],
+    sequence: int,
+    stage: str,
+    argv: Sequence[Any] = (),
+    exit_code: int = 0,
+    result_category: str = "PASS",
+    semantic_projection: Mapping[str, Any] | None = None,
+    stdout_byte_length: int = 0,
+    stdout_root: str | None = None,
+    stderr_byte_length: int = 0,
+    stderr_root: str | None = None,
+    terminal: str | None = None,
+) -> dict[str, Any]:
+    empty_root = "sha256-v1:" + hashlib.sha256(b"").hexdigest()
+    parameter = {
+        "mode": mode,
+        "subject_mode": subject_mode,
+        "stage": stage,
+        "sequence": sequence,
+    }
+    row = {
+        "schema": V2_EVENT_SCHEMA,
+        "case_id": case_id,
+        "assertion_id": assertion_id,
+        "executor_id": assertion_id,
+        "parameter_root": semantic_root(parameter),
+        "stage": stage,
+        "sequence": sequence,
+        "argv": v2_sanitized_argv(argv),
+        "exit_code": int(exit_code),
+        "result_category": result_category,
+        "semantic_projection": dict(semantic_projection or {}),
+        "stdout_byte_length": int(stdout_byte_length),
+        "stdout_root": empty_root if stdout_root is None else stdout_root,
+        "stderr_byte_length": int(stderr_byte_length),
+        "stderr_root": empty_root if stderr_root is None else stderr_root,
+        "first_divergence": None,
+        "recovery": "NOT_REQUIRED",
+        "terminal": terminal,
+        "safe_relative_artifacts": dict(safe_artifact_projection),
+        "no_claim": (
+            "the event is redacted deterministic planning evidence and "
+            "mints no semantic, human, write, implementation, or release authority"
+        ),
+    }
+    v2_validate_log_event_count(
+        sequence + 1,
+        error_type=EvidenceFailed,
+    )
+    if len(canonical_bytes(row)) > V2_LOG_LINE_BYTES_CAP:
+        raise EvidenceFailed("v2 event line exceeds its byte cap")
+    return row
+
+
 def v2_event_rows(
     *,
     mode: str,
@@ -22182,7 +23125,6 @@ def v2_event_rows(
             "v2.case.nomock-offline-replay",
         ),
     }[mode]
-    empty_root = "sha256-v1:" + hashlib.sha256(b"").hexdigest()
     safe_artifact_projection = {
         "base": list(V2_RUN_ARTIFACTS),
         "optional_count": len(safe_artifacts) - len(V2_RUN_ARTIFACTS),
@@ -22194,70 +23136,29 @@ def v2_event_rows(
         ),
     }
     events: list[dict[str, Any]] = []
-
-    def append(
-        stage: str,
-        *,
-        argv: Sequence[Any] = (),
-        exit_code: int = 0,
-        result_category: str = "PASS",
-        semantic_projection: Mapping[str, Any] | None = None,
-        stdout_byte_length: int = 0,
-        stdout_root: str = empty_root,
-        stderr_byte_length: int = 0,
-        stderr_root: str = empty_root,
-        terminal: str | None = None,
-    ) -> None:
-        parameter = {
-            "mode": mode,
-            "subject_mode": subject_mode,
-            "stage": stage,
-            "sequence": len(events),
-        }
-        row = {
-            "schema": V2_EVENT_SCHEMA,
-            "case_id": case_id,
-            "assertion_id": assertion_id,
-            "executor_id": assertion_id,
-            "parameter_root": semantic_root(parameter),
-            "stage": stage,
-            "sequence": len(events),
-            "argv": v2_sanitized_argv(argv),
-            "exit_code": int(exit_code),
-            "result_category": result_category,
-            "semantic_projection": dict(semantic_projection or {}),
-            "stdout_byte_length": int(stdout_byte_length),
-            "stdout_root": stdout_root,
-            "stderr_byte_length": int(stderr_byte_length),
-            "stderr_root": stderr_root,
-            "first_divergence": None,
-            "recovery": "NOT_REQUIRED",
-            "terminal": terminal,
-            "safe_relative_artifacts": safe_artifact_projection,
-            "no_claim": (
-                "the event is redacted deterministic planning evidence and "
-                "mints no semantic, human, write, implementation, or release authority"
-            ),
-        }
-        v2_validate_log_event_count(
-            len(events) + 1,
-            error_type=EvidenceFailed,
-        )
-        if len(canonical_bytes(row)) > V2_LOG_LINE_BYTES_CAP:
-            raise EvidenceFailed("v2 event line exceeds its byte cap")
-        events.append(row)
-
-    append(
-        "assertion-start",
+    events.append(v2_build_event_row(
+        mode=mode,
+        subject_mode=subject_mode,
+        case_id=case_id,
+        assertion_id=assertion_id,
+        safe_artifact_projection=safe_artifact_projection,
+        sequence=len(events),
+        stage="assertion-start",
         argv=reproduction,
         semantic_projection={
             "source_root": source["semantic_root"],
             "manifest_root": source["manifest"]["semantic_root"],
         },
-    )
+    ))
     for index, receipt in enumerate(v2_source_command_receipts(source)):
-        append(
-            f"source-command-{index:06d}",
+        events.append(v2_build_event_row(
+            mode=mode,
+            subject_mode=subject_mode,
+            case_id=case_id,
+            assertion_id=assertion_id,
+            safe_artifact_projection=safe_artifact_projection,
+            sequence=len(events),
+            stage=f"source-command-{index:06d}",
             argv=receipt["argv"],
             exit_code=receipt["exit_code"],
             result_category=receipt["result_category"],
@@ -22270,7 +23171,7 @@ def v2_event_rows(
             stdout_root=receipt["stdout_root"],
             stderr_byte_length=receipt["stderr_byte_length"],
             stderr_root=receipt["stderr_root"],
-        )
+        ))
     for stage, document in (
         ("inventory-derived", inventory),
         ("authority-derived", authority),
@@ -22278,12 +23179,24 @@ def v2_event_rows(
         ("history-projection-derived", history),
         ("zero-sets-derived", zero_sets),
     ):
-        append(
-            stage,
+        events.append(v2_build_event_row(
+            mode=mode,
+            subject_mode=subject_mode,
+            case_id=case_id,
+            assertion_id=assertion_id,
+            safe_artifact_projection=safe_artifact_projection,
+            sequence=len(events),
+            stage=stage,
             semantic_projection={"semantic_root": document["semantic_root"]},
-        )
-    append(
-        "assertion-terminal",
+        ))
+    events.append(v2_build_event_row(
+        mode=mode,
+        subject_mode=subject_mode,
+        case_id=case_id,
+        assertion_id=assertion_id,
+        safe_artifact_projection=safe_artifact_projection,
+        sequence=len(events),
+        stage="assertion-terminal",
         semantic_projection={
             "source_root": source["semantic_root"],
             "inventory_root": inventory["semantic_root"],
@@ -22292,9 +23205,15 @@ def v2_event_rows(
             "history_root": history["semantic_root"],
             "zero_sets_root": zero_sets["semantic_root"],
         },
-    )
-    append(
-        "suite-terminal",
+    ))
+    events.append(v2_build_event_row(
+        mode=mode,
+        subject_mode=subject_mode,
+        case_id=case_id,
+        assertion_id=assertion_id,
+        safe_artifact_projection=safe_artifact_projection,
+        sequence=len(events),
+        stage="suite-terminal",
         semantic_projection={
             "subject_mode": subject_mode,
             "prior_event_roots": [
@@ -22302,7 +23221,7 @@ def v2_event_rows(
             ],
         },
         terminal="Pass",
-    )
+    ))
     if (
         [row["sequence"] for row in events] != list(range(len(events)))
         or sum(row["terminal"] is not None for row in events) != 1
@@ -22346,9 +23265,15 @@ def v2_bundle_payloads(
     zero_sets: Mapping[str, Any],
     optional_payloads: Mapping[str, bytes],
     reproduction: Sequence[str],
+    current_source_files: list[dict[str, Any]],
     replay_equivalence: Mapping[str, Any] | None = None,
 ) -> dict[str, bytes]:
-    v2_validate_source_document(source)
+    source, current_source_files = (
+        v2_validate_source_document_against_source_files(
+            source,
+            current_source_files,
+        )
+    )
     if subject_mode == "review-plan":
         if "state" not in source["captured"]["audit_capture"]:
             raise EvidenceFailed(
@@ -22430,7 +23355,7 @@ def v2_bundle_payloads(
             label=f"v2 optional artifact {relative}",
             require_canonical=True,
         )
-        if not isinstance(document, dict):
+        if type(document) is not dict:
             raise EvidenceFailed(f"v2 optional artifact {relative} is not an object")
         v2_exact_keys(
             document,
@@ -22439,15 +23364,15 @@ def v2_bundle_payloads(
         )
         verify_semantic_root(document, label=f"v2 optional artifact {relative}")
         entry = registry_by_path[relative]
-        complete_plan = document.get("complete_plan")
-        bounded_index = document.get("bounded_incomplete_index")
+        complete_plan = dict.get(document, "complete_plan")
+        bounded_index = dict.get(document, "bounded_incomplete_index")
         if (
-            not isinstance(complete_plan, dict)
+            type(complete_plan) is not dict
             or set(complete_plan)
             != {"target", "authority", "actual_review_minutes"}
-            or not isinstance(complete_plan.get("target"), dict)
-            or not isinstance(complete_plan.get("authority"), dict)
-            or not isinstance(bounded_index, dict)
+            or type(dict.get(complete_plan, "target")) is not dict
+            or type(dict.get(complete_plan, "authority")) is not dict
+            or type(bounded_index) is not dict
             or set(bounded_index)
             != {"complete", "target_id", "missing_sections"}
             or bounded_index["complete"] is not False
@@ -22458,8 +23383,8 @@ def v2_bundle_payloads(
                 f"v2 optional artifact {relative} has a malformed full plan"
             )
         target_id = bounded_index["target_id"]
-        expected_target = inventory_by_id.get(target_id)
-        expected_authority = authority_by_id.get(target_id)
+        expected_target = dict.get(inventory_by_id, target_id)
+        expected_authority = dict.get(authority_by_id, target_id)
         if expected_target is None or expected_authority is None:
             raise EvidenceFailed(
                 f"v2 optional artifact {relative} names an unknown target"
@@ -22475,9 +23400,20 @@ def v2_bundle_payloads(
             expected_target,
             expected_authority,
         )
+        expected_target_root_text = expected_target["target_root"]
+        if (
+            type(expected_target_root_text) is not str
+            or V2_SEMANTIC_ROOT_PATTERN.fullmatch(
+                expected_target_root_text
+            )
+            is None
+        ):
+            raise EvidenceFailed(
+                f"v2 optional artifact {relative} target root is malformed"
+            )
         expected_relative = (
             "oversize/"
-            f"{str(expected_target['target_root']).split(':', 1)[-1]}.json"
+            f"{expected_target_root_text[len('sha256-v1:'):]}.json"
         )
         if (
             relative != expected_relative
@@ -22546,14 +23482,14 @@ def v2_bundle_payloads(
             entry["byte_length"] != len(payload)
             or entry["semantic_root"] != document["semantic_root"]
             or entry["aggregate_cap_accounting"] != len(payload)
-            or entry["schema_kind"] != document.get("schema")
+            or entry["schema_kind"] != dict.get(document, "schema")
             or entry["media_kind"] != "application/json"
             or entry["target_roots"] != [expected_target["target_root"]]
-            or entry["field_roots"] != document.get("field_roots")
-            or entry["clause_roots"] != document.get("clause_roots")
-            or entry["exceeded_caps"] != document.get("exceeded_caps")
-            or document.get("retained_full_plan_path") != relative
-            or document.get("retained_full_plan_root")
+            or entry["field_roots"] != dict.get(document, "field_roots")
+            or entry["clause_roots"] != dict.get(document, "clause_roots")
+            or entry["exceeded_caps"] != dict.get(document, "exceeded_caps")
+            or dict.get(document, "retained_full_plan_path") != relative
+            or dict.get(document, "retained_full_plan_root")
             != semantic_root(document["complete_plan"])
         ):
             raise EvidenceFailed(f"v2 optional registry identity differs for {relative}")
@@ -22940,26 +23876,40 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
     try:
         descriptor = os.open(path, flags, 0o644)
     except FileExistsError as error:
-        raise EvidenceFailed(
-            f"v2 overwrite is forbidden for {path.relative_to(REPO_ROOT)}"
-        ) from error
+        raise EvidenceFailed("v2 overwrite is forbidden for reserved artifact") from error
     except OSError as error:
         raise InfrastructureFailed(
-            f"v2 exclusive writer could not create {path.relative_to(REPO_ROOT)}"
+            "v2 exclusive writer could not create reserved artifact"
         ) from error
+    written = 0
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
-        with os.fdopen(descriptor, "wb", closefd=True) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if type(count) is not int or count <= 0:
+                raise InfrastructureFailed(
+                    "v2 exclusive writer observed a non-positive write"
+                )
+            written += count
+        os.fsync(descriptor)
     except OSError as error:
         raise InfrastructureFailed(
-            f"v2 exclusive writer failed for {path.relative_to(REPO_ROOT)}"
+            "v2 exclusive writer failed for reserved artifact"
         ) from error
     except BaseException:
         # Repository policy forbids deletion; an incomplete prefix deliberately
         # remains without a valid terminal seal for manual recovery.
         raise
+    finally:
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    "v2 exclusive writer could not close reserved artifact"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
 
 
 def v2_fsync_directory(path: Path) -> None:
@@ -22969,17 +23919,21 @@ def v2_fsync_directory(path: Path) -> None:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise InfrastructureFailed("v2 directory could not be opened for fsync") from error
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         os.fsync(descriptor)
     except OSError as error:
         raise InfrastructureFailed("v2 directory fsync failed") from error
     finally:
-        try:
-            os.close(descriptor)
-        except OSError:
-            # The durability operation has already completed or raised its
-            # typed failure. A close error must not replace either outcome.
-            pass
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    "v2 directory descriptor close failed"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
 
 
 @dataclass
@@ -23309,13 +24263,13 @@ def v2_reserve_bundle(
 def v2_expected_bundle_directories(
     names: Iterable[str],
 ) -> list[str]:
-    expected: set[str] = set()
+    expected: dict[str, None] = {}
     for name in names:
         parent = PurePosixPath(name).parent
         while str(parent) != ".":
-            expected.add(str(parent))
+            expected[str(parent)] = None
             parent = parent.parent
-    return sorted(expected, key=lambda value: value.encode("utf-8"))
+    return sorted(expected, key=lambda value: str.encode(value, "utf-8"))
 
 
 def v2_validate_bundle_enumeration_budget(
@@ -23386,8 +24340,8 @@ def v2_validate_canonical_byte_size(
         ensure_ascii=False,
     )
     try:
-        for chunk in encoder.iterencode(value):
-            byte_length += len(chunk.encode("utf-8"))
+        for chunk in json.JSONEncoder.iterencode(encoder, value):
+            byte_length += len(str.encode(chunk, "utf-8"))
             if byte_length > cap:
                 raise error_type(
                     f"{label} exceeds its aggregate byte cap"
@@ -23404,16 +24358,21 @@ def v2_validate_canonical_byte_size(
 def v2_preflight_publication_topology(
     payloads: Mapping[str, bytes],
 ) -> tuple[list[str], list[str]]:
+    if type(payloads) is not dict:
+        raise EvidenceFailed(
+            "v2 publication payload collection must be an exact dictionary"
+        )
     v2_validate_bundle_enumeration_budget(
-        file_count=len(payloads),
+        file_count=dict.__len__(payloads),
         directory_count=0,
         path_bytes=0,
     )
     names: list[str] = []
-    for raw_name, payload in payloads.items():
-        if not isinstance(raw_name, str) or not isinstance(payload, bytes):
+    for raw_name, payload in dict.items(payloads):
+        if type(raw_name) is not str or type(payload) is not bytes:
             raise EvidenceFailed(
-                "v2 publication payload keys and values must be strings and bytes"
+                "v2 publication payload keys and values must use exact "
+                "strings and bytes"
             )
         try:
             relative = safe_relative(raw_name, label="v2 artifact member")
@@ -23446,7 +24405,12 @@ def v2_preflight_publication_topology(
         )
     aliases: dict[str, str] = {}
     for relative in [*directories, *names]:
-        alias = unicodedata.normalize("NFC", relative).casefold()
+        alias = v2_exact_normalized_casefold(
+            relative,
+            normalization="NFC",
+            label="v2 publication topology member",
+            error_type=EvidenceFailed,
+        )
         if alias in aliases and aliases[alias] != relative:
             raise EvidenceFailed(
                 "v2 publication topology contains a Unicode/case alias"
@@ -23529,6 +24493,8 @@ def v2_write_reserved_member(
         create=True,
     )
     descriptor: int | None = None
+    identity: dict[str, int] | None = None
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= os.O_NOFOLLOW
@@ -23552,7 +24518,6 @@ def v2_write_reserved_member(
         os.fsync(descriptor)
         identity = v2_stat_identity(os.fstat(descriptor))
         os.fsync(parent_descriptor)
-        return identity
     except HarnessError:
         raise
     except OSError as error:
@@ -23560,15 +24525,28 @@ def v2_write_reserved_member(
             f"v2 descriptor-relative write failed for {relative}"
         ) from error
     finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        try:
-            os.close(parent_descriptor)
-        except OSError:
-            pass
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    "v2 reserved member descriptor close failed: "
+                    f"{relative}"
+                ),
+            ),
+            (
+                parent_descriptor,
+                InfrastructureFailed(
+                    "v2 reserved member parent descriptor close failed: "
+                    f"{relative}"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
+    if identity is None:
+        raise InfrastructureFailed(
+            f"v2 descriptor-relative write produced no identity for {relative}"
+        )
+    return identity
 
 
 def v2_read_descriptor_strict(
@@ -23632,6 +24610,8 @@ def v2_read_reserved_member(
         create=False,
     )
     descriptor: int | None = None
+    payload: bytes | None = None
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW
         descriptor = os.open(
@@ -23639,7 +24619,7 @@ def v2_read_reserved_member(
             flags,
             dir_fd=parent_descriptor,
         )
-        return v2_read_descriptor_strict(
+        payload = v2_read_descriptor_strict(
             descriptor,
             label=f"v2 reserved artifact {name}",
             expected_identity=expected_identity,
@@ -23651,15 +24631,28 @@ def v2_read_reserved_member(
             f"v2 reserved artifact {name} cannot be opened safely"
         ) from error
     finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        try:
-            os.close(parent_descriptor)
-        except OSError:
-            pass
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    "v2 reserved artifact descriptor close failed: "
+                    f"{name}"
+                ),
+            ),
+            (
+                parent_descriptor,
+                InfrastructureFailed(
+                    "v2 reserved artifact parent descriptor close failed: "
+                    f"{name}"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
+    if payload is None:
+        raise InfrastructureFailed(
+            f"v2 reserved artifact {name} produced no payload"
+        )
+    return payload
 
 
 def v2_verify_reserved_publication(
@@ -24252,7 +25245,11 @@ def v2_execute_live_plan(
         )
         available_roots["authority"] = authority["semantic_root"]
         stage = "prior_campaign"
-        prior_campaign = v2_load_prior_campaign(parsed.prior_campaign)
+        prior_campaign = v2_load_prior_campaign(
+            parsed.prior_campaign,
+            accepted_manifest=manifest,
+            current_source_files=snapshot.source["source_files"],
+        )
         stage = "source_assembly"
         source = v2_build_source_document(
             snapshot=snapshot,
@@ -24324,6 +25321,7 @@ def v2_execute_live_plan(
             zero_sets=zero_sets,
             optional_payloads=optional_payloads,
             reproduction=reproduction,
+            current_source_files=snapshot.source["source_files"],
         )
         stage = "synopsis"
         synopsis = v2_synopsis(
@@ -24466,6 +25464,8 @@ def v2_read_file_strict(
         descriptor = os.open(path, flags)
     except OSError as error:
         raise InputRefused(f"{label} cannot be opened safely") from error
+    payload: bytes | None = None
+    close_failure: V2DescriptorCloseFailure | None = None
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -24493,18 +25493,24 @@ def v2_read_file_strict(
         after = os.fstat(descriptor)
         if after.st_nlink != 1 or v2_stat_identity(after) != before_identity:
             raise InputRefused(f"{label} changed while being read")
-        return b"".join(chunks)
+        payload = b"".join(chunks)
     except InputRefused:
         raise
     except OSError as error:
         raise InputRefused(f"{label} failed during strict read") from error
     finally:
-        try:
-            os.close(descriptor)
-        except OSError:
-            # The strict read has already produced its typed result. Do not
-            # mask it with a descriptor-close failure.
-            pass
+        close_failure = v2_close_owned_descriptors((
+            (
+                descriptor,
+                InfrastructureFailed(
+                    f"{label} descriptor close failed"
+                ),
+            ),
+        ))
+    v2_raise_descriptor_close_failure(close_failure)
+    if payload is None:
+        raise InfrastructureFailed(f"{label} strict read produced no payload")
+    return payload
 
 
 def v2_safe_member(value: str, *, label: str) -> str:
@@ -24640,7 +25646,12 @@ def v2_enumerate_bundle(
     v2_assert_unique(files, label="v2 bundle files")
     aliases: dict[str, str] = {}
     for relative in [*directories, *files]:
-        alias = unicodedata.normalize("NFC", relative).casefold()
+        alias = v2_exact_normalized_casefold(
+            relative,
+            normalization="NFC",
+            label="v2 bundle member",
+            error_type=InputRefused,
+        )
         if alias in aliases and aliases[alias] != relative:
             raise InputRefused("v2 bundle contains a Unicode/case path alias")
         aliases[alias] = relative
@@ -24861,7 +25872,7 @@ def v2_validate_source_full_issue(
             f"v2 source all-issue row {index} has malformed comments"
         )
     previous_comment_order: tuple[datetime, int] | None = None
-    comment_ids: set[int] = set()
+    comment_ids: dict[int, None] = {}
     for comment_index, comment in enumerate(comments):
         if not isinstance(comment, dict):
             raise InputRefused(
@@ -24903,7 +25914,7 @@ def v2_validate_source_full_issue(
                 f"v2 source all-issue row {index} comments are noncanonical"
             )
         previous_comment_order = comment_order
-        comment_ids.add(comment["id"])
+        comment_ids[comment["id"]] = None
     rollup = issue["rollup"]
     if rollup is not None:
         if not isinstance(rollup, dict):
@@ -25260,7 +26271,7 @@ def v2_validate_source_graph(
             continue
         visited = {issue_id}
         frontier = [issue_id]
-        descendant_counts: Counter[str] = Counter()
+        descendant_counts: dict[str, int] = {}
         while frontier:
             next_frontier: list[str] = []
             for current in frontier:
@@ -25273,10 +26284,16 @@ def v2_validate_source_graph(
                     ):
                         continue
                     visited.add(child_id)
-                    descendant_counts[issue_by_id[child_id]["status"]] += 1
+                    child_status = issue_by_id[child_id]["status"]
+                    descendant_counts[child_status] = (
+                        dict.get(descendant_counts, child_status, 0) + 1
+                    )
                     next_frontier.append(child_id)
             frontier = sorted(next_frontier)
-        expected_descendants = dict(sorted(descendant_counts.items()))
+        expected_descendants = {
+            status: descendant_counts[status]
+            for status in sorted(descendant_counts)
+        }
         if rollup["descendants"] != expected_descendants:
             raise EvidenceFailed(
                 "v2 source graph rollup descendant counts disagree for "
@@ -26088,15 +27105,17 @@ def v2_preflight_source_v1_inventory_nested_lists(
 def v2_preflight_source_v1_lint_nested_lists(
     lint: Mapping[str, Any],
 ) -> None:
+    if type(lint) is not dict:
+        raise InputRefused("v2 source v1 lint projection is not an exact object")
     for scope in LINT_SCOPES:
-        projection = lint.get(scope)
-        if not isinstance(projection, dict):
+        projection = dict.get(lint, scope)
+        if type(projection) is not dict:
             raise InputRefused(
                 f"v2 source v1 lint scope {scope} is not an object"
             )
-        results = projection.get("results")
-        declared_issues = projection.get("issues")
-        declared_warnings = projection.get("total")
+        results = dict.get(projection, "results")
+        declared_issues = dict.get(projection, "issues")
+        declared_warnings = dict.get(projection, "total")
         if not isinstance(results, list):
             raise InputRefused(
                 f"v2 source v1 lint scope {scope} results are not an array"
@@ -26113,13 +27132,13 @@ def v2_preflight_source_v1_lint_nested_lists(
         warning_count = 0
         maximum_warnings_per_issue = 0
         for index, row in enumerate(results):
-            if not isinstance(row, dict):
+            if type(row) is not dict:
                 raise InputRefused(
                     "v2 source v1 lint scope "
                     f"{scope} row {index} is not an object"
                 )
-            missing_sections = row.get("missing")
-            suggestions = row.get("suggestions")
+            missing_sections = dict.get(row, "missing")
+            suggestions = dict.get(row, "suggestions")
             if not isinstance(missing_sections, list):
                 raise InputRefused(
                     "v2 source v1 lint scope "
@@ -26163,14 +27182,19 @@ def v2_preflight_source_v1_lint_nested_lists(
 def v2_preflight_source_observation_nested_lists(
     observation: Mapping[str, Any],
 ) -> None:
-    source_files = observation.get("source_files")
-    status_cut = observation.get("status_cut")
-    tracker_ready_issue_ids = observation.get("tracker_ready_issue_ids")
-    command_receipts = observation.get("command_receipts")
-    br_version = observation.get("br_version")
+    if type(observation) is not dict:
+        raise InputRefused("v2 source observation is not an exact object")
+    source_files = dict.get(observation, "source_files")
+    status_cut = dict.get(observation, "status_cut")
+    tracker_ready_issue_ids = dict.get(
+        observation,
+        "tracker_ready_issue_ids",
+    )
+    command_receipts = dict.get(observation, "command_receipts")
+    br_version = dict.get(observation, "br_version")
     features = (
-        br_version.get("features")
-        if isinstance(br_version, dict)
+        dict.get(br_version, "features")
+        if type(br_version) is dict
         else None
     )
     if not isinstance(source_files, list):
@@ -26232,10 +27256,525 @@ def v2_preflight_source_observation_nested_lists(
                 )
 
 
-def v2_validate_source_document(source: Mapping[str, Any]) -> None:
-    if not isinstance(source, dict):
-        raise InputRefused("v2 source artifact is not an object")
-    if source.get("schema") != V2_SOURCE_SCHEMA:
+def v2_exact_wire_list_item(
+    value: list[Any],
+    *,
+    index: int,
+    expected_length: int,
+    label: str,
+    path: str,
+) -> tuple[bool, Any]:
+    if list.__len__(value) != expected_length:
+        raise InputRefused(f"{label} changed while validating {path}")
+    if index >= expected_length:
+        return False, None
+    try:
+        return True, list.__getitem__(value, index)
+    except IndexError as error:
+        raise InputRefused(
+            f"{label} changed while validating {path}"
+        ) from error
+
+
+def v2_exact_wire_dict_item(
+    value: dict[str, Any],
+    *,
+    iterator: Iterator[str],
+    expected_length: int,
+    label: str,
+    path: str,
+) -> tuple[bool, Any, Any]:
+    if dict.__len__(value) != expected_length:
+        raise InputRefused(f"{label} changed while validating {path}")
+    try:
+        key = next(iterator)
+    except StopIteration:
+        if dict.__len__(value) != expected_length:
+            raise InputRefused(f"{label} changed while validating {path}")
+        return False, None, None
+    except RuntimeError as error:
+        raise InputRefused(
+            f"{label} changed while validating {path}"
+        ) from error
+    try:
+        item = dict.__getitem__(value, key)
+    except KeyError as error:
+        raise InputRefused(
+            f"{label} changed while validating {path}"
+        ) from error
+    return True, key, item
+
+
+def v2_exact_wire_container_unchanged(
+    value: Any,
+    snapshot: Any,
+    *,
+    label: str,
+    path: str,
+) -> None:
+    def same_member(left: Any, right: Any) -> bool:
+        if type(left) is not type(right):
+            return False
+        if left is None or type(left) is bool:
+            return left is right
+        if type(left) in {int, str}:
+            return left == right
+        if type(left) is float:
+            return float.hex(left) == float.hex(right)
+        if type(left) in {list, dict}:
+            return left is right
+        return False
+
+    unchanged = True
+    if type(value) is list and type(snapshot) is list:
+        live_length = list.__len__(value)
+        snapshot_length = list.__len__(snapshot)
+        unchanged = live_length == snapshot_length
+        if unchanged:
+            for index in range(snapshot_length):
+                present, live_item = v2_exact_wire_list_item(
+                    value,
+                    index=index,
+                    expected_length=snapshot_length,
+                    label=label,
+                    path=path,
+                )
+                if not present:
+                    unchanged = False
+                    break
+                if not same_member(
+                    live_item,
+                    list.__getitem__(snapshot, index),
+                ):
+                    unchanged = False
+                    break
+    elif type(value) is dict and type(snapshot) is dict:
+        unchanged = dict.__len__(value) == dict.__len__(snapshot)
+        if unchanged:
+            for key, snapshot_item in dict.items(snapshot):
+                if not dict.__contains__(value, key):
+                    unchanged = False
+                    break
+                try:
+                    live_item = dict.__getitem__(value, key)
+                except (KeyError, RuntimeError) as error:
+                    raise InputRefused(
+                        f"{label} changed while validating {path}"
+                    ) from error
+                if not same_member(live_item, snapshot_item):
+                    unchanged = False
+                    break
+    else:
+        raise EvidenceFailed(
+            f"{label} exact-wire snapshot type differs at {path}"
+        )
+    if not unchanged:
+        raise InputRefused(f"{label} changed while validating {path}")
+
+
+def v2_exact_json_string_wire_lengths(
+    value: str,
+    *,
+    wire_cap: int,
+    label: str,
+    path: str,
+) -> tuple[int, int]:
+    """Return exact UTF-8 scalar and canonical JSON string byte lengths."""
+    if type(value) is not str or type(wire_cap) is not int or wire_cap < 0:
+        raise EvidenceFailed(f"{label} exact-wire string accounting is invalid")
+    utf8_bytes = 0
+    wire_bytes = 2  # Opening and closing quotes.
+    for character in value:
+        codepoint = ord(character)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise InputRefused(f"{label} contains invalid Unicode at {path}")
+        if codepoint <= 0x7F:
+            utf8_bytes += 1
+        elif codepoint <= 0x7FF:
+            utf8_bytes += 2
+        elif codepoint <= 0xFFFF:
+            utf8_bytes += 3
+        else:
+            utf8_bytes += 4
+        if character in {'"', "\\"}:
+            wire_bytes += 2
+        elif codepoint <= 0x1F:
+            wire_bytes += 2 if character in "\b\t\n\f\r" else 6
+        else:
+            wire_bytes += (
+                1
+                if codepoint <= 0x7F
+                else 2
+                if codepoint <= 0x7FF
+                else 3
+                if codepoint <= 0xFFFF
+                else 4
+            )
+        if wire_bytes > wire_cap:
+            raise InputRefused(
+                f"{label} exceeds its exact-wire canonical byte cap"
+            )
+    if wire_bytes > wire_cap:
+        raise InputRefused(
+            f"{label} exceeds its exact-wire canonical byte cap"
+        )
+    return utf8_bytes, wire_bytes
+
+
+def v2_validate_exact_json_wire(
+    value: Any,
+    *,
+    label: str,
+    item_cap: int = V2_SOURCE_EXACT_WIRE_ITEM_CAP,
+    node_cap: int = V2_SOURCE_EXACT_WIRE_NODE_CAP,
+    depth_cap: int = V2_SOURCE_EXACT_WIRE_DEPTH_CAP,
+    byte_cap: int = V2_SOURCE_PROJECTION_BYTES_CAP,
+    snapshot_byte_cap: int = V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP,
+) -> Any:
+    """Validate exact JSON data and return a detached stable tree."""
+    if (
+        type(item_cap) is not int
+        or type(node_cap) is not int
+        or type(depth_cap) is not int
+        or type(byte_cap) is not int
+        or type(snapshot_byte_cap) is not int
+        or item_cap < 0
+        or node_cap < 1
+        or depth_cap < 0
+        or byte_cap < 1
+        or snapshot_byte_cap < 0
+    ):
+        raise EvidenceFailed(f"{label} exact-wire caps are invalid")
+    stack: list[tuple[str, Any, int, str, Any]] = [
+        ("value", value, 0, "$", None)
+    ]
+    active_containers: dict[int, None] = {}
+    container_snapshots: list[tuple[Any, Any, str]] = []
+    node_count = 0
+    item_count = 0
+    scalar_bytes = 0
+    canonical_wire_bytes = 1  # canonical_bytes terminal newline.
+    snapshot_bytes = 0
+    while stack:
+        operation, current, depth, path, state = stack.pop()
+        if operation == "leave":
+            dict.pop(active_containers, id(current), None)
+            continue
+        if operation == "list-item":
+            index, expected_length = state
+            present, item = v2_exact_wire_list_item(
+                current,
+                index=int(index),
+                expected_length=int(expected_length),
+                label=label,
+                path=path,
+            )
+            if not present:
+                continue
+            stack.append((
+                "list-item",
+                current,
+                depth,
+                path,
+                (int(index) + 1, int(expected_length)),
+            ))
+            stack.append((
+                "value",
+                item,
+                depth + 1,
+                f"{path}[{index}]",
+                None,
+            ))
+            continue
+        if operation == "dict-item":
+            iterator, ordinal, expected_length = state
+            present, key, item = v2_exact_wire_dict_item(
+                current,
+                iterator=iterator,
+                expected_length=int(expected_length),
+                label=label,
+                path=path,
+            )
+            if not present:
+                continue
+            if type(key) is not str:
+                raise InputRefused(
+                    f"{label} contains a non-exact object key at {path}"
+                )
+            key_utf8_bytes, key_wire_bytes = (
+                v2_exact_json_string_wire_lengths(
+                    key,
+                    wire_cap=byte_cap - canonical_wire_bytes,
+                    label=label,
+                    path=f"{path}.<key:{ordinal}>",
+                )
+            )
+            scalar_bytes += key_utf8_bytes
+            canonical_wire_bytes += key_wire_bytes
+            stack.append((
+                "dict-item",
+                current,
+                depth,
+                path,
+                (iterator, int(ordinal) + 1, int(expected_length)),
+            ))
+            stack.append((
+                "value",
+                item,
+                depth + 1,
+                f"{path}.<member:{ordinal}>",
+                None,
+            ))
+            if (
+                scalar_bytes > byte_cap
+                or canonical_wire_bytes > byte_cap
+            ):
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire byte cap"
+                )
+            continue
+        if operation != "value":
+            raise EvidenceFailed(f"{label} exact-wire traversal state differs")
+        if depth > depth_cap:
+            raise InputRefused(f"{label} exceeds its exact-wire depth cap")
+        node_count += 1
+        if node_count > node_cap:
+            raise InputRefused(f"{label} exceeds its exact-wire node cap")
+        if current is None:
+            canonical_wire_bytes += 4
+            if canonical_wire_bytes > byte_cap:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire canonical byte cap"
+                )
+            continue
+        if type(current) is bool:
+            canonical_wire_bytes += 4 if current else 5
+            if canonical_wire_bytes > byte_cap:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire canonical byte cap"
+                )
+            continue
+        if type(current) is int:
+            integer_text = v2_bounded_exact_integer_text(
+                current,
+                label=f"{label} integer at {path}",
+                error_type=InputRefused,
+            )
+            integer_bytes = len(str.encode(integer_text, "ascii"))
+            scalar_bytes += integer_bytes
+            canonical_wire_bytes += integer_bytes
+        elif type(current) is float:
+            if not math.isfinite(current):
+                raise InputRefused(
+                    f"{label} contains a non-finite float at {path}"
+                )
+            float_text = repr(current)
+            float_bytes = len(str.encode(float_text, "ascii"))
+            scalar_bytes += float_bytes
+            canonical_wire_bytes += float_bytes
+        elif type(current) is str:
+            string_utf8_bytes, string_wire_bytes = (
+                v2_exact_json_string_wire_lengths(
+                    current,
+                    wire_cap=byte_cap - canonical_wire_bytes,
+                    label=label,
+                    path=path,
+                )
+            )
+            scalar_bytes += string_utf8_bytes
+            canonical_wire_bytes += string_wire_bytes
+        elif type(current) is list:
+            length = list.__len__(current)
+            if length > item_cap - item_count:
+                raise InputRefused(f"{label} exceeds its exact-wire item cap")
+            item_count += length
+            structural_bytes = 2 + (length - 1 if length else 0)
+            snapshot_charge = (
+                V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+                + length * V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES
+            )
+            if structural_bytes > byte_cap - canonical_wire_bytes:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire canonical byte cap"
+                )
+            if snapshot_charge > snapshot_byte_cap - snapshot_bytes:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire snapshot cap"
+                )
+            canonical_wire_bytes += structural_bytes
+            snapshot_bytes += snapshot_charge
+            identity = id(current)
+            if identity in active_containers:
+                raise InputRefused(
+                    f"{label} contains a cyclic container at {path}"
+                )
+            active_containers[identity] = None
+            snapshot = list.copy(current)
+            if list.__len__(current) != length:
+                raise InputRefused(
+                    f"{label} changed while validating {path}"
+                )
+            container_snapshots.append((current, snapshot, path))
+            stack.append(("leave", current, depth, path, None))
+            stack.append((
+                "list-item",
+                snapshot,
+                depth,
+                path,
+                (0, length),
+            ))
+        elif type(current) is dict:
+            length = dict.__len__(current)
+            dict_items = length * 2
+            if dict_items > item_cap - item_count:
+                raise InputRefused(f"{label} exceeds its exact-wire item cap")
+            item_count += dict_items
+            structural_bytes = (
+                2
+                + (length - 1 if length else 0)
+                + length
+            )
+            snapshot_charge = (
+                V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES
+                + length * V2_EXACT_WIRE_DICT_SNAPSHOT_ITEM_BYTES
+            )
+            if structural_bytes > byte_cap - canonical_wire_bytes:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire canonical byte cap"
+                )
+            if snapshot_charge > snapshot_byte_cap - snapshot_bytes:
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire snapshot cap"
+                )
+            canonical_wire_bytes += structural_bytes
+            snapshot_bytes += snapshot_charge
+            identity = id(current)
+            if identity in active_containers:
+                raise InputRefused(
+                    f"{label} contains a cyclic container at {path}"
+                )
+            active_containers[identity] = None
+            snapshot = dict.copy(current)
+            if dict.__len__(current) != length:
+                raise InputRefused(
+                    f"{label} changed while validating {path}"
+                )
+            container_snapshots.append((current, snapshot, path))
+            stack.append(("leave", current, depth, path, None))
+            stack.append((
+                "dict-item",
+                snapshot,
+                depth,
+                path,
+                (dict.__iter__(snapshot), 0, length),
+            ))
+        else:
+            raise InputRefused(
+                f"{label} contains a non-exact JSON value at {path}"
+            )
+        if (
+            scalar_bytes > byte_cap
+            or canonical_wire_bytes > byte_cap
+            or snapshot_bytes > snapshot_byte_cap
+        ):
+            raise InputRefused(
+                f"{label} exceeds an exact-wire byte or snapshot cap"
+            )
+    for live_container, snapshot, path in container_snapshots:
+        v2_exact_wire_container_unchanged(
+            live_container,
+            snapshot,
+            label=label,
+            path=path,
+        )
+    detached_by_path: dict[str, Any] = {}
+    for _live_container, snapshot, snapshot_path in reversed(
+        container_snapshots
+    ):
+        if type(snapshot) is list:
+            for index in range(list.__len__(snapshot)):
+                item = list.__getitem__(snapshot, index)
+                if type(item) in {list, dict}:
+                    child_path = f"{snapshot_path}[{index}]"
+                    child = dict.get(detached_by_path, child_path)
+                    if child is None:
+                        raise EvidenceFailed(
+                            f"{label} exact-wire detached list child is missing"
+                        )
+                    list.__setitem__(snapshot, index, child)
+        else:
+            for ordinal, (key, item) in enumerate(dict.items(snapshot)):
+                if type(item) in {list, dict}:
+                    child_path = f"{snapshot_path}.<member:{ordinal}>"
+                    child = dict.get(detached_by_path, child_path)
+                    if child is None:
+                        raise EvidenceFailed(
+                            f"{label} exact-wire detached object child is missing"
+                        )
+                    dict.__setitem__(snapshot, key, child)
+        detached_by_path[snapshot_path] = snapshot
+    if type(value) in {list, dict}:
+        detached_root = dict.get(detached_by_path, "$")
+        if detached_root is None:
+            raise EvidenceFailed(f"{label} exact-wire detached root is missing")
+    else:
+        detached_root = value
+    return detached_root
+
+
+def v2_validate_source_document_against_source_files(
+    source: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    validated_source = v2_validate_exact_json_wire(
+        source,
+        label="v2 source artifact",
+    )
+    validated_source_files = v2_validate_exact_json_wire(
+        current_source_files,
+        label="v2 source validation identities",
+    )
+    if type(validated_source) is not dict:
+        raise EvidenceFailed("v2 source artifact is not an exact object")
+    if type(validated_source_files) is not list:
+        raise EvidenceFailed("v2 source identities are not an exact array")
+    source = validated_source
+    current_source_files = validated_source_files
+    if (
+        type(current_source_files) is not list
+        or len(current_source_files) != 3
+        or any(type(identity) is not dict for identity in current_source_files)
+    ):
+        raise EvidenceFailed(
+            "v2 source validation identities are not three exact dictionaries"
+        )
+    expected_identity_paths = [
+        str(SCRIPT_REL),
+        str(CASE_MANIFEST_REL),
+        str(CASE_MANIFEST_V2_REL),
+    ]
+    for index, identity in enumerate(current_source_files):
+        v2_exact_keys(
+            identity,
+            {"path", "bytes", "content_identity"},
+            label=f"v2 source validation identity {index}",
+        )
+        if (
+            type(identity["path"]) is not str
+            or identity["path"] != expected_identity_paths[index]
+            or type(identity["bytes"]) is not int
+            or identity["bytes"] < 0
+            or type(identity["content_identity"]) is not str
+            or re.fullmatch(
+                r"sha256-v1:[0-9a-f]{64}",
+                identity["content_identity"],
+            )
+            is None
+        ):
+            raise EvidenceFailed(
+                f"v2 source validation identity {index} is malformed"
+            )
+    if dict.get(source, "schema") != V2_SOURCE_SCHEMA:
         raise InputRefused("v2 source artifact has an unknown schema")
     v2_exact_keys(
         source,
@@ -26290,7 +27829,9 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         not isinstance(source["v1_baseline"], dict)
         or not isinstance(contracts, dict)
         or set(contracts) != V2_SOURCE_CONTRACT_FIELDS
-        or any(not isinstance(value, dict) for value in contracts.values())
+        or any(
+            type(value) is not dict for value in dict.values(contracts)
+        )
     ):
         raise InputRefused("v2 source retained contracts are malformed")
     captured = source["captured"]
@@ -26466,15 +28007,10 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         raise InputRefused(
             "v2 source observation identity or capture contract is malformed"
         )
-    current_source_files_preflight = v2_source_file_identities()
-    expected_source_files_preflight = [
-        current_source_files_preflight[0],
-        current_source_files_preflight[1],
-        {
-            **current_source_files_preflight[2],
-            "content_identity": manifest["content_identity"],
-        },
+    current_source_files_preflight = [
+        dict(identity) for identity in current_source_files
     ]
+    expected_source_files_preflight = current_source_files_preflight
     if (
         observation_preflight["source_files"]
         != expected_source_files_preflight
@@ -26710,15 +28246,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         raise InputRefused(
             "v2 source observation source-file membership or order differs"
         )
-    current_source_files = v2_source_file_identities()
-    expected_source_files = [
-        current_source_files[0],
-        current_source_files[1],
-        {
-            **current_source_files[2],
-            "content_identity": manifest["content_identity"],
-        },
-    ]
+    expected_source_files = current_source_files
     if (
         source_files != expected_source_files
         or source_files[1]["content_identity"]
@@ -26735,7 +28263,6 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         error_type=InputRefused,
     )
     tracker_ready_issue_ids = observation["tracker_ready_issue_ids"]
-    all_issue_ids = [row["id"] for row in all_issues]
     if (
         any(
             not isinstance(issue_id, str) or not issue_id
@@ -26744,7 +28271,10 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         or tracker_ready_issue_ids != sorted(tracker_ready_issue_ids)
         or len(tracker_ready_issue_ids)
         != len(set(tracker_ready_issue_ids))
-        or not set(tracker_ready_issue_ids).issubset(all_issue_ids)
+        or any(
+            issue_id not in all_issue_by_id
+            for issue_id in tracker_ready_issue_ids
+        )
         or any(
             all_issue_by_id[issue_id]["status"] == "tombstone"
             for issue_id in tracker_ready_issue_ids
@@ -26884,7 +28414,7 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         or any(
             type(observation[field]) is not int
             or observation[field] != expected
-            for field, expected in observation_counts.items()
+            for field, expected in dict.items(observation_counts)
         )
     ):
         raise EvidenceFailed(
@@ -27009,26 +28539,40 @@ def v2_validate_source_document(source: Mapping[str, Any]) -> None:
         audit_ids.append(issue_id)
     v2_assert_unique(audit_ids, label="v2 source audit IDs")
     verify_semantic_root(source, label="source-v2.json")
+    return source, current_source_files
+
+
+def v2_validate_source_document(source: Mapping[str, Any]) -> None:
+    v2_validate_source_document_against_source_files(
+        source,
+        v2_source_file_identities(),
+    )
 
 
 def v2_validate_source_manifest_anchor(
     source: Mapping[str, Any],
     accepted_manifest: Mapping[str, Any],
 ) -> None:
-    retained = source.get("manifest")
-    if not isinstance(retained, dict):
+    if type(source) is not dict or type(accepted_manifest) is not dict:
+        raise EvidenceFailed(
+            "v2 source and accepted manifest anchor must be exact objects"
+        )
+    retained = dict.get(source, "manifest")
+    if type(retained) is not dict:
         raise EvidenceFailed("v2 source lacks a retained manifest identity")
     if (
-        retained.get("semantic_root") != accepted_manifest.get("semantic_root")
-        or retained.get("content_identity")
-        != accepted_manifest.get("content_identity")
-        or retained.get("harness_contract_identity")
-        != accepted_manifest.get("harness_contract_identity")
-        or retained.get("case_count") != accepted_manifest.get("case_count")
-        or retained.get("assertion_count")
-        != accepted_manifest.get("assertion_count")
-        or retained.get("criterion_count")
-        != accepted_manifest.get("criterion_count")
+        dict.get(retained, "semantic_root")
+        != dict.get(accepted_manifest, "semantic_root")
+        or dict.get(retained, "content_identity")
+        != dict.get(accepted_manifest, "content_identity")
+        or dict.get(retained, "harness_contract_identity")
+        != dict.get(accepted_manifest, "harness_contract_identity")
+        or dict.get(retained, "case_count")
+        != dict.get(accepted_manifest, "case_count")
+        or dict.get(retained, "assertion_count")
+        != dict.get(accepted_manifest, "assertion_count")
+        or dict.get(retained, "criterion_count")
+        != dict.get(accepted_manifest, "criterion_count")
     ):
         raise EvidenceFailed(
             "v2 retained manifest identity differs from the accepted trust anchor"
@@ -27044,12 +28588,13 @@ def v2_validate_source_manifest_anchor(
         "replay": dict(accepted_manifest["replay_contract"]),
         "caps": dict(accepted_manifest["caps"]),
     }
-    if source.get("contracts") != expected_contracts:
+    if dict.get(source, "contracts") != expected_contracts:
         raise EvidenceFailed(
             "v2 retained contracts differ from the accepted manifest"
         )
-    if source.get("v1_baseline") != accepted_manifest.get(
-        "compatibility_contract"
+    if dict.get(source, "v1_baseline") != dict.get(
+        accepted_manifest,
+        "compatibility_contract",
     ):
         raise EvidenceFailed(
             "v2 retained v1 baseline differs from the accepted manifest"
@@ -27087,7 +28632,7 @@ def v2_read_retained_bundle(
     if not isinstance(terminal, dict) or terminal.get("schema") != V2_TERMINAL_SCHEMA:
         raise InputRefused("v2 terminal.json has an unknown schema")
     verify_semantic_root(terminal, label="terminal.json")
-    registry = terminal.get("optional_content_registry")
+    registry = terminal["optional_content_registry"]
     if not isinstance(registry, list):
         raise EvidenceFailed("v2 terminal optional registry is malformed")
     optional_paths: list[str] = []
@@ -27401,10 +28946,12 @@ def v2_validate_refusal_bundle(
         label="v2 refusal reproduce.txt",
         require_canonical=True,
     )
+    reproduction = v2_validate_retained_reproduction_argv(
+        reproduction,
+        label="v2 refusal reproduce.txt",
+    )
     if (
-        not isinstance(reproduction, list)
-        or not all(isinstance(value, str) for value in reproduction)
-        or reproduction != terminal["reproduction"]
+        reproduction != terminal["reproduction"]
     ):
         raise EvidenceFailed("v2 refusal reproduction binding differs")
     expected_identity_names = set(payloads) - {"terminal.json"}
@@ -27463,14 +29010,15 @@ def v2_validate_refusal_bundle(
     )
 
 
-def v2_reconstruct_retained(
+def _v2_reconstruct_retained_uncommitted(
     *,
     artifact_root: str,
     input_dir: str,
     payloads: Mapping[str, bytes],
     terminal: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
-    accepted_manifest: Mapping[str, Any] | None = None,
+    accepted_manifest: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -27521,27 +29069,41 @@ def v2_reconstruct_retained(
         label="v2 retained green terminal",
     )
     verify_semantic_root(terminal, label="v2 retained green terminal")
-    registry = terminal.get("optional_content_registry")
-    if not isinstance(registry, list):
+    registry = terminal["optional_content_registry"]
+    if type(registry) is not list:
         raise EvidenceFailed("v2 retained optional registry is malformed")
     optional_paths: list[str] = []
+    registry_by_path: dict[str, dict[str, Any]] = {}
     for index, entry in enumerate(registry):
-        if not isinstance(entry, dict):
+        if type(entry) is not dict:
             raise EvidenceFailed(
                 f"v2 retained optional registry row {index} is malformed"
             )
-        optional_paths.append(
-            v2_safe_member(
-                str(entry.get("relative_path") or ""),
-                label=f"v2 retained optional registry row {index}",
+        try:
+            relative_value = entry["relative_path"]
+        except KeyError as error:
+            raise EvidenceFailed(
+                f"v2 retained optional registry row {index} is malformed"
+            ) from error
+        if type(relative_value) is not str:
+            raise EvidenceFailed(
+                f"v2 retained optional registry row {index} is malformed"
             )
+        relative_path = v2_safe_member(
+            relative_value,
+            label=f"v2 retained optional registry row {index}",
         )
+        optional_paths.append(relative_path)
+        registry_by_path[relative_path] = entry
     v2_assert_unique(
         optional_paths,
         label="v2 retained optional registry paths",
     )
-    if any(path in V2_RUN_ARTIFACTS for path in optional_paths):
-        raise EvidenceFailed("v2 retained optional registry shadows a base artifact")
+    for optional_path in optional_paths:
+        if optional_path in V2_RUN_ARTIFACTS:
+            raise EvidenceFailed(
+                "v2 retained optional registry shadows a base artifact"
+            )
     expected_payload_names = set(V2_RUN_ARTIFACTS) | set(optional_paths)
     if set(payloads) != expected_payload_names:
         raise EvidenceFailed("v2 reconstructed artifact membership differs")
@@ -27554,27 +29116,27 @@ def v2_reconstruct_retained(
         "it does not prove current state on replay or mint any authority"
     )
     if (
-        terminal.get("schema") != V2_TERMINAL_SCHEMA
-        or terminal.get("bundle_state") != "COMPLETE_GREEN"
-        or terminal.get("terminal") != "Pass"
-        or terminal.get("exit_code") != 0
-        or terminal.get("mode")
-        not in {terminal.get("subject_mode"), "replay"}
-        or terminal.get("subject_mode")
+        terminal["schema"] != V2_TERMINAL_SCHEMA
+        or terminal["bundle_state"] != "COMPLETE_GREEN"
+        or terminal["terminal"] != "Pass"
+        or terminal["exit_code"] != 0
+        or terminal["mode"]
+        not in {terminal["subject_mode"], "replay"}
+        or terminal["subject_mode"]
         not in {"review-plan", "history-plan"}
-        or terminal.get("artifact_root")
+        or terminal["artifact_root"]
         != str(safe_relative(artifact_root, label="artifact root"))
-        or terminal.get("artifact_dir")
+        or terminal["artifact_dir"]
         != str(safe_relative(input_dir, label="artifact dir"))
-        or terminal.get("base_artifacts") != list(V2_RUN_ARTIFACTS)
-        or terminal.get("safe_relative_artifacts")
+        or terminal["base_artifacts"] != list(V2_RUN_ARTIFACTS)
+        or terminal["safe_relative_artifacts"]
         != expected_safe_artifacts
-        or terminal.get("complete_evidence_bundle") is not True
-        or terminal.get("complete_green_prefix") is not True
-        or terminal.get("first_divergence") is not None
-        or terminal.get("recovery") != "NOT_REQUIRED"
-        or terminal.get("retry_requires_fresh_run_dir") is not False
-        or terminal.get("no_claim") != expected_terminal_no_claim
+        or terminal["complete_evidence_bundle"] is not True
+        or terminal["complete_green_prefix"] is not True
+        or terminal["first_divergence"] is not None
+        or terminal["recovery"] != "NOT_REQUIRED"
+        or terminal["retry_requires_fresh_run_dir"] is not False
+        or terminal["no_claim"] != expected_terminal_no_claim
     ):
         raise EvidenceFailed(
             "v2 retained reconstruction requires an explicit complete-green seal"
@@ -27594,7 +29156,15 @@ def v2_reconstruct_retained(
             label=f"v2 artifact {name}",
             require_canonical=True,
         )
-        if not isinstance(document, dict) or document.get("schema") != schema:
+        if type(document) is not dict:
+            raise InputRefused(f"v2 artifact {name} has an unknown schema")
+        try:
+            document_schema = document["schema"]
+        except KeyError as error:
+            raise InputRefused(
+                f"v2 artifact {name} has an unknown schema"
+            ) from error
+        if document_schema != schema:
             raise InputRefused(f"v2 artifact {name} has an unknown schema")
         verify_semantic_root(document, label=name)
         documents[name] = document
@@ -27604,22 +29174,22 @@ def v2_reconstruct_retained(
     retained_review = documents["review-plan-v2.json"]
     retained_history = documents["history-v2.json"]
     retained_zero = documents["zero-sets-v2.json"]
-    v2_validate_source_document(source)
-    accepted = (
-        accepted_manifest
-        if accepted_manifest is not None
-        else load_case_manifest_v2()
+    source, current_source_files = (
+        v2_validate_source_document_against_source_files(
+            source,
+            current_source_files,
+        )
     )
-    v2_validate_source_manifest_anchor(source, accepted)
+    v2_validate_source_manifest_anchor(source, accepted_manifest)
     reproduction = strict_json_loads(
         payloads["reproduce.txt"],
         label="v2 reproduce.txt",
         require_canonical=True,
     )
-    if not isinstance(reproduction, list) or not all(
-        isinstance(value, str) for value in reproduction
-    ):
-        raise EvidenceFailed("v2 reproduce.txt is not an argv array")
+    reproduction = v2_validate_retained_reproduction_argv(
+        reproduction,
+        label="v2 reproduce.txt",
+    )
 
     roots = {
         "manifest_root": source["manifest"]["semantic_root"],
@@ -27631,34 +29201,39 @@ def v2_reconstruct_retained(
         "zero_sets_root": retained_zero["semantic_root"],
     }
     for field, expected in roots.items():
-        if terminal.get(field) != expected:
+        if terminal[field] != expected:
             raise EvidenceFailed(f"v2 terminal root differs at {field}")
+    expected_event_sequence: list[int] = []
+    expected_event_count = 0
+    for event_index, _ in enumerate(events):
+        expected_event_sequence.append(event_index)
+        expected_event_count += 1
     if (
-        terminal.get("event_count") != len(events)
-        or terminal.get("event_sequence") != list(range(len(events)))
-        or terminal.get("event_roots")
+        terminal["event_count"] != expected_event_count
+        or terminal["event_sequence"] != expected_event_sequence
+        or terminal["event_roots"]
         != [semantic_root(row) for row in events]
-        or terminal.get("terminal_event_root") != semantic_root(events[-1])
-        or terminal.get("events_content_root")
+        or terminal["terminal_event_root"] != semantic_root(events[-1])
+        or terminal["events_content_root"]
         != "sha256-v1:" + hashlib.sha256(payloads["events.jsonl"]).hexdigest()
-        or terminal.get("reproduction") != reproduction
+        or terminal["reproduction"] != reproduction
     ):
         raise EvidenceFailed("v2 terminal event/reproduction seal differs")
 
-    registry_by_path = {
-        row["relative_path"]: row
-        for row in terminal["optional_content_registry"]
-    }
     schema_by_name = {
         **schemas,
         "events.jsonl": V2_EVENT_SCHEMA,
         "reproduce.txt": "frankensim.argv-json.v2",
-        **{
-            path: row["schema_kind"] for path, row in registry_by_path.items()
-        },
     }
+    for relative_path in optional_paths:
+        schema_kind = registry_by_path[relative_path]["schema_kind"]
+        if type(schema_kind) is not str:
+            raise EvidenceFailed(
+                "v2 retained optional registry schema kind is malformed"
+            )
+        schema_by_name[relative_path] = schema_kind
     expected_identity_names = set(payloads) - {"terminal.json"}
-    if set(terminal.get("artifact_identities", {})) != expected_identity_names:
+    if set(terminal["artifact_identities"]) != expected_identity_names:
         raise EvidenceFailed("v2 terminal artifact identity membership differs")
     for name in sorted(expected_identity_names):
         expected_identity = v2_artifact_identity(
@@ -27703,7 +29278,7 @@ def v2_reconstruct_retained(
         current_universe=snapshot.all_issues,
         current_finding_ids=v2_snapshot_current_finding_ids(snapshot),
     )
-    subject_mode = str(terminal.get("subject_mode") or terminal.get("mode") or "")
+    subject_mode = str(terminal["subject_mode"] or terminal["mode"] or "")
     if subject_mode == "review-plan":
         review, optional_payloads = v2_build_review_plan(
             inventory,
@@ -27756,7 +29331,8 @@ def v2_reconstruct_retained(
         zero_sets=zero_sets,
         optional_payloads=optional_payloads,
         reproduction=reproduction,
-        replay_equivalence=terminal.get("replay_equivalence") or {},
+        current_source_files=current_source_files,
+        replay_equivalence=terminal["replay_equivalence"] or {},
     )
     if set(reconstructed) != set(payloads):
         raise EvidenceFailed("v2 reconstructed artifact membership differs")
@@ -27772,6 +29348,55 @@ def v2_reconstruct_retained(
         zero_sets,
         optional_payloads,
     )
+
+
+def v2_reconstruct_retained(
+    *,
+    artifact_root: str,
+    input_dir: str,
+    payloads: Mapping[str, bytes],
+    terminal: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    accepted_manifest: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, bytes],
+]:
+    # Offline reconstruction is observational: even a successful plan build
+    # must not retain transport-cache insertions or LRU reordering, and a
+    # later byte-comparison refusal must restore the exact entry order.
+    with _v2_child_transport_cache_lock:
+        prior_transport_cache: list[
+            tuple[tuple[Any, ...], dict[str, int]]
+        ] = []
+        for key in _v2_child_transport_cache:
+            list.append(
+                prior_transport_cache,
+                (key, _v2_child_transport_cache[key]),
+            )
+        try:
+            OrderedDict.clear(_v2_child_transport_cache)
+            return _v2_reconstruct_retained_uncommitted(
+                artifact_root=artifact_root,
+                input_dir=input_dir,
+                payloads=payloads,
+                terminal=terminal,
+                events=events,
+                accepted_manifest=accepted_manifest,
+                current_source_files=current_source_files,
+            )
+        finally:
+            OrderedDict.clear(_v2_child_transport_cache)
+            OrderedDict.update(
+                _v2_child_transport_cache,
+                prior_transport_cache,
+            )
 
 
 def v2_validate_replay_result_document(
@@ -27815,13 +29440,16 @@ def v2_validate_replay_result_document(
     ):
         raise EvidenceFailed("v2 replay result contract differs")
     verify_semantic_root(document, label="v2 replay result")
-    if not isinstance(published_terminal, dict):
+    if type(published_terminal) is not dict:
         raise EvidenceFailed("v2 replay result lacks its published terminal")
     verify_semantic_root(
         published_terminal,
         label="v2 replay result published terminal",
     )
-    replay_equivalence = published_terminal.get("replay_equivalence")
+    replay_equivalence = dict.get(
+        published_terminal,
+        "replay_equivalence",
+    )
     try:
         published_artifact_path = (
             safe_relative(
@@ -27845,24 +29473,25 @@ def v2_validate_replay_result_document(
             "network_access",
         ):
             if (
-                document[field] != replay_equivalence.get(field)
+                document[field] != dict.get(replay_equivalence, field)
                 or document[field] is not False
             ):
                 activity_mismatch = True
                 break
     if (
-        published_terminal.get("schema") != V2_TERMINAL_SCHEMA
-        or published_terminal.get("mode") != "replay"
-        or published_terminal.get("bundle_state") != "COMPLETE_GREEN"
-        or published_terminal.get("terminal") != "Pass"
-        or published_terminal.get("exit_code") != 0
+        dict.get(published_terminal, "schema") != V2_TERMINAL_SCHEMA
+        or dict.get(published_terminal, "mode") != "replay"
+        or dict.get(published_terminal, "bundle_state")
+        != "COMPLETE_GREEN"
+        or dict.get(published_terminal, "terminal") != "Pass"
+        or dict.get(published_terminal, "exit_code") != 0
         or type(replay_equivalence) is not dict
         or document["replay_terminal_root"]
         != published_terminal["semantic_root"]
         or document["retained_terminal_root"]
-        != replay_equivalence.get("retained_terminal_root")
+        != dict.get(replay_equivalence, "retained_terminal_root")
         or document["subject_mode"]
-        != published_terminal.get("subject_mode")
+        != dict.get(published_terminal, "subject_mode")
         or document["artifact_dir"] != str(published_artifact_path)
         or activity_mismatch
     ):
@@ -27876,18 +29505,14 @@ def _v2_replay_bundle_offline(
     artifact_root: str,
     input_dir: str,
     output_dir: str,
-    accepted_manifest: Mapping[str, Any] | None = None,
+    accepted_manifest: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
 ) -> dict[str, Any]:
     source_directory, retained_payloads, terminal, events = (
         v2_read_retained_bundle(
             artifact_root=artifact_root,
             input_dir=input_dir,
         )
-    )
-    accepted_manifest = (
-        load_case_manifest_v2()
-        if accepted_manifest is None
-        else v2_clone_runner_manifest(accepted_manifest)
     )
     if terminal.get("bundle_state") == "COMPLETE_NON_GREEN":
         result = v2_validate_refusal_bundle(
@@ -27932,6 +29557,7 @@ def _v2_replay_bundle_offline(
         terminal=terminal,
         events=events,
         accepted_manifest=accepted_manifest,
+        current_source_files=current_source_files,
     )
     reproduction = v2_reproduction_argv(
         mode="replay",
@@ -27965,6 +29591,7 @@ def _v2_replay_bundle_offline(
         zero_sets=zero_sets,
         optional_payloads=optional_payloads,
         reproduction=reproduction,
+        current_source_files=current_source_files,
         replay_equivalence=replay_equivalence,
     )
     publication = v2_publish_bundle(
@@ -28008,12 +29635,24 @@ def v2_replay_bundle(
     output_dir: str,
     accepted_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    accepted = (
+        load_case_manifest_v2()
+        if accepted_manifest is None
+        else v2_clone_runner_manifest(accepted_manifest)
+    )
+    current_source_files = v2_source_file_identities()
+    if accepted_manifest is not None:
+        current_source_files[2] = {
+            **current_source_files[2],
+            "content_identity": accepted["content_identity"],
+        }
     with v2_offline_replay_scope():
         result = _v2_replay_bundle_offline(
             artifact_root=artifact_root,
             input_dir=input_dir,
             output_dir=output_dir,
-            accepted_manifest=accepted_manifest,
+            accepted_manifest=accepted,
+            current_source_files=current_source_files,
         )
     return result
 
@@ -28039,6 +29678,20 @@ V2_REFUSAL_STATE_DEPTH_CAP = 32
 V2_REFUSAL_GLOBAL_ACCESS_CAP = 4_096
 V2_REFUSAL_NODE_CAP = 65_536
 V2_REFUSAL_ITEM_CAP = 262_144
+# Additional-state payloads retain their established one-mebibyte canonical
+# data ceiling and 262,144-item structural ceiling. Snapshot bookkeeping has
+# its own derived logical allowance: the densest supported container shape is
+# one outer list item plus one empty dictionary snapshot per structural item.
+# This bound preserves that full domain without presenting the logical charge
+# as an allocator-specific peak-resident-memory measurement.
+V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP = (
+    V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+    + V2_REFUSAL_ITEM_CAP
+    * (
+        V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES
+        + V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES
+    )
+)
 V2_REFUSAL_SCALAR_BYTES_CAP = 16 * 1_024 * 1_024
 V2_REFUSAL_INSTRUCTION_CAP = 1_000_000
 V2_REFUSAL_PROJECTION_BYTES_CAP = 16 * 1_024 * 1_024
@@ -28190,6 +29843,9 @@ V2_REFUSAL_PATH_AUXILIARY_TYPES = tuple(
 V2_REFUSAL_AUDITED_CONSTRUCTOR_TYPES = tuple(
     dict.fromkeys((Counter, Path, PurePosixPath, *V2_REFUSAL_PATH_TYPES))
 )
+V2_AUDITED_CONSTRUCTOR_NATIVE_RESULT_PATHS = {
+    Counter: frozenset({"items"}),
+}
 V2_REFUSAL_EXECUTABLE_CLOSURE_EXEMPT_TYPES = tuple(
     dict.fromkeys(
         (
@@ -28260,6 +29916,7 @@ V2_AUTOMATIC_EXTERNAL_STATE_CAPABILITIES = frozenset(
 )
 V2_AUDITED_PURE_CALL_RESULT_PATHS = (
     (hashlib.sha256, frozenset({"copy", "digest", "hexdigest"})),
+    (unicodedata.category, frozenset({"startswith"})),
 )
 V2_TYPE_ATTRIBUTE_DESCRIPTORS = {
     name: type.__dict__[name]
@@ -28316,6 +29973,7 @@ V2_ENUM_PROPERTY_TYPE = enum.property
 V2_OPERATOR_ATTRGETTER_TYPE = type(operator.attrgetter("fixture"))
 V2_OPERATOR_ITEMGETTER_TYPE = type(operator.itemgetter(0))
 V2_OPERATOR_METHODCALLER_TYPE = type(operator.methodcaller("fixture"))
+V2_REGEX_BOUND_METHOD_TYPE = type(PATH_PATTERN.search)
 V2_OPERATOR_ITEMGETTER_REDUCE_DESCRIPTOR = (
     V2_OPERATOR_ITEMGETTER_TYPE.__dict__["__reduce__"]
 )
@@ -28696,22 +30354,77 @@ def v2_external_capability_name(
     return f"{v2_raw_module_name(module)}.{attribute_name}"
 
 
-V2_REFUSAL_EXTERNAL_CALLABLE_CAPABILITIES = tuple(
-    (
-        candidate,
-        v2_external_capability_name(module, attribute_name),
-    )
-    for module in V2_REFUSAL_EXTERNAL_MODULES
-    for attribute_name, candidate in dict.items(v2_raw_module_dict(module))
-    if any(
-        type(candidate) is candidate_type
-        for candidate_type in (
-            types.FunctionType,
-            types.BuiltinFunctionType,
-            types.BuiltinMethodType,
-            types.MethodDescriptorType,
-            types.WrapperDescriptorType,
+V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY = "fixture-selected-resources"
+
+
+def v2_fixture_set_process_cwd(path: Path) -> None:
+    os.chdir(path)
+
+
+def v2_fixture_set_process_environment_bytes(key: bytes, value: bytes) -> None:
+    os.environb[key] = value
+
+
+def v2_fixture_delete_process_environment_bytes(key: bytes) -> None:
+    del os.environb[key]
+
+
+def v2_fixture_mutate_process_environment_codec_views() -> None:
+    os.environ.encodekey = str
+    os.environb.decodevalue = str
+
+
+def v2_fixture_replace_process_environment_bindings() -> None:
+    os.environ = {}  # type: ignore[assignment]
+    os.environb = {}  # type: ignore[assignment]
+
+
+def v2_fixture_set_process_recursion_limit(limit: int) -> None:
+    sys.setrecursionlimit(limit)
+
+
+V2_FIXTURE_SELECTED_RESOURCE_CALLABLES = (
+    v2_read_repo_relative_file_strict,
+    require_fresh_run_dir,
+    v2_write_exclusive,
+    v2_fixture_set_process_cwd,
+    v2_fixture_set_process_environment_bytes,
+    v2_fixture_delete_process_environment_bytes,
+    v2_fixture_mutate_process_environment_codec_views,
+    v2_fixture_replace_process_environment_bindings,
+    v2_fixture_set_process_recursion_limit,
+    os.close,
+    os.fdopen,
+    os.fstat,
+    os.fsync,
+    os.open,
+    os.pread,
+    os.stat,
+    os.utime,
+    os.write,
+)
+V2_REFUSAL_EXTERNAL_CALLABLE_CAPABILITIES = (
+    tuple(
+        (
+            candidate,
+            v2_external_capability_name(module, attribute_name),
         )
+        for module in V2_REFUSAL_EXTERNAL_MODULES
+        for attribute_name, candidate in dict.items(v2_raw_module_dict(module))
+        if any(
+            type(candidate) is candidate_type
+            for candidate_type in (
+                types.FunctionType,
+                types.BuiltinFunctionType,
+                types.BuiltinMethodType,
+                types.MethodDescriptorType,
+                types.WrapperDescriptorType,
+            )
+        )
+    )
+    + tuple(
+        (candidate, V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY)
+        for candidate in V2_FIXTURE_SELECTED_RESOURCE_CALLABLES
     )
 )
 
@@ -28767,23 +30480,156 @@ def v2_external_type_path_capabilities(
 
 
 V2_CALL_OPS = frozenset({"CALL", "CALL_FUNCTION_EX", "CALL_KW"})
+V2_DIRECT_CALL_RESULT_PATH = ("<direct-call-result>",)
+V2_DERIVED_CALL_RESULT_PATH = ("<derived-call-result>",)
 V2_ATTRIBUTE_ACCESS_OPS = frozenset(
     {"LOAD_ATTR", "LOAD_METHOD"}
 )
-V2_VALUE_LOAD_OPS = frozenset(
-    {
-        "LOAD_GLOBAL",
-        "LOAD_NAME",
-        "LOAD_DEREF",
-        "LOAD_CLASSDEREF",
-        "LOAD_FAST",
+V2_FAST_LOCAL_LOAD_OPS = frozenset({
+    "LOAD_FAST",
+    "LOAD_FAST_AND_CLEAR",
+    "LOAD_FAST_BORROW",
+    "LOAD_FAST_CHECK",
+    # Kept as a defensive spelling for bytecode metadata readers which expose
+    # the compiler's maybe-null pseudo operation. Released CPython 3.11-3.14
+    # emits LOAD_FAST_AND_CLEAR/LOAD_FAST_CHECK instead.
+    "LOAD_FAST_MAYBE_NULL",
+})
+V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS = frozenset({
+    "LOAD_FAST_AND_CLEAR",
+    "LOAD_FAST_CHECK",
+    "LOAD_FAST_MAYBE_NULL",
+})
+V2_FAST_SUPERINSTRUCTION_EXPANSIONS = {
+    "LOAD_FAST_LOAD_FAST": ("LOAD_FAST", "LOAD_FAST"),
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": (
         "LOAD_FAST_BORROW",
-    }
-)
+        "LOAD_FAST_BORROW",
+    ),
+    "STORE_FAST_LOAD_FAST": ("STORE_FAST", "LOAD_FAST"),
+    "STORE_FAST_STORE_FAST": ("STORE_FAST", "STORE_FAST"),
+}
+
+
+@dataclass(frozen=True)
+class V2AnalysisInstruction:
+    opname: str
+    arg: int | None
+    argval: Any
+    argrepr: str
+    positions: Any
+    offset: int
+    is_jump_target: bool
+
+
+def v2_analysis_instructions(
+    code: types.CodeType,
+) -> list[V2AnalysisInstruction]:
+    raw_instructions = list(dis.get_instructions(code))
+    normalized: list[V2AnalysisInstruction] = []
+    for index, instruction in enumerate(raw_instructions):
+        expansion = V2_FAST_SUPERINSTRUCTION_EXPANSIONS.get(
+            instruction.opname
+        )
+        if expansion is None:
+            normalized.append(
+                V2AnalysisInstruction(
+                    instruction.opname,
+                    instruction.arg,
+                    instruction.argval,
+                    instruction.argrepr,
+                    instruction.positions,
+                    instruction.offset,
+                    instruction.is_jump_target,
+                )
+            )
+            continue
+        names = instruction.argval
+        if (
+            type(names) is not tuple
+            or len(names) != len(expansion)
+            or any(type(name) is not str for name in names)
+        ):
+            raise EvidenceFailed(
+                "refusal-state fast superinstruction operands are not exact"
+            )
+        next_instruction = (
+            raw_instructions[index + 1]
+            if index + 1 < len(raw_instructions)
+            else None
+        )
+        for component_index, (opname, name) in enumerate(
+            zip(expansion, names, strict=True)
+        ):
+            positions = instruction.positions
+            if (
+                component_index == len(expansion) - 1
+                and opname in {"LOAD_FAST", "LOAD_FAST_BORROW"}
+                and next_instruction is not None
+                and next_instruction.opname == "PUSH_NULL"
+            ):
+                # PEP 709 can fuse the loop-variable store with the callable
+                # load while assigning the fused instruction the loop
+                # variable's position. PUSH_NULL retains the callable token's
+                # exact source span, which the call matcher needs.
+                positions = next_instruction.positions
+            normalized.append(
+                V2AnalysisInstruction(
+                    opname,
+                    None,
+                    name,
+                    name,
+                    positions,
+                    instruction.offset,
+                    instruction.is_jump_target and component_index == 0,
+                )
+            )
+    return normalized
+
+
+def v2_code_parameter_layout(
+    code: types.CodeType,
+) -> tuple[tuple[str, str], ...]:
+    """Return exact parameter names and their zero-call binding classes."""
+    if type(code) is not types.CodeType:
+        raise EvidenceFailed("refusal-state parameter code is not exact")
+    fixed_count = code.co_argcount + code.co_kwonlyargcount
+    layout = [
+        (
+            name,
+            "positional"
+            if index < code.co_argcount
+            else "keyword-only",
+        )
+        for index, name in enumerate(code.co_varnames[:fixed_count])
+    ]
+    next_index = fixed_count
+    if code.co_flags & 0x04:  # CO_VARARGS
+        if next_index >= len(code.co_varnames):
+            raise EvidenceFailed("refusal-state variadic parameter is missing")
+        list.append(layout, (code.co_varnames[next_index], "variadic"))
+        next_index += 1
+    if code.co_flags & 0x08:  # CO_VARKEYWORDS
+        if next_index >= len(code.co_varnames):
+            raise EvidenceFailed(
+                "refusal-state keyword-variadic parameter is missing"
+            )
+        list.append(
+            layout,
+            (code.co_varnames[next_index], "keyword-variadic"),
+        )
+    if any(type(name) is not str for name, _kind in layout):
+        raise EvidenceFailed("refusal-state parameter names are not exact")
+    return tuple(layout)
+
+
+def v2_code_parameter_names(code: types.CodeType) -> tuple[str, ...]:
+    """Return positional, keyword-only, variadic, and keyword-variadic names."""
+    return tuple(name for name, _kind in v2_code_parameter_layout(code))
 
 
 def v2_instruction_access_path(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
     index: int,
 ) -> tuple[tuple[str, ...], int]:
     path: list[str] = []
@@ -28800,7 +30646,7 @@ def v2_instruction_access_path(
 
 
 def v2_access_has_direct_call_protocol(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
     source_index: int,
     path_end: int,
 ) -> bool:
@@ -28828,7 +30674,7 @@ def v2_access_has_direct_call_protocol(
 
 
 def v2_matching_direct_call_index(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
     source_index: int,
     path_end: int,
 ) -> int | None:
@@ -28837,49 +30683,105 @@ def v2_matching_direct_call_index(
         source_index,
         path_end,
     ):
+        return v2_matching_specialized_builtin_fallback_call_index(
+            instructions,
+            source_index,
+            path_end,
+        )
+    return v2_matching_prepared_call_index(instructions, path_end)
+
+
+def v2_matching_specialized_builtin_fallback_call_index(
+    instructions: Sequence[V2AnalysisInstruction],
+    source_index: int,
+    path_end: int,
+) -> int | None:
+    """Bind CPython 3.14's exact ``any``/``all`` fallback call.
+
+    CPython 3.14 can inline the common built-in path while retaining the loaded
+    callable across a branch for the shadowed-global fallback. That fallback
+    has no ordinary NULL call protocol, so the generic matcher cannot see it.
+    Require the complete identity-guard prefix before using source positions
+    to bind the fallback CALL; an ordinary value passed as another call's
+    argument therefore cannot be mistaken for a callable.
+    """
+    if path_end != source_index or source_index + 3 >= len(instructions):
+        return None
+    source = instructions[source_index]
+    if (
+        source.opname != "LOAD_GLOBAL"
+        or type(source.argval) is not str
+        or source.argval not in {"all", "any"}
+    ):
+        return None
+    identity_guard = instructions[source_index + 1 : source_index + 4]
+    if [instruction.opname for instruction in identity_guard] != [
+        "COPY",
+        "LOAD_COMMON_CONSTANT",
+        "IS_OP",
+    ]:
+        return None
+    expected_repr = f"<built-in function {source.argval}>"
+    if identity_guard[1].argrepr != expected_repr:
         return None
     return v2_matching_prepared_call_index(instructions, path_end)
 
 
 def v2_matching_prepared_call_index(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
     target_end: int,
 ) -> int | None:
-    call_depth = 1
-    index = target_end + 1
-    while index < len(instructions):
+    terminal_position = instructions[target_end].positions
+    terminal_fields = (
+        terminal_position.lineno,
+        terminal_position.end_lineno,
+        terminal_position.col_offset,
+        terminal_position.end_col_offset,
+    )
+    if any(type(field) is not int for field in terminal_fields):
+        raise EvidenceFailed(
+            "refusal-state direct call lacks exact source-position metadata"
+        )
+    terminal_start = (
+        terminal_position.lineno,
+        terminal_position.col_offset,
+    )
+    terminal_stop = (
+        terminal_position.end_lineno,
+        terminal_position.end_col_offset,
+    )
+    for index in range(target_end + 1, len(instructions)):
         instruction = instructions[index]
-        if instruction.opname in V2_VALUE_LOAD_OPS:
-            _, nested_path_end = v2_instruction_access_path(
-                instructions,
-                index,
-            )
-            if v2_access_has_direct_call_protocol(
-                instructions,
-                index,
-                nested_path_end,
-            ):
-                call_depth += 1
-            index = nested_path_end
-        elif instruction.opname in V2_CALL_OPS:
-            call_depth -= 1
-            if call_depth == 0:
-                return index
-        elif instruction.opname in {
-            "JUMP_BACKWARD",
-            "JUMP_BACKWARD_NO_INTERRUPT",
-            "RETURN_CONST",
-            "RETURN_VALUE",
-            "RAISE_VARARGS",
-            "RERAISE",
-        }:
-            return None
-        index += 1
-    return None
+        if instruction.opname not in V2_CALL_OPS:
+            continue
+        call_position = instruction.positions
+        call_fields = (
+            call_position.lineno,
+            call_position.end_lineno,
+            call_position.col_offset,
+            call_position.end_col_offset,
+        )
+        if any(type(field) is not int for field in call_fields):
+            continue
+        call_start = (
+            call_position.lineno,
+            call_position.col_offset,
+        )
+        call_stop = (
+            call_position.end_lineno,
+            call_position.end_col_offset,
+        )
+        if call_start <= terminal_start and terminal_stop <= call_stop:
+            return index
+    raise EvidenceFailed(
+        "refusal-state direct call cannot be bound to exact source-position "
+        "metadata"
+    )
 
 
 def v2_static_subscript_call(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
+    path_start: int,
     path_end: int,
 ) -> tuple[Any, int] | None:
     key_index = path_end + 1
@@ -28898,26 +30800,612 @@ def v2_static_subscript_call(
         or subscript.opname == "BINARY_OP" and subscript.argrepr == "[]"
     ):
         return None
+    preceding_push_null = (
+        path_start > 0
+        and instructions[path_start - 1].opname == "PUSH_NULL"
+    )
     following_index = subscript_index + 1
-    if following_index >= len(instructions) or instructions[
-        following_index
-    ].opname not in {"PUSH_NULL", "PRECALL", "CALL", "CALL_KW"}:
+    following_push_null = (
+        following_index < len(instructions)
+        and instructions[following_index].opname == "PUSH_NULL"
+    )
+    direct_call_protocol = (
+        (
+            preceding_push_null
+            or instructions[path_start].opname == "LOAD_GLOBAL"
+            and "NULL" in instructions[path_start].argrepr
+        )
+        if sys.version_info < (3, 13)
+        else following_push_null
+    )
+    if not direct_call_protocol:
         return None
     call_index = v2_matching_prepared_call_index(
         instructions,
         subscript_index,
     )
-    if call_index is None:
-        return None
     return key, call_index
 
 
 def v2_call_result_access_path(
-    instructions: Sequence[dis.Instruction],
+    instructions: Sequence[V2AnalysisInstruction],
     call_index: int,
 ) -> tuple[str, ...]:
     path, _ = v2_instruction_access_path(instructions, call_index)
+    if path:
+        return path
+    inner_position = instructions[call_index].positions
+    inner_fields = (
+        inner_position.lineno,
+        inner_position.end_lineno,
+        inner_position.col_offset,
+        inner_position.end_col_offset,
+    )
+    if any(type(field) is not int for field in inner_fields):
+        raise EvidenceFailed(
+            "refusal-state call result lacks exact source-position metadata"
+        )
+    inner_start = (inner_position.lineno, inner_position.col_offset)
+    inner_stop = (inner_position.end_lineno, inner_position.end_col_offset)
+    for following in instructions[call_index + 1 :]:
+        if following.opname not in V2_CALL_OPS:
+            continue
+        outer_position = following.positions
+        outer_fields = (
+            outer_position.lineno,
+            outer_position.end_lineno,
+            outer_position.col_offset,
+            outer_position.end_col_offset,
+        )
+        if any(type(field) is not int for field in outer_fields):
+            continue
+        outer_start = (
+            outer_position.lineno,
+            outer_position.col_offset,
+        )
+        outer_stop = (
+            outer_position.end_lineno,
+            outer_position.end_col_offset,
+        )
+        if outer_start == inner_start and inner_stop < outer_stop:
+            return V2_DIRECT_CALL_RESULT_PATH
     return path
+
+
+V2_FAST_ORIGIN_UNKNOWN = ("unknown",)
+V2_FAST_ORIGIN_STATIC = ("static",)
+V2_FAST_ORIGIN_UNBOUND = ("unbound",)
+V2_FAST_ORIGIN_NULL = ("null",)
+V2_FAST_ORIGIN_RESOLUTION_CAP = 32
+
+
+def v2_fast_origin_binding(
+    source_kind: str,
+    source_name: str,
+    source_path: tuple[str, ...] = (),
+) -> tuple[Any, ...]:
+    return ("binding", source_kind, source_name, source_path)
+
+
+def v2_fast_origin_with_path(
+    origin: tuple[Any, ...],
+    path: tuple[str, ...],
+) -> tuple[Any, ...]:
+    if not path:
+        return origin
+    return ("attribute", origin, path)
+
+
+def v2_fast_origin_stack_effect(
+    instruction: V2AnalysisInstruction,
+) -> int | None:
+    opcode = dis.opmap.get(instruction.opname)
+    if opcode is None:
+        return None
+    try:
+        if instruction.arg is None:
+            return dis.stack_effect(opcode)
+        return dis.stack_effect(opcode, instruction.arg)
+    except (TypeError, ValueError):
+        return None
+
+
+def v2_fast_local_origin_dataflow(
+    instructions: Sequence[V2AnalysisInstruction],
+    code: types.CodeType,
+) -> dict[str, Any]:
+    """Build a bounded, conservative origin graph for fast-local values.
+
+    The graph deliberately unions every syntactic definition of a local. That
+    over-approximates control flow, so conditional aliases refuse rather than
+    inheriting whichever branch happens to occur first in bytecode order.
+    """
+    parameter_layout = dict(v2_code_parameter_layout(code))
+    definitions: defaultdict[str, set[tuple[Any, ...]]] = defaultdict(set)
+    for name in parameter_layout:
+        definitions[name].add(v2_fast_origin_binding("parameter", name))
+
+    call_sources: defaultdict[int, set[tuple[Any, ...]]] = defaultdict(set)
+    implicit_call_expressions: list[tuple[int, tuple[Any, ...]]] = []
+    load_expressions: dict[int, tuple[Any, ...]] = {}
+    dynamic_uses: list[tuple[str, tuple[Any, ...]]] = []
+
+    for index, instruction in enumerate(instructions):
+        source: tuple[Any, ...] | None = None
+        if (
+            instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
+            and type(instruction.argval) is str
+        ):
+            source = v2_fast_origin_binding("global", instruction.argval)
+        elif (
+            instruction.opname in {"LOAD_DEREF", "LOAD_CLASSDEREF"}
+            and type(instruction.argval) is str
+            and instruction.argval in code.co_freevars
+        ):
+            source = v2_fast_origin_binding("freevar", instruction.argval)
+        elif (
+            instruction.opname in V2_FAST_LOCAL_LOAD_OPS
+            and type(instruction.argval) is str
+        ):
+            source = ("local", instruction.argval)
+            if instruction.opname in V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS:
+                source = ("maybe-unbound", source)
+        if source is None:
+            continue
+        path, path_end = v2_instruction_access_path(instructions, index)
+        access = v2_fast_origin_with_path(source, path)
+        if instruction.opname in V2_FAST_LOCAL_LOAD_OPS:
+            load_expressions[index] = access
+        call_index = v2_matching_direct_call_index(
+            instructions,
+            index,
+            path_end,
+        )
+        if call_index is not None:
+            call_sources[call_index].add(access)
+
+    stack: list[tuple[Any, ...]] = []
+
+    def pop_origin() -> tuple[Any, ...]:
+        return list.pop(stack) if stack else V2_FAST_ORIGIN_UNKNOWN
+
+    def pop_origins(count: int) -> list[tuple[Any, ...]]:
+        return [pop_origin() for _index in range(max(0, count))]
+
+    for index, instruction in enumerate(instructions):
+        opname = instruction.opname
+        if index > 0 and instruction.is_jump_target:
+            # Definitions in a target block remain useful, but operand-stack
+            # values crossing a branch are conservatively unknown.
+            list.clear(stack)
+        if opname in V2_FAST_LOCAL_LOAD_OPS:
+            expression = ("local", instruction.argval)
+            if opname in V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS:
+                expression = ("maybe-unbound", expression)
+            list.append(stack, expression)
+            if opname == "LOAD_FAST_AND_CLEAR" and type(
+                instruction.argval
+            ) is str:
+                definitions[instruction.argval].add(V2_FAST_ORIGIN_UNBOUND)
+            continue
+        if opname in {"LOAD_GLOBAL", "LOAD_NAME"}:
+            effect = v2_fast_origin_stack_effect(instruction)
+            if effect == 2:
+                list.append(stack, V2_FAST_ORIGIN_NULL)
+            list.append(
+                stack,
+                v2_fast_origin_binding("global", instruction.argval)
+                if type(instruction.argval) is str
+                else V2_FAST_ORIGIN_UNKNOWN,
+            )
+            continue
+        if opname in {"LOAD_DEREF", "LOAD_CLASSDEREF"}:
+            if (
+                type(instruction.argval) is str
+                and instruction.argval in code.co_freevars
+            ):
+                list.append(
+                    stack,
+                    v2_fast_origin_binding("freevar", instruction.argval),
+                )
+            else:
+                list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+            continue
+        if opname in {"LOAD_CONST", "LOAD_SMALL_INT"}:
+            if type(instruction.argval) in {str, int}:
+                list.append(stack, ("constant", instruction.argval))
+            else:
+                list.append(stack, V2_FAST_ORIGIN_STATIC)
+            continue
+        if opname in {"LOAD_CLOSURE", "LOAD_BUILD_CLASS", "LOAD_ASSERTION_ERROR"}:
+            list.append(stack, V2_FAST_ORIGIN_STATIC)
+            continue
+        if opname == "PUSH_NULL":
+            list.append(stack, V2_FAST_ORIGIN_NULL)
+            continue
+        if opname in V2_ATTRIBUTE_ACCESS_OPS:
+            base = pop_origin()
+            attribute = (
+                (instruction.argval,)
+                if type(instruction.argval) is str
+                else ("<unknown-attribute>",)
+            )
+            expression = v2_fast_origin_with_path(base, attribute)
+            effect = v2_fast_origin_stack_effect(instruction)
+            if effect == 1:
+                list.append(stack, V2_FAST_ORIGIN_NULL)
+            list.append(stack, expression)
+            continue
+        if opname == "COPY":
+            depth = instruction.arg
+            list.append(
+                stack,
+                stack[-depth]
+                if type(depth) is int and 0 < depth <= len(stack)
+                else V2_FAST_ORIGIN_UNKNOWN,
+            )
+            continue
+        if opname == "SWAP":
+            depth = instruction.arg
+            if type(depth) is int and 0 < depth <= len(stack):
+                stack[-1], stack[-depth] = stack[-depth], stack[-1]
+            else:
+                list.clear(stack)
+            continue
+        if opname in V2_CALL_OPS:
+            effect = v2_fast_origin_stack_effect(instruction)
+            pop_count = 1 - effect if effect is not None else len(stack)
+            consumed = pop_origins(pop_count)
+            sources = call_sources.get(index, set())
+            if len(sources) == 1:
+                callable_origin = next(iter(sources))
+            elif sources:
+                callable_origin = (
+                    "choice",
+                    tuple(sorted(sources, key=repr)),
+                )
+            else:
+                callable_origin = V2_FAST_ORIGIN_UNKNOWN
+                implicit_candidates = [
+                    candidate
+                    for candidate in consumed
+                    if candidate != V2_FAST_ORIGIN_NULL
+                ]
+                if implicit_candidates:
+                    callable_origin = implicit_candidates[-1]
+                    list.append(
+                        implicit_call_expressions,
+                        (index, callable_origin),
+                    )
+            list.append(stack, ("call-result", callable_origin))
+            continue
+        if opname == "PRECALL":
+            effect = v2_fast_origin_stack_effect(instruction)
+            if effect is not None and effect < 0:
+                pop_origins(-effect)
+            continue
+        if opname == "STORE_FAST":
+            if type(instruction.argval) is str:
+                definitions[instruction.argval].add(pop_origin())
+            else:
+                pop_origin()
+            continue
+        if opname == "STORE_FAST_MAYBE_NULL":
+            stored = ("maybe-unbound", pop_origin())
+            if type(instruction.argval) is str:
+                definitions[instruction.argval].add(stored)
+            continue
+        if opname == "DELETE_FAST":
+            if type(instruction.argval) is str:
+                definitions[instruction.argval].add(V2_FAST_ORIGIN_UNBOUND)
+            continue
+        if opname in {"UNPACK_SEQUENCE", "UNPACK_EX"}:
+            source = pop_origin()
+            list.append(dynamic_uses, ("unpack", source))
+            if opname == "UNPACK_SEQUENCE" and type(instruction.arg) is int:
+                count = instruction.arg
+            elif opname == "UNPACK_EX" and type(instruction.arg) is int:
+                count = (
+                    instruction.arg & 0xFF
+                ) + (instruction.arg >> 8) + 1
+            else:
+                count = 0
+            for item_index in reversed(range(count)):
+                list.append(stack, ("unpack", source, item_index))
+            continue
+        if (
+            opname == "BINARY_SUBSCR"
+            or opname == "BINARY_OP" and instruction.argrepr == "[]"
+        ):
+            key_origin = pop_origin()
+            source = pop_origin()
+            key = (
+                key_origin[1]
+                if len(key_origin) == 2
+                and key_origin[0] == "constant"
+                and type(key_origin[1]) in {str, int}
+                else None
+            )
+            expression = ("subscript", source, key)
+            list.append(dynamic_uses, ("subscript", source))
+            list.append(stack, expression)
+            continue
+        if opname == "TO_BOOL" or opname.startswith("POP_JUMP"):
+            source = pop_origin()
+            list.append(dynamic_uses, ("truth", source))
+            if opname == "TO_BOOL":
+                list.append(stack, V2_FAST_ORIGIN_STATIC)
+            else:
+                list.clear(stack)
+            continue
+        if opname.startswith("JUMP_IF"):
+            source = stack[-1] if stack else V2_FAST_ORIGIN_UNKNOWN
+            list.append(dynamic_uses, ("truth", source))
+            list.clear(stack)
+            continue
+        if opname in {"GET_ITER", "GET_YIELD_FROM_ITER"}:
+            source = pop_origin()
+            list.append(dynamic_uses, ("iterate", source))
+            list.append(stack, ("derived", opname, source))
+            continue
+        if opname == "FOR_ITER":
+            list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+            continue
+        if opname in {"BUILD_LIST", "BUILD_SET", "BUILD_TUPLE"}:
+            count = instruction.arg if type(instruction.arg) is int else 0
+            members = tuple(reversed(pop_origins(count)))
+            list.append(stack, ("aggregate", opname, members))
+            continue
+        if opname == "BUILD_MAP":
+            count = instruction.arg if type(instruction.arg) is int else 0
+            members = tuple(reversed(pop_origins(count * 2)))
+            list.append(stack, ("aggregate", opname, members))
+            continue
+        if opname == "BUILD_CONST_KEY_MAP":
+            count = instruction.arg if type(instruction.arg) is int else 0
+            members = tuple(reversed(pop_origins(count + 1)))
+            list.append(stack, ("aggregate", opname, members))
+            continue
+        if opname == "MAKE_FUNCTION":
+            effect = v2_fast_origin_stack_effect(instruction)
+            pop_count = 1 - effect if effect is not None else len(stack)
+            pop_origins(pop_count)
+            list.append(stack, ("static-callable",))
+            continue
+        if opname == "SET_FUNCTION_ATTRIBUTE":
+            # CPython 3.13+ keeps the new function at TOS and consumes the
+            # defaults/closure/annotation payload immediately below it.
+            if len(stack) >= 2:
+                stack.pop(-2)
+            else:
+                list.clear(stack)
+                list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+            continue
+        if opname.startswith("UNARY_"):
+            source = pop_origin()
+            list.append(dynamic_uses, (opname, source))
+            list.append(stack, ("derived", opname, source))
+            continue
+        if (
+            opname.startswith("BINARY_")
+            or opname in {"COMPARE_OP", "CONTAINS_OP", "IS_OP"}
+        ):
+            right = pop_origin()
+            left = pop_origin()
+            list.append(dynamic_uses, (opname, ("aggregate", opname, (left, right))))
+            list.append(stack, ("derived", opname, left, right))
+            continue
+        if opname == "POP_TOP":
+            pop_origin()
+            continue
+        if opname in {"STORE_DEREF", "STORE_GLOBAL", "STORE_NAME"}:
+            pop_origin()
+            continue
+        if opname in {
+            "RETURN_CONST",
+            "RETURN_VALUE",
+            "RAISE_VARARGS",
+            "RERAISE",
+        }:
+            list.clear(stack)
+            continue
+        if opname in {
+            "CACHE",
+            "COPY_FREE_VARS",
+            "END_FOR",
+            "EXTENDED_ARG",
+            "KW_NAMES",
+            "MAKE_CELL",
+            "NOP",
+            "NOT_TAKEN",
+            "RESUME",
+        }:
+            continue
+        if opname.startswith("JUMP"):
+            list.clear(stack)
+            continue
+        effect = v2_fast_origin_stack_effect(instruction)
+        if effect is None:
+            list.clear(stack)
+        elif effect < 0:
+            pop_origins(-effect)
+        elif effect > 0:
+            for _index in range(effect):
+                list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+
+    return {
+        "definitions": {
+            name: frozenset(values)
+            for name, values in definitions.items()
+        },
+        "load_expressions": load_expressions,
+        "dynamic_uses": tuple(dynamic_uses),
+        "implicit_call_expressions": tuple(implicit_call_expressions),
+        "parameter_layout": parameter_layout,
+    }
+
+
+def v2_resolve_fast_origin(
+    expression: tuple[Any, ...],
+    definitions: Mapping[str, frozenset[tuple[Any, ...]]],
+    *,
+    trail: tuple[str, ...] = (),
+    depth: int = 0,
+) -> frozenset[tuple[Any, ...]]:
+    if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+        return frozenset({V2_FAST_ORIGIN_UNKNOWN})
+    kind = expression[0] if expression else "unknown"
+    if kind == "local":
+        name = expression[1]
+        if type(name) is not str or name in trail:
+            return frozenset({V2_FAST_ORIGIN_UNKNOWN})
+        candidates = definitions.get(name)
+        if not candidates:
+            return frozenset({V2_FAST_ORIGIN_UNKNOWN})
+        resolved: set[tuple[Any, ...]] = set()
+        for candidate in candidates:
+            resolved.update(v2_resolve_fast_origin(
+                candidate,
+                definitions,
+                trail=(*trail, name),
+                depth=depth + 1,
+            ))
+            if len(resolved) > V2_FAST_ORIGIN_RESOLUTION_CAP:
+                return frozenset({V2_FAST_ORIGIN_UNKNOWN})
+        return frozenset(resolved)
+    if kind == "choice":
+        resolved = set()
+        for candidate in expression[1]:
+            resolved.update(v2_resolve_fast_origin(
+                candidate,
+                definitions,
+                trail=trail,
+                depth=depth + 1,
+            ))
+        return (
+            frozenset(resolved)
+            if len(resolved) <= V2_FAST_ORIGIN_RESOLUTION_CAP
+            else frozenset({V2_FAST_ORIGIN_UNKNOWN})
+        )
+    if kind == "attribute":
+        base, path = expression[1], expression[2]
+        resolved: set[tuple[Any, ...]] = set()
+        for candidate in v2_resolve_fast_origin(
+            base,
+            definitions,
+            trail=trail,
+            depth=depth + 1,
+        ):
+            if candidate[0] == "binding":
+                resolved.add((
+                    "binding",
+                    candidate[1],
+                    candidate[2],
+                    (*candidate[3], *path),
+                ))
+            elif candidate[0] == "call-result":
+                resolved.add(("result-access", candidate, path))
+            elif candidate[0] == "result-access":
+                resolved.add((
+                    "result-access",
+                    candidate[1],
+                    (*candidate[2], *path),
+                ))
+            elif candidate[0] == "maybe-unbound":
+                resolved.add((
+                    "maybe-unbound",
+                    ("attribute", candidate[1], path),
+                ))
+            else:
+                resolved.add(("attribute", candidate, path))
+        return frozenset(resolved)
+    if kind == "call-result":
+        return frozenset(
+            ("call-result", candidate)
+            for candidate in v2_resolve_fast_origin(
+                expression[1],
+                definitions,
+                trail=trail,
+                depth=depth + 1,
+            )
+        )
+    if kind in {"subscript", "unpack", "maybe-unbound"}:
+        suffix = expression[2:]
+        return frozenset(
+            (kind, candidate, *suffix)
+            for candidate in v2_resolve_fast_origin(
+                expression[1],
+                definitions,
+                trail=trail,
+                depth=depth + 1,
+            )
+        )
+    return frozenset({expression})
+
+
+def v2_fast_origin_call_result_roots(
+    expression: tuple[Any, ...],
+) -> frozenset[tuple[Any, ...]]:
+    roots: set[tuple[Any, ...]] = set()
+
+    def visit(candidate: Any, depth: int) -> None:
+        if depth > V2_REFUSAL_STATE_DEPTH_CAP or type(candidate) is not tuple:
+            return
+        if not candidate:
+            return
+        kind = candidate[0]
+        if kind == "call-result":
+            callable_origin = candidate[1]
+            if (
+                type(callable_origin) is tuple
+                and callable_origin
+                and callable_origin[0] == "binding"
+            ):
+                roots.add(callable_origin)
+            else:
+                visit(callable_origin, depth + 1)
+            return
+        if kind in {
+            "aggregate",
+            "attribute",
+            "derived",
+            "maybe-unbound",
+            "result-access",
+            "subscript",
+            "unpack",
+        }:
+            for part in candidate[1:]:
+                if type(part) is tuple:
+                    if part and type(part[0]) is tuple:
+                        for nested in part:
+                            visit(nested, depth + 1)
+                    else:
+                        visit(part, depth + 1)
+
+    visit(expression, 0)
+    return frozenset(roots)
+
+
+def v2_fast_origin_is_static(expression: tuple[Any, ...]) -> bool:
+    if not expression:
+        return False
+    kind = expression[0]
+    if kind in {"constant", "static", "static-callable"}:
+        return True
+    if kind == "attribute":
+        return v2_fast_origin_is_static(expression[1])
+    if kind == "aggregate":
+        # BUILD_LIST/SET/TUPLE/MAP produce exact built-in containers even
+        # when their members are dynamic. Calling a base container method is
+        # therefore a statically known receiver operation; member origins are
+        # still traversed separately for subscript/unpack/call-result use.
+        return True
+    if kind == "derived":
+        return all(
+            type(part) is not tuple or v2_fast_origin_is_static(part)
+            for part in expression[2:]
+        )
+    return False
 
 
 def v2_code_access_analysis(
@@ -28926,10 +31414,20 @@ def v2_code_access_analysis(
     context: dict[str, Any],
     depth: int = 0,
     merge_nested_bindings: bool = True,
+    constants_prevalidated: bool = False,
 ) -> dict[str, Any]:
     if depth > V2_REFUSAL_STATE_DEPTH_CAP:
         raise EvidenceFailed("refusal-state code traversal exceeds its depth cap")
-    instructions = list(dis.get_instructions(code))
+    if not constants_prevalidated:
+        # dis.get_instructions renders constant argument representations.
+        # Validate and bound the exact constant graph first so dis cannot
+        # perform an unbounded integer/string conversion of untrusted code.
+        v2_code_semantic_projection(
+            code,
+            context=context,
+            depth=depth,
+        )
+    instructions = v2_analysis_instructions(code)
     v2_refusal_charge(context, "instructions", len(instructions))
     if any(
         type(constant) is str
@@ -28969,8 +31467,7 @@ def v2_code_access_analysis(
         str,
         defaultdict[tuple[str, ...], set[tuple[str, ...]]],
     ] = defaultdict(lambda: defaultdict(set))
-    parameter_count = code.co_argcount + code.co_kwonlyargcount
-    parameter_names = frozenset(code.co_varnames[:parameter_count])
+    parameter_names = frozenset(v2_code_parameter_names(code))
     parameter_paths: defaultdict[str, set[tuple[str, ...]]] = defaultdict(set)
     bare_parameter_names: set[str] = set()
     called_parameter_names: set[str] = set()
@@ -28986,43 +31483,23 @@ def v2_code_access_analysis(
         str,
         defaultdict[tuple[str, ...], set[tuple[str, ...]]],
     ] = defaultdict(lambda: defaultdict(set))
-    local_aliases: dict[str, tuple[str, str, tuple[str, ...]]] = {}
-    ambiguous_local_aliases: set[str] = set()
-    seen_local_alias_stores: set[str] = set()
-    pending_local_aliases: dict[
-        int,
-        tuple[str, str, tuple[str, ...]],
-    ] = {}
-    pending_ambiguous_local_aliases: set[int] = set()
     static_subscript_calls: list[dict[str, Any]] = []
-
-    def schedule_local_alias(
-        *,
-        path_end: int,
-        source_kind: str,
-        source_name: str,
-        source_path: tuple[str, ...],
-    ) -> None:
-        store_index = path_end + 1
-        if (
-            store_index < len(instructions)
-            and instructions[store_index].opname == "STORE_FAST"
-            and isinstance(instructions[store_index].argval, str)
-        ):
-            pending_local_aliases[store_index] = (
-                source_kind,
-                source_name,
-                source_path,
-            )
+    fast_origin_data = v2_fast_local_origin_dataflow(instructions, code)
+    fast_origin_definitions = fast_origin_data["definitions"]
 
     def record_static_subscript_call(
         *,
         source_kind: str,
         source_name: str,
         source_path: tuple[str, ...],
+        path_start: int,
         path_end: int,
     ) -> None:
-        result = v2_static_subscript_call(instructions, path_end)
+        result = v2_static_subscript_call(
+            instructions,
+            path_start,
+            path_end,
+        )
         if result is None:
             return
         key, call_index = result
@@ -29037,28 +31514,197 @@ def v2_code_access_analysis(
             ),
         })
 
-    for index, instruction in enumerate(instructions):
-        if (
-            instruction.opname == "STORE_FAST"
-            and isinstance(instruction.argval, str)
-        ):
-            local_name = instruction.argval
-            if index in pending_ambiguous_local_aliases:
-                ambiguous_local_aliases.add(local_name)
-            pending = pending_local_aliases.pop(index, None)
-            if pending is None:
-                if local_name in local_aliases:
-                    ambiguous_local_aliases.add(local_name)
-                local_aliases.pop(local_name, None)
+    def record_result_path(
+        root: tuple[Any, ...],
+        result_path: tuple[str, ...],
+    ) -> None:
+        if not result_path or root[0] != "binding":
+            return
+        source_kind, source_name, source_path = root[1], root[2], root[3]
+        if source_kind == "global":
+            if source_path:
+                paths = global_path_call_result_paths[source_name][source_path]
             else:
-                prior = local_aliases.get(local_name)
+                paths = call_result_paths[source_name]
+        elif source_kind == "freevar":
+            if source_path:
+                paths = freevar_path_call_result_paths[source_name][source_path]
+            else:
+                paths = freevar_call_result_paths[source_name]
+        elif source_kind == "parameter":
+            if source_path:
+                paths = parameter_path_call_result_paths[source_name][source_path]
+            else:
+                paths = parameter_call_result_paths[source_name]
+        else:
+            raise EvidenceFailed(
+                "refusal-state fast-local result has an unsupported root"
+            )
+        paths.discard(())
+        paths.add(result_path)
+
+    def record_binding_access(
+        binding: tuple[Any, ...],
+        *,
+        call_index: int | None,
+    ) -> None:
+        source_kind, source_name, source_path = (
+            binding[1],
+            binding[2],
+            binding[3],
+        )
+        result_path = (
+            v2_call_result_access_path(instructions, call_index)
+            if call_index is not None
+            else ()
+        )
+        if source_kind == "global":
+            if source_path:
+                module_paths[source_name].add(source_path)
+                if call_index is not None:
+                    called_global_paths[source_name].add(source_path)
+                    global_path_call_result_paths[source_name][
+                        source_path
+                    ].add(result_path)
+            else:
+                bare_global_names.add(source_name)
+                if call_index is not None:
+                    called_global_names.add(source_name)
+                    call_result_paths[source_name].add(result_path)
+        elif source_kind == "freevar":
+            if source_path:
+                freevar_paths[source_name].add(source_path)
+                if call_index is not None:
+                    called_freevar_paths[source_name].add(source_path)
+                    freevar_path_call_result_paths[source_name][
+                        source_path
+                    ].add(result_path)
+            else:
+                bare_freevar_names.add(source_name)
+                if call_index is not None:
+                    called_freevar_names.add(source_name)
+                    freevar_call_result_paths[source_name].add(result_path)
+        elif source_kind == "parameter":
+            if source_path:
+                parameter_paths[source_name].add(source_path)
+                if call_index is not None:
+                    called_parameter_paths[source_name].add(source_path)
+                    parameter_path_call_result_paths[source_name][
+                        source_path
+                    ].add(result_path)
+            else:
+                bare_parameter_names.add(source_name)
+                if call_index is not None:
+                    called_parameter_names.add(source_name)
+                    parameter_call_result_paths[source_name].add(result_path)
+        else:
+            raise EvidenceFailed(
+                "refusal-state fast-local binding has an unsupported origin"
+            )
+
+    def record_fast_expression(
+        expression: tuple[Any, ...],
+        *,
+        call_index: int | None,
+    ) -> None:
+        resolved = v2_resolve_fast_origin(
+            expression,
+            fast_origin_definitions,
+        )
+        if call_index is not None and len(resolved) != 1:
+            raise EvidenceFailed(
+                "refusal-state callable reaches a control-flow-ambiguous "
+                f"local alias in {code.co_qualname}"
+            )
+        for origin in resolved:
+            kind = origin[0]
+            if kind == "binding":
+                record_binding_access(origin, call_index=call_index)
+                continue
+            if kind == "result-access":
+                roots = v2_fast_origin_call_result_roots(origin[1])
+                call_result = origin[1]
+                callable_origin = (
+                    call_result[1]
+                    if call_result[0] == "call-result"
+                    else V2_FAST_ORIGIN_UNKNOWN
+                )
                 if (
-                    local_name in seen_local_alias_stores
-                    and prior != pending
+                    not roots
+                    and callable_origin[0] == "subscript"
+                    and callable_origin[1][0] == "binding"
+                    and type(callable_origin[2]) in {str, int}
                 ):
-                    ambiguous_local_aliases.add(local_name)
-                local_aliases[local_name] = pending
-            seen_local_alias_stores.add(local_name)
+                    base = callable_origin[1]
+                    static_subscript_calls.append({
+                        "source_kind": base[1],
+                        "source_name": base[2],
+                        "source_path": base[3],
+                        "key": callable_origin[2],
+                        "call_result_path": origin[2],
+                    })
+                    continue
+                if len(roots) != 1:
+                    raise EvidenceFailed(
+                        "refusal-state stored call result has an ambiguous root"
+                    )
+                record_result_path(next(iter(roots)), origin[2])
+                continue
+            if kind == "call-result":
+                if call_index is not None:
+                    result_kind = (
+                        "local result"
+                        if expression[0] in {"local", "maybe-unbound"}
+                        else "call result"
+                    )
+                    raise EvidenceFailed(
+                        "refusal-state callable invokes a dynamically produced "
+                        f"{result_kind} in {code.co_qualname}"
+                    )
+                continue
+            if kind == "subscript":
+                base, key = origin[1], origin[2]
+                roots = v2_fast_origin_call_result_roots(base)
+                for root in roots:
+                    record_result_path(root, V2_DERIVED_CALL_RESULT_PATH)
+                if call_index is not None and base[0] == "binding":
+                    if type(key) not in {str, int}:
+                        raise EvidenceFailed(
+                            "refusal-state stored subscript key is not exact"
+                        )
+                    static_subscript_calls.append({
+                        "source_kind": base[1],
+                        "source_name": base[2],
+                        "source_path": base[3],
+                        "key": key,
+                        "call_result_path": v2_call_result_access_path(
+                            instructions,
+                            call_index,
+                        ),
+                    })
+                    continue
+            if v2_fast_origin_is_static(origin):
+                continue
+            if call_index is not None:
+                if kind in {"maybe-unbound", "unbound"}:
+                    raise EvidenceFailed(
+                        "refusal-state callable reaches a possibly unbound "
+                        f"local alias in {code.co_qualname}"
+                    )
+                raise EvidenceFailed(
+                    "refusal-state callable invokes an unproven local value "
+                    f"in {code.co_qualname}"
+                )
+
+    def record_dynamic_result_use(expression: tuple[Any, ...]) -> None:
+        for origin in v2_resolve_fast_origin(
+            expression,
+            fast_origin_definitions,
+        ):
+            for root in v2_fast_origin_call_result_roots(origin):
+                record_result_path(root, V2_DERIVED_CALL_RESULT_PATH)
+
+    for index, instruction in enumerate(instructions):
         if instruction.opname in V2_IMPORT_OPS:
             raise EvidenceFailed(
                 "refusal callback contains import bytecode in "
@@ -29086,16 +31732,11 @@ def v2_code_access_analysis(
                 instructions,
                 index,
             )
-            schedule_local_alias(
-                path_end=path_end,
-                source_kind="global",
-                source_name=name,
-                source_path=path,
-            )
             record_static_subscript_call(
                 source_kind="global",
                 source_name=name,
                 source_path=path,
+                path_start=index,
                 path_end=path_end,
             )
             call_index = v2_matching_direct_call_index(
@@ -29130,16 +31771,11 @@ def v2_code_access_analysis(
                 instructions,
                 index,
             )
-            schedule_local_alias(
-                path_end=path_end,
-                source_kind="freevar",
-                source_name=freevar_name,
-                source_path=freevar_path,
-            )
             record_static_subscript_call(
                 source_kind="freevar",
                 source_name=freevar_name,
                 source_path=freevar_path,
+                path_start=index,
                 path_end=path_end,
             )
             call_index = v2_matching_direct_call_index(
@@ -29167,170 +31803,42 @@ def v2_code_access_analysis(
                         result_path
                     )
         if (
-            instruction.opname in {"LOAD_FAST", "LOAD_FAST_BORROW"}
-            and isinstance(instruction.argval, str)
-            and instruction.argval in ambiguous_local_aliases
+            instruction.opname in V2_FAST_LOCAL_LOAD_OPS
+            and type(instruction.argval) is str
         ):
-            ambiguous_path, ambiguous_path_end = (
-                v2_instruction_access_path(instructions, index)
-            )
-            ambiguous_call_index = v2_matching_direct_call_index(
-                instructions,
-                index,
-                ambiguous_path_end,
-            )
-            ambiguous_subscript_call = v2_static_subscript_call(
-                instructions,
-                ambiguous_path_end,
-            )
-            ambiguous_store_index = ambiguous_path_end + 1
-            if (
-                ambiguous_store_index < len(instructions)
-                and instructions[ambiguous_store_index].opname == "STORE_FAST"
-            ):
-                pending_ambiguous_local_aliases.add(
-                    ambiguous_store_index
-                )
-            if (
-                ambiguous_call_index is not None
-                or ambiguous_subscript_call is not None
-            ):
+            expression = fast_origin_data["load_expressions"].get(index)
+            if expression is None:
                 raise EvidenceFailed(
-                    "refusal-state callable reaches a control-flow-ambiguous "
-                    f"local alias {instruction.argval} in {code.co_qualname}"
+                    "refusal-state fast-local access lacks an origin"
                 )
-        if (
-            instruction.opname in {"LOAD_FAST", "LOAD_FAST_BORROW"}
-            and isinstance(instruction.argval, str)
-            and instruction.argval in local_aliases
-        ):
-            alias_name = instruction.argval
-            source_kind, source_name, source_prefix = local_aliases[
-                alias_name
-            ]
-            alias_path, path_end = v2_instruction_access_path(
+            _path, path_end = v2_instruction_access_path(
                 instructions,
                 index,
             )
-            source_path = (*source_prefix, *alias_path)
-            schedule_local_alias(
-                path_end=path_end,
-                source_kind=source_kind,
-                source_name=source_name,
-                source_path=source_path,
-            )
-            record_static_subscript_call(
-                source_kind=source_kind,
-                source_name=source_name,
-                source_path=source_path,
-                path_end=path_end,
-            )
+            for origin in v2_resolve_fast_origin(
+                expression,
+                fast_origin_definitions,
+            ):
+                if origin[0] == "binding":
+                    record_static_subscript_call(
+                        source_kind=origin[1],
+                        source_name=origin[2],
+                        source_path=origin[3],
+                        path_start=index,
+                        path_end=path_end,
+                    )
             call_index = v2_matching_direct_call_index(
                 instructions,
                 index,
                 path_end,
             )
-            result_path = (
-                v2_call_result_access_path(instructions, call_index)
-                if call_index is not None
-                else ()
-            )
-            if source_kind == "global":
-                if source_path:
-                    module_paths[source_name].add(source_path)
-                    if call_index is not None:
-                        called_global_paths[source_name].add(source_path)
-                        global_path_call_result_paths[source_name][
-                            source_path
-                        ].add(result_path)
-                else:
-                    bare_global_names.add(source_name)
-                    if call_index is not None:
-                        called_global_names.add(source_name)
-                        call_result_paths[source_name].add(result_path)
-            elif source_kind == "freevar":
-                if source_path:
-                    freevar_paths[source_name].add(source_path)
-                    if call_index is not None:
-                        called_freevar_paths[source_name].add(source_path)
-                        freevar_path_call_result_paths[source_name][
-                            source_path
-                        ].add(result_path)
-                else:
-                    bare_freevar_names.add(source_name)
-                    if call_index is not None:
-                        called_freevar_names.add(source_name)
-                        freevar_call_result_paths[source_name].add(
-                            result_path
-                        )
-            elif source_kind == "parameter":
-                if source_path:
-                    parameter_paths[source_name].add(source_path)
-                    if call_index is not None:
-                        called_parameter_paths[source_name].add(source_path)
-                        parameter_path_call_result_paths[source_name][
-                            source_path
-                        ].add(result_path)
-                else:
-                    bare_parameter_names.add(source_name)
-                    if call_index is not None:
-                        called_parameter_names.add(source_name)
-                        parameter_call_result_paths[source_name].add(
-                            result_path
-                        )
-            else:
-                raise EvidenceFailed(
-                    "refusal-state local alias has an unsupported origin"
-                )
-        if (
-            instruction.opname in {"LOAD_FAST", "LOAD_FAST_BORROW"}
-            and isinstance(instruction.argval, str)
-            and instruction.argval in parameter_names
-            and instruction.argval not in local_aliases
-        ):
-            parameter_name = instruction.argval
-            parameter_path, path_end = v2_instruction_access_path(
-                instructions,
-                index,
-            )
-            schedule_local_alias(
-                path_end=path_end,
-                source_kind="parameter",
-                source_name=parameter_name,
-                source_path=parameter_path,
-            )
-            record_static_subscript_call(
-                source_kind="parameter",
-                source_name=parameter_name,
-                source_path=parameter_path,
-                path_end=path_end,
-            )
-            call_index = v2_matching_direct_call_index(
-                instructions,
-                index,
-                path_end,
-            )
-            result_path = (
-                v2_call_result_access_path(instructions, call_index)
-                if call_index is not None
-                else ()
-            )
-            if parameter_path:
-                parameter_paths[parameter_name].add(parameter_path)
-                if call_index is not None:
-                    called_parameter_paths[parameter_name].add(
-                        parameter_path
-                    )
-                    parameter_path_call_result_paths[
-                        parameter_name
-                    ][parameter_path].add(result_path)
-            else:
-                bare_parameter_names.add(parameter_name)
-                if call_index is not None:
-                    called_parameter_names.add(parameter_name)
-                    parameter_call_result_paths[parameter_name].add(
-                        result_path
-                    )
+            record_fast_expression(expression, call_index=call_index)
+    for _operation, expression in fast_origin_data["dynamic_uses"]:
+        record_dynamic_result_use(expression)
+    for call_index, expression in fast_origin_data[
+        "implicit_call_expressions"
+    ]:
+        record_fast_expression(expression, call_index=call_index)
     # Nested function invocation dataflow varies across CPython 3.11-3.14
     # (LOAD_FAST_BORROW, CALL_KW, CALL_FUNCTION_EX, closure aliases, and
     # SET_FUNCTION_ATTRIBUTE all change the local pattern). This refusal
@@ -29343,13 +31851,22 @@ def v2_code_access_analysis(
         if type(constant) is types.CodeType
     ]
     for nested_code in nested_codes:
+        merge_current_bindings = (
+            merge_nested_bindings
+            or nested_code.co_name in {
+                "<listcomp>",
+                "<setcomp>",
+                "<dictcomp>",
+            }
+        )
         nested = v2_code_access_analysis(
             nested_code,
             context=context,
             depth=depth + 1,
             merge_nested_bindings=merge_nested_bindings,
+            constants_prevalidated=True,
         )
-        if not merge_nested_bindings:
+        if not merge_current_bindings:
             continue
         for name, operations in nested["accesses"].items():
             accesses[name].update(operations)
@@ -29570,10 +32087,15 @@ def v2_code_constant_projection(
     if type(value) is bool:
         return value
     if type(value) is int:
+        integer_text = v2_bounded_exact_integer_text(
+            value,
+            label="refusal-state code constant",
+            error_type=EvidenceFailed,
+        )
         v2_refusal_charge(
             context,
             "scalar_bytes",
-            max(1, (value.bit_length() + 7) // 8),
+            len(integer_text.encode("ascii")),
         )
         return value
     if type(value) is str:
@@ -30010,6 +32532,7 @@ def v2_trusted_callable_projection_body(
     if not v2_exact_type_is_one_of(value, (
         types.BuiltinFunctionType,
         types.BuiltinMethodType,
+        V2_REGEX_BOUND_METHOD_TYPE,
         types.ClassMethodDescriptorType,
         types.MethodDescriptorType,
         types.MethodWrapperType,
@@ -30463,7 +32986,15 @@ def v2_executable_function_overlay(
             }
             completed.add(identity)
             return projection
-        analysis = v2_code_access_analysis(code, context=context)
+        code_projection = v2_code_semantic_projection(
+            code,
+            context=context,
+        )
+        analysis = v2_code_access_analysis(
+            code,
+            context=context,
+            constants_prevalidated=True,
+        )
         function_globals = v2_raw_function_attribute(value, "__globals__")
         function_builtins = v2_raw_function_attribute(value, "__builtins__")
         if type(function_globals) is not dict:
@@ -30624,9 +33155,11 @@ def v2_executable_function_overlay(
             "kind": "executable-function-accesses",
             "function_node_id": context["object_ids"].get(identity),
             "name": code.co_qualname,
+            "code": code_projection,
             "referenced_globals": global_rows,
             "referenced_closure": closure_rows,
             "referenced_default_parameters": parameter_rows,
+            "no_claim": V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM,
         }
         completed.add(identity)
         return projection
@@ -30646,10 +33179,18 @@ def v2_called_value_projection(
     depth: int,
 ) -> dict[str, Any]:
     value_is_type = v2_raw_is_type_object(value)
+    direct_result_invocation = any(
+        tuple(str(part) for part in path) == V2_DIRECT_CALL_RESULT_PATH
+        for path in call_result_paths or ()
+    )
+    if direct_result_invocation:
+        raise EvidenceFailed(
+            "refusal callback invokes a dynamically produced call result"
+        )
     nonempty_result_paths = [
         tuple(str(part) for part in path)
         for path in call_result_paths or ()
-        if path
+        if path and tuple(str(part) for part in path) != V2_DIRECT_CALL_RESULT_PATH
     ]
     if value_is_type:
         if type(value) is not type:
@@ -30658,16 +33199,18 @@ def v2_called_value_projection(
                 "provide an explicit bounded projection"
             )
         constructor_rows: list[dict[str, Any]] = []
-        if (
-            not any(
-                value is candidate
-                for candidate in V2_REFUSAL_TRUSTED_BUILTIN_TYPES
+        trusted_builtin_constructor = any(
+            value is candidate
+            for candidate in V2_REFUSAL_TRUSTED_BUILTIN_TYPES
+        )
+        audited_constructor = any(
+            value is candidate
+            for candidate in V2_REFUSAL_AUDITED_CONSTRUCTOR_TYPES
+        )
+        if not trusted_builtin_constructor and not audited_constructor:
+            harness_error_constructor = HarnessError in v2_raw_type_mro(
+                value
             )
-            and not any(
-                value is candidate
-                for candidate in V2_REFUSAL_AUDITED_CONSTRUCTOR_TYPES
-            )
-        ):
             for constructor_name in ("__new__", "__init__"):
                 constructor = v2_raw_attribute_without_user_code(
                     value,
@@ -30690,6 +33233,28 @@ def v2_called_value_projection(
                             depth=depth + 1,
                         ),
                     })
+                elif (
+                    constructor is object.__new__
+                    or constructor is object.__init__
+                    or harness_error_constructor
+                ):
+                    constructor_rows.append({
+                        "name": constructor_name,
+                        "state": {
+                            "kind": "audited-base-constructor",
+                            "identity": (
+                                "harness-error-base"
+                                if harness_error_constructor
+                                else "builtins.object"
+                            ),
+                        },
+                    })
+                else:
+                    raise EvidenceFailed(
+                        "refusal callback calls a class with an unaudited "
+                        f"native {constructor_name} constructor"
+                    )
+        if nonempty_result_paths and not trusted_builtin_constructor:
             for result_path in nonempty_result_paths:
                 method = v2_raw_attribute_without_user_code(
                     value,
@@ -30702,6 +33267,13 @@ def v2_called_value_projection(
                         types.MethodType,
                         label="constructed result method function",
                     )
+                if type(method) is property:
+                    method = v2_exact_descriptor_read(
+                        V2_PROPERTY_ACCESSOR_DESCRIPTORS["fget"],
+                        method,
+                        property,
+                        label="constructed result property getter",
+                    )
                 if type(method) is types.FunctionType:
                     constructor_rows.append({
                         "name": ".".join(result_path),
@@ -30712,10 +33284,28 @@ def v2_called_value_projection(
                             depth=depth + 1,
                         ),
                     })
+                elif (
+                    len(result_path) == 1
+                    and result_path[0]
+                    in V2_AUDITED_CONSTRUCTOR_NATIVE_RESULT_PATHS.get(
+                        value,
+                        frozenset(),
+                    )
+                ):
+                    constructor_rows.append({
+                        "name": result_path[0],
+                        "state": {
+                            "kind": (
+                                "audited-local-constructor-native-result-path"
+                            ),
+                            "constructor": v2_type_identity(value),
+                        },
+                    })
                 else:
                     raise EvidenceFailed(
                         "refusal callback calls a dynamically resolved class "
-                        "result path without an auditable Python function"
+                        "result path without an auditable Python function: "
+                        f"{v2_type_identity(value)}.{'.'.join(result_path)}"
                     )
         return {
             "kind": "called-class",
@@ -31178,10 +33768,15 @@ def v2_state_projection_value(
     if context is None:
         context = v2_new_refusal_projection_context()
     if type(value) is int:
+        integer_text = v2_bounded_exact_integer_text(
+            value,
+            label="refusal-state exact integer",
+            error_type=EvidenceFailed,
+        )
         v2_refusal_charge(
             context,
             "scalar_bytes",
-            max(1, (value.bit_length() + 7) // 8),
+            len(integer_text.encode("ascii")),
         )
         return value
     if type(value) is float:
@@ -31363,8 +33958,10 @@ def v2_state_projection_value(
         metadata = (
             {}
             if value is os.environ
+            or value is os.environb
             or v2_exact_type_is_one_of(value, V2_REFUSAL_PATH_TYPES)
             or v2_exact_type_is_one_of(value, V2_REFUSAL_LOCK_TYPES)
+            or type(value) is re.Pattern
             or v2_raw_instance_of(
                 value,
                 (
@@ -31451,10 +34048,15 @@ def v2_state_projection_value(
                 audited_native_bases=(int,),
             )
             scalar_value = int.__int__(value)
+            integer_text = v2_bounded_exact_integer_text(
+                scalar_value,
+                label="refusal-state integer subclass value",
+                error_type=EvidenceFailed,
+            )
             v2_refusal_charge(
                 context,
                 "scalar_bytes",
-                max(1, (scalar_value.bit_length() + 7) // 8),
+                len(integer_text.encode("ascii")),
             )
             return finish({
                 "kind": "int-subclass",
@@ -31750,12 +34352,32 @@ def v2_state_projection_value(
         if type(value) is re.Pattern:
             return finish({
                 "kind": "regular-expression",
-                "pattern": value.pattern,
-                "flags": value.flags,
-                "groups": value.groups,
-                "groupindex": dict(value.groupindex),
+                "pattern": v2_state_projection_value(
+                    value.pattern,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "flags": v2_state_projection_value(
+                    value.flags,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "groups": v2_state_projection_value(
+                    value.groups,
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
+                "groupindex": v2_state_projection_value(
+                    dict(value.groupindex),
+                    seen=seen,
+                    context=context,
+                    depth=depth + 1,
+                ),
             })
-        if value is os.environ:
+        if value is os.environ or value is os.environb:
             environment_state = v2_raw_instance_dictionary(value)
             if type(environment_state) is not dict:
                 raise EvidenceFailed(
@@ -31774,19 +34396,28 @@ def v2_state_projection_value(
                 "decodevalue",
             ):
                 codec = environment_state.get(codec_name)
-                if type(codec) is not types.FunctionType:
-                    raise EvidenceFailed(
-                        "refusal-state process environment codec is not an "
-                        "exact Python function"
-                    )
-                codec_rows.append({
-                    "name": codec_name,
-                    "state": v2_trusted_callable_projection(
+                if type(codec) is types.FunctionType:
+                    codec_state = v2_trusted_callable_projection(
                         codec,
                         seen=seen,
                         context=context,
                         depth=depth + 1,
-                    ),
+                    )
+                elif codec is bytes:
+                    codec_state = v2_state_projection_value(
+                        codec,
+                        seen=seen,
+                        context=context,
+                        depth=depth + 1,
+                    )
+                else:
+                    raise EvidenceFailed(
+                        "refusal-state process environment codec is not an "
+                        "audited exact function or bytes identity"
+                    )
+                codec_rows.append({
+                    "name": codec_name,
+                    "state": codec_state,
                 })
             return finish({
                 "kind": "process-environment",
@@ -32040,6 +34671,7 @@ def v2_state_projection_value(
         if v2_exact_type_is_one_of(value, (
             types.BuiltinFunctionType,
             types.BuiltinMethodType,
+            V2_REGEX_BOUND_METHOD_TYPE,
             types.ClassMethodDescriptorType,
             types.MethodDescriptorType,
             types.MethodWrapperType,
@@ -32133,9 +34765,14 @@ def v2_state_projection_value(
                 raise EvidenceFailed(
                     "refusal-state function closure metadata differs"
                 )
+            function_code_projection = v2_code_semantic_projection(
+                function_code,
+                context=context,
+            )
             analysis = v2_code_access_analysis(
                 function_code,
                 context=context,
+                constants_prevalidated=True,
             )
             closure_rows: list[dict[str, Any]] = []
             for name, cell in zip(
@@ -32397,10 +35034,7 @@ def v2_state_projection_value(
                     context=context,
                     depth=depth + 1,
                 ),
-                "code": v2_code_semantic_projection(
-                    function_code,
-                    context=context,
-                ),
+                "code": function_code_projection,
                 "defaults": v2_state_projection_value(
                     v2_raw_function_attribute(value, "__defaults__"),
                     seen=seen,
@@ -32997,14 +35631,19 @@ def v2_explicit_projection_external_capabilities(
                     str(part),
                 )
             key = subscript_call["key"]
-            current_mro = v2_raw_type_mro(type(current))
-            if any(base is dict for base in current_mro):
-                v2_require_audited_type_layout(
-                    current,
-                    audited_native_bases=(dict,),
-                )
+            if type(current) is dict:
+                raw_items = list(dict.items(current))
+                if any(
+                    type(candidate_key) is not str
+                    and type(candidate_key) is not int
+                    for candidate_key, _candidate_value in raw_items
+                ):
+                    raise EvidenceFailed(
+                        "explicit projection static dict subscript contains "
+                        "a non-exact stored key"
+                    )
                 target = V2_REFUSAL_PINNED_CLASS_ATTRIBUTE_MISSING
-                for candidate_key, candidate_value in dict.items(current):
+                for candidate_key, candidate_value in raw_items:
                     exact_match = (
                         type(key) is str
                         and type(candidate_key) is str
@@ -33022,11 +35661,7 @@ def v2_explicit_projection_external_capabilities(
                         "explicit projection static dict subscript lacks an "
                         "exact hook-free key match"
                     )
-            elif any(base is list for base in current_mro):
-                v2_require_audited_type_layout(
-                    current,
-                    audited_native_bases=(list,),
-                )
+            elif type(current) is list:
                 if type(key) is not int:
                     raise EvidenceFailed(
                         "explicit projection static list subscript index is "
@@ -33039,11 +35674,7 @@ def v2_explicit_projection_external_capabilities(
                         "out of bounds"
                     )
                 target = list.__getitem__(current, key)
-            elif any(base is tuple for base in current_mro):
-                v2_require_audited_type_layout(
-                    current,
-                    audited_native_bases=(tuple,),
-                )
+            elif type(current) is tuple:
                 if type(key) is not int:
                     raise EvidenceFailed(
                         "explicit projection static tuple subscript index is "
@@ -33165,7 +35796,56 @@ def v2_restore_external_process_state(state: Mapping[str, Any]) -> None:
         ) from error
 
 
+def v2_reject_unbound_required_parameter_calls(value: Any) -> None:
+    if type(value) is not types.FunctionType:
+        return
+    code = v2_raw_function_attribute(value, "__code__")
+    if type(code) is not types.CodeType:
+        raise EvidenceFailed("explicit projection function code is not exact")
+    analysis = v2_code_access_analysis(
+        code,
+        context=v2_new_refusal_projection_context(),
+        merge_nested_bindings=False,
+    )
+    defaults = v2_function_default_bindings(value, code)
+    parameter_layout = dict(v2_code_parameter_layout(code))
+    required = {
+        name
+        for name, kind in parameter_layout.items()
+        if kind in {"positional", "keyword-only"}
+        and name not in defaults
+    }
+    invoked = set(analysis["called_parameter_names"])
+    invoked.update(
+        name
+        for name, paths in analysis["called_parameter_paths"].items()
+        if paths
+    )
+    invoked.update(
+        row["source_name"]
+        for row in analysis["static_subscript_calls"]
+        if row["source_kind"] == "parameter"
+    )
+    unbound_invoked = sorted(required & invoked)
+    if unbound_invoked:
+        raise EvidenceFailed(
+            "explicit projection invokes an unbound required parameter: "
+            + ", ".join(unbound_invoked)
+        )
+    empty_variadic_invoked = sorted(
+        name
+        for name in invoked
+        if parameter_layout.get(name) in {"variadic", "keyword-variadic"}
+    )
+    if empty_variadic_invoked:
+        raise EvidenceFailed(
+            "explicit projection invokes an empty variadic parameter: "
+            + ", ".join(empty_variadic_invoked)
+        )
+
+
 def v2_bounded_explicit_projection(value: Any) -> Any:
+    v2_reject_unbound_required_parameter_calls(value)
     context = v2_new_refusal_projection_context()
     projected = v2_state_projection_value(value, context=context)
     v2_validate_refusal_projection_graph(projected)
@@ -33558,6 +36238,1006 @@ class V2CheckCollector:
             "no_claim": V2_ASSERTION_RESULT_NO_CLAIM,
         }
         return v2_rooted(document)
+
+
+def v2_require_fixture_resource_cap(
+    value: int,
+    cap: int,
+    *,
+    diagnostic: str,
+) -> None:
+    """Enforce one exact inclusive selected-resource boundary."""
+    if type(value) is not int or value < 0:
+        raise EvidenceFailed(
+            "fixture resource cap observation is not a non-negative exact integer"
+        )
+    if type(cap) is not int or cap < 0:
+        raise InfrastructureFailed(
+            "fixture resource cap is not a non-negative exact integer"
+        )
+    if type(diagnostic) is not str or not diagnostic:
+        raise InfrastructureFailed(
+            "fixture resource cap diagnostic is malformed"
+        )
+    if value > cap:
+        raise EvidenceFailed(diagnostic)
+
+
+def v2_fixture_callback_data_projection(value: Any) -> Any:
+    """Project one selected-resource callback through the mature graph."""
+    context = v2_new_refusal_projection_context(
+        {
+            "scalar_bytes": V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
+            "projection_bytes": (
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+            ),
+        },
+        authorized_external_capabilities=(
+            V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY,
+            *V2_AUTOMATIC_EXTERNAL_STATE_CAPABILITIES,
+        ),
+    )
+    projection = v2_state_projection_value(value, context=context)
+    v2_validate_refusal_projection_graph(projection)
+    if v2_projection_contains_opaque(projection):
+        raise EvidenceFailed(
+            "fixture callback contains unprojectable opaque state"
+        )
+    try:
+        payload = canonical_bytes(projection)
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise EvidenceFailed(
+            "fixture callback projection is not canonical JSON data"
+        ) from error
+    v2_require_fixture_resource_cap(
+        len(payload),
+        V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
+        diagnostic="fixture callback data exceeds its projection byte cap",
+    )
+    return projection
+
+
+def v2_fixture_additional_state_projection(value: Any) -> Any:
+    """Return a stable, bounded, occurrence-detached JSON-like tree."""
+    try:
+        return v2_validate_exact_json_wire(
+            value,
+            label="fixture additional state",
+            item_cap=V2_REFUSAL_ITEM_CAP,
+            node_cap=V2_REFUSAL_ITEM_CAP + 1,
+            depth_cap=V2_REFUSAL_STATE_DEPTH_CAP,
+            byte_cap=V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
+            snapshot_byte_cap=(
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
+            ),
+        )
+    except InputRefused as error:
+        diagnostic, exact = v2_exception_diagnostic(error)
+        if not exact:
+            raise EvidenceFailed(
+                "fixture additional state was refused without an exact diagnostic"
+            ) from error
+        raise EvidenceFailed(diagnostic) from error
+
+
+def v2_fixture_descriptor_names(
+    candidate_directories: tuple[str, ...] = (
+        "/dev/fd",
+        "/proc/self/fd",
+    ),
+    *,
+    list_directory: Callable[[str], list[str]] = os.listdir,
+) -> tuple[str, list[str]]:
+    if (
+        type(candidate_directories) is not tuple
+        or not candidate_directories
+        or any(
+            type(path) is not str or not path
+            for path in candidate_directories
+        )
+    ):
+        raise EvidenceFailed(
+            "fixture descriptor census candidates are malformed"
+        )
+    unavailable_errors: list[OSError] = []
+    for directory in candidate_directories:
+        try:
+            names = list_directory(directory)
+        except OSError as error:
+            if error.errno in {
+                errno.ENOENT,
+                errno.ENOTDIR,
+                errno.EACCES,
+                errno.EPERM,
+            }:
+                unavailable_errors.append(error)
+                continue
+            raise InfrastructureFailed(
+                "fixture resource descriptor census failed"
+            ) from error
+        if (
+            type(names) is not list
+            or any(type(name) is not str for name in names)
+        ):
+            raise InfrastructureFailed(
+                "fixture resource descriptor census returned malformed names"
+            )
+        v2_require_fixture_resource_cap(
+            len(names),
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP,
+            diagnostic=(
+                "fixture resource descriptor census exceeds its bounded cap"
+            ),
+        )
+        return directory, names
+    raise InfrastructureFailed(
+        "fixture resource descriptor census is unavailable on this host"
+    ) from unavailable_errors[0]
+
+
+def v2_bounded_process_environment_bytes_snapshot() -> dict[bytes, bytes]:
+    """Capture the live Python bytes environment without an unbounded copy."""
+    environment = os.environb
+    try:
+        declared_count = len(environment)
+    except Exception as error:
+        raise EvidenceFailed(
+            "fixture resource environment changed while being captured"
+        ) from error
+    v2_require_fixture_resource_cap(
+        declared_count,
+        V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP,
+        diagnostic="fixture resource environment entry count exceeds its cap",
+    )
+    snapshot: dict[bytes, bytes] = {}
+    raw_bytes = 0
+    try:
+        for key in environment:
+            if len(snapshot) >= V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP:
+                raise EvidenceFailed(
+                    "fixture resource environment entry count exceeds its cap"
+                )
+            value = environment[key]
+            if type(key) is not bytes or type(value) is not bytes:
+                raise EvidenceFailed(
+                    "fixture resource environment contains non-exact bytes"
+                )
+            if key in snapshot:
+                raise EvidenceFailed(
+                    "fixture resource environment changed while being captured"
+                )
+            entry_bytes = len(key) + len(value)
+            if entry_bytes > (
+                V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP - raw_bytes
+            ):
+                raise EvidenceFailed(
+                    "fixture resource environment bytes exceed their cap"
+                )
+            raw_bytes += entry_bytes
+            snapshot[key] = value
+    except EvidenceFailed:
+        raise
+    except Exception as error:
+        raise EvidenceFailed(
+            "fixture resource environment changed while being captured"
+        ) from error
+    verified_keys: dict[bytes, None] = {}
+    try:
+        if os.environb is not environment:
+            raise EvidenceFailed(
+                "fixture resource environment changed while being captured"
+            )
+        for key in environment:
+            if len(verified_keys) >= (
+                V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
+            ):
+                raise EvidenceFailed(
+                    "fixture resource environment entry count exceeds its cap"
+                )
+            value = environment[key]
+            if (
+                type(key) is not bytes
+                or type(value) is not bytes
+                or key in verified_keys
+                or not dict.__contains__(snapshot, key)
+                or value != dict.__getitem__(snapshot, key)
+            ):
+                raise EvidenceFailed(
+                    "fixture resource environment changed while being captured"
+                )
+            dict.__setitem__(verified_keys, key, None)
+        final_count = len(environment)
+    except EvidenceFailed:
+        raise
+    except Exception as error:
+        raise EvidenceFailed(
+            "fixture resource environment changed while being captured"
+        ) from error
+    if (
+        len(snapshot) != declared_count
+        or len(verified_keys) != declared_count
+        or final_count != declared_count
+    ):
+        raise EvidenceFailed(
+            "fixture resource environment changed while being captured"
+        )
+    return snapshot
+
+
+def v2_exact_fixture_resource_paths_snapshot(
+    paths: Sequence[Path],
+) -> tuple[Path, ...]:
+    """Copy an exact list/tuple under the path cap without user hooks."""
+    if type(paths) not in {list, tuple}:
+        raise EvidenceFailed(
+            "fixture resource paths must use an exact bounded sequence"
+        )
+    declared_count = len(paths)
+    v2_require_fixture_resource_cap(
+        declared_count,
+        V2_FIXTURE_RESOURCE_PATHS_CAP,
+        diagnostic="fixture resource path count exceeds its bounded cap",
+    )
+    exact_getitem = (
+        list.__getitem__ if type(paths) is list else tuple.__getitem__
+    )
+    snapshot: list[Path] = []
+    try:
+        for index in range(declared_count):
+            if len(paths) != declared_count:
+                raise EvidenceFailed(
+                    "fixture resource paths changed while being captured"
+                )
+            path = exact_getitem(paths, index)
+            if type(path) is not type(REPO_ROOT):
+                raise EvidenceFailed(
+                    "fixture resource path must use the exact repository path type"
+                )
+            list.append(snapshot, path)
+    except EvidenceFailed:
+        raise
+    except (IndexError, RuntimeError) as error:
+        raise EvidenceFailed(
+            "fixture resource paths changed while being captured"
+        ) from error
+    if len(paths) != declared_count:
+        raise EvidenceFailed(
+            "fixture resource paths changed while being captured"
+        )
+    try:
+        if len(paths) != declared_count:
+            raise EvidenceFailed(
+                "fixture resource paths changed while being captured"
+            )
+        for index in range(declared_count):
+            if exact_getitem(paths, index) is not snapshot[index]:
+                raise EvidenceFailed(
+                    "fixture resource paths changed while being captured"
+                )
+        if len(paths) != declared_count:
+            raise EvidenceFailed(
+                "fixture resource paths changed while being captured"
+            )
+    except EvidenceFailed:
+        raise
+    except (IndexError, RuntimeError) as error:
+        raise EvidenceFailed(
+            "fixture resource paths changed while being captured"
+        ) from error
+    return tuple(snapshot)
+
+
+def v2_fixture_resource_state(
+    paths: Sequence[Path],
+    *,
+    additional_state: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Capture bounded semantic state for fixture-backed refusal checks.
+
+    These checks intentionally exercise selected descriptor and filesystem
+    behavior outside the general callback graph. The projection binds each
+    named resource itself, the live descriptor census, Python's environment
+    mapping, cwd, recursion limit, harness state, and callback defaults/closure
+    data. It does not claim directory-descendant membership, native-only
+    ``putenv`` state, descriptor offsets, or unrelated filesystem state.
+    """
+    path_snapshot = v2_exact_fixture_resource_paths_snapshot(paths)
+    concrete_path_type = type(REPO_ROOT)
+    prepared_paths: list[
+        tuple[
+            bytes,
+            str,
+            Path,
+            list[tuple[Path, tuple[int, int, int]]],
+        ]
+    ] = []
+    seen_paths: set[str] = set()
+    repository_root_identity: tuple[int, int, int] | None = None
+    if path_snapshot:
+        try:
+            repository_root_state = os.lstat(REPO_ROOT)
+        except OSError as error:
+            raise EvidenceFailed(
+                "fixture resource repository-root metadata read failed"
+            ) from error
+        if stat.S_ISLNK(repository_root_state.st_mode):
+            raise EvidenceFailed(
+                "fixture resource repository root is a symbolic link"
+            )
+        repository_root_identity = (
+            repository_root_state.st_dev,
+            repository_root_state.st_ino,
+            stat.S_IFMT(repository_root_state.st_mode),
+        )
+    for path in path_snapshot:
+        if type(path) is not concrete_path_type:
+            raise EvidenceFailed(
+                "fixture resource path must use the exact repository path type"
+            )
+        try:
+            relative_path = path.relative_to(REPO_ROOT)
+        except ValueError as error:
+            raise EvidenceFailed(
+                "fixture resource path escapes the repository"
+            ) from error
+        if ".." in relative_path.parts:
+            raise EvidenceFailed(
+                "fixture resource path escapes the repository"
+            )
+        cursor = REPO_ROOT
+        parent_identities: list[tuple[Path, tuple[int, int, int]]] = []
+        if relative_path.parts:
+            if repository_root_identity is None:
+                raise EvidenceFailed(
+                    "fixture resource repository-root identity is unavailable"
+                )
+            list.append(
+                parent_identities,
+                (REPO_ROOT, repository_root_identity),
+            )
+        for component in relative_path.parts[:-1]:
+            cursor = cursor / component
+            try:
+                parent_state = os.lstat(cursor)
+            except OSError as error:
+                raise EvidenceFailed(
+                    "fixture resource parent metadata read failed: "
+                    f"{relative_path.as_posix()}"
+                ) from error
+            if stat.S_ISLNK(parent_state.st_mode):
+                raise EvidenceFailed(
+                    "fixture resource path traverses a symbolic-link parent"
+                )
+            list.append(
+                parent_identities,
+                (
+                    cursor,
+                    (
+                        parent_state.st_dev,
+                        parent_state.st_ino,
+                        stat.S_IFMT(parent_state.st_mode),
+                    ),
+                ),
+            )
+        relative = relative_path.as_posix()
+        try:
+            relative_bytes = str.encode(relative, "utf-8")
+        except UnicodeEncodeError as error:
+            raise EvidenceFailed(
+                "fixture resource relative path is not valid UTF-8"
+            ) from error
+        v2_require_fixture_resource_cap(
+            len(relative_bytes),
+            V2_FIXTURE_RESOURCE_PATH_BYTES_CAP,
+            diagnostic=(
+                "fixture resource relative path exceeds its byte cap"
+            ),
+        )
+        if relative in seen_paths:
+            raise EvidenceFailed("fixture resource paths contain a duplicate")
+        seen_paths.add(relative)
+        prepared_paths.append(
+            (relative_bytes, relative, path, parent_identities)
+        )
+
+    rows: list[dict[str, Any]] = []
+    total_file_bytes = 0
+    for (
+        _relative_bytes,
+        relative,
+        path,
+        parent_identities,
+    ) in sorted(prepared_paths):
+        try:
+            state = os.lstat(path)
+        except OSError as error:
+            raise EvidenceFailed(
+                f"fixture resource metadata read failed: {relative}"
+            ) from error
+        row: dict[str, Any] = {
+            "path": relative,
+            "identity": {
+                "device": state.st_dev,
+                "inode": state.st_ino,
+                "mode": state.st_mode,
+                "link_count": state.st_nlink,
+            },
+        }
+        resource_close_failure: V2DescriptorCloseFailure | None = None
+        if stat.S_ISREG(state.st_mode):
+            v2_require_fixture_resource_cap(
+                state.st_size,
+                V2_FIXTURE_RESOURCE_FILE_BYTES_CAP,
+                diagnostic=(
+                    f"fixture resource file exceeds its byte cap: {relative}"
+                ),
+            )
+            total_file_bytes += state.st_size
+            v2_require_fixture_resource_cap(
+                total_file_bytes,
+                V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP,
+                diagnostic=(
+                    "fixture resource aggregate file bytes exceed their cap"
+                ),
+            )
+            try:
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY
+                    | os.O_CLOEXEC
+                    | os.O_NONBLOCK
+                    | os.O_NOFOLLOW,
+                )
+            except OSError as error:
+                raise EvidenceFailed(
+                    f"fixture resource open failed: {relative}"
+                ) from error
+            try:
+                descriptor_before = os.fstat(descriptor)
+                identity_before = (
+                    descriptor_before.st_dev,
+                    descriptor_before.st_ino,
+                    descriptor_before.st_mode,
+                    descriptor_before.st_nlink,
+                    descriptor_before.st_size,
+                    descriptor_before.st_mtime_ns,
+                    descriptor_before.st_ctime_ns,
+                )
+                path_identity = (
+                    state.st_dev,
+                    state.st_ino,
+                    state.st_mode,
+                    state.st_nlink,
+                    state.st_size,
+                    state.st_mtime_ns,
+                    state.st_ctime_ns,
+                )
+                if identity_before != path_identity:
+                    raise EvidenceFailed(
+                        f"fixture resource changed before fingerprinting {relative}"
+                    )
+                chunks: list[bytes] = []
+                offset = 0
+                while offset < descriptor_before.st_size:
+                    chunk = os.pread(
+                        descriptor,
+                        min(64 * 1024, descriptor_before.st_size - offset),
+                        offset,
+                    )
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    offset += len(chunk)
+                payload = b"".join(chunks)
+                descriptor_after = os.fstat(descriptor)
+                identity_after = (
+                    descriptor_after.st_dev,
+                    descriptor_after.st_ino,
+                    descriptor_after.st_mode,
+                    descriptor_after.st_nlink,
+                    descriptor_after.st_size,
+                    descriptor_after.st_mtime_ns,
+                    descriptor_after.st_ctime_ns,
+                )
+            except OSError as error:
+                raise EvidenceFailed(
+                    f"fixture resource fingerprint read failed: {relative}"
+                ) from error
+            finally:
+                resource_close_failure = v2_close_owned_descriptors((
+                    (
+                        descriptor,
+                        EvidenceFailed(
+                            "fixture resource descriptor close failed: "
+                            f"{relative}"
+                        ),
+                    ),
+                ))
+            if (
+                len(payload) != state.st_size
+                or identity_after != identity_before
+            ):
+                raise EvidenceFailed(
+                    f"fixture resource changed while fingerprinting {relative}"
+                )
+            row.update({
+                "kind": "regular-file",
+                "size": state.st_size,
+                "mtime_ns": state.st_mtime_ns,
+                "content_root": (
+                    "sha256-v1:" + hashlib.sha256(payload).hexdigest()
+                ),
+            })
+        elif stat.S_ISDIR(state.st_mode):
+            row.update({
+                "kind": "directory",
+                "size": state.st_size,
+                "mtime_ns": state.st_mtime_ns,
+            })
+        elif stat.S_ISLNK(state.st_mode):
+            try:
+                target = os.readlink(path)
+            except OSError as error:
+                raise EvidenceFailed(
+                    f"fixture resource symbolic-link read failed: {relative}"
+                ) from error
+            target_bytes = os.fsencode(target)
+            try:
+                str.encode(target, "utf-8")
+                target_display: str | None = target
+                target_encoding = "utf-8"
+            except UnicodeEncodeError:
+                target_display = None
+                target_encoding = "posix-bytes"
+            v2_require_fixture_resource_cap(
+                len(target_bytes),
+                V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP,
+                diagnostic=(
+                    "fixture resource symlink target exceeds its cap: "
+                    f"{relative}"
+                ),
+            )
+            try:
+                symlink_after = os.lstat(path)
+            except OSError as error:
+                raise EvidenceFailed(
+                    "fixture resource symbolic-link metadata recheck failed: "
+                    f"{relative}"
+                ) from error
+            if (
+                symlink_after.st_dev,
+                symlink_after.st_ino,
+                symlink_after.st_mode,
+                symlink_after.st_nlink,
+                symlink_after.st_size,
+                symlink_after.st_mtime_ns,
+                symlink_after.st_ctime_ns,
+            ) != (
+                state.st_dev,
+                state.st_ino,
+                state.st_mode,
+                state.st_nlink,
+                state.st_size,
+                state.st_mtime_ns,
+                state.st_ctime_ns,
+            ):
+                raise EvidenceFailed(
+                    f"fixture resource symlink changed while fingerprinting {relative}"
+                )
+            row.update({
+                "kind": "symbolic-link",
+                "size": state.st_size,
+                "mtime_ns": state.st_mtime_ns,
+                "target": target_display,
+                "target_encoding": target_encoding,
+                "target_byte_length": len(target_bytes),
+                "target_root": (
+                    "sha256-v1:"
+                    + hashlib.sha256(target_bytes).hexdigest()
+                ),
+            })
+        else:
+            row.update({
+                "kind": "other",
+                "size": state.st_size,
+                "mtime_ns": state.st_mtime_ns,
+            })
+        try:
+            final_state = os.lstat(path)
+        except OSError as error:
+            raise EvidenceFailed(
+                f"fixture resource metadata recheck failed: {relative}"
+            ) from error
+        if v2_stat_identity(final_state) != v2_stat_identity(state):
+            raise EvidenceFailed(
+                f"fixture resource changed while fingerprinting {relative}"
+            )
+        for parent_path, expected_parent_identity in parent_identities:
+            try:
+                final_parent_state = os.lstat(parent_path)
+            except OSError as error:
+                raise EvidenceFailed(
+                    "fixture resource parent metadata recheck failed: "
+                    f"{relative}"
+                ) from error
+            final_parent_identity = (
+                final_parent_state.st_dev,
+                final_parent_state.st_ino,
+                stat.S_IFMT(final_parent_state.st_mode),
+            )
+            if (
+                final_parent_identity != expected_parent_identity
+                or stat.S_ISLNK(final_parent_state.st_mode)
+            ):
+                raise EvidenceFailed(
+                    f"fixture resource parent changed while fingerprinting {relative}"
+                )
+        v2_raise_descriptor_close_failure(resource_close_failure)
+        rows.append(row)
+    descriptor_census_source, descriptor_names = (
+        v2_fixture_descriptor_names()
+    )
+    descriptors: list[dict[str, int]] = []
+    seen_descriptor_names: dict[str, None] = {}
+    maximum_descriptor_name = str(V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX)
+    for descriptor_name in descriptor_names:
+        if (
+            not str.isascii(descriptor_name)
+            or not str.isdigit(descriptor_name)
+            or (
+                len(descriptor_name) > 1
+                and str.startswith(descriptor_name, "0")
+            )
+            or len(descriptor_name) > len(maximum_descriptor_name)
+            or (
+                len(descriptor_name) == len(maximum_descriptor_name)
+                and descriptor_name > maximum_descriptor_name
+            )
+            or descriptor_name in seen_descriptor_names
+        ):
+            raise InfrastructureFailed(
+                "fixture resource descriptor census returned a malformed name"
+            )
+        dict.__setitem__(seen_descriptor_names, descriptor_name, None)
+        try:
+            descriptor = int(descriptor_name, 10)
+        except ValueError as error:
+            raise InfrastructureFailed(
+                "fixture resource descriptor census returned a malformed name"
+            ) from error
+        if descriptor > V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX:
+            raise InfrastructureFailed(
+                "fixture resource descriptor census returned a malformed name"
+            )
+        try:
+            descriptor_state = os.fstat(descriptor)
+            descriptor_flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            status_flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        except OverflowError as error:
+            raise InfrastructureFailed(
+                "fixture resource descriptor census returned a malformed name"
+            ) from error
+        except OSError as error:
+            if error.errno in {errno.EBADF, errno.ENOENT}:
+                # /dev/fd can enumerate its own already-closed directory
+                # descriptor. Only descriptors still live after enumeration
+                # belong to the stable process state.
+                continue
+            raise EvidenceFailed(
+                "fixture resource descriptor census failed"
+            ) from error
+        descriptors.append({
+            "descriptor": descriptor,
+            "device": descriptor_state.st_dev,
+            "inode": descriptor_state.st_ino,
+            "mode": descriptor_state.st_mode,
+            "descriptor_flags": descriptor_flags,
+            "status_flags": status_flags,
+        })
+    descriptors.sort(key=lambda row: row["descriptor"])
+    environment_is_pinned = (
+        os.environ is V2_INITIAL_PROCESS_ENVIRONMENT
+        and os.environb is V2_INITIAL_PROCESS_ENVIRONMENT_BYTES
+    )
+    environment_rows: list[dict[str, Any]] = []
+    if environment_is_pinned:
+        environment_snapshot = (
+            v2_bounded_process_environment_bytes_snapshot()
+        )
+        environment_rows = [
+            {
+                "key_byte_length": len(key),
+                "key_root": "sha256-v1:" + hashlib.sha256(key).hexdigest(),
+                "value_byte_length": len(value),
+                "value_root": "sha256-v1:" + hashlib.sha256(value).hexdigest(),
+            }
+            for key, value in sorted(
+                dict.items(environment_snapshot),
+                key=lambda item: item[0],
+            )
+        ]
+    if additional_state is None:
+        extra = None
+    else:
+        try:
+            additional_value = additional_state()
+        except HarnessError:
+            raise
+        except Exception as error:
+            raise EvidenceFailed(
+                "fixture resource additional-state callback failed"
+            ) from error
+        extra = v2_fixture_additional_state_projection(additional_value)
+    try:
+        process_cwd = os.getcwdb()
+    except OSError as error:
+        raise EvidenceFailed(
+            "fixture resource process cwd capture failed"
+        ) from error
+    projection = {
+        "paths": rows,
+        "descriptor_census_source": descriptor_census_source,
+        "open_descriptors": descriptors,
+        "process_cwd": {
+            "byte_length": len(process_cwd),
+            "content_root": (
+                "sha256-v1:" + hashlib.sha256(process_cwd).hexdigest()
+            ),
+        },
+        "process_python_environment_is_pinned": environment_is_pinned,
+        "process_python_environment": environment_rows,
+        "process_recursion_limit": sys.getrecursionlimit(),
+        "additional_state": extra,
+        "command_receipt_count": len(_command_receipts),
+        "cancel_requested": _cancel_requested,
+    }
+    projection_payload = canonical_bytes(projection)
+    v2_require_fixture_resource_cap(
+        len(projection_payload),
+        V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
+        diagnostic=(
+            "fixture resource state exceeds its aggregate projection byte cap"
+        ),
+    )
+    final_path_snapshot = v2_exact_fixture_resource_paths_snapshot(paths)
+    if final_path_snapshot != path_snapshot:
+        raise EvidenceFailed(
+            "fixture resource paths changed while being captured"
+        )
+    return projection
+
+
+def v2_exact_instance_dictionary_snapshot(
+    value: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    raw = v2_raw_instance_dictionary(value)
+    if raw is None or any(type(key) is not str for key in dict.keys(raw)):
+        raise EvidenceFailed(f"{label} lacks an exact string-keyed dictionary")
+    return dict(dict.items(raw))
+
+
+def v2_restore_exact_instance_dictionary(
+    value: Any,
+    snapshot: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if type(snapshot) is not dict:
+        raise EvidenceFailed(f"{label} snapshot is not an exact dictionary")
+    raw = v2_raw_instance_dictionary(value)
+    if raw is None:
+        raise EvidenceFailed(f"{label} lost its exact instance dictionary")
+    for key in list(dict.keys(raw)):
+        if key not in snapshot:
+            dict.__delitem__(raw, key)
+    for key, item in dict.items(snapshot):
+        if type(key) is not str:
+            raise EvidenceFailed(f"{label} snapshot has a non-string key")
+        dict.__setitem__(raw, key, item)
+
+
+def v2_check_fixture_resource_refusal(
+    checks: V2CheckCollector,
+    check_id: str,
+    error_type: type[HarnessError],
+    callback: Callable[[], Any],
+    *,
+    contains: str,
+    paths: Sequence[Path],
+    additional_state: Callable[[], Any] | None = None,
+) -> None:
+    try:
+        saved_cwd = os.getcwdb()
+    except OSError as error:
+        raise EvidenceFailed(
+            "fixture resource baseline cwd capture failed"
+        ) from error
+    saved_environment_object = os.environ
+    saved_environment_bytes_object = os.environb
+    saved_environment_attributes = v2_exact_instance_dictionary_snapshot(
+        saved_environment_object,
+        label="fixture process environment",
+    )
+    saved_environment_bytes_attributes = (
+        v2_exact_instance_dictionary_snapshot(
+            saved_environment_bytes_object,
+            label="fixture byte process environment",
+        )
+    )
+    saved_environment_bytes = (
+        v2_bounded_process_environment_bytes_snapshot()
+    )
+    saved_recursion_limit = sys.getrecursionlimit()
+
+    def capture_state() -> dict[str, Any]:
+        additional_callable_before = (
+            v2_fixture_callback_data_projection(additional_state)
+            if additional_state is not None
+            else None
+        )
+        resources = v2_fixture_resource_state(
+            paths,
+            additional_state=additional_state,
+        )
+        additional_callable_after = (
+            v2_fixture_callback_data_projection(additional_state)
+            if additional_state is not None
+            else None
+        )
+        if additional_callable_before != additional_callable_after:
+            raise EvidenceFailed(
+                "fixture resource additional-state projector mutated its "
+                "reachable data"
+            )
+        return {
+            "resources": resources,
+            "callback_data": v2_fixture_callback_data_projection(callback),
+            "additional_state_callable_data": additional_callable_after,
+        }
+
+    try:
+        before_state = capture_state()
+        before_root = semantic_root(before_state)
+        error = expect_error(error_type, callback, contains=contains)
+        after_state: dict[str, Any] | None = None
+        after_capture_error: BaseException | None = None
+        try:
+            after_state = capture_state()
+        except BaseException as capture_error:
+            after_capture_error = capture_error
+        after_root = (
+            semantic_root(after_state)
+            if after_state is not None
+            else None
+        )
+    finally:
+        restoration_errors: list[BaseException] = []
+
+        def restore_step(callback: Callable[[], None]) -> None:
+            try:
+                callback()
+            except BaseException as restoration_error:
+                restoration_errors.append(restoration_error)
+
+        def restore_recursion_limit() -> None:
+            if sys.getrecursionlimit() != saved_recursion_limit:
+                sys.setrecursionlimit(saved_recursion_limit)
+
+        def restore_environment_attributes() -> None:
+            v2_restore_exact_instance_dictionary(
+                saved_environment_object,
+                saved_environment_attributes,
+                label="fixture process environment",
+            )
+
+        def restore_environment_bytes_attributes() -> None:
+            v2_restore_exact_instance_dictionary(
+                saved_environment_bytes_object,
+                saved_environment_bytes_attributes,
+                label="fixture byte process environment",
+            )
+
+        def restore_environment_bindings() -> None:
+            os.environ = saved_environment_object
+            os.environb = saved_environment_bytes_object
+
+        def restore_environment_entries() -> None:
+            for key in sorted(
+                set(saved_environment_bytes_object).difference(
+                    saved_environment_bytes
+                )
+            ):
+                del saved_environment_bytes_object[key]
+            for key in sorted(saved_environment_bytes):
+                value = saved_environment_bytes[key]
+                if saved_environment_bytes_object.get(key) != value:
+                    saved_environment_bytes_object[key] = value
+
+        def restore_cwd() -> None:
+            if os.getcwdb() != saved_cwd:
+                os.chdir(saved_cwd)
+
+        def verify_restoration() -> None:
+            if (
+                os.environ is not saved_environment_object
+                or os.environb is not saved_environment_bytes_object
+                or v2_exact_instance_dictionary_snapshot(
+                    saved_environment_object,
+                    label="restored fixture process environment",
+                )
+                != saved_environment_attributes
+                or v2_exact_instance_dictionary_snapshot(
+                    saved_environment_bytes_object,
+                    label="restored fixture byte process environment",
+                )
+                != saved_environment_bytes_attributes
+                or v2_bounded_process_environment_bytes_snapshot()
+                != saved_environment_bytes
+                or sys.getrecursionlimit() != saved_recursion_limit
+                or os.getcwdb() != saved_cwd
+            ):
+                raise EvidenceFailed(
+                    "fixture resource cleanup left changed process state"
+                )
+
+        for restoration in (
+            restore_recursion_limit,
+            restore_environment_attributes,
+            restore_environment_bytes_attributes,
+            restore_environment_bindings,
+            restore_environment_entries,
+            restore_cwd,
+            verify_restoration,
+        ):
+            restore_step(restoration)
+        if restoration_errors:
+            raise EvidenceFailed(
+                "fixture resource cleanup could not restore all process state"
+            ) from restoration_errors[0]
+    diagnostic, diagnostic_exact = v2_exception_diagnostic(error)
+    divergence = (
+        first_projection_divergence(before_state, after_state)
+        if after_state is not None
+        else None
+    )
+    checks.check(
+        check_id,
+        type(error) is error_type
+        and diagnostic_exact
+        and contains in diagnostic
+        and after_capture_error is None
+        and divergence is None
+        and before_root == after_root,
+        expected={
+            "exact_error_type": v2_raw_type_name(error_type),
+            "terminal": v2_harness_error_terminal(error_type),
+            "diagnostic_contains": contains,
+            "fixture_state_root": before_root,
+            "first_divergence": None,
+            "after_capture_error": None,
+        },
+        observed={
+            "error_type": v2_raw_type_name(type(error)),
+            "terminal": (
+                v2_harness_error_terminal(type(error))
+                if type(error) is error_type
+                else None
+            ),
+            "diagnostic_exact": diagnostic_exact,
+            "diagnostic_contains": contains in diagnostic,
+            "diagnostic_root": text_root(diagnostic),
+            "fixture_state_root_before": before_root,
+            "fixture_state_root_after": after_root,
+            "first_divergence": divergence,
+            "after_capture_error": (
+                v2_raw_type_name(type(after_capture_error))
+                if after_capture_error is not None
+                else None
+            ),
+        },
+    )
 
 
 def v2_synthetic_source_issue(
@@ -34785,6 +38465,7 @@ def v2_replayable_fixture_bundle(
         zero_sets=zero,
         optional_payloads=optional,
         reproduction=reproduction,
+        current_source_files=fixture_source_files,
     )
     components = (
         source,
@@ -37804,6 +41485,22 @@ def v2_execute_schema_cli_ux(
             def strict_fixture_relative(path: Path) -> str:
                 return path.relative_to(REPO_ROOT).as_posix()
 
+            expected_os_pread = os.pread
+            strict_fixture_paths = (
+                strict_root,
+                regular_path,
+                linked_target_path,
+                linked_alias_path,
+                symlink_path,
+                real_parent,
+                parent_alias,
+                parent_member,
+                race_path,
+            )
+
+            def strict_fixture_additional_state() -> dict[str, bool]:
+                return {"os_pread_is_expected": os.pread is expected_os_pread}
+
             checks.check(
                 "strict-reader-regular-file-exact",
                 v2_read_repo_relative_file_strict(
@@ -37827,7 +41524,8 @@ def v2_execute_schema_cli_ux(
                     ).hexdigest(),
                 },
             )
-            checks.refuses(
+            v2_check_fixture_resource_refusal(
+                checks,
                 "strict-reader-leaf-symlink-refused",
                 InputRefused,
                 lambda: v2_read_repo_relative_file_strict(
@@ -37835,8 +41533,11 @@ def v2_execute_schema_cli_ux(
                     label="strict-read leaf symlink",
                 ),
                 contains="cannot be opened safely",
+                paths=strict_fixture_paths,
+                additional_state=strict_fixture_additional_state,
             )
-            checks.refuses(
+            v2_check_fixture_resource_refusal(
+                checks,
                 "strict-reader-hard-link-refused",
                 InputRefused,
                 lambda: v2_read_repo_relative_file_strict(
@@ -37844,8 +41545,11 @@ def v2_execute_schema_cli_ux(
                     label="strict-read hard link",
                 ),
                 contains="not one uniquely linked regular file",
+                paths=strict_fixture_paths,
+                additional_state=strict_fixture_additional_state,
             )
-            checks.refuses(
+            v2_check_fixture_resource_refusal(
+                checks,
                 "strict-reader-parent-symlink-refused",
                 InputRefused,
                 lambda: v2_read_repo_relative_file_strict(
@@ -37853,8 +41557,11 @@ def v2_execute_schema_cli_ux(
                     label="strict-read parent symlink",
                 ),
                 contains="cannot be opened safely",
+                paths=strict_fixture_paths,
+                additional_state=strict_fixture_additional_state,
             )
-            checks.refuses(
+            v2_check_fixture_resource_refusal(
+                checks,
                 "strict-reader-cap-plus-one-refused",
                 InputRefused,
                 lambda: v2_read_repo_relative_file_strict(
@@ -37863,41 +41570,40 @@ def v2_execute_schema_cli_ux(
                     cap=len(regular_payload) - 1,
                 ),
                 contains="bounded byte cap",
+                paths=strict_fixture_paths,
+                additional_state=strict_fixture_additional_state,
             )
 
-            expected_os_pread = os.pread
+            race_original_pread = os.pread
+            touching_pread_state = {"touched": False}
+
+            def touching_pread(
+                descriptor: int,
+                length: int,
+                offset: int,
+            ) -> bytes:
+                payload = race_original_pread(descriptor, length, offset)
+                if not touching_pread_state["touched"]:
+                    touching_pread_state["touched"] = True
+                    state = os.stat(
+                        race_path,
+                        follow_symlinks=False,
+                    )
+                    os.utime(
+                        race_path,
+                        ns=(
+                            state.st_atime_ns,
+                            state.st_mtime_ns + 1_000_000_000,
+                        ),
+                        follow_symlinks=False,
+                    )
+                return payload
 
             def read_while_identity_changes() -> bytes:
-                original_pread = os.pread
                 original_state = os.stat(
                     race_path,
                     follow_symlinks=False,
                 )
-                touched = False
-
-                def touching_pread(
-                    descriptor: int,
-                    length: int,
-                    offset: int,
-                ) -> bytes:
-                    nonlocal touched
-                    payload = original_pread(descriptor, length, offset)
-                    if not touched:
-                        touched = True
-                        state = os.stat(
-                            race_path,
-                            follow_symlinks=False,
-                        )
-                        os.utime(
-                            race_path,
-                            ns=(
-                                state.st_atime_ns,
-                                state.st_mtime_ns + 1_000_000_000,
-                            ),
-                            follow_symlinks=False,
-                        )
-                    return payload
-
                 try:
                     os.pread = touching_pread
                     return v2_read_repo_relative_file_strict(
@@ -37905,7 +41611,7 @@ def v2_execute_schema_cli_ux(
                         label="strict-read changing fixture",
                     )
                 finally:
-                    os.pread = original_pread
+                    os.pread = race_original_pread
                     os.utime(
                         race_path,
                         ns=(
@@ -37914,35 +41620,16 @@ def v2_execute_schema_cli_ux(
                         ),
                         follow_symlinks=False,
                     )
+                    touching_pread_state["touched"] = False
 
-            def mid_read_external_state(
-                _stat: Any = os.stat,
-                _utime: Any = os.utime,
-                _pread: Any = os.pread,
-            ) -> dict[str, Any]:
-                del _stat, _utime, _pread
-                race_state = os.stat(
-                    race_path,
-                    follow_symlinks=False,
-                )
-                return {
-                    "os_pread_restored": os.pread is expected_os_pread,
-                    "race_atime_ns": race_state.st_atime_ns,
-                    "race_mtime_ns": race_state.st_mtime_ns,
-                    "race_size": race_state.st_size,
-                    "command_receipt_count": len(_command_receipts),
-                    "cancel_requested": _cancel_requested,
-                }
-
-            checks.refuses(
+            v2_check_fixture_resource_refusal(
+                checks,
                 "strict-reader-mid-read-change-refused",
                 InputRefused,
                 read_while_identity_changes,
                 contains="changed while being read",
-                projection=mid_read_external_state,
-                projection_label=(
-                    "HARNESS_STATE_OS_PREAD_AND_RACE_FILE_RESTORATION"
-                ),
+                paths=strict_fixture_paths,
+                additional_state=strict_fixture_additional_state,
             )
     elif slug == "cli-review-receipts":
         inventory = v2_synthetic_inventory([v2_synthetic_target(0)])
@@ -43191,6 +46878,765 @@ def v2_execute_source_cases(
             ),
             contains="duplicate issue",
         )
+
+        exact_integer_boundary = 1 << (
+            V2_EXACT_JSON_INTEGER_BITS_CAP - 1
+        )
+        v2_validate_exact_json_wire(
+            {
+                "zero": 0,
+                "positive_boundary": exact_integer_boundary,
+                "negative_boundary": -exact_integer_boundary,
+                "boolean": True,
+            },
+            label="exact-wire integer boundary fixture",
+        )
+        huge_integer_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"integer": 1 << 100_000},
+                label="exact-wire huge integer fixture",
+            ),
+            contains="oversized integer",
+        )
+        exact_wire_test_item_cap = 32
+        v2_validate_exact_json_wire(
+            [None] * exact_wire_test_item_cap,
+            label="exact-wire exact item-cap fixture",
+            item_cap=exact_wire_test_item_cap,
+            node_cap=exact_wire_test_item_cap + 1,
+        )
+        item_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                [None] * (exact_wire_test_item_cap + 1),
+                label="exact-wire item-cap-plus-one fixture",
+                item_cap=exact_wire_test_item_cap,
+                node_cap=exact_wire_test_item_cap + 2,
+            ),
+            contains="exact-wire item cap",
+        )
+        v2_validate_exact_json_wire(
+            [None],
+            label="exact-wire exact node-cap fixture",
+            item_cap=1,
+            node_cap=2,
+        )
+        node_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                [[None]],
+                label="exact-wire node-cap-plus-one fixture",
+                item_cap=2,
+                node_cap=2,
+            ),
+            contains="exact-wire node cap",
+        )
+        exact_depth_fixture: Any = None
+        for _depth_index in range(V2_SOURCE_EXACT_WIRE_DEPTH_CAP):
+            exact_depth_fixture = [exact_depth_fixture]
+        v2_validate_exact_json_wire(
+            exact_depth_fixture,
+            label="exact-wire exact depth-cap fixture",
+        )
+        over_depth_fixture = [exact_depth_fixture]
+        depth_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                over_depth_fixture,
+                label="exact-wire depth-cap-plus-one fixture",
+            ),
+            contains="exact-wire depth cap",
+        )
+        hostile_integer_hooks = {
+            "bit_length": 0,
+            "str": 0,
+            "repr": 0,
+        }
+
+        class HostileExactWireInteger(int):
+            def bit_length(self) -> int:
+                hostile_integer_hooks["bit_length"] += 1
+                raise RuntimeError("hostile integer bit_length executed")
+
+            def __str__(self) -> str:
+                hostile_integer_hooks["str"] += 1
+                raise RuntimeError("hostile integer __str__ executed")
+
+            def __repr__(self) -> str:
+                hostile_integer_hooks["repr"] += 1
+                raise RuntimeError("hostile integer __repr__ executed")
+
+        hostile_integer_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"integer": HostileExactWireInteger(7)},
+                label="exact-wire hostile integer fixture",
+            ),
+            contains="non-exact JSON value",
+        )
+        hostile_over_cap_hooks = {"repr": 0, "str": 0}
+
+        class HostileOverCapChild:
+            def __repr__(self) -> str:
+                hostile_over_cap_hooks["repr"] += 1
+                raise RuntimeError("over-cap child repr executed")
+
+            def __str__(self) -> str:
+                hostile_over_cap_hooks["str"] += 1
+                raise RuntimeError("over-cap child str executed")
+
+        over_cap_children = [
+            HostileOverCapChild()
+            for _index in range(exact_wire_test_item_cap + 1)
+        ]
+        prospective_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                over_cap_children,
+                label="exact-wire prospective item-cap fixture",
+                item_cap=exact_wire_test_item_cap,
+                node_cap=exact_wire_test_item_cap + 2,
+            ),
+            contains="exact-wire item cap",
+        )
+        invalid_unicode_value_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"value": "\ud800"},
+                label="exact-wire invalid Unicode value fixture",
+            ),
+            contains="invalid Unicode",
+        )
+        invalid_unicode_key_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"\ud800": "value"},
+                label="exact-wire invalid Unicode key fixture",
+            ),
+            contains="invalid Unicode",
+        )
+        invalid_unicode_canonical_error = expect_error(
+            InputRefused,
+            lambda: strict_json_loads(
+                b'{"value":"\\ud800"}\n',
+                label="canonical invalid Unicode fixture",
+                require_canonical=True,
+            ),
+            contains="cannot be encoded as UTF-8",
+        )
+        changed_list_fixture = [None]
+        changed_list_fixture.clear()
+        changed_list_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_list_item(
+                changed_list_fixture,
+                index=0,
+                expected_length=1,
+                label="exact-wire changed list fixture",
+                path="$",
+            ),
+            contains="changed while validating",
+        )
+        changed_dict_fixture = {"value": None}
+        changed_dict_iterator = dict.__iter__(changed_dict_fixture)
+        changed_dict_fixture.clear()
+        changed_dict_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_dict_item(
+                changed_dict_fixture,
+                iterator=changed_dict_iterator,
+                expected_length=1,
+                label="exact-wire changed dictionary fixture",
+                path="$",
+            ),
+            contains="changed while validating",
+        )
+        replaced_list_fixture: list[Any] = [None]
+        replaced_list_snapshot = list.copy(replaced_list_fixture)
+        list.__setitem__(replaced_list_fixture, 0, "changed")
+        replaced_list_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_container_unchanged(
+                replaced_list_fixture,
+                replaced_list_snapshot,
+                label="exact-wire replaced list fixture",
+                path="$",
+            ),
+            contains="changed while validating",
+        )
+        replaced_dict_fixture: dict[str, Any] = {"value": None}
+        replaced_dict_snapshot = dict.copy(replaced_dict_fixture)
+        dict.__setitem__(replaced_dict_fixture, "value", "changed")
+        replaced_dict_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_container_unchanged(
+                replaced_dict_fixture,
+                replaced_dict_snapshot,
+                label="exact-wire replaced dictionary fixture",
+                path="$",
+            ),
+            contains="changed while validating",
+        )
+        detach_source = {"nested": [{"value": 1}]}
+        detached_tree = v2_validate_exact_json_wire(
+            detach_source,
+            label="exact-wire detached tree fixture",
+        )
+        detach_source["nested"][0]["value"] = 2
+        detached_tree_stable = (
+            type(detached_tree) is dict
+            and detached_tree["nested"][0]["value"] == 1
+            and detached_tree is not detach_source
+            and detached_tree["nested"] is not detach_source["nested"]
+        )
+        checks.check(
+            "source-exact-wire-budgets-and-subclass-hooks",
+            huge_integer_error.terminal == "InputRefused"
+            and item_cap_error.terminal == "InputRefused"
+            and node_cap_error.terminal == "InputRefused"
+            and depth_cap_error.terminal == "InputRefused"
+            and prospective_cap_error.terminal == "InputRefused"
+            and invalid_unicode_value_error.terminal == "InputRefused"
+            and invalid_unicode_key_error.terminal == "InputRefused"
+            and invalid_unicode_canonical_error.terminal == "InputRefused"
+            and changed_list_error.terminal == "InputRefused"
+            and changed_dict_error.terminal == "InputRefused"
+            and replaced_list_error.terminal == "InputRefused"
+            and replaced_dict_error.terminal == "InputRefused"
+            and detached_tree_stable
+            and hostile_integer_error.terminal == "InputRefused"
+            and hostile_integer_hooks
+            == {"bit_length": 0, "str": 0, "repr": 0}
+            and hostile_over_cap_hooks == {"repr": 0, "str": 0}
+            and V2_SOURCE_EXACT_WIRE_ITEM_CAP
+            == (V2_SOURCE_PROJECTION_BYTES_CAP - 1) // 2
+            and V2_SOURCE_EXACT_WIRE_NODE_CAP
+            == V2_SOURCE_EXACT_WIRE_ITEM_CAP + 1,
+            expected={
+                "exact_boundary": "accepted",
+                "exact_boolean": "accepted",
+                "huge_exact_integer": "InputRefused",
+                "exact_item_cap": "accepted",
+                "item_cap_plus_one": "InputRefused",
+                "exact_node_cap": "accepted",
+                "node_cap_plus_one": "InputRefused",
+                "exact_depth_cap": "accepted",
+                "depth_cap_plus_one": "InputRefused",
+                "prospective_parent_refusal": "before-child-hooks",
+                "structural_cap": "densest-canonical-array-derived",
+                "invalid_unicode_value": "InputRefused",
+                "invalid_unicode_key": "InputRefused",
+                "invalid_unicode_canonical_json": "InputRefused",
+                "changed_list": "InputRefused",
+                "changed_dictionary": "InputRefused",
+                "same_length_list_replacement": "InputRefused",
+                "same_length_dictionary_replacement": "InputRefused",
+                "detached_tree_stable_after_input_mutation": True,
+                "integer_subclass": "InputRefused",
+                "subclass_hook_calls": 0,
+            },
+            observed={
+                "exact_boundary_bits": exact_integer_boundary.bit_length(),
+                "decimal_digit_cap": (
+                    V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
+                ),
+                "huge_exact_integer": huge_integer_error.terminal,
+                "test_item_cap": exact_wire_test_item_cap,
+                "item_cap_plus_one": item_cap_error.terminal,
+                "node_cap_plus_one": node_cap_error.terminal,
+                "depth_cap": V2_SOURCE_EXACT_WIRE_DEPTH_CAP,
+                "depth_cap_plus_one": depth_cap_error.terminal,
+                "prospective_parent_refusal": (
+                    prospective_cap_error.terminal
+                ),
+                "production_item_cap": V2_SOURCE_EXACT_WIRE_ITEM_CAP,
+                "source_byte_cap": V2_SOURCE_PROJECTION_BYTES_CAP,
+                "invalid_unicode_terminals": [
+                    invalid_unicode_value_error.terminal,
+                    invalid_unicode_key_error.terminal,
+                    invalid_unicode_canonical_error.terminal,
+                ],
+                "changed_container_terminals": [
+                    changed_list_error.terminal,
+                    changed_dict_error.terminal,
+                    replaced_list_error.terminal,
+                    replaced_dict_error.terminal,
+                ],
+                "detached_tree_stable_after_input_mutation": (
+                    detached_tree_stable
+                ),
+                "integer_subclass": hostile_integer_error.terminal,
+                "subclass_hook_calls": sum(
+                    hostile_integer_hooks.values()
+                ),
+                "over_cap_child_hook_calls": sum(
+                    hostile_over_cap_hooks.values()
+                ),
+            },
+        )
+
+        list_cycle: list[Any] = []
+        list.append(list_cycle, list_cycle)
+        dict_cycle: dict[str, Any] = {}
+        dict_cycle["self"] = dict_cycle
+        mutual_list: list[Any] = []
+        mutual_dict: dict[str, Any] = {"list": mutual_list}
+        list.append(mutual_list, mutual_dict)
+        shared_leaf = {"value": 1}
+        repeated_alias = [shared_leaf, shared_leaf]
+        tree_shape_errors = {
+            "list_cycle": expect_error(
+                InputRefused,
+                lambda: v2_validate_exact_json_wire(
+                    list_cycle,
+                    label="exact-wire list cycle fixture",
+                ),
+                contains="cyclic container",
+            ),
+            "dict_cycle": expect_error(
+                InputRefused,
+                lambda: v2_validate_exact_json_wire(
+                    dict_cycle,
+                    label="exact-wire dictionary cycle fixture",
+                ),
+                contains="cyclic container",
+            ),
+            "mutual_cycle": expect_error(
+                InputRefused,
+                lambda: v2_validate_exact_json_wire(
+                    mutual_list,
+                    label="exact-wire mutual cycle fixture",
+                ),
+                contains="cyclic container",
+            ),
+        }
+        repeated_alias_detached = v2_validate_exact_json_wire(
+            repeated_alias,
+            label="exact-wire repeated alias fixture",
+            item_cap=6,
+            node_cap=5,
+        )
+        repeated_alias_item_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                repeated_alias,
+                label="exact-wire repeated alias item plus-one fixture",
+                item_cap=5,
+                node_cap=5,
+            ),
+            contains="exact-wire item cap",
+        )
+        repeated_alias_node_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                repeated_alias,
+                label="exact-wire repeated alias node plus-one fixture",
+                item_cap=6,
+                node_cap=4,
+            ),
+            contains="exact-wire node cap",
+        )
+        repeated_alias_dealiased = (
+            repeated_alias_detached[0] == repeated_alias_detached[1]
+            and repeated_alias_detached[0]
+            is not repeated_alias_detached[1]
+            and repeated_alias_detached[0] is not shared_leaf
+        )
+        exact_dict_boundary = v2_validate_exact_json_wire(
+            {"value": None},
+            label="exact-wire dictionary item boundary fixture",
+            item_cap=2,
+            node_cap=2,
+        )
+        dict_item_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"value": None},
+                label="exact-wire dictionary item plus-one fixture",
+                item_cap=1,
+                node_cap=2,
+            ),
+            contains="exact-wire item cap",
+        )
+        non_string_key_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {1: "value"},
+                label="exact-wire non-string key fixture",
+            ),
+            contains="non-exact object key",
+        )
+        disjoint_input = [{"value": 1}, {"value": 1}]
+        disjoint_detached = v2_validate_exact_json_wire(
+            disjoint_input,
+            label="exact-wire disjoint tree fixture",
+        )
+        disjoint_tree_preserved = (
+            disjoint_detached is not disjoint_input
+            and disjoint_detached[0] is not disjoint_input[0]
+            and disjoint_detached[1] is not disjoint_input[1]
+            and disjoint_detached[0] is not disjoint_detached[1]
+        )
+        checks.check(
+            "source-exact-wire-tree-shape-and-dictionary-accounting",
+            all(
+                error.terminal == "InputRefused"
+                for error in tree_shape_errors.values()
+            )
+            and repeated_alias_dealiased
+            and repeated_alias_item_error.terminal == "InputRefused"
+            and repeated_alias_node_error.terminal == "InputRefused"
+            and exact_dict_boundary == {"value": None}
+            and dict_item_error.terminal == "InputRefused"
+            and non_string_key_error.terminal == "InputRefused"
+            and disjoint_tree_preserved,
+            expected={
+                "cycles": "InputRefused",
+                "repeated_container_identity": "de-aliased-per-wire-occurrence",
+                "repeated_alias_items": 6,
+                "repeated_alias_nodes": 5,
+                "json_wire_shape": "detached-tree",
+                "one_entry_dict_items": 2,
+                "one_entry_dict_nodes": 2,
+                "non_string_key": "InputRefused",
+                "detached_siblings": "identity-disjoint",
+            },
+            observed={
+                "terminals": {
+                    name: error.terminal
+                    for name, error in tree_shape_errors.items()
+                },
+                "repeated_alias_dealiased": repeated_alias_dealiased,
+                "repeated_alias_item_plus_one": (
+                    repeated_alias_item_error.terminal
+                ),
+                "repeated_alias_node_plus_one": (
+                    repeated_alias_node_error.terminal
+                ),
+                "dict_item_plus_one": dict_item_error.terminal,
+                "non_string_key": non_string_key_error.terminal,
+                "detached_siblings_identity_disjoint": (
+                    disjoint_tree_preserved
+                ),
+            },
+        )
+
+        escaped_wire_fixture = {
+            "mixed": ["quote=\"", "line\nfeed", "slash=\\", None]
+        }
+        escaped_wire_bytes = len(canonical_bytes(escaped_wire_fixture))
+        escaped_wire_detached = v2_validate_exact_json_wire(
+            escaped_wire_fixture,
+            label="exact-wire escaped canonical boundary fixture",
+            byte_cap=escaped_wire_bytes,
+        )
+        escaped_wire_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                escaped_wire_fixture,
+                label="exact-wire escaped canonical plus-one fixture",
+                byte_cap=escaped_wire_bytes - 1,
+            ),
+            contains="canonical byte cap",
+        )
+        v2_validate_exact_json_wire(
+            [],
+            label="exact-wire snapshot exact-cap fixture",
+            snapshot_byte_cap=(
+                V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+            ),
+        )
+        snapshot_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                [],
+                label="exact-wire snapshot cap plus-one fixture",
+                snapshot_byte_cap=(
+                    V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES - 1
+                ),
+            ),
+            contains="snapshot cap",
+        )
+        exact_decimal_text = "1" + "0" * (
+            V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP - 1
+        )
+        parsed_decimal_boundary = strict_json_loads(
+            exact_decimal_text + "\n",
+            label="exact JSON integer decimal boundary fixture",
+            require_canonical=True,
+        )
+        decimal_plus_one_error = expect_error(
+            InputRefused,
+            lambda: strict_json_loads(
+                "1" + "0" * V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP,
+                label="exact JSON integer decimal plus-one fixture",
+            ),
+            contains="decimal-digit budget exceeded",
+        )
+        bit_plus_one_text = str(1 << V2_EXACT_JSON_INTEGER_BITS_CAP)
+        bit_plus_one_error = expect_error(
+            InputRefused,
+            lambda: strict_json_loads(
+                bit_plus_one_text,
+                label="exact JSON integer bit plus-one fixture",
+            ),
+            contains="bit budget exceeded",
+        )
+        parsed_depth_boundary = strict_json_loads(
+            "[" * V2_SOURCE_EXACT_WIRE_DEPTH_CAP
+            + "null"
+            + "]" * V2_SOURCE_EXACT_WIRE_DEPTH_CAP
+            + "\n",
+            label="exact JSON parser depth boundary fixture",
+            require_canonical=True,
+        )
+        v2_validate_exact_json_wire(
+            parsed_depth_boundary,
+            label="exact JSON parser plus exact-wire depth boundary fixture",
+        )
+        parsed_depth_plus_one = strict_json_loads(
+            "[" * (V2_SOURCE_EXACT_WIRE_DEPTH_CAP + 1)
+            + "null"
+            + "]" * (V2_SOURCE_EXACT_WIRE_DEPTH_CAP + 1),
+            label="exact JSON parser depth plus-one fixture",
+        )
+        parsed_depth_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                parsed_depth_plus_one,
+                label="exact JSON parser plus exact-wire depth refusal fixture",
+            ),
+            contains="exact-wire depth cap",
+        )
+        original_json_loads = json.loads
+
+        def synthetic_parser_recursion(*_args: Any, **_kwargs: Any) -> Any:
+            raise RecursionError("synthetic parser recursion")
+
+        json.loads = synthetic_parser_recursion
+        try:
+            parser_recursion_error = expect_error(
+                InputRefused,
+                lambda: strict_json_loads(
+                    "null",
+                    label="deep JSON parser refusal fixture",
+                ),
+                contains="JSON parser depth",
+            )
+        finally:
+            json.loads = original_json_loads
+        parser_subclass_hooks = {"text": 0, "bytes": 0}
+
+        class HostileParserText(str):
+            def startswith(self, *_args: Any, **_kwargs: Any) -> bool:
+                parser_subclass_hooks["text"] += 1
+                raise RuntimeError("hostile parser text hook executed")
+
+        class HostileParserBytes(bytes):
+            def decode(self, *_args: Any, **_kwargs: Any) -> str:
+                parser_subclass_hooks["bytes"] += 1
+                raise RuntimeError("hostile parser bytes hook executed")
+
+        parser_subclass_errors = [
+            expect_error(
+                InputRefused,
+                lambda: strict_json_loads(
+                    HostileParserText("null"),
+                    label="JSON text subclass fixture",
+                ),
+                contains="exact bytes or exact text",
+            ),
+            expect_error(
+                InputRefused,
+                lambda: strict_json_loads(
+                    HostileParserBytes(b"null"),
+                    label="JSON bytes subclass fixture",
+                ),
+                contains="exact bytes or exact text",
+            ),
+        ]
+        checks.check(
+            "source-exact-wire-canonical-bytes-and-parser-boundaries",
+            escaped_wire_detached == escaped_wire_fixture
+            and escaped_wire_error.terminal == "InputRefused"
+            and snapshot_cap_error.terminal == "InputRefused"
+            and type(parsed_decimal_boundary) is int
+            and len(str(parsed_decimal_boundary))
+            == V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
+            and decimal_plus_one_error.terminal == "InputRefused"
+            and bit_plus_one_error.terminal == "InputRefused"
+            and parsed_depth_error.terminal == "InputRefused"
+            and parser_recursion_error.terminal == "InputRefused"
+            and all(
+                error.terminal == "InputRefused"
+                for error in parser_subclass_errors
+            )
+            and parser_subclass_hooks == {"text": 0, "bytes": 0},
+            expected={
+                "escaped_canonical_exact_bytes": "accepted",
+                "escaped_canonical_one_short": "InputRefused",
+                "snapshot_exact_logical_bytes": "accepted",
+                "snapshot_one_short": "InputRefused",
+                "integer_decimal_exact": "accepted-before-int-conversion",
+                "integer_decimal_plus_one": "InputRefused",
+                "integer_bits_plus_one": "InputRefused",
+                "depth_exact_parse_and_validate": "accepted",
+                "depth_plus_one": "InputRefused",
+                "parser_recursion": "InputRefused",
+                "parser_input_subclasses": "InputRefused-before-hooks",
+            },
+            observed={
+                "escaped_canonical_bytes": escaped_wire_bytes,
+                "escaped_one_short": escaped_wire_error.terminal,
+                "snapshot_one_short": snapshot_cap_error.terminal,
+                "integer_decimal_digits": len(exact_decimal_text),
+                "integer_decimal_plus_one": decimal_plus_one_error.terminal,
+                "integer_bits_plus_one": bit_plus_one_error.terminal,
+                "depth_plus_one": parsed_depth_error.terminal,
+                "parser_recursion": parser_recursion_error.terminal,
+                "parser_subclass_terminals": [
+                    error.terminal for error in parser_subclass_errors
+                ],
+                "parser_subclass_hook_calls": sum(
+                    parser_subclass_hooks.values()
+                ),
+            },
+        )
+
+        finite_float_fixture = [
+            0.0,
+            -0.0,
+            float.fromhex("0x0.0000000000001p-1022"),
+            sys.float_info.max,
+        ]
+        finite_float_detached = v2_validate_exact_json_wire(
+            finite_float_fixture,
+            label="exact-wire finite float fixture",
+        )
+        nonfinite_errors = [
+            expect_error(
+                InputRefused,
+                lambda value=value: v2_validate_exact_json_wire(
+                    [value],
+                    label="exact-wire non-finite float fixture",
+                ),
+                contains="non-finite float",
+            )
+            for value in (float("nan"), float("inf"), float("-inf"))
+        ]
+
+        class ExactWireFloatSubclass(float):
+            pass
+
+        float_subclass_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                [ExactWireFloatSubclass(1.0)],
+                label="exact-wire float subclass fixture",
+            ),
+            contains="non-exact JSON value",
+        )
+        signed_zero_live = [0.0]
+        signed_zero_snapshot = [-0.0]
+        signed_zero_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_container_unchanged(
+                signed_zero_live,
+                signed_zero_snapshot,
+                label="exact-wire signed-zero replacement fixture",
+                path="$",
+            ),
+            contains="changed while validating",
+        )
+        astral_detached = v2_validate_exact_json_wire(
+            {"astral": "\U0001f600"},
+            label="exact-wire astral Unicode fixture",
+        )
+        low_surrogate_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                {"value": "\udcff"},
+                label="exact-wire low-surrogate fixture",
+            ),
+            contains="invalid Unicode",
+        )
+        integrated_mutation_source: list[Any] = [None]
+        integrated_comparator = v2_exact_wire_container_unchanged
+        integrated_comparator_calls = 0
+
+        def mutate_before_integrated_comparison(
+            value: Any,
+            snapshot: Any,
+            *,
+            label: str,
+            path: str,
+        ) -> None:
+            nonlocal integrated_comparator_calls
+            integrated_comparator_calls += 1
+            if value is integrated_mutation_source:
+                list.__setitem__(value, 0, "changed")
+            integrated_comparator(
+                value,
+                snapshot,
+                label=label,
+                path=path,
+            )
+
+        globals()["v2_exact_wire_container_unchanged"] = (
+            mutate_before_integrated_comparison
+        )
+        try:
+            integrated_mutation_error = expect_error(
+                InputRefused,
+                lambda: v2_validate_exact_json_wire(
+                    integrated_mutation_source,
+                    label="exact-wire integrated mutation fixture",
+                ),
+                contains="changed while validating",
+            )
+        finally:
+            globals()["v2_exact_wire_container_unchanged"] = (
+                integrated_comparator
+            )
+        checks.check(
+            "source-exact-wire-float-unicode-and-integrated-mutation-matrix",
+            [float.hex(value) for value in finite_float_detached]
+            == [float.hex(value) for value in finite_float_fixture]
+            and all(
+                error.terminal == "InputRefused"
+                for error in nonfinite_errors
+            )
+            and float_subclass_error.terminal == "InputRefused"
+            and signed_zero_error.terminal == "InputRefused"
+            and astral_detached == {"astral": "\U0001f600"}
+            and low_surrogate_error.terminal == "InputRefused"
+            and integrated_mutation_error.terminal == "InputRefused"
+            and integrated_comparator_calls >= 1,
+            expected={
+                "finite_float_hex": "preserved",
+                "nan_and_infinities": "InputRefused",
+                "float_subclass": "InputRefused",
+                "signed_zero_replacement": "InputRefused",
+                "astral_unicode": "accepted",
+                "low_surrogate": "InputRefused",
+                "integrated_final_snapshot_check": "InputRefused",
+            },
+            observed={
+                "finite_float_hex": [
+                    float.hex(value) for value in finite_float_detached
+                ],
+                "nonfinite_terminals": [
+                    error.terminal for error in nonfinite_errors
+                ],
+                "float_subclass": float_subclass_error.terminal,
+                "signed_zero_replacement": signed_zero_error.terminal,
+                "astral_unicode": astral_detached,
+                "low_surrogate": low_surrogate_error.terminal,
+                "integrated_mutation": integrated_mutation_error.terminal,
+                "integrated_comparator_calls": integrated_comparator_calls,
+            },
+        )
         source_payloads, _, _ = v2_replayable_fixture_bundle(
             manifest,
             subject_mode="review-plan",
@@ -43200,127 +47646,133 @@ def v2_execute_source_cases(
             label="source nested preflight seed",
             require_canonical=True,
         )
-        v2_validate_source_document(retained_source_seed)
+        retained_source_file_identities = v2_source_file_identities()
+        v2_validate_source_document_against_source_files(
+            retained_source_seed,
+            retained_source_file_identities,
+        )
 
-        def unrooted_source_capture_mutation(
+        def validate_source_capture_mutation_recipe(
             capture_name: str,
-            mutation: Callable[[dict[str, Any]], None],
-        ) -> dict[str, Any]:
+            recipe: str,
+        ) -> None:
             candidate = strict_json_loads(
                 canonical_bytes(retained_source_seed),
                 label=f"source {capture_name} preflight mutation",
                 require_canonical=True,
             )
-            mutation(candidate["captured"][capture_name])
-            return candidate
+            document = candidate["captured"][capture_name]
+            if recipe == "inventory-rows-non-array":
+                document["rows"] = "not-an-array"
+            elif recipe == "inventory-warning-cap":
+                document["warning_rows"] = [{}] * (
+                    V2_WARNING_ROWS_CAP + 1
+                )
+            elif recipe == "inventory-per-issue-warning-cap":
+                document["rows"] = [
+                    {
+                        "missing_sections": [
+                            "warning"
+                        ] * (V2_WARNINGS_PER_ISSUE_CAP + 1)
+                    }
+                ]
+            elif recipe == "lint-results-non-array":
+                document["all"]["results"] = "not-an-array"
+            elif recipe == "lint-row-cap":
+                document["all"]["results"] = [{"missing": []}] * (
+                    V2_INVENTORY_ROWS_CAP + 1
+                )
+            elif recipe == "lint-per-issue-warning-cap":
+                document["all"]["results"] = [
+                    {
+                        "missing": [
+                            "warning"
+                        ] * (V2_WARNINGS_PER_ISSUE_CAP + 1)
+                    }
+                ]
+            elif recipe == "observation-receipts-non-array":
+                document["command_receipts"] = "not-an-array"
+            elif recipe == "observation-receipt-cap":
+                document["command_receipts"] = [None] * (
+                    V2_LOG_EVENTS_CAP - 7
+                )
+            elif recipe == "observation-source-file-cap":
+                document["source_files"] = [{}] * (
+                    V2_BUNDLE_FILES_CAP + 1
+                )
+            else:
+                raise EvidenceFailed(
+                    f"unknown source preflight mutation recipe: {recipe}"
+                )
+            v2_validate_source_document_against_source_files(
+                candidate,
+                retained_source_file_identities,
+            )
 
-        for label, capture_name, mutation, diagnostic in (
+        for label, capture_name, recipe, diagnostic in (
             (
                 "retained-inventory-rows-non-array-preflight",
                 "v1_inventory_projection",
-                lambda document: document.__setitem__(
-                    "rows",
-                    "not-an-array",
-                ),
+                "inventory-rows-non-array",
                 "inventory rows are not an array",
             ),
             (
                 "retained-inventory-warning-cap-preflight",
                 "v1_inventory_projection",
-                lambda document: document.__setitem__(
-                    "warning_rows",
-                    [{}] * (V2_WARNING_ROWS_CAP + 1),
-                ),
+                "inventory-warning-cap",
                 "warning rows exceed the warning row cap",
             ),
             (
                 "retained-inventory-per-issue-warning-cap-preflight",
                 "v1_inventory_projection",
-                lambda document: document.__setitem__(
-                    "rows",
-                    [
-                        {
-                            "missing_sections": [
-                                "warning"
-                            ]
-                            * (V2_WARNINGS_PER_ISSUE_CAP + 1)
-                        }
-                    ],
-                ),
+                "inventory-per-issue-warning-cap",
                 "per-issue warning count",
             ),
             (
                 "retained-lint-results-non-array-preflight",
                 "v1_lint_projection",
-                lambda document: document["all"].__setitem__(
-                    "results",
-                    "not-an-array",
-                ),
+                "lint-results-non-array",
                 "lint scope all results are not an array",
             ),
             (
                 "retained-lint-row-cap-preflight",
                 "v1_lint_projection",
-                lambda document: document["all"].__setitem__(
-                    "results",
-                    [{"missing": []}]
-                    * (V2_INVENTORY_ROWS_CAP + 1),
-                ),
+                "lint-row-cap",
                 "inventory row count",
             ),
             (
                 "retained-lint-per-issue-warning-cap-preflight",
                 "v1_lint_projection",
-                lambda document: document["all"].__setitem__(
-                    "results",
-                    [
-                        {
-                            "missing": [
-                                "warning"
-                            ]
-                            * (V2_WARNINGS_PER_ISSUE_CAP + 1)
-                        }
-                    ],
-                ),
+                "lint-per-issue-warning-cap",
                 "per-issue warning count",
             ),
             (
                 "retained-observation-receipts-non-array-preflight",
                 "observation",
-                lambda document: document.__setitem__(
-                    "command_receipts",
-                    "not-an-array",
-                ),
+                "observation-receipts-non-array",
                 "command receipts are not an array",
             ),
             (
                 "retained-observation-receipt-cap-preflight",
                 "observation",
-                lambda document: document.__setitem__(
-                    "command_receipts",
-                    [{}] * (V2_LOG_EVENTS_CAP - 7),
-                ),
+                "observation-receipt-cap",
                 "command receipts exceed the event budget",
             ),
             (
                 "retained-observation-source-file-cap-preflight",
                 "observation",
-                lambda document: document.__setitem__(
-                    "source_files",
-                    [{}] * (V2_BUNDLE_FILES_CAP + 1),
-                ),
+                "observation-source-file-cap",
                 "source files exceed the bundle file cap",
             ),
         ):
-            candidate = unrooted_source_capture_mutation(
-                capture_name,
-                mutation,
-            )
             checks.refuses(
                 label,
                 InputRefused,
-                lambda candidate=candidate: v2_validate_source_document(
-                    candidate
+                lambda capture_name=capture_name, recipe=recipe: (
+                    validate_source_capture_mutation_recipe(
+                        capture_name,
+                        recipe,
+                    )
                 ),
                 contains=diagnostic,
             )
@@ -44845,6 +49297,71 @@ def v2_execute_authority_cases(
             declared=True,
         )
 
+        authority_identity_hook_calls = {
+            "strip": 0,
+            "encode": 0,
+            "casefold": 0,
+            "eq": 0,
+        }
+
+        class HostileAuthorityIdentity(str):
+            def strip(self, *_args: Any, **_kwargs: Any) -> str:
+                authority_identity_hook_calls["strip"] += 1
+                return str(self)
+
+            def encode(self, *_args: Any, **_kwargs: Any) -> bytes:
+                authority_identity_hook_calls["encode"] += 1
+                return b"hostile"
+
+            def casefold(self) -> str:
+                authority_identity_hook_calls["casefold"] += 1
+                return "hostile"
+
+            def __eq__(self, _other: Any) -> bool:
+                authority_identity_hook_calls["eq"] += 1
+                return True
+
+        hostile_authority_receipt = dict(receipt_seed["receipts"][0])
+        hostile_authority_receipt["declared_acceptance_owner"] = (
+            HostileAuthorityIdentity("owner")
+        )
+        hostile_authority_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_receipt_authority_identities(
+                hostile_authority_receipt,
+                target_id="hostile-authority-identity-fixture",
+            ),
+            contains="noncanonical",
+        )
+        exact_nfkc_casefold = v2_exact_normalized_casefold(
+            "ＮＯＤＡＴＡ",
+            normalization="NFKC",
+            label="exact authority identity fixture",
+            error_type=InputRefused,
+        )
+        checks.check(
+            "authority-identity-subclass-hooks-refused-before-normalization",
+            hostile_authority_error.terminal == "InputRefused"
+            and authority_identity_hook_calls
+            == {"strip": 0, "encode": 0, "casefold": 0, "eq": 0}
+            and exact_nfkc_casefold == "nodata",
+            expected={
+                "terminal": "InputRefused",
+                "hook_calls": {
+                    "strip": 0,
+                    "encode": 0,
+                    "casefold": 0,
+                    "eq": 0,
+                },
+                "exact_nfkc_casefold": "nodata",
+            },
+            observed={
+                "terminal": hostile_authority_error.terminal,
+                "hook_calls": authority_identity_hook_calls,
+                "exact_nfkc_casefold": exact_nfkc_casefold,
+            },
+        )
+
         def receipt_with_identity(value: str) -> dict[str, Any]:
             candidate = strict_json_loads(
                 canonical_bytes(receipt_seed),
@@ -44914,13 +49431,14 @@ def v2_execute_authority_cases(
                 ].encode("utf-8")
             ),
         )
+        over_cap_receipts = receipt_with_identity(
+            "x" * (V2_AUTHORITY_IDENTITY_BYTES_CAP + 1)
+        )
         checks.refuses(
             "authority-identity-byte-cap-plus-one-refused",
             InputRefused,
             lambda: v2_validate_receipt_bindings(
-                receipt_with_identity(
-                    "x" * (V2_AUTHORITY_IDENTITY_BYTES_CAP + 1)
-                ),
+                over_cap_receipts,
                 base_inventory,
             ),
             contains="noncanonical",
@@ -51319,15 +55837,24 @@ def v2_execute_artifact_cases(
             }
         )
 
-        class DuplicateProjectedKeyMapping(Mapping[str, str]):
+        hostile_mapping_hooks = {
+            "getitem": 0,
+            "iter": 0,
+            "len": 0,
+        }
+
+        class HostileOpaqueMapping(Mapping[str, str]):
             def __getitem__(self, _key: str) -> str:
-                return "duplicate-projection-secret"
+                hostile_mapping_hooks["getitem"] += 1
+                raise AssertionError("mapping __getitem__ hook was invoked")
 
             def __iter__(self) -> Iterator[str]:
-                return iter(("token=duplicate", "token=duplicate"))
+                hostile_mapping_hooks["iter"] += 1
+                raise AssertionError("mapping __iter__ hook was invoked")
 
             def __len__(self) -> int:
-                return 2
+                hostile_mapping_hooks["len"] += 1
+                raise AssertionError("mapping __len__ hook was invoked")
 
         collision_error = expect_error(
             EvidenceFailed,
@@ -51336,12 +55863,9 @@ def v2_execute_artifact_cases(
             ),
             contains="mapping keys must be exact strings",
         )
-        projected_collision_error = expect_error(
-            EvidenceFailed,
-            lambda: v2_assertion_evidence_projection(
-                DuplicateProjectedKeyMapping()
-            ),
-            contains="collide after projection",
+        hostile_mapping = HostileOpaqueMapping()
+        projected_hostile_mapping = v2_assertion_evidence_projection(
+            hostile_mapping
         )
         checks.check(
             "assertion-evidence-sensitive-metadata-projected",
@@ -51377,20 +55901,26 @@ def v2_execute_artifact_cases(
                 )
             )
             and collision_error.terminal == "EvidenceFailed"
-            and projected_collision_error.terminal == "EvidenceFailed",
+            and projected_hostile_mapping
+            == {
+                "kind": "opaque",
+                "type": v2_type_identity(type(hostile_mapping)),
+            }
+            and hostile_mapping_hooks
+            == {"getitem": 0, "iter": 0, "len": 0},
             expected={
                 "sensitive_strings_numbers_booleans_and_lists": "redacted",
                 "path_bearing_key": "projected",
                 "non_string_key": "refused without collision",
+                "arbitrary_mapping": "opaque without hooks",
             },
             observed={
                 "projected_evidence": projected_evidence,
                 "projected_path_key": projected_path_key,
                 "projected_assignment_key": projected_assignment_key,
                 "collision_terminal": collision_error.terminal,
-                "projected_collision_terminal": (
-                    projected_collision_error.terminal
-                ),
+                "projected_hostile_mapping": projected_hostile_mapping,
+                "hostile_mapping_hooks": hostile_mapping_hooks,
             },
         )
         mutated_state = {"phase": "before"}
@@ -54836,6 +59366,66 @@ def v2_execute_artifact_cases(
                 ProjectedComplex(2.0, -3.0)
             ),
         }
+        oversized_integer = 1 << 100_000
+        oversized_default_callback_invoked = {"value": False}
+
+        def oversized_default_callback(
+            _value: int = oversized_integer,
+        ) -> None:
+            oversized_default_callback_invoked["value"] = True
+            raise InputRefused("unreachable oversized-default callback")
+
+        oversized_default_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_callback_refusal_projection(
+                oversized_default_callback,
+                collector_rows=[],
+            ),
+            contains="oversized integer",
+        )
+
+        def integer_constant_template() -> int:
+            return 0
+
+        template_constants = list(integer_constant_template.__code__.co_consts)
+        integer_constant_index = next(
+            index
+            for index, value in enumerate(template_constants)
+            if type(value) is int and value == 0
+        )
+        template_constants[integer_constant_index] = oversized_integer
+        oversized_constant_callback = types.FunctionType(
+            integer_constant_template.__code__.replace(
+                co_consts=tuple(template_constants)
+            ),
+            integer_constant_template.__globals__,
+            "oversized_constant_callback",
+        )
+        oversized_constant_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_callback_refusal_projection(
+                oversized_constant_callback,
+                collector_rows=[],
+            ),
+            contains="oversized integer",
+        )
+        oversized_assertion_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_assertion_evidence_projection(oversized_integer),
+            contains="oversized integer",
+        )
+        nonfinite_assertion_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_assertion_evidence_projection(float("inf")),
+            contains="non-finite float",
+        )
+        oversized_additional_state_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_additional_state_projection(
+                {"oversized": oversized_integer}
+            ),
+            contains="oversized integer",
+        )
         ordered_probe = OrderedDict((('alpha', 1), ('beta', 2)))
         ordered_collector = V2CheckCollector(
             "fixture-ordered-dictionary-refusal-state",
@@ -54922,7 +59512,16 @@ def v2_execute_artifact_cases(
             and len(bytearray_collector.rows) == 1
             and bytearray_collector.rows[0]["passed"] is False
             and bytes(bytearray.__iter__(hooked_bytearray)) == b"ab"
-            and buffer_hook_state["calls"] == 0,
+            and buffer_hook_state["calls"] == 0
+            and oversized_default_callback_invoked == {"value": False}
+            and [
+                oversized_default_error.terminal,
+                oversized_constant_error.terminal,
+                oversized_assertion_error.terminal,
+                nonfinite_assertion_error.terminal,
+                oversized_additional_state_error.terminal,
+            ]
+            == ["EvidenceFailed"] * 5,
             expected={
                 "scalar_subclass_kinds": {
                     "str": "str-subclass",
@@ -54935,6 +59534,14 @@ def v2_execute_artifact_cases(
                 "ordered_reorder_detected": True,
                 "bytearray_mutation_detected": True,
                 "bytearray_buffer_hook_calls": 0,
+                "oversized_integer_boundaries": {
+                    "default": "EvidenceFailed",
+                    "code_constant": "EvidenceFailed",
+                    "assertion_evidence": "EvidenceFailed",
+                    "additional_state": "EvidenceFailed",
+                    "callback_invoked": False,
+                },
+                "nonfinite_assertion_float": "EvidenceFailed",
                 "fixtures_restored": True,
             },
             observed={
@@ -54963,6 +59570,18 @@ def v2_execute_artifact_cases(
                     bytearray.__iter__(hooked_bytearray)
                 ),
                 "bytearray_buffer_hook_calls": buffer_hook_state["calls"],
+                "oversized_integer_terminals": [
+                    oversized_default_error.terminal,
+                    oversized_constant_error.terminal,
+                    oversized_assertion_error.terminal,
+                    oversized_additional_state_error.terminal,
+                ],
+                "oversized_default_callback_invoked": (
+                    oversized_default_callback_invoked["value"]
+                ),
+                "nonfinite_assertion_float": (
+                    nonfinite_assertion_error.terminal
+                ),
             },
         )
 
@@ -55312,12 +59931,76 @@ def v2_execute_artifact_cases(
             actual_unrelated_call()
             raise InputRefused("synthetic unrelated call-window refusal")
 
+        def generated_argument_call_window_callback() -> dict[int, int]:
+            return dict(
+                sorted(
+                    Counter(
+                        value for value in (1, 2, 1)
+                    ).items()
+                )
+            )
+
+        class CallWindowProduct:
+            def method(self) -> int:
+                return 1
+
+            def post(self) -> int:
+                return 2
+
+        def call_window_factory() -> CallWindowProduct:
+            return CallWindowProduct()
+
+        def call_window_target(_value: Any) -> CallWindowProduct:
+            return CallWindowProduct()
+
+        def call_window_inner(value: int) -> int:
+            return value
+
+        def nested_result_call_window_callback() -> int:
+            return call_window_target(
+                call_window_factory().method()
+            ).post()
+
+        call_window_source = {"read": call_window_factory}
+
+        def nested_subscript_call_window_callback(
+            source: dict[str, Callable[[], CallWindowProduct]] = (
+                call_window_source
+            ),
+        ) -> int:
+            return call_window_target(
+                source["read"]().method()
+            ).post()
+
+        def inline_comprehension_call_window_callback(
+            target: Callable[[Any], CallWindowProduct] = call_window_target,
+            inner: Callable[[int], int] = call_window_inner,
+            data: tuple[int, ...] = (1, 2),
+        ) -> int:
+            return target([inner(value) for value in data]).post()
+
         long_call_analysis = v2_code_access_analysis(
             long_argument_callback.__code__,
             context=v2_new_refusal_projection_context(),
         )
         unrelated_call_analysis = v2_code_access_analysis(
             unrelated_call_window_callback.__code__,
+            context=v2_new_refusal_projection_context(),
+        )
+        generated_argument_call_analysis = v2_code_access_analysis(
+            generated_argument_call_window_callback.__code__,
+            context=v2_new_refusal_projection_context(),
+        )
+        nested_result_call_analysis = v2_code_access_analysis(
+            nested_result_call_window_callback.__code__,
+            context=v2_new_refusal_projection_context(),
+        )
+        nested_subscript_call_analysis = v2_code_access_analysis(
+            nested_subscript_call_window_callback.__code__,
+            context=v2_new_refusal_projection_context(),
+        )
+        inline_comprehension_call_analysis = v2_code_access_analysis(
+            inline_comprehension_call_window_callback.__code__,
             context=v2_new_refusal_projection_context(),
         )
 
@@ -55356,10 +60039,70 @@ def v2_execute_artifact_cases(
 
         capability_holder = {"read": os.getcwd}
 
+        def capability_identity(value: Any) -> Any:
+            return value
+
         def subscript_projection(
             source: dict[str, Callable[[], str]] = capability_holder,
         ) -> dict[str, str]:
             return {"cwd": source["read"]()}
+
+        def subscript_argument_only_projection(
+            source: dict[str, Callable[[], str]] = capability_holder,
+            target: Callable[[Any], Any] = capability_identity,
+        ) -> dict[str, Any]:
+            return {"callable": target(source["read"])}
+
+        global_capability_holder = {"read": os.getcwd}
+
+        def global_subscript_projection() -> dict[str, str]:
+            return {"cwd": global_capability_holder["read"]()}
+
+        def global_subscript_argument_only_projection() -> dict[str, Any]:
+            return {
+                "callable": capability_identity(
+                    global_capability_holder["read"]
+                )
+            }
+
+        def list_comprehension_capability_projection(
+            read: Callable[[], str] = os.getcwd,
+        ) -> list[str]:
+            return [read() for _ in (1,)]
+
+        def set_comprehension_capability_projection(
+            read: Callable[[], str] = os.getcwd,
+        ) -> set[str]:
+            return {read() for _ in (1,)}
+
+        def dict_comprehension_capability_projection(
+            read: Callable[[], str] = os.getcwd,
+        ) -> dict[int, str]:
+            return {index: read() for index in (1,)}
+
+        comprehension_projection_probe = V2CheckCollector(
+            "fixture-comprehension-capability-probe",
+            "fixture.comprehension-capability-probe",
+        )
+
+        def comprehension_probe_refusal() -> None:
+            raise InputRefused("synthetic comprehension capability refusal")
+
+        for comprehension_label, comprehension_projection in (
+            ("list", list_comprehension_capability_projection),
+            ("set", set_comprehension_capability_projection),
+            ("dict", dict_comprehension_capability_projection),
+        ):
+            comprehension_projection_probe.refuses(
+                f"{comprehension_label}-comprehension",
+                InputRefused,
+                comprehension_probe_refusal,
+                contains="synthetic comprehension capability refusal",
+                projection=comprehension_projection,
+                projection_label=(
+                    "SUPPORTED_RUNTIME_COMPREHENSION_PROCESS_CWD"
+                ),
+            )
 
         missing_subscript_hook_state = {"calls": 0}
 
@@ -55381,7 +60124,160 @@ def v2_execute_artifact_cases(
             lambda: v2_explicit_projection_external_capabilities(
                 missing_subscript_projection
             ),
-            contains="exact hook-free key match",
+            contains="audited exact container",
+        )
+
+        subscript_hook_state = {
+            "override_getitem": 0,
+            "collision_hash": 0,
+            "collision_eq": 0,
+        }
+
+        class ExistingKeyOverrideDict(
+            dict[str, Callable[[], str]]
+        ):
+            def __getitem__(self, key: str) -> Callable[[], str]:
+                subscript_hook_state["override_getitem"] += 1
+                del key
+                return sys.getrecursionlimit  # type: ignore[return-value]
+
+        overridden_subscript_holder = ExistingKeyOverrideDict()
+        dict.__setitem__(overridden_subscript_holder, "read", os.getcwd)
+
+        def overridden_subscript_projection(
+            source: dict[str, Callable[[], str]] = (
+                overridden_subscript_holder
+            ),
+        ) -> dict[str, str]:
+            return {"cwd": source["read"]()}
+
+        overridden_subscript_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_explicit_projection_external_capabilities(
+                overridden_subscript_projection
+            ),
+            contains="audited exact container",
+        )
+
+        collision_active = {"value": False}
+
+        class CollisionKey:
+            def __hash__(self) -> int:
+                subscript_hook_state["collision_hash"] += 1
+                return hash("read")
+
+            def __eq__(self, other: Any) -> bool:
+                subscript_hook_state["collision_eq"] += 1
+                return collision_active["value"] and other == "read"
+
+        collision_key = CollisionKey()
+        collision_subscript_holder: dict[Any, Callable[[], Any]] = {}
+        dict.__setitem__(
+            collision_subscript_holder,
+            collision_key,
+            sys.getrecursionlimit,
+        )
+        dict.__setitem__(collision_subscript_holder, "read", os.getcwd)
+        collision_active["value"] = True
+        subscript_hook_state["collision_hash"] = 0
+        subscript_hook_state["collision_eq"] = 0
+
+        def collision_subscript_projection(
+            source: dict[Any, Callable[[], Any]] = (
+                collision_subscript_holder
+            ),
+        ) -> dict[str, Any]:
+            return {"value": source["read"]()}
+
+        collision_subscript_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_explicit_projection_external_capabilities(
+                collision_subscript_projection
+            ),
+            contains="non-exact stored key",
+        )
+        checks.check(
+            "refusal-static-subscript-containers-and-keys-are-exact-before-hooks",
+            overridden_subscript_error.terminal == "EvidenceFailed"
+            and collision_subscript_error.terminal == "EvidenceFailed"
+            and subscript_hook_state
+            == {
+                "override_getitem": 0,
+                "collision_hash": 0,
+                "collision_eq": 0,
+            },
+            expected={
+                "terminals": ["EvidenceFailed", "EvidenceFailed"],
+                "hook_calls": {
+                    "override_getitem": 0,
+                    "collision_hash": 0,
+                    "collision_eq": 0,
+                },
+            },
+            observed={
+                "terminals": [
+                    overridden_subscript_error.terminal,
+                    collision_subscript_error.terminal,
+                ],
+                "hook_calls": subscript_hook_state,
+            },
+        )
+
+        regex_search_projection = v2_bounded_explicit_projection(
+            re.compile("fixture-a").search
+        )
+        regex_match_projection = v2_bounded_explicit_projection(
+            re.compile("fixture-a").match
+        )
+        regex_other_receiver_projection = v2_bounded_explicit_projection(
+            re.compile("fixture-b").search
+        )
+        bytes_regex_search_projection = v2_bounded_explicit_projection(
+            re.compile(b"fixture-a").search
+        )
+        regex_projection_roots = {
+            "search": semantic_root(regex_search_projection),
+            "match": semantic_root(regex_match_projection),
+            "other_receiver": semantic_root(regex_other_receiver_projection),
+            "bytes_search": semantic_root(bytes_regex_search_projection),
+        }
+        checks.check(
+            "refusal-regex-method-receiver-and-bytes-patterns-are-exactly-bound",
+            len(set(regex_projection_roots.values())) == 4
+            and regex_search_projection["qualname"] == "Pattern.search"
+            and regex_match_projection["qualname"] == "Pattern.match"
+            and regex_search_projection["bound_self"]["kind"]
+            == "regular-expression"
+            and bytes_regex_search_projection["bound_self"]["pattern"][
+                "kind"
+            ]
+            == "bytes"
+            and bytes_regex_search_projection["bound_self"]["pattern"][
+                "byte_length"
+            ]
+            == len(b"fixture-a"),
+            expected={
+                "distinct_projection_roots": 4,
+                "methods": ["Pattern.search", "Pattern.match"],
+                "receiver_kind": "regular-expression",
+                "bytes_pattern_length": len(b"fixture-a"),
+            },
+            observed={
+                "distinct_projection_roots": len(
+                    set(regex_projection_roots.values())
+                ),
+                "projection_roots": regex_projection_roots,
+                "methods": [
+                    regex_search_projection["qualname"],
+                    regex_match_projection["qualname"],
+                ],
+                "receiver_kind": regex_search_projection["bound_self"][
+                    "kind"
+                ],
+                "bytes_pattern": bytes_regex_search_projection[
+                    "bound_self"
+                ]["pattern"],
+            },
         )
 
         def out_of_bounds_list_subscript_projection(
@@ -55493,6 +60389,36 @@ def v2_execute_artifact_cases(
                     subscript_projection
                 )
             ),
+            "static-subscript-argument-only": sorted(
+                v2_explicit_projection_external_capabilities(
+                    subscript_argument_only_projection
+                )
+            ),
+            "global-static-subscript": sorted(
+                v2_explicit_projection_external_capabilities(
+                    global_subscript_projection
+                )
+            ),
+            "global-static-subscript-argument-only": sorted(
+                v2_explicit_projection_external_capabilities(
+                    global_subscript_argument_only_projection
+                )
+            ),
+            "list-comprehension": sorted(
+                v2_explicit_projection_external_capabilities(
+                    list_comprehension_capability_projection
+                )
+            ),
+            "set-comprehension": sorted(
+                v2_explicit_projection_external_capabilities(
+                    set_comprehension_capability_projection
+                )
+            ),
+            "dict-comprehension": sorted(
+                v2_explicit_projection_external_capabilities(
+                    dict_comprehension_capability_projection
+                )
+            ),
             "global-argument": sorted(
                 v2_explicit_projection_external_capabilities(
                     global_argument_projection
@@ -55522,11 +60448,51 @@ def v2_execute_artifact_cases(
             in unrelated_call_analysis["called_freevar_names"]
             and "passive_unrelated_target"
             not in unrelated_call_analysis["called_freevar_names"]
+            and generated_argument_call_analysis[
+                "call_result_paths"
+            ].get("Counter")
+            == (("items",),)
+            and generated_argument_call_analysis[
+                "call_result_paths"
+            ].get("sorted")
+            == ((),)
+            and nested_result_call_analysis[
+                "freevar_call_result_paths"
+            ].get("call_window_factory")
+            == (("method",),)
+            and nested_result_call_analysis[
+                "freevar_call_result_paths"
+            ].get("call_window_target")
+            == (("post",),)
+            and nested_subscript_call_analysis[
+                "freevar_call_result_paths"
+            ].get("call_window_target")
+            == (("post",),)
+            and any(
+                row["key"] == "read"
+                and row["call_result_path"] == ("method",)
+                for row in nested_subscript_call_analysis[
+                    "static_subscript_calls"
+                ]
+            )
+            and inline_comprehension_call_analysis[
+                "parameter_call_result_paths"
+            ].get("target")
+            == (("post",),)
+            and "inner"
+            in inline_comprehension_call_analysis[
+                "called_parameter_names"
+            ]
             and conditional_alias_error.terminal == "EvidenceFailed"
             and missing_subscript_hook_state["calls"] == 0
             and missing_subscript_error.terminal == "EvidenceFailed"
             and list_subscript_error.terminal == "EvidenceFailed"
             and tuple_subscript_error.terminal == "EvidenceFailed"
+            and len(comprehension_projection_probe.rows) == 3
+            and all(
+                row["passed"] is True
+                for row in comprehension_projection_probe.rows
+            )
             and capability_results
             == {
                 "bound-method": ["process-cwd"],
@@ -55537,6 +60503,12 @@ def v2_execute_artifact_cases(
                 ],
                 "local-alias": ["process-cwd"],
                 "static-subscript": ["process-cwd"],
+                "static-subscript-argument-only": [],
+                "global-static-subscript": ["process-cwd"],
+                "global-static-subscript-argument-only": [],
+                "list-comprehension": ["process-cwd"],
+                "set-comprehension": ["process-cwd"],
+                "dict-comprehension": ["process-cwd"],
                 "global-argument": ["process-python-environment"],
                 "long-helper-call": ["process-cwd"],
                 "unused-default": [],
@@ -55546,6 +60518,17 @@ def v2_execute_artifact_cases(
                 "long_argument_target_called": True,
                 "unrelated_target_called": False,
                 "actual_neighbor_called": True,
+                "generated_argument_call_results": {
+                    "Counter": [["items"]],
+                    "sorted": [[]],
+                },
+                "nested_call_results": {
+                    "factory": [["method"]],
+                    "target": [["post"]],
+                    "subscript": [["method"]],
+                    "comprehension_target": [["post"]],
+                    "comprehension_inner_called": True,
+                },
                 "conditional_alias_terminal": "EvidenceFailed",
                 "missing_subscript_hook_calls": 0,
                 "missing_subscript_terminal": "EvidenceFailed",
@@ -55553,6 +60536,7 @@ def v2_execute_artifact_cases(
                     "EvidenceFailed",
                     "EvidenceFailed",
                 ],
+                "comprehension_projection_callbacks_reached": 3,
                 "capabilities": {
                     "bound-method": ["process-cwd"],
                     "callable-instance": ["process-cwd"],
@@ -55562,6 +60546,12 @@ def v2_execute_artifact_cases(
                     ],
                     "local-alias": ["process-cwd"],
                     "static-subscript": ["process-cwd"],
+                    "static-subscript-argument-only": [],
+                    "global-static-subscript": ["process-cwd"],
+                    "global-static-subscript-argument-only": [],
+                    "list-comprehension": ["process-cwd"],
+                    "set-comprehension": ["process-cwd"],
+                    "dict-comprehension": ["process-cwd"],
                     "global-argument": ["process-python-environment"],
                     "long-helper-call": ["process-cwd"],
                     "unused-default": [],
@@ -55575,6 +60565,48 @@ def v2_execute_artifact_cases(
                 "unrelated_called_freevars": sorted(
                     unrelated_call_analysis["called_freevar_names"]
                 ),
+                "generated_argument_call_results": {
+                    name: [list(path) for path in paths]
+                    for name, paths in sorted(
+                        generated_argument_call_analysis[
+                            "call_result_paths"
+                        ].items()
+                    )
+                    if name in {"Counter", "sorted"}
+                },
+                "nested_call_results": {
+                    "factory": [
+                        list(path)
+                        for path in nested_result_call_analysis[
+                            "freevar_call_result_paths"
+                        ].get("call_window_factory", ())
+                    ],
+                    "target": [
+                        list(path)
+                        for path in nested_result_call_analysis[
+                            "freevar_call_result_paths"
+                        ].get("call_window_target", ())
+                    ],
+                    "subscript": [
+                        list(row["call_result_path"])
+                        for row in nested_subscript_call_analysis[
+                            "static_subscript_calls"
+                        ]
+                        if row["key"] == "read"
+                    ],
+                    "comprehension_target": [
+                        list(path)
+                        for path in inline_comprehension_call_analysis[
+                            "parameter_call_result_paths"
+                        ].get("target", ())
+                    ],
+                    "comprehension_inner_called": (
+                        "inner"
+                        in inline_comprehension_call_analysis[
+                            "called_parameter_names"
+                        ]
+                    ),
+                },
                 "conditional_alias_terminal": (
                     conditional_alias_error.terminal
                 ),
@@ -55588,7 +60620,297 @@ def v2_execute_artifact_cases(
                     list_subscript_error.terminal,
                     tuple_subscript_error.terminal,
                 ],
+                "comprehension_projection_callbacks_reached": len(
+                    comprehension_projection_probe.rows
+                ),
                 "capabilities": capability_results,
+            },
+        )
+
+        dynamic_result_callbacks_invoked = {
+            "immediate": False,
+            "stored": False,
+            "native_constructor": False,
+        }
+
+        def inert_result_factory() -> Callable[[], None]:
+            return lambda: None
+
+        def immediate_dynamic_result_callback(
+            factory: Callable[[], Callable[[], None]] = inert_result_factory,
+        ) -> None:
+            dynamic_result_callbacks_invoked["immediate"] = True
+            factory()()
+            raise InputRefused("unreachable immediate result refusal")
+
+        def stored_dynamic_result_callback(
+            factory: Callable[[], Callable[[], None]] = inert_result_factory,
+        ) -> None:
+            dynamic_result_callbacks_invoked["stored"] = True
+            generated = factory()
+            generated()
+            raise InputRefused("unreachable stored result refusal")
+
+        inert_code = (lambda: None).__code__
+
+        def native_constructor_callback(
+            constructor: type[Any] = types.FunctionType,
+            code: types.CodeType = inert_code,
+        ) -> None:
+            dynamic_result_callbacks_invoked["native_constructor"] = True
+            constructor(code, {})
+            raise InputRefused("unreachable native constructor refusal")
+
+        def unbound_required_call(value: Callable[[], None]) -> None:
+            value()
+
+        def unbound_required_method(value: Any) -> None:
+            value.read()
+
+        def bound_default_call(
+            value: Callable[[], None] = lambda: None,
+        ) -> None:
+            value()
+
+        bound_default_projection = v2_bounded_explicit_projection(
+            bound_default_call
+        )
+        bound_default_parameter_rows = dict.get(
+            bound_default_projection,
+            "referenced_default_parameters",
+            [],
+        )
+        bound_default_access_rows = (
+            dict.get(
+                dict.get(
+                    bound_default_parameter_rows[0],
+                    "executable_access",
+                    {},
+                ),
+                "rows",
+                [],
+            )
+            if bound_default_parameter_rows
+            else []
+        )
+        bound_default_no_claim = (
+            dict.get(
+                dict.get(bound_default_access_rows[0], "state", {}),
+                "no_claim",
+            )
+            if bound_default_access_rows
+            else None
+        )
+
+        dynamic_result_errors = {
+            "immediate": expect_error(
+                EvidenceFailed,
+                lambda: v2_callback_refusal_projection(
+                    immediate_dynamic_result_callback,
+                    collector_rows=[],
+                ),
+                contains="dynamically produced call result",
+            ),
+            "stored": expect_error(
+                EvidenceFailed,
+                lambda: v2_callback_refusal_projection(
+                    stored_dynamic_result_callback,
+                    collector_rows=[],
+                ),
+                contains="dynamically produced local result",
+            ),
+            "native_constructor": expect_error(
+                EvidenceFailed,
+                lambda: v2_callback_refusal_projection(
+                    native_constructor_callback,
+                    collector_rows=[],
+                ),
+                contains="unaudited native __new__ constructor",
+            ),
+            "unbound_required_call": expect_error(
+                EvidenceFailed,
+                lambda: v2_bounded_explicit_projection(
+                    unbound_required_call
+                ),
+                contains="invokes an unbound required parameter",
+            ),
+            "unbound_required_method": expect_error(
+                EvidenceFailed,
+                lambda: v2_bounded_explicit_projection(
+                    unbound_required_method
+                ),
+                contains="invokes an unbound required parameter",
+            ),
+        }
+        checks.check(
+            "refusal-dynamic-call-results-and-native-constructors-fail-closed",
+            dynamic_result_callbacks_invoked
+            == {
+                "immediate": False,
+                "stored": False,
+                "native_constructor": False,
+            }
+            and all(
+                error.terminal == "EvidenceFailed"
+                for error in dynamic_result_errors.values()
+            )
+            and bound_default_no_claim
+            == V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM,
+            expected={
+                "callbacks_invoked": {
+                    "immediate": False,
+                    "stored": False,
+                    "native_constructor": False,
+                },
+                "terminals": {
+                    "immediate": "EvidenceFailed",
+                    "stored": "EvidenceFailed",
+                    "native_constructor": "EvidenceFailed",
+                    "unbound_required_call": "EvidenceFailed",
+                    "unbound_required_method": "EvidenceFailed",
+                },
+                "bound_default_call": "projected-with-no-claim",
+            },
+            observed={
+                "callbacks_invoked": dynamic_result_callbacks_invoked,
+                "terminals": {
+                    name: error.terminal
+                    for name, error in dynamic_result_errors.items()
+                },
+                "bound_default_projection_no_claim": (
+                    bound_default_no_claim
+                ),
+            },
+        )
+
+        reconstruction_projection_context = (
+            v2_new_refusal_projection_context()
+        )
+        reconstruction_code_projection = v2_state_projection_value(
+            v2_reconstruct_retained,
+            context=reconstruction_projection_context,
+        )
+        v2_validate_refusal_projection_graph(
+            reconstruction_code_projection
+        )
+        reconstruction_projection_opaque = v2_projection_contains_opaque(
+            reconstruction_code_projection
+        )
+        reconstruction_projection_payload = canonical_bytes(
+            reconstruction_code_projection
+        )
+        reconstruction_no_claim_found = False
+        reconstruction_projection_stack: list[Any] = [
+            reconstruction_code_projection
+        ]
+        while reconstruction_projection_stack:
+            projected_value = list.pop(reconstruction_projection_stack)
+            if type(projected_value) is dict:
+                if (
+                    dict.get(projected_value, "no_claim")
+                    == V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM
+                ):
+                    reconstruction_no_claim_found = True
+                list.extend(
+                    reconstruction_projection_stack,
+                    dict.values(projected_value),
+                )
+            elif type(projected_value) is list:
+                list.extend(
+                    reconstruction_projection_stack,
+                    projected_value,
+                )
+        public_reconstruction_projection = v2_bounded_explicit_projection(
+            v2_reconstruct_retained
+        )
+        public_reconstruction_projection_opaque = (
+            v2_projection_contains_opaque(
+                public_reconstruction_projection
+            )
+        )
+        public_reconstruction_projection_payload = canonical_bytes(
+            public_reconstruction_projection
+        )
+        public_reconstruction_no_claim_found = False
+        public_reconstruction_stack: list[Any] = [
+            public_reconstruction_projection
+        ]
+        while public_reconstruction_stack:
+            projected_value = list.pop(public_reconstruction_stack)
+            if type(projected_value) is dict:
+                if (
+                    dict.get(projected_value, "no_claim")
+                    == V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM
+                ):
+                    public_reconstruction_no_claim_found = True
+                list.extend(
+                    public_reconstruction_stack,
+                    dict.values(projected_value),
+                )
+            elif type(projected_value) is list:
+                list.extend(public_reconstruction_stack, projected_value)
+        reconstruction_limits = reconstruction_projection_context["limits"]
+        reconstruction_counters = {
+            key: reconstruction_projection_context["counters"][key]
+            for key in (
+                "nodes",
+                "items",
+                "scalar_bytes",
+                "instructions",
+            )
+        }
+        checks.check(
+            "retained-reconstruction-transitive-code-closure-is-bounded-with-no-claim",
+            not reconstruction_projection_opaque
+            and reconstruction_no_claim_found
+            and len(reconstruction_projection_payload)
+            <= reconstruction_limits["projection_bytes"]
+            and all(
+                reconstruction_counters[key]
+                <= reconstruction_limits[key]
+                for key in reconstruction_counters
+            )
+            and not public_reconstruction_projection_opaque
+            and public_reconstruction_no_claim_found,
+            expected={
+                "opaque": False,
+                "all_counters_within_limits": True,
+                "canonical_projection_within_limit": True,
+                "executable_code_no_claim": (
+                    V2_EXECUTABLE_CODE_PROJECTION_NO_CLAIM
+                ),
+                "public_projection_without_bound_inputs": (
+                    "bounded code-only projection with executable-code no-claim"
+                ),
+            },
+            observed={
+                "opaque": reconstruction_projection_opaque,
+                "counters": reconstruction_counters,
+                "limits": {
+                    key: reconstruction_limits[key]
+                    for key in (
+                        "nodes",
+                        "items",
+                        "scalar_bytes",
+                        "instructions",
+                        "projection_bytes",
+                    )
+                },
+                "canonical_projection_bytes": len(
+                    reconstruction_projection_payload
+                ),
+                "executable_code_no_claim_found": (
+                    reconstruction_no_claim_found
+                ),
+                "public_projection_without_bound_inputs": {
+                    "canonical_bytes": len(
+                        public_reconstruction_projection_payload
+                    ),
+                    "opaque": public_reconstruction_projection_opaque,
+                    "executable_code_no_claim_found": (
+                        public_reconstruction_no_claim_found
+                    ),
+                },
             },
         )
 
@@ -56085,6 +61407,10 @@ def v2_execute_artifact_cases(
             manifest,
             subject_mode=subject_mode,
         )
+        retained_source_file_identities = [
+            dict(row)
+            for row in retained[0]["captured"]["observation"]["source_files"]
+        ]
         terminal = strict_json_loads(
             payloads["terminal.json"],
             label="replayable fixture terminal",
@@ -56098,6 +61424,7 @@ def v2_execute_artifact_cases(
             terminal=terminal,
             events=events,
             accepted_manifest=accepted_manifest,
+            current_source_files=retained_source_file_identities,
         )
         after_receipts = len(_command_receipts)
         checks.check(
@@ -56134,10 +61461,14 @@ def v2_execute_artifact_cases(
             observed=after_receipts,
         )
     elif slug == "replay-tamper-live-denied":
-        payloads, accepted_manifest, _ = v2_replayable_fixture_bundle(
+        payloads, accepted_manifest, retained = v2_replayable_fixture_bundle(
             manifest,
             subject_mode="review-plan",
         )
+        retained_source_file_identities = [
+            dict(row)
+            for row in retained[0]["captured"]["observation"]["source_files"]
+        ]
         terminal = strict_json_loads(
             payloads["terminal.json"],
             label="tamper fixture terminal",
@@ -56152,6 +61483,7 @@ def v2_execute_artifact_cases(
             terminal=terminal,
             events=events,
             accepted_manifest=accepted_manifest,
+            current_source_files=retained_source_file_identities,
         )
         checks.check(
             "offline-baseline-no-live-or-network",
@@ -56207,6 +61539,9 @@ def v2_execute_artifact_cases(
                 artifact_dir="replay-output",
                 replay_input="review-plan-run",
             ),
+            current_source_files=reconstructed[0]["captured"][
+                "observation"
+            ]["source_files"],
             replay_equivalence=fixture_replay_equivalence,
         )
         published_replay_terminal = strict_json_loads(
@@ -56264,24 +61599,32 @@ def v2_execute_artifact_cases(
         )
 
         def reroot_replay_result(
-            mutation: Callable[[dict[str, Any]], None],
+            field: str,
+            value: Any = None,
+            *,
+            remove: bool = False,
         ) -> dict[str, Any]:
             candidate = strict_json_loads(
                 canonical_bytes(replay_result_seed),
                 label="v2 replay result mutation seed",
                 require_canonical=True,
             )
-            candidate.pop("semantic_root", None)
-            mutation(candidate)
+            if type(candidate) is not dict:
+                raise EvidenceFailed(
+                    "v2 replay result mutation seed is not an exact object"
+                )
+            dict.pop(candidate, "semantic_root", None)
+            if remove:
+                dict.pop(candidate, field)
+            else:
+                candidate[field] = value
             return v2_rooted(candidate)
 
         checks.refuses(
             "replay-result-extra-field-refused",
             EvidenceFailed,
             lambda: validate_fixture_replay_result(
-                reroot_replay_result(
-                    lambda row: row.__setitem__("unexpected", True)
-                )
+                reroot_replay_result("unexpected", True)
             ),
             contains="non-closed schema",
         )
@@ -56289,9 +61632,7 @@ def v2_execute_artifact_cases(
             "replay-result-missing-field-refused",
             EvidenceFailed,
             lambda: validate_fixture_replay_result(
-                reroot_replay_result(
-                    lambda row: row.pop("network_access")
-                )
+                reroot_replay_result("network_access", remove=True)
             ),
             contains="non-closed schema",
         )
@@ -56299,11 +61640,7 @@ def v2_execute_artifact_cases(
             "replay-result-nonpass-refused",
             EvidenceFailed,
             lambda: validate_fixture_replay_result(
-                reroot_replay_result(
-                    lambda row: row.__setitem__(
-                        "terminal", "EvidenceFailed"
-                    )
-                )
+                reroot_replay_result("terminal", "EvidenceFailed")
             ),
             contains="contract differs",
         )
@@ -56311,11 +61648,7 @@ def v2_execute_artifact_cases(
             "replay-result-live-activity-claim-refused",
             EvidenceFailed,
             lambda: validate_fixture_replay_result(
-                reroot_replay_result(
-                    lambda row: row.__setitem__(
-                        "live_tracker_reads", True
-                    )
-                )
+                reroot_replay_result("live_tracker_reads", True)
             ),
             contains="contract differs",
         )
@@ -56324,9 +61657,8 @@ def v2_execute_artifact_cases(
             EvidenceFailed,
             lambda: validate_fixture_replay_result(
                 reroot_replay_result(
-                    lambda row: row.__setitem__(
-                        "artifact_dir", "../escaped-replay"
-                    )
+                    "artifact_dir",
+                    "../escaped-replay",
                 )
             ),
             contains="artifact directory is unsafe",
@@ -56365,10 +61697,8 @@ def v2_execute_artifact_cases(
                 lambda field=field, replacement=replacement: (
                     validate_fixture_replay_result(
                         reroot_replay_result(
-                            lambda row: row.__setitem__(
-                                field,
-                                replacement,
-                            )
+                            field,
+                            replacement,
                         )
                     )
                 ),
@@ -56622,6 +61952,15 @@ def v2_execute_artifact_cases(
             label="retained source mutation seed",
             require_canonical=True,
         )
+        mutation_source_file_identities = [
+            dict(row) for row in retained_source_file_identities
+        ]
+
+        def validate_retained_source(candidate: Mapping[str, Any]) -> None:
+            v2_validate_source_document_against_source_files(
+                candidate,
+                mutation_source_file_identities,
+            )
 
         def reroot_source_top(
             mutation: Callable[[dict[str, Any]], None],
@@ -56691,7 +62030,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-affirmative-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(source_no_claim),
+            lambda: validate_retained_source(source_no_claim),
             contains="invalid identity or authority",
         )
         observation_no_claim = reroot_source_capture(
@@ -56704,7 +62043,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-observation-affirmative-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(observation_no_claim),
+            lambda: validate_retained_source(observation_no_claim),
             contains="observation identity or capture contract",
         )
         issue_no_claim = reroot_source_issue(
@@ -56716,7 +62055,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-issue-affirmative-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(issue_no_claim),
+            lambda: validate_retained_source(issue_no_claim),
             contains="invalid core scalars",
         )
         review_receipts_no_claim = reroot_source_capture(
@@ -56729,7 +62068,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-review-receipts-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 review_receipts_no_claim
             ),
             contains="identity or no-claim differs",
@@ -56744,7 +62083,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-prior-campaign-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 prior_campaign_no_claim
             ),
             contains="carries evidence or authority",
@@ -56768,7 +62107,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-file-identity-refused",
             EvidenceFailed,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 forged_source_identity
             ),
             contains="source-file identities",
@@ -56802,7 +62141,7 @@ def v2_execute_artifact_cases(
                 f"rerooted-source-files-{mutation_name}-typed-refusal",
                 InputRefused,
                 lambda malformed_source_files=malformed_source_files: (
-                    v2_validate_source_document(
+                    validate_retained_source(
                         malformed_source_files
                     )
                 ),
@@ -56818,7 +62157,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-duplicate-label-refused",
             InputRefused,
-            lambda: v2_validate_source_document(duplicate_labels),
+            lambda: validate_retained_source(duplicate_labels),
             contains="noncanonical labels",
         )
         duplicate_relations = reroot_source_issue(
@@ -56845,7 +62184,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-duplicate-relation-identity-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 duplicate_relations
             ),
             contains="duplicates a dependencies neighbor",
@@ -56881,7 +62220,7 @@ def v2_execute_artifact_cases(
         retained_id_errors = [
             expect_error(
                 InputRefused,
-                lambda mutation=mutation: v2_validate_source_document(
+                lambda mutation=mutation: validate_retained_source(
                     reroot_source_issue(mutation)
                 ),
                 contains=message,
@@ -56944,7 +62283,7 @@ def v2_execute_artifact_cases(
         retained_lint_errors = [
             expect_error(
                 InputRefused,
-                lambda mutation=mutation: v2_validate_source_document(
+                lambda mutation=mutation: validate_retained_source(
                     reroot_source_lint(mutation)
                 ),
                 contains="br lint",
@@ -56989,7 +62328,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-command-stream-schema-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 missing_stream_field
             ),
             contains="non-closed schema",
@@ -57003,7 +62342,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-command-raw-stream-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 retained_raw_stream
             ),
             contains="retention contract differs",
@@ -57021,7 +62360,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-command-unsanitized-argv-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 unsanitized_receipt_argv
             ),
             contains="unsanitized value",
@@ -57032,7 +62371,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-source-command-empty-stream-root-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_source(
                 empty_stream_root
             ),
             contains="retention contract differs",
@@ -57098,7 +62437,7 @@ def v2_execute_artifact_cases(
         command_projection_binding_errors = [
             expect_error(
                 InputRefused,
-                lambda candidate=candidate: v2_validate_source_document(
+                lambda candidate=candidate: validate_retained_source(
                     candidate
                 ),
                 contains="projection",
@@ -57127,7 +62466,11 @@ def v2_execute_artifact_cases(
                 for error in command_projection_binding_errors
             ],
         )
-        history_payloads, _, _ = v2_replayable_fixture_bundle(
+        (
+            history_payloads,
+            history_accepted_manifest,
+            _,
+        ) = v2_replayable_fixture_bundle(
             manifest,
             subject_mode="history-plan",
             artifact_root="target/v2-fixture",
@@ -57138,6 +62481,27 @@ def v2_execute_artifact_cases(
             label="retained history source mutation seed",
             require_canonical=True,
         )
+        history_source_file_identities: list[dict[str, Any]] = []
+        for identity in retained_source_file_identities:
+            history_source_file_identities.append(dict(identity))
+        if len(history_source_file_identities) != 3:
+            raise EvidenceFailed(
+                "retained history fixture lacks three trusted source identities"
+            )
+        history_source_file_identities[2] = {
+            **history_source_file_identities[2],
+            "content_identity": history_accepted_manifest[
+                "content_identity"
+            ],
+        }
+
+        def validate_retained_history_source(
+            candidate: Mapping[str, Any],
+        ) -> None:
+            v2_validate_source_document_against_source_files(
+                candidate,
+                history_source_file_identities,
+            )
 
         def reroot_history_audit(
             mutation: Callable[[dict[str, Any]], None],
@@ -57169,7 +62533,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-audit-affirmative-no-claim-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_history_source(
                 affirmative_audit_claim
             ),
             contains="cardinality or scalar contract differs",
@@ -57183,7 +62547,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-audit-extra-field-refused",
             InputRefused,
-            lambda: v2_validate_source_document(extra_audit_field),
+            lambda: validate_retained_history_source(extra_audit_field),
             contains="non-closed schema",
         )
 
@@ -57204,7 +62568,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-audit-unsanitized-argv-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_history_source(
                 unsanitized_audit_argv
             ),
             contains="identity or terminal contract differs",
@@ -57226,7 +62590,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-audit-malformed-events-refused",
             InputRefused,
-            lambda: v2_validate_source_document(
+            lambda: validate_retained_history_source(
                 malformed_audit_events
             ),
             contains="source audit document",
@@ -57269,7 +62633,7 @@ def v2_execute_artifact_cases(
         audit_event_wire_errors = [
             expect_error(
                 InputRefused,
-                lambda mutation=mutation: v2_validate_source_document(
+                lambda mutation=mutation: validate_retained_history_source(
                     reroot_history_audit(
                         lambda audit_capture: mutate_first_audit_event(
                             audit_capture,
@@ -57392,7 +62756,7 @@ def v2_execute_artifact_cases(
         audit_receipt_binding_errors = [
             expect_error(
                 InputRefused,
-                lambda candidate=candidate: v2_validate_source_document(
+                lambda candidate=candidate: validate_retained_history_source(
                     candidate
                 ),
                 contains=message,
@@ -57438,7 +62802,7 @@ def v2_execute_artifact_cases(
         checks.refuses(
             "rerooted-audit-empty-document-root-refused",
             InputRefused,
-            lambda: v2_validate_source_document(empty_audit_root),
+            lambda: validate_retained_history_source(empty_audit_root),
             contains="normalized projection",
         )
 
@@ -57454,6 +62818,7 @@ def v2_execute_artifact_cases(
                 terminal=candidate_terminal,
                 events=candidate_events,
                 accepted_manifest=accepted_manifest,
+                current_source_files=retained_source_file_identities,
             )
 
         missing = dict(payloads)
@@ -58789,7 +64154,12 @@ def v2_execute_fault_resource_cases(
         )
 
     elif slug == "fault-output-lock-export":
-        checks.refuses(
+        publication_fixture_paths = (
+            REPO_ROOT,
+            REPO_ROOT / SCRIPT_REL,
+        )
+        v2_check_fixture_resource_refusal(
+            checks,
             "existing-output-reservation",
             EvidenceFailed,
             lambda: require_fresh_run_dir(
@@ -58797,12 +64167,1800 @@ def v2_execute_fault_resource_cases(
                 label="fixture guaranteed-existing root",
             ),
             contains="already exists",
+            paths=publication_fixture_paths,
         )
-        checks.refuses(
+        v2_check_fixture_resource_refusal(
+            checks,
             "exclusive-writer-no-overwrite",
             EvidenceFailed,
             lambda: v2_write_exclusive(REPO_ROOT / SCRIPT_REL, b"forbidden"),
             contains="overwrite is forbidden",
+            paths=publication_fixture_paths,
+        )
+        descriptor_leak_probe = V2CheckCollector(
+            "fixture-resource-descriptor-leak-probe",
+            "fixture.resource-descriptor-leak-probe",
+        )
+        leaked_descriptors: list[int] = []
+
+        def leak_descriptor_then_refuse() -> None:
+            leaked_descriptors.append(
+                os.open(REPO_ROOT / SCRIPT_REL, os.O_RDONLY | os.O_CLOEXEC)
+            )
+            raise EvidenceFailed("synthetic descriptor leak refusal")
+
+        try:
+            descriptor_leak_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_check_fixture_resource_refusal(
+                    descriptor_leak_probe,
+                    "descriptor-leak-must-fail",
+                    EvidenceFailed,
+                    leak_descriptor_then_refuse,
+                    contains="synthetic descriptor leak",
+                    paths=publication_fixture_paths,
+                ),
+                contains="descriptor-leak-must-fail failed",
+            )
+        finally:
+            for leaked_descriptor in leaked_descriptors:
+                os.close(leaked_descriptor)
+        descriptors_closed = True
+        for leaked_descriptor in leaked_descriptors:
+            try:
+                os.fstat(leaked_descriptor)
+            except OSError as error:
+                if error.errno == errno.EBADF:
+                    continue
+                raise
+            descriptors_closed = False
+        descriptor_probe_calls: list[str] = []
+
+        def fallback_descriptor_census(directory: str) -> list[str]:
+            descriptor_probe_calls.append(directory)
+            if directory == "/synthetic-primary-fd":
+                raise OSError(errno.ENOENT, "synthetic unavailable census")
+            return ["7", "8"]
+
+        fallback_descriptor_source, fallback_descriptor_names = (
+            v2_fixture_descriptor_names(
+                ("/synthetic-primary-fd", "/synthetic-secondary-fd"),
+                list_directory=fallback_descriptor_census,
+            )
+        )
+
+        def missing_descriptor_census(_directory: str) -> list[str]:
+            raise OSError(errno.ENOENT, "synthetic unavailable census")
+
+        missing_descriptor_census_error = expect_error(
+            InfrastructureFailed,
+            lambda: v2_fixture_descriptor_names(
+                ("/synthetic-primary-fd", "/synthetic-secondary-fd"),
+                list_directory=missing_descriptor_census,
+            ),
+            contains="descriptor census is unavailable on this host",
+        )
+
+        def failed_descriptor_census(_directory: str) -> list[str]:
+            raise OSError(errno.EIO, "synthetic census failure")
+
+        failed_descriptor_census_error = expect_error(
+            InfrastructureFailed,
+            lambda: v2_fixture_descriptor_names(
+                ("/synthetic-primary-fd",),
+                list_directory=failed_descriptor_census,
+            ),
+            contains="descriptor census failed",
+        )
+        checks.check(
+            "resource-refusal-fingerprint-detects-descriptor-leak",
+            descriptor_leak_error.terminal == "EvidenceFailed"
+            and len(descriptor_leak_probe.rows) == 1
+            and descriptor_leak_probe.rows[0]["passed"] is False
+            and len(leaked_descriptors) == 1
+            and descriptors_closed
+            and descriptor_probe_calls
+            == ["/synthetic-primary-fd", "/synthetic-secondary-fd"]
+            and fallback_descriptor_source == "/synthetic-secondary-fd"
+            and fallback_descriptor_names == ["7", "8"]
+            and missing_descriptor_census_error.terminal
+            == "InfrastructureFailed"
+            and failed_descriptor_census_error.terminal
+            == "InfrastructureFailed",
+            expected={
+                "terminal": "EvidenceFailed",
+                "probe_passed": False,
+                "leaked_descriptor_count": 1,
+                "fixture_cleanup_closed_descriptors": True,
+                "descriptor_fallback_calls": [
+                    "/synthetic-primary-fd",
+                    "/synthetic-secondary-fd",
+                ],
+                "descriptor_fallback_source": "/synthetic-secondary-fd",
+                "descriptor_fallback_names": ["7", "8"],
+                "missing_descriptor_directory": "InfrastructureFailed",
+                "failed_descriptor_census": "InfrastructureFailed",
+            },
+            observed={
+                "terminal": descriptor_leak_error.terminal,
+                "probe_passed": descriptor_leak_probe.rows[0]["passed"],
+                "leaked_descriptor_count": len(leaked_descriptors),
+                "fixture_cleanup_closed_descriptors": descriptors_closed,
+                "descriptor_fallback_calls": descriptor_probe_calls,
+                "descriptor_fallback_source": fallback_descriptor_source,
+                "descriptor_fallback_names": fallback_descriptor_names,
+                "missing_descriptor_directory": (
+                    missing_descriptor_census_error.terminal
+                ),
+                "failed_descriptor_census": (
+                    failed_descriptor_census_error.terminal
+                ),
+            },
+        )
+
+        permission_fallback_calls: list[str] = []
+
+        def permission_fallback_descriptor_census(
+            directory: str,
+        ) -> list[str]:
+            list.append(permission_fallback_calls, directory)
+            if directory == "/synthetic-permission-fd":
+                raise OSError(errno.EPERM, "synthetic restricted census")
+            return []
+
+        permission_fallback_source, permission_fallback_names = (
+            v2_fixture_descriptor_names(
+                (
+                    "/synthetic-permission-fd",
+                    "/synthetic-permission-fallback-fd",
+                ),
+                list_directory=permission_fallback_descriptor_census,
+            )
+        )
+        malformed_descriptor_listing_error = expect_error(
+            InfrastructureFailed,
+            lambda: v2_fixture_descriptor_names(
+                ("/synthetic-malformed-fd",),
+                list_directory=lambda _directory: ("7",),  # type: ignore[arg-type]
+            ),
+            contains="returned malformed names",
+        )
+        original_descriptor_name_provider = v2_fixture_descriptor_names
+        original_descriptor_fstat = os.fstat
+        descriptor_fstat_calls: list[int] = []
+
+        def closed_synthetic_descriptor(descriptor: int) -> Any:
+            list.append(descriptor_fstat_calls, descriptor)
+            raise OSError(errno.EBADF, "synthetic closed descriptor")
+
+        descriptor_name_errors: dict[str, str] = {}
+        try:
+            os.fstat = closed_synthetic_descriptor
+            globals()["v2_fixture_descriptor_names"] = (
+                lambda: (
+                    "/synthetic-descriptor-fd",
+                    [str(V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX)],
+                )
+            )
+            exact_max_descriptor_projection = v2_fixture_resource_state([])
+            for descriptor_label, descriptor_names in (
+                ("empty", [""]),
+                ("nondigit", ["descriptor"]),
+                ("leading-zero", ["00"]),
+                ("duplicate", ["7", "7"]),
+                (
+                    "max-plus-one",
+                    [str(V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX + 1)],
+                ),
+                ("very-long", ["9" * 10_000]),
+            ):
+                globals()["v2_fixture_descriptor_names"] = (
+                    lambda names=descriptor_names: (
+                        "/synthetic-descriptor-fd",
+                        names,
+                    )
+                )
+                descriptor_name_error = expect_error(
+                    InfrastructureFailed,
+                    lambda: v2_fixture_resource_state([]),
+                    contains="returned a malformed name",
+                )
+                dict.__setitem__(
+                    descriptor_name_errors,
+                    descriptor_label,
+                    descriptor_name_error.terminal,
+                )
+        finally:
+            globals()["v2_fixture_descriptor_names"] = (
+                original_descriptor_name_provider
+            )
+            os.fstat = original_descriptor_fstat
+        checks.check(
+            "descriptor-census-name-and-errno-bounds",
+            permission_fallback_calls
+            == [
+                "/synthetic-permission-fd",
+                "/synthetic-permission-fallback-fd",
+            ]
+            and permission_fallback_source
+            == "/synthetic-permission-fallback-fd"
+            and permission_fallback_names == []
+            and malformed_descriptor_listing_error.terminal
+            == "InfrastructureFailed"
+            and exact_max_descriptor_projection["open_descriptors"] == []
+            and descriptor_fstat_calls
+            == [V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX, 7]
+            and descriptor_name_errors
+            == {
+                "empty": "InfrastructureFailed",
+                "nondigit": "InfrastructureFailed",
+                "leading-zero": "InfrastructureFailed",
+                "duplicate": "InfrastructureFailed",
+                "max-plus-one": "InfrastructureFailed",
+                "very-long": "InfrastructureFailed",
+            },
+            expected={
+                "permission_fallback": [
+                    "/synthetic-permission-fd",
+                    "/synthetic-permission-fallback-fd",
+                ],
+                "exact_max_descriptor": "admitted then observed closed",
+                "malformed_terminals": {
+                    "empty": "InfrastructureFailed",
+                    "nondigit": "InfrastructureFailed",
+                    "leading-zero": "InfrastructureFailed",
+                    "duplicate": "InfrastructureFailed",
+                    "max-plus-one": "InfrastructureFailed",
+                    "very-long": "InfrastructureFailed",
+                },
+            },
+            observed={
+                "permission_fallback_calls": permission_fallback_calls,
+                "permission_fallback_source": permission_fallback_source,
+                "permission_fallback_names": permission_fallback_names,
+                "malformed_listing_terminal": (
+                    malformed_descriptor_listing_error.terminal
+                ),
+                "exact_max_fstat_calls": descriptor_fstat_calls,
+                "malformed_terminals": descriptor_name_errors,
+            },
+        )
+
+        class InitialLengthFailureEnvironment:
+            def __len__(self) -> int:
+                raise RuntimeError("synthetic initial environment length")
+
+        class IterationFailureEnvironment:
+            def __len__(self) -> int:
+                return 0
+
+            def __iter__(self) -> Iterator[bytes]:
+                raise RuntimeError("synthetic environment iteration")
+
+        class LateLengthFailureEnvironment:
+            def __init__(self) -> None:
+                self.length_calls = 0
+
+            def __len__(self) -> int:
+                self.length_calls += 1
+                if self.length_calls > 1:
+                    raise RuntimeError("synthetic late environment length")
+                return 0
+
+            def __iter__(self) -> Iterator[bytes]:
+                return iter(())
+
+        class TornValueEnvironment:
+            def __init__(self) -> None:
+                self.value_calls = 0
+
+            def __len__(self) -> int:
+                return 1
+
+            def __iter__(self) -> Iterator[bytes]:
+                return iter((b"FS_V2_TORN_ENVIRONMENT",))
+
+            def __getitem__(self, _key: bytes) -> bytes:
+                self.value_calls += 1
+                return b"before" if self.value_calls == 1 else b"after"
+
+        class OversizeEnvironment:
+            def __init__(self) -> None:
+                self.iteration_calls = 0
+
+            def __len__(self) -> int:
+                return V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP + 1
+
+            def __iter__(self) -> Iterator[bytes]:
+                self.iteration_calls += 1
+                return iter(())
+
+        bounded_environment_fixtures = {
+            "initial-length": InitialLengthFailureEnvironment(),
+            "iteration": IterationFailureEnvironment(),
+            "late-length": LateLengthFailureEnvironment(),
+            "torn-value": TornValueEnvironment(),
+            "over-cap": OversizeEnvironment(),
+        }
+        bounded_environment_terminals: dict[str, str] = {}
+        original_environment_bytes_binding = os.environb
+        try:
+            for environment_label, environment_fixture in dict.items(
+                bounded_environment_fixtures
+            ):
+                os.environb = environment_fixture  # type: ignore[assignment]
+                environment_error = expect_error(
+                    EvidenceFailed,
+                    v2_bounded_process_environment_bytes_snapshot,
+                    contains=(
+                        "entry count exceeds"
+                        if environment_label == "over-cap"
+                        else "environment changed"
+                    ),
+                )
+                dict.__setitem__(
+                    bounded_environment_terminals,
+                    environment_label,
+                    environment_error.terminal,
+                )
+        finally:
+            os.environb = original_environment_bytes_binding
+        oversize_environment_fixture = bounded_environment_fixtures[
+            "over-cap"
+        ]
+        checks.check(
+            "bounded-environment-snapshot-mutations-and-errors-typed",
+            bounded_environment_terminals
+            == {
+                "initial-length": "EvidenceFailed",
+                "iteration": "EvidenceFailed",
+                "late-length": "EvidenceFailed",
+                "torn-value": "EvidenceFailed",
+                "over-cap": "EvidenceFailed",
+            }
+            and isinstance(
+                oversize_environment_fixture,
+                OversizeEnvironment,
+            )
+            and oversize_environment_fixture.iteration_calls == 0
+            and os.environb is original_environment_bytes_binding,
+            expected={
+                "terminals": {
+                    "initial-length": "EvidenceFailed",
+                    "iteration": "EvidenceFailed",
+                    "late-length": "EvidenceFailed",
+                    "torn-value": "EvidenceFailed",
+                    "over-cap": "EvidenceFailed",
+                },
+                "over-cap-iteration-calls": 0,
+                "environment-binding-restored": True,
+            },
+            observed={
+                "terminals": bounded_environment_terminals,
+                "over-cap-iteration-calls": (
+                    oversize_environment_fixture.iteration_calls
+                ),
+                "environment-binding-restored": (
+                    os.environb is original_environment_bytes_binding
+                ),
+            },
+        )
+
+        wrong_resource_path_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_resource_state(
+                [str(REPO_ROOT / SCRIPT_REL)]  # type: ignore[list-item]
+            ),
+            contains=(
+                "fixture resource path must use the exact repository path type"
+            ),
+        )
+        absent_resource_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_resource_state([
+                REPO_ROOT / "synthetic-absent-resource-probe"
+            ]),
+            contains="fixture resource metadata read failed",
+        )
+        original_resource_open = os.open
+
+        def failed_resource_open(
+            path: Any,
+            flags: int,
+            *args: Any,
+            **kwargs: Any,
+        ) -> int:
+            if Path(path) == REPO_ROOT / SCRIPT_REL:
+                raise OSError(errno.EIO, "synthetic selected-resource open")
+            return original_resource_open(path, flags, *args, **kwargs)
+
+        os.open = failed_resource_open
+        try:
+            open_resource_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    REPO_ROOT / SCRIPT_REL
+                ]),
+                contains="fixture resource open failed",
+            )
+        finally:
+            os.open = original_resource_open
+
+        class SyntheticResourceLinkStat:
+            st_mode = stat.S_IFLNK | 0o777
+            st_dev = 1
+            st_ino = 2
+            st_nlink = 1
+            st_size = 1
+            st_mtime_ns = 3
+            st_ctime_ns = 4
+
+        synthetic_resource_link = (
+            REPO_ROOT / "synthetic-resource-link-probe"
+        )
+        original_resource_lstat = os.lstat
+        original_resource_readlink = os.readlink
+
+        def synthetic_resource_lstat(path: Any) -> Any:
+            if Path(path) == synthetic_resource_link:
+                return SyntheticResourceLinkStat()
+            return original_resource_lstat(path)
+
+        def failed_resource_readlink(path: Any) -> str:
+            if Path(path) == synthetic_resource_link:
+                raise OSError(errno.EIO, "synthetic selected-resource link")
+            return original_resource_readlink(path)
+
+        def non_utf8_resource_readlink(path: Any) -> str:
+            if Path(path) == synthetic_resource_link:
+                return "\udcff"
+            return original_resource_readlink(path)
+
+        os.lstat = synthetic_resource_lstat
+        os.readlink = failed_resource_readlink
+        try:
+            readlink_resource_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    synthetic_resource_link
+                ]),
+                contains="fixture resource symbolic-link read failed",
+            )
+            os.readlink = non_utf8_resource_readlink
+            non_utf8_link_projection = v2_fixture_resource_state([
+                synthetic_resource_link
+            ])
+        finally:
+            os.lstat = original_resource_lstat
+            os.readlink = original_resource_readlink
+
+        original_resource_getcwdb = os.getcwdb
+
+        def failed_resource_getcwdb() -> bytes:
+            raise OSError(errno.EIO, "synthetic selected-resource cwd")
+
+        os.getcwdb = failed_resource_getcwdb
+        try:
+            cwd_resource_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([]),
+                contains="fixture resource process cwd capture failed",
+            )
+        finally:
+            os.getcwdb = original_resource_getcwdb
+        wrong_resource_path_diagnostic, wrong_resource_path_exact = (
+            v2_exception_diagnostic(wrong_resource_path_error)
+        )
+        resource_os_errors = {
+            "wrong_path_type": wrong_resource_path_error.terminal,
+            "absent_path": absent_resource_error.terminal,
+            "open": open_resource_error.terminal,
+            "readlink": readlink_resource_error.terminal,
+            "cwd": cwd_resource_error.terminal,
+        }
+        non_utf8_link_row = non_utf8_link_projection["paths"][0]
+        checks.check(
+            "resource-state-os-errors-are-typed-and-deterministic",
+            wrong_resource_path_exact
+            and wrong_resource_path_diagnostic
+            == (
+                "fixture resource path must use the exact repository path type"
+            )
+            and all(
+                terminal == "EvidenceFailed"
+                for terminal in resource_os_errors.values()
+            )
+            and non_utf8_link_row["target"] is None
+            and non_utf8_link_row["target_encoding"] == "posix-bytes"
+            and non_utf8_link_row["size"] == 1
+            and non_utf8_link_row["target_byte_length"] == 1
+            and non_utf8_link_row["target_root"]
+            == "sha256-v1:" + hashlib.sha256(b"\xff").hexdigest(),
+            expected={
+                "wrong_path_type_diagnostic": (
+                    "fixture resource path must use the exact repository path type"
+                ),
+                "terminals": {
+                    "wrong_path_type": "EvidenceFailed",
+                    "absent_path": "EvidenceFailed",
+                    "open": "EvidenceFailed",
+                    "readlink": "EvidenceFailed",
+                    "cwd": "EvidenceFailed",
+                },
+                "non_utf8_link": {
+                    "display": None,
+                    "encoding": "posix-bytes",
+                    "metadata_size": 1,
+                    "byte_length": 1,
+                    "byte_root": (
+                        "sha256-v1:" + hashlib.sha256(b"\xff").hexdigest()
+                    ),
+                },
+            },
+            observed={
+                "wrong_path_type_diagnostic": (
+                    wrong_resource_path_diagnostic
+                ),
+                "terminals": resource_os_errors,
+                "non_utf8_link": {
+                    "display": non_utf8_link_row["target"],
+                    "encoding": non_utf8_link_row["target_encoding"],
+                    "metadata_size": non_utf8_link_row["size"],
+                    "byte_length": non_utf8_link_row["target_byte_length"],
+                    "byte_root": non_utf8_link_row["target_root"],
+                },
+            },
+        )
+
+        selected_resource_path = REPO_ROOT / SCRIPT_REL
+        selected_parent_path = REPO_ROOT / "scripts" / "ci"
+        original_resource_lstat = os.lstat
+        original_resource_fstat = os.fstat
+        original_resource_pread = os.pread
+        original_resource_close = os.close
+        original_resource_fcntl = fcntl.fcntl
+        original_descriptor_name_provider = v2_fixture_descriptor_names
+        resource_read_error_terminals: dict[str, str] = {}
+        resource_close_calls: list[int] = []
+
+        def record_resource_error(
+            label: str,
+            callback: Callable[[], Any],
+            diagnostic: str,
+        ) -> None:
+            captured_error = expect_error(
+                EvidenceFailed,
+                callback,
+                contains=diagnostic,
+            )
+            dict.__setitem__(
+                resource_read_error_terminals,
+                label,
+                captured_error.terminal,
+            )
+
+        def changed_resource_stat(
+            source: Any,
+            *,
+            mode: int | None = None,
+        ) -> Any:
+            return types.SimpleNamespace(
+                st_dev=source.st_dev,
+                st_ino=source.st_ino + 1,
+                st_mode=source.st_mode if mode is None else mode,
+                st_nlink=source.st_nlink,
+                st_size=source.st_size,
+                st_mtime_ns=source.st_mtime_ns,
+                st_ctime_ns=source.st_ctime_ns,
+            )
+
+        try:
+            def failed_root_lstat(path: Any) -> Any:
+                if Path(path) == REPO_ROOT:
+                    raise OSError(errno.EIO, "synthetic root lstat")
+                return original_resource_lstat(path)
+
+            os.lstat = failed_root_lstat
+            record_resource_error(
+                "root-initial-lstat",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "repository-root metadata read failed",
+            )
+            os.lstat = original_resource_lstat
+
+            def failed_parent_initial_lstat(path: Any) -> Any:
+                if Path(path) == selected_parent_path:
+                    raise OSError(errno.EIO, "synthetic parent lstat")
+                return original_resource_lstat(path)
+
+            os.lstat = failed_parent_initial_lstat
+            record_resource_error(
+                "parent-initial-lstat",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "parent metadata read failed",
+            )
+            os.lstat = original_resource_lstat
+
+            def failed_selected_fstat(_descriptor: int) -> Any:
+                raise OSError(errno.EIO, "synthetic selected fstat")
+
+            def tracked_resource_close(descriptor: int) -> None:
+                list.append(resource_close_calls, descriptor)
+                original_resource_close(descriptor)
+
+            os.fstat = failed_selected_fstat
+            os.close = tracked_resource_close
+            record_resource_error(
+                "selected-fstat",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "fingerprint read failed",
+            )
+            os.fstat = original_resource_fstat
+            os.close = original_resource_close
+
+            def failed_selected_pread(
+                _descriptor: int,
+                _length: int,
+                _offset: int,
+            ) -> bytes:
+                raise OSError(errno.EIO, "synthetic selected pread")
+
+            os.pread = failed_selected_pread
+            record_resource_error(
+                "selected-pread",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "fingerprint read failed",
+            )
+            os.pread = original_resource_pread
+
+            def failed_selected_close(descriptor: int) -> None:
+                original_resource_close(descriptor)
+                raise OSError(errno.EIO, "synthetic selected close")
+
+            os.close = failed_selected_close
+            record_resource_error(
+                "selected-close",
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                "descriptor close failed",
+            )
+            os.close = original_resource_close
+
+            synthetic_recheck_link = (
+                REPO_ROOT / "synthetic-resource-recheck-link"
+            )
+            synthetic_link_state = types.SimpleNamespace(
+                st_dev=1,
+                st_ino=2,
+                st_mode=stat.S_IFLNK | 0o777,
+                st_nlink=1,
+                st_size=1,
+                st_mtime_ns=3,
+                st_ctime_ns=4,
+            )
+            synthetic_link_lstat_calls = 0
+
+            def failed_symlink_recheck_lstat(path: Any) -> Any:
+                nonlocal synthetic_link_lstat_calls
+                if Path(path) == synthetic_recheck_link:
+                    synthetic_link_lstat_calls += 1
+                    if synthetic_link_lstat_calls > 1:
+                        raise OSError(
+                            errno.EIO,
+                            "synthetic symlink recheck",
+                        )
+                    return synthetic_link_state
+                return original_resource_lstat(path)
+
+            os.lstat = failed_symlink_recheck_lstat
+            os.readlink = (
+                lambda path: (
+                    "x"
+                    if Path(path) == synthetic_recheck_link
+                    else original_resource_readlink(path)
+                )
+            )
+            record_resource_error(
+                "symlink-recheck-lstat",
+                lambda: v2_fixture_resource_state([
+                    synthetic_recheck_link
+                ]),
+                "symbolic-link metadata recheck failed",
+            )
+            os.lstat = original_resource_lstat
+            os.readlink = original_resource_readlink
+
+            census_descriptor = os.open(
+                selected_resource_path,
+                os.O_RDONLY | os.O_CLOEXEC,
+            )
+            globals()["v2_fixture_descriptor_names"] = (
+                lambda: (
+                    "/synthetic-live-descriptor-fd",
+                    [str(census_descriptor)],
+                )
+            )
+
+            def failed_descriptor_fcntl(
+                descriptor: int,
+                operation: int,
+                *args: Any,
+            ) -> Any:
+                if descriptor == census_descriptor:
+                    raise OSError(errno.EIO, "synthetic descriptor fcntl")
+                return original_resource_fcntl(
+                    descriptor,
+                    operation,
+                    *args,
+                )
+
+            fcntl.fcntl = failed_descriptor_fcntl
+            try:
+                record_resource_error(
+                    "descriptor-fcntl",
+                    lambda: v2_fixture_resource_state([]),
+                    "descriptor census failed",
+                )
+            finally:
+                original_resource_close(census_descriptor)
+                fcntl.fcntl = original_resource_fcntl
+                globals()["v2_fixture_descriptor_names"] = (
+                    original_descriptor_name_provider
+                )
+        finally:
+            os.lstat = original_resource_lstat
+            os.fstat = original_resource_fstat
+            os.pread = original_resource_pread
+            os.close = original_resource_close
+            os.readlink = original_resource_readlink
+            fcntl.fcntl = original_resource_fcntl
+            globals()["v2_fixture_descriptor_names"] = (
+                original_descriptor_name_provider
+            )
+        checks.check(
+            "resource-read-recheck-and-close-errors-are-typed",
+            resource_read_error_terminals
+            == {
+                "root-initial-lstat": "EvidenceFailed",
+                "parent-initial-lstat": "EvidenceFailed",
+                "selected-fstat": "EvidenceFailed",
+                "selected-pread": "EvidenceFailed",
+                "selected-close": "EvidenceFailed",
+                "symlink-recheck-lstat": "EvidenceFailed",
+                "descriptor-fcntl": "EvidenceFailed",
+            }
+            and len(resource_close_calls) == 1,
+            expected={
+                "terminals": {
+                    "root-initial-lstat": "EvidenceFailed",
+                    "parent-initial-lstat": "EvidenceFailed",
+                    "selected-fstat": "EvidenceFailed",
+                    "selected-pread": "EvidenceFailed",
+                    "selected-close": "EvidenceFailed",
+                    "symlink-recheck-lstat": "EvidenceFailed",
+                    "descriptor-fcntl": "EvidenceFailed",
+                },
+                "selected-fstat-cleanup-close-calls": 1,
+            },
+            observed={
+                "terminals": resource_read_error_terminals,
+                "selected-fstat-cleanup-close-calls": len(
+                    resource_close_calls
+                ),
+            },
+        )
+
+        resource_identity_terminals: dict[str, str] = {}
+        try:
+            selected_leaf_calls = 0
+
+            def replaced_selected_leaf_lstat(path: Any) -> Any:
+                nonlocal selected_leaf_calls
+                state = original_resource_lstat(path)
+                if Path(path) == selected_resource_path:
+                    selected_leaf_calls += 1
+                    if selected_leaf_calls > 1:
+                        return changed_resource_stat(state)
+                return state
+
+            os.lstat = replaced_selected_leaf_lstat
+            replaced_leaf_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                contains="changed while fingerprinting",
+            )
+            dict.__setitem__(
+                resource_identity_terminals,
+                "leaf-replaced",
+                replaced_leaf_error.terminal,
+            )
+            os.lstat = original_resource_lstat
+
+            selected_leaf_calls = 0
+
+            def failed_selected_leaf_recheck(path: Any) -> Any:
+                nonlocal selected_leaf_calls
+                if Path(path) == selected_resource_path:
+                    selected_leaf_calls += 1
+                    if selected_leaf_calls > 1:
+                        raise OSError(errno.EIO, "synthetic leaf recheck")
+                return original_resource_lstat(path)
+
+            os.lstat = failed_selected_leaf_recheck
+            failed_leaf_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                contains="metadata recheck failed",
+            )
+            dict.__setitem__(
+                resource_identity_terminals,
+                "leaf-recheck-error",
+                failed_leaf_error.terminal,
+            )
+            os.lstat = original_resource_lstat
+
+            selected_parent_calls = 0
+
+            def replaced_selected_parent_lstat(path: Any) -> Any:
+                nonlocal selected_parent_calls
+                state = original_resource_lstat(path)
+                if Path(path) == selected_parent_path:
+                    selected_parent_calls += 1
+                    if selected_parent_calls > 1:
+                        return changed_resource_stat(state)
+                return state
+
+            os.lstat = replaced_selected_parent_lstat
+            replaced_parent_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                contains="parent changed while fingerprinting",
+            )
+            dict.__setitem__(
+                resource_identity_terminals,
+                "parent-replaced",
+                replaced_parent_error.terminal,
+            )
+            os.lstat = original_resource_lstat
+
+            selected_parent_calls = 0
+
+            def failed_selected_parent_recheck(path: Any) -> Any:
+                nonlocal selected_parent_calls
+                if Path(path) == selected_parent_path:
+                    selected_parent_calls += 1
+                    if selected_parent_calls > 1:
+                        raise OSError(errno.EIO, "synthetic parent recheck")
+                return original_resource_lstat(path)
+
+            os.lstat = failed_selected_parent_recheck
+            failed_parent_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state([
+                    selected_resource_path
+                ]),
+                contains="parent metadata recheck failed",
+            )
+            dict.__setitem__(
+                resource_identity_terminals,
+                "parent-recheck-error",
+                failed_parent_error.terminal,
+            )
+        finally:
+            os.lstat = original_resource_lstat
+        checks.check(
+            "resource-final-path-and-parent-identity-changes-refused",
+            resource_identity_terminals
+            == {
+                "leaf-replaced": "EvidenceFailed",
+                "leaf-recheck-error": "EvidenceFailed",
+                "parent-replaced": "EvidenceFailed",
+                "parent-recheck-error": "EvidenceFailed",
+            },
+            expected={
+                "leaf-replaced": "EvidenceFailed",
+                "leaf-recheck-error": "EvidenceFailed",
+                "parent-replaced": "EvidenceFailed",
+                "parent-recheck-error": "EvidenceFailed",
+            },
+            observed=resource_identity_terminals,
+        )
+
+        def guarded_process_state_expect_error(
+            callback: Callable[[], Any],
+            *,
+            contains: str,
+        ) -> HarnessError:
+            guard_cwd = os.getcwdb()
+            guard_environment = os.environ
+            guard_environment_bytes = os.environb
+            guard_environment_attributes = (
+                v2_exact_instance_dictionary_snapshot(
+                    guard_environment,
+                    label="test-owned fixture process environment guard",
+                )
+            )
+            guard_environment_bytes_attributes = (
+                v2_exact_instance_dictionary_snapshot(
+                    guard_environment_bytes,
+                    label=(
+                        "test-owned fixture byte process environment guard"
+                    ),
+                )
+            )
+            guard_environment_entries = (
+                v2_bounded_process_environment_bytes_snapshot()
+            )
+            guard_recursion_limit = sys.getrecursionlimit()
+            guard_recursion_setter = sys.setrecursionlimit
+            try:
+                return expect_error(
+                    EvidenceFailed,
+                    callback,
+                    contains=contains,
+                )
+            finally:
+                guard_restoration_errors: list[BaseException] = []
+
+                def guard_step(step: Callable[[], None]) -> None:
+                    try:
+                        step()
+                    except BaseException as error:
+                        list.append(guard_restoration_errors, error)
+
+                def guard_restore_recursion() -> None:
+                    sys.setrecursionlimit = guard_recursion_setter
+                    if sys.getrecursionlimit() != guard_recursion_limit:
+                        guard_recursion_setter(guard_recursion_limit)
+
+                def guard_restore_string_attributes() -> None:
+                    v2_restore_exact_instance_dictionary(
+                        guard_environment,
+                        guard_environment_attributes,
+                        label=(
+                            "test-owned restored fixture process environment"
+                        ),
+                    )
+
+                def guard_restore_bytes_attributes() -> None:
+                    v2_restore_exact_instance_dictionary(
+                        guard_environment_bytes,
+                        guard_environment_bytes_attributes,
+                        label=(
+                            "test-owned restored fixture byte process environment"
+                        ),
+                    )
+
+                def guard_restore_bindings() -> None:
+                    os.environ = guard_environment
+                    os.environb = guard_environment_bytes
+
+                def guard_restore_entries() -> None:
+                    for key in list(guard_environment_bytes):
+                        if not dict.__contains__(
+                            guard_environment_entries,
+                            key,
+                        ):
+                            del guard_environment_bytes[key]
+                    for key, value in dict.items(
+                        guard_environment_entries
+                    ):
+                        if guard_environment_bytes.get(key) != value:
+                            guard_environment_bytes[key] = value
+
+                def guard_restore_cwd() -> None:
+                    if os.getcwdb() != guard_cwd:
+                        os.chdir(guard_cwd)
+
+                for guard_restoration in (
+                    guard_restore_recursion,
+                    guard_restore_string_attributes,
+                    guard_restore_bytes_attributes,
+                    guard_restore_bindings,
+                    guard_restore_entries,
+                    guard_restore_cwd,
+                ):
+                    guard_step(guard_restoration)
+                if guard_restoration_errors:
+                    raise EvidenceFailed(
+                        "test-owned process-state cleanup failed"
+                    ) from guard_restoration_errors[0]
+
+        process_cwd_before = os.getcwdb()
+        process_environment_key = b"FS_V2_RESOURCE_RESTORE_PROBE"
+        process_environment_before = os.environb.get(process_environment_key)
+        process_environment_mutation = (
+            b"mutated-a"
+            if process_environment_before != b"mutated-a"
+            else b"mutated-b"
+        )
+        process_recursion_before = sys.getrecursionlimit()
+        process_environment_codec_before = os.environ.encodekey
+        process_cwd_probe = V2CheckCollector(
+            "fixture-resource-cwd-mutation-probe",
+            "fixture.resource-cwd-mutation-probe",
+        )
+        process_environment_probe = V2CheckCollector(
+            "fixture-resource-environment-mutation-probe",
+            "fixture.resource-environment-mutation-probe",
+        )
+        process_recursion_probe = V2CheckCollector(
+            "fixture-resource-recursion-mutation-probe",
+            "fixture.resource-recursion-mutation-probe",
+        )
+        process_environment_codec_probe = V2CheckCollector(
+            "fixture-resource-environment-codec-mutation-probe",
+            "fixture.resource.environment-codec-mutation-probe",
+        )
+
+        def mutate_cwd_then_refuse() -> None:
+            v2_fixture_set_process_cwd(REPO_ROOT / "scripts")
+            raise EvidenceFailed("synthetic cwd mutation refusal")
+
+        def mutate_environment_then_refuse() -> None:
+            v2_fixture_set_process_environment_bytes(
+                process_environment_key,
+                process_environment_mutation,
+            )
+            raise EvidenceFailed("synthetic environment mutation refusal")
+
+        def mutate_recursion_then_refuse() -> None:
+            v2_fixture_set_process_recursion_limit(
+                process_recursion_before + 1
+            )
+            raise EvidenceFailed("synthetic recursion mutation refusal")
+
+        def mutate_environment_codec_then_refuse() -> None:
+            os.environ.encodekey = str
+            raise EvidenceFailed("synthetic environment codec mutation refusal")
+
+        process_cwd_error = guarded_process_state_expect_error(
+            lambda: v2_check_fixture_resource_refusal(
+                process_cwd_probe,
+                "cwd-mutation-must-fail",
+                EvidenceFailed,
+                mutate_cwd_then_refuse,
+                contains="synthetic cwd mutation",
+                paths=publication_fixture_paths,
+            ),
+            contains="cwd-mutation-must-fail failed",
+        )
+        process_environment_error = guarded_process_state_expect_error(
+            lambda: v2_check_fixture_resource_refusal(
+                process_environment_probe,
+                "environment-mutation-must-fail",
+                EvidenceFailed,
+                mutate_environment_then_refuse,
+                contains="synthetic environment mutation",
+                paths=publication_fixture_paths,
+            ),
+            contains="environment-mutation-must-fail failed",
+        )
+        process_recursion_error = guarded_process_state_expect_error(
+            lambda: v2_check_fixture_resource_refusal(
+                process_recursion_probe,
+                "recursion-mutation-must-fail",
+                EvidenceFailed,
+                mutate_recursion_then_refuse,
+                contains="synthetic recursion mutation",
+                paths=publication_fixture_paths,
+            ),
+            contains="recursion-mutation-must-fail failed",
+        )
+        process_environment_codec_error = guarded_process_state_expect_error(
+            lambda: v2_check_fixture_resource_refusal(
+                process_environment_codec_probe,
+                "environment-codec-mutation-must-fail",
+                EvidenceFailed,
+                mutate_environment_codec_then_refuse,
+                contains="synthetic environment codec mutation",
+                paths=publication_fixture_paths,
+            ),
+            contains="environment-codec-mutation-must-fail failed",
+        )
+        checks.check(
+            "resource-refusal-process-state-mutations-detected-and-restored",
+            [
+                process_cwd_error.terminal,
+                process_environment_error.terminal,
+                process_recursion_error.terminal,
+                process_environment_codec_error.terminal,
+            ]
+            == ["EvidenceFailed"] * 4
+            and all(
+                len(probe.rows) == 1 and probe.rows[0]["passed"] is False
+                for probe in (
+                    process_cwd_probe,
+                    process_environment_probe,
+                    process_recursion_probe,
+                    process_environment_codec_probe,
+                )
+            )
+            and os.getcwdb() == process_cwd_before
+            and os.environb.get(process_environment_key)
+            == process_environment_before
+            and sys.getrecursionlimit() == process_recursion_before
+            and os.environ.encodekey is process_environment_codec_before,
+            expected={
+                "terminals": ["EvidenceFailed"] * 4,
+                "divergences_detected": [True] * 4,
+                "cwd_restored": True,
+                "environment_restored": True,
+                "recursion_limit_restored": True,
+                "environment_codec_restored": True,
+            },
+            observed={
+                "terminals": [
+                    process_cwd_error.terminal,
+                    process_environment_error.terminal,
+                    process_recursion_error.terminal,
+                    process_environment_codec_error.terminal,
+                ],
+                "probe_passed": [
+                    probe.rows[0]["passed"]
+                    for probe in (
+                        process_cwd_probe,
+                        process_environment_probe,
+                        process_recursion_probe,
+                        process_environment_codec_probe,
+                    )
+                ],
+                "cwd_restored": os.getcwdb() == process_cwd_before,
+                "environment_restored": (
+                    os.environb.get(process_environment_key)
+                    == process_environment_before
+                ),
+                "recursion_limit_restored": (
+                    sys.getrecursionlimit() == process_recursion_before
+                ),
+                "environment_codec_restored": (
+                    os.environ.encodekey is process_environment_codec_before
+                ),
+            },
+        )
+
+        full_environment_delete_key = b"FS_V2_RESOURCE_DELETE_PROBE"
+        full_environment_add_key = b"FS_V2_RESOURCE_ADD_PROBE"
+        prior_full_environment_delete_value = os.environb.get(
+            full_environment_delete_key
+        )
+        prior_full_environment_add_value = os.environb.get(
+            full_environment_add_key
+        )
+        full_environment_probe = V2CheckCollector(
+            "fixture-resource-full-environment-mutation-probe",
+            "fixture.resource.full-environment-mutation-probe",
+        )
+        full_environment_result: dict[str, Any] = {}
+        try:
+            v2_fixture_set_process_environment_bytes(
+                full_environment_delete_key,
+                b"baseline-delete-value",
+            )
+            if full_environment_add_key in os.environb:
+                del os.environb[full_environment_add_key]
+            full_environment_object = os.environ
+            full_environment_bytes_object = os.environb
+            full_environment_attributes = (
+                v2_exact_instance_dictionary_snapshot(
+                    full_environment_object,
+                    label="fixture full process environment",
+                )
+            )
+            full_environment_bytes_attributes = (
+                v2_exact_instance_dictionary_snapshot(
+                    full_environment_bytes_object,
+                    label="fixture full byte process environment",
+                )
+            )
+            full_environment_snapshot = (
+                v2_bounded_process_environment_bytes_snapshot()
+            )
+            full_environment_root_before = semantic_root([
+                {
+                    "key_root": (
+                        "sha256-v1:" + hashlib.sha256(key).hexdigest()
+                    ),
+                    "value_root": (
+                        "sha256-v1:" + hashlib.sha256(value).hexdigest()
+                    ),
+                }
+                for key, value in sorted(
+                    dict.items(full_environment_snapshot),
+                    key=lambda item: item[0],
+                )
+            ])
+
+            def mutate_full_environment_then_refuse() -> None:
+                v2_fixture_delete_process_environment_bytes(
+                    full_environment_delete_key
+                )
+                v2_fixture_set_process_environment_bytes(
+                    full_environment_add_key,
+                    b"added-value",
+                )
+                v2_fixture_mutate_process_environment_codec_views()
+                v2_fixture_replace_process_environment_bindings()
+                raise EvidenceFailed(
+                    "synthetic full environment mutation refusal"
+                )
+
+            full_environment_error = guarded_process_state_expect_error(
+                lambda: v2_check_fixture_resource_refusal(
+                    full_environment_probe,
+                    "full-environment-mutation-must-fail",
+                    EvidenceFailed,
+                    mutate_full_environment_then_refuse,
+                    contains="synthetic full environment mutation",
+                    paths=publication_fixture_paths,
+                ),
+                contains="full-environment-mutation-must-fail failed",
+            )
+            full_environment_after = (
+                v2_bounded_process_environment_bytes_snapshot()
+            )
+            full_environment_root_after = semantic_root([
+                {
+                    "key_root": (
+                        "sha256-v1:" + hashlib.sha256(key).hexdigest()
+                    ),
+                    "value_root": (
+                        "sha256-v1:" + hashlib.sha256(value).hexdigest()
+                    ),
+                }
+                for key, value in sorted(
+                    dict.items(full_environment_after),
+                    key=lambda item: item[0],
+                )
+            ])
+            full_environment_result = {
+                "terminal": full_environment_error.terminal,
+                "probe_rows": len(full_environment_probe.rows),
+                "probe_passed": full_environment_probe.rows[0]["passed"],
+                "string_mapping_identity_restored": (
+                    os.environ is full_environment_object
+                ),
+                "bytes_mapping_identity_restored": (
+                    os.environb is full_environment_bytes_object
+                ),
+                "string_codec_dictionary_restored": (
+                    v2_exact_instance_dictionary_snapshot(
+                        full_environment_object,
+                        label="restored fixture full process environment",
+                    )
+                    == full_environment_attributes
+                ),
+                "bytes_codec_dictionary_restored": (
+                    v2_exact_instance_dictionary_snapshot(
+                        full_environment_bytes_object,
+                        label="restored fixture full byte process environment",
+                    )
+                    == full_environment_bytes_attributes
+                ),
+                "raw_mapping_restored": (
+                    full_environment_after == full_environment_snapshot
+                ),
+                "raw_mapping_root_before": full_environment_root_before,
+                "raw_mapping_root_after": full_environment_root_after,
+            }
+        finally:
+            if prior_full_environment_delete_value is None:
+                if full_environment_delete_key in os.environb:
+                    del os.environb[full_environment_delete_key]
+            else:
+                os.environb[full_environment_delete_key] = (
+                    prior_full_environment_delete_value
+                )
+            if prior_full_environment_add_value is None:
+                if full_environment_add_key in os.environb:
+                    del os.environb[full_environment_add_key]
+            else:
+                os.environb[full_environment_add_key] = (
+                    prior_full_environment_add_value
+                )
+        checks.check(
+            "resource-environment-full-state-and-both-codecs-restored",
+            full_environment_result
+            == {
+                "terminal": "EvidenceFailed",
+                "probe_rows": 1,
+                "probe_passed": False,
+                "string_mapping_identity_restored": True,
+                "bytes_mapping_identity_restored": True,
+                "string_codec_dictionary_restored": True,
+                "bytes_codec_dictionary_restored": True,
+                "raw_mapping_restored": True,
+                "raw_mapping_root_before": full_environment_result.get(
+                    "raw_mapping_root_before"
+                ),
+                "raw_mapping_root_after": full_environment_result.get(
+                    "raw_mapping_root_before"
+                ),
+            },
+            expected={
+                "terminal": "EvidenceFailed",
+                "divergence_detected": True,
+                "mapping_identities_restored": True,
+                "both_codec_dictionaries_restored": True,
+                "full_raw_mapping_root_restored": True,
+            },
+            observed=full_environment_result,
+        )
+
+        restoration_failure_key = b"FS_V2_RESTORATION_FAILURE_PROBE"
+        restoration_failure_prior = os.environb.get(restoration_failure_key)
+        restoration_failure_probe = V2CheckCollector(
+            "fixture-resource-restoration-failure-probe",
+            "fixture.resource.restoration-failure-probe",
+        )
+        restoration_failure_setter_calls = 0
+        restoration_failure_before_guard: dict[str, bool] = {}
+        original_recursion_setter = sys.setrecursionlimit
+        restoration_failure_cwd = os.getcwdb()
+        restoration_failure_limit = sys.getrecursionlimit()
+
+        def fail_second_recursion_setter(limit: int) -> None:
+            nonlocal restoration_failure_setter_calls
+            restoration_failure_setter_calls += 1
+            if restoration_failure_setter_calls > 1:
+                raise RuntimeError("synthetic recursion restoration failure")
+            original_recursion_setter(limit)
+
+        def mutate_multiple_states_then_refuse() -> None:
+            v2_fixture_set_process_recursion_limit(
+                restoration_failure_limit + 1
+            )
+            v2_fixture_set_process_environment_bytes(
+                restoration_failure_key,
+                b"mutated",
+            )
+            v2_fixture_set_process_cwd(REPO_ROOT / "scripts")
+            raise EvidenceFailed("synthetic multi-state refusal")
+
+        def invoke_restoration_failure_probe() -> None:
+            sys.setrecursionlimit = fail_second_recursion_setter
+            try:
+                v2_check_fixture_resource_refusal(
+                    restoration_failure_probe,
+                    "restoration-failure-must-remain-non-green",
+                    EvidenceFailed,
+                    mutate_multiple_states_then_refuse,
+                    contains="synthetic multi-state refusal",
+                    paths=publication_fixture_paths,
+                )
+            except EvidenceFailed:
+                restoration_failure_before_guard.update({
+                    "cwd_restored": (
+                        os.getcwdb() == restoration_failure_cwd
+                    ),
+                    "environment_restored": (
+                        os.environb.get(restoration_failure_key)
+                        == restoration_failure_prior
+                    ),
+                    "recursion_still_changed": (
+                        sys.getrecursionlimit()
+                        != restoration_failure_limit
+                    ),
+                })
+                raise
+
+        restoration_cleanup_error = guarded_process_state_expect_error(
+            invoke_restoration_failure_probe,
+            contains="cleanup could not restore all process state",
+        )
+        checks.check(
+            "resource-restoration-continues-after-early-step-failure",
+            restoration_cleanup_error.terminal == "EvidenceFailed"
+            and restoration_failure_setter_calls == 2
+            and restoration_failure_before_guard
+            == {
+                "cwd_restored": True,
+                "environment_restored": True,
+                "recursion_still_changed": True,
+            }
+            and sys.setrecursionlimit is original_recursion_setter
+            and sys.getrecursionlimit() == restoration_failure_limit
+            and os.getcwdb() == restoration_failure_cwd
+            and os.environb.get(restoration_failure_key)
+            == restoration_failure_prior
+            and restoration_failure_probe.rows == [],
+            expected={
+                "terminal": "EvidenceFailed",
+                "failing_restoration_step": "recursion-limit",
+                "later_cwd_restoration_ran": True,
+                "later_environment_restoration_ran": True,
+                "test_guard_restored_recursion": True,
+                "collector_rows": 0,
+            },
+            observed={
+                "terminal": restoration_cleanup_error.terminal,
+                "setter_calls": restoration_failure_setter_calls,
+                "state_before_test_guard": (
+                    restoration_failure_before_guard
+                ),
+                "test_guard_restored_recursion_setter": (
+                    sys.setrecursionlimit is original_recursion_setter
+                ),
+                "test_guard_restored_recursion_limit": (
+                    sys.getrecursionlimit() == restoration_failure_limit
+                ),
+                "test_guard_restored_cwd": (
+                    os.getcwdb() == restoration_failure_cwd
+                ),
+                "test_guard_restored_environment": (
+                    os.environb.get(restoration_failure_key)
+                    == restoration_failure_prior
+                ),
+                "collector_rows": len(restoration_failure_probe.rows),
+            },
+        )
+
+        class BoundResourceMutationProbe:
+            def __init__(self) -> None:
+                self.phase = "before"
+
+            def mutate_then_refuse(self) -> None:
+                self.phase = "after"
+                raise EvidenceFailed("synthetic bound-state mutation refusal")
+
+        bound_resource_state = BoundResourceMutationProbe()
+        bound_resource_probe = V2CheckCollector(
+            "fixture-resource-bound-state-probe",
+            "fixture.resource-bound-state-probe",
+        )
+        bound_resource_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_check_fixture_resource_refusal(
+                bound_resource_probe,
+                "bound-state-mutation-must-fail",
+                EvidenceFailed,
+                bound_resource_state.mutate_then_refuse,
+                contains="synthetic bound-state mutation",
+                paths=publication_fixture_paths,
+            ),
+            contains="bound-state-mutation-must-fail failed",
+        )
+        bound_resource_phase_after = bound_resource_state.phase
+        bound_resource_state.phase = "before"
+        checks.check(
+            "resource-refusal-bound-callback-state-detected",
+            bound_resource_error.terminal == "EvidenceFailed"
+            and len(bound_resource_probe.rows) == 1
+            and bound_resource_probe.rows[0]["passed"] is False
+            and bound_resource_phase_after == "after"
+            and bound_resource_state.phase == "before",
+            expected={
+                "terminal": "EvidenceFailed",
+                "mutation_detected": True,
+                "test_cleanup_restored": True,
+            },
+            observed={
+                "terminal": bound_resource_error.terminal,
+                "probe_passed": bound_resource_probe.rows[0]["passed"],
+                "phase_after_callback": bound_resource_phase_after,
+                "phase_after_cleanup": bound_resource_state.phase,
+            },
+        )
+
+        additional_state_calls = {"count": 0}
+        additional_state_callback_invoked = {"value": False}
+
+        def mutating_additional_state() -> dict[str, int]:
+            additional_state_calls["count"] += 1
+            return {"call_count": additional_state_calls["count"]}
+
+        def unreachable_additional_state_callback() -> None:
+            additional_state_callback_invoked["value"] = True
+            raise EvidenceFailed("unreachable additional-state callback")
+
+        additional_state_probe = V2CheckCollector(
+            "fixture-resource-additional-state-probe",
+            "fixture.resource-additional-state-probe",
+        )
+        additional_state_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_check_fixture_resource_refusal(
+                additional_state_probe,
+                "additional-state-mutation-must-fail",
+                EvidenceFailed,
+                unreachable_additional_state_callback,
+                contains="unreachable additional-state callback",
+                paths=publication_fixture_paths,
+                additional_state=mutating_additional_state,
+            ),
+            contains="additional-state projector mutated",
+        )
+        checks.check(
+            "resource-additional-state-precallback-mutation-refused",
+            additional_state_error.terminal == "EvidenceFailed"
+            and additional_state_calls == {"count": 1}
+            and additional_state_callback_invoked == {"value": False}
+            and additional_state_probe.rows == [],
+            expected={
+                "terminal": "EvidenceFailed",
+                "additional_state_calls": 1,
+                "callback_invoked": False,
+                "collector_rows": 0,
+            },
+            observed={
+                "terminal": additional_state_error.terminal,
+                "additional_state_calls": additional_state_calls["count"],
+                "callback_invoked": additional_state_callback_invoked["value"],
+                "collector_rows": len(additional_state_probe.rows),
+            },
+        )
+
+        additional_capacity = V2_REFUSAL_ITEM_CAP
+        flat_additional_state = [0] * additional_capacity
+        flat_additional_projection = (
+            v2_fixture_additional_state_projection(flat_additional_state)
+        )
+        flat_additional_exact = (
+            len(flat_additional_projection) == additional_capacity
+            and list.__getitem__(flat_additional_projection, 0) == 0
+            and list.__getitem__(
+                flat_additional_projection,
+                additional_capacity - 1,
+            )
+            == 0
+            and flat_additional_projection is not flat_additional_state
+        )
+        list.append(flat_additional_state, 0)
+        flat_additional_plus_one_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_additional_state_projection(
+                flat_additional_state
+            ),
+            contains="item cap",
+        )
+        flat_additional_state = []
+        flat_additional_projection = []
+
+        dense_additional_state = [
+            {} for _index in range(additional_capacity)
+        ]
+        dense_additional_wire_bytes = len(
+            canonical_bytes(dense_additional_state)
+        )
+        dense_additional_projection = (
+            v2_fixture_additional_state_projection(dense_additional_state)
+        )
+        dense_additional_exact = (
+            len(dense_additional_projection) == additional_capacity
+            and dict.__len__(
+                list.__getitem__(dense_additional_projection, 0)
+            )
+            == 0
+            and list.__getitem__(dense_additional_projection, 0)
+            is not list.__getitem__(dense_additional_projection, 1)
+            and list.__getitem__(dense_additional_projection, 0)
+            is not list.__getitem__(dense_additional_state, 0)
+        )
+        list.append(dense_additional_state, {})
+        dense_additional_plus_one_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_additional_state_projection(
+                dense_additional_state
+            ),
+            contains="item cap",
+        )
+        dense_additional_state = []
+        dense_additional_projection = []
+
+        shared_additional_leaf = {"nested": [1]}
+        shared_additional_source = [
+            shared_additional_leaf,
+            shared_additional_leaf,
+        ]
+        shared_additional_projection = (
+            v2_fixture_additional_state_projection(
+                shared_additional_source
+            )
+        )
+        shared_additional_dealiased = (
+            list.__getitem__(shared_additional_projection, 0)
+            is not list.__getitem__(shared_additional_projection, 1)
+            and dict.__getitem__(
+                list.__getitem__(shared_additional_projection, 0),
+                "nested",
+            )
+            is not dict.__getitem__(
+                list.__getitem__(shared_additional_projection, 1),
+                "nested",
+            )
+            and list.__getitem__(shared_additional_projection, 0)
+            is not shared_additional_leaf
+        )
+        exact_additional_string = "x" * (
+            V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP - 3
+        )
+        exact_additional_wire_bytes = len(
+            canonical_bytes(exact_additional_string)
+        )
+        exact_additional_projection = (
+            v2_fixture_additional_state_projection(
+                exact_additional_string
+            )
+        )
+        additional_wire_plus_one_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_additional_state_projection(
+                exact_additional_string + "x"
+            ),
+            contains="canonical byte cap",
+        )
+        failing_additional_state_calls = {"count": 0}
+        primary_after_failing_additional_state = {"called": False}
+
+        def failing_additional_state() -> None:
+            failing_additional_state_calls["count"] += 1
+            raise RuntimeError("synthetic ordinary additional-state failure")
+
+        def primary_after_additional_state_failure() -> None:
+            primary_after_failing_additional_state["called"] = True
+            raise EvidenceFailed("unreachable primary callback")
+
+        failing_additional_state_probe = V2CheckCollector(
+            "fixture-resource-failing-additional-state-probe",
+            "fixture.resource.failing-additional-state-probe",
+        )
+        failing_additional_state_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_check_fixture_resource_refusal(
+                failing_additional_state_probe,
+                "ordinary-additional-state-failure-must-stop",
+                EvidenceFailed,
+                primary_after_additional_state_failure,
+                contains="unreachable primary callback",
+                paths=publication_fixture_paths,
+                additional_state=failing_additional_state,
+            ),
+            contains="additional-state callback failed",
+        )
+        checks.check(
+            "additional-state-established-capacity-and-plus-one",
+            flat_additional_exact
+            and dense_additional_exact
+            and dense_additional_wire_bytes
+            <= V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+            and flat_additional_plus_one_error.terminal == "EvidenceFailed"
+            and dense_additional_plus_one_error.terminal == "EvidenceFailed"
+            and shared_additional_dealiased
+            and exact_additional_wire_bytes
+            == V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+            and exact_additional_projection == exact_additional_string
+            and additional_wire_plus_one_error.terminal == "EvidenceFailed"
+            and V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
+            == (
+                V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+                + V2_REFUSAL_ITEM_CAP
+                * (
+                    V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES
+                    + V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES
+                )
+            )
+            and failing_additional_state_error.terminal == "EvidenceFailed"
+            and failing_additional_state_calls == {"count": 1}
+            and primary_after_failing_additional_state == {"called": False}
+            and failing_additional_state_probe.rows == [],
+            expected={
+                "flat_scalar_items": additional_capacity,
+                "dense_empty_object_items": additional_capacity,
+                "flat_plus_one": "EvidenceFailed",
+                "dense_plus_one": "EvidenceFailed",
+                "shared_alias_policy": "fully occurrence-dealiased",
+                "canonical_exact_bytes": (
+                    V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+                ),
+                "canonical_plus_one": "EvidenceFailed",
+                "ordinary_callback_error": "EvidenceFailed",
+                "primary_callback_invoked": False,
+            },
+            observed={
+                "flat_scalar_exact": flat_additional_exact,
+                "dense_empty_object_exact": dense_additional_exact,
+                "dense_canonical_bytes": dense_additional_wire_bytes,
+                "flat_plus_one": flat_additional_plus_one_error.terminal,
+                "dense_plus_one": dense_additional_plus_one_error.terminal,
+                "shared_alias_dealiased": shared_additional_dealiased,
+                "canonical_exact_bytes": exact_additional_wire_bytes,
+                "canonical_plus_one": (
+                    additional_wire_plus_one_error.terminal
+                ),
+                "logical_snapshot_cap": (
+                    V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
+                ),
+                "ordinary_callback_error": (
+                    failing_additional_state_error.terminal
+                ),
+                "additional_state_calls": (
+                    failing_additional_state_calls["count"]
+                ),
+                "primary_callback_invoked": (
+                    primary_after_failing_additional_state["called"]
+                ),
+                "collector_rows": len(failing_additional_state_probe.rows),
+            },
+        )
+
+        non_utf8_environment_key = b"FS_V2_NON_UTF8_\xff"
+        non_utf8_environment_value = b"value-\xfe"
+        prior_non_utf8_environment = os.environb.get(non_utf8_environment_key)
+        try:
+            v2_fixture_set_process_environment_bytes(
+                non_utf8_environment_key,
+                non_utf8_environment_value,
+            )
+            non_utf8_resource_state = v2_fixture_resource_state(
+                publication_fixture_paths
+            )
+        finally:
+            if prior_non_utf8_environment is None:
+                del os.environb[non_utf8_environment_key]
+            else:
+                os.environb[non_utf8_environment_key] = (
+                    prior_non_utf8_environment
+                )
+        expected_non_utf8_key_root = (
+            "sha256-v1:"
+            + hashlib.sha256(non_utf8_environment_key).hexdigest()
+        )
+        expected_non_utf8_value_root = (
+            "sha256-v1:"
+            + hashlib.sha256(non_utf8_environment_value).hexdigest()
+        )
+        non_utf8_environment_rows = [
+            row
+            for row in non_utf8_resource_state["process_python_environment"]
+            if row["key_root"] == expected_non_utf8_key_root
+        ]
+        checks.check(
+            "resource-non-utf8-environment-projected-by-root",
+            non_utf8_resource_state[
+                "process_python_environment_is_pinned"
+            ]
+            is True
+            and non_utf8_environment_rows
+            == [
+                {
+                    "key_byte_length": len(non_utf8_environment_key),
+                    "key_root": expected_non_utf8_key_root,
+                    "value_byte_length": len(non_utf8_environment_value),
+                    "value_root": expected_non_utf8_value_root,
+                }
+            ]
+            and os.environb.get(non_utf8_environment_key)
+            == prior_non_utf8_environment,
+            expected={
+                "environment_is_pinned": True,
+                "non_utf8_rows": 1,
+                "raw_environment_restored": True,
+            },
+            observed={
+                "environment_is_pinned": non_utf8_resource_state[
+                    "process_python_environment_is_pinned"
+                ],
+                "non_utf8_rows": non_utf8_environment_rows,
+                "raw_environment_restored": (
+                    os.environb.get(non_utf8_environment_key)
+                    == prior_non_utf8_environment
+                ),
+            },
         )
         failure = v2_failure_evidence(
             stage="output-reservation",
@@ -58857,6 +66015,97 @@ def v2_execute_fault_resource_cases(
                 }
             ),
             contains="Unicode/case alias",
+        )
+        publication_path_hook_calls = {
+            "casefold": 0,
+            "encode": 0,
+            "getitem": 0,
+            "items": 0,
+            "iter": 0,
+            "len": 0,
+        }
+
+        class HostilePublicationPath(str):
+            def casefold(self) -> str:
+                publication_path_hook_calls["casefold"] += 1
+                return "terminal.json"
+
+            def encode(self, *_args: Any, **_kwargs: Any) -> bytes:
+                publication_path_hook_calls["encode"] += 1
+                return b"terminal.json"
+
+        hostile_publication_payloads: dict[Any, bytes] = {
+            "terminal.json": b"{}\n",
+        }
+        dict.__setitem__(
+            hostile_publication_payloads,
+            HostilePublicationPath("hostile.json"),
+            b"{}\n",
+        )
+        hostile_publication_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_preflight_publication_topology(
+                hostile_publication_payloads
+            ),
+            contains="exact",
+        )
+
+        class HostilePublicationPayloads(Mapping[str, bytes]):
+            def __getitem__(self, _key: str) -> bytes:
+                publication_path_hook_calls["getitem"] += 1
+                raise RuntimeError("hostile publication __getitem__ executed")
+
+            def __iter__(self) -> Iterator[str]:
+                publication_path_hook_calls["iter"] += 1
+                raise RuntimeError("hostile publication __iter__ executed")
+
+            def __len__(self) -> int:
+                publication_path_hook_calls["len"] += 1
+                raise RuntimeError("hostile publication __len__ executed")
+
+            def items(self) -> Any:
+                publication_path_hook_calls["items"] += 1
+                raise RuntimeError("hostile publication items executed")
+
+        hostile_publication_mapping_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_preflight_publication_topology(
+                HostilePublicationPayloads()
+            ),
+            contains="exact dictionary",
+        )
+        checks.check(
+            "publication-path-subclass-hooks-refused-before-alias-normalization",
+            hostile_publication_error.terminal == "EvidenceFailed"
+            and hostile_publication_mapping_error.terminal == "EvidenceFailed"
+            and publication_path_hook_calls
+            == {
+                "casefold": 0,
+                "encode": 0,
+                "getitem": 0,
+                "items": 0,
+                "iter": 0,
+                "len": 0,
+            },
+            expected={
+                "terminal": "EvidenceFailed",
+                "mapping_terminal": "EvidenceFailed",
+                "hook_calls": {
+                    "casefold": 0,
+                    "encode": 0,
+                    "getitem": 0,
+                    "items": 0,
+                    "iter": 0,
+                    "len": 0,
+                },
+            },
+            observed={
+                "terminal": hostile_publication_error.terminal,
+                "mapping_terminal": (
+                    hostile_publication_mapping_error.terminal
+                ),
+                "hook_calls": publication_path_hook_calls,
+            },
         )
         preflight_reservation = V2BundleReservation(
             output=REPO_ROOT,
@@ -59860,6 +67109,51 @@ def v2_execute_fault_resource_cases(
                 "max_source_projection_bytes": (
                     V2_SOURCE_PROJECTION_BYTES_CAP
                 ),
+                "max_exact_json_integer_decimal_digits": (
+                    V2_EXACT_JSON_INTEGER_DECIMAL_DIGITS_CAP
+                ),
+                "max_exact_json_integer_bits": (
+                    V2_EXACT_JSON_INTEGER_BITS_CAP
+                ),
+                "max_source_exact_wire_items": (
+                    V2_SOURCE_EXACT_WIRE_ITEM_CAP
+                ),
+                "max_source_exact_wire_nodes": (
+                    V2_SOURCE_EXACT_WIRE_NODE_CAP
+                ),
+                "max_source_exact_wire_depth": (
+                    V2_SOURCE_EXACT_WIRE_DEPTH_CAP
+                ),
+                "max_fixture_resource_paths": (
+                    V2_FIXTURE_RESOURCE_PATHS_CAP
+                ),
+                "max_fixture_resource_path_bytes": (
+                    V2_FIXTURE_RESOURCE_PATH_BYTES_CAP
+                ),
+                "max_fixture_resource_file_bytes": (
+                    V2_FIXTURE_RESOURCE_FILE_BYTES_CAP
+                ),
+                "max_fixture_resource_total_file_bytes": (
+                    V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP
+                ),
+                "max_fixture_resource_symlink_bytes": (
+                    V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP
+                ),
+                "max_fixture_resource_descriptor_entries": (
+                    V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
+                ),
+                "max_fixture_resource_environment_entries": (
+                    V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
+                ),
+                "max_fixture_resource_environment_bytes": (
+                    V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP
+                ),
+                "max_fixture_resource_additional_state_bytes": (
+                    V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+                ),
+                "max_fixture_resource_projection_bytes": (
+                    V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP
+                ),
                 "max_history_citations_per_issue": (
                     V2_HISTORY_CITATIONS_PER_ISSUE_CAP
                 ),
@@ -59909,6 +67203,70 @@ def v2_execute_fault_resource_cases(
             }.items()),
             expected="all manifest caps bound",
             observed=manifest["caps"],
+        )
+        fixture_resource_caps = {
+            "paths": V2_FIXTURE_RESOURCE_PATHS_CAP,
+            "path_bytes": V2_FIXTURE_RESOURCE_PATH_BYTES_CAP,
+            "file_bytes": V2_FIXTURE_RESOURCE_FILE_BYTES_CAP,
+            "total_file_bytes": V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP,
+            "symlink_bytes": V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP,
+            "descriptor_entries": (
+                V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
+            ),
+            "environment_entries": (
+                V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
+            ),
+            "environment_bytes": V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP,
+            "additional_state_bytes": (
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+            ),
+            "projection_bytes": V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
+        }
+        fixture_resource_cap_rows: list[dict[str, Any]] = []
+        for cap_name, cap in fixture_resource_caps.items():
+            diagnostic = f"synthetic fixture resource {cap_name} over cap"
+            v2_require_fixture_resource_cap(
+                cap,
+                cap,
+                diagnostic=diagnostic,
+            )
+            cap_error = expect_error(
+                EvidenceFailed,
+                lambda cap=cap, diagnostic=diagnostic: (
+                    v2_require_fixture_resource_cap(
+                        cap + 1,
+                        cap,
+                        diagnostic=diagnostic,
+                    )
+                ),
+                contains=diagnostic,
+            )
+            fixture_resource_cap_rows.append({
+                "name": cap_name,
+                "cap": cap,
+                "exact_admitted": True,
+                "plus_one_terminal": cap_error.terminal,
+                "plus_one_diagnostic_root": text_root(str(cap_error)),
+            })
+        checks.check(
+            "fixture-resource-cap-exact-and-plus-one-matrix",
+            len(fixture_resource_cap_rows) == len(fixture_resource_caps)
+            and all(
+                row["exact_admitted"] is True
+                and row["plus_one_terminal"] == "EvidenceFailed"
+                for row in fixture_resource_cap_rows
+            ),
+            expected={
+                "cap_names": list(fixture_resource_caps),
+                "exact_terminal": "admitted",
+                "plus_one_terminal": "EvidenceFailed",
+            },
+            observed={
+                "cap_names": [
+                    row["name"] for row in fixture_resource_cap_rows
+                ],
+                "rows": fixture_resource_cap_rows,
+            },
         )
         exact_status = v2_validate_status(
             "s" * V2_STATUS_BYTES_CAP,
@@ -60981,12 +68339,32 @@ def v2_execute_fault_resource_cases(
             issue_id: str,
             *,
             capture_ordinal: int,
+            br_cwd: Path = REPO_ROOT,
         ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-            del capture_ordinal
+            del capture_ordinal, br_cwd
             rejected_audit_capture_calls.append(issue_id)
             raise EvidenceFailed(
                 "audit capture was invoked before issue-ID preflight"
             )
+
+        hostile_audit_sequence_hooks = {
+            "getitem": 0,
+            "iter": 0,
+            "len": 0,
+        }
+
+        class HostileAuditIssueSequence(Sequence[str]):
+            def __getitem__(self, _index: int) -> str:
+                hostile_audit_sequence_hooks["getitem"] += 1
+                raise RuntimeError("hostile audit issue item hook executed")
+
+            def __iter__(self) -> Iterator[str]:
+                hostile_audit_sequence_hooks["iter"] += 1
+                raise RuntimeError("hostile audit issue iterator executed")
+
+            def __len__(self) -> int:
+                hostile_audit_sequence_hooks["len"] += 1
+                raise RuntimeError("hostile audit issue length hook executed")
 
         globals()["v2_capture_one_audit"] = rejected_audit_capture_probe
         try:
@@ -60994,6 +68372,11 @@ def v2_execute_fault_resource_cases(
                 (
                     "audit-round-string-sequence-refused",
                     "not-an-issue-array",
+                    "not a sequence",
+                ),
+                (
+                    "audit-round-hostile-sequence-refused-before-hooks",
+                    HostileAuditIssueSequence(),
                     "not a sequence",
                 ),
                 (
@@ -61020,8 +68403,8 @@ def v2_execute_fault_resource_cases(
                     "inventory row cap",
                 ),
             ):
-                checks.refuses(
-                    label,
+                capture_calls_before = len(rejected_audit_capture_calls)
+                audit_round_error = expect_error(
                     InputRefused,
                     lambda issue_ids=issue_ids: v2_capture_audit_round(
                         issue_ids,
@@ -61029,6 +68412,60 @@ def v2_execute_fault_resource_cases(
                     ),
                     contains=diagnostic,
                 )
+                audit_round_diagnostic, audit_round_diagnostic_exact = (
+                    v2_exception_diagnostic(audit_round_error)
+                )
+                checks.check(
+                    label,
+                    audit_round_error.terminal == "InputRefused"
+                    and audit_round_diagnostic_exact
+                    and diagnostic in audit_round_diagnostic
+                    and len(rejected_audit_capture_calls)
+                    == capture_calls_before,
+                    expected={
+                        "terminal": "InputRefused",
+                        "diagnostic_contains": diagnostic,
+                        "capture_calls_added": 0,
+                    },
+                    observed={
+                        "terminal": audit_round_error.terminal,
+                        "diagnostic_exact": audit_round_diagnostic_exact,
+                        "diagnostic_root": text_root(
+                            audit_round_diagnostic
+                        ),
+                        "capture_calls_added": (
+                            len(rejected_audit_capture_calls)
+                            - capture_calls_before
+                        ),
+                    },
+                )
+            invalid_ordinal_error = expect_error(
+                InputRefused,
+                lambda: v2_capture_audit_round(
+                    [],
+                    capture_ordinal=True,
+                ),
+                contains="exact round 1 or 2",
+            )
+            checks.check(
+                "audit-round-nonexact-ordinal-refused-before-capture",
+                invalid_ordinal_error.terminal == "InputRefused"
+                and rejected_audit_capture_calls == []
+                and hostile_audit_sequence_hooks
+                == {"getitem": 0, "iter": 0, "len": 0},
+                expected={
+                    "terminal": "InputRefused",
+                    "capture_calls": 0,
+                    "hostile_sequence_hook_calls": 0,
+                },
+                observed={
+                    "terminal": invalid_ordinal_error.terminal,
+                    "capture_calls": len(rejected_audit_capture_calls),
+                    "hostile_sequence_hook_calls": (
+                        hostile_audit_sequence_hooks
+                    ),
+                },
+            )
         finally:
             globals()["v2_capture_one_audit"] = original_capture_one_audit
         checks.check(
@@ -61370,16 +68807,41 @@ def v2_execute_fault_resource_cases(
                     "argv": missing_receipt["argv"],
                 },
             )
-            checks.refuses(
-                "stdin-cap-plus-one-refused-before-start",
+            receipt_count_before_stdin_refusal = len(_command_receipts)
+            stdin_refusal_error = expect_error(
                 EvidenceFailed,
                 lambda: run_command(
                     (sys.executable, "-c", "pass"),
                     input_text="x" * 17,
                 ),
                 contains="stdin exceeds",
-                projection=lambda: len(_command_receipts),
-                projection_label="COMMAND_RECEIPT_COUNT",
+            )
+            stdin_refusal_diagnostic, stdin_refusal_diagnostic_exact = (
+                v2_exception_diagnostic(stdin_refusal_error)
+            )
+            checks.check(
+                "stdin-cap-plus-one-refused-before-start",
+                stdin_refusal_error.terminal == "EvidenceFailed"
+                and stdin_refusal_diagnostic_exact
+                and "stdin exceeds" in stdin_refusal_diagnostic
+                and len(_command_receipts)
+                == receipt_count_before_stdin_refusal,
+                expected={
+                    "terminal": "EvidenceFailed",
+                    "diagnostic_contains": "stdin exceeds",
+                    "command_receipts_added": 0,
+                },
+                observed={
+                    "terminal": stdin_refusal_error.terminal,
+                    "diagnostic_exact": stdin_refusal_diagnostic_exact,
+                    "diagnostic_root": text_root(
+                        stdin_refusal_diagnostic
+                    ),
+                    "command_receipts_added": (
+                        len(_command_receipts)
+                        - receipt_count_before_stdin_refusal
+                    ),
+                },
             )
         finally:
             CAPS["subprocess_stdout_bytes"] = prior_stream_cap
@@ -61415,6 +68877,9 @@ def v2_execute_fault_resource_cases(
                 zero_sets=zero,
                 optional_payloads=optional,
                 reproduction=["script", "--review-plan"],
+                current_source_files=source["captured"]["observation"][
+                    "source_files"
+                ],
             ),
             contains="differs from its target",
         )
@@ -61434,6 +68899,9 @@ def v2_execute_fault_resource_cases(
                 zero_sets=zero,
                 optional_payloads={},
                 reproduction=["script", "--review-plan"],
+                current_source_files=source["captured"]["observation"][
+                    "source_files"
+                ],
             ),
             contains="membership differs",
         )
@@ -62411,6 +69879,7 @@ def v2_nomock_history_evidence(
 def v2_reconstruct_payload_map(
     payloads: Mapping[str, bytes],
     accepted_manifest: Mapping[str, Any],
+    current_source_files: list[dict[str, Any]],
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -62433,6 +69902,7 @@ def v2_reconstruct_payload_map(
         terminal=terminal,
         events=events,
         accepted_manifest=accepted_manifest,
+        current_source_files=current_source_files,
     )
 
 
@@ -63348,6 +70818,7 @@ def _v2_execute_nomock_cases_impl(
             artifact_root=artifact_root,
             input_dir=artifact_dir,
         )
+        current_source_files = v2_source_file_identities()
         reconstructed = v2_reconstruct_retained(
             artifact_root=artifact_root,
             input_dir=artifact_dir,
@@ -63355,6 +70826,7 @@ def _v2_execute_nomock_cases_impl(
             terminal=terminal,
             events=events,
             accepted_manifest=manifest,
+            current_source_files=current_source_files,
         )
         source, inventory, authority, review, history, zero_sets, _ = (
             reconstructed
@@ -63493,6 +70965,7 @@ def _v2_execute_nomock_cases_impl(
             terminal=replay_terminal,
             events=replay_events,
             accepted_manifest=manifest,
+            current_source_files=current_source_files,
         )
         checks.check(
             "released-plan-offline-replay",
@@ -63594,7 +71067,11 @@ def _v2_execute_nomock_cases_impl(
             subject_mode="history-plan",
             issue=None,
         )
-        reconstructed = v2_reconstruct_payload_map(payloads, accepted)
+        reconstructed = v2_reconstruct_payload_map(
+            payloads,
+            accepted,
+            components[0]["captured"]["observation"]["source_files"],
+        )
         terminal = strict_json_loads(
             payloads["terminal.json"],
             label="no-mock plan terminal",
@@ -63777,7 +71254,11 @@ def _v2_execute_nomock_cases_impl(
                 issue=changed,
             )
             review = components[3]
-            reconstructed = v2_reconstruct_payload_map(payloads, accepted)
+            reconstructed = v2_reconstruct_payload_map(
+                payloads,
+                accepted,
+                components[0]["captured"]["observation"]["source_files"],
+            )
         finally:
             fixture_br_set_description(issue_id, old_description)
         after = fixture_br_semantic_projection(fixture_br_show(issue_id))
@@ -63830,6 +71311,12 @@ def _v2_execute_nomock_cases_impl(
                 artifact_root=artifact_root,
                 artifact_dir=artifact_dir,
             )
+            fixture_source_file_identities = [
+                dict(row)
+                for row in retained[0]["captured"]["observation"][
+                    "source_files"
+                ]
+            ]
             (
                 _,
                 retained_payloads,
@@ -63847,6 +71334,7 @@ def _v2_execute_nomock_cases_impl(
                 terminal=retained_terminal,
                 events=retained_events,
                 accepted_manifest=accepted,
+                current_source_files=fixture_source_file_identities,
             )
             roots[subject_mode] = [
                 row["semantic_root"] for row in reconstructed[:6]
@@ -63887,6 +71375,7 @@ def _v2_execute_nomock_cases_impl(
                         artifact_root=artifact_root,
                         input_dir=artifact_dir,
                         output_dir=replay_dir,
+                        accepted_manifest=accepted,
                     )
                     if replay_result["terminal"] != "Pass":
                         raise EvidenceFailed(
@@ -63907,7 +71396,8 @@ def _v2_execute_nomock_cases_impl(
                     payloads=replay_payloads,
                     terminal=replay_terminal,
                     events=replay_events,
-                    accepted_manifest=manifest,
+                    accepted_manifest=accepted,
+                    current_source_files=fixture_source_file_identities,
                 )
                 checks.check(
                     "review-plan-disjoint-filesystem-replay-exact",
@@ -64061,7 +71551,8 @@ def _v2_execute_nomock_cases_impl(
                     payloads=explicit_payloads,
                     terminal=explicit_terminal,
                     events=explicit_events,
-                    accepted_manifest=manifest,
+                    accepted_manifest=accepted,
+                    current_source_files=fixture_source_file_identities,
                 )
                 checks.check(
                     "explicit-replay-v2-subprocess-success-rooted",
