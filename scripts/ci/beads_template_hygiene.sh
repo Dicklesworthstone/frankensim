@@ -1164,6 +1164,8 @@ V2_FIXTURE_RESOURCE_PATH_BYTES_CAP = 1_024
 V2_FIXTURE_RESOURCE_FILE_BYTES_CAP = 8 * 1024 * 1024
 V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP = 32 * 1024 * 1024
 V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP = 4_096
+V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP = 8
+V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP = 1_024
 V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP = 4_096
 V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP = 4_096
 V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP = 1024 * 1024
@@ -1533,10 +1535,7 @@ class InfrastructureFailed(HarnessError):
     terminal = "InfrastructureFailed"
 
 
-@dataclass(frozen=True)
-class V2DescriptorCloseFailure:
-    error: HarnessError
-    cause: BaseException
+V2DescriptorCloseFailure = tuple[HarnessError, BaseException]
 
 
 def v2_close_owned_descriptors(
@@ -1556,10 +1555,7 @@ def v2_close_owned_descriptors(
             os.close(descriptor)
         except BaseException as cause:
             if first_failure is None:
-                first_failure = V2DescriptorCloseFailure(
-                    error=typed_error,
-                    cause=cause,
-                )
+                first_failure = (typed_error, cause)
     return first_failure
 
 
@@ -1568,9 +1564,10 @@ def v2_raise_descriptor_close_failure(
 ) -> None:
     if failure is None:
         return
-    if isinstance(failure.cause, OSError):
-        raise failure.error from failure.cause
-    raise failure.cause
+    typed_error, cause = failure
+    if isinstance(cause, OSError):
+        raise typed_error from cause
+    raise cause
 
 
 class OutputPublicationFailed(InfrastructureFailed):
@@ -1976,12 +1973,12 @@ def v2_read_repo_relative_file_strict(
                 directory_flags,
                 dir_fd=current_descriptor,
             )
+            directory_descriptors.append(child_descriptor)
             child_stat = os.fstat(child_descriptor)
             if not stat.S_ISDIR(child_stat.st_mode):
                 raise InputRefused(
                     f"{label} contains a non-directory component"
                 )
-            directory_descriptors.append(child_descriptor)
             directory_links.append(
                 (
                     current_descriptor,
@@ -30678,59 +30675,45 @@ def v2_matching_direct_call_index(
     source_index: int,
     path_end: int,
 ) -> int | None:
+    matches = v2_matching_direct_call_indices(
+        instructions,
+        source_index,
+        path_end,
+    )
+    return matches[0] if matches else None
+
+
+def v2_matching_direct_call_indices(
+    instructions: Sequence[V2AnalysisInstruction],
+    source_index: int,
+    path_end: int,
+) -> tuple[int, ...]:
     if not v2_access_has_direct_call_protocol(
         instructions,
         source_index,
         path_end,
     ):
-        return v2_matching_specialized_builtin_fallback_call_index(
-            instructions,
-            source_index,
-            path_end,
-        )
-    return v2_matching_prepared_call_index(instructions, path_end)
-
-
-def v2_matching_specialized_builtin_fallback_call_index(
-    instructions: Sequence[V2AnalysisInstruction],
-    source_index: int,
-    path_end: int,
-) -> int | None:
-    """Bind CPython 3.14's exact ``any``/``all`` fallback call.
-
-    CPython 3.14 can inline the common built-in path while retaining the loaded
-    callable across a branch for the shadowed-global fallback. That fallback
-    has no ordinary NULL call protocol, so the generic matcher cannot see it.
-    Require the complete identity-guard prefix before using source positions
-    to bind the fallback CALL; an ordinary value passed as another call's
-    argument therefore cannot be mistaken for a callable.
-    """
-    if path_end != source_index or source_index + 3 >= len(instructions):
-        return None
-    source = instructions[source_index]
-    if (
-        source.opname != "LOAD_GLOBAL"
-        or type(source.argval) is not str
-        or source.argval not in {"all", "any"}
-    ):
-        return None
-    identity_guard = instructions[source_index + 1 : source_index + 4]
-    if [instruction.opname for instruction in identity_guard] != [
-        "COPY",
-        "LOAD_COMMON_CONSTANT",
-        "IS_OP",
-    ]:
-        return None
-    expected_repr = f"<built-in function {source.argval}>"
-    if identity_guard[1].argrepr != expected_repr:
-        return None
-    return v2_matching_prepared_call_index(instructions, path_end)
+        return ()
+    return v2_matching_prepared_call_indices(instructions, path_end)
 
 
 def v2_matching_prepared_call_index(
     instructions: Sequence[V2AnalysisInstruction],
     target_end: int,
 ) -> int | None:
+    matches = v2_matching_prepared_call_indices(instructions, target_end)
+    if not matches:
+        raise EvidenceFailed(
+            "refusal-state direct call cannot be bound to exact "
+            "source-position metadata"
+        )
+    return matches[0]
+
+
+def v2_matching_prepared_call_indices(
+    instructions: Sequence[V2AnalysisInstruction],
+    target_end: int,
+) -> tuple[int, ...]:
     terminal_position = instructions[target_end].positions
     terminal_fields = (
         terminal_position.lineno,
@@ -30750,6 +30733,7 @@ def v2_matching_prepared_call_index(
         terminal_position.end_lineno,
         terminal_position.end_col_offset,
     )
+    matches: list[int] = []
     for index in range(target_end + 1, len(instructions)):
         instruction = instructions[index]
         if instruction.opname not in V2_CALL_OPS:
@@ -30772,11 +30756,8 @@ def v2_matching_prepared_call_index(
             call_position.end_col_offset,
         )
         if call_start <= terminal_start and terminal_stop <= call_stop:
-            return index
-    raise EvidenceFailed(
-        "refusal-state direct call cannot be bound to exact source-position "
-        "metadata"
-    )
+            list.append(matches, index)
+    return tuple(matches)
 
 
 def v2_static_subscript_call(
@@ -30914,21 +30895,28 @@ def v2_fast_local_origin_dataflow(
     instructions: Sequence[V2AnalysisInstruction],
     code: types.CodeType,
 ) -> dict[str, Any]:
-    """Build a bounded, conservative origin graph for fast-local values.
-
-    The graph deliberately unions every syntactic definition of a local. That
-    over-approximates control flow, so conditional aliases refuse rather than
-    inheriting whichever branch happens to occur first in bytecode order.
-    """
+    """Build a bounded reaching-origin graph over normalized CPython CFGs."""
     parameter_layout = dict(v2_code_parameter_layout(code))
-    definitions: defaultdict[str, set[tuple[Any, ...]]] = defaultdict(set)
+    initial_bindings: dict[tuple[str, str], tuple[Any, ...]] = {}
     for name in parameter_layout:
-        definitions[name].add(v2_fast_origin_binding("parameter", name))
+        initial_bindings[("fast", name)] = v2_fast_origin_binding(
+            "parameter",
+            name,
+        )
+    for name in code.co_freevars:
+        initial_bindings[("freevar", name)] = v2_fast_origin_binding(
+            "freevar",
+            name,
+        )
 
-    call_sources: defaultdict[int, set[tuple[Any, ...]]] = defaultdict(set)
-    implicit_call_expressions: list[tuple[int, tuple[Any, ...]]] = []
-    load_expressions: dict[int, tuple[Any, ...]] = {}
-    dynamic_uses: list[tuple[str, tuple[Any, ...]]] = []
+    source_call_indices: defaultdict[int, set[int]] = defaultdict(set)
+    observed_call_sources: defaultdict[int, set[tuple[Any, ...]]] = (
+        defaultdict(set)
+    )
+    access_expressions: dict[int, tuple[Any, ...]] = {}
+    implicit_call_expressions: set[tuple[int, tuple[Any, ...]]] = set()
+    dynamic_uses: set[tuple[str, tuple[Any, ...]]] = set()
+    invoked_nested_codes: set[types.CodeType] = set()
 
     for index, instruction in enumerate(instructions):
         source: tuple[Any, ...] | None = None
@@ -30954,75 +30942,302 @@ def v2_fast_local_origin_dataflow(
             continue
         path, path_end = v2_instruction_access_path(instructions, index)
         access = v2_fast_origin_with_path(source, path)
-        if instruction.opname in V2_FAST_LOCAL_LOAD_OPS:
-            load_expressions[index] = access
-        call_index = v2_matching_direct_call_index(
+        call_indices = v2_matching_direct_call_indices(
             instructions,
             index,
             path_end,
         )
-        if call_index is not None:
-            call_sources[call_index].add(access)
+        for call_index in call_indices:
+            source_call_indices[index].add(call_index)
 
-    stack: list[tuple[Any, ...]] = []
+    def origin_options(expression: tuple[Any, ...]) -> set[tuple[Any, ...]]:
+        if expression and expression[0] == "choice":
+            return set(expression[1])
+        return {expression}
 
-    def pop_origin() -> tuple[Any, ...]:
-        return list.pop(stack) if stack else V2_FAST_ORIGIN_UNKNOWN
+    def merge_origin(
+        left: tuple[Any, ...],
+        right: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        if left == right:
+            return left
+        options = origin_options(left) | origin_options(right)
+        if V2_FAST_ORIGIN_UNKNOWN in options or len(
+            options
+        ) > V2_FAST_ORIGIN_RESOLUTION_CAP:
+            return V2_FAST_ORIGIN_UNKNOWN
+        return ("choice", tuple(sorted(options, key=repr)))
 
-    def pop_origins(count: int) -> list[tuple[Any, ...]]:
-        return [pop_origin() for _index in range(max(0, count))]
+    def merge_binding_maps(
+        left: Mapping[tuple[str, str], tuple[Any, ...]],
+        right: Mapping[tuple[str, str], tuple[Any, ...]],
+    ) -> dict[tuple[str, str], tuple[Any, ...]]:
+        merged: dict[tuple[str, str], tuple[Any, ...]] = {}
+        for key in set(left) | set(right):
+            merged[key] = merge_origin(
+                left.get(key, V2_FAST_ORIGIN_UNBOUND),
+                right.get(key, V2_FAST_ORIGIN_UNBOUND),
+            )
+        return merged
 
+    def merge_states(
+        prior: tuple[
+            tuple[tuple[Any, ...], ...],
+            dict[tuple[str, str], tuple[Any, ...]],
+            frozenset[tuple[Any, ...]],
+        ],
+        incoming: tuple[
+            tuple[tuple[Any, ...], ...],
+            dict[tuple[str, str], tuple[Any, ...]],
+            frozenset[tuple[Any, ...]],
+        ],
+    ) -> tuple[
+        tuple[tuple[Any, ...], ...],
+        dict[tuple[str, str], tuple[Any, ...]],
+        frozenset[tuple[Any, ...]],
+    ]:
+        prior_stack, prior_bindings, prior_invalidations = prior
+        next_stack, next_bindings, next_invalidations = incoming
+        if len(prior_stack) != len(next_stack):
+            merged_stack = tuple(
+                V2_FAST_ORIGIN_UNKNOWN
+                for _index in range(max(len(prior_stack), len(next_stack)))
+            )
+        else:
+            merged_stack = tuple(
+                merge_origin(left, right)
+                for left, right in zip(
+                    prior_stack,
+                    next_stack,
+                    strict=True,
+                )
+            )
+        return (
+            merged_stack,
+            merge_binding_maps(prior_bindings, next_bindings),
+            prior_invalidations | next_invalidations,
+        )
+
+    offset_to_index: dict[int, int] = {}
     for index, instruction in enumerate(instructions):
+        offset_to_index.setdefault(instruction.offset, index)
+
+    exception_successors: defaultdict[
+        int,
+        list[tuple[int, int, bool]],
+    ] = defaultdict(list)
+    try:
+        exception_entries = tuple(dis.Bytecode(code).exception_entries)
+    except (AttributeError, TypeError, ValueError):
+        exception_entries = ()
+    for entry in exception_entries:
+        target_index = offset_to_index.get(entry.target)
+        if target_index is None:
+            continue
+        for index, instruction in enumerate(instructions):
+            if entry.start <= instruction.offset < entry.end:
+                exception_successors[index].append((
+                    target_index,
+                    entry.depth,
+                    bool(entry.lasti),
+                ))
+
+    def jump_target_index(
+        instruction: V2AnalysisInstruction,
+    ) -> int | None:
+        target = instruction.argval
+        if type(target) is not int:
+            target = getattr(target, "offset", None)
+        return offset_to_index.get(target) if type(target) is int else None
+
+    def edge_stack_effect(
+        instruction: V2AnalysisInstruction,
+        *,
+        jump: bool,
+    ) -> int | None:
+        opcode = dis.opmap.get(instruction.opname)
+        if opcode is None:
+            return None
+        try:
+            if instruction.arg is None:
+                return dis.stack_effect(opcode, jump=jump)
+            return dis.stack_effect(opcode, instruction.arg, jump=jump)
+        except (TypeError, ValueError):
+            return None
+
+    def adjusted_stack(
+        stack: Sequence[tuple[Any, ...]],
+        effect: int | None,
+    ) -> tuple[tuple[Any, ...], ...]:
+        if effect is None:
+            return (V2_FAST_ORIGIN_UNKNOWN,) * len(stack)
+        target_height = max(0, len(stack) + effect)
+        if target_height <= len(stack):
+            return tuple(stack[:target_height])
+        return (
+            *tuple(stack),
+            *(
+                V2_FAST_ORIGIN_UNKNOWN
+                for _index in range(target_height - len(stack))
+            ),
+        )
+
+    def binding_key(
+        opname: str,
+        name: str,
+    ) -> tuple[str, str]:
+        if opname in {"LOAD_GLOBAL", "LOAD_NAME", "STORE_GLOBAL", "STORE_NAME"}:
+            return ("global", name)
+        if name in code.co_cellvars:
+            return ("fast", name)
+        if name in code.co_freevars:
+            return ("freevar", name)
+        return ("fast", name)
+
+    def binding_default(key: tuple[str, str]) -> tuple[Any, ...]:
+        kind, name = key
+        if kind == "global":
+            return v2_fast_origin_binding("global", name)
+        if kind == "freevar":
+            return v2_fast_origin_binding("freevar", name)
+        return V2_FAST_ORIGIN_UNBOUND
+
+    def member_invalidated(
+        base: tuple[Any, ...],
+        member: tuple[Any, ...],
+        invalidations: frozenset[tuple[Any, ...]],
+    ) -> bool:
+        return any(
+            (candidate, member) in invalidations
+            for candidate in origin_options(base)
+        )
+
+    states: dict[
+        int,
+        tuple[
+            tuple[tuple[Any, ...], ...],
+            dict[tuple[str, str], tuple[Any, ...]],
+            frozenset[tuple[Any, ...]],
+        ],
+    ] = {0: ((), dict(initial_bindings), frozenset())}
+    worklist: deque[int] = deque([0])
+    queued = {0}
+    updates = 0
+    update_cap = max(256, len(instructions) * 96)
+
+    def queue_state(
+        target: int | None,
+        state: tuple[
+            tuple[tuple[Any, ...], ...],
+            dict[tuple[str, str], tuple[Any, ...]],
+            frozenset[tuple[Any, ...]],
+        ],
+    ) -> None:
+        nonlocal updates
+        if target is None or not 0 <= target < len(instructions):
+            return
+        prior = states.get(target)
+        merged = state if prior is None else merge_states(prior, state)
+        if prior == merged:
+            return
+        states[target] = merged
+        updates += 1
+        if updates > update_cap:
+            raise EvidenceFailed(
+                "refusal-state fast-local CFG exceeds its convergence cap"
+            )
+        if target not in queued:
+            queued.add(target)
+            worklist.append(target)
+
+    protocol_callables = frozenset({
+        "all",
+        "any",
+        "bool",
+        "hash",
+        "iter",
+        "len",
+        "next",
+        "repr",
+        "str",
+    })
+    generator_consumers = frozenset({
+        "all",
+        "any",
+        "list",
+        "max",
+        "min",
+        "next",
+        "set",
+        "sum",
+        "tuple",
+    })
+
+    while worklist:
+        index = worklist.popleft()
+        queued.discard(index)
+        instruction = instructions[index]
         opname = instruction.opname
-        if index > 0 and instruction.is_jump_target:
-            # Definitions in a target block remain useful, but operand-stack
-            # values crossing a branch are conservatively unknown.
-            list.clear(stack)
+        input_stack, input_bindings, input_invalidations = states[index]
+        stack = list(input_stack)
+        bindings = dict(input_bindings)
+        invalidations = set(input_invalidations)
+
+        def pop_origin() -> tuple[Any, ...]:
+            return list.pop(stack) if stack else V2_FAST_ORIGIN_UNKNOWN
+
+        def pop_origins(count: int) -> list[tuple[Any, ...]]:
+            return [pop_origin() for _index in range(max(0, count))]
+
+        custom_edges: list[
+            tuple[int | None, tuple[tuple[Any, ...], ...]]
+        ] | None = None
+
         if opname in V2_FAST_LOCAL_LOAD_OPS:
-            expression = ("local", instruction.argval)
+            key = ("fast", instruction.argval)
+            expression = bindings.get(key, binding_default(key))
             if opname in V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS:
                 expression = ("maybe-unbound", expression)
             list.append(stack, expression)
             if opname == "LOAD_FAST_AND_CLEAR" and type(
                 instruction.argval
             ) is str:
-                definitions[instruction.argval].add(V2_FAST_ORIGIN_UNBOUND)
-            continue
+                bindings[key] = V2_FAST_ORIGIN_UNBOUND
         if opname in {"LOAD_GLOBAL", "LOAD_NAME"}:
             effect = v2_fast_origin_stack_effect(instruction)
             if effect == 2:
                 list.append(stack, V2_FAST_ORIGIN_NULL)
+            key = ("global", instruction.argval)
             list.append(
                 stack,
-                v2_fast_origin_binding("global", instruction.argval)
-                if type(instruction.argval) is str
-                else V2_FAST_ORIGIN_UNKNOWN,
+                bindings.get(key, binding_default(key))
+                if type(instruction.argval) is str else V2_FAST_ORIGIN_UNKNOWN,
             )
-            continue
         if opname in {"LOAD_DEREF", "LOAD_CLASSDEREF"}:
-            if (
-                type(instruction.argval) is str
-                and instruction.argval in code.co_freevars
-            ):
-                list.append(
-                    stack,
-                    v2_fast_origin_binding("freevar", instruction.argval),
-                )
+            if type(instruction.argval) is str:
+                key = binding_key(opname, instruction.argval)
+                list.append(stack, bindings.get(key, binding_default(key)))
             else:
                 list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
-            continue
         if opname in {"LOAD_CONST", "LOAD_SMALL_INT"}:
-            if type(instruction.argval) in {str, int}:
+            if type(instruction.argval) is types.CodeType:
+                list.append(stack, ("code", instruction.argval))
+            elif type(instruction.argval) in {str, int}:
                 list.append(stack, ("constant", instruction.argval))
             else:
                 list.append(stack, V2_FAST_ORIGIN_STATIC)
-            continue
-        if opname in {"LOAD_CLOSURE", "LOAD_BUILD_CLASS", "LOAD_ASSERTION_ERROR"}:
+        if opname == "LOAD_COMMON_CONSTANT":
             list.append(stack, V2_FAST_ORIGIN_STATIC)
-            continue
+        if opname == "LOAD_CLOSURE":
+            if type(instruction.argval) is str:
+                key = binding_key("LOAD_DEREF", instruction.argval)
+                list.append(stack, bindings.get(key, binding_default(key)))
+            else:
+                list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+        if opname in {"LOAD_BUILD_CLASS", "LOAD_ASSERTION_ERROR"}:
+            list.append(stack, V2_FAST_ORIGIN_STATIC)
         if opname == "PUSH_NULL":
             list.append(stack, V2_FAST_ORIGIN_NULL)
-            continue
         if opname in V2_ATTRIBUTE_ACCESS_OPS:
             base = pop_origin()
             attribute = (
@@ -31030,12 +31245,19 @@ def v2_fast_local_origin_dataflow(
                 if type(instruction.argval) is str
                 else ("<unknown-attribute>",)
             )
-            expression = v2_fast_origin_with_path(base, attribute)
+            expression = (
+                ("mutated-member", base, ("attribute", *attribute))
+                if member_invalidated(
+                    base,
+                    ("attribute", *attribute),
+                    frozenset(invalidations),
+                )
+                else v2_fast_origin_with_path(base, attribute)
+            )
             effect = v2_fast_origin_stack_effect(instruction)
             if effect == 1:
                 list.append(stack, V2_FAST_ORIGIN_NULL)
             list.append(stack, expression)
-            continue
         if opname == "COPY":
             depth = instruction.arg
             list.append(
@@ -31044,64 +31266,132 @@ def v2_fast_local_origin_dataflow(
                 if type(depth) is int and 0 < depth <= len(stack)
                 else V2_FAST_ORIGIN_UNKNOWN,
             )
-            continue
         if opname == "SWAP":
             depth = instruction.arg
             if type(depth) is int and 0 < depth <= len(stack):
                 stack[-1], stack[-depth] = stack[-depth], stack[-1]
             else:
                 list.clear(stack)
-            continue
         if opname in V2_CALL_OPS:
             effect = v2_fast_origin_stack_effect(instruction)
             pop_count = 1 - effect if effect is not None else len(stack)
             consumed = pop_origins(pop_count)
-            sources = call_sources.get(index, set())
-            if len(sources) == 1:
-                callable_origin = next(iter(sources))
-            elif sources:
-                callable_origin = (
-                    "choice",
-                    tuple(sorted(sources, key=repr)),
-                )
-            else:
-                callable_origin = V2_FAST_ORIGIN_UNKNOWN
-                implicit_candidates = [
-                    candidate
-                    for candidate in consumed
+            simulated = next(
+                (
+                    candidate for candidate in reversed(consumed)
                     if candidate != V2_FAST_ORIGIN_NULL
-                ]
-                if implicit_candidates:
-                    callable_origin = implicit_candidates[-1]
-                    list.append(
-                        implicit_call_expressions,
-                        (index, callable_origin),
-                    )
-            list.append(stack, ("call-result", callable_origin))
-            continue
+                ),
+                V2_FAST_ORIGIN_UNKNOWN,
+            )
+            prepared_arguments: tuple[tuple[Any, ...], ...] = ()
+            if simulated and simulated[0] == "prepared-call":
+                prepared_arguments = simulated[2]
+                simulated = simulated[1]
+            # Source spans are only corroboration.  In particular, one span
+            # can cover nested calls on 3.14 and a subscript expression on
+            # 3.11; it must never replace or invalidate the simulated
+            # call-frame origin.  The exact-source sets remain useful for
+            # bounded reprocessing when a predecessor is first discovered.
+            callable_origin = simulated
+            implicit_call_expressions.add((index, callable_origin))
+            callable_options = origin_options(callable_origin)
+            for candidate in callable_options:
+                if candidate and candidate[0] == "nested-function":
+                    nested_code = candidate[1]
+                    if nested_code.co_flags & 0x20:
+                        continue
+                    invoked_nested_codes.add(nested_code)
+            argument_count = (
+                instruction.arg if type(instruction.arg) is int else 0
+            )
+            arguments = (
+                list(prepared_arguments)
+                if prepared_arguments
+                else consumed[:argument_count]
+            )
+            protocol = any(
+                candidate[0] == "binding"
+                and candidate[1] == "global"
+                and not candidate[3]
+                and candidate[2] in protocol_callables
+                for candidate in callable_options
+            )
+            consumes_generator = any(
+                candidate[0] == "binding"
+                and candidate[1] == "global"
+                and not candidate[3]
+                and candidate[2] in generator_consumers
+                for candidate in callable_options
+            )
+            if protocol:
+                for argument in arguments:
+                    dynamic_uses.add(("call-protocol", argument))
+            if consumes_generator:
+                for argument in arguments:
+                    for option in origin_options(argument):
+                        if option and option[0] == "suspended-nested":
+                            invoked_nested_codes.add(option[1])
+            if any(
+                option and option[0] == "nested-function"
+                and option[1].co_flags & 0x20
+                for option in callable_options
+            ):
+                nested_code = next(
+                    option[1] for option in callable_options
+                    if option and option[0] == "nested-function"
+                )
+                list.append(stack, ("suspended-nested", nested_code))
+            else:
+                list.append(stack, ("call-result", callable_origin))
         if opname == "PRECALL":
+            argument_count = (
+                instruction.arg if type(instruction.arg) is int else 0
+            )
+            if argument_count <= len(stack):
+                arguments = stack[-argument_count:] if argument_count else []
+                callable_index = len(stack) - argument_count - 1
+                callable_origin = (
+                    stack[callable_index]
+                    if callable_index >= 0
+                    else V2_FAST_ORIGIN_UNKNOWN
+                )
+                if callable_index >= 0:
+                    stack[callable_index] = (
+                        "prepared-call",
+                        callable_origin,
+                        tuple(arguments),
+                    )
+                if any(
+                    candidate[0] == "binding"
+                    and candidate[1] == "global"
+                    and candidate[2] in protocol_callables
+                    and not candidate[3]
+                    for candidate in origin_options(callable_origin)
+                ):
+                    for argument in arguments:
+                        dynamic_uses.add(("call-protocol", argument))
             effect = v2_fast_origin_stack_effect(instruction)
             if effect is not None and effect < 0:
                 pop_origins(-effect)
-            continue
         if opname == "STORE_FAST":
             if type(instruction.argval) is str:
-                definitions[instruction.argval].add(pop_origin())
+                bindings[("fast", instruction.argval)] = pop_origin()
             else:
                 pop_origin()
-            continue
         if opname == "STORE_FAST_MAYBE_NULL":
             stored = ("maybe-unbound", pop_origin())
             if type(instruction.argval) is str:
-                definitions[instruction.argval].add(stored)
-            continue
+                bindings[("fast", instruction.argval)] = stored
         if opname == "DELETE_FAST":
             if type(instruction.argval) is str:
-                definitions[instruction.argval].add(V2_FAST_ORIGIN_UNBOUND)
-            continue
+                bindings[("fast", instruction.argval)] = V2_FAST_ORIGIN_UNBOUND
+        if opname in {"STORE_DEREF", "STORE_GLOBAL", "STORE_NAME"}:
+            stored = pop_origin()
+            if type(instruction.argval) is str:
+                bindings[binding_key(opname, instruction.argval)] = stored
         if opname in {"UNPACK_SEQUENCE", "UNPACK_EX"}:
             source = pop_origin()
-            list.append(dynamic_uses, ("unpack", source))
+            dynamic_uses.add(("unpack", source))
             if opname == "UNPACK_SEQUENCE" and type(instruction.arg) is int:
                 count = instruction.arg
             elif opname == "UNPACK_EX" and type(instruction.arg) is int:
@@ -31112,7 +31402,6 @@ def v2_fast_local_origin_dataflow(
                 count = 0
             for item_index in reversed(range(count)):
                 list.append(stack, ("unpack", source, item_index))
-            continue
         if (
             opname == "BINARY_SUBSCR"
             or opname == "BINARY_OP" and instruction.argrepr == "[]"
@@ -31126,81 +31415,201 @@ def v2_fast_local_origin_dataflow(
                 and type(key_origin[1]) in {str, int}
                 else None
             )
-            expression = ("subscript", source, key)
-            list.append(dynamic_uses, ("subscript", source))
+            member = ("subscript", key)
+            expression = (
+                ("mutated-member", source, member)
+                if member_invalidated(
+                    source,
+                    member,
+                    frozenset(invalidations),
+                )
+                else (
+                    source[2][key]
+                    if source
+                    and source[0] == "aggregate"
+                    and source[1] in {"BUILD_LIST", "BUILD_TUPLE"}
+                    and type(key) is int
+                    and -len(source[2]) <= key < len(source[2])
+                    else ("subscript", source, key)
+                )
+            )
+            dynamic_uses.add(("subscript", source))
             list.append(stack, expression)
-            continue
-        if opname == "TO_BOOL" or opname.startswith("POP_JUMP"):
+        if opname == "STORE_ATTR":
+            receiver = pop_origin()
+            pop_origin()
+            dynamic_uses.add(("store-attribute", receiver))
+            if type(instruction.argval) is str:
+                for candidate in origin_options(receiver):
+                    invalidations.add((
+                        candidate,
+                        ("attribute", instruction.argval),
+                    ))
+        if opname == "DELETE_ATTR":
+            receiver = pop_origin()
+            dynamic_uses.add(("delete-attribute", receiver))
+            if type(instruction.argval) is str:
+                for candidate in origin_options(receiver):
+                    invalidations.add((
+                        candidate,
+                        ("attribute", instruction.argval),
+                    ))
+        if opname == "STORE_SUBSCR":
+            key_origin = pop_origin()
+            receiver = pop_origin()
+            pop_origin()
+            dynamic_uses.add(("store-subscript", receiver))
+            key = (
+                key_origin[1]
+                if len(key_origin) == 2 and key_origin[0] == "constant"
+                else None
+            )
+            for candidate in origin_options(receiver):
+                invalidations.add((candidate, ("subscript", key)))
+        if opname == "DELETE_SUBSCR":
+            key_origin = pop_origin()
+            receiver = pop_origin()
+            dynamic_uses.add(("delete-subscript", receiver))
+            key = (
+                key_origin[1]
+                if len(key_origin) == 2 and key_origin[0] == "constant"
+                else None
+            )
+            for candidate in origin_options(receiver):
+                invalidations.add((candidate, ("subscript", key)))
+        if opname == "TO_BOOL":
             source = pop_origin()
-            list.append(dynamic_uses, ("truth", source))
-            if opname == "TO_BOOL":
-                list.append(stack, V2_FAST_ORIGIN_STATIC)
-            else:
-                list.clear(stack)
-            continue
+            dynamic_uses.add(("truth", source))
+            list.append(stack, V2_FAST_ORIGIN_STATIC)
+        if opname.startswith("POP_JUMP"):
+            source = pop_origin()
+            dynamic_uses.add(("truth", source))
+            target = jump_target_index(instruction)
+            custom_edges = [
+                (target, tuple(stack)),
+                (index + 1, tuple(stack)),
+            ]
         if opname.startswith("JUMP_IF"):
             source = stack[-1] if stack else V2_FAST_ORIGIN_UNKNOWN
-            list.append(dynamic_uses, ("truth", source))
-            list.clear(stack)
-            continue
+            dynamic_uses.add(("truth", source))
+            target = jump_target_index(instruction)
+            custom_edges = [
+                (target, tuple(stack)),
+                (index + 1, tuple(stack[:-1])),
+            ]
         if opname in {"GET_ITER", "GET_YIELD_FROM_ITER"}:
             source = pop_origin()
-            list.append(dynamic_uses, ("iterate", source))
+            dynamic_uses.add(("iterate", source))
             list.append(stack, ("derived", opname, source))
-            continue
         if opname == "FOR_ITER":
-            list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
-            continue
+            iterator = stack[-1] if stack else V2_FAST_ORIGIN_UNKNOWN
+            for option in origin_options(iterator):
+                if option and option[0] == "suspended-nested":
+                    invoked_nested_codes.add(option[1])
+                elif option and option[0] == "derived":
+                    for nested in option[2:]:
+                        if (
+                            type(nested) is tuple
+                            and nested
+                            and nested[0] == "suspended-nested"
+                        ):
+                            invoked_nested_codes.add(nested[1])
+            custom_edges = [
+                (
+                    index + 1,
+                    adjusted_stack(
+                        input_stack,
+                        edge_stack_effect(instruction, jump=False),
+                    ),
+                ),
+                (
+                    jump_target_index(instruction),
+                    adjusted_stack(
+                        input_stack,
+                        edge_stack_effect(instruction, jump=True),
+                    ),
+                ),
+            ]
+        if opname == "SEND":
+            custom_edges = [
+                (
+                    index + 1,
+                    adjusted_stack(
+                        input_stack,
+                        edge_stack_effect(instruction, jump=False),
+                    ),
+                ),
+                (
+                    jump_target_index(instruction),
+                    adjusted_stack(
+                        input_stack,
+                        edge_stack_effect(instruction, jump=True),
+                    ),
+                ),
+            ]
         if opname in {"BUILD_LIST", "BUILD_SET", "BUILD_TUPLE"}:
             count = instruction.arg if type(instruction.arg) is int else 0
             members = tuple(reversed(pop_origins(count)))
             list.append(stack, ("aggregate", opname, members))
-            continue
         if opname == "BUILD_MAP":
             count = instruction.arg if type(instruction.arg) is int else 0
             members = tuple(reversed(pop_origins(count * 2)))
             list.append(stack, ("aggregate", opname, members))
-            continue
         if opname == "BUILD_CONST_KEY_MAP":
             count = instruction.arg if type(instruction.arg) is int else 0
             members = tuple(reversed(pop_origins(count + 1)))
             list.append(stack, ("aggregate", opname, members))
-            continue
         if opname == "MAKE_FUNCTION":
             effect = v2_fast_origin_stack_effect(instruction)
             pop_count = 1 - effect if effect is not None else len(stack)
-            pop_origins(pop_count)
-            list.append(stack, ("static-callable",))
-            continue
+            consumed = pop_origins(pop_count)
+            nested_code = next(
+                (
+                    candidate[1] for candidate in consumed
+                    if candidate and candidate[0] == "code"
+                ),
+                None,
+            )
+            list.append(
+                stack,
+                ("nested-function", nested_code, ())
+                if type(nested_code) is types.CodeType
+                else ("static-callable",),
+            )
         if opname == "SET_FUNCTION_ATTRIBUTE":
             # CPython 3.13+ keeps the new function at TOS and consumes the
             # defaults/closure/annotation payload immediately below it.
             if len(stack) >= 2:
-                stack.pop(-2)
+                attribute_value = stack.pop(-2)
+                function_value = stack[-1]
+                if function_value and function_value[0] == "nested-function":
+                    stack[-1] = (
+                        "nested-function",
+                        function_value[1],
+                        (*function_value[2], (instruction.arg, attribute_value)),
+                    )
             else:
                 list.clear(stack)
                 list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
-            continue
         if opname.startswith("UNARY_"):
             source = pop_origin()
-            list.append(dynamic_uses, (opname, source))
+            dynamic_uses.add((opname, source))
             list.append(stack, ("derived", opname, source))
-            continue
         if (
             opname.startswith("BINARY_")
+            and opname != "BINARY_SUBSCR"
+            and not (opname == "BINARY_OP" and instruction.argrepr == "[]")
             or opname in {"COMPARE_OP", "CONTAINS_OP", "IS_OP"}
         ):
             right = pop_origin()
             left = pop_origin()
-            list.append(dynamic_uses, (opname, ("aggregate", opname, (left, right))))
+            dynamic_uses.add((
+                opname,
+                ("aggregate", opname, (left, right)),
+            ))
             list.append(stack, ("derived", opname, left, right))
-            continue
         if opname == "POP_TOP":
             pop_origin()
-            continue
-        if opname in {"STORE_DEREF", "STORE_GLOBAL", "STORE_NAME"}:
-            pop_origin()
-            continue
         if opname in {
             "RETURN_CONST",
             "RETURN_VALUE",
@@ -31208,11 +31617,10 @@ def v2_fast_local_origin_dataflow(
             "RERAISE",
         }:
             list.clear(stack)
-            continue
+            custom_edges = []
         if opname in {
             "CACHE",
             "COPY_FREE_VARS",
-            "END_FOR",
             "EXTENDED_ARG",
             "KW_NAMES",
             "MAKE_CELL",
@@ -31220,27 +31628,152 @@ def v2_fast_local_origin_dataflow(
             "NOT_TAKEN",
             "RESUME",
         }:
-            continue
-        if opname.startswith("JUMP"):
-            list.clear(stack)
-            continue
-        effect = v2_fast_origin_stack_effect(instruction)
-        if effect is None:
-            list.clear(stack)
-        elif effect < 0:
-            pop_origins(-effect)
-        elif effect > 0:
-            for _index in range(effect):
-                list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+            pass
+        elif opname.startswith("JUMP") and custom_edges is None:
+            custom_edges = [(jump_target_index(instruction), tuple(stack))]
+        elif custom_edges is None and opname not in {
+            *V2_FAST_LOCAL_LOAD_OPS,
+            "BINARY_SUBSCR",
+            "BUILD_CONST_KEY_MAP",
+            "BUILD_LIST",
+            "BUILD_MAP",
+            "BUILD_SET",
+            "BUILD_TUPLE",
+            "CALL",
+            "CALL_FUNCTION_EX",
+            "CALL_KW",
+            "COMPARE_OP",
+            "CONTAINS_OP",
+            "COPY",
+            "DELETE_ATTR",
+            "DELETE_FAST",
+            "DELETE_SUBSCR",
+            "FOR_ITER",
+            "GET_ITER",
+            "GET_YIELD_FROM_ITER",
+            "IS_OP",
+            "LOAD_ASSERTION_ERROR",
+            "LOAD_BUILD_CLASS",
+            "LOAD_CLASSDEREF",
+            "LOAD_CLOSURE",
+            "LOAD_COMMON_CONSTANT",
+            "LOAD_CONST",
+            "LOAD_DEREF",
+            "LOAD_GLOBAL",
+            "LOAD_NAME",
+            "LOAD_SMALL_INT",
+            "MAKE_FUNCTION",
+            "POP_TOP",
+            "PRECALL",
+            "PUSH_NULL",
+            "SEND",
+            "SET_FUNCTION_ATTRIBUTE",
+            "STORE_ATTR",
+            "STORE_DEREF",
+            "STORE_FAST",
+            "STORE_FAST_MAYBE_NULL",
+            "STORE_GLOBAL",
+            "STORE_NAME",
+            "STORE_SUBSCR",
+            "SWAP",
+            "TO_BOOL",
+            "UNPACK_EX",
+            "UNPACK_SEQUENCE",
+        } and not opname.startswith(("BINARY_", "UNARY_")):
+            effect = v2_fast_origin_stack_effect(instruction)
+            if effect is None:
+                list.clear(stack)
+            elif effect < 0:
+                pop_origins(-effect)
+            elif effect > 0:
+                for _index in range(effect):
+                    list.append(stack, V2_FAST_ORIGIN_UNKNOWN)
+
+        access = None
+        if index in source_call_indices or opname in {
+            *V2_FAST_LOCAL_LOAD_OPS,
+            "LOAD_CLASSDEREF",
+            "LOAD_DEREF",
+            "LOAD_GLOBAL",
+            "LOAD_NAME",
+        }:
+            source_expression: tuple[Any, ...] | None = None
+            if opname in V2_FAST_LOCAL_LOAD_OPS:
+                key = ("fast", instruction.argval)
+                source_expression = input_bindings.get(
+                    key,
+                    binding_default(key),
+                )
+                if opname in V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS:
+                    source_expression = ("maybe-unbound", source_expression)
+            elif opname in {"LOAD_DEREF", "LOAD_CLASSDEREF"} and type(
+                instruction.argval
+            ) is str:
+                key = binding_key(opname, instruction.argval)
+                source_expression = input_bindings.get(
+                    key,
+                    binding_default(key),
+                )
+            elif opname in {"LOAD_GLOBAL", "LOAD_NAME"} and type(
+                instruction.argval
+            ) is str:
+                key = ("global", instruction.argval)
+                source_expression = input_bindings.get(
+                    key,
+                    binding_default(key),
+                )
+            if source_expression is not None:
+                path, _path_end = v2_instruction_access_path(
+                    instructions,
+                    index,
+                )
+                access = v2_fast_origin_with_path(source_expression, path)
+                prior_access = access_expressions.get(index)
+                access_expressions[index] = (
+                    access if prior_access is None
+                    else merge_origin(prior_access, access)
+                )
+                for call_index in source_call_indices.get(index, set()):
+                    if access not in observed_call_sources[call_index]:
+                        observed_call_sources[call_index].add(access)
+                        if call_index in states and call_index not in queued:
+                            queued.add(call_index)
+                            worklist.append(call_index)
+
+        if custom_edges is None:
+            custom_edges = [(index + 1, tuple(stack))]
+        output_invalidations = frozenset(invalidations)
+        for target, edge_stack in custom_edges:
+            queue_state(
+                target,
+                (edge_stack, dict(bindings), output_invalidations),
+            )
+        for target, handler_depth, handler_lasti in exception_successors.get(
+            index,
+            (),
+        ):
+            handler_stack = list(input_stack[:handler_depth])
+            list.append(handler_stack, V2_FAST_ORIGIN_UNKNOWN)
+            if handler_lasti:
+                list.append(handler_stack, V2_FAST_ORIGIN_UNKNOWN)
+            queue_state(
+                target,
+                (
+                    tuple(handler_stack),
+                    merge_binding_maps(input_bindings, bindings),
+                    output_invalidations,
+                ),
+            )
 
     return {
-        "definitions": {
-            name: frozenset(values)
-            for name, values in definitions.items()
-        },
-        "load_expressions": load_expressions,
-        "dynamic_uses": tuple(dynamic_uses),
-        "implicit_call_expressions": tuple(implicit_call_expressions),
+        "definitions": {},
+        "load_expressions": access_expressions,
+        "dynamic_uses": tuple(sorted(dynamic_uses, key=repr)),
+        "implicit_call_expressions": tuple(sorted(
+            implicit_call_expressions,
+            key=lambda row: (row[0], repr(row[1])),
+        )),
+        "invoked_nested_codes": frozenset(invoked_nested_codes),
         "parameter_layout": parameter_layout,
     }
 
@@ -31368,8 +31901,10 @@ def v2_fast_origin_call_result_roots(
         if kind in {
             "aggregate",
             "attribute",
+            "choice",
             "derived",
             "maybe-unbound",
+            "mutated-member",
             "result-access",
             "subscript",
             "unpack",
@@ -31390,7 +31925,12 @@ def v2_fast_origin_is_static(expression: tuple[Any, ...]) -> bool:
     if not expression:
         return False
     kind = expression[0]
-    if kind in {"constant", "static", "static-callable"}:
+    if kind in {
+        "constant",
+        "nested-function",
+        "static",
+        "static-callable",
+    }:
         return True
     if kind == "attribute":
         return v2_fast_origin_is_static(expression[1])
@@ -31728,80 +32268,23 @@ def v2_code_access_analysis(
             accesses[name].add(instruction.opname)
             if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
                 continue
-            path, path_end = v2_instruction_access_path(
-                instructions,
-                index,
-            )
-            record_static_subscript_call(
-                source_kind="global",
-                source_name=name,
-                source_path=path,
-                path_start=index,
-                path_end=path_end,
-            )
-            call_index = v2_matching_direct_call_index(
-                instructions,
-                index,
-                path_end,
-            )
-            result_path = (
-                v2_call_result_access_path(instructions, call_index)
-                if call_index is not None
-                else ()
-            )
-            if path:
-                module_paths[name].add(path)
-                if call_index is not None:
-                    called_global_paths[name].add(path)
-                    global_path_call_result_paths[name][path].add(
-                        result_path
-                    )
-            else:
-                bare_global_names.add(name)
-                if call_index is not None:
-                    called_global_names.add(name)
-                    call_result_paths[name].add(result_path)
+            expression = fast_origin_data["load_expressions"].get(index)
+            if expression is None:
+                raise EvidenceFailed(
+                    "refusal-state global access lacks a reaching origin"
+                )
+            record_fast_expression(expression, call_index=None)
         if (
             instruction.opname in {"LOAD_DEREF", "LOAD_CLASSDEREF"}
             and isinstance(instruction.argval, str)
             and instruction.argval in code.co_freevars
         ):
-            freevar_name = instruction.argval
-            freevar_path, path_end = v2_instruction_access_path(
-                instructions,
-                index,
-            )
-            record_static_subscript_call(
-                source_kind="freevar",
-                source_name=freevar_name,
-                source_path=freevar_path,
-                path_start=index,
-                path_end=path_end,
-            )
-            call_index = v2_matching_direct_call_index(
-                instructions,
-                index,
-                path_end,
-            )
-            result_path = (
-                v2_call_result_access_path(instructions, call_index)
-                if call_index is not None
-                else ()
-            )
-            if freevar_path:
-                freevar_paths[freevar_name].add(freevar_path)
-                if call_index is not None:
-                    called_freevar_paths[freevar_name].add(freevar_path)
-                    freevar_path_call_result_paths[
-                        freevar_name
-                    ][freevar_path].add(result_path)
-            else:
-                bare_freevar_names.add(freevar_name)
-                if call_index is not None:
-                    called_freevar_names.add(freevar_name)
-                    freevar_call_result_paths[freevar_name].add(
-                        result_path
-                    )
+            expression = fast_origin_data["load_expressions"].get(index)
+            if expression is None:
+                raise EvidenceFailed(
+                    "refusal-state closure access lacks a reaching origin"
+                )
+            record_fast_expression(expression, call_index=None)
         if (
             instruction.opname in V2_FAST_LOCAL_LOAD_OPS
             and type(instruction.argval) is str
@@ -31811,28 +32294,7 @@ def v2_code_access_analysis(
                 raise EvidenceFailed(
                     "refusal-state fast-local access lacks an origin"
                 )
-            _path, path_end = v2_instruction_access_path(
-                instructions,
-                index,
-            )
-            for origin in v2_resolve_fast_origin(
-                expression,
-                fast_origin_definitions,
-            ):
-                if origin[0] == "binding":
-                    record_static_subscript_call(
-                        source_kind=origin[1],
-                        source_name=origin[2],
-                        source_path=origin[3],
-                        path_start=index,
-                        path_end=path_end,
-                    )
-            call_index = v2_matching_direct_call_index(
-                instructions,
-                index,
-                path_end,
-            )
-            record_fast_expression(expression, call_index=call_index)
+            record_fast_expression(expression, call_index=None)
     for _operation, expression in fast_origin_data["dynamic_uses"]:
         record_dynamic_result_use(expression)
     for call_index, expression in fast_origin_data[
@@ -31853,6 +32315,7 @@ def v2_code_access_analysis(
     for nested_code in nested_codes:
         merge_current_bindings = (
             merge_nested_bindings
+            or nested_code in fast_origin_data["invoked_nested_codes"]
             or nested_code.co_name in {
                 "<listcomp>",
                 "<setcomp>",
@@ -36328,16 +36791,38 @@ def v2_fixture_descriptor_names(
     *,
     list_directory: Callable[[str], list[str]] = os.listdir,
 ) -> tuple[str, list[str]]:
-    if (
-        type(candidate_directories) is not tuple
-        or not candidate_directories
-        or any(
-            type(path) is not str or not path
-            for path in candidate_directories
-        )
-    ):
+    if type(candidate_directories) is not tuple or not candidate_directories:
         raise EvidenceFailed(
             "fixture descriptor census candidates are malformed"
+        )
+    v2_require_fixture_resource_cap(
+        len(candidate_directories),
+        V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP,
+        diagnostic=(
+            "fixture descriptor census candidate count exceeds its cap"
+        ),
+    )
+    for path in candidate_directories:
+        if type(path) is not str or not path:
+            raise EvidenceFailed(
+                "fixture descriptor census candidates are malformed"
+            )
+        if len(path) > V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP:
+            raise EvidenceFailed(
+                "fixture descriptor census candidate path exceeds its byte cap"
+            )
+        try:
+            path_bytes = str.encode(path, "utf-8")
+        except UnicodeEncodeError as error:
+            raise EvidenceFailed(
+                "fixture descriptor census candidate path is not valid UTF-8"
+            ) from error
+        v2_require_fixture_resource_cap(
+            len(path_bytes),
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP,
+            diagnostic=(
+                "fixture descriptor census candidate path exceeds its byte cap"
+            ),
         )
     unavailable_errors: list[OSError] = []
     for directory in candidate_directories:
@@ -36882,13 +37367,13 @@ def v2_fixture_resource_state(
     maximum_descriptor_name = str(V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX)
     for descriptor_name in descriptor_names:
         if (
-            not str.isascii(descriptor_name)
+            len(descriptor_name) > len(maximum_descriptor_name)
+            or not str.isascii(descriptor_name)
             or not str.isdigit(descriptor_name)
             or (
                 len(descriptor_name) > 1
                 and str.startswith(descriptor_name, "0")
             )
-            or len(descriptor_name) > len(maximum_descriptor_name)
             or (
                 len(descriptor_name) == len(maximum_descriptor_name)
                 and descriptor_name > maximum_descriptor_name
@@ -65898,6 +66383,113 @@ def v2_execute_fault_resource_cases(
             },
         )
 
+        path_snapshot_original_lstat = os.lstat
+        growing_paths: list[Path] = [REPO_ROOT / SCRIPT_REL]
+        growth_triggered = False
+
+        def grow_fixture_paths_after_snapshot(path: Any) -> Any:
+            nonlocal growth_triggered
+            result = path_snapshot_original_lstat(path)
+            if not growth_triggered and Path(path) == REPO_ROOT:
+                growth_triggered = True
+                growing_paths.extend(
+                    [REPO_ROOT / SCRIPT_REL]
+                    * V2_FIXTURE_RESOURCE_PATHS_CAP
+                )
+            return result
+
+        os.lstat = grow_fixture_paths_after_snapshot
+        try:
+            growing_paths_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state(growing_paths),
+                contains="path count exceeds its bounded cap",
+            )
+        finally:
+            os.lstat = path_snapshot_original_lstat
+
+        hostile_path_equality_calls = 0
+
+        class HostileReplacementPath:
+            def __eq__(self, _other: Any) -> bool:
+                nonlocal hostile_path_equality_calls
+                hostile_path_equality_calls += 1
+                raise RuntimeError("hostile path equality must not execute")
+
+        replacement_paths: list[Any] = [REPO_ROOT / SCRIPT_REL]
+        replacement_triggered = False
+
+        def replace_fixture_path_after_snapshot(path: Any) -> Any:
+            nonlocal replacement_triggered
+            result = path_snapshot_original_lstat(path)
+            if not replacement_triggered and Path(path) == REPO_ROOT:
+                replacement_triggered = True
+                replacement_paths[0] = HostileReplacementPath()
+            return result
+
+        os.lstat = replace_fixture_path_after_snapshot
+        try:
+            replacement_path_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_resource_state(replacement_paths),
+                contains="exact repository path type",
+            )
+        finally:
+            os.lstat = path_snapshot_original_lstat
+
+        normalization_hook_calls = {"eq": 0, "hash": 0}
+
+        class HostileNormalization:
+            def __eq__(self, _other: Any) -> bool:
+                normalization_hook_calls["eq"] += 1
+                raise RuntimeError("hostile normalization equality executed")
+
+            def __hash__(self) -> int:
+                normalization_hook_calls["hash"] += 1
+                raise RuntimeError("hostile normalization hash executed")
+
+        normalization_type_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_exact_normalized_casefold(
+                "stable",
+                normalization=HostileNormalization(),  # type: ignore[arg-type]
+                label="hostile normalization fixture",
+                error_type=EvidenceFailed,
+            ),
+            contains="not an exact normalizable string",
+        )
+        checks.check(
+            "fixture-resource-path-snapshot-and-normalization-hooks",
+            growth_triggered
+            and len(growing_paths) == V2_FIXTURE_RESOURCE_PATHS_CAP + 1
+            and growing_paths_error.terminal == "EvidenceFailed"
+            and replacement_triggered
+            and replacement_path_error.terminal == "EvidenceFailed"
+            and hostile_path_equality_calls == 0
+            and normalization_type_error.terminal == "EvidenceFailed"
+            and normalization_hook_calls == {"eq": 0, "hash": 0},
+            expected={
+                "growth_terminal": "EvidenceFailed",
+                "captured_plus_one_count": (
+                    V2_FIXTURE_RESOURCE_PATHS_CAP + 1
+                ),
+                "replacement_terminal": "EvidenceFailed",
+                "hostile_path_equality_calls": 0,
+                "normalization_terminal": "EvidenceFailed",
+                "normalization_hook_calls": {"eq": 0, "hash": 0},
+            },
+            observed={
+                "growth_triggered": growth_triggered,
+                "grown_count": len(growing_paths),
+                "growth_terminal": growing_paths_error.terminal,
+                "replacement_triggered": replacement_triggered,
+                "replacement_terminal": replacement_path_error.terminal,
+                "hostile_path_equality_calls": hostile_path_equality_calls,
+                "normalization_terminal": normalization_type_error.terminal,
+                "normalization_hook_calls": normalization_hook_calls,
+            },
+        )
+
         non_utf8_environment_key = b"FS_V2_NON_UTF8_\xff"
         non_utf8_environment_value = b"value-\xfe"
         prior_non_utf8_environment = os.environb.get(non_utf8_environment_key)
@@ -65911,7 +66503,8 @@ def v2_execute_fault_resource_cases(
             )
         finally:
             if prior_non_utf8_environment is None:
-                del os.environb[non_utf8_environment_key]
+                if non_utf8_environment_key in os.environb:
+                    del os.environb[non_utf8_environment_key]
             else:
                 os.environb[non_utf8_environment_key] = (
                     prior_non_utf8_environment
@@ -66171,6 +66764,326 @@ def v2_execute_fault_resource_cases(
                     preflight_reservation.terminal_assignment_started
                 ),
             },
+        )
+
+        cleanup_rows: list[dict[str, Any]] = []
+
+        def exercise_directory_cleanup(
+            *,
+            fail_primary: bool,
+        ) -> None:
+            original_open = os.open
+            original_fsync = os.fsync
+            original_close = os.close
+            operations: list[str] = []
+
+            def fake_open(*_args: Any, **_kwargs: Any) -> int:
+                operations.append("open")
+                return 301
+
+            def fake_fsync(_descriptor: int) -> None:
+                operations.append("fsync")
+                if fail_primary:
+                    raise OSError(errno.EIO, "synthetic fsync primary")
+
+            def fake_close(_descriptor: int) -> None:
+                operations.append("close")
+                raise OSError(errno.EIO, "synthetic fsync close")
+
+            os.open = fake_open
+            os.fsync = fake_fsync
+            os.close = fake_close
+            expected_diagnostic = (
+                "v2 directory fsync failed"
+                if fail_primary
+                else "v2 directory descriptor close failed"
+            )
+            try:
+                error = expect_error(
+                    InfrastructureFailed,
+                    lambda: v2_fsync_directory(REPO_ROOT),
+                    contains=expected_diagnostic,
+                )
+            finally:
+                os.open = original_open
+                os.fsync = original_fsync
+                os.close = original_close
+            cleanup_rows.append({
+                "case": (
+                    "directory-primary-and-close"
+                    if fail_primary
+                    else "directory-close-only"
+                ),
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+                "operations": operations,
+            })
+
+        def exercise_exclusive_writer_cleanup(
+            *,
+            fail_primary: bool,
+        ) -> None:
+            original_open = os.open
+            original_write = os.write
+            original_fsync = os.fsync
+            original_close = os.close
+            operations: list[str] = []
+
+            def fake_open(*_args: Any, **_kwargs: Any) -> int:
+                operations.append("open")
+                return 302
+
+            def fake_write(_descriptor: int, payload: bytes) -> int:
+                operations.append("write")
+                if fail_primary:
+                    raise OSError(errno.EIO, "synthetic write primary")
+                return len(payload)
+
+            def fake_fsync(_descriptor: int) -> None:
+                operations.append("fsync")
+
+            def fake_close(_descriptor: int) -> None:
+                operations.append("close")
+                raise OSError(errno.EIO, "synthetic writer close")
+
+            os.open = fake_open
+            os.write = fake_write
+            os.fsync = fake_fsync
+            os.close = fake_close
+            expected_diagnostic = (
+                "v2 exclusive writer failed for reserved artifact"
+                if fail_primary
+                else "v2 exclusive writer could not close reserved artifact"
+            )
+            try:
+                error = expect_error(
+                    InfrastructureFailed,
+                    lambda: v2_write_exclusive(
+                        REPO_ROOT / "synthetic-cleanup-member",
+                        b"x",
+                    ),
+                    contains=expected_diagnostic,
+                )
+            finally:
+                os.open = original_open
+                os.write = original_write
+                os.fsync = original_fsync
+                os.close = original_close
+            cleanup_rows.append({
+                "case": (
+                    "exclusive-primary-and-close"
+                    if fail_primary
+                    else "exclusive-close-only"
+                ),
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+                "operations": operations,
+            })
+
+        def exercise_reserved_member_cleanup(
+            *,
+            operation: str,
+            fail_primary: bool,
+        ) -> None:
+            original_open_reserved_directory = v2_open_reserved_directory
+            original_read_descriptor_strict = v2_read_descriptor_strict
+            original_open = os.open
+            original_write = os.write
+            original_fsync = os.fsync
+            original_fstat = os.fstat
+            original_close = os.close
+            operations: list[str] = []
+            parent_descriptor = 501 if operation == "write" else 601
+            member_descriptor = 502 if operation == "write" else 602
+
+            def fake_open_reserved_directory(
+                _reservation: V2BundleReservation,
+                _relative: PurePosixPath,
+                *,
+                create: bool,
+            ) -> int:
+                operations.append(f"open-parent:{create}")
+                return parent_descriptor
+
+            def fake_open(*_args: Any, **_kwargs: Any) -> int:
+                operations.append("open-member")
+                return member_descriptor
+
+            def fake_write(_descriptor: int, payload: bytes) -> int:
+                operations.append("write")
+                if fail_primary:
+                    raise OSError(errno.EIO, "synthetic reserved write")
+                return len(payload)
+
+            def fake_fsync(descriptor: int) -> None:
+                operations.append(f"fsync:{descriptor}")
+
+            def fake_fstat(_descriptor: int) -> Any:
+                operations.append("fstat")
+                return types.SimpleNamespace(
+                    st_dev=1,
+                    st_ino=2,
+                    st_mode=stat.S_IFREG | 0o644,
+                    st_nlink=1,
+                    st_size=1,
+                    st_mtime_ns=3,
+                    st_ctime_ns=4,
+                )
+
+            def fake_read_descriptor_strict(
+                _descriptor: int,
+                *,
+                label: str,
+                expected_identity: Mapping[str, int] | None = None,
+            ) -> bytes:
+                del label, expected_identity
+                operations.append("read")
+                if fail_primary:
+                    raise InputRefused("synthetic reserved read primary")
+                return b"x"
+
+            def fake_close(descriptor: int) -> None:
+                operations.append(f"close:{descriptor}")
+                raise OSError(errno.EIO, "synthetic reserved close")
+
+            globals()["v2_open_reserved_directory"] = (
+                fake_open_reserved_directory
+            )
+            globals()["v2_read_descriptor_strict"] = (
+                fake_read_descriptor_strict
+            )
+            os.open = fake_open
+            os.write = fake_write
+            os.fsync = fake_fsync
+            os.fstat = fake_fstat
+            os.close = fake_close
+            synthetic_reservation = V2BundleReservation(
+                output=REPO_ROOT,
+                artifact_root="target",
+                artifact_dir="synthetic-cleanup",
+                terminal_descriptor=None,
+                output_descriptor=None,
+                parent_descriptor=None,
+                path_anchors=(),
+            )
+            if operation == "write":
+                callback: Callable[[], Any] = lambda: (
+                    v2_write_reserved_member(
+                        synthetic_reservation,
+                        relative=PurePosixPath("member.json"),
+                        payload=b"x",
+                    )
+                )
+                expected_type: type[HarnessError] = InfrastructureFailed
+                expected_diagnostic = (
+                    "v2 descriptor-relative write failed for member.json"
+                    if fail_primary
+                    else (
+                        "v2 reserved member descriptor close failed: "
+                        "member.json"
+                    )
+                )
+            else:
+                callback = lambda: v2_read_reserved_member(
+                    synthetic_reservation,
+                    name="member.json",
+                    expected_identity={},
+                )
+                expected_type = (
+                    InputRefused if fail_primary else InfrastructureFailed
+                )
+                expected_diagnostic = (
+                    "synthetic reserved read primary"
+                    if fail_primary
+                    else (
+                        "v2 reserved artifact descriptor close failed: "
+                        "member.json"
+                    )
+                )
+            try:
+                error = expect_error(
+                    expected_type,
+                    callback,
+                    contains=expected_diagnostic,
+                )
+            finally:
+                globals()["v2_open_reserved_directory"] = (
+                    original_open_reserved_directory
+                )
+                globals()["v2_read_descriptor_strict"] = (
+                    original_read_descriptor_strict
+                )
+                os.open = original_open
+                os.write = original_write
+                os.fsync = original_fsync
+                os.fstat = original_fstat
+                os.close = original_close
+            cleanup_rows.append({
+                "case": f"reserved-{operation}-"
+                + ("primary-and-close" if fail_primary else "close-only"),
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+                "operations": operations,
+            })
+
+        for cleanup_primary_failure in (False, True):
+            exercise_directory_cleanup(
+                fail_primary=cleanup_primary_failure,
+            )
+            exercise_exclusive_writer_cleanup(
+                fail_primary=cleanup_primary_failure,
+            )
+            exercise_reserved_member_cleanup(
+                operation="write",
+                fail_primary=cleanup_primary_failure,
+            )
+            exercise_reserved_member_cleanup(
+                operation="read",
+                fail_primary=cleanup_primary_failure,
+            )
+
+        cleanup_by_case = {
+            row["case"]: row for row in cleanup_rows
+        }
+        checks.check(
+            "descriptor-cleanup-primary-precedence-matrix",
+            len(cleanup_rows) == 8
+            and all(
+                row["terminal"]
+                in {"InfrastructureFailed", "InputRefused"}
+                for row in cleanup_rows
+            )
+            and cleanup_by_case["directory-close-only"]["operations"]
+            == ["open", "fsync", "close"]
+            and cleanup_by_case["directory-primary-and-close"][
+                "diagnostic"
+            ]
+            == "v2 directory fsync failed"
+            and cleanup_by_case["exclusive-close-only"]["operations"]
+            == ["open", "write", "fsync", "close"]
+            and cleanup_by_case["exclusive-primary-and-close"][
+                "diagnostic"
+            ]
+            == "v2 exclusive writer failed for reserved artifact"
+            and cleanup_by_case["reserved-write-close-only"][
+                "operations"
+            ][-2:] == ["close:502", "close:501"]
+            and cleanup_by_case["reserved-write-primary-and-close"][
+                "diagnostic"
+            ] == "v2 descriptor-relative write failed for member.json"
+            and cleanup_by_case["reserved-read-close-only"][
+                "operations"
+            ][-2:] == ["close:602", "close:601"]
+            and cleanup_by_case["reserved-read-primary-and-close"][
+                "diagnostic"
+            ] == "synthetic reserved read primary",
+            expected={
+                "rows": 8,
+                "all_closes_attempted": True,
+                "close_only": "first deterministic close failure",
+                "dual_failure": "primary operation failure",
+            },
+            observed={"rows": cleanup_rows},
         )
 
         def exercise_directory_chain(
@@ -67210,15 +68123,25 @@ def v2_execute_fault_resource_cases(
             "file_bytes": V2_FIXTURE_RESOURCE_FILE_BYTES_CAP,
             "total_file_bytes": V2_FIXTURE_RESOURCE_TOTAL_FILE_BYTES_CAP,
             "symlink_bytes": V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP,
+            "descriptor_candidates": (
+                V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP
+            ),
+            "descriptor_candidate_path_bytes": (
+                V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+            ),
             "descriptor_entries": (
                 V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
             ),
+            "descriptor": V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX,
             "environment_entries": (
                 V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
             ),
             "environment_bytes": V2_FIXTURE_RESOURCE_ENVIRONMENT_BYTES_CAP,
             "additional_state_bytes": (
                 V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+            ),
+            "additional_state_snapshot_bytes": (
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
             ),
             "projection_bytes": V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
         }
@@ -67266,6 +68189,213 @@ def v2_execute_fault_resource_cases(
                     row["name"] for row in fixture_resource_cap_rows
                 ],
                 "rows": fixture_resource_cap_rows,
+            },
+        )
+        descriptor_candidate_calls: list[str] = []
+
+        def bounded_descriptor_candidates(path: str) -> list[str]:
+            descriptor_candidate_calls.append(path)
+            return []
+
+        exact_candidate_paths = tuple(
+            f"/synthetic-fd-{index}"
+            for index in range(
+                V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP
+            )
+        )
+        exact_candidate_source, exact_candidate_names = (
+            v2_fixture_descriptor_names(
+                exact_candidate_paths,
+                list_directory=bounded_descriptor_candidates,
+            )
+        )
+        calls_after_exact_candidates = list(descriptor_candidate_calls)
+        descriptor_candidate_calls.clear()
+        candidate_count_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_descriptor_names(
+                exact_candidate_paths + ("/synthetic-fd-plus-one",),
+                list_directory=bounded_descriptor_candidates,
+            ),
+            contains="candidate count exceeds its cap",
+        )
+        calls_after_candidate_count_refusal = list(
+            descriptor_candidate_calls
+        )
+        descriptor_candidate_calls.clear()
+        exact_ascii_candidate = "a" * (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+        )
+        ascii_source, ascii_names = v2_fixture_descriptor_names(
+            (exact_ascii_candidate,),
+            list_directory=bounded_descriptor_candidates,
+        )
+        descriptor_candidate_calls.clear()
+        ascii_plus_one_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_descriptor_names(
+                (exact_ascii_candidate + "a",),
+                list_directory=bounded_descriptor_candidates,
+            ),
+            contains="candidate path exceeds its byte cap",
+        )
+        calls_after_ascii_refusal = list(descriptor_candidate_calls)
+        descriptor_candidate_calls.clear()
+        exact_unicode_candidate = "é" * (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP // 2
+        )
+        unicode_source, unicode_names = v2_fixture_descriptor_names(
+            (exact_unicode_candidate,),
+            list_directory=bounded_descriptor_candidates,
+        )
+        descriptor_candidate_calls.clear()
+        unicode_plus_one_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_descriptor_names(
+                (exact_unicode_candidate + "é",),
+                list_directory=bounded_descriptor_candidates,
+            ),
+            contains="candidate path exceeds its byte cap",
+        )
+        calls_after_unicode_refusal = list(descriptor_candidate_calls)
+        descriptor_candidate_calls.clear()
+        surrogate_candidate_error = expect_error(
+            EvidenceFailed,
+            lambda: v2_fixture_descriptor_names(
+                ("/synthetic-\ud800-fd",),
+                list_directory=bounded_descriptor_candidates,
+            ),
+            contains="not valid UTF-8",
+        )
+        calls_after_surrogate_refusal = list(descriptor_candidate_calls)
+        checks.check(
+            "descriptor-census-candidate-count-and-path-byte-boundaries",
+            exact_candidate_source == exact_candidate_paths[0]
+            and exact_candidate_names == []
+            and calls_after_exact_candidates == [exact_candidate_paths[0]]
+            and candidate_count_error.terminal == "EvidenceFailed"
+            and calls_after_candidate_count_refusal == []
+            and ascii_source == exact_ascii_candidate
+            and ascii_names == []
+            and len(str.encode(ascii_source, "utf-8"))
+            == V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+            and ascii_plus_one_error.terminal == "EvidenceFailed"
+            and calls_after_ascii_refusal == []
+            and unicode_source == exact_unicode_candidate
+            and unicode_names == []
+            and len(str.encode(unicode_source, "utf-8"))
+            == V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+            and unicode_plus_one_error.terminal == "EvidenceFailed"
+            and calls_after_unicode_refusal == []
+            and surrogate_candidate_error.terminal == "EvidenceFailed"
+            and calls_after_surrogate_refusal == [],
+            expected={
+                "exact_candidate_count": (
+                    V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP
+                ),
+                "count_plus_one": "EvidenceFailed before directory read",
+                "ascii_exact_bytes": (
+                    V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+                ),
+                "ascii_plus_one": "EvidenceFailed before directory read",
+                "unicode_exact_bytes": (
+                    V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+                ),
+                "unicode_plus_one": "EvidenceFailed before directory read",
+                "surrogate": "EvidenceFailed before directory read",
+            },
+            observed={
+                "exact_candidate_source": exact_candidate_source,
+                "exact_candidate_names": exact_candidate_names,
+                "exact_candidate_calls": calls_after_exact_candidates,
+                "count_plus_one_terminal": candidate_count_error.terminal,
+                "count_plus_one_calls": calls_after_candidate_count_refusal,
+                "ascii_exact_bytes": len(
+                    str.encode(ascii_source, "utf-8")
+                ),
+                "ascii_plus_one_terminal": ascii_plus_one_error.terminal,
+                "ascii_plus_one_calls": calls_after_ascii_refusal,
+                "unicode_exact_bytes": len(
+                    str.encode(unicode_source, "utf-8")
+                ),
+                "unicode_plus_one_terminal": unicode_plus_one_error.terminal,
+                "unicode_plus_one_calls": calls_after_unicode_refusal,
+                "surrogate_terminal": surrogate_candidate_error.terminal,
+                "surrogate_calls": calls_after_surrogate_refusal,
+            },
+        )
+
+        source_wire_kwdefaults = v2_raw_function_attribute(
+            v2_validate_exact_json_wire,
+            "__kwdefaults__",
+        )
+        prior_list_snapshot_base = V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+        try:
+            globals()["V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES"] = (
+                V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
+            )
+            source_snapshot_exact = v2_validate_exact_json_wire(
+                [],
+                label="source configured snapshot exact cap",
+            )
+            globals()["V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES"] = (
+                V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP + 1
+            )
+            source_snapshot_plus_one_error = expect_error(
+                InputRefused,
+                lambda: v2_validate_exact_json_wire(
+                    [],
+                    label="source configured snapshot plus one",
+                ),
+                contains="snapshot cap",
+            )
+            globals()["V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES"] = (
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
+            )
+            additional_snapshot_exact = (
+                v2_fixture_additional_state_projection([])
+            )
+            globals()["V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES"] = (
+                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP + 1
+            )
+            additional_snapshot_plus_one_error = expect_error(
+                EvidenceFailed,
+                lambda: v2_fixture_additional_state_projection([]),
+                contains="snapshot cap",
+            )
+        finally:
+            globals()["V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES"] = (
+                prior_list_snapshot_base
+            )
+        checks.check(
+            "configured-snapshot-cap-boundaries",
+            type(source_wire_kwdefaults) is dict
+            and source_wire_kwdefaults["snapshot_byte_cap"]
+            == V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
+            and source_snapshot_exact == []
+            and source_snapshot_plus_one_error.terminal == "InputRefused"
+            and additional_snapshot_exact == []
+            and additional_snapshot_plus_one_error.terminal
+            == "EvidenceFailed",
+            expected={
+                "source_default": V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP,
+                "source_exact": "admitted",
+                "source_plus_one": "InputRefused",
+                "additional_exact": "admitted",
+                "additional_plus_one": "EvidenceFailed",
+            },
+            observed={
+                "source_default": (
+                    source_wire_kwdefaults.get("snapshot_byte_cap")
+                    if type(source_wire_kwdefaults) is dict
+                    else None
+                ),
+                "source_exact": source_snapshot_exact,
+                "source_plus_one": source_snapshot_plus_one_error.terminal,
+                "additional_exact": additional_snapshot_exact,
+                "additional_plus_one": (
+                    additional_snapshot_plus_one_error.terminal
+                ),
             },
         )
         exact_status = v2_validate_status(
