@@ -1538,7 +1538,7 @@ class InfrastructureFailed(HarnessError):
 V2DescriptorCloseFailure = tuple[HarnessError, BaseException]
 
 
-def v2_close_owned_descriptors(
+def v2_collect_owned_descriptor_close_failure(
     specifications: Sequence[tuple[int | None, HarnessError]],
 ) -> V2DescriptorCloseFailure | None:
     """Attempt every owned close and retain the first cleanup failure.
@@ -1557,6 +1557,34 @@ def v2_close_owned_descriptors(
             if first_failure is None:
                 first_failure = (typed_error, cause)
     return first_failure
+
+
+def v2_close_owned_descriptors(
+    specifications: Sequence[tuple[int | None, HarnessError]],
+    *,
+    surface_failure: bool,
+) -> None:
+    """Close every descriptor, surfacing cleanup only after body success."""
+    first_error: HarnessError | None = None
+    first_cause: BaseException | None = None
+    for descriptor, typed_error in specifications:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except BaseException as cause:
+            if first_cause is None:
+                first_error = typed_error
+                first_cause = cause
+    if not surface_failure or first_cause is None:
+        return
+    if not isinstance(first_cause, OSError):
+        raise first_cause
+    if first_error is None:
+        raise InfrastructureFailed(
+            "descriptor cleanup lost its typed failure"
+        ) from first_cause
+    raise first_error from first_cause
 
 
 def v2_raise_descriptor_close_failure(
@@ -1884,7 +1912,7 @@ def bounded_read(
         raise InputRefused(
             f"expected readable regular file: {display_path}"
         ) from error
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -1922,6 +1950,7 @@ def bounded_read(
             raise InputRefused(
                 f"input artifact changed during bounded read: {display_path}"
             )
+        operation_succeeded = True
     except HarnessError:
         raise
     except OSError as error:
@@ -1929,15 +1958,14 @@ def bounded_read(
             f"bounded input read failed: {display_path}"
         ) from error
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
                     f"bounded input descriptor close failed: {display_path}"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
     return payload
 
 
@@ -1962,7 +1990,7 @@ def v2_read_repo_relative_file_strict(
     directory_links: list[tuple[int, str, int, int, int]] = []
     file_descriptor: int | None = None
     payload: bytes | None = None
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         root_descriptor = os.open(REPO_ROOT, directory_flags)
         directory_descriptors.append(root_descriptor)
@@ -2076,6 +2104,7 @@ def v2_read_repo_relative_file_strict(
                     f"{label} path identity changed while being read"
                 )
         payload = b"".join(chunks)
+        operation_succeeded = True
     except HarnessError:
         raise
     except OSError as error:
@@ -2096,8 +2125,10 @@ def v2_read_repo_relative_file_strict(
                     f"{label} directory descriptor close failed"
                 ),
             ))
-        close_failure = v2_close_owned_descriptors(close_specs)
-    v2_raise_descriptor_close_failure(close_failure)
+        v2_close_owned_descriptors(
+            close_specs,
+            surface_failure=operation_succeeded,
+        )
     if payload is None:
         raise InfrastructureFailed(f"{label} strict read produced no payload")
     return payload
@@ -23899,7 +23930,7 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
             "v2 exclusive writer could not create reserved artifact"
         ) from error
     written = 0
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         while written < len(payload):
             count = os.write(descriptor, payload[written:])
@@ -23909,6 +23940,7 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
                 )
             written += count
         os.fsync(descriptor)
+        operation_succeeded = True
     except OSError as error:
         raise InfrastructureFailed(
             "v2 exclusive writer failed for reserved artifact"
@@ -23918,15 +23950,14 @@ def v2_write_exclusive(path: Path, payload: bytes) -> None:
         # remains without a valid terminal seal for manual recovery.
         raise
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
                     "v2 exclusive writer could not close reserved artifact"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
 
 
 def v2_fsync_directory(path: Path) -> None:
@@ -23936,21 +23967,21 @@ def v2_fsync_directory(path: Path) -> None:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise InfrastructureFailed("v2 directory could not be opened for fsync") from error
-    close_failure: V2DescriptorCloseFailure | None = None
+    operation_succeeded = False
     try:
         os.fsync(descriptor)
+        operation_succeeded = True
     except OSError as error:
         raise InfrastructureFailed("v2 directory fsync failed") from error
     finally:
-        close_failure = v2_close_owned_descriptors((
+        v2_close_owned_descriptors((
             (
                 descriptor,
                 InfrastructureFailed(
                     "v2 directory descriptor close failed"
                 ),
             ),
-        ))
-    v2_raise_descriptor_close_failure(close_failure)
+        ), surface_failure=operation_succeeded)
 
 
 @dataclass
@@ -31162,7 +31193,8 @@ def v2_fast_local_origin_dataflow(
         updates += 1
         if updates > update_cap:
             raise EvidenceFailed(
-                "refusal-state fast-local CFG exceeds its convergence cap"
+                "refusal-state fast-local CFG exceeds its convergence cap "
+                f"in {code.co_qualname} at instruction {target}"
             )
         if target not in queued:
             queued.add(target)
