@@ -1896,6 +1896,32 @@ def bounded_read(
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             payload = handle.read(cap + 1)
         after = os.fstat(descriptor)
+        if len(payload) > cap:
+            raise InputRefused(
+                f"input artifact exceeds {cap} byte cap: {display_path}"
+            )
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity:
+            raise InputRefused(
+                f"input artifact changed during bounded read: {display_path}"
+            )
     except HarnessError:
         raise
     except OSError as error:
@@ -1912,32 +1938,6 @@ def bounded_read(
             ),
         ))
     v2_raise_descriptor_close_failure(close_failure)
-    if len(payload) > cap:
-        raise InputRefused(
-            f"input artifact exceeds {cap} byte cap: {display_path}"
-        )
-    before_identity = (
-        before.st_dev,
-        before.st_ino,
-        before.st_mode,
-        before.st_nlink,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    )
-    after_identity = (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_nlink,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    )
-    if before_identity != after_identity:
-        raise InputRefused(
-            f"input artifact changed during bounded read: {display_path}"
-        )
     return payload
 
 
@@ -3784,15 +3784,20 @@ V2_MANIFEST_TABLE_KEYS = {
         "max_source_exact_wire_items",
         "max_source_exact_wire_nodes",
         "max_source_exact_wire_depth",
+        "max_source_exact_wire_snapshot_bytes",
         "max_fixture_resource_paths",
         "max_fixture_resource_path_bytes",
         "max_fixture_resource_file_bytes",
         "max_fixture_resource_total_file_bytes",
         "max_fixture_resource_symlink_bytes",
+        "max_fixture_resource_descriptor_candidates",
+        "max_fixture_resource_descriptor_candidate_path_bytes",
         "max_fixture_resource_descriptor_entries",
+        "max_fixture_resource_descriptor",
         "max_fixture_resource_environment_entries",
         "max_fixture_resource_environment_bytes",
         "max_fixture_resource_additional_state_bytes",
+        "max_fixture_resource_additional_state_snapshot_bytes",
         "max_fixture_resource_projection_bytes",
         "max_history_citations_per_issue",
         "max_compatibility_targets_per_receipt",
@@ -4380,6 +4385,9 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_source_exact_wire_items": V2_SOURCE_EXACT_WIRE_ITEM_CAP,
         "max_source_exact_wire_nodes": V2_SOURCE_EXACT_WIRE_NODE_CAP,
         "max_source_exact_wire_depth": V2_SOURCE_EXACT_WIRE_DEPTH_CAP,
+        "max_source_exact_wire_snapshot_bytes": (
+            V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
+        ),
         "max_fixture_resource_paths": V2_FIXTURE_RESOURCE_PATHS_CAP,
         "max_fixture_resource_path_bytes": (
             V2_FIXTURE_RESOURCE_PATH_BYTES_CAP
@@ -4393,8 +4401,17 @@ def load_case_manifest_v2() -> dict[str, Any]:
         "max_fixture_resource_symlink_bytes": (
             V2_FIXTURE_RESOURCE_SYMLINK_BYTES_CAP
         ),
+        "max_fixture_resource_descriptor_candidates": (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATES_CAP
+        ),
+        "max_fixture_resource_descriptor_candidate_path_bytes": (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_CANDIDATE_PATH_BYTES_CAP
+        ),
         "max_fixture_resource_descriptor_entries": (
             V2_FIXTURE_RESOURCE_DESCRIPTOR_ENTRIES_CAP
+        ),
+        "max_fixture_resource_descriptor": (
+            V2_FIXTURE_RESOURCE_DESCRIPTOR_MAX
         ),
         "max_fixture_resource_environment_entries": (
             V2_FIXTURE_RESOURCE_ENVIRONMENT_ENTRIES_CAP
@@ -4404,6 +4421,9 @@ def load_case_manifest_v2() -> dict[str, Any]:
         ),
         "max_fixture_resource_additional_state_bytes": (
             V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
+        ),
+        "max_fixture_resource_additional_state_snapshot_bytes": (
+            V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_SNAPSHOT_BYTES_CAP
         ),
         "max_fixture_resource_projection_bytes": (
             V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP
@@ -30493,8 +30513,6 @@ V2_FAST_LOCAL_LOAD_OPS = frozenset({
     "LOAD_FAST_MAYBE_NULL",
 })
 V2_FAST_LOCAL_MAYBE_UNBOUND_LOAD_OPS = frozenset({
-    "LOAD_FAST_AND_CLEAR",
-    "LOAD_FAST_CHECK",
     "LOAD_FAST_MAYBE_NULL",
 })
 V2_FAST_SUPERINSTRUCTION_EXPANSIONS = {
@@ -67026,6 +67044,155 @@ def v2_execute_fault_resource_cases(
                 "operations": operations,
             })
 
+        def exercise_strict_directory_registration(
+            *,
+            non_directory: bool,
+        ) -> None:
+            original_open = os.open
+            original_fstat = os.fstat
+            original_close = os.close
+            operations: list[str] = []
+            descriptors = iter((10, 11))
+
+            def fake_open(*_args: Any, **_kwargs: Any) -> int:
+                descriptor = next(descriptors)
+                operations.append(f"open:{descriptor}")
+                return descriptor
+
+            def fake_fstat(descriptor: int) -> Any:
+                operations.append(f"fstat:{descriptor}")
+                if not non_directory:
+                    raise OSError(errno.EIO, "synthetic child fstat")
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+
+            def fake_close(descriptor: int) -> None:
+                operations.append(f"close:{descriptor}")
+
+            os.open = fake_open
+            os.fstat = fake_fstat
+            os.close = fake_close
+            diagnostic = (
+                "contains a non-directory component"
+                if non_directory
+                else "cannot be opened safely"
+            )
+            try:
+                error = expect_error(
+                    InputRefused,
+                    lambda: v2_read_repo_relative_file_strict(
+                        "scripts/member.json",
+                        label="synthetic strict child",
+                    ),
+                    contains=diagnostic,
+                )
+            finally:
+                os.open = original_open
+                os.fstat = original_fstat
+                os.close = original_close
+            cleanup_rows.append({
+                "case": (
+                    "strict-child-nondirectory"
+                    if non_directory
+                    else "strict-child-fstat-primary"
+                ),
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+                "operations": operations,
+            })
+
+        def exercise_bounded_read_semantic_precedence(
+            *,
+            identity_change: bool,
+        ) -> None:
+            original_open = os.open
+            original_fstat = os.fstat
+            original_fdopen = os.fdopen
+            original_close = os.close
+            operations: list[str] = []
+            fstat_calls = 0
+
+            class SyntheticHandle:
+                def __enter__(self) -> "SyntheticHandle":
+                    operations.append("handle-enter")
+                    return self
+
+                def read(self, _count: int) -> bytes:
+                    operations.append("read")
+                    return b"x" if identity_change else b"xx"
+
+                def __exit__(
+                    self,
+                    _error_type: Any,
+                    _error: Any,
+                    _traceback: Any,
+                ) -> None:
+                    operations.append("handle-exit")
+
+            def fake_open(*_args: Any, **_kwargs: Any) -> int:
+                operations.append("open")
+                return 20
+
+            def fake_fstat(_descriptor: int) -> Any:
+                nonlocal fstat_calls
+                fstat_calls += 1
+                operations.append(f"fstat:{fstat_calls}")
+                return types.SimpleNamespace(
+                    st_dev=1,
+                    st_ino=(2 if fstat_calls == 1 or not identity_change else 3),
+                    st_mode=stat.S_IFREG | 0o644,
+                    st_nlink=1,
+                    st_size=1,
+                    st_mtime_ns=4,
+                    st_ctime_ns=5,
+                )
+
+            def fake_fdopen(
+                _descriptor: int,
+                _mode: str,
+                *,
+                closefd: bool,
+            ) -> SyntheticHandle:
+                operations.append(f"fdopen:{closefd}")
+                return SyntheticHandle()
+
+            def fake_close(_descriptor: int) -> None:
+                operations.append("close")
+                raise OSError(errno.EIO, "synthetic bounded-read close")
+
+            os.open = fake_open
+            os.fstat = fake_fstat
+            os.fdopen = fake_fdopen
+            os.close = fake_close
+            diagnostic = (
+                "changed during bounded read"
+                if identity_change
+                else "exceeds 1 byte cap"
+            )
+            try:
+                error = expect_error(
+                    InputRefused,
+                    lambda: bounded_read(
+                        REPO_ROOT / SCRIPT_REL,
+                        cap=1,
+                    ),
+                    contains=diagnostic,
+                )
+            finally:
+                os.open = original_open
+                os.fstat = original_fstat
+                os.fdopen = original_fdopen
+                os.close = original_close
+            cleanup_rows.append({
+                "case": (
+                    "bounded-read-identity-and-close"
+                    if identity_change
+                    else "bounded-read-oversize-and-close"
+                ),
+                "terminal": error.terminal,
+                "diagnostic": str(error),
+                "operations": operations,
+            })
+
         for cleanup_primary_failure in (False, True):
             exercise_directory_cleanup(
                 fail_primary=cleanup_primary_failure,
@@ -67041,13 +67208,17 @@ def v2_execute_fault_resource_cases(
                 operation="read",
                 fail_primary=cleanup_primary_failure,
             )
+        exercise_strict_directory_registration(non_directory=False)
+        exercise_strict_directory_registration(non_directory=True)
+        exercise_bounded_read_semantic_precedence(identity_change=False)
+        exercise_bounded_read_semantic_precedence(identity_change=True)
 
         cleanup_by_case = {
             row["case"]: row for row in cleanup_rows
         }
         checks.check(
             "descriptor-cleanup-primary-precedence-matrix",
-            len(cleanup_rows) == 8
+            len(cleanup_rows) == 12
             and all(
                 row["terminal"]
                 in {"InfrastructureFailed", "InputRefused"}
@@ -67076,9 +67247,27 @@ def v2_execute_fault_resource_cases(
             ][-2:] == ["close:602", "close:601"]
             and cleanup_by_case["reserved-read-primary-and-close"][
                 "diagnostic"
-            ] == "synthetic reserved read primary",
+            ] == "synthetic reserved read primary"
+            and cleanup_by_case["strict-child-fstat-primary"][
+                "operations"
+            ][-2:] == ["close:11", "close:10"]
+            and cleanup_by_case["strict-child-nondirectory"][
+                "operations"
+            ][-2:] == ["close:11", "close:10"]
+            and cleanup_by_case["bounded-read-oversize-and-close"][
+                "terminal"
+            ] == "InputRefused"
+            and "exceeds 1 byte cap" in cleanup_by_case[
+                "bounded-read-oversize-and-close"
+            ]["diagnostic"]
+            and cleanup_by_case["bounded-read-identity-and-close"][
+                "terminal"
+            ] == "InputRefused"
+            and "changed during bounded read" in cleanup_by_case[
+                "bounded-read-identity-and-close"
+            ]["diagnostic"],
             expected={
-                "rows": 8,
+                "rows": 12,
                 "all_closes_attempted": True,
                 "close_only": "first deterministic close failure",
                 "dual_failure": "primary operation failure",
