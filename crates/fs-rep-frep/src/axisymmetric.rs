@@ -16,7 +16,9 @@ use fs_geom::{
 /// Hard work bound for both construction and a single exhaustive query.
 pub const MAX_AXISYMMETRIC_SEGMENTS: usize = 1024;
 const TAU: f64 = core::f64::consts::TAU;
-const JOIN_ULPS: f64 = 256.0 * f64::EPSILON;
+/// Binary64 relative slack.  Individual predicates turn this into a quantity
+/// with the same dimension as the quantity being compared.
+const ROUNDING_ULPS: f64 = 256.0 * f64::EPSILON;
 
 /// One point in the meridian half-plane. `radius` is cylindrical radius and
 /// must be non-negative; `axial` is the coordinate along the revolution axis.
@@ -52,9 +54,12 @@ pub enum MeridianSegment {
     /// polygonal approximation. `clockwise` selects the oriented sweep from
     /// `start` to `end` around `center`.
     Arc {
-        /// Oriented start.
+        /// Oriented start. Construction canonicalizes it onto the retained
+        /// circle from the center, start angle, and one canonical radius.
         start: MeridianPoint,
-        /// Oriented end.
+        /// Oriented end. Input may differ from the declared circle by the
+        /// scale-aware admission residual; construction canonicalizes the
+        /// stored loop vertex so all consumers share one circle.
         end: MeridianPoint,
         /// Circle center in the meridian plane.
         center: MeridianPoint,
@@ -246,6 +251,9 @@ pub enum AxisymmetricError {
         /// Index of the degenerate feature.
         index: usize,
     },
+    /// A cancellable validation consumer observed cancellation before all
+    /// construction predicates completed.
+    Cancelled,
     /// Arc endpoints are not on the declared circle within a conservative
     /// machine-scale construction tolerance.
     InvalidArc {
@@ -301,6 +309,10 @@ impl core::fmt::Display for AxisymmetricError {
             Self::DegenerateFeature { index } => write!(
                 f,
                 "feature {index} is degenerate or has an unsupported full-circle sweep"
+            ),
+            Self::Cancelled => write!(
+                f,
+                "axisymmetric construction validation was cancelled before completion"
             ),
             Self::InvalidArc { index } => write!(
                 f,
@@ -425,7 +437,12 @@ impl AxisymmetricChart {
     /// Validate a closed oriented line/arc loop. Unsupported topology or
     /// malformed geometry is a typed refusal; binary64 trace/topology
     /// authority remains explicitly unavailable in v1.
-    pub fn try_new(segments: Vec<MeridianSegment>) -> Result<Self, AxisymmetricError> {
+    pub fn try_new(mut segments: Vec<MeridianSegment>) -> Result<Self, AxisymmetricError> {
+        // First validate the caller's literal loop and bounded endpoint
+        // residuals. Canonicalizing afterwards cannot repair an open or
+        // malformed profile.
+        validate_profile(&segments)?;
+        canonicalize_arc_endpoints(&mut segments)?;
         let certificate = validate_profile(&segments)?;
         let mut r_max: f64 = 0.0;
         let mut z_min = f64::INFINITY;
@@ -455,6 +472,13 @@ impl AxisymmetricChart {
         validate_profile(&self.segments)
     }
 
+    pub(crate) fn verify_construction_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricConstructionCertificate, AxisymmetricError> {
+        validate_profile_with_cx(&self.segments, Some(cx))
+    }
+
     /// Retained construction certificate.
     #[must_use]
     pub const fn construction_certificate(&self) -> AxisymmetricConstructionCertificate {
@@ -481,8 +505,11 @@ impl AxisymmetricChart {
         cx: &Cx<'_>,
     ) -> Result<AxisymmetricSupportPoint, AxisymmetricSupportError> {
         let unit = normalized_support_direction(direction)?;
-        self.verify_construction()
-            .map_err(AxisymmetricSupportError::InvalidChart)?;
+        match self.verify_construction_with_cx(cx) {
+            Ok(_) => {}
+            Err(AxisymmetricError::Cancelled) => return Err(AxisymmetricSupportError::Cancelled),
+            Err(error) => return Err(AxisymmetricSupportError::InvalidChart(error)),
+        }
         let radial = unit.x.hypot(unit.y);
         let radial_coefficient = -radial;
         let mut best: Option<SupportCandidate> = None;
@@ -793,25 +820,126 @@ fn squared_delta(a: MeridianPoint, b: MeridianPoint) -> f64 {
     dr.mul_add(dr, dz * dz)
 }
 fn scale_of(points: &[MeridianPoint]) -> f64 {
-    points
-        .iter()
-        .fold(1.0_f64, |s, p| s.max(p.radius.abs()).max(p.axial.abs()))
+    // Predicate slack must follow local geometric differences, not the world
+    // axial origin. A large rigid z translation cannot make a small fillet
+    // look less simple or less circular.
+    let mut scale = f64::MIN_POSITIVE;
+    for (index, point) in points.iter().copied().enumerate() {
+        for other in points.iter().copied().skip(index + 1) {
+            scale = scale
+                .max((point.radius - other.radius).abs())
+                .max((point.axial - other.axial).abs());
+        }
+    }
+    scale
 }
-fn construction_tolerance(points: &[MeridianPoint]) -> f64 {
-    JOIN_ULPS * scale_of(points)
+fn length_tolerance(points: &[MeridianPoint]) -> f64 {
+    (ROUNDING_ULPS * scale_of(points)).max(f64::MIN_POSITIVE)
 }
 fn query_tolerance(a: MeridianPoint, b: MeridianPoint) -> f64 {
-    JOIN_ULPS * scale_of(&[a, b])
+    length_tolerance(&[a, b])
+}
+fn area_tolerance(points: &[MeridianPoint]) -> f64 {
+    let scale = scale_of(points);
+    ROUNDING_ULPS * scale * scale
+}
+fn angle_tolerance() -> f64 {
+    ROUNDING_ULPS
+}
+fn discriminant_tolerance(aa: f64, bb: f64, cc: f64) -> f64 {
+    // `b^2 - 4ac` has units L^4.  Scaling by the competing L^4 terms,
+    // rather than a length tolerance, keeps tangent classification invariant
+    // under a uniform unit change.
+    ROUNDING_ULPS
+        * (bb * bb)
+            .abs()
+            .max((4.0 * aa * cc).abs())
+            .max(f64::MIN_POSITIVE)
 }
 fn tie_tolerance(a: f64, b: f64) -> f64 {
-    JOIN_ULPS * a.abs().max(b.abs()).max(1.0)
+    (ROUNDING_ULPS * a.abs().max(b.abs()).max(f64::MIN_POSITIVE)).max(f64::MIN_POSITIVE)
 }
 fn same_point(a: MeridianPoint, b: MeridianPoint) -> bool {
     a.radius == b.radius && a.axial == b.axial
 }
 
+/// Replace each admitted arc endpoint with a point on one retained canonical
+/// circle, then propagate that point to the adjoining line/arc vertex. The
+/// public input still has to close literally before this step; this only
+/// removes sub-ULP subtractive disagreement between a fillet's tangent paths
+/// and the circle consumed by distance, support, and Green integrals.
+fn canonicalize_arc_endpoints(segments: &mut [MeridianSegment]) -> Result<(), AxisymmetricError> {
+    let mut vertices: Vec<_> = segments.iter().map(|segment| segment.start()).collect();
+    let mut canonical_vertices: Vec<Option<(MeridianPoint, usize)>> = vec![None; segments.len()];
+
+    for (index, segment) in segments.iter().copied().enumerate() {
+        let MeridianSegment::Arc {
+            start, end, center, ..
+        } = segment
+        else {
+            continue;
+        };
+        let radius = squared_delta(start, center).sqrt();
+        let start_angle = (start.axial - center.axial).atan2(start.radius - center.radius);
+        let end_angle = (end.axial - center.axial).atan2(end.radius - center.radius);
+        let start = canonical_circle_point(center, radius, start_angle);
+        let end = canonical_circle_point(center, radius, end_angle);
+        for (vertex, point) in [(index, start), ((index + 1) % segments.len(), end)] {
+            match canonical_vertices[vertex] {
+                None => canonical_vertices[vertex] = Some((point, index)),
+                Some((prior, prior_index)) => {
+                    if !nearby_point(prior, point) {
+                        return Err(AxisymmetricError::InvalidArc {
+                            index: prior_index.min(index),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for (index, replacement) in canonical_vertices.into_iter().enumerate() {
+        if let Some((point, _)) = replacement {
+            vertices[index] = point;
+        }
+    }
+    for (index, segment) in segments.iter_mut().enumerate() {
+        let start = vertices[index];
+        let end = vertices[(index + 1) % vertices.len()];
+        match segment {
+            MeridianSegment::Line {
+                start: line_start,
+                end: line_end,
+            }
+            | MeridianSegment::Arc {
+                start: line_start,
+                end: line_end,
+                ..
+            } => {
+                *line_start = start;
+                *line_end = end;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_circle_point(center: MeridianPoint, radius: f64, angle: f64) -> MeridianPoint {
+    MeridianPoint::new(
+        center.radius + radius * angle.cos(),
+        center.axial + radius * angle.sin(),
+    )
+}
+
 fn validate_profile(
     segments: &[MeridianSegment],
+) -> Result<AxisymmetricConstructionCertificate, AxisymmetricError> {
+    validate_profile_with_cx(segments, None)
+}
+
+fn validate_profile_with_cx(
+    segments: &[MeridianSegment],
+    cx: Option<&Cx<'_>>,
 ) -> Result<AxisymmetricConstructionCertificate, AxisymmetricError> {
     if !(3..=MAX_AXISYMMETRIC_SEGMENTS).contains(&segments.len()) {
         return Err(AxisymmetricError::SegmentCount {
@@ -819,6 +947,9 @@ fn validate_profile(
         });
     }
     for (index, segment) in segments.iter().copied().enumerate() {
+        if index % 16 == 0 && validation_checkpoint(cx)? {
+            return Err(AxisymmetricError::Cancelled);
+        }
         let points = match segment {
             MeridianSegment::Line { start, end } => [start, end, start],
             MeridianSegment::Arc {
@@ -859,11 +990,14 @@ fn validate_profile(
     }
     let area = signed_area(segments);
     let points: Vec<_> = segments.iter().map(|s| s.start()).collect();
-    if area <= construction_tolerance(&points).powi(2) {
+    if !area.is_finite() || area <= area_tolerance(&points) {
         return Err(AxisymmetricError::NonPositiveOrientation);
     }
     for first in 0..segments.len() {
         for second in first + 1..segments.len() {
+            if (first * segments.len() + second) % 16 == 0 && validation_checkpoint(cx)? {
+                return Err(AxisymmetricError::Cancelled);
+            }
             if adjacent(first, second, segments.len()) {
                 let join = shared_adjacent_join(segments, first, second);
                 if adjacent_features_reintersect(segments[first], segments[second], join) {
@@ -897,6 +1031,10 @@ fn validate_profile(
     })
 }
 
+fn validation_checkpoint(cx: Option<&Cx<'_>>) -> Result<bool, AxisymmetricError> {
+    Ok(cx.is_some_and(|context| context.checkpoint().is_err()))
+}
+
 fn validate_arc(index: usize, segment: MeridianSegment) -> Result<(), AxisymmetricError> {
     let MeridianSegment::Arc {
         start, end, center, ..
@@ -906,11 +1044,13 @@ fn validate_arc(index: usize, segment: MeridianSegment) -> Result<(), Axisymmetr
     };
     let rs = squared_delta(start, center).sqrt();
     let re = squared_delta(end, center).sqrt();
-    let tolerance = construction_tolerance(&[start, end, center]);
-    if rs <= tolerance || rs != re {
+    let tolerance = length_tolerance(&[start, end, center]);
+    if rs <= tolerance || (rs - re).abs() > tolerance {
         return Err(AxisymmetricError::InvalidArc { index });
     }
-    if arc_sweep(segment).abs() <= tolerance || TAU - arc_sweep(segment).abs() <= tolerance {
+    if arc_sweep(segment).abs() <= angle_tolerance()
+        || TAU - arc_sweep(segment).abs() <= angle_tolerance()
+    {
         return Err(AxisymmetricError::DegenerateFeature { index });
     }
     let leftmost = if arc_contains_angle(segment, core::f64::consts::PI) {
@@ -944,7 +1084,7 @@ fn arc_has_interior_axis_tangent(segment: MeridianSegment, tolerance: f64) -> bo
     } else {
         (start - core::f64::consts::PI).rem_euclid(TAU)
     };
-    travel > tolerance && travel < sweep.abs() - tolerance
+    travel > angle_tolerance() && travel < sweep.abs() - angle_tolerance()
 }
 
 fn arc_radius(segment: MeridianSegment) -> f64 {
@@ -989,7 +1129,7 @@ fn arc_contains_angle(segment: MeridianSegment, angle: f64) -> bool {
     } else {
         (start - angle).rem_euclid(TAU)
     };
-    delta <= sweep.abs() + JOIN_ULPS
+    delta <= sweep.abs() + angle_tolerance()
 }
 fn segment_extrema(segment: MeridianSegment) -> Vec<MeridianPoint> {
     let mut points = vec![segment.start(), segment.end()];
@@ -1111,28 +1251,31 @@ fn arc_half_open_crossing(segment: MeridianSegment, angle: f64) -> bool {
     };
     let end_distance = sweep.abs() - travel;
     let axial_derivative = sweep.signum() * angle.cos();
-    if travel <= JOIN_ULPS {
-        return axial_derivative > JOIN_ULPS;
+    if travel <= angle_tolerance() {
+        return axial_derivative > angle_tolerance();
     }
-    if end_distance <= JOIN_ULPS {
-        return axial_derivative < -JOIN_ULPS;
+    if end_distance <= angle_tolerance() {
+        return axial_derivative < -angle_tolerance();
     }
-    angle.cos().abs() > JOIN_ULPS
+    angle.cos().abs() > angle_tolerance()
 }
 
 fn signed_area(segments: &[MeridianSegment]) -> f64 {
+    let axial_origin = segments[0].start().axial;
     0.5 * segments
         .iter()
         .copied()
         .map(|segment| match segment {
             MeridianSegment::Line { start, end } => {
-                start.radius * end.axial - start.axial * end.radius
+                start.radius * (end.axial - axial_origin)
+                    - (start.axial - axial_origin) * end.radius
             }
             MeridianSegment::Arc { center, .. } => {
                 let r = arc_radius(segment);
                 let a = arc_start_angle(segment);
                 let b = a + arc_sweep(segment);
-                r * center.radius * (b.sin() - a.sin()) - r * center.axial * (b.cos() - a.cos())
+                r * center.radius * (b.sin() - a.sin())
+                    - r * (center.axial - axial_origin) * (b.cos() - a.cos())
                     + r * r * (b - a)
             }
         })
@@ -1159,6 +1302,33 @@ fn nearby_point(a: MeridianPoint, b: MeridianPoint) -> bool {
     squared_delta(a, b) <= query_tolerance(a, b).powi(2)
 }
 
+/// Compare a numerically reconstructed intersection with the literal shared
+/// join using the adjacent features' local extent.  A tolerance derived from
+/// just the two almost-identical points collapses to zero after a rigid
+/// translation and would falsely turn a literal line/arc join into a crossing.
+fn nearby_feature_point(
+    point: MeridianPoint,
+    join: MeridianPoint,
+    first: MeridianSegment,
+    second: MeridianSegment,
+) -> bool {
+    let mut points = vec![
+        point,
+        join,
+        first.start(),
+        first.end(),
+        second.start(),
+        second.end(),
+    ];
+    if let MeridianSegment::Arc { center, .. } = first {
+        points.push(center);
+    }
+    if let MeridianSegment::Arc { center, .. } = second {
+        points.push(center);
+    }
+    squared_delta(point, join) <= length_tolerance(&points).powi(2)
+}
+
 /// Adjacent features may meet only at their one literal loop join. Any other
 /// crossing, tangency, or overlapping interval makes the meridian invalid.
 fn adjacent_features_reintersect(
@@ -1167,15 +1337,14 @@ fn adjacent_features_reintersect(
     join: MeridianPoint,
 ) -> bool {
     match (a, b) {
-        (
-            MeridianSegment::Line { start: a0, end: a1 },
-            MeridianSegment::Line { start: b0, end: b1 },
-        ) => adjacent_line_line_reintersects(a0, a1, b0, b1, join),
+        (MeridianSegment::Line { .. }, MeridianSegment::Line { .. }) => {
+            adjacent_line_line_reintersects(a, b, join)
+        }
         (MeridianSegment::Line { start, end }, arc @ MeridianSegment::Arc { .. })
         | (arc @ MeridianSegment::Arc { .. }, MeridianSegment::Line { start, end }) => {
             line_arc_intersection_points(start, end, arc)
                 .into_iter()
-                .any(|point| !nearby_point(point, join))
+                .any(|point| !nearby_feature_point(point, join, a, b))
         }
         (a @ MeridianSegment::Arc { .. }, b @ MeridianSegment::Arc { .. }) => {
             adjacent_arc_arc_reintersects(a, b, join)
@@ -1184,14 +1353,18 @@ fn adjacent_features_reintersect(
 }
 
 fn adjacent_line_line_reintersects(
-    a0: MeridianPoint,
-    a1: MeridianPoint,
-    b0: MeridianPoint,
-    b1: MeridianPoint,
+    a: MeridianSegment,
+    b: MeridianSegment,
     join: MeridianPoint,
 ) -> bool {
+    let MeridianSegment::Line { start: a0, end: a1 } = a else {
+        unreachable!()
+    };
+    let MeridianSegment::Line { start: b0, end: b1 } = b else {
+        unreachable!()
+    };
     for (point, start, end) in [(a0, b0, b1), (a1, b0, b1), (b0, a0, a1), (b1, a0, a1)] {
-        if !nearby_point(point, join) && on_line(start, end, point) {
+        if !nearby_feature_point(point, join, a, b) && on_line(start, end, point) {
             return true;
         }
     }
@@ -1216,10 +1389,12 @@ fn adjacent_arc_arc_reintersects(
     else {
         unreachable!()
     };
-    let coincident = nearby_point(ca, cb) && (arc_radius(a) - arc_radius(b)).abs() <= JOIN_ULPS;
+    let coincident = nearby_feature_point(ca, cb, a, b)
+        && (arc_radius(a) - arc_radius(b)).abs()
+            <= length_tolerance(&[ca, cb, a.start(), b.start()]);
     if coincident {
         for (point, other) in [(a.start(), b), (a.end(), b), (b.start(), a), (b.end(), a)] {
-            if !nearby_point(point, join) && point_on_arc(other, point) {
+            if !nearby_feature_point(point, join, a, b) && point_on_arc(other, point) {
                 return true;
             }
         }
@@ -1227,7 +1402,7 @@ fn adjacent_arc_arc_reintersects(
     }
     arc_arc_intersection_points(a, b)
         .into_iter()
-        .any(|point| !nearby_point(point, join))
+        .any(|point| !nearby_feature_point(point, join, a, b))
 }
 
 fn point_on_arc(arc: MeridianSegment, point: MeridianPoint) -> bool {
@@ -1263,7 +1438,7 @@ fn cross(a: MeridianPoint, b: MeridianPoint, c: MeridianPoint) -> f64 {
     (b.radius - a.radius) * (c.axial - a.axial) - (b.axial - a.axial) * (c.radius - a.radius)
 }
 fn on_line(a: MeridianPoint, b: MeridianPoint, p: MeridianPoint) -> bool {
-    cross(a, b, p).abs() <= query_tolerance(a, b)
+    cross(a, b, p).abs() <= area_tolerance(&[a, b, p])
         && p.radius >= a.radius.min(b.radius) - query_tolerance(a, b)
         && p.radius <= a.radius.max(b.radius) + query_tolerance(a, b)
         && p.axial >= a.axial.min(b.axial) - query_tolerance(a, b)
@@ -1305,7 +1480,7 @@ fn line_arc_intersection_points(
     let bb = 2.0 * (fr * dr + fz * dz);
     let cc = fr.mul_add(fr, fz * fz) - arc_radius(arc).powi(2);
     let disc = bb.mul_add(bb, -4.0 * aa * cc);
-    if disc < -query_tolerance(start, end) {
+    if disc < -discriminant_tolerance(aa, bb, cc) {
         return Vec::new();
     }
     let root = disc.max(0.0).sqrt();
@@ -1336,8 +1511,9 @@ fn arc_arc_intersect(a: MeridianSegment, b: MeridianSegment) -> bool {
     let dx = cb.radius - ca.radius;
     let dy = cb.axial - ca.axial;
     let d = dx.hypot(dy);
-    if d <= JOIN_ULPS {
-        return (ra - rb).abs() <= JOIN_ULPS;
+    let tolerance = length_tolerance(&[ca, cb, a.start(), b.start()]);
+    if d <= tolerance {
+        return (ra - rb).abs() <= tolerance;
     }
     !arc_arc_intersection_points(a, b).is_empty()
 }
@@ -1352,7 +1528,8 @@ fn arc_arc_intersection_points(a: MeridianSegment, b: MeridianSegment) -> Vec<Me
     let dx = cb.radius - ca.radius;
     let dy = cb.axial - ca.axial;
     let d = dx.hypot(dy);
-    if d <= JOIN_ULPS || d > ra + rb + JOIN_ULPS || d < (ra - rb).abs() - JOIN_ULPS {
+    let tolerance = length_tolerance(&[ca, cb, a.start(), b.start()]);
+    if d <= tolerance || d > ra + rb + tolerance || d < (ra - rb).abs() - tolerance {
         return Vec::new();
     }
     let x = (ra * ra - rb * rb + d * d) / (2.0 * d);

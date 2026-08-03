@@ -38,6 +38,36 @@ fn cylinder(radius: f64, half_height: f64, axial_offset: f64) -> AxisymmetricCha
     .expect("closed CCW cylinder")
 }
 
+fn densely_refined_cylinder() -> AxisymmetricChart {
+    // This remains a multi-feature O(n^2) admission path without making the
+    // test spend its time constructing the maximum permitted loop.
+    let subdivisions = 32_usize;
+    let radius = 2.0;
+    let half_height = 1.0;
+    let mut segments = Vec::with_capacity(4 * subdivisions);
+    for index in 0..subdivisions {
+        let left = radius * index as f64 / subdivisions as f64;
+        let right = radius * (index + 1) as f64 / subdivisions as f64;
+        segments.push(line(point(left, -half_height), point(right, -half_height)));
+    }
+    for index in 0..subdivisions {
+        let lower = -half_height + 2.0 * half_height * index as f64 / subdivisions as f64;
+        let upper = -half_height + 2.0 * half_height * (index + 1) as f64 / subdivisions as f64;
+        segments.push(line(point(radius, lower), point(radius, upper)));
+    }
+    for index in 0..subdivisions {
+        let right = radius * (subdivisions - index) as f64 / subdivisions as f64;
+        let left = radius * (subdivisions - index - 1) as f64 / subdivisions as f64;
+        segments.push(line(point(right, half_height), point(left, half_height)));
+    }
+    for index in 0..subdivisions {
+        let upper = half_height - 2.0 * half_height * index as f64 / subdivisions as f64;
+        let lower = half_height - 2.0 * half_height * (index + 1) as f64 / subdivisions as f64;
+        segments.push(line(point(0.0, upper), point(0.0, lower)));
+    }
+    AxisymmetricChart::try_new(segments).expect("dense simple cylinder meridian")
+}
+
 fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     if cancelled {
@@ -201,4 +231,13 @@ fn g0_hostile_and_cancelled_support_requests_refuse() {
             Err(AxisymmetricSupportError::Cancelled)
         ));
     });
+}
+
+#[test]
+fn g0_cancelled_support_refuses_during_bounded_quadratic_revalidation() {
+    let chart = densely_refined_cylinder();
+    let result = with_cx(true, |cx| {
+        chart.minimum_support_point(Vec3::new(1.0, 0.0, 1.0), cx)
+    });
+    assert!(matches!(result, Err(AxisymmetricSupportError::Cancelled)));
 }

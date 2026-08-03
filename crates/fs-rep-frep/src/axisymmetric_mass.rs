@@ -179,8 +179,11 @@ impl AxisymmetricChart {
         if !density.is_finite() || density <= 0.0 {
             return Err(AxisymmetricMassError::InvalidDensity { density });
         }
-        self.verify_construction()
-            .map_err(AxisymmetricMassError::InvalidChart)?;
+        match self.verify_construction_with_cx(cx) {
+            Ok(_) => {}
+            Err(AxisymmetricError::Cancelled) => return Err(AxisymmetricMassError::Cancelled),
+            Err(error) => return Err(AxisymmetricMassError::InvalidChart(error)),
+        }
 
         let mut moments = BoundaryMoments::default();
         for (index, segment) in self.segments().iter().copied().enumerate() {
@@ -209,6 +212,7 @@ impl AxisymmetricChart {
             return Err(AxisymmetricMassError::NonPositiveMass { mass });
         }
         let center_axial = first_axial / volume;
+        ensure_finite(center_axial, "center axial coordinate")?;
         let mut centered_r2_z2 = 0.0;
         let mut centered_r2_z2_abs = 0.0;
         for (index, segment) in self.segments().iter().copied().enumerate() {
@@ -232,11 +236,8 @@ impl AxisymmetricChart {
         }
         let mut principal_transverse = density * PI * (0.25 * moments.r4 + centered_r2_z2);
         let principal_axial = origin_axial;
-        let origin_transverse = principal_transverse + mass * center_axial * center_axial;
-        ensure_finite(center_axial, "center axial coordinate")?;
         ensure_finite(principal_transverse, "principal transverse inertia")?;
         ensure_finite(principal_axial, "principal axial inertia")?;
-        ensure_finite(origin_transverse, "origin transverse inertia")?;
 
         // The centroidal moment is evaluated in a centered second boundary
         // pass. Only the final boundary sum can leave a few negative ulps;
@@ -244,6 +245,7 @@ impl AxisymmetricChart {
         let inertia_scale = density * PI * (0.25 * moments.r4_abs + centered_r2_z2_abs);
         ensure_finite(inertia_scale, "principal transverse inertia scale")?;
         let roundoff = inertia_scale * 64.0 * f64::EPSILON;
+        ensure_finite(roundoff, "principal transverse roundoff diagnostic")?;
         if principal_transverse < 0.0 && principal_transverse >= -roundoff {
             principal_transverse = 0.0;
         }
@@ -260,6 +262,32 @@ impl AxisymmetricChart {
             });
         }
 
+        // Compute this only after the final centroidal value has been
+        // accepted, so the published pair obeys the parallel-axis identity.
+        let origin_transverse = principal_transverse + mass * center_axial * center_axial;
+        ensure_finite(origin_transverse, "origin transverse inertia")?;
+
+        // These term scales are diagnostics only, but publication remains
+        // transactional: every returned scalar must be finite after its own
+        // density/pi multipliers, not merely before them.
+        let volume_term_scale = PI * moments.r2_abs;
+        let axial_first_moment_term_scale = PI * moments.r2_z_abs;
+        let centroidal_transverse_term_scale = inertia_scale;
+        let axial_inertia_term_scale = density * 0.5 * PI * moments.r4_abs;
+        ensure_finite(volume_term_scale, "volume roundoff diagnostic")?;
+        ensure_finite(
+            axial_first_moment_term_scale,
+            "axial first-moment roundoff diagnostic",
+        )?;
+        ensure_finite(
+            centroidal_transverse_term_scale,
+            "centroidal transverse roundoff diagnostic",
+        )?;
+        ensure_finite(
+            axial_inertia_term_scale,
+            "axial inertia roundoff diagnostic",
+        )?;
+
         Ok(AxisymmetricMassProperties {
             volume,
             mass,
@@ -273,12 +301,10 @@ impl AxisymmetricChart {
                 axial: origin_axial,
             },
             roundoff_diagnostics: AxisymmetricMassRoundoffDiagnostics {
-                volume_term_scale: PI * moments.r2_abs,
-                axial_first_moment_term_scale: PI * moments.r2_z_abs,
-                centroidal_transverse_term_scale: density
-                    * PI
-                    * (0.25 * moments.r4_abs + centered_r2_z2_abs),
-                axial_inertia_term_scale: density * 0.5 * PI * moments.r4_abs,
+                volume_term_scale,
+                axial_first_moment_term_scale,
+                centroidal_transverse_term_scale,
+                axial_inertia_term_scale,
             },
         })
     }

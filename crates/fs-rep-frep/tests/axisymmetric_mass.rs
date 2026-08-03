@@ -2,7 +2,7 @@
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::Point3;
+use fs_geom::{Point3, Vec3};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricMassError, MeridianPoint, MeridianSegment,
     SquatDiscEdgeTreatment,
@@ -137,6 +137,21 @@ fn g0_cylinder_mass_center_and_principal_inertia_match_closed_forms() {
             .centroidal_transverse_term_scale
             >= properties.principal_inertia.transverse.abs()
     );
+    for diagnostic in [
+        properties.roundoff_diagnostics.volume_term_scale,
+        properties
+            .roundoff_diagnostics
+            .axial_first_moment_term_scale,
+        properties
+            .roundoff_diagnostics
+            .centroidal_transverse_term_scale,
+        properties.roundoff_diagnostics.axial_inertia_term_scale,
+    ] {
+        assert!(
+            diagnostic.is_finite(),
+            "published diagnostic must be finite"
+        );
+    }
 }
 
 #[test]
@@ -157,6 +172,31 @@ fn g0_exact_arc_sphere_matches_volume_and_isotropic_inertia() {
     assert_close(properties.center_of_mass.z, 0.0);
     assert_close(properties.principal_inertia.transverse, inertia);
     assert_close(properties.principal_inertia.axial, inertia);
+}
+
+#[test]
+fn g0_nominal_millimetre_filleted_disc_constructs_and_feeds_support_and_mass() {
+    let chart = AxisymmetricChart::squat_disc(
+        0.038,
+        0.006,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+    )
+    .expect("nominal 38 mm by 6 mm disc with a 1 mm fillet");
+    with_cx(false, |cx| {
+        let support = chart
+            .minimum_support_point(Vec3::new(1.0, 0.0, 1.0), cx)
+            .expect("tilted nominal disc support is unique");
+        assert!(support.point.x.is_finite());
+        assert!(support.point.z.is_finite());
+
+        let properties = chart
+            .mass_properties(7_800.0, cx)
+            .expect("nominal disc mass properties");
+        assert!(properties.volume.is_finite() && properties.volume > 0.0);
+        assert!(properties.mass.is_finite() && properties.mass > 0.0);
+        assert!(properties.principal_inertia.transverse > 0.0);
+        assert!(properties.principal_inertia.axial > 0.0);
+    });
 }
 
 #[test]
@@ -339,12 +379,16 @@ fn g0_positive_density_with_representational_mass_underflow_refuses() {
 
 #[test]
 fn g0_positive_mass_with_underflowed_principal_inertia_refuses() {
-    // The tiny radial scale leaves a positive finite mass at this density,
-    // but its axial inertia is smaller than the least binary64 subnormal.
-    let chart = cylinder(5.0e-9, 1.0e16, 0.0);
+    // This ordinary cylinder has volume above one, so multiplying by the least
+    // positive subnormal leaves a positive representable mass. Its axial
+    // inertia coefficient is below one half, which underflows the principal
+    // moment without relying on an extreme meridian that construction should
+    // reject before mechanics begins.
+    let chart = cylinder(0.5, 2.0, 0.0);
+    let density = f64::from_bits(1);
     with_cx(false, |cx| {
         assert!(matches!(
-            chart.mass_properties(f64::MIN_POSITIVE, cx),
+            chart.mass_properties(density, cx),
             Err(AxisymmetricMassError::NonPositivePrincipalInertia { .. })
         ));
     });

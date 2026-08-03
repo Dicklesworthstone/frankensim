@@ -304,11 +304,11 @@ fn g0_hostile_profiles_refuse_before_a_chart_is_exposed() {
     let near_circle_mismatch = AxisymmetricChart::try_new(vec![
         MeridianSegment::Arc {
             start: point(1.0, 0.0),
-            end: point(0.0, 1.0 + 8.0 * f64::EPSILON),
+            end: point(0.0, 1.0 + 1024.0 * f64::EPSILON),
             center: point(0.0, 0.0),
             clockwise: false,
         },
-        line(point(0.0, 1.0 + 8.0 * f64::EPSILON), point(0.0, 0.0)),
+        line(point(0.0, 1.0 + 1024.0 * f64::EPSILON), point(0.0, 0.0)),
         line(point(0.0, 0.0), point(1.0, 0.0)),
     ]);
     assert!(matches!(
@@ -399,6 +399,24 @@ fn g0_arc_endpoint_parity_uses_local_axial_derivative_for_major_and_equal_height
     ])
     .expect("valid CCW equal-height arc cap");
 
+    // A CCW cap above the clockwise minor arc exercises the same local
+    // derivative rule for the opposite sweep sign without crossing itself.
+    let clockwise_cap = AxisymmetricChart::try_new(vec![
+        MeridianSegment::Arc {
+            start: equal_left,
+            end: equal_right,
+            center: point(3.0, 0.0),
+            clockwise: true,
+        },
+        line(equal_right, point(equal_right.radius, 2.0)),
+        line(
+            point(equal_right.radius, 2.0),
+            point(equal_left.radius, 2.0),
+        ),
+        line(point(equal_left.radius, 2.0), equal_left),
+    ])
+    .expect("valid CCW clockwise-arc cap");
+
     with_cx(|cx| {
         for axial in [major_start.axial, major_end.axial] {
             assert!(
@@ -406,14 +424,92 @@ fn g0_arc_endpoint_parity_uses_local_axial_derivative_for_major_and_equal_height
                 "major-arc join z={axial} must remain outside"
             );
         }
-        assert!(
-            equal_height
-                .eval(Point3::new(3.0, 0.0, 0.5), cx)
-                .signed_distance
-                < 0.0,
-            "equal-height arc joins must include both local lower crossings"
-        );
+        for axial in [0.5 - 1.0e-6, 0.5, 0.5 + 1.0e-6] {
+            assert!(
+                equal_height
+                    .eval(Point3::new(3.0, 0.0, axial), cx)
+                    .signed_distance
+                    < 0.0,
+                "CCW equal-height arc must keep both sides of join z={axial} inside"
+            );
+        }
+        for axial in [0.5 - 1.0e-6, 0.5, 0.5 + 1.0e-6] {
+            assert!(
+                clockwise_cap
+                    .eval(Point3::new(3.0, 0.0, axial), cx)
+                    .signed_distance
+                    > 0.0,
+                "clockwise equal-height arc must keep both sides of join z={axial} outside"
+            );
+        }
     });
+}
+
+#[test]
+fn g3_construction_admission_is_stable_under_uniform_unit_rescaling() {
+    for scale in [1.0e-9, 1.0, 1.0e9] {
+        AxisymmetricChart::squat_disc(
+            2.0 * scale,
+            2.0 * scale,
+            SquatDiscEdgeTreatment::CircularFillet {
+                radius: 0.5 * scale,
+            },
+        )
+        .expect("valid circular-fillet profile must remain admissible after unit rescaling");
+
+        let overlapping = AxisymmetricChart::try_new(vec![
+            line(point(0.0, 0.0), point(2.0 * scale, 0.0)),
+            line(point(2.0 * scale, 0.0), point(1.0 * scale, 0.0)),
+            line(point(1.0 * scale, 0.0), point(1.0 * scale, 1.0 * scale)),
+            line(point(1.0 * scale, 1.0 * scale), point(0.0, 1.0 * scale)),
+            line(point(0.0, 1.0 * scale), point(0.0, 0.0)),
+        ]);
+        assert!(matches!(
+            overlapping,
+            Err(AxisymmetricError::SelfIntersection {
+                first: 0,
+                second: 1
+            })
+        ));
+    }
+}
+
+#[test]
+fn g3_construction_admission_uses_local_not_world_axial_scale() {
+    // Binary-exact local dimensions retain their exact represented shape even
+    // at a large axial origin; admission must depend on these local extents.
+    let radius = 0.5;
+    let thickness = 0.5;
+    let fillet = 0.125;
+    for axial_offset in [0.0, 1.0e12] {
+        let half = 0.5 * thickness;
+        let lower_tangent = point(radius - fillet, axial_offset - half);
+        let lower_outer = point(radius, axial_offset - half + fillet);
+        let upper_outer = point(radius, axial_offset + half - fillet);
+        let upper_tangent = point(radius - fillet, axial_offset + half);
+        AxisymmetricChart::try_new(vec![
+            line(point(0.0, axial_offset - half), lower_tangent),
+            MeridianSegment::Arc {
+                start: lower_tangent,
+                end: lower_outer,
+                center: point(radius - fillet, axial_offset - half + fillet),
+                clockwise: false,
+            },
+            line(lower_outer, upper_outer),
+            MeridianSegment::Arc {
+                start: upper_outer,
+                end: upper_tangent,
+                center: point(radius - fillet, axial_offset + half - fillet),
+                clockwise: false,
+            },
+            line(upper_tangent, point(0.0, axial_offset + half)),
+            line(
+                point(0.0, axial_offset + half),
+                point(0.0, axial_offset - half),
+            ),
+        ])
+        .expect("rigid axial translation must not change construction admission");
+    }
 }
 
 #[test]

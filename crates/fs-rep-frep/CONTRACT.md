@@ -172,10 +172,15 @@ the suite unchanged.
   meridian half-plane, revolved about z. Cylindrical faces, conical chamfers,
   circular fillets, bores, and axis closures are represented directly. Its
   construction certificate checks finite coordinates, literal closure,
-  orientation, exact binary64 circle consistency at each arc endpoint,
+  orientation, a scale-aware endpoint-circle residual followed by
+  canonicalization onto one retained binary64 circle,
   half-plane containment, and intersections/retracing even between adjacent
   features away from their one literal join. It also checks exhaustive feature
-  coverage and the even-odd inside rule.
+  coverage and the even-odd inside rule. Its binary64 predicate slack is
+  quantity-specific (length, signed area, angular travel, and line/circle
+  discriminant), scaled with the corresponding input quantity; this preserves
+  admission behavior under ordinary uniform unit rescaling but is not a
+  robust-predicate certificate.
   Evaluation searches every non-collapsed feature and returns no gradient at
   ties, medial points, seams, or axis-degenerate closest sets. Unsupported
   splines, open/non-CCW/self-crossing profiles, full-circle arcs, and failed
@@ -202,7 +207,10 @@ the suite unchanged.
   product that underflows to zero mass, and also refuses a zero centroidal
   principal moment for a positive-volume 3D solid. These are geometry-boundary
   refusals, not a relaxation of the non-authoritative roundoff diagnostics or
-  their narrow negative-roundoff clamp.
+  their narrow negative-roundoff clamp. Centroidal acceptance precedes the
+  published origin transverse moment, and every post-multiplier diagnostic is
+  finite-checked transactionally; neither policy makes the diagnostics an
+  error enclosure.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.
