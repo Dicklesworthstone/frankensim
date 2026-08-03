@@ -394,9 +394,6 @@ fn checkpoint_fingerprint_rejects_each_semantic_mutation_group() {
     let mut gas = input.clone();
     gas.gas.dynamic_viscosity_pa_s *= 1.1;
     variants.push(gas);
-    let mut grid_and_mask = input.clone();
-    grid_and_mask.grid.gap_m[0] *= 1.1;
-    variants.push(grid_and_mask);
     let mut topology = input.clone();
     topology.boundary = GasFilmBoundaryTopology::Open {
         left_absolute_pressure_pa: 101_325.0,
@@ -420,11 +417,7 @@ fn checkpoint_fingerprint_rejects_each_semantic_mutation_group() {
     wall.wall_motion.upper_tangential_velocity_m_per_s = 0.1;
     variants.push(wall);
     let mut initial_and_gauge = input.clone();
-    initial_and_gauge.initial_absolute_pressure_pa = 102_000.0;
     initial_and_gauge.gauge_reference_absolute_pressure_pa = 99_000.0;
-    initial_and_gauge.gas.declared_density_kg_m3 = 102_000.0
-        / (initial_and_gauge.gas.specific_gas_constant_j_kg_k
-            * initial_and_gauge.gas.temperature_k);
     variants.push(initial_and_gauge);
     let mut timestep_and_budget = input.clone();
     timestep_and_budget.timestep_s *= 2.0;
@@ -438,6 +431,41 @@ fn checkpoint_fingerprint_rejects_each_semantic_mutation_group() {
             })
         );
     }
+}
+
+#[test]
+fn restart_admits_physical_gap_evolution_and_changed_tangential_speed() {
+    let mut first_input = fixture(8);
+    first_input.wall_motion.gap_rate_m_per_s = -1.0e-4;
+    let first = solve_isothermal_gas_film_1d(&first_input, None).expect("first squeeze step");
+    let mut second_input = first_input.clone();
+    second_input.grid.gap_m = first_input
+        .grid
+        .gap_m
+        .iter()
+        .map(|gap| gap + second_input.wall_motion.gap_rate_m_per_s * second_input.timestep_s)
+        .collect();
+    second_input.wall_motion.upper_tangential_velocity_m_per_s = 0.5;
+    let second = solve_isothermal_gas_film_1d(&second_input, Some(&first.checkpoint))
+        .expect("consistent second squeeze step");
+    assert_eq!(second.checkpoint.step_index, 2);
+}
+
+#[test]
+fn restart_rejects_inconsistent_gap_evolution_without_mutating_checkpoint() {
+    let mut input = fixture(8);
+    input.wall_motion.gap_rate_m_per_s = -1.0e-4;
+    let first = solve_isothermal_gas_film_1d(&input, None).expect("first squeeze step");
+    let before = first.checkpoint.clone();
+    let mut inconsistent = input.clone();
+    inconsistent.grid.gap_m[0] += 1.0e-7;
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&inconsistent, Some(&first.checkpoint)),
+        Err(GasFilmError::CheckpointMismatch {
+            field: "active_gap_evolution"
+        })
+    );
+    assert_eq!(first.checkpoint, before);
 }
 
 #[test]

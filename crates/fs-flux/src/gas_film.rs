@@ -12,6 +12,8 @@ use core::fmt::Write;
 
 const MODEL_ID: &str = "fs-flux/isothermal-compressible-reynolds-1d-v1";
 const MAX_GEOMETRIC_CELLS: usize = 4_096;
+const RESTART_GAP_EVOLUTION_ABSOLUTE_TOLERANCE_M: f64 = 1.0e-15;
+const RESTART_GAP_EVOLUTION_RELATIVE_TOLERANCE: f64 = 1.0e-12;
 
 /// Typed refusal or bounded-solve failure for the gas-film foundation.
 #[derive(Debug, Clone, PartialEq)]
@@ -252,8 +254,13 @@ pub struct GasFilmCheckpoint {
     pub input_authority: GasFilmInputAuthority,
     /// Caller-declared input uncertainty retained without propagation.
     pub input_uncertainty: GasFilmUncertainty,
-    /// Complete deterministic input fingerprint required for restart.
+    /// Deterministic invariant-configuration fingerprint required for restart.
     pub configuration_fingerprint: String,
+    /// Full accepted request fingerprint retained for provenance only.
+    ///
+    /// It includes dynamic gap and wall-motion values, so it is deliberately
+    /// not compared to a subsequent physically evolving request.
+    pub accepted_request_fingerprint: String,
     /// Pressure at active cells only [Pa absolute].
     pub active_absolute_pressure_pa: Vec<f64>,
     /// Exact active-cell gaps at the accepted step [m].
@@ -695,7 +702,7 @@ fn initial_state(
                     field: "input_authority",
                 });
             }
-            if state.configuration_fingerprint != configuration_fingerprint(input) {
+            if state.configuration_fingerprint != invariant_configuration_fingerprint(input) {
                 return Err(GasFilmError::CheckpointMismatch {
                     field: "configuration_fingerprint",
                 });
@@ -714,6 +721,25 @@ fn initial_state(
             for pressure in &state.active_absolute_pressure_pa {
                 positive(*pressure, "checkpoint.active_absolute_pressure_pa")?;
             }
+            for (new_gap, old_gap) in input
+                .grid
+                .gap_m
+                .iter()
+                .take(active)
+                .zip(&state.active_gap_m)
+            {
+                let expected = derived(
+                    *old_gap + input.wall_motion.gap_rate_m_per_s * input.timestep_s,
+                    "checkpoint_expected_active_gap_m",
+                )?;
+                let tolerance = RESTART_GAP_EVOLUTION_ABSOLUTE_TOLERANCE_M
+                    + RESTART_GAP_EVOLUTION_RELATIVE_TOLERANCE * expected.abs().max(new_gap.abs());
+                if (*new_gap - expected).abs() > tolerance {
+                    return Err(GasFilmError::CheckpointMismatch {
+                        field: "active_gap_evolution",
+                    });
+                }
+            }
             Ok((
                 state.active_absolute_pressure_pa.clone(),
                 state.active_gap_m.clone(),
@@ -723,12 +749,138 @@ fn initial_state(
     }
 }
 
+/// Fingerprint of fields that cannot change across a restart sequence.
+///
+/// Current gaps and wall velocities/rate are deliberately excluded.  The
+/// latter are per-step data, with gap evolution checked geometrically against
+/// the accepted state before iteration.
+fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
+    fn text(output: &mut String, label: &str, value: &str) {
+        let _ = write!(output, "{label}={value};");
+    }
+    fn number(output: &mut String, label: &str, value: f64) {
+        let _ = write!(output, "{label}={:016x};", value.to_bits());
+    }
+    let mut output = String::new();
+    text(&mut output, "case", &input.identity.case_id);
+    text(&mut output, "model", &input.identity.model_id);
+    text(&mut output, "species", &input.identity.gas_species_id);
+    text(&mut output, "eos", &input.identity.eos_id);
+    text(
+        &mut output,
+        "viscosity_source",
+        &input.identity.viscosity_source_id,
+    );
+    text(&mut output, "thermal", &input.identity.thermal_model_id);
+    text(&mut output, "frame", &input.identity.frame_id);
+    let _ = write!(
+        output,
+        "seed={};authority={:?};",
+        input.identity.deterministic_seed, input.identity.authority
+    );
+    number(&mut output, "R", input.gas.specific_gas_constant_j_kg_k);
+    number(&mut output, "T", input.gas.temperature_k);
+    number(&mut output, "mu", input.gas.dynamic_viscosity_pa_s);
+    number(
+        &mut output,
+        "rho_declared",
+        input.gas.declared_density_kg_m3,
+    );
+    number(
+        &mut output,
+        "h_declared",
+        input.gas.declared_specific_enthalpy_j_kg,
+    );
+    number(&mut output, "length", input.grid.length_m);
+    let _ = write!(output, "cells={};", input.grid.gap_m.len());
+    for excluded in &input.grid.contact_exclusion.excluded {
+        let _ = write!(output, "mask={excluded};");
+    }
+    match input.boundary {
+        GasFilmBoundaryTopology::Sealed => text(&mut output, "boundary_kind", "sealed"),
+        GasFilmBoundaryTopology::Open { .. } => text(&mut output, "boundary_kind", "open"),
+        GasFilmBoundaryTopology::Vented { .. } => text(&mut output, "boundary_kind", "vented"),
+    }
+    match &input.slip_policy {
+        SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
+        SlipPolicy::RarefiedSlipRequested { source_id } => {
+            text(&mut output, "rarefied_slip", source_id)
+        }
+    }
+    match &input.roughness_policy {
+        RoughnessPolicy::ResolvedSmooth {
+            source_id,
+            maximum_roughness_m,
+        } => {
+            text(&mut output, "roughness", source_id);
+            number(&mut output, "roughness_max", *maximum_roughness_m);
+        }
+        RoughnessPolicy::Unresolved { source_id } => {
+            text(&mut output, "roughness_unresolved", source_id)
+        }
+    }
+    number(
+        &mut output,
+        "mean_free_path",
+        input.applicability.mean_free_path_m,
+    );
+    number(
+        &mut output,
+        "knudsen_max",
+        input.applicability.maximum_knudsen_number,
+    );
+    number(
+        &mut output,
+        "slope_max",
+        input.applicability.maximum_gap_slope,
+    );
+    number(
+        &mut output,
+        "sound_speed",
+        input.applicability.speed_of_sound_m_per_s,
+    );
+    number(
+        &mut output,
+        "mach_max",
+        input.applicability.maximum_mach_number,
+    );
+    number(
+        &mut output,
+        "uncertainty_mu",
+        input.uncertainty.viscosity_relative_bound,
+    );
+    number(
+        &mut output,
+        "uncertainty_gap",
+        input.uncertainty.gap_relative_bound,
+    );
+    number(
+        &mut output,
+        "uncertainty_pressure",
+        input.uncertainty.pressure_relative_bound,
+    );
+    number(
+        &mut output,
+        "gauge_reference",
+        input.gauge_reference_absolute_pressure_pa,
+    );
+    number(&mut output, "timestep", input.timestep_s);
+    let _ = write!(output, "iterations={};", input.budget.maximum_iterations);
+    number(
+        &mut output,
+        "residual_tolerance",
+        input.budget.mass_residual_tolerance_kg_m2_s,
+    );
+    number(&mut output, "relaxation", input.budget.relaxation);
+    output
+}
+
 /// Deterministic, complete restart identity for every semantic input.
 ///
 /// Floats are represented by IEEE-754 bits after validation, preserving exact
 /// caller values without locale/formatting dependence.  This is an identity
 /// guard, not a cryptographic digest or physical-validation certificate.
-fn configuration_fingerprint(input: &GasFilmInput) -> String {
+fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
     fn text(output: &mut String, label: &str, value: &str) {
         let _ = write!(output, "{label}={value};");
     }
@@ -1225,7 +1377,8 @@ pub fn solve_isothermal_gas_film_1d(
             case_id: input.identity.case_id.clone(),
             input_authority: input.identity.authority,
             input_uncertainty: input.uncertainty,
-            configuration_fingerprint: configuration_fingerprint(input),
+            configuration_fingerprint: invariant_configuration_fingerprint(input),
+            accepted_request_fingerprint: accepted_request_fingerprint(input),
             active_absolute_pressure_pa: checkpoint_pressure,
             active_gap_m: gap.to_vec(),
             active_cells: active,

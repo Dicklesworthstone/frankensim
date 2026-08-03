@@ -209,10 +209,14 @@ density against the same ideal-gas EOS used in storage; density is not silently
 treated as an independent incompressible property.
 Caller-declared viscosity/gap/pressure uncertainty bounds are retained in the
 receipt but are deliberately not propagated, calibrated, or certified.  A
-restart binds a deterministic full-configuration fingerprint over every
-identity, gas/card value, grid/mask/topology, slip/roughness/applicability,
-uncertainty, wall motion, initial and gauge-reference pressures, timestep, and
-budget field; a changed configuration refuses rather than reusing history.
+restart binds a deterministic invariant-configuration fingerprint over model/
+source/gas cards, grid length/count and fixed mask/topology kind, slip/
+roughness/applicability, uncertainty, gauge reference, timestep, budget, and
+authority. Dynamic current gaps and wall motion remain per-step inputs: restart
+checks each new active gap against accepted gap plus declared `dh/dt * dt`
+within a named numerical tolerance, while allowing changed tangential speed.
+The checkpoint also retains the full accepted-request fingerprint for
+provenance, but never mistakes it for a static restart constraint.
 
 The discretization retains pressure-driven Poiseuille mass flux plus moving-wall
 Couette mass flux, implicit storage, uniform squeeze through exact old/new gap
