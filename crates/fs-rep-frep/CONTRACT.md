@@ -179,6 +179,12 @@ the suite unchanged.
   construction obligations refuse before the ExactDistance trait is exposed.
   The retained v1 input fingerprint is deterministic provenance only, not an
   authority or a substitute for a consumer's independent reconstruction.
+- `squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment)` is the
+  user-facing centered-disc constructor. `Sharp` produces the literal
+  cap/cylinder/axis meridian. `CircularFillet { radius }` produces two true
+  circular arcs, with `0 <= radius <= min(outer_radius, thickness / 2)`;
+  zero is exactly sharp and equality boundaries omit collapsed tangent lines.
+  Invalid dimensions or radii refuse before a chart is returned.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.

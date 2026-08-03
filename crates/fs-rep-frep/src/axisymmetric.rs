@@ -62,6 +62,20 @@ pub enum MeridianSegment {
     },
 }
 
+/// User-facing outer-edge treatment for [`squat_disc`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SquatDiscEdgeTreatment {
+    /// A C0 rim where the planar caps meet the cylindrical outer face.
+    Sharp,
+    /// Equal, true circular fillets at the upper and lower outer rims.
+    /// `radius == 0.0` is exactly the sharp profile; it does not create a
+    /// degenerate zero-radius arc.
+    CircularFillet {
+        /// Radius of each meridian circular fillet.
+        radius: f64,
+    },
+}
+
 impl MeridianSegment {
     fn start(self) -> MeridianPoint {
         match self {
@@ -120,6 +134,21 @@ pub enum AxisymmetricError {
         /// Observed negative radius.
         value: f64,
     },
+    /// A public squat-disc dimension was non-finite or non-positive.
+    NonPositiveDimension {
+        /// Named public dimension.
+        field: &'static str,
+        /// Observed invalid value.
+        value: f64,
+    },
+    /// A public squat-disc fillet radius lay outside its closed admissible
+    /// interval `[0, min(outer_radius, thickness / 2)]`.
+    InvalidEdgeRadius {
+        /// Requested fillet radius.
+        radius: f64,
+        /// Largest admissible radius for this disc.
+        maximum: f64,
+    },
     /// Consecutive features do not share a literal endpoint.
     OpenLoop {
         /// Index of the feature whose end fails to join its successor.
@@ -163,6 +192,14 @@ impl core::fmt::Display for AxisymmetricError {
             Self::NegativeRadius { value } => {
                 write!(f, "meridian radius must be non-negative, got {value}")
             }
+            Self::NonPositiveDimension { field, value } => write!(
+                f,
+                "squat-disc {field} must be finite and strictly positive, got {value}"
+            ),
+            Self::InvalidEdgeRadius { radius, maximum } => write!(
+                f,
+                "squat-disc edge radius must lie in [0, {maximum}], got {radius}"
+            ),
             Self::OpenLoop { index } => write!(
                 f,
                 "feature {index} does not share its endpoint with the next feature"
@@ -200,6 +237,93 @@ pub struct AxisymmetricChart {
 }
 
 impl AxisymmetricChart {
+    /// Build a centered compact disc of revolution with an exact sharp or
+    /// circularly filleted outer rim.
+    ///
+    /// `outer_radius` and `thickness` are strictly positive. A circular
+    /// `radius` is admitted exactly when
+    /// `0 <= radius <= min(outer_radius, thickness / 2)`. The generated
+    /// profile uses literal circular arcs and omits collapsed tangent lines at
+    /// either equality boundary, so no polygonization or zero-length feature
+    /// can enter the generic validator.
+    pub fn squat_disc(
+        outer_radius: f64,
+        thickness: f64,
+        edge_treatment: SquatDiscEdgeTreatment,
+    ) -> Result<Self, AxisymmetricError> {
+        if !outer_radius.is_finite() || outer_radius <= 0.0 {
+            return Err(AxisymmetricError::NonPositiveDimension {
+                field: "outer_radius",
+                value: outer_radius,
+            });
+        }
+        if !thickness.is_finite() || thickness <= 0.0 {
+            return Err(AxisymmetricError::NonPositiveDimension {
+                field: "thickness",
+                value: thickness,
+            });
+        }
+        let half_thickness = thickness * 0.5;
+        let edge_radius = match edge_treatment {
+            SquatDiscEdgeTreatment::Sharp => 0.0,
+            SquatDiscEdgeTreatment::CircularFillet { radius } => {
+                let maximum = outer_radius.min(half_thickness);
+                if !radius.is_finite() || radius < 0.0 || radius > maximum {
+                    return Err(AxisymmetricError::InvalidEdgeRadius { radius, maximum });
+                }
+                radius
+            }
+        };
+        if edge_radius == 0.0 {
+            return Self::try_new(vec![
+                line(
+                    point(0.0, -half_thickness),
+                    point(outer_radius, -half_thickness),
+                ),
+                line(
+                    point(outer_radius, -half_thickness),
+                    point(outer_radius, half_thickness),
+                ),
+                line(
+                    point(outer_radius, half_thickness),
+                    point(0.0, half_thickness),
+                ),
+                line(point(0.0, half_thickness), point(0.0, -half_thickness)),
+            ]);
+        }
+
+        let lower_axis = point(0.0, -half_thickness);
+        let lower_tangent = point(outer_radius - edge_radius, -half_thickness);
+        let lower_outer = point(outer_radius, -half_thickness + edge_radius);
+        let upper_outer = point(outer_radius, half_thickness - edge_radius);
+        let upper_tangent = point(outer_radius - edge_radius, half_thickness);
+        let upper_axis = point(0.0, half_thickness);
+        let mut segments = Vec::with_capacity(5);
+        if edge_radius < outer_radius {
+            segments.push(line(lower_axis, lower_tangent));
+        }
+        segments.push(MeridianSegment::Arc {
+            start: lower_tangent,
+            end: lower_outer,
+            center: point(outer_radius - edge_radius, -half_thickness + edge_radius),
+            clockwise: false,
+        });
+        if edge_radius < half_thickness {
+            segments.push(line(lower_outer, upper_outer));
+        }
+        segments.push(MeridianSegment::Arc {
+            start: upper_outer,
+            end: upper_tangent,
+            center: point(outer_radius - edge_radius, half_thickness - edge_radius),
+            clockwise: false,
+        });
+        if edge_radius < outer_radius {
+            segments.push(line(upper_tangent, upper_axis));
+        }
+        segments.push(line(upper_axis, lower_axis));
+        Self::try_new(segments)
+    }
+
     /// Validate a closed oriented line/arc loop and publish its global
     /// ExactDistance theorem. Unsupported topology or malformed geometry is a
     /// typed refusal; there is no estimate-only constructor hidden here.
@@ -303,6 +427,17 @@ impl AxisymmetricChart {
     }
 }
 
+/// Build a centered compact disc of revolution. See
+/// [`AxisymmetricChart::squat_disc`] for its exact geometry and validation
+/// contract.
+pub fn squat_disc(
+    outer_radius: f64,
+    thickness: f64,
+    edge_treatment: SquatDiscEdgeTreatment,
+) -> Result<AxisymmetricChart, AxisymmetricError> {
+    AxisymmetricChart::squat_disc(outer_radius, thickness, edge_treatment)
+}
+
 impl Chart for AxisymmetricChart {
     fn eval(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
         self.query(x, cx)
@@ -355,6 +490,12 @@ fn rounded_enclosure(value: f64) -> NumericalCertificate {
 
 fn finite3(p: Point3) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+}
+fn point(radius: f64, axial: f64) -> MeridianPoint {
+    MeridianPoint::new(radius, axial)
+}
+fn line(start: MeridianPoint, end: MeridianPoint) -> MeridianSegment {
+    MeridianSegment::Line { start, end }
 }
 fn finite_point(p: MeridianPoint) -> bool {
     p.radius.is_finite() && p.axial.is_finite()

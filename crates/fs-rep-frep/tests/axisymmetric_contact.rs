@@ -4,7 +4,8 @@ use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Chart, Point3, TraceStepClaim};
 use fs_rep_frep::{
-    AxisymmetricChart, AxisymmetricError, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
+    AxisymmetricChart, AxisymmetricError, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint,
+    MeridianSegment, SquatDiscEdgeTreatment,
 };
 
 fn point(radius: f64, axial: f64) -> MeridianPoint {
@@ -106,6 +107,86 @@ fn g0_cancelled_search_refuses_without_promoting_a_partial_feature_scan() {
         assert!(sample.lipschitz.is_none());
         assert_eq!(sample.error.kind, fs_evidence::NumericalKind::NoClaim);
     });
+}
+
+#[test]
+fn g0_squat_disc_sharp_and_zero_fillet_have_exact_distances() {
+    let sharp = AxisymmetricChart::squat_disc(2.0, 2.0, SquatDiscEdgeTreatment::Sharp)
+        .expect("positive sharp disc");
+    let zero = AxisymmetricChart::squat_disc(
+        2.0,
+        2.0,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 0.0 },
+    )
+    .expect("zero fillet canonicalizes to sharp");
+    assert_eq!(sharp.segments(), zero.segments());
+    with_cx(|cx| {
+        assert_eq!(
+            sharp.eval(Point3::new(0.0, 0.0, 0.0), cx).signed_distance,
+            -1.0
+        );
+        assert_eq!(
+            sharp.eval(Point3::new(3.0, 0.0, 0.0), cx).signed_distance,
+            1.0
+        );
+        assert_eq!(
+            sharp.eval(Point3::new(0.0, 0.0, 2.0), cx).signed_distance,
+            1.0
+        );
+        assert_eq!(
+            sharp.eval(Point3::new(3.0, 0.0, 2.0), cx).signed_distance,
+            2.0_f64.sqrt()
+        );
+    });
+}
+
+#[test]
+fn g0_squat_disc_true_fillets_handle_maximum_radius_without_degenerate_lines() {
+    let filleted = AxisymmetricChart::squat_disc(
+        2.0,
+        2.0,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 1.0 },
+    )
+    .expect("edge radius equals thickness/2");
+    assert_eq!(filleted.construction_certificate().input_feature_count, 5);
+    assert_eq!(
+        filleted.construction_certificate().surfaced_feature_count,
+        4
+    );
+    with_cx(|cx| {
+        let cylindrical = filleted.eval(Point3::new(2.25, 0.0, 0.0), cx);
+        assert_eq!(cylindrical.signed_distance, 0.25);
+        let corner = filleted.eval(Point3::new(2.5, 0.0, 1.0), cx);
+        assert!((corner.signed_distance - (3.25_f64.sqrt() - 1.0)).abs() < 1e-12);
+    });
+
+    let all_fillet = AxisymmetricChart::squat_disc(
+        1.0,
+        2.0,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 1.0 },
+    )
+    .expect("edge radius equals both closed bounds");
+    assert_eq!(all_fillet.construction_certificate().input_feature_count, 3);
+}
+
+#[test]
+fn g0_squat_disc_rejects_invalid_dimensions_and_edge_radii() {
+    for (radius, thickness) in [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, f64::NAN)] {
+        assert!(matches!(
+            AxisymmetricChart::squat_disc(radius, thickness, SquatDiscEdgeTreatment::Sharp),
+            Err(AxisymmetricError::NonPositiveDimension { .. })
+        ));
+    }
+    for radius in [-0.1, 1.01, f64::NAN] {
+        assert!(matches!(
+            AxisymmetricChart::squat_disc(
+                2.0,
+                2.0,
+                SquatDiscEdgeTreatment::CircularFillet { radius },
+            ),
+            Err(AxisymmetricError::InvalidEdgeRadius { .. })
+        ));
+    }
 }
 
 #[test]

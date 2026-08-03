@@ -40,6 +40,7 @@ mod ival;
 pub use axisymmetric::{
     AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricError,
     AxisymmetricIdentity, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
+    SquatDiscEdgeTreatment, squat_disc,
 };
 
 use fs_evidence::NumericalCertificate;
