@@ -346,17 +346,20 @@ impl DiscGeometry {
 /// Pose information needed by the reduced exterior-flow geometry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DiscPose {
-    /// Unit disc normal in the declared world frame.
+    /// Nominal unit disc normal in the declared world frame. Accepted
+    /// near-unit values are projected before force evaluation.
     pub normal_world: Vec3,
 }
 
 impl DiscPose {
-    /// Validate an explicitly unit disc normal.  The value is not silently
-    /// normalized so malformed frame data cannot hide in a force coefficient.
+    /// Admit a near-unit disc normal and store its unit projection. Values
+    /// outside the explicit unit tolerance are refused rather than silently
+    /// normalized.
     pub fn try_new(normal_world: Vec3) -> Result<Self, ReducedAeroError> {
         let pose = Self { normal_world };
-        pose.validate()?;
-        Ok(pose)
+        Ok(Self {
+            normal_world: pose.unit_normal()?,
+        })
     }
 
     fn validate(self) -> Result<(), ReducedAeroError> {
@@ -371,15 +374,25 @@ impl DiscPose {
         }
         Ok(())
     }
+
+    fn unit_normal(self) -> Result<Vec3, ReducedAeroError> {
+        self.validate()?;
+        let norm = checked_norm(self.normal_world, "pose.normal_world_norm")?;
+        finite_vec3(
+            self.normal_world.scaled(1.0 / norm),
+            "pose.unit_normal_world",
+        )
+    }
 }
 
 /// Body translational and angular velocity in the explicit world frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyKinematics {
-    /// Disc-center/reference-point position [m] in the declared world frame.
-    /// The reported torque is about this point.
+    /// Disc-center position [m] in the declared world frame. All reported
+    /// wrenches are about this center; this reduced model does not shift
+    /// moments to an arbitrary off-center reference point.
     pub reference_point_world_m: Vec3,
-    /// Reference-point velocity [m/s].
+    /// Disc-center velocity [m/s].
     pub linear_velocity_world_m_per_s: Vec3,
     /// Angular velocity [rad/s] (radian is dimensionless).
     pub angular_velocity_world_rad_per_s: Vec3,
@@ -690,7 +703,7 @@ impl ReducedAeroModel {
         let speed = checked_norm(relative_velocity, "relative_speed_m_per_s")?;
         let angular = input.kinematics.angular_velocity_world_rad_per_s;
         let angular_speed = checked_norm(angular, "angular_speed_rad_per_s")?;
-        let normal = input.pose.normal_world;
+        let normal = input.pose.unit_normal()?;
         let relative_roughness = finite_derived(
             input.roughness.height_m / geometry.radius_m,
             "relative_roughness",

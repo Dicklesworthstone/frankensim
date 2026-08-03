@@ -430,6 +430,17 @@ fn aero_012_duplicate_correlation_identity_is_order_independent_refusal() {
 #[test]
 fn aero_013_edge_on_form_drag_uses_rim_silhouette_not_wetted_rim_area() {
     let model = model("fixture.edge-on-silhouette", 1.1);
+    let mut face_on = input(Vec3::ZERO);
+    face_on.pose = DiscPose::try_new(Vec3::new(1.0, 0.0, 0.0)).expect("unit normal");
+    face_on.kinematics.linear_velocity_world_m_per_s = Vec3::new(4.0, 0.0, 0.0);
+    face_on.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    let face_wrench = model.evaluate(&face_on).expect("face-on wrench");
+    let face_area_m2 = std::f64::consts::PI * face_on.geometry.radius_m.powi(2);
+    let face_roughness_factor = 1.0 + face_on.roughness.height_m / face_on.geometry.radius_m;
+    let expected_face_force_n =
+        -0.5 * 1.2 * 1.1 * face_roughness_factor * face_area_m2 * 4.0_f64.powi(2);
+    assert!((face_wrench.force_world_n.x - expected_face_force_n).abs() <= 1.0e-14);
+
     let mut edge_on = input(Vec3::ZERO);
     edge_on.pose = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0)).expect("unit normal");
     edge_on.kinematics.linear_velocity_world_m_per_s = Vec3::new(4.0, 0.0, 0.0);
@@ -443,6 +454,27 @@ fn aero_013_edge_on_form_drag_uses_rim_silhouette_not_wetted_rim_area() {
     assert!((wrench.force_world_n.x - expected_force_n).abs() <= 1.0e-14);
     assert_eq!(wrench.force_world_n.y, 0.0);
     assert_eq!(wrench.force_world_n.z, 0.0);
+}
+
+#[test]
+fn aero_016_near_unit_pose_is_projected_at_admission_and_evaluation() {
+    let near_unit = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0 + 5.0e-13))
+        .expect("near-unit normal is admitted");
+    assert_eq!(near_unit.normal_world, Vec3::new(0.0, 0.0, 1.0));
+
+    let model = model("fixture.near-unit-pose", 1.1);
+    let mut projected_input = input(Vec3::ZERO);
+    projected_input.pose.normal_world = Vec3::new(0.0, 0.0, 1.0 + 5.0e-13);
+    projected_input.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    let mut exact_input = projected_input.clone();
+    exact_input.pose = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0)).expect("unit normal");
+
+    let projected = model
+        .evaluate(&projected_input)
+        .expect("public near-unit pose is projected at evaluation");
+    let exact = model.evaluate(&exact_input).expect("exact unit pose");
+    assert_eq!(projected.force_world_n, exact.force_world_n);
+    assert_eq!(projected.torque_world_n_m, exact.torque_world_n_m);
 }
 
 #[test]
