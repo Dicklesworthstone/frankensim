@@ -16,7 +16,13 @@
 
 use core::fmt;
 
+use fs_exec::Cx;
+use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_rep_frep::{
+    AxisymmetricChart, AxisymmetricMassError, AxisymmetricMassProperties,
+    AxisymmetricSupportAuthority, AxisymmetricSupportError, MeridianSegment,
+};
 use fs_tribo::{
     ContactFrame, FrictionLaw, FrictionRegime, InputAuthority, InterfaceSystemRef, TangentialSlip,
 };
@@ -46,12 +52,14 @@ pub enum ContactDynamicsError {
     /// The caller supplied an initial state with material penetration beyond the
     /// declared numerical admission tolerance.
     InitialPenetrationExceeded { gap_m: f64, tolerance_m: f64 },
-    /// A step's geometric drift exceeded the bounded position-projection tolerance.
-    GeometricProjectionExceeded { gap_m: f64, tolerance_m: f64 },
-    /// The coupled sticking solve met neither the declared normal nor tangent residual bound.
+    /// A finite velocity or geometric constraint residual exceeded its declared bound.
     ConstraintResidualExceeded {
-        residual_m_per_s: f64,
-        tolerance_m_per_s: f64,
+        /// Named residual in its documented units.
+        field: &'static str,
+        /// Observed finite residual.
+        residual: f64,
+        /// Declared bound in the same units.
+        tolerance: f64,
     },
     /// The retained fixed-step bound was exceeded.
     StepBudgetExceeded,
@@ -61,6 +69,10 @@ pub enum ContactDynamicsError {
     DryLawRefusal { detail: String },
     /// The coarse and refined runs did not retain the same terminal class.
     IncomparableRefinement,
+    /// The actual axisymmetric-profile mass evaluation refused publication.
+    ProfileMassRefusal { detail: AxisymmetricMassError },
+    /// The actual profile's support query refused publication, including cancellation.
+    ProfileSupportRefusal { detail: AxisymmetricSupportError },
 }
 
 impl fmt::Display for ContactDynamicsError {
@@ -135,10 +147,30 @@ pub struct ContactDynamicsInput {
     pub release_speed_tolerance_m_per_s: f64,
 }
 
+/// A true axisymmetric-profile contact setup.
+///
+/// `controls` supplies state, gravity, friction, and fixed-step bounds. Its
+/// cylinder geometry is retained for source compatibility only: it is not read
+/// by the profile dynamics path for mass, inertia, support, or tolerance scale.
+#[derive(Debug, Clone)]
+pub struct ProfileContactDynamicsInput {
+    /// Exact sharp or circular-filleted body profile.
+    pub chart: AxisymmetricChart,
+    /// Homogeneous material density in kg/m³.
+    pub density_kg_per_m3: f64,
+    /// Dynamics controls and initial state; its `geometry` is never a fallback.
+    pub controls: ContactDynamicsInput,
+}
+
 impl ContactDynamicsInput {
     /// Validates every caller-controlled scalar and reconstructs mass properties.
     pub fn validate(&self) -> Result<MassProperties, ContactDynamicsError> {
         let mass_properties = self.geometry.mass_properties()?;
+        self.validate_controls(self.geometry.radius_m.min(self.geometry.thickness_m))?;
+        Ok(mass_properties)
+    }
+
+    fn validate_controls(&self, contact_length_scale_m: f64) -> Result<(), ContactDynamicsError> {
         positive_finite(self.gravity_m_per_s2, "gravity_m_per_s2")?;
         nonnegative_finite(
             self.static_friction_coefficient,
@@ -157,6 +189,19 @@ impl ContactDynamicsInput {
             self.release_speed_tolerance_m_per_s,
             "release_speed_tolerance_m_per_s",
         )?;
+        positive_finite(contact_length_scale_m, "contact_length_scale_m")?;
+        let largest_numerical_gap_m = checked_mul(
+            contact_length_scale_m,
+            1.0e-4,
+            "geometry_relative_gap_tolerance",
+        )?;
+        if self.contact_tolerance_m > largest_numerical_gap_m
+            || self.maximum_initial_penetration_m > largest_numerical_gap_m
+        {
+            return Err(ContactDynamicsError::InvalidInput {
+                field: "geometry_relative_contact_tolerance",
+            });
+        }
         if self.interface.ordered_system_id().trim().is_empty()
             || self.interface.history_id().trim().is_empty()
             || self.interface.provenance().source_id().trim().is_empty()
@@ -179,7 +224,7 @@ impl ContactDynamicsInput {
             self.initial_state.angular_momentum_body(),
             "initial_state.angular_momentum_body",
         )?;
-        Ok(mass_properties)
+        Ok(())
     }
 }
 
@@ -194,6 +239,19 @@ pub struct ContactGeometry {
     pub point_world_m: Vec3,
     /// Unit disc symmetry axis in world coordinates.
     pub symmetry_axis_world: Vec3,
+}
+
+/// Contact geometry derived from one actual axisymmetric-profile support query.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileContactGeometry {
+    /// World-frame contact geometry relative to the true center of mass.
+    pub contact: ContactGeometry,
+    /// Retained analytic feature selected by the profile support query.
+    pub support_source_feature: usize,
+    /// Explicit authority retained from the profile query.
+    pub support_authority: AxisymmetricSupportAuthority,
+    /// Profile-derived mass and centroidal principal inertia used by the run.
+    pub mass_properties: AxisymmetricMassProperties,
 }
 
 /// Static-friction feasibility evaluated from the solved contact impulse.
@@ -309,7 +367,7 @@ pub struct ContactDynamicsRun {
     pub termination: ContactTermination,
 }
 
-/// Comparison of a fixed horizon with the same horizon at half the timestep.
+/// Per-quantity endpoint comparison against a deterministic quarter-step reference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimestepRefinement {
     /// Result using the caller timestep.
@@ -330,8 +388,26 @@ pub struct TimestepRefinement {
     pub coarse_reference_position_difference_m: f64,
     /// Half-step center-of-mass endpoint distance to the quarter-step reference [m].
     pub fine_reference_position_difference_m: f64,
-    /// Whether the half-step endpoint was no farther from the retained reference.
-    pub refinement_improved: bool,
+    /// Coarse world linear-momentum endpoint distance to the reference [kg m/s].
+    pub coarse_reference_linear_momentum_difference_kg_m_per_s: f64,
+    /// Half-step world linear-momentum endpoint distance to the reference [kg m/s].
+    pub fine_reference_linear_momentum_difference_kg_m_per_s: f64,
+    /// Coarse body angular-momentum endpoint distance to the reference [kg m²/s].
+    pub coarse_reference_angular_momentum_difference_kg_m2_per_s: f64,
+    /// Half-step body angular-momentum endpoint distance to the reference [kg m²/s].
+    pub fine_reference_angular_momentum_difference_kg_m2_per_s: f64,
+    /// Coarse orientation geodesic distance to the reference [rad].
+    pub coarse_reference_orientation_angle_rad: f64,
+    /// Half-step orientation geodesic distance to the reference [rad].
+    pub fine_reference_orientation_angle_rad: f64,
+    /// Whether the half-step position endpoint is no farther from the reference.
+    pub position_refinement_improved: bool,
+    /// Whether the half-step linear-momentum endpoint is no farther from the reference.
+    pub linear_momentum_refinement_improved: bool,
+    /// Whether the half-step angular-momentum endpoint is no farther from the reference.
+    pub angular_momentum_refinement_improved: bool,
+    /// Whether the half-step orientation is no farther from the reference.
+    pub orientation_refinement_improved: bool,
 }
 
 /// Returns the unique lowest rim contact of a tilted finite cylinder.
@@ -384,6 +460,95 @@ pub fn contact_geometry(
     })
 }
 
+/// Queries one actual profile support point below the current pose.
+pub fn profile_contact_geometry(
+    chart: &AxisymmetricChart,
+    mass: AxisymmetricMassProperties,
+    pose: Pose,
+    cx: &Cx<'_>,
+) -> Result<ProfileContactGeometry, ContactDynamicsError> {
+    let body_ground_direction = world_to_body(pose.orientation(), GROUND_NORMAL)?;
+    let support = chart
+        .minimum_support_point(
+            GeomVec3::new(
+                body_ground_direction.x,
+                body_ground_direction.y,
+                body_ground_direction.z,
+            ),
+            cx,
+        )
+        .map_err(|detail| ContactDynamicsError::ProfileSupportRefusal { detail })?;
+    let relative_body = point_difference(support.point, mass.center_of_mass)?;
+    let radius_world_m = pose.orientation().rotate_body_to_world(relative_body);
+    finite_vec(radius_world_m, "profile_radius_world_m")?;
+    let point_world_m = checked_add(
+        pose.position_world(),
+        radius_world_m,
+        "profile_point_world_m",
+    )?;
+    finite_scalar(point_world_m.z, "profile_gap_m")?;
+    Ok(ProfileContactGeometry {
+        contact: ContactGeometry {
+            gap_m: point_world_m.z,
+            radius_world_m,
+            point_world_m,
+            symmetry_axis_world: pose
+                .orientation()
+                .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+        },
+        support_source_feature: support.source_feature,
+        support_authority: support.authority,
+        mass_properties: mass,
+    })
+}
+
+fn profile_mass_to_mbd(
+    mass: AxisymmetricMassProperties,
+) -> Result<MassProperties, ContactDynamicsError> {
+    finite_scalar(mass.mass, "profile_mass")?;
+    MassProperties::new(
+        mass.mass,
+        Vec3::ZERO,
+        Vec3::new(
+            mass.principal_inertia.transverse,
+            mass.principal_inertia.transverse,
+            mass.principal_inertia.axial,
+        ),
+    )
+    .map_err(rigid_refusal)
+}
+
+fn point_difference(point: Point3, center: Point3) -> Result<Vec3, ContactDynamicsError> {
+    let relative = Vec3::new(point.x - center.x, point.y - center.y, point.z - center.z);
+    finite_vec(relative, "profile_support_minus_center_of_mass")?;
+    Ok(relative)
+}
+
+fn profile_contact_length_scale_m(chart: &AxisymmetricChart) -> Result<f64, ContactDynamicsError> {
+    let mut radius_m: f64 = 0.0;
+    let mut axial_min_m = f64::INFINITY;
+    let mut axial_max_m = f64::NEG_INFINITY;
+    for segment in chart.segments() {
+        let points = match *segment {
+            MeridianSegment::Line { start, end } => [start, end, start],
+            MeridianSegment::Arc {
+                start, end, center, ..
+            } => [start, end, center],
+        };
+        for point in points {
+            finite_scalar(point.radius, "profile_meridian_radius")?;
+            finite_scalar(point.axial, "profile_meridian_axial")?;
+            radius_m = radius_m.max(point.radius);
+            axial_min_m = axial_min_m.min(point.axial);
+            axial_max_m = axial_max_m.max(point.axial);
+        }
+    }
+    let axial_extent_m = checked_scalar_sub(axial_max_m, axial_min_m, "profile_axial_extent_m")?;
+    let scale_m = radius_m.min(axial_extent_m);
+    positive_finite(scale_m, "profile_contact_length_scale_m")?;
+    Ok(scale_m)
+}
+
 /// Places a supplied orientation and momentum state exactly on the plane.
 ///
 /// This helper only resolves finite-cylinder geometry; it does not impose a
@@ -401,16 +566,68 @@ pub fn state_at_ground_contact(
     RigidBodyState::new(pose, linear_momentum_world, angular_momentum_body).map_err(rigid_refusal)
 }
 
+/// Places a true-profile body at its unique current ground support point.
+///
+/// The supplied mass properties must come from the same chart and density as
+/// the subsequent profile run. No cylinder approximation is involved.
+pub fn profile_state_at_ground_contact(
+    chart: &AxisymmetricChart,
+    mass: AxisymmetricMassProperties,
+    orientation: UnitQuaternion,
+    linear_momentum_world: Vec3,
+    angular_momentum_body: Vec3,
+    cx: &Cx<'_>,
+) -> Result<RigidBodyState, ContactDynamicsError> {
+    let provisional = Pose::new(Vec3::ZERO, orientation).map_err(rigid_refusal)?;
+    let contact = profile_contact_geometry(chart, mass, provisional, cx)?.contact;
+    let position = Vec3::new(0.0, 0.0, -contact.radius_world_m.z);
+    let pose = Pose::new(position, orientation).map_err(rigid_refusal)?;
+    RigidBodyState::new(pose, linear_momentum_world, angular_momentum_body).map_err(rigid_refusal)
+}
+
 /// Runs the fixed-step unilateral contact solver until its horizon or an honest terminal event.
 pub fn run_contact_dynamics(
     input: &ContactDynamicsInput,
 ) -> Result<ContactDynamicsRun, ContactDynamicsError> {
     let mass_properties = input.validate()?;
+    let mut query = |pose| contact_geometry(input.geometry, pose);
+    run_with_contact_query(input, mass_properties, &mut query)
+}
+
+/// Runs the same contact dynamics against the actual sharp or filleted
+/// axisymmetric chart. The caller-owned `Cx` is polled by both mass and
+/// support queries; cancellation and non-unique support remain typed refusals.
+pub fn run_profile_contact_dynamics(
+    input: &ProfileContactDynamicsInput,
+    cx: &Cx<'_>,
+) -> Result<ContactDynamicsRun, ContactDynamicsError> {
+    input
+        .controls
+        .validate_controls(profile_contact_length_scale_m(&input.chart)?)?;
+    let profile_mass = input
+        .chart
+        .mass_properties(input.density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    let mass_properties = profile_mass_to_mbd(profile_mass)?;
+    let mut query = |pose| {
+        profile_contact_geometry(&input.chart, profile_mass, pose, cx).map(|detail| detail.contact)
+    };
+    run_with_contact_query(&input.controls, mass_properties, &mut query)
+}
+
+fn run_with_contact_query<F>(
+    input: &ContactDynamicsInput,
+    mass_properties: MassProperties,
+    contact_query: &mut F,
+) -> Result<ContactDynamicsRun, ContactDynamicsError>
+where
+    F: FnMut(Pose) -> Result<ContactGeometry, ContactDynamicsError>,
+{
     let mut state = input.initial_state;
     let mut steps = Vec::with_capacity(input.maximum_steps as usize);
 
     for step_index in 0..input.maximum_steps {
-        let geometry = contact_geometry(input.geometry, state.pose())?;
+        let geometry = contact_query(state.pose())?;
         if step_index == 0 && geometry.gap_m < -input.maximum_initial_penetration_m {
             return Err(ContactDynamicsError::InitialPenetrationExceeded {
                 gap_m: geometry.gap_m,
@@ -429,7 +646,7 @@ pub fn run_contact_dynamics(
             });
         }
 
-        let attempted = sticking_step(input, mass_properties, state, geometry)?;
+        let attempted = sticking_step(input, mass_properties, state, geometry, contact_query)?;
         match attempted {
             AttemptedStep::Completed(receipt) => {
                 state = receipt.state_after;
@@ -484,7 +701,59 @@ pub fn run_contact_dynamics(
 pub fn refine_timestep_by_two(
     input: &ContactDynamicsInput,
 ) -> Result<TimestepRefinement, ContactDynamicsError> {
-    input.validate()?;
+    let mass_properties = input.validate()?;
+    let (fine_input, reference_input) = refinement_inputs(input)?;
+    let coarse = run_contact_dynamics(input)?;
+    let fine = run_contact_dynamics(&fine_input)?;
+    let reference = run_contact_dynamics(&reference_input)?;
+    build_refinement(
+        coarse,
+        fine,
+        reference,
+        input.gravity_m_per_s2,
+        input.geometry.mass_kg,
+        mass_properties,
+    )
+}
+
+/// Repeats a true-profile horizon at half and quarter timesteps.
+///
+/// All three runs retain the same chart and density; only fixed-step controls
+/// differ. This reports component-wise endpoint diagnostics rather than a
+/// mixed-unit aggregate norm.
+pub fn refine_profile_timestep_by_two(
+    input: &ProfileContactDynamicsInput,
+    cx: &Cx<'_>,
+) -> Result<TimestepRefinement, ContactDynamicsError> {
+    input
+        .controls
+        .validate_controls(profile_contact_length_scale_m(&input.chart)?)?;
+    let profile_mass = input
+        .chart
+        .mass_properties(input.density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    let mass_properties = profile_mass_to_mbd(profile_mass)?;
+    let (fine_controls, reference_controls) = refinement_inputs(&input.controls)?;
+    let mut fine_input = input.clone();
+    fine_input.controls = fine_controls;
+    let mut reference_input = input.clone();
+    reference_input.controls = reference_controls;
+    let coarse = run_profile_contact_dynamics(input, cx)?;
+    let fine = run_profile_contact_dynamics(&fine_input, cx)?;
+    let reference = run_profile_contact_dynamics(&reference_input, cx)?;
+    build_refinement(
+        coarse,
+        fine,
+        reference,
+        input.controls.gravity_m_per_s2,
+        profile_mass.mass,
+        mass_properties,
+    )
+}
+
+fn refinement_inputs(
+    input: &ContactDynamicsInput,
+) -> Result<(ContactDynamicsInput, ContactDynamicsInput), ContactDynamicsError> {
     let fine_steps = input
         .maximum_steps
         .checked_mul(2)
@@ -495,15 +764,23 @@ pub fn refine_timestep_by_two(
     if reference_steps > MAX_STEPS {
         return Err(ContactDynamicsError::StepBudgetExceeded);
     }
-    let mut fine_input = input.clone();
-    fine_input.timestep_s *= 0.5;
-    fine_input.maximum_steps = fine_steps;
-    let mut reference_input = input.clone();
-    reference_input.timestep_s *= 0.25;
-    reference_input.maximum_steps = reference_steps;
-    let coarse = run_contact_dynamics(input)?;
-    let fine = run_contact_dynamics(&fine_input)?;
-    let reference = run_contact_dynamics(&reference_input)?;
+    let mut fine = input.clone();
+    fine.timestep_s = checked_mul(input.timestep_s, 0.5, "fine_timestep_s")?;
+    fine.maximum_steps = fine_steps;
+    let mut reference = input.clone();
+    reference.timestep_s = checked_mul(input.timestep_s, 0.25, "reference_timestep_s")?;
+    reference.maximum_steps = reference_steps;
+    Ok((fine, reference))
+}
+
+fn build_refinement(
+    coarse: ContactDynamicsRun,
+    fine: ContactDynamicsRun,
+    reference: ContactDynamicsRun,
+    gravity_m_per_s2: f64,
+    mass_kg: f64,
+    mass_properties: MassProperties,
+) -> Result<TimestepRefinement, ContactDynamicsError> {
     if terminal_class(&coarse.termination) != terminal_class(&fine.termination)
         || terminal_class(&coarse.termination) != terminal_class(&reference.termination)
     {
@@ -534,17 +811,13 @@ pub fn refine_timestep_by_two(
         "refinement.angular_momentum_difference",
     )?;
     let coarse_energy = mechanical_energy(
-        input.gravity_m_per_s2,
-        input.geometry.mass_kg,
-        input.geometry.mass_properties()?,
+        gravity_m_per_s2,
+        mass_kg,
+        mass_properties,
         coarse.final_state,
     )?;
-    let fine_energy = mechanical_energy(
-        input.gravity_m_per_s2,
-        input.geometry.mass_kg,
-        input.geometry.mass_properties()?,
-        fine.final_state,
-    )?;
+    let fine_energy =
+        mechanical_energy(gravity_m_per_s2, mass_kg, mass_properties, fine.final_state)?;
     let final_mechanical_energy_difference_j =
         checked_scalar_sub(fine_energy, coarse_energy, "refinement.energy_difference")?;
     let coarse_reference_position_difference_m = endpoint_position_difference(
@@ -557,6 +830,39 @@ pub fn refine_timestep_by_two(
         reference.final_state,
         "refinement.fine_reference_position_difference",
     )?;
+    let coarse_reference_linear_momentum_difference_kg_m_per_s =
+        endpoint_linear_momentum_difference(
+            coarse.final_state,
+            reference.final_state,
+            "refinement.coarse_reference_linear_momentum_difference",
+        )?;
+    let fine_reference_linear_momentum_difference_kg_m_per_s = endpoint_linear_momentum_difference(
+        fine.final_state,
+        reference.final_state,
+        "refinement.fine_reference_linear_momentum_difference",
+    )?;
+    let coarse_reference_angular_momentum_difference_kg_m2_per_s =
+        endpoint_angular_momentum_difference(
+            coarse.final_state,
+            reference.final_state,
+            "refinement.coarse_reference_angular_momentum_difference",
+        )?;
+    let fine_reference_angular_momentum_difference_kg_m2_per_s =
+        endpoint_angular_momentum_difference(
+            fine.final_state,
+            reference.final_state,
+            "refinement.fine_reference_angular_momentum_difference",
+        )?;
+    let coarse_reference_orientation_angle_rad = endpoint_orientation_angle(
+        coarse.final_state,
+        reference.final_state,
+        "refinement.coarse_reference_orientation_angle",
+    )?;
+    let fine_reference_orientation_angle_rad = endpoint_orientation_angle(
+        fine.final_state,
+        reference.final_state,
+        "refinement.fine_reference_orientation_angle",
+    )?;
     Ok(TimestepRefinement {
         coarse,
         fine,
@@ -567,8 +873,20 @@ pub fn refine_timestep_by_two(
         final_mechanical_energy_difference_j,
         coarse_reference_position_difference_m,
         fine_reference_position_difference_m,
-        refinement_improved: fine_reference_position_difference_m
+        coarse_reference_linear_momentum_difference_kg_m_per_s,
+        fine_reference_linear_momentum_difference_kg_m_per_s,
+        coarse_reference_angular_momentum_difference_kg_m2_per_s,
+        fine_reference_angular_momentum_difference_kg_m2_per_s,
+        coarse_reference_orientation_angle_rad,
+        fine_reference_orientation_angle_rad,
+        position_refinement_improved: fine_reference_position_difference_m
             <= coarse_reference_position_difference_m,
+        linear_momentum_refinement_improved: fine_reference_linear_momentum_difference_kg_m_per_s
+            <= coarse_reference_linear_momentum_difference_kg_m_per_s,
+        angular_momentum_refinement_improved: fine_reference_angular_momentum_difference_kg_m2_per_s
+            <= coarse_reference_angular_momentum_difference_kg_m2_per_s,
+        orientation_refinement_improved: fine_reference_orientation_angle_rad
+            <= coarse_reference_orientation_angle_rad,
     })
 }
 
@@ -584,12 +902,16 @@ enum AttemptedStep {
     },
 }
 
-fn sticking_step(
+fn sticking_step<F>(
     input: &ContactDynamicsInput,
     mass_properties: MassProperties,
     state: RigidBodyState,
     contact_before: ContactGeometry,
-) -> Result<AttemptedStep, ContactDynamicsError> {
+    contact_query: &mut F,
+) -> Result<AttemptedStep, ContactDynamicsError>
+where
+    F: FnMut(Pose) -> Result<ContactGeometry, ContactDynamicsError>,
+{
     let duration = input.timestep_s;
     let mass = mass_properties.mass();
     let momentum = state.linear_momentum_world();
@@ -663,8 +985,10 @@ fn sticking_step(
         required_tangential_impulse_ns,
         "friction_cone_margin_ns",
     )?;
-    let feasible = friction_cone_margin_ns
-        >= -contact_impulse_tolerance(static_capacity_impulse_ns, required_tangential_impulse_ns);
+    // A completed sticking step is admissible only inside the mathematical
+    // cone. A numerical tolerance must never turn an outside-cone impulse
+    // into an applied no-slip result.
+    let feasible = friction_cone_margin_ns >= 0.0;
     let stick = StickFeasibility {
         normal_impulse_ns,
         required_tangential_impulse_ns,
@@ -676,12 +1000,7 @@ fn sticking_step(
     if !feasible {
         return Ok(AttemptedStep::StickInfeasible(stick));
     }
-    let post_impulse = apply_impulse(
-        mass_properties,
-        free_state,
-        contact_before.radius_world_m,
-        total_impulse,
-    )?;
+    let post_impulse = apply_impulse(free_state, contact_before.radius_world_m, total_impulse)?;
     let post_impulse_contact_velocity =
         contact_velocity(mass_properties, post_impulse, contact_before.radius_world_m)?;
     let post_impulse_contact_velocity_residual = checked_sub(
@@ -693,11 +1012,13 @@ fn sticking_step(
         post_impulse_contact_velocity_residual,
         "post_impulse_contact_velocity_residual",
     )?;
-    let residual_tolerance = contact_velocity_tolerance(target_contact_velocity)?;
+    let residual_tolerance =
+        contact_velocity_tolerance(free_contact_velocity, target_contact_velocity)?;
     if residual_norm > residual_tolerance {
         return Err(ContactDynamicsError::ConstraintResidualExceeded {
-            residual_m_per_s: residual_norm,
-            tolerance_m_per_s: residual_tolerance,
+            field: "post_impulse_contact_velocity_m_per_s",
+            residual: residual_norm,
+            tolerance: residual_tolerance,
         });
     }
     let post_angular_velocity =
@@ -722,11 +1043,12 @@ fn sticking_step(
         "raw_position",
     )?;
     let raw_pose = Pose::new(raw_position, orientation).map_err(rigid_refusal)?;
-    let raw_contact = contact_geometry(input.geometry, raw_pose)?;
+    let raw_contact = contact_query(raw_pose)?;
     if raw_contact.gap_m.abs() > input.contact_tolerance_m {
-        return Err(ContactDynamicsError::GeometricProjectionExceeded {
-            gap_m: raw_contact.gap_m,
-            tolerance_m: input.contact_tolerance_m,
+        return Err(ContactDynamicsError::ConstraintResidualExceeded {
+            field: "projected_contact_gap_m",
+            residual: raw_contact.gap_m.abs(),
+            tolerance: input.contact_tolerance_m,
         });
     }
     let corrected_position = checked_sub(
@@ -748,10 +1070,12 @@ fn sticking_step(
         post_impulse.angular_momentum_body(),
     )
     .map_err(rigid_refusal)?;
-    let contact_after = contact_geometry(input.geometry, pose_after)?;
+    let contact_after = contact_query(pose_after)?;
     if contact_after.gap_m.abs() > input.contact_tolerance_m {
-        return Err(ContactDynamicsError::NonFiniteDerived {
+        return Err(ContactDynamicsError::ConstraintResidualExceeded {
             field: "projected_contact_gap_m",
+            residual: contact_after.gap_m.abs(),
+            tolerance: input.contact_tolerance_m,
         });
     }
     let energy = energy_ledger(
@@ -877,7 +1201,6 @@ fn solve_3x3(mut system: [[f64; 4]; 3]) -> Result<[f64; 3], ContactDynamicsError
 }
 
 fn apply_impulse(
-    mass_properties: MassProperties,
     state: RigidBodyState,
     radius_world_m: Vec3,
     impulse_world_ns: Vec3,
@@ -1109,14 +1432,56 @@ fn endpoint_position_difference(
     )
 }
 
-fn contact_impulse_tolerance(capacity: f64, required: f64) -> f64 {
-    256.0 * f64::EPSILON * capacity.abs().max(required.abs())
+fn endpoint_linear_momentum_difference(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    field: &'static str,
+) -> Result<f64, ContactDynamicsError> {
+    stable_norm(
+        checked_sub(
+            left.linear_momentum_world(),
+            right.linear_momentum_world(),
+            field,
+        )?,
+        field,
+    )
 }
 
-fn contact_velocity_tolerance(target: Vec3) -> Result<f64, ContactDynamicsError> {
+fn endpoint_angular_momentum_difference(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    field: &'static str,
+) -> Result<f64, ContactDynamicsError> {
+    stable_norm(
+        checked_sub(
+            left.angular_momentum_body(),
+            right.angular_momentum_body(),
+            field,
+        )?,
+        field,
+    )
+}
+
+fn endpoint_orientation_angle(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    field: &'static str,
+) -> Result<f64, ContactDynamicsError> {
+    let [lw, lx, ly, lz] = left.pose().orientation().components();
+    let [rw, rx, ry, rz] = right.pose().orientation().components();
+    let dot = (((lw * rw) + (lx * rx)) + (ly * ry)) + (lz * rz);
+    finite_scalar(dot, field)?;
+    let angle = 2.0 * dot.abs().clamp(-1.0, 1.0).acos();
+    finite_scalar(angle, field)?;
+    Ok(angle)
+}
+
+fn contact_velocity_tolerance(free: Vec3, target: Vec3) -> Result<f64, ContactDynamicsError> {
     checked_mul(
         1024.0 * f64::EPSILON,
-        stable_norm(target, "target_contact_velocity")?.max(1.0),
+        stable_norm(free, "free_contact_velocity")?
+            .max(stable_norm(target, "target_contact_velocity")?)
+            .max(1.0),
         "contact_velocity_tolerance",
     )
 }

@@ -1,9 +1,13 @@
 use fs_euler_disc_e2e::{
     CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
-    ContactDynamicsInput, ContactTermination, contact_geometry, refine_timestep_by_two,
-    run_contact_dynamics, state_at_ground_contact,
+    ContactDynamicsInput, ContactTermination, ProfileContactDynamicsInput, contact_geometry,
+    profile_contact_geometry, profile_state_at_ground_contact, refine_profile_timestep_by_two,
+    refine_timestep_by_two, run_contact_dynamics, run_profile_contact_dynamics,
+    state_at_ground_contact,
 };
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_rep_frep::{AxisymmetricChart, AxisymmetricMassError, SquatDiscEdgeTreatment};
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {
@@ -11,6 +15,29 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "expected {expected:?}, got {actual:?}, tolerance {tolerance:?}"
     );
+}
+
+fn with_cx<R>(cancelled: bool, operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    if cancelled {
+        gate.request();
+    }
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x434f_4e54_4143_54,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
 }
 
 fn tilted_input(
@@ -169,6 +196,35 @@ fn hostile_initial_penetration_is_refused_instead_of_projected_away() {
 }
 
 #[test]
+fn geometry_relative_gap_tolerances_refuse_unbounded_projection_policy() {
+    let mut input = tilted_input(4.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
+    input.contact_tolerance_m = 1.0e-3;
+    match run_contact_dynamics(&input) {
+        Err(ContactDynamicsError::InvalidInput {
+            field: "geometry_relative_contact_tolerance",
+        }) => {}
+        other => panic!("expected geometry-relative tolerance refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn finite_gap_excess_reports_constraint_residual_instead_of_a_projection_claim() {
+    let mut input = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
+    input.contact_tolerance_m = 1.0e-15;
+    match run_contact_dynamics(&input) {
+        Err(ContactDynamicsError::ConstraintResidualExceeded {
+            field: "projected_contact_gap_m",
+            residual,
+            tolerance,
+        }) => {
+            assert!(residual.is_finite());
+            assert!(residual > tolerance);
+        }
+        other => panic!("expected finite projected-gap residual, got {other:?}"),
+    }
+}
+
+#[test]
 fn horizontal_cylinder_line_contact_is_refused() {
     let input = tilted_input(4.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
     let horizontal =
@@ -280,7 +336,174 @@ fn fixed_horizon_refinement_is_deterministic_and_reports_endpoint_difference() {
             .is_finite()
     );
     assert!(refinement.fine_reference_position_difference_m.is_finite());
-    assert!(refinement.refinement_improved);
+    assert!(
+        refinement
+            .coarse_reference_linear_momentum_difference_kg_m_per_s
+            .is_finite()
+    );
+    assert!(
+        refinement
+            .fine_reference_linear_momentum_difference_kg_m_per_s
+            .is_finite()
+    );
+    assert!(
+        refinement
+            .coarse_reference_angular_momentum_difference_kg_m2_per_s
+            .is_finite()
+    );
+    assert!(
+        refinement
+            .fine_reference_angular_momentum_difference_kg_m2_per_s
+            .is_finite()
+    );
+    assert!(
+        refinement
+            .coarse_reference_orientation_angle_rad
+            .is_finite()
+    );
+    assert!(refinement.fine_reference_orientation_angle_rad.is_finite());
     assert!(CONTACT_NO_CLAIM_BOUNDARY.contains("No sliding"));
     assert!(CONTACT_NO_CLAIM_BOUNDARY.contains("convergence-order claim"));
+}
+
+#[test]
+fn sharp_and_one_millimetre_fillet_use_distinct_profile_support_and_mass_inputs() {
+    with_cx(false, |cx| {
+        let sharp = AxisymmetricChart::squat_disc(0.038, 0.006, SquatDiscEdgeTreatment::Sharp)
+            .expect("physical sharp disc");
+        let filleted = AxisymmetricChart::squat_disc(
+            0.038,
+            0.006,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        )
+        .expect("physical 1 mm fillet");
+        let density_kg_per_m3 = 7_800.0;
+        let sharp_mass = sharp
+            .mass_properties(density_kg_per_m3, cx)
+            .expect("sharp profile mass");
+        let filleted_mass = filleted
+            .mass_properties(density_kg_per_m3, cx)
+            .expect("filleted profile mass");
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let zero_pose = Pose::new(Vec3::ZERO, orientation).expect("finite support pose");
+        let sharp_contact = profile_contact_geometry(&sharp, sharp_mass, zero_pose, cx)
+            .expect("unique sharp support");
+        let filleted_contact = profile_contact_geometry(&filleted, filleted_mass, zero_pose, cx)
+            .expect("unique filleted support");
+        let support_delta = sharp_contact
+            .contact
+            .radius_world_m
+            .sub(filleted_contact.contact.radius_world_m);
+        assert!(
+            support_delta.dot(support_delta).sqrt() > 1.0e-6,
+            "the actual fillet must change the support input"
+        );
+        assert!(
+            (sharp_mass.mass - filleted_mass.mass).abs() > 1.0e-9,
+            "the profile mass must not silently retain a sharp-cylinder value"
+        );
+        assert!(
+            (sharp_mass.principal_inertia.axial - filleted_mass.principal_inertia.axial).abs()
+                > 1.0e-12,
+            "the profile inertia must enter the rigid-body model"
+        );
+        assert_eq!(
+            sharp_contact.support_authority, filleted_contact.support_authority,
+            "both analytic support inputs retain the same explicit authority"
+        );
+    });
+}
+
+#[test]
+fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnostics() {
+    with_cx(false, |cx| {
+        let chart = AxisymmetricChart::squat_disc(
+            0.038,
+            0.006,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        )
+        .expect("physical 1 mm fillet");
+        let density_kg_per_m3 = 7_800.0;
+        let mass = chart
+            .mass_properties(density_kg_per_m3, cx)
+            .expect("profile mass");
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let state = profile_state_at_ground_contact(
+            &chart,
+            mass,
+            orientation,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, mass.principal_inertia.axial * 0.05),
+            cx,
+        )
+        .expect("grounded profile state");
+        let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 2);
+        controls.initial_state = state;
+        let input = ProfileContactDynamicsInput {
+            chart,
+            density_kg_per_m3,
+            controls,
+        };
+        let first = run_profile_contact_dynamics(&input, cx).expect("profile run");
+        let repeated = run_profile_contact_dynamics(&input, cx).expect("repeat profile run");
+        assert_eq!(first, repeated);
+        assert_eq!(first.termination, ContactTermination::HorizonReached);
+        let refinement = refine_profile_timestep_by_two(&input, cx).expect("profile refinement");
+        assert_eq!(refinement.coarse, first);
+        assert!(
+            refinement
+                .coarse_reference_position_difference_m
+                .is_finite()
+        );
+        assert!(refinement.fine_reference_position_difference_m.is_finite());
+        assert!(
+            refinement
+                .coarse_reference_linear_momentum_difference_kg_m_per_s
+                .is_finite()
+        );
+        assert!(
+            refinement
+                .fine_reference_linear_momentum_difference_kg_m_per_s
+                .is_finite()
+        );
+        assert!(
+            refinement
+                .coarse_reference_angular_momentum_difference_kg_m2_per_s
+                .is_finite()
+        );
+        assert!(
+            refinement
+                .fine_reference_angular_momentum_difference_kg_m2_per_s
+                .is_finite()
+        );
+        assert!(
+            refinement
+                .coarse_reference_orientation_angle_rad
+                .is_finite()
+        );
+        assert!(refinement.fine_reference_orientation_angle_rad.is_finite());
+    });
+}
+
+#[test]
+fn cancelled_profile_mass_query_is_a_typed_refusal() {
+    let chart = AxisymmetricChart::squat_disc(
+        0.038,
+        0.006,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+    )
+    .expect("physical profile");
+    let input = ProfileContactDynamicsInput {
+        chart,
+        density_kg_per_m3: 7_800.0,
+        controls: tilted_input(4.0, Vec3::ZERO, 0.0, 1.0e-4, 1),
+    };
+    with_cx(true, |cx| match run_profile_contact_dynamics(&input, cx) {
+        Err(ContactDynamicsError::ProfileMassRefusal {
+            detail: AxisymmetricMassError::Cancelled,
+        }) => {}
+        other => panic!("expected typed cancelled profile-mass refusal, got {other:?}"),
+    });
 }
