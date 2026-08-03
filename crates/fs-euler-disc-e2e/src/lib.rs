@@ -1,14 +1,23 @@
 //! Euler-disc flagship integration boundary.
 //!
-//! The first landed slice freezes the scientific Context of Use, claim
-//! taxonomy, evidence ceilings, and binding no-claims.  It intentionally does
-//! not contain geometry, contact, base, gas, solver, experiment, or target
-//! outcome implementations.
+//! The crate freezes the scientific Context of Use, claim taxonomy, evidence
+//! ceilings, and binding no-claims. Its only executable physics slice is a
+//! bounded ideal no-slip rolling baseline with an explicit thin-disc
+//! small-angle oracle; it does not implement compliant contact, base, gas,
+//! experiment, or target-outcome prediction.
 
 #![forbid(unsafe_code)]
 
+pub mod baseline;
 pub mod contract;
 pub mod protocol;
+
+pub use baseline::{
+    BaselineDynamicsClass, BaselineEnergyLedger, BaselineEquilibriumReceipt, BaselineRefusal,
+    BaselineRefusalReason, BaselineRunOutput, BaselineSample, BaselineState,
+    BaselineSupportDiagnostic, BaselineTerminal, BaselineTrajectory, SquatDiscInput,
+    run_ideal_conservative_baseline,
+};
 
 pub use contract::{
     AuthorityCeiling, CLAIM_POLICY_ASSESSMENT_LOG_DOMAIN, CONTRACT_CHECK_RECEIPT_DOMAIN,

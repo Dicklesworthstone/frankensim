@@ -14,9 +14,17 @@
 pub mod ale;
 pub mod bdm;
 pub mod ns;
+pub mod reduced_aero;
 pub mod trimesh;
 
 pub use ns::{FluxParams, FluxSolution, FluxSystem};
+pub use reduced_aero::{
+    AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,
+    ComponentWrenches, ContributionFamily, CorrelationIdentity, CorrelationUncertainty,
+    DiscGeometry, DiscPose, EdgeFlow, EstimateAuthority, FormDrag, GasProperties, GasPropertyCard,
+    OrientationRateDamping, ReducedAeroComponents, ReducedAeroError, ReducedAeroInput,
+    ReducedAeroModel, RotationalSkinFriction, SurfaceRoughness, Vec3, WorkReceipt, WorkWindow,
+};
 pub use trimesh::TriMesh;
 
 /// Crate version, re-exported for provenance stamping.

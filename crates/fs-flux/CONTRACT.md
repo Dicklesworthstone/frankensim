@@ -25,6 +25,19 @@ adjoints.
   collapse, integrates owner-oriented swept edge areas, and returns
   per-cell plus global GCL defects without rejecting a finite mismatch
   or certifying itself.
+- `reduced_aero`: a deterministic exterior-flow screening seam for a moving
+  circular disc, suitable for a spinning tilted disc without importing the
+  Euler-disc domain. `ReducedAeroInput` names one world frame and uses coherent
+  SI fields: metres, seconds, kilograms, newtons, and newton-metres. A
+  `ReducedAeroModel` separately exposes quadratic translational/form drag,
+  face rotational skin friction, exterior-rim edge flow, and disc-axis-rate
+  damping. `CandidateWrench` is force/moment **on the body** about the supplied
+  reference point; it retains every component rather than hiding a thin-gap or
+  fitted term in a total coefficient. Gas, roughness, and caller-supplied
+  coefficient-uncertainty card identities flow into the `EstimateOnly` receipt.
+  `WorkWindow` refuses duplicate caller keys,
+  providing one domain-level exactly-once work receipt before the coupling
+  driver supplies its chosen closed accounting chart.
 - `bdm` module: `cell_basis` builds the per-cell BDM1 basis (all of
   P1², 6 dofs = mean + signed-arclength normal moments per edge,
   BOTH against the global edge normal and orientation — orientation
@@ -85,6 +98,16 @@ adjoints.
    `Δarea - Σ signed_edge_sweep`; a quadratic-in-time signed-area check
    refuses a collapse between two otherwise valid endpoint meshes
    (flux-007, G0/G3).
+8. `reduced_aero` is a passive exterior model in relative motion: for a
+   stationary ambient, `F dot v + M dot omega <= 0`, so its retained relative
+   dissipation is non-negative. It uses translational Reynolds (diameter),
+   rotational Reynolds (`omega * radius^2`), relative roughness, and tip-Mach
+   gates as explicit inclusive correlation domains. Moving ambient flow retains
+   the identity `body_power = relative_power + F dot ambient_velocity`, but it
+   requires a total gas-plus-boundary accounting window rather than asserting
+   a sign for body power. Zero density/motion are exact zero limits; forbidden
+   thin-gap-pressure and target-fitted families fail admission (aero-001
+   through aero-009, G0/G3).
 
 ## Error model
 
@@ -102,6 +125,11 @@ Bit-deterministic across runs on a platform: BTree edge ordering,
 fixed assembly and quadrature order, deterministic dense LU / GMRES.
 The affine-triangle audit also has exact same-instance replay evidence.
 Cross-ISA goldens and a full G5 audit are not recorded.
+
+The reduced aerodynamic wrench has no iteration, random sampling, or
+arrival-order reduction. Alternative candidates are sorted by canonical
+correlation identity, so equivalent input order replays bit-for-bit on the
+same platform. Cross-ISA equality is not claimed.
 
 ## Cancellation behavior
 
@@ -128,6 +156,13 @@ expansion/shear, two-cell interior cancellation, replay, translation
 covariance, continuous-trajectory minima, and fail-closed endpoint,
 topology, stale-cache, orientation, and finiteness cases.
 
+`tests/reduced_aero.rs`: aero-001 zero-density/static limits; aero-002
+reversal and stationary-ambient dissipation; aero-003 quadratic scaling and
+source receipt mutation; aero-004 moving-ambient accounting identity;
+aero-005 frame objectivity; aero-006 correlation-domain and missing-property
+refusal; aero-007 alternative-correlation disagreement; aero-008 exactly-once
+work; aero-009 hostile thin-gap/target-fit refusal.
+
 ## No-claim boundaries
 
 - Turbulence: NO LES/RANS closure ships here and nothing pretends
@@ -151,3 +186,11 @@ topology, stale-cache, orientation, and finiteness cases.
   or 3-D cells, couple FSI, or certify the continuum solver. It carries
   no ledger identity and the synchronous audit has no `Cx`
   cancellation lane; those remain integration work.
+- `reduced_aero` is an Estimate-only, caller-coefficient screening model. It
+  neither resolves Navier--Stokes/CFD nor models turbulence, wakes, thin-gap
+  pressure, squeeze films, contact, ambient vorticity, or a physical device's
+  target outcomes. It makes no claim that air dominates a device. Its compact
+  domain gates are correlation applicability checks, not independent physical
+  validation. `WorkWindow` prevents duplicate application inside one caller
+  window but is not an `fs-couple` closed first-law/entropy audit; a moving
+  ambient/boundary specifically needs that separate total accounting closure.

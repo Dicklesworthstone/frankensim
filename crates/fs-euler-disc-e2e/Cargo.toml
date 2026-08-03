@@ -15,6 +15,9 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir" }
+fs-mbd = { path = "../fs-mbd" }
+fs-time = { path = "../fs-time" }
+fs-tribo = { path = "../fs-tribo" }
 
 [lints]
 workspace = true

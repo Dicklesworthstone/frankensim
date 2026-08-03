@@ -1202,6 +1202,9 @@ dependencies = [
  "fs-evidence",
  "fs-govern",
  "fs-ir",
+ "fs-mbd",
+ "fs-time",
+ "fs-tribo",
 ]
 
 [[package]]
@@ -1618,6 +1621,10 @@ dependencies = [
  "fs-casebook",
  "fsci-special",
 ]
+
+[[package]]
+name = "fs-mbd"
+version = "0.0.1"
 
 [[package]]
 name = "fs-mesh"
@@ -2300,6 +2307,10 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
 ]
+
+[[package]]
+name = "fs-tribo"
+version = "0.0.1"
 
 [[package]]
 name = "fs-tropical"
