@@ -659,6 +659,7 @@ pub fn solve_tilted_disc_air_film(
                 gap_rate_m_per_s: mean(&rates, "sector_mean_gap_rate")?,
             },
             initial_absolute_pressure_pa: input.initial_absolute_pressure_pa,
+            gauge_reference_absolute_pressure_pa: input.gauge_reference_absolute_pressure_pa,
             timestep_s: input.timestep_s,
             budget: input.budget,
         };
