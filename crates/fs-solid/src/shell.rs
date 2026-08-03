@@ -444,7 +444,7 @@ impl ShellPlate {
                     what: "triangle indices must be distinct in range".into(),
                 });
             }
-            let mut canonical = *triangle;
+            let mut canonical = triangle;
             canonical.sort_unstable();
             if !faces.insert(canonical) {
                 return Err(ShellError::InvalidInput {
