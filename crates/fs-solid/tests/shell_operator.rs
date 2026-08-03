@@ -254,6 +254,31 @@ fn shell_003_refuses_malformed_budgeted_and_out_of_applicability_requests() {
         Err(ShellError::InvalidInput { .. })
     ));
 
+    let mut duplicate = plate();
+    duplicate.triangles.push([2, 1, 0]);
+    assert!(matches!(
+        duplicate.assemble(),
+        Err(ShellError::InvalidInput { .. })
+    ));
+
+    let mut disconnected = plate();
+    disconnected.nodes.extend([
+        ShellNode {
+            position_m: [2.0, 0.0, 0.0],
+        },
+        ShellNode {
+            position_m: [3.0, 0.0, 0.0],
+        },
+        ShellNode {
+            position_m: [2.0, 1.0, 0.0],
+        },
+    ]);
+    disconnected.triangles.push([3, 4, 5]);
+    assert!(matches!(
+        disconnected.assemble(),
+        Err(ShellError::UnsupportedGeometry { .. })
+    ));
+
     let mut collinear_support = plate();
     collinear_support.nodes.push(ShellNode {
         position_m: [0.5, 0.0, 0.0],

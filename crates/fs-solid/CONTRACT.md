@@ -153,6 +153,8 @@ constructor facade.
   spread is diagnostic only, not a physical condition number or continuum
   certificate; larger valid assemblies explicitly report that those bounded
   algebraic diagnostics were not computed.
+  Duplicate triangles and components disconnected by an edge are refused before
+  assembly; callers requiring several components must model separate plates.
 
 ## Invariants
 

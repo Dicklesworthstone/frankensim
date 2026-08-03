@@ -412,6 +412,46 @@ impl ShellPlate {
                 });
             }
         }
+        for (index, triangle) in self.triangles.iter().enumerate() {
+            let mut canonical = *triangle;
+            canonical.sort_unstable();
+            if self.triangles[..index].iter().any(|other| {
+                let mut other_canonical = *other;
+                other_canonical.sort_unstable();
+                other_canonical == canonical
+            }) {
+                return Err(ShellError::InvalidInput {
+                    what: "duplicate triangles are not admitted by the flat plate surrogate".into(),
+                });
+            }
+        }
+        let mut connected = vec![false; self.triangles.len()];
+        connected[0] = true;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (index, triangle) in self.triangles.iter().enumerate() {
+                if connected[index] {
+                    continue;
+                }
+                if self
+                    .triangles
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, other)| {
+                        connected[other_index] && triangles_share_edge(*triangle, *other)
+                    })
+                {
+                    connected[index] = true;
+                    changed = true;
+                }
+            }
+        }
+        if connected.iter().any(|connected| !connected) {
+            return Err(ShellError::UnsupportedGeometry {
+                what: "disconnected triangles require separate plate assemblies".into(),
+            });
+        }
         let mut used_nodes = vec![false; self.nodes.len()];
         for triangle in &self.triangles {
             for &node in triangle {
@@ -681,6 +721,10 @@ fn validate_derived_matrix(name: &str, values: &[f64]) -> Result<(), ShellError>
             what: format!("derived {name} matrix is non-finite"),
         })
     }
+}
+
+fn triangles_share_edge(left: [usize; 3], right: [usize; 3]) -> bool {
+    left.iter().filter(|node| right.contains(*node)).count() >= 2
 }
 
 fn validate_support_geometry(
