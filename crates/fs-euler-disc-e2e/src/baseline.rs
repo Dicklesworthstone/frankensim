@@ -13,7 +13,9 @@ use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
 };
 use fs_time::{quat_exp_step, quat_rotate};
-use fs_tribo::{FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef};
+use fs_tribo::{
+    ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
+};
 
 /// Gravitational acceleration used by the baseline, in m/s².
 pub const STANDARD_GRAVITY_MPS2: f64 = 9.806_65;
@@ -65,6 +67,8 @@ pub struct SquatDiscInput {
     pub interface_system_id: String,
     /// Declared history identity consumed by `fs-tribo`.
     pub interface_history_id: String,
+    /// Caller-declared source identity retained by `fs-tribo`; not a material receipt.
+    pub interface_source_id: String,
     /// Authority carried with the dry-contact inputs; it is retained, not upgraded.
     pub interface_authority: InputAuthority,
     /// Initial physical state at t = 0.
@@ -106,7 +110,8 @@ impl SquatDiscInput {
             static_friction_coefficient: 1.0,
             interface_system_id: "baseline/squat-disc->planar-support".to_owned(),
             interface_history_id: "baseline/ideal-no-slip-v1".to_owned(),
-            interface_authority: InputAuthority::Estimated,
+            interface_source_id: "baseline/caller-declared-thin-disc-oracle".to_owned(),
+            interface_authority: InputAuthority::CallerDeclared,
             initial_state: BaselineState {
                 time_seconds: 0.0,
                 position_m: [0.0; 3],
@@ -609,15 +614,17 @@ fn mbd_diagnostics(
         ),
     )
     .ok()?;
+    let pose = Pose::new(
+        Vec3::new(
+            state.position_m[0],
+            state.position_m[1],
+            state.position_m[2],
+        ),
+        orientation,
+    )
+    .ok()?;
     let state = RigidBodyState::new(
-        Pose {
-            position_world: Vec3::new(
-                state.position_m[0],
-                state.position_m[1],
-                state.position_m[2],
-            ),
-            orientation,
-        },
+        pose,
         Vec3::new(
             input.mass_kg * state.linear_velocity_mps[0],
             input.mass_kg * state.linear_velocity_mps[1],
@@ -631,13 +638,16 @@ fn mbd_diagnostics(
     )
     .ok()?;
     let gravity = Gravity::new(Vec3::new(0.0, 0.0, -STANDARD_GRAVITY_MPS2)).ok()?;
-    Some(RigidBodyIntegrator::new(gravity).diagnostics(state, properties))
+    RigidBodyIntegrator::new(gravity)
+        .diagnostics(state, properties)
+        .ok()
 }
 
 fn interface_reference(input: &SquatDiscInput) -> Option<InterfaceSystemRef> {
     InterfaceSystemRef::new(
         input.interface_system_id.clone(),
         input.interface_history_id.clone(),
+        input.interface_source_id.clone(),
         input.interface_authority,
         InterfaceMedium::Dry,
     )
@@ -649,10 +659,12 @@ fn static_friction_capacity(input: &SquatDiscInput) -> Option<f64> {
         static_mu: input.static_friction_coefficient,
         kinetic_mu: input.static_friction_coefficient,
     };
+    let frame = ContactFrame::new([0.0, 0.0, 1.0]).ok()?;
+    let zero_slip = TangentialSlip::new(&frame, [0.0; 3]).ok()?;
     law.evaluate(
         &interface_reference(input)?,
         input.mass_kg * STANDARD_GRAVITY_MPS2,
-        [0.0; 3],
+        zero_slip,
     )
     .ok()
     .map(|response| response.static_limit)
