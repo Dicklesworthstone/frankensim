@@ -14,9 +14,11 @@ use fs_solid::{OperatorDiagnostics, ShellAssembly, ShellError, ShellPlate, Shell
 
 /// Largest retained integration length for this synchronous campaign rung.
 ///
-/// The campaign's 200-step coarse trajectory and its 400-step half-timestep
-/// refinement are the only admitted horizons. This is deliberately not a
-/// general long-running integration API because it has no cancellation point.
+/// The largest single synchronous trajectory is 400 steps. Three-level
+/// refinement admits only coarse trajectories of at most 100 steps, followed
+/// by 200- and 400-step trajectories over the same horizon. This is
+/// deliberately not a general long-running integration API because it has no
+/// cancellation point.
 pub const MAX_BASE_RESPONSE_STEPS: u32 = 400;
 
 /// Largest accepted dimensionless residual of the scaled supported static solve.
@@ -108,13 +110,20 @@ pub enum BaseResponseError {
     ModalReduction { detail: &'static str },
     /// The retained trajectory would exceed the declared bounded work budget.
     StepBudgetExceeded,
-    /// The timestep is outside the conservative modal stability envelope.
-    TimestepOutsideStability {
+    /// The timestep is outside the conservative modal-resolution envelope.
+    ///
+    /// The scalar implicit-midpoint update itself is linearly stable for this
+    /// damped linear system; this refusal bounds fixture-scale resolution, not
+    /// unconditional stability.
+    TimestepOutsideResolution {
         nondimensional_step: f64,
         limit: f64,
     },
     /// The reduced supported static solve did not meet its scaled residual bound.
     ReducedSolveResidual { scaled_residual: f64, limit: f64 },
+    /// A finer member of the retained refinement ladder did not improve a
+    /// terminal component or total-energy difference.
+    RefinementNotImproved { component: &'static str },
     /// A derived quantity became non-finite.
     NonFiniteDerived { field: &'static str },
 }
@@ -179,6 +188,13 @@ pub struct BaseResponseDiagnostics {
     pub reduced_solve_scaled_residual: f64,
     /// Declared dimensionless acceptance limit for `reduced_solve_scaled_residual`.
     pub reduced_solve_scaled_residual_limit: f64,
+    /// Full-DOF supported static unit-load shape before modal normalization.
+    ///
+    /// Translation entries are [m] and rotation entries are [rad]. It is
+    /// retained solely to allow independent reconstruction of the scaled
+    /// supported-solve residual; it is not a dynamic state or a continuum
+    /// shape claim.
+    pub supported_static_shape: Vec<f64>,
     /// Undamped angular frequency [rad/s].
     pub modal_frequency_rad_s: f64,
 }
@@ -207,12 +223,14 @@ impl BaseResponseRun {
     }
 }
 
-/// Coarse/fine evidence for one deterministic timestep-refinement pair.
+/// Three-level evidence for one deterministic timestep-refinement ladder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaseResponseRefinement {
     /// Requested timestep run.
     pub coarse: BaseResponseRun,
     /// Half-timestep, doubled-step run over the same horizon.
+    pub medium: BaseResponseRun,
+    /// Quarter-timestep, four-times-step run over the same horizon.
     pub fine: BaseResponseRun,
     /// Absolute difference in terminal modal displacement [m].
     pub terminal_displacement_difference_m: f64,
@@ -220,6 +238,12 @@ pub struct BaseResponseRefinement {
     pub terminal_elastic_energy_difference_j: f64,
     /// Dimensionless difference in terminal total modal energy.
     pub terminal_normalized_energy_difference: f64,
+    /// The medium-to-fine terminal displacement difference did not increase
+    /// relative to the coarse-to-medium difference.
+    pub displacement_refinement_improved: bool,
+    /// The medium-to-fine terminal total-energy difference did not increase
+    /// relative to the coarse-to-medium difference.
+    pub energy_refinement_improved: bool,
 }
 
 /// Assemble and integrate the one-mode production flexible-base rung.
@@ -251,13 +275,14 @@ pub fn run_reduced_base_response(
         nondimensional_timestep_limit,
         reduced_solve_scaled_residual: mode.scaled_solve_residual,
         reduced_solve_scaled_residual_limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
+        supported_static_shape: mode.full_static_shape.clone(),
         modal_frequency_rad_s,
     };
     let nondimensional_step = input.timestep_s * diagnostics.modal_frequency_rad_s;
     if !(nondimensional_step.is_finite()
         && nondimensional_step <= diagnostics.nondimensional_timestep_limit)
     {
-        return Err(BaseResponseError::TimestepOutsideStability {
+        return Err(BaseResponseError::TimestepOutsideResolution {
             nondimensional_step,
             limit: diagnostics.nondimensional_timestep_limit,
         });
@@ -265,9 +290,7 @@ pub fn run_reduced_base_response(
 
     let mut displacement = input.initial_modal_displacement_m;
     let mut velocity = input.initial_modal_velocity_m_per_s;
-    let initial_force = mode.force_at(input, 0.0);
-    let mut acceleration =
-        (initial_force - mode.damping * velocity - mode.stiffness * displacement) / mode.mass;
+    let mut acceleration = modal_acceleration(mode, input, 0.0, displacement, velocity);
     finite(acceleration, "initial_acceleration")?;
     let mut damping_work = 0.0;
     let mut external_work = 0.0;
@@ -285,21 +308,24 @@ pub fn run_reduced_base_response(
     )?);
 
     for step in 1..=input.steps {
-        let previous_force = mode.force_at(input, (step - 1) as f64 / input.steps as f64);
-        let half_velocity = velocity + 0.5 * input.timestep_s * acceleration;
-        let next_displacement = displacement + input.timestep_s * half_velocity;
+        // Implicit midpoint uses one midpoint state for acceleration, damping
+        // work, external work, and the state update. Its linear solve is
+        // scalar because this rung retains exactly one supported mode.
+        let timestep = input.timestep_s;
+        let midpoint_force = mode.force_at(input, (step as f64 - 0.5) / input.steps as f64);
+        let midpoint_velocity = (midpoint_force + 2.0 * mode.mass * velocity / timestep
+            - mode.stiffness * displacement)
+            / (2.0 * mode.mass / timestep + mode.damping + 0.5 * mode.stiffness * timestep);
+        let next_displacement = displacement + timestep * midpoint_velocity;
+        let next_velocity = 2.0 * midpoint_velocity - velocity;
         let progress = step as f64 / input.steps as f64;
-        let next_force = mode.force_at(input, progress);
         let next_acceleration =
-            (next_force - mode.damping * half_velocity - mode.stiffness * next_displacement)
-                / mode.mass;
-        let next_velocity = half_velocity + 0.5 * input.timestep_s * next_acceleration;
+            modal_acceleration(mode, input, progress, next_displacement, next_velocity);
         finite(next_displacement, "modal_displacement")?;
         finite(next_velocity, "modal_velocity")?;
         finite(next_acceleration, "modal_acceleration")?;
-        let midpoint_velocity = 0.5 * (velocity + next_velocity);
-        damping_work += mode.damping * midpoint_velocity * midpoint_velocity * input.timestep_s;
-        external_work += 0.5 * (previous_force + next_force) * (next_displacement - displacement);
+        damping_work += mode.damping * midpoint_velocity * midpoint_velocity * timestep;
+        external_work += midpoint_force * (next_displacement - displacement);
         finite(damping_work, "damping_work")?;
         finite(external_work, "external_work")?;
         displacement = next_displacement;
@@ -345,15 +371,22 @@ pub fn run_reduced_base_response(
     })
 }
 
-/// Run a deterministic timestep-halving pair over the same physical horizon.
+/// Run a deterministic three-level timestep-halving ladder over one horizon.
+///
+/// This retains component and energy improvement checks but makes no
+/// convergence-order claim.
 pub fn refine_reduced_base_response(
     input: &BaseResponseInput,
 ) -> Result<BaseResponseRefinement, BaseResponseError> {
-    if input.steps > MAX_BASE_RESPONSE_STEPS / 2 {
+    if input.steps > MAX_BASE_RESPONSE_STEPS / 4 {
         return Err(BaseResponseError::StepBudgetExceeded);
     }
     let coarse = run_reduced_base_response(input)?;
-    let mut fine_input = input.clone();
+    let mut medium_input = input.clone();
+    medium_input.timestep_s *= 0.5;
+    medium_input.steps *= 2;
+    let medium = run_reduced_base_response(&medium_input)?;
+    let mut fine_input = medium_input;
     fine_input.timestep_s *= 0.5;
     fine_input.steps *= 2;
     let fine = run_reduced_base_response(&fine_input)?;
@@ -362,6 +395,11 @@ pub fn refine_reduced_base_response(
         .ok_or(BaseResponseError::NonFiniteDerived {
             field: "coarse samples",
         })?;
+    let medium_terminal = medium
+        .final_sample()
+        .ok_or(BaseResponseError::NonFiniteDerived {
+            field: "medium samples",
+        })?;
     let fine_terminal = fine
         .final_sample()
         .ok_or(BaseResponseError::NonFiniteDerived {
@@ -369,34 +407,73 @@ pub fn refine_reduced_base_response(
         })?;
     let coarse_terminal_energy =
         coarse_terminal.modal_kinetic_energy_j + coarse_terminal.elastic_energy_j;
+    let medium_terminal_energy =
+        medium_terminal.modal_kinetic_energy_j + medium_terminal.elastic_energy_j;
     let fine_terminal_energy =
         fine_terminal.modal_kinetic_energy_j + fine_terminal.elastic_energy_j;
-    let terminal_normalized_energy_difference = (coarse_terminal_energy - fine_terminal_energy)
+    let coarse_medium_displacement =
+        (coarse_terminal.modal_displacement_m - medium_terminal.modal_displacement_m).abs();
+    let medium_fine_displacement =
+        (medium_terminal.modal_displacement_m - fine_terminal.modal_displacement_m).abs();
+    let coarse_medium_energy = (coarse_terminal_energy - medium_terminal_energy).abs();
+    let medium_fine_energy = (medium_terminal_energy - fine_terminal_energy).abs();
+    let displacement_scale = coarse_terminal
+        .modal_displacement_m
         .abs()
-        / coarse_terminal_energy
-            .abs()
-            .max(fine_terminal_energy.abs())
-            .max(f64::MIN_POSITIVE);
+        .max(medium_terminal.modal_displacement_m.abs())
+        .max(fine_terminal.modal_displacement_m.abs())
+        .max(f64::MIN_POSITIVE);
+    let energy_scale = coarse_terminal_energy
+        .abs()
+        .max(medium_terminal_energy.abs())
+        .max(fine_terminal_energy.abs())
+        .max(f64::MIN_POSITIVE);
+    let displacement_refinement_improved = refinement_improved(
+        coarse_medium_displacement,
+        medium_fine_displacement,
+        displacement_scale,
+    );
+    if !displacement_refinement_improved {
+        return Err(BaseResponseError::RefinementNotImproved {
+            component: "terminal displacement",
+        });
+    }
+    let energy_refinement_improved =
+        refinement_improved(coarse_medium_energy, medium_fine_energy, energy_scale);
+    if !energy_refinement_improved {
+        return Err(BaseResponseError::RefinementNotImproved {
+            component: "terminal total energy",
+        });
+    }
+    let terminal_normalized_energy_difference = medium_fine_energy / energy_scale;
     finite(
         terminal_normalized_energy_difference,
         "terminal_normalized_energy_difference",
     )?;
     Ok(BaseResponseRefinement {
-        terminal_displacement_difference_m: (coarse_terminal.modal_displacement_m
-            - fine_terminal.modal_displacement_m)
-            .abs(),
-        terminal_elastic_energy_difference_j: (coarse_terminal.elastic_energy_j
+        terminal_displacement_difference_m: medium_fine_displacement,
+        terminal_elastic_energy_difference_j: (medium_terminal.elastic_energy_j
             - fine_terminal.elastic_energy_j)
             .abs(),
         terminal_normalized_energy_difference,
+        displacement_refinement_improved,
+        energy_refinement_improved,
         coarse,
+        medium,
         fine,
     })
+}
+
+fn refinement_improved(coarse_difference: f64, fine_difference: f64, scale: f64) -> bool {
+    fine_difference.is_finite()
+        && coarse_difference.is_finite()
+        && fine_difference <= coarse_difference + 64.0 * f64::EPSILON * scale
 }
 
 #[derive(Debug, Clone)]
 struct ReducedMode {
     full_shape: Vec<f64>,
+    full_static_shape: Vec<f64>,
     translation_scale_m: f64,
     scaled_solve_residual: f64,
     mass: f64,
@@ -408,6 +485,17 @@ impl ReducedMode {
     fn force_at(&self, input: &BaseResponseInput, progress: f64) -> f64 {
         dot(&self.full_shape, &full_load(input, progress))
     }
+}
+
+fn modal_acceleration(
+    mode: &ReducedMode,
+    input: &BaseResponseInput,
+    progress: f64,
+    displacement: f64,
+    velocity: f64,
+) -> f64 {
+    (mode.force_at(input, progress) - mode.damping * velocity - mode.stiffness * displacement)
+        / mode.mass
 }
 
 fn validate_input(input: &BaseResponseInput) -> Result<(), BaseResponseError> {
@@ -503,7 +591,7 @@ fn load_shaped_mode(
         });
     }
     let mixed_unit_scales = mixed_unit_scales(input, &assembly.free_dofs)?;
-    let (reduced_shape, scaled_solve_residual) = solve_mixed_unit_system(
+    let (reduced_static_shape, scaled_solve_residual) = solve_mixed_unit_system(
         assembly.stiffness.values(),
         assembly.stiffness.dimension(),
         &reduced_load,
@@ -518,11 +606,11 @@ fn load_shaped_mode(
             limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
         });
     }
-    let translation_scale_m = reduced_shape
+    let translation_scale_m = reduced_static_shape
         .iter()
         .zip(&assembly.free_dofs)
-        .filter(|(_, &dof)| dof % 6 < 3)
-        .map(|(&value, _)| value.abs())
+        .filter(|(_, dof)| **dof % 6 < 3)
+        .map(|(value, _)| value.abs())
         .fold(0.0_f64, f64::max);
     if !(translation_scale_m.is_finite() && translation_scale_m > 0.0) {
         return Err(BaseResponseError::ModalReduction {
@@ -533,12 +621,20 @@ fn load_shaped_mode(
     // by a translational metre scale leaves a dimensionless displacement shape
     // (and rotational entries in 1/m), preserving q[m], M[kg], K[N/m], C[Ns/m]
     // and phi^T F[N].  Mass normalization would destroy those units.
-    let reduced_shape: Vec<f64> = reduced_shape
-        .into_iter()
+    let reduced_shape: Vec<f64> = reduced_static_shape
+        .iter()
+        .copied()
         .map(|value| value / translation_scale_m)
         .collect();
+    let mut full_static_shape = vec![0.0; assembly.full_mass.dimension()];
     let mut full_shape = vec![0.0; assembly.full_mass.dimension()];
-    for (&index, &value) in assembly.free_dofs.iter().zip(&reduced_shape) {
+    for ((&index, &static_value), &value) in assembly
+        .free_dofs
+        .iter()
+        .zip(&reduced_static_shape)
+        .zip(&reduced_shape)
+    {
+        full_static_shape[index] = static_value;
         full_shape[index] = value;
     }
     let mass = dot(&reduced_shape, &assembly.mass.apply(&reduced_shape));
@@ -559,6 +655,7 @@ fn load_shaped_mode(
     }
     Ok(ReducedMode {
         full_shape,
+        full_static_shape,
         translation_scale_m,
         scaled_solve_residual,
         mass,

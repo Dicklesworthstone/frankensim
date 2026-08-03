@@ -64,6 +64,72 @@ fn input(damping: DampingModel) -> BaseResponseInput {
     }
 }
 
+fn independently_reconstructed_scaled_residual(
+    request: &BaseResponseInput,
+    static_shape: &[f64],
+) -> f64 {
+    let assembly = request.plate.assemble().expect("fixture plate assembles");
+    let mut translation_scale_m = 0.0_f64;
+    for (index, node) in request.plate.nodes.iter().enumerate() {
+        for other in request.plate.nodes.iter().skip(index + 1) {
+            let delta = [
+                node.position_m[0] - other.position_m[0],
+                node.position_m[1] - other.position_m[1],
+                node.position_m[2] - other.position_m[2],
+            ];
+            translation_scale_m = translation_scale_m
+                .max((delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt());
+        }
+    }
+    let mut full_unit_load = vec![0.0; request.plate.nodes.len() * 6];
+    for (node, weight) in [(request.load.start_node, 0.5), (request.load.end_node, 0.5)] {
+        for component in 0..3 {
+            full_unit_load[node * 6 + component] -=
+                weight * request.level_support.level_normal[component];
+        }
+    }
+    let reduced_shape: Vec<_> = assembly
+        .free_dofs
+        .iter()
+        .map(|&dof| static_shape[dof])
+        .collect();
+    let reduced_load: Vec<_> = assembly
+        .free_dofs
+        .iter()
+        .map(|&dof| full_unit_load[dof])
+        .collect();
+    let scales: Vec<_> = assembly
+        .free_dofs
+        .iter()
+        .map(|dof| {
+            if *dof % 6 < 3 {
+                translation_scale_m
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let residual_squared: f64 = (0..assembly.stiffness.dimension())
+        .map(|row| {
+            let residual = assembly.stiffness.values()
+                [row * assembly.stiffness.dimension()..(row + 1) * assembly.stiffness.dimension()]
+                .iter()
+                .zip(&reduced_shape)
+                .map(|(coefficient, value)| coefficient * value)
+                .sum::<f64>()
+                - reduced_load[row];
+            let scaled = scales[row] * residual;
+            scaled * scaled
+        })
+        .sum();
+    let load_squared: f64 = reduced_load
+        .iter()
+        .zip(&scales)
+        .map(|(force, scale)| (force * scale) * (force * scale))
+        .sum();
+    residual_squared.sqrt() / load_squared.sqrt()
+}
+
 fn moving_input(damping: DampingModel) -> BaseResponseInput {
     let support = ShellSupport {
         node_indices: [0, 1, 2],
@@ -159,6 +225,17 @@ fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_
     assert!(terminal.support_reaction_norm_n > 0.0);
     assert!(run.energy_closure_residual_j.abs() < 2.0e-6);
     assert!(run.normalized_energy_closure_residual < 1.0e-4);
+    let reconstructed = independently_reconstructed_scaled_residual(
+        &input(DampingModel::Rayleigh {
+            mass_proportional_per_s: 0.2,
+            stiffness_proportional_s: 1.0e-6,
+        }),
+        &run.diagnostics.supported_static_shape,
+    );
+    assert!(
+        (reconstructed - run.diagnostics.reduced_solve_scaled_residual).abs() < 1.0e-12,
+        "independent residual {reconstructed:e}"
+    );
 }
 
 #[test]
@@ -227,29 +304,33 @@ fn e2e_reduced_flexible_base_zero_damping_preserves_free_modal_energy() {
 
 #[test]
 fn e2e_reduced_flexible_base_timestep_refinement_is_retained() {
-    let evidence = refine_reduced_base_response(&input(DampingModel::Rayleigh {
+    let mut request = input(DampingModel::Rayleigh {
         mass_proportional_per_s: 0.1,
         stiffness_proportional_s: 5.0e-7,
-    }))
-    .expect("refinement pair");
+    });
+    request.steps = 100;
+    let evidence = refine_reduced_base_response(&request).expect("refinement pair");
     assert!(evidence.terminal_displacement_difference_m < 1.0e-6);
     assert!(evidence.terminal_elastic_energy_difference_j < 1.0e-6);
     assert!(evidence.coarse.energy_closure_residual_j.abs() < 2.0e-6);
     assert!(evidence.fine.energy_closure_residual_j.abs() < 2.0e-6);
     assert!(evidence.coarse.normalized_energy_closure_residual < 1.0e-4);
+    assert!(evidence.medium.normalized_energy_closure_residual < 1.0e-4);
     assert!(evidence.fine.normalized_energy_closure_residual < 1.0e-4);
     assert!(evidence.terminal_normalized_energy_difference < 1.0e-4);
+    assert!(evidence.displacement_refinement_improved);
+    assert!(evidence.energy_refinement_improved);
 }
 
 #[test]
-fn e2e_public_base_response_api_refuses_unstable_damping_and_long_synchronous_runs() {
+fn e2e_public_base_response_api_refuses_unresolved_damping_and_long_synchronous_runs() {
     let unstable = input(DampingModel::Rayleigh {
         mass_proportional_per_s: 1.0e6,
         stiffness_proportional_s: 0.0,
     });
     assert!(matches!(
         run_reduced_base_response(&unstable),
-        Err(BaseResponseError::TimestepOutsideStability { .. })
+        Err(BaseResponseError::TimestepOutsideResolution { .. })
     ));
 
     let mut too_long = input(DampingModel::None);
@@ -258,6 +339,34 @@ fn e2e_public_base_response_api_refuses_unstable_damping_and_long_synchronous_ru
         run_reduced_base_response(&too_long),
         Err(BaseResponseError::StepBudgetExceeded)
     ));
+}
+
+#[test]
+fn e2e_reduced_flexible_base_length_rescaling_preserves_scaled_solve_admission() {
+    let original_request = input(DampingModel::None);
+    let original = run_reduced_base_response(&original_request).expect("reference scale admits");
+    let mut scaled_request = original_request.clone();
+    let factor = 10.0;
+    for node in &mut scaled_request.plate.nodes {
+        for coordinate in &mut node.position_m {
+            *coordinate *= factor;
+        }
+    }
+    scaled_request.plate.thickness_m *= factor;
+    scaled_request.timestep_s *= 0.1;
+    let scaled = run_reduced_base_response(&scaled_request).expect("rescaled plate admits");
+    for (run, request) in [(&original, &original_request), (&scaled, &scaled_request)] {
+        assert!(run.diagnostics.reduced_solve_scaled_residual.is_finite());
+        assert!(
+            run.diagnostics.reduced_solve_scaled_residual
+                <= run.diagnostics.reduced_solve_scaled_residual_limit
+        );
+        let reconstructed = independently_reconstructed_scaled_residual(
+            request,
+            &run.diagnostics.supported_static_shape,
+        );
+        assert!((reconstructed - run.diagnostics.reduced_solve_scaled_residual).abs() < 1.0e-12);
+    }
 }
 
 #[test]
