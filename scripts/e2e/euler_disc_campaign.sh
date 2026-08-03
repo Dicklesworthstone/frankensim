@@ -633,6 +633,7 @@ while written < len(receipt_bytes):
         raise SystemExit("JSONL refusal: could not append the retained final receipt")
     written += count
 os.fsync(stderr_fd)
+verify_path_identity(output_path, output_fd, "output")
 verify_path_identity(stderr_path, stderr_fd, "stderr log")
 
 print(
