@@ -7,6 +7,10 @@
 //! outcome, thin-gap solution, or resolved CFD. The dry channel calls
 //! `fs-tribo` directly; the separately named Bildsten boundary-layer channel
 //! is energy-only and supplies no force/wrench.
+//!
+//! Exponent recovery and discrete `P * dt` energy closure test only numerical
+//! self-consistency of these stated equations. They are neither independent
+//! emergence nor experimental or physical validation.
 
 use core::fmt;
 
@@ -24,6 +28,13 @@ pub const MAX_REDUCED_DECAY_STEPS: u32 = 200_000;
 /// This is an input refusal boundary for the reduced reference, not a
 /// certification that every state below it is physically resolved.
 pub const MAX_SMALL_ANGLE_THETA_RAD: f64 = 0.2;
+/// Coefficient in the published Bildsten energy-only power law.
+///
+/// With a caller multiplier of one, the channel evaluates
+/// `4 sqrt(mu rho) g^(5/4) R^(11/4) theta^(-5/4)` [W].
+pub const BILDSTEN_PUBLISHED_POWER_COEFFICIENT: f64 = 4.0;
+/// Stable model identity retained in every numerical-reference run.
+pub const REDUCED_DECAY_MODEL_ID: &str = "euler-disc-small-angle-late-stage-v1";
 
 /// Refusal from the bounded late-stage reference model.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +56,18 @@ pub enum ReducedDecayError {
     NonFiniteDerived { field: &'static str },
     /// Refinement would exceed the retained step bound.
     RefinementStepBudgetOverflow,
+    /// Coarse and fine integrations reached different terminal classes.
+    RefinementTerminalMismatch {
+        /// Requested-step terminal class.
+        coarse: ReducedDecayTerminal,
+        /// Half-step terminal class.
+        fine: ReducedDecayTerminal,
+    },
+    /// Matching refinement terminals did not reach the declared validity cutoff.
+    RefinementIncompleteTerminal {
+        /// Shared terminal class.
+        terminal: ReducedDecayTerminal,
+    },
     /// A caller supplied a malformed run with no retained samples.
     MissingSample,
 }
@@ -59,13 +82,6 @@ impl std::error::Error for ReducedDecayError {}
 
 fn finite_positive(value: f64, field: &'static str) -> Result<(), ReducedDecayError> {
     if !(value.is_finite() && value > 0.0) {
-        return Err(ReducedDecayError::InvalidInput { field });
-    }
-    Ok(())
-}
-
-fn finite_nonnegative(value: f64, field: &'static str) -> Result<(), ReducedDecayError> {
-    if !(value.is_finite() && value >= 0.0) {
         return Err(ReducedDecayError::InvalidInput { field });
     }
     Ok(())
@@ -92,17 +108,18 @@ pub struct DryContourChannel {
 
 impl DryContourChannel {
     fn validate(&self) -> Result<(), ReducedDecayError> {
-        finite_nonnegative(self.normal_force_n, "dry_contour.normal_force_n")?;
-        finite_nonnegative(self.contour_force_n, "dry_contour.contour_force_n")
+        finite_positive(self.normal_force_n, "dry_contour.normal_force_n")?;
+        finite_positive(self.contour_force_n, "dry_contour.contour_force_n")
     }
 }
 
 /// Bildsten-style rotating-disc boundary-layer energy closure.
 ///
-/// With `nu = mu/rho`, its power is
-/// `C * mu * R^4 * Omega^(5/2) / sqrt(nu)`.  Under the declared late-stage
-/// relation, this is proportional to `theta^(-5/4)`, yielding the reference
-/// inclination exponent `4/9` while this closure remains applicable.
+/// Its direct energy-only law is `C * 4 sqrt(mu rho) g^(5/4) R^(11/4)
+/// theta^(-5/4)`, where `C = 1` is the published coefficient convention.
+/// Under the declared late-stage relation, this is proportional to
+/// `theta^(-5/4)`, yielding the reference inclination exponent `4/9` while
+/// this closure remains applicable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BildstenBoundaryLayerChannel {
     /// Named correlation/source identity; no authority is upgraded here.
@@ -111,8 +128,9 @@ pub struct BildstenBoundaryLayerChannel {
     pub density_kg_per_m3: f64,
     /// Dynamic viscosity [Pa s].
     pub dynamic_viscosity_pa_s: f64,
-    /// Caller-declared non-negative dimensionless prefactor, not a fitted
-    /// Euler-outcome coefficient.
+    /// Caller-declared positive multiplier of the published law. A multiplier
+    /// of one means the cited coefficient is used exactly; it is not fitted to
+    /// an Euler-disc outcome.
     pub dimensionless_prefactor: f64,
 }
 
@@ -124,19 +142,24 @@ impl BildstenBoundaryLayerChannel {
             self.dynamic_viscosity_pa_s,
             "bildsten.dynamic_viscosity_pa_s",
         )?;
-        finite_nonnegative(
+        finite_positive(
             self.dimensionless_prefactor,
             "bildsten.dimensionless_prefactor",
         )
     }
 
-    fn power_w(&self, radius_m: f64, omega_rad_s: f64) -> Result<f64, ReducedDecayError> {
-        let kinematic_viscosity = self.dynamic_viscosity_pa_s / self.density_kg_per_m3;
+    fn power_w(
+        &self,
+        radius_m: f64,
+        gravity_m_per_s2: f64,
+        theta_rad: f64,
+    ) -> Result<f64, ReducedDecayError> {
         let power = self.dimensionless_prefactor
-            * self.dynamic_viscosity_pa_s
-            * radius_m.powi(4)
-            * omega_rad_s.powf(2.5)
-            / kinematic_viscosity.sqrt();
+            * BILDSTEN_PUBLISHED_POWER_COEFFICIENT
+            * (self.dynamic_viscosity_pa_s * self.density_kg_per_m3).sqrt()
+            * gravity_m_per_s2.powf(1.25)
+            * radius_m.powf(2.75)
+            * theta_rad.powf(-1.25);
         if !(power.is_finite() && power >= 0.0) {
             return Err(ReducedDecayError::NonFiniteDerived {
                 field: "bildsten.power_w",
@@ -332,12 +355,40 @@ pub enum ReducedDecayTerminal {
 /// Complete numerical-reference output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedDecayRun {
+    /// Model, source, interface, authority, and no-validation declarations.
+    pub provenance: ReducedDecayProvenance,
     /// Retained deterministic state samples, including initial/final states.
     pub samples: Vec<ReducedDecaySample>,
     /// Structured terminal condition.
     pub terminal: ReducedDecayTerminal,
     /// `initial_energy - final_energy - channel_work` [J].
     pub energy_closure_residual_j: f64,
+}
+
+/// Provenance retained with a reduced numerical-reference run.
+///
+/// These declarations bind the model to caller inputs and explicitly state
+/// that this run is not physical validation or an admitted experiment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReducedDecayProvenance {
+    /// Stable reduced-model identity.
+    pub model_id: &'static str,
+    /// Model authority ceiling.
+    pub model_authority: &'static str,
+    /// Physical-validation disposition.
+    pub physical_validation: &'static str,
+    /// Cancellation capability deliberately absent from this scalar reference.
+    pub cancellation_capability: &'static str,
+    /// Dry interface system identity, when the channel is active.
+    pub dry_interface_system_id: Option<String>,
+    /// Dry caller-source identity, when the channel is active.
+    pub dry_source_id: Option<String>,
+    /// Dry caller authority, when the channel is active.
+    pub dry_authority: Option<InputAuthority>,
+    /// Bildsten closure source identity, when the channel is active.
+    pub bildsten_source_id: Option<String>,
+    /// Authority ceiling of the Bildsten multiplier.
+    pub bildsten_multiplier_authority: &'static str,
 }
 
 impl ReducedDecayRun {
@@ -372,7 +423,22 @@ pub fn structured_runner_output(
 ) -> Result<String, ReducedDecayError> {
     let final_sample = run.final_sample()?;
     Ok(format!(
-        "schema=reduced-decay-v1 terminal={:?} time_s={:.12e} theta_rad={:.12e} energy_j={:.12e} dry_work_j={:.12e} bildsten_work_j={:.12e} closure_residual_j={:.12e}\nrefinement_terminal_time_difference_s={:.12e} refinement_total_work_difference_j={:.12e}",
+        "schema=reduced-decay-v1 model_id={} model_authority={} physical_validation={} cancellation_capability={} dry_interface_system_id={} dry_source_id={} dry_authority={:?} bildsten_source_id={} bildsten_multiplier_authority={} terminal={:?} time_s={:.12e} theta_rad={:.12e} energy_j={:.12e} dry_work_j={:.12e} bildsten_work_j={:.12e} closure_residual_j={:.12e}\nrefinement_terminal_time_difference_s={:.12e} refinement_total_work_difference_j={:.12e} evidence_scope=numerical-self-consistency-only",
+        run.provenance.model_id,
+        run.provenance.model_authority,
+        run.provenance.physical_validation,
+        run.provenance.cancellation_capability,
+        run.provenance
+            .dry_interface_system_id
+            .as_deref()
+            .unwrap_or("none"),
+        run.provenance.dry_source_id.as_deref().unwrap_or("none"),
+        run.provenance.dry_authority,
+        run.provenance
+            .bildsten_source_id
+            .as_deref()
+            .unwrap_or("none"),
+        run.provenance.bildsten_multiplier_authority,
         run.terminal,
         final_sample.time_s,
         final_sample.theta_rad,
@@ -388,6 +454,7 @@ pub fn structured_runner_output(
 /// Runs the fixed-step reference with exact per-step energy decrement.
 pub fn run_reduced_decay(input: &ReducedDecayInput) -> Result<ReducedDecayRun, ReducedDecayError> {
     input.validate()?;
+    let provenance = provenance(input);
     let initial_energy_j = input.energy_j(input.initial_theta_rad)?;
     let mut theta_rad = input.initial_theta_rad;
     let mut time_s = 0.0;
@@ -433,6 +500,7 @@ pub fn run_reduced_decay(input: &ReducedDecayInput) -> Result<ReducedDecayRun, R
         if theta_rad <= input.validity_cutoff_theta_rad {
             let final_energy_j = input.energy_j(theta_rad)?;
             return Ok(ReducedDecayRun {
+                provenance,
                 samples,
                 terminal: ReducedDecayTerminal::ValidityCutoff,
                 energy_closure_residual_j: initial_energy_j - final_energy_j - work.total_j(),
@@ -441,6 +509,7 @@ pub fn run_reduced_decay(input: &ReducedDecayInput) -> Result<ReducedDecayRun, R
     }
     let final_energy_j = input.energy_j(theta_rad)?;
     Ok(ReducedDecayRun {
+        provenance,
         samples,
         terminal: ReducedDecayTerminal::StepBudgetExhausted,
         energy_closure_residual_j: initial_energy_j - final_energy_j - work.total_j(),
@@ -462,12 +531,23 @@ pub fn refinement_evidence(
     fine_input.timestep_s *= 0.5;
     fine_input.maximum_steps = fine_steps;
     let fine = run_reduced_decay(&fine_input)?;
+    if coarse.terminal != fine.terminal {
+        return Err(ReducedDecayError::RefinementTerminalMismatch {
+            coarse: coarse.terminal,
+            fine: fine.terminal,
+        });
+    }
+    if coarse.terminal != ReducedDecayTerminal::ValidityCutoff {
+        return Err(ReducedDecayError::RefinementIncompleteTerminal {
+            terminal: coarse.terminal,
+        });
+    }
+    let coarse_terminal = coarse.final_sample()?;
+    let fine_terminal = fine.final_sample()?;
     Ok(RefinementEvidence {
-        terminal_time_difference_s: (coarse.final_sample()?.time_s - fine.final_sample()?.time_s)
+        terminal_time_difference_s: (coarse_terminal.time_s - fine_terminal.time_s).abs(),
+        total_work_difference_j: (coarse_terminal.work.total_j() - fine_terminal.work.total_j())
             .abs(),
-        total_work_difference_j: (coarse.final_sample()?.work.total_j()
-            - fine.final_sample()?.work.total_j())
-        .abs(),
         coarse,
         fine,
     })
@@ -499,7 +579,7 @@ fn powers_at(
         0.0
     };
     let bildsten_boundary_layer_w = if let Some(channel) = &input.bildsten_boundary_layer {
-        channel.power_w(input.radius_m, omega_rad_s)?
+        channel.power_w(input.radius_m, input.gravity_m_per_s2, theta_rad)?
     } else {
         0.0
     };
@@ -507,6 +587,25 @@ fn powers_at(
         dry_contour_w,
         bildsten_boundary_layer_w,
     })
+}
+
+fn provenance(input: &ReducedDecayInput) -> ReducedDecayProvenance {
+    let dry = input.dry_contour.as_ref();
+    ReducedDecayProvenance {
+        model_id: REDUCED_DECAY_MODEL_ID,
+        model_authority: "numerical-reference-only",
+        physical_validation: "not-claimed",
+        cancellation_capability: "not-implemented",
+        dry_interface_system_id: dry
+            .map(|channel| channel.interface.ordered_system_id().to_owned()),
+        dry_source_id: dry.map(|channel| channel.interface.provenance().source_id().to_owned()),
+        dry_authority: dry.map(|channel| channel.interface.provenance().authority()),
+        bildsten_source_id: input
+            .bildsten_boundary_layer
+            .as_ref()
+            .map(|channel| channel.source_id.clone()),
+        bildsten_multiplier_authority: "caller-declared",
+    }
 }
 
 fn sample(

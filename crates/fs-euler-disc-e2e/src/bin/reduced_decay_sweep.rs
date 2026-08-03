@@ -1,9 +1,6 @@
-//! Deterministic numerical-reference sweep for the isolated reduced-decay module.
+//! Deterministic numerical-reference sweep for the public reduced-decay API.
 
-#[path = "../reduced_decay.rs"]
-mod reduced_decay;
-
-use reduced_decay::{
+use fs_euler_disc_e2e::{
     ReducedDecayInput, refinement_evidence, run_reduced_decay, structured_runner_output,
 };
 

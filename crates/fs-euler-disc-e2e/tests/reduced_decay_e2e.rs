@@ -1,12 +1,15 @@
-#[path = "../src/reduced_decay.rs"]
-mod reduced_decay;
+//! Numerical self-consistency checks for the public reduced-decay API.
+//!
+//! Exponent recovery and `P * dt` energy closure are internal consistency
+//! checks of the stated reduced equations. They are not independent emergence,
+//! experimental agreement, or physical validation.
 
-use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
-use reduced_decay::{
+use fs_euler_disc_e2e::{
     BildstenBoundaryLayerChannel, DryContourChannel, ReducedDecayError, ReducedDecayInput,
     ReducedDecayTerminal, STANDARD_GRAVITY_M_PER_S2, refinement_evidence, run_reduced_decay,
     structured_runner_output,
 };
+use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn dry_channel(force_n: f64) -> DryContourChannel {
     DryContourChannel {
@@ -177,7 +180,10 @@ fn e2e_reduced_decay_mass_radius_and_gas_density_scaling_are_explicit() {
     let radius_sample = run_reduced_decay(&radius_double)
         .expect("radius run")
         .samples[0];
-    assert!((radius_sample.omega_rad_s / base_sample.omega_rad_s - 2.0_f64.sqrt()).abs() < 1.0e-12);
+    assert!(
+        (radius_sample.omega_rad_s / base_sample.omega_rad_s - 1.0 / 2.0_f64.sqrt()).abs()
+            < 1.0e-12
+    );
     assert!(
         (radius_sample.powers.bildsten_boundary_layer_w
             / base_sample.powers.bildsten_boundary_layer_w
@@ -205,6 +211,24 @@ fn e2e_reduced_decay_mass_radius_and_gas_density_scaling_are_explicit() {
 }
 
 #[test]
+fn e2e_reduced_decay_multiplier_one_is_the_published_bildsten_law() {
+    let scenario = input(None, Some(1.2));
+    let sample = run_reduced_decay(&scenario)
+        .expect("published-law run")
+        .samples[0];
+    let channel = scenario
+        .bildsten_boundary_layer
+        .as_ref()
+        .expect("Bildsten channel");
+    let expected_w = 4.0
+        * (channel.dynamic_viscosity_pa_s * channel.density_kg_per_m3).sqrt()
+        * scenario.gravity_m_per_s2.powf(1.25)
+        * scenario.radius_m.powf(2.75)
+        * scenario.initial_theta_rad.powf(-1.25);
+    assert!((sample.powers.bildsten_boundary_layer_w / expected_w - 1.0).abs() < 1.0e-12);
+}
+
+#[test]
 fn e2e_reduced_decay_timestep_refinement_is_bounded_and_closes_energy() {
     let evidence = refinement_evidence(&input(Some(0.002), Some(1.2))).expect("refinement");
     assert_eq!(
@@ -216,6 +240,18 @@ fn e2e_reduced_decay_timestep_refinement_is_bounded_and_closes_energy() {
     assert!(evidence.total_work_difference_j < 1.0e-9);
     assert!(evidence.coarse.energy_closure_residual_j.abs() < 1.0e-12);
     assert!(evidence.fine.energy_closure_residual_j.abs() < 1.0e-12);
+}
+
+#[test]
+fn e2e_reduced_decay_refinement_refuses_non_cutoff_terminal_evidence() {
+    let mut step_limited = input(Some(0.002), Some(1.2));
+    step_limited.maximum_steps = 1;
+    assert!(matches!(
+        refinement_evidence(&step_limited),
+        Err(ReducedDecayError::RefinementIncompleteTerminal {
+            terminal: ReducedDecayTerminal::StepBudgetExhausted
+        })
+    ));
 }
 
 #[test]
@@ -245,6 +281,42 @@ fn e2e_reduced_decay_invalid_inputs_and_cutoff_are_structured() {
         run_reduced_decay(&no_channel),
         Err(ReducedDecayError::NoActiveChannel)
     ));
+    let mut zero_multiplier = input(None, Some(1.2));
+    zero_multiplier
+        .bildsten_boundary_layer
+        .as_mut()
+        .expect("Bildsten channel")
+        .dimensionless_prefactor = 0.0;
+    assert!(matches!(
+        run_reduced_decay(&zero_multiplier),
+        Err(ReducedDecayError::InvalidInput {
+            field: "bildsten.dimensionless_prefactor"
+        })
+    ));
+    let mut zero_contour_force = input(Some(0.002), None);
+    zero_contour_force
+        .dry_contour
+        .as_mut()
+        .expect("dry channel")
+        .contour_force_n = 0.0;
+    assert!(matches!(
+        run_reduced_decay(&zero_contour_force),
+        Err(ReducedDecayError::InvalidInput {
+            field: "dry_contour.contour_force_n"
+        })
+    ));
+    let mut unsupported_unloaded_contour = input(Some(0.002), None);
+    unsupported_unloaded_contour
+        .dry_contour
+        .as_mut()
+        .expect("dry channel")
+        .normal_force_n = 0.0;
+    assert!(matches!(
+        run_reduced_decay(&unsupported_unloaded_contour),
+        Err(ReducedDecayError::InvalidInput {
+            field: "dry_contour.normal_force_n"
+        })
+    ));
 }
 
 #[test]
@@ -255,9 +327,17 @@ fn e2e_reduced_decay_runner_output_is_structured_and_deterministic() {
     let first = structured_runner_output(&run, &refinement).expect("structured output");
     let second = structured_runner_output(&run, &refinement).expect("structured output");
     assert_eq!(first, second);
-    assert!(first.starts_with("schema=reduced-decay-v1 terminal=ValidityCutoff "));
+    assert!(
+        first.starts_with("schema=reduced-decay-v1 model_id=euler-disc-small-angle-late-stage-v1 ")
+    );
+    assert!(first.contains("model_authority=numerical-reference-only"));
+    assert!(first.contains("physical_validation=not-claimed"));
+    assert!(first.contains("dry_authority=SyntheticFixture"));
+    assert!(first.contains("bildsten_source_id=synthetic/bildsten-energy-only"));
+    assert!(first.contains("terminal=ValidityCutoff"));
     assert!(first.contains("dry_work_j="));
     assert!(first.contains("bildsten_work_j="));
     assert!(first.contains("closure_residual_j="));
     assert!(first.contains("\nrefinement_terminal_time_difference_s="));
+    assert!(first.ends_with("evidence_scope=numerical-self-consistency-only"));
 }
