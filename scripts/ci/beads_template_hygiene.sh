@@ -8755,8 +8755,9 @@ def assemble_inventory(
             )
         if acceptance_text:
             acceptance_root = text_root(acceptance_text)
-            acceptance_counts[acceptance_root] = (
-                dict.get(acceptance_counts, acceptance_root, 0) + 1
+            acceptance_counts[acceptance_root] = v2_exact_int_add(
+                dict.get(acceptance_counts, acceptance_root, 0),
+                1,
             )
     lint_status_by_id: dict[str, str] = {}
     for status in status_scopes:
@@ -8787,7 +8788,10 @@ def assemble_inventory(
                 "show issue acceptance criteria is not an exact string"
             )
         duplicate_acceptance = bool(acceptance_text) and (
-            acceptance_counts[text_root(acceptance_text)] > 1
+            v2_exact_int_less(
+                1,
+                acceptance_counts[text_root(acceptance_text)],
+            )
         )
         if missing:
             disposition, rationale, falsifier = classify_issue(
@@ -10147,9 +10151,14 @@ def v2_br_hash(
         raise EvidenceFailed("br hash error type is not an allowed terminal")
     if type(label) is not str or not label:
         raise EvidenceFailed("br hash label is malformed")
-    if type(value) is not str or V2_BR_HASH_FULLMATCH(
-        r"[0-9a-f]{64}", value
-    ) is None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in value
+        )
+    ):
         raise error_type(f"{label} is not a canonical lowercase hash")
     return value
 
@@ -31962,13 +31971,18 @@ def v2_validate_review_plan(
         raise EvidenceFailed(
             "v2 review-plan target mapping is dropped, duplicated, or substituted"
         )
-    retained_ids = sorted(
+    retained_ids = [
         row["target_id"] for row in expected_retained
-    )
-    if sorted([*observed_ids, *retained_ids]) != sorted(target_by_id):
+    ]
+    if len(observed_ids) + len(retained_ids) != len(target_by_id):
         raise EvidenceFailed(
             "v2 review-plan scheduled and retained target universe differs"
         )
+    for target_id in target_by_id:
+        if (target_id in observed_ids) == (target_id in retained_ids):
+            raise EvidenceFailed(
+                "v2 review-plan scheduled and retained target universe differs"
+            )
     if (
         counts["targets"] != len(target_by_id)
         or counts["scheduled_targets"] != len(expected_ids)
@@ -32056,12 +32070,7 @@ def v2_validate_review_plan(
             or entry["byte_length"] < 0
             or type(entry["aggregate_cap_accounting"]) is not int
             or entry["aggregate_cap_accounting"] != entry["byte_length"]
-            or type(entry["semantic_root"]) is not str
-            or re.fullmatch(
-                r"sha256-v1:[0-9a-f]{64}",
-                entry["semantic_root"],
-            )
-            is None
+            or not v2_is_semantic_root(entry["semantic_root"])
             or entry["field_roots"] != target["field_roots"]
             or entry["clause_roots"] != target["clause_roots"]
             or entry["exceeded_caps"] != expected_exceeded
@@ -32269,6 +32278,14 @@ def v2_validate_review_plan(
             for key in sorted(expected_route_counts)
         },
     }
+    completed_adjudication_minutes = 0
+    for retained_row in expected_retained:
+        retained_target_id = retained_row["target_id"]
+        retained_decision = authority_by_id[retained_target_id]
+        completed_adjudication_minutes = v2_exact_int_add(
+            completed_adjudication_minutes,
+            int(retained_decision["review_minutes"]),
+        )
     expected_work = {
         "total_review_minutes": sum(
             int(authority_by_id[target_id]["review_minutes"])
@@ -32281,9 +32298,8 @@ def v2_validate_review_plan(
             int(decision["review_minutes"])
             for decision in authority_by_id.values()
         ),
-        "total_completed_adjudication_minutes": sum(
-            int(authority_by_id[row["target_id"]]["review_minutes"])
-            for row in expected_retained
+        "total_completed_adjudication_minutes": (
+            completed_adjudication_minutes
         ),
         "minimum_child_review_minutes": min(
             (int(child["review_minutes"]) for child in children),
@@ -34600,6 +34616,60 @@ def v2_artifact_identity(
     )
 
 
+def v2_bundle_exact_json_dict(
+    value: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Detach one recursively exact JSON object for bundle consumption."""
+    snapshot = v2_released_json_snapshot(
+        value,
+        label=label,
+        error_type=EvidenceFailed,
+    )
+    if type(snapshot) is not dict:
+        raise EvidenceFailed(f"{label} is not an exact object")
+    return snapshot
+
+
+def v2_bundle_exact_string_list(
+    value: Any,
+    *,
+    label: str,
+    cap: int,
+) -> list[str]:
+    """Detach one bounded exact string list for bundle consumption."""
+    if type(cap) is not int or cap < 0:
+        raise EvidenceFailed("v2 bundle string-list cap is malformed")
+    snapshot = v2_released_json_snapshot(
+        value,
+        label=label,
+        error_type=EvidenceFailed,
+    )
+    if type(snapshot) is not list or list.__len__(snapshot) > cap:
+        raise EvidenceFailed(f"{label} is not a bounded exact list")
+    for index, item in enumerate(list.__iter__(snapshot)):
+        if type(item) is not str:
+            raise EvidenceFailed(f"{label} row {index} is not an exact string")
+    return snapshot
+
+
+def v2_bundle_validation_copy(
+    value: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Detach a disposable exact object for semantic validation only."""
+    snapshot = v2_released_json_snapshot(
+        value,
+        label=label,
+        error_type=EvidenceFailed,
+    )
+    if type(snapshot) is not dict:
+        raise EvidenceFailed(f"{label} is not an exact object")
+    return snapshot
+
+
 def v2_bundle_payloads(
     *,
     mode: str,
@@ -34623,23 +34693,114 @@ def v2_bundle_payloads(
             current_source_files,
         )
     )
+    # Seal every authority-bearing JSON input once at the bundle boundary and
+    # consume only those detached trees below.  A validator-local snapshot is
+    # insufficient when later registry/event assembly resumes from the
+    # caller's original nested containers.
+    inventory = v2_bundle_exact_json_dict(
+        inventory,
+        label="v2 bundle inventory",
+    )
+    authority = v2_bundle_exact_json_dict(
+        authority,
+        label="v2 bundle authority",
+    )
+    review_plan = v2_bundle_exact_json_dict(
+        review_plan,
+        label="v2 bundle review plan",
+    )
+    history = v2_bundle_exact_json_dict(
+        history,
+        label="v2 bundle history",
+    )
+    zero_sets = v2_bundle_exact_json_dict(
+        zero_sets,
+        label="v2 bundle zero sets",
+    )
+    replay_equivalence = v2_bundle_exact_json_dict(
+        {} if replay_equivalence is None else replay_equivalence,
+        label="v2 bundle replay equivalence",
+    )
+
+    validation_inventory = v2_bundle_validation_copy(
+        inventory,
+        label="v2 bundle validation inventory",
+    )
+    validation_authority = v2_bundle_validation_copy(
+        authority,
+        label="v2 bundle validation authority",
+    )
+    validation_review_plan = v2_bundle_validation_copy(
+        review_plan,
+        label="v2 bundle validation review plan",
+    )
+    validation_history = v2_bundle_validation_copy(
+        history,
+        label="v2 bundle validation history",
+    )
+    validation_zero_sets = v2_bundle_validation_copy(
+        zero_sets,
+        label="v2 bundle validation zero sets",
+    )
+    if any(
+        type(document) is not dict
+        for document in (
+            inventory,
+            authority,
+            review_plan,
+            history,
+            zero_sets,
+            replay_equivalence,
+        )
+    ):
+        raise EvidenceFailed("v2 bundle input document is not an exact object")
+    validation_reproduction = v2_validate_retained_argv(
+        reproduction,
+        label="v2 bundle reproduction",
+    )
+    reproduction = v2_bundle_exact_string_list(
+        validation_reproduction,
+        label="v2 bundle reproduction snapshot",
+        cap=V2_COMMAND_ARGUMENTS_CAP,
+    )
+    if type(optional_payloads) is not dict:
+        raise EvidenceFailed("v2 optional payloads are not an exact object")
+    optional_payload_count = dict.__len__(optional_payloads)
+    if optional_payload_count > V2_INVENTORY_ROWS_CAP:
+        raise EvidenceFailed("v2 optional payload membership exceeds its cap")
+    optional_payload_snapshot = dict.copy(optional_payloads)
+    if dict.__len__(optional_payload_snapshot) != optional_payload_count:
+        raise EvidenceFailed("v2 optional payloads changed while being sealed")
+    for relative, payload in dict.items(optional_payload_snapshot):
+        if type(relative) is not str or type(payload) is not bytes:
+            raise EvidenceFailed(
+                "v2 optional payload membership is not exact string-to-bytes"
+            )
+        if (
+            not dict.__contains__(optional_payloads, relative)
+            or dict.__getitem__(optional_payloads, relative) is not payload
+        ):
+            raise EvidenceFailed("v2 optional payloads changed while being sealed")
+    if dict.__len__(optional_payloads) != optional_payload_count:
+        raise EvidenceFailed("v2 optional payloads changed while being sealed")
+    optional_payloads = optional_payload_snapshot
     if subject_mode == "review-plan":
         if "state" not in source["captured"]["audit_capture"]:
             raise EvidenceFailed(
                 "v2 review-plan source unexpectedly retains a history audit"
             )
         v2_validate_review_plan(
-            review_plan,
-            inventory,
-            authority,
+            validation_review_plan,
+            validation_inventory,
+            validation_authority,
             review_receipts=source["captured"]["review_receipts"],
         )
         v2_validate_not_requested(
-            history,
+            validation_history,
             schema=V2_HISTORY_SCHEMA,
             mode=subject_mode,
             source_root=source["semantic_root"],
-            inventory_root=inventory["semantic_root"],
+            inventory_root=validation_inventory["semantic_root"],
             projection="history",
         )
     elif subject_mode == "history-plan":
@@ -34648,25 +34809,27 @@ def v2_bundle_payloads(
                 "v2 history-plan source lacks its requested history audit"
             )
         v2_validate_not_requested(
-            review_plan,
+            validation_review_plan,
             schema=V2_REVIEW_PLAN_SCHEMA,
             mode=subject_mode,
             source_root=source["semantic_root"],
-            inventory_root=inventory["semantic_root"],
+            inventory_root=validation_inventory["semantic_root"],
             projection="review-plan",
         )
         expected_history = v2_build_history(
             source_root=source["semantic_root"],
-            inventory=inventory,
-            authority=authority,
+            inventory=validation_inventory,
+            authority=validation_authority,
             all_issues=source["captured"]["all_issues"],
             audit_capture=source["captured"]["audit_capture"],
             history_contract=source["contracts"]["history"],
         )
-        if history != expected_history:
+        if canonical_bytes(validation_history) != canonical_bytes(
+            expected_history
+        ):
             divergence = first_projection_divergence(
                 expected_history,
-                history,
+                validation_history,
             )
             raise EvidenceFailed(
                 "v2 history projection differs from its exact source-derived "
@@ -34674,12 +34837,24 @@ def v2_bundle_payloads(
             )
     else:
         raise EvidenceFailed("v2 bundle subject mode is unknown")
-    registry = review_plan.get("oversize_content") or []
-    if not isinstance(registry, list):
+    retained_registry = dict.get(review_plan, "oversize_content")
+    validation_registry = dict.get(
+        validation_review_plan,
+        "oversize_content",
+    )
+    if retained_registry is None:
+        retained_registry = []
+    if validation_registry is None:
+        validation_registry = []
+    if (
+        type(retained_registry) is not list
+        or type(validation_registry) is not list
+    ):
         raise EvidenceFailed("v2 oversize registry is not an array")
     registry_by_path: dict[str, Mapping[str, Any]] = {}
-    for index, entry in enumerate(registry):
-        if not isinstance(entry, dict):
+    optional_paths: list[str] = []
+    for index, entry in enumerate(validation_registry):
+        if type(entry) is not dict:
             raise EvidenceFailed(f"v2 oversize registry row {index} is malformed")
         v2_exact_keys(
             entry,
@@ -34687,51 +34862,77 @@ def v2_bundle_payloads(
             label=f"v2 oversize registry row {index}",
         )
         relative = str(
-            safe_relative(entry["relative_path"], label="v2 oversize artifact")
+            safe_relative(
+                entry["relative_path"],
+                label="v2 oversize artifact",
+            )
         )
-        if relative in V2_RUN_ARTIFACTS or relative in registry_by_path:
+        if relative in V2_RUN_ARTIFACTS or relative in optional_paths:
             raise EvidenceFailed("v2 oversize registry duplicates an artifact")
         registry_by_path[relative] = entry
-    if set(optional_payloads) != set(registry_by_path):
+        optional_paths.append(relative)
+    registry_paths = frozenset(optional_paths)
+    if dict.__len__(optional_payloads) != dict.__len__(registry_by_path):
         raise EvidenceFailed("v2 optional payload membership differs from its registry")
-    inventory_by_id = {
-        row["id"]: row for row in inventory.get("rows", [])
-    }
+    for relative in dict.__iter__(optional_payloads):
+        if relative not in registry_paths:
+            raise EvidenceFailed(
+                "v2 optional payload membership differs from its registry"
+            )
+    inventory_rows = dict.get(validation_inventory, "rows")
+    authority_decisions = dict.get(validation_authority, "decisions")
+    if type(inventory_rows) is not list or type(authority_decisions) is not list:
+        raise EvidenceFailed(
+            "v2 bundle inventory or authority collections are malformed"
+        )
+    inventory_by_id = {row["id"]: row for row in inventory_rows}
     authority_by_id = {
-        row["target_id"]: row
-        for row in authority.get("decisions", [])
+        row["target_id"]: row for row in authority_decisions
     }
-    for relative, payload in optional_payloads.items():
+    for relative, payload in dict.items(optional_payloads):
         if len(payload) > RUN_ARTIFACT_CAP:
             raise EvidenceFailed(f"v2 optional artifact {relative} exceeds cap")
-        document = strict_json_loads(
+        parsed_document = strict_json_loads(
             payload,
             label=f"v2 optional artifact {relative}",
             require_canonical=True,
         )
-        if type(document) is not dict:
-            raise EvidenceFailed(f"v2 optional artifact {relative} is not an object")
+        document = v2_bundle_validation_copy(
+            parsed_document,
+            label=f"v2 optional artifact {relative}",
+        )
         v2_exact_keys(
             document,
             V2_OVERSIZE_ARTIFACT_FIELDS,
             label=f"v2 optional artifact {relative}",
         )
         verify_semantic_root(document, label=f"v2 optional artifact {relative}")
-        entry = registry_by_path[relative]
+        entry = dict.__getitem__(registry_by_path, relative)
         complete_plan = document["complete_plan"]
         bounded_index = document["bounded_incomplete_index"]
         if (
             type(complete_plan) is not dict
-            or set(complete_plan)
-            != {"target", "authority", "actual_review_minutes"}
-            or type(complete_plan["target"]) is not dict
-            or type(complete_plan["authority"]) is not dict
             or type(bounded_index) is not dict
-            or set(bounded_index)
-            != {"complete", "target_id", "missing_sections"}
+        ):
+            raise EvidenceFailed(
+                f"v2 optional artifact {relative} has a malformed full plan"
+            )
+        v2_exact_keys(
+            complete_plan,
+            {"target", "authority", "actual_review_minutes"},
+            label=f"v2 optional artifact {relative} complete plan",
+        )
+        v2_exact_keys(
+            bounded_index,
+            {"complete", "target_id", "missing_sections"},
+            label=f"v2 optional artifact {relative} bounded index",
+        )
+        if (
+            type(complete_plan["target"]) is not dict
+            or type(complete_plan["authority"]) is not dict
             or bounded_index["complete"] is not False
-            or not isinstance(bounded_index["target_id"], str)
-            or not isinstance(bounded_index["missing_sections"], list)
+            or type(bounded_index["target_id"]) is not str
+            or type(bounded_index["missing_sections"]) is not list
         ):
             raise EvidenceFailed(
                 f"v2 optional artifact {relative} has a malformed full plan"
@@ -34758,13 +34959,7 @@ def v2_bundle_payloads(
             expected_authority,
         )
         expected_target_root_text = expected_target["target_root"]
-        if (
-            type(expected_target_root_text) is not str
-            or V2_SEMANTIC_ROOT_PATTERN.fullmatch(
-                expected_target_root_text
-            )
-            is None
-        ):
+        if not v2_is_semantic_root(expected_target_root_text):
             raise EvidenceFailed(
                 f"v2 optional artifact {relative} target root is malformed"
             )
@@ -34774,69 +34969,90 @@ def v2_bundle_payloads(
         )
         if (
             relative != expected_relative
-            or complete_plan != expected_complete_plan
-            or bounded_index["missing_sections"]
-            != expected_target["missing_sections"]
-            or document["source_roots"]
-            != [
+            or canonical_bytes(complete_plan)
+            != canonical_bytes(expected_complete_plan)
+            or canonical_bytes(bounded_index["missing_sections"])
+            != canonical_bytes(expected_target["missing_sections"])
+            or canonical_bytes(document["source_roots"])
+            != canonical_bytes([
                 expected_target["target_root"],
                 expected_target["v1_row_root"],
                 expected_target["campaign_epoch_root"],
-            ]
-            or document["field_roots"] != expected_target["field_roots"]
-            or document["clause_roots"] != expected_target["clause_roots"]
-            or document["exceeded_caps"] != expected_exceeded_caps
+            ])
+            or canonical_bytes(document["field_roots"])
+            != canonical_bytes(expected_target["field_roots"])
+            or canonical_bytes(document["clause_roots"])
+            != canonical_bytes(expected_target["clause_roots"])
+            or canonical_bytes(document["exceeded_caps"])
+            != canonical_bytes(expected_exceeded_caps)
             or not expected_exceeded_caps
-            or document["canonical_br_show_argv"]
-            != ["br", "show", target_id, "--json", *BR_READ_FLAGS]
+            or canonical_bytes(document["canonical_br_show_argv"])
+            != canonical_bytes([
+                "br",
+                "show",
+                target_id,
+                "--json",
+                *BR_READ_FLAGS,
+            ])
             or document["retained_full_plan_path"] != relative
             or document["retained_full_plan_root"]
             != semantic_root(expected_complete_plan)
-            or document["owner_questions"]
-            != list(V2_OVERSIZE_OWNER_QUESTIONS)
+            or canonical_bytes(document["owner_questions"])
+            != canonical_bytes(list(V2_OVERSIZE_OWNER_QUESTIONS))
             or document["no_claim"] != V2_OVERSIZE_NO_CLAIM
         ):
             raise EvidenceFailed(
                 f"v2 optional artifact {relative} differs from source projections"
             )
         exceeded_caps = document["exceeded_caps"]
-        if (
-            not isinstance(exceeded_caps, list)
-            or not exceeded_caps
-            or any(
-                not isinstance(row, dict)
-                or set(row) != V2_OVERSIZE_EXCEEDED_CAP_FIELDS
-                or not isinstance(row["cap"], str)
+        if type(exceeded_caps) is not list or not exceeded_caps:
+            raise EvidenceFailed(
+                f"v2 optional artifact {relative} has malformed cap diagnostics"
+            )
+        for row_index, row in enumerate(exceeded_caps):
+            if type(row) is not dict:
+                raise EvidenceFailed(
+                    f"v2 optional artifact {relative} has malformed cap diagnostics"
+                )
+            v2_exact_keys(
+                row,
+                V2_OVERSIZE_EXCEEDED_CAP_FIELDS,
+                label=(
+                    f"v2 optional artifact {relative} exceeded cap "
+                    f"row {row_index}"
+                ),
+            )
+            if (
+                type(row["cap"]) is not str
                 or not row["cap"]
-                or not isinstance(row["source_path"], str)
+                or type(row["source_path"]) is not str
                 or not row["source_path"]
                 or type(row["observed"]) is not int
                 or type(row["limit"]) is not int
                 or row["observed"] <= row["limit"]
                 or type(row["violation_count"]) is not int
                 or row["violation_count"] < 1
-                or not isinstance(row["violating_membership_root"], str)
-                or re.fullmatch(
-                    r"sha256-v1:[0-9a-f]{64}",
-                    row["violating_membership_root"],
+                or not v2_is_semantic_root(
+                    row["violating_membership_root"]
                 )
-                is None
-                for row in exceeded_caps
-            )
-        ):
-            raise EvidenceFailed(
-                f"v2 optional artifact {relative} has malformed cap diagnostics"
-            )
+            ):
+                raise EvidenceFailed(
+                    f"v2 optional artifact {relative} has malformed cap diagnostics"
+                )
         if (
             entry["byte_length"] != len(payload)
             or entry["semantic_root"] != document["semantic_root"]
             or entry["aggregate_cap_accounting"] != len(payload)
             or entry["schema_kind"] != document["schema"]
             or entry["media_kind"] != "application/json"
-            or entry["target_roots"] != [expected_target["target_root"]]
-            or entry["field_roots"] != document["field_roots"]
-            or entry["clause_roots"] != document["clause_roots"]
-            or entry["exceeded_caps"] != document["exceeded_caps"]
+            or canonical_bytes(entry["target_roots"])
+            != canonical_bytes([expected_target["target_root"]])
+            or canonical_bytes(entry["field_roots"])
+            != canonical_bytes(document["field_roots"])
+            or canonical_bytes(entry["clause_roots"])
+            != canonical_bytes(document["clause_roots"])
+            or canonical_bytes(entry["exceeded_caps"])
+            != canonical_bytes(document["exceeded_caps"])
             or document["retained_full_plan_path"] != relative
             or document["retained_full_plan_root"]
             != semantic_root(document["complete_plan"])
@@ -34844,20 +35060,20 @@ def v2_bundle_payloads(
             raise EvidenceFailed(f"v2 optional registry identity differs for {relative}")
 
     safe_artifacts = sorted(
-        [*V2_RUN_ARTIFACTS, *optional_payloads],
+        [*V2_RUN_ARTIFACTS, *optional_paths],
         key=lambda value: value.encode("utf-8"),
     )
     events = v2_event_rows(
         mode=mode,
         subject_mode=subject_mode,
         source=source,
-        inventory=inventory,
-        authority=authority,
-        review_plan=review_plan,
-        history=history,
-        zero_sets=zero_sets,
+        inventory=validation_inventory,
+        authority=validation_authority,
+        review_plan=validation_review_plan,
+        history=validation_history,
+        zero_sets=validation_zero_sets,
         safe_artifacts=safe_artifacts,
-        reproduction=reproduction,
+        reproduction=validation_reproduction,
     )
     payloads: dict[str, bytes] = {
         "source-v2.json": canonical_bytes(source),
@@ -34867,10 +35083,13 @@ def v2_bundle_payloads(
         "history-v2.json": canonical_bytes(history),
         "zero-sets-v2.json": canonical_bytes(zero_sets),
         "events.jsonl": b"".join(canonical_bytes(row) for row in events),
-        "reproduce.txt": canonical_bytes(list(reproduction)),
-        **dict(optional_payloads),
+        "reproduce.txt": canonical_bytes(reproduction),
+        **{
+            relative: dict.__getitem__(optional_payloads, relative)
+            for relative in optional_paths
+        },
     }
-    schema_by_name = {
+    schema_by_name: dict[str, str] = {
         "source-v2.json": V2_SOURCE_SCHEMA,
         "inventory-v2.json": V2_INVENTORY_SCHEMA,
         "authority-v2.json": V2_AUTHORITY_SCHEMA,
@@ -34880,8 +35099,11 @@ def v2_bundle_payloads(
         "events.jsonl": V2_EVENT_SCHEMA,
         "reproduce.txt": "frankensim.argv-json.v2",
         **{
-            relative: str(registry_by_path[relative]["schema_kind"])
-            for relative in optional_payloads
+            relative: dict.__getitem__(
+                dict.__getitem__(registry_by_path, relative),
+                "schema_kind",
+            )
+            for relative in optional_paths
         },
     }
     identities = {
@@ -34909,7 +35131,7 @@ def v2_bundle_payloads(
             "base_artifacts": list(V2_RUN_ARTIFACTS),
             "safe_relative_artifacts": safe_artifacts,
             "artifact_identities": identities,
-            "optional_content_registry": registry,
+            "optional_content_registry": retained_registry,
             "manifest_root": source["manifest"]["semantic_root"],
             "source_root": source["semantic_root"],
             "inventory_root": inventory["semantic_root"],
@@ -34925,8 +35147,8 @@ def v2_bundle_payloads(
             "event_sequence": list(range(len(events))),
             "event_roots": [semantic_root(row) for row in events],
             "terminal_event_root": semantic_root(events[-1]),
-            "reproduction": list(reproduction),
-            "replay_equivalence": dict(replay_equivalence or {}),
+            "reproduction": reproduction,
+            "replay_equivalence": replay_equivalence,
             "first_divergence": None,
             "recovery": "NOT_REQUIRED",
             "complete_evidence_bundle": True,
@@ -34942,8 +35164,21 @@ def v2_bundle_payloads(
         **payloads,
         "terminal.json": canonical_bytes(terminal),
     }
-    if set(payloads) != set(V2_RUN_ARTIFACTS) | set(optional_payloads):
+    expected_payload_count = len(V2_RUN_ARTIFACTS) + dict.__len__(
+        optional_payloads
+    )
+    if dict.__len__(payloads) != expected_payload_count:
         raise EvidenceFailed("v2 payload membership differs from its exact contract")
+    for name in V2_RUN_ARTIFACTS:
+        if not dict.__contains__(payloads, name):
+            raise EvidenceFailed(
+                "v2 payload membership differs from its exact contract"
+            )
+    for name in dict.__iter__(optional_payloads):
+        if not dict.__contains__(payloads, name):
+            raise EvidenceFailed(
+                "v2 payload membership differs from its exact contract"
+            )
     for name, payload in dict.items(payloads):
         if len(payload) > RUN_ARTIFACT_CAP:
             raise EvidenceFailed(f"v2 artifact {name} exceeds its 64 MiB cap")
@@ -38640,7 +38875,6 @@ def v2_validate_source_graph(
 ) -> None:
     if type(all_issues) is not list:
         raise InputRefused("v2 source graph issues are not an exact array")
-    issue_by_id: dict[str, dict[str, Any]] = {}
     for issue_index, issue in enumerate(list.__iter__(all_issues)):
         if type(issue) is not dict:
             raise InputRefused(
@@ -38652,13 +38886,19 @@ def v2_validate_source_graph(
             label=f"v2 source graph issue {issue_index}",
         )
         issue_id = dict.__getitem__(issue, "id")
-        if (
-            type(issue_id) is not str
-            or not issue_id
-            or dict.__contains__(issue_by_id, issue_id)
-        ):
+        if type(issue_id) is not str or not issue_id:
             raise InputRefused("v2 source graph issue membership is malformed")
-        dict.__setitem__(issue_by_id, issue_id, issue)
+    issue_ids = [
+        dict.__getitem__(issue, "id")
+        for issue in list.__iter__(all_issues)
+    ]
+    if len(issue_ids) != len(set(issue_ids)):
+        raise InputRefused("v2 source graph issue membership is malformed")
+    issue_by_id = {
+        dict.__getitem__(issue, "id"): issue
+        for issue in list.__iter__(all_issues)
+    }
+    node_ids = sorted(issue_ids)
     reverse_fields = (
         ("dependencies", "dependents"),
         ("dependents", "dependencies"),
@@ -38694,7 +38934,7 @@ def v2_validate_source_graph(
             dict.__getitem__(relation, "id"),
         ) == identity
 
-    for issue_id in sorted(dict.__iter__(issue_by_id)):
+    for issue_id in node_ids:
         issue = dict.__getitem__(issue_by_id, issue_id)
         for relation_field, _reciprocal_field in reverse_fields:
             neighbors = [
@@ -38773,13 +39013,13 @@ def v2_validate_source_graph(
                         "v2 source graph relation lacks exact reciprocal edge: "
                         f"{issue_id}.{relation_field}->{neighbor_id}"
                     )
-    blocking_adjacency: dict[str, list[str]] = {}
-    parent_adjacency: dict[str, list[str]] = {}
-    for issue_id in sorted(dict.__iter__(issue_by_id)):
-        issue = dict.__getitem__(issue_by_id, issue_id)
-        dict.__setitem__(blocking_adjacency, issue_id, sorted(
+    blocking_adjacency = {
+        issue_id: sorted(
             dict.__getitem__(relation, "id")
-            for relation in dict.__getitem__(issue, "dependencies")
+            for relation in dict.__getitem__(
+                dict.__getitem__(issue_by_id, issue_id),
+                "dependencies",
+            )
             if (
                 dict.__getitem__(relation, "type")
                 in V2_BLOCKING_DEPENDENCY_TYPES
@@ -38788,59 +39028,119 @@ def v2_validate_source_graph(
                     "external:",
                 )
             )
-        ))
-        parent_id = dict.__getitem__(issue, "parent")
-        dict.__setitem__(
-            parent_adjacency,
-            issue_id,
-            [parent_id] if parent_id else [],
         )
+        for issue_id in node_ids
+    }
+    parent_adjacency = {
+        issue_id: (
+            [
+                dict.__getitem__(
+                    dict.__getitem__(issue_by_id, issue_id),
+                    "parent",
+                )
+            ]
+            if dict.__getitem__(
+                dict.__getitem__(issue_by_id, issue_id),
+                "parent",
+            )
+            else []
+        )
+        for issue_id in node_ids
+    }
+    child_adjacency = {
+        issue_id: sorted(
+            dict.__getitem__(relation, "id")
+            for relation in dict.__getitem__(
+                dict.__getitem__(issue_by_id, issue_id),
+                "dependents",
+            )
+            if (
+                dict.__getitem__(relation, "type") == "parent-child"
+                and not str.startswith(
+                    dict.__getitem__(relation, "id"),
+                    "external:",
+                )
+            )
+        )
+        for issue_id in node_ids
+    }
     v2_validate_source_graph_acyclic(
         blocking_adjacency,
-        node_ids=sorted(dict.__iter__(issue_by_id)),
+        node_ids=node_ids,
         relation_label="blocking dependency cycle",
     )
     v2_validate_source_graph_acyclic(
         parent_adjacency,
-        node_ids=sorted(dict.__iter__(issue_by_id)),
+        node_ids=node_ids,
         relation_label="parent hierarchy cycle",
     )
 
-    for issue_id in sorted(dict.__iter__(issue_by_id)):
+    node_index = {
+        node_id: node_number
+        for node_number, node_id in enumerate(node_ids)
+    }
+    child_adjacency_masks = v2_graph_adjacency_masks(
+        child_adjacency,
+        node_ids,
+    )
+    for issue_id in node_ids:
         issue = dict.__getitem__(issue_by_id, issue_id)
         rollup = dict.__getitem__(issue, "rollup")
         if rollup is None:
             continue
-        visited = {issue_id: None}
-        frontier = [issue_id]
-        descendant_counts: dict[str, int] = {}
-        while frontier:
-            next_frontier: list[str] = []
-            for current in frontier:
-                current_issue = dict.__getitem__(issue_by_id, current)
-                for relation in dict.__getitem__(current_issue, "dependents"):
-                    child_id = dict.__getitem__(relation, "id")
-                    if (
-                        dict.__getitem__(relation, "type") != "parent-child"
-                        or str.startswith(child_id, "external:")
-                        or child_id in visited
-                    ):
-                        continue
-                    dict.__setitem__(visited, child_id, None)
-                    child_status = dict.__getitem__(
-                        dict.__getitem__(issue_by_id, child_id),
-                        "status",
-                    )
-                    dict.__setitem__(
-                        descendant_counts,
-                        child_status,
-                        dict.get(descendant_counts, child_status, 0) + 1,
-                    )
-                    next_frontier.append(child_id)
-            frontier = sorted(next_frontier)
+        issue_number = v2_graph_node_index(node_index, issue_id)
+        issue_bit = 1 << issue_number
+        visited_mask = issue_bit
+        frontier_mask = issue_bit
+        descendant_mask = 0
+        while int.__ne__(frontier_mask, 0) is True:
+            current_bit = v2_graph_lowest_bit(frontier_mask)
+            frontier_mask = v2_graph_mask_without_bit(
+                frontier_mask,
+                current_bit,
+            )
+            current_number = v2_graph_node_number_from_bit(current_bit)
+            pending_children = tuple.__getitem__(
+                child_adjacency_masks,
+                current_number,
+            )
+            while int.__ne__(pending_children, 0) is True:
+                child_bit = v2_graph_lowest_bit(pending_children)
+                pending_children = v2_graph_mask_without_bit(
+                    pending_children,
+                    child_bit,
+                )
+                if v2_graph_mask_contains_bit(visited_mask, child_bit):
+                    continue
+                visited_mask = v2_graph_mask_with_bit(
+                    visited_mask,
+                    child_bit,
+                )
+                frontier_mask = v2_graph_mask_with_bit(
+                    frontier_mask,
+                    child_bit,
+                )
+                descendant_mask = v2_graph_mask_with_bit(
+                    descendant_mask,
+                    child_bit,
+                )
+        descendant_statuses = [
+            dict.__getitem__(
+                dict.__getitem__(issue_by_id, node_id),
+                "status",
+            )
+            for node_number, node_id in enumerate(node_ids)
+            if v2_graph_mask_contains_bit(
+                descendant_mask,
+                1 << node_number,
+            )
+        ]
         expected_descendants = {
-            status: dict.__getitem__(descendant_counts, status)
-            for status in sorted(descendant_counts)
+            status: sum(
+                candidate_status == status
+                for candidate_status in descendant_statuses
+            )
+            for status in sorted(frozenset(descendant_statuses))
         }
         if dict.__getitem__(rollup, "descendants") != expected_descendants:
             raise EvidenceFailed(
@@ -40295,14 +40595,16 @@ def v2_validate_exact_json_wire(
         ("value", value, 0, "$", None)
     ]
     active_containers: dict[int, None] = {}
-    container_snapshots: list[tuple[Any, Any, str]] = []
+    container_snapshots: dict[str, tuple[Any, Any, str]] = {}
     node_count = 0
     item_count = 0
     scalar_bytes = 0
     canonical_wire_bytes = 1  # canonical_bytes terminal newline.
     snapshot_bytes = 0
     while stack:
-        operation, current, depth, path, state = stack.pop()
+        frame = list.__getitem__(stack, -1)
+        list.pop(stack)
+        operation, current, depth, path, state = frame
         if operation == "leave":
             dict.pop(active_containers, id(current), None)
             continue
@@ -40322,12 +40624,15 @@ def v2_validate_exact_json_wire(
                 current,
                 depth,
                 path,
-                (int(index) + 1, int(expected_length)),
+                (
+                    v2_exact_int_add(int(index), 1),
+                    int(expected_length),
+                ),
             ))
             stack.append((
                 "value",
                 item,
-                depth + 1,
+                v2_exact_int_add(int(depth), 1),
                 f"{path}[{index}]",
                 None,
             ))
@@ -40355,19 +40660,29 @@ def v2_validate_exact_json_wire(
                     path=f"{path}.<key:{ordinal}>",
                 )
             )
-            scalar_bytes += key_utf8_bytes
-            canonical_wire_bytes += key_wire_bytes
+            scalar_bytes = v2_exact_int_add(
+                scalar_bytes,
+                key_utf8_bytes,
+            )
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                key_wire_bytes,
+            )
             stack.append((
                 "dict-item",
                 current,
                 depth,
                 path,
-                (iterator, int(ordinal) + 1, int(expected_length)),
+                (
+                    iterator,
+                    v2_exact_int_add(int(ordinal), 1),
+                    int(expected_length),
+                ),
             ))
             stack.append((
                 "value",
                 item,
-                depth + 1,
+                v2_exact_int_add(int(depth), 1),
                 f"{path}.<member:{ordinal}>",
                 None,
             ))
@@ -40383,18 +40698,24 @@ def v2_validate_exact_json_wire(
             raise EvidenceFailed(f"{label} exact-wire traversal state differs")
         if depth > depth_cap:
             raise InputRefused(f"{label} exceeds its exact-wire depth cap")
-        node_count += 1
+        node_count = v2_exact_int_add(node_count, 1)
         if node_count > node_cap:
             raise InputRefused(f"{label} exceeds its exact-wire node cap")
         if current is None:
-            canonical_wire_bytes += 4
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                4,
+            )
             if canonical_wire_bytes > byte_cap:
                 raise InputRefused(
                     f"{label} exceeds its exact-wire canonical byte cap"
                 )
             continue
         if type(current) is bool:
-            canonical_wire_bytes += 4 if current else 5
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                4 if current else 5,
+            )
             if canonical_wire_bytes > byte_cap:
                 raise InputRefused(
                     f"{label} exceeds its exact-wire canonical byte cap"
@@ -40407,8 +40728,14 @@ def v2_validate_exact_json_wire(
                 error_type=InputRefused,
             )
             integer_bytes = len(str.encode(integer_text, "ascii"))
-            scalar_bytes += integer_bytes
-            canonical_wire_bytes += integer_bytes
+            scalar_bytes = v2_exact_int_add(
+                scalar_bytes,
+                integer_bytes,
+            )
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                integer_bytes,
+            )
         elif type(current) is float:
             if not V2_EXACT_JSON_ISFINITE(current):
                 raise InputRefused(
@@ -40416,8 +40743,14 @@ def v2_validate_exact_json_wire(
                 )
             float_text = repr(current)
             float_bytes = len(str.encode(float_text, "ascii"))
-            scalar_bytes += float_bytes
-            canonical_wire_bytes += float_bytes
+            scalar_bytes = v2_exact_int_add(
+                scalar_bytes,
+                float_bytes,
+            )
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                float_bytes,
+            )
         elif type(current) is str:
             string_utf8_bytes, string_wire_bytes = (
                 v2_exact_json_string_wire_lengths(
@@ -40427,13 +40760,19 @@ def v2_validate_exact_json_wire(
                     path=path,
                 )
             )
-            scalar_bytes += string_utf8_bytes
-            canonical_wire_bytes += string_wire_bytes
+            scalar_bytes = v2_exact_int_add(
+                scalar_bytes,
+                string_utf8_bytes,
+            )
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                string_wire_bytes,
+            )
         elif type(current) is list:
             length = list.__len__(current)
             if length > item_cap - item_count:
                 raise InputRefused(f"{label} exceeds its exact-wire item cap")
-            item_count += length
+            item_count = v2_exact_int_add(item_count, length)
             structural_bytes = 2 + (length - 1 if length else 0)
             snapshot_charge = (
                 V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
@@ -40447,8 +40786,14 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} exceeds its exact-wire snapshot cap"
                 )
-            canonical_wire_bytes += structural_bytes
-            snapshot_bytes += snapshot_charge
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                structural_bytes,
+            )
+            snapshot_bytes = v2_exact_int_add(
+                snapshot_bytes,
+                snapshot_charge,
+            )
             identity = id(current)
             if identity in active_containers:
                 raise InputRefused(
@@ -40460,7 +40805,11 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} changed while validating {path}"
                 )
-            container_snapshots.append((current, snapshot, path))
+            dict.__setitem__(
+                container_snapshots,
+                path,
+                (current, snapshot, path),
+            )
             stack.append(("leave", current, depth, path, None))
             stack.append((
                 "list-item",
@@ -40474,7 +40823,7 @@ def v2_validate_exact_json_wire(
             dict_items = length * 2
             if dict_items > item_cap - item_count:
                 raise InputRefused(f"{label} exceeds its exact-wire item cap")
-            item_count += dict_items
+            item_count = v2_exact_int_add(item_count, dict_items)
             structural_bytes = (
                 2
                 + (length - 1 if length else 0)
@@ -40492,8 +40841,14 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} exceeds its exact-wire snapshot cap"
                 )
-            canonical_wire_bytes += structural_bytes
-            snapshot_bytes += snapshot_charge
+            canonical_wire_bytes = v2_exact_int_add(
+                canonical_wire_bytes,
+                structural_bytes,
+            )
+            snapshot_bytes = v2_exact_int_add(
+                snapshot_bytes,
+                snapshot_charge,
+            )
             identity = id(current)
             if identity in active_containers:
                 raise InputRefused(
@@ -40505,7 +40860,11 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} changed while validating {path}"
                 )
-            container_snapshots.append((current, snapshot, path))
+            dict.__setitem__(
+                container_snapshots,
+                path,
+                (current, snapshot, path),
+            )
             stack.append(("leave", current, depth, path, None))
             stack.append((
                 "dict-item",
@@ -40526,7 +40885,19 @@ def v2_validate_exact_json_wire(
             raise InputRefused(
                 f"{label} exceeds an exact-wire byte or snapshot cap"
             )
-    for live_container, snapshot, path in container_snapshots:
+    # The traversal worklist is empty here by construction. Rebind it before
+    # detached-tree reconstruction so later writes into retained snapshots
+    # cannot be conservatively mistaken for mutations of stale frame aliases.
+    stack = []
+    frame = ("released", None, 0, "$", None)
+    current = None
+    state = None
+    item = None
+    snapshot = None
+    iterator = None
+    for live_container, snapshot, path in dict.values(
+        container_snapshots
+    ):
         v2_exact_wire_container_unchanged(
             live_container,
             snapshot,
@@ -40534,9 +40905,9 @@ def v2_validate_exact_json_wire(
             path=path,
         )
     detached_by_path: dict[str, Any] = {}
-    for _live_container, snapshot, snapshot_path in reversed(
-        container_snapshots
-    ):
+    for _live_container, snapshot, snapshot_path in reversed(tuple(
+        dict.values(container_snapshots)
+    )):
         if type(snapshot) is list:
             for index in range(list.__len__(snapshot)):
                 item = list.__getitem__(snapshot, index)
@@ -42917,6 +43288,7 @@ V2_AUDITED_PURE_CALL_RESULT_PATHS = (
         frozenset({"<derived-call-result>", "<iter-item>"}),
     ),
     (json.dumps, frozenset({"<derived-call-result>", "encode"})),
+    (json.loads, frozenset({"<derived-call-result>"})),
     (math.isfinite, frozenset({"<derived-call-result>"})),
     (
         str.splitlines,
@@ -45977,12 +46349,45 @@ V2_TRANSPORT_CACHE_MUTATION_CODE_CONTRACTS = (
     ),
 )
 V2_AUDITED_LOCAL_FAST_RESULT_KINDS = frozenset({
+    "detached-json-dict",
+    "exact-bytes",
     "exact-int",
     "exact-json-dict",
     "exact-json-list",
     "exact-str",
+    "owned-json-dict",
 })
 V2_AUDITED_LOCAL_FAST_RESULT_CONTRACTS = (
+    (
+        "canonical_bytes",
+        canonical_bytes,
+        canonical_bytes.__code__,
+        "exact-bytes",
+    ),
+    (
+        "v2_rooted",
+        v2_rooted,
+        v2_rooted.__code__,
+        "owned-json-dict",
+    ),
+    (
+        "v2_bundle_exact_json_dict",
+        v2_bundle_exact_json_dict,
+        v2_bundle_exact_json_dict.__code__,
+        "exact-json-dict",
+    ),
+    (
+        "v2_bundle_exact_string_list",
+        v2_bundle_exact_string_list,
+        v2_bundle_exact_string_list.__code__,
+        "exact-json-list",
+    ),
+    (
+        "v2_bundle_validation_copy",
+        v2_bundle_validation_copy,
+        v2_bundle_validation_copy.__code__,
+        "detached-json-dict",
+    ),
     (
         "v2_br_exact_mapping",
         v2_br_exact_mapping,
@@ -46276,6 +46681,32 @@ V2_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS = (
     (
         v2_validate_canonical_byte_size,
         frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
+    (
+        v2_bundle_exact_json_dict,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH[0],
+            V2_DIRECT_CALL_RESULT_PATH[0],
+            "<iter-item>",
+            "get",
+        }),
+    ),
+    (
+        v2_bundle_exact_string_list,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH[0],
+            V2_DIRECT_CALL_RESULT_PATH[0],
+            "<iter-item>",
+        }),
+    ),
+    (
+        v2_bundle_validation_copy,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH[0],
+            V2_DIRECT_CALL_RESULT_PATH[0],
+            "<iter-item>",
+            "get",
+        }),
     ),
     # This wrapper delegates to the exact-wire validator and returns only its
     # recursively detached JSON tree, translating every harness refusal to the
@@ -46906,6 +47337,10 @@ V2_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS = (
             "<iter-item>",
             ("<iter-item>", "items"),
         }),
+    ),
+    (
+        v2_validate_source_command_receipts,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
     ),
     (
         v2_stable_issue_projection,
@@ -48204,6 +48639,10 @@ def v2_fast_local_origin_dataflow(
         tuple[Any, tuple[Any, ...]],
     ] = {}
     origin_cache_entry_cap = max(256, len(instructions) * 64)
+    origin_alias_identity_cache: dict[
+        int,
+        tuple[tuple[Any, ...], int, bool],
+    ] = {}
     hazardous_mapping_allocation_sites: set[tuple[Any, ...]] = set()
     hazard_epoch = 0
 
@@ -48213,10 +48652,29 @@ def v2_fast_local_origin_dataflow(
     def origin_carries_exact_json_alias(
         origin: tuple[Any, ...],
     ) -> bool:
-        return v2_fast_origin_carries_exact_json_alias(
+        identity = id(origin)
+        cached = dict.get(origin_alias_identity_cache, identity)
+        if (
+            cached is not None
+            and cached[0] is origin
+            and cached[1] == hazard_epoch
+        ):
+            return cached[2]
+        result = v2_fast_origin_carries_exact_json_alias(
             origin,
             hazardous_allocation_sites=exact_json_hazard_sites(),
         )
+        if (
+            dict.__len__(origin_alias_identity_cache)
+            >= origin_cache_entry_cap
+        ):
+            dict.clear(origin_alias_identity_cache)
+        dict.__setitem__(
+            origin_alias_identity_cache,
+            identity,
+            (origin, hazard_epoch, result),
+        )
+        return result
 
     def origin_is_borrowed_exact_json_alias(
         origin: tuple[Any, ...],
@@ -48242,6 +48700,10 @@ def v2_fast_local_origin_dataflow(
         if allocation_site not in hazardous_mapping_allocation_sites:
             set.add(hazardous_mapping_allocation_sites, allocation_site)
             hazard_epoch += 1
+            # A previously clean aggregate reference can become hazardous in
+            # the middle of one instruction.  Invalidate immediately; the
+            # later whole-CFG requeue remains separately required.
+            dict.clear(origin_alias_identity_cache)
         return origin
 
     def origin_sort_key(value: Any) -> tuple[Any, ...]:
@@ -48361,12 +48823,17 @@ def v2_fast_local_origin_dataflow(
             and target[1] == "BUILD_LIST"
         ):
             return V2_FAST_ORIGIN_UNKNOWN
-        combined = tuple(sorted(
-            {*target[2], *members},
-            key=origin_sort_key,
-        ))
-        if len(combined) > V2_FAST_ORIGIN_RESOLUTION_CAP:
-            return V2_FAST_ORIGIN_UNKNOWN
+        member_origins = (*target[2], *members)
+        # A list reached through append is a possibility set, not a positional
+        # sequence.  Merge its possible member provenance into one bounded
+        # origin instead of accumulating one row per loop iteration.  Tuple
+        # work items retain their positional shape through merge_origin, while
+        # heterogeneous members remain an explicit bounded choice.
+        combined = (
+            (merge_origins(member_origins),)
+            if member_origins
+            else ()
+        )
         return (
             "aggregate",
             "BUILD_LIST",
@@ -48998,12 +49465,12 @@ def v2_fast_local_origin_dataflow(
             # site instead of growing a recursive choice on every loop edge.
             # The final marker disables positional-subscript exactness because
             # these members are a bounded possibility set, not list positions.
-            members = tuple(sorted(
-                set(left[2]) | set(right[2]),
-                key=origin_sort_key,
-            ))
-            if len(members) > V2_FAST_ORIGIN_RESOLUTION_CAP:
-                return V2_FAST_ORIGIN_UNKNOWN
+            possible_members = (*left[2], *right[2])
+            members = (
+                (merge_origins(possible_members),)
+                if possible_members
+                else ()
+            )
             return (
                 "aggregate",
                 "BUILD_LIST",
@@ -49693,6 +50160,27 @@ def v2_fast_local_origin_dataflow(
                 _pinned_code,
                 code,
                 call_instruction.offset,
+            )
+        if result_kind == "detached-json-dict":
+            # This exact built-in dict is a fresh, disposable validation
+            # snapshot.  It deliberately carries no alias to the separately
+            # retained authority snapshot, so a validator may consume or
+            # mutate it without changing output bytes.
+            return (
+                "protocol-result",
+                ("dict",),
+                (),
+                False,
+            )
+        if result_kind == "owned-json-dict":
+            # The helper allocates a new exact outer dict but may borrow
+            # nested values from its already sealed input.  Preserve those
+            # aliases so subsequent mutation checks remain fail-closed.
+            return (
+                "protocol-result",
+                ("dict",),
+                tuple(arguments),
+                False,
             )
         return (
             "protocol-result",
@@ -50900,15 +51388,20 @@ def v2_fast_local_origin_dataflow(
             tuple[tuple[Any, ...], tuple[Any, ...]]
         ] = []
         for receiver in receivers:
-            summarized_assertion_projection = (
+            summarized_code_pinned_projection = (
                 len(receiver) >= 5
                 and receiver[0] == "aggregate"
                 and receiver[1]
                 in {"BUILD_MAP", "BUILD_CONST_KEY_MAP"}
                 and receiver[4] is True
-                and active_executable_function
-                is V2_ASSERTION_EVIDENCE_PROJECTOR_CONTRACT[0]
-                and code is V2_ASSERTION_EVIDENCE_PROJECTOR_CONTRACT[1]
+                and (
+                    active_executable_function
+                    is V2_ASSERTION_EVIDENCE_PROJECTOR_CONTRACT[0]
+                    and code is V2_ASSERTION_EVIDENCE_PROJECTOR_CONTRACT[1]
+                    or active_executable_function
+                    is v2_validate_exact_json_wire
+                    and code is v2_validate_exact_json_wire.__code__
+                )
             )
             if not (
                 len(receiver) >= 5
@@ -50917,7 +51410,7 @@ def v2_fast_local_origin_dataflow(
                 in {"BUILD_MAP", "BUILD_CONST_KEY_MAP"}
                 and (
                     receiver[4] is False
-                    or summarized_assertion_projection
+                    or summarized_code_pinned_projection
                 )
             ):
                 return False, ()
@@ -51236,6 +51729,80 @@ def v2_fast_local_origin_dataflow(
             merge_origins(results) if results else V2_FAST_ORIGIN_STATIC,
         )
 
+    def exact_list_pop_effect(
+        callable_options: set[tuple[Any, ...]],
+        arguments: Sequence[tuple[Any, ...]],
+        keyword_names: tuple[str, ...] | None,
+    ) -> tuple[
+        bool,
+        tuple[tuple[tuple[Any, ...], tuple[Any, ...]], ...],
+        tuple[Any, ...] | None,
+    ]:
+        """Model a last-item pop from one exact local list allocation."""
+        flattened = {
+            flattened_callable_binding(candidate)
+            for candidate in callable_options
+        }
+        unbound_call = flattened == {
+            ("binding", "global", "list", ("pop",))
+        }
+        bound_call = bool(callable_options) and all(
+            candidate
+            and candidate[0] == "attribute"
+            and candidate[2] == ("pop",)
+            and len(candidate[1]) >= 5
+            and candidate[1][0] == "aggregate"
+            and candidate[1][1] == "BUILD_LIST"
+            for candidate in callable_options
+        )
+        if not unbound_call and not bound_call:
+            return False, (), None
+        expected_count = 1 if unbound_call else 0
+        if keyword_names != () or len(arguments) != expected_count:
+            dynamic_uses[index].add((
+                "invalid-exact-list-mutation-call-shape",
+                V2_FAST_ORIGIN_STATIC,
+            ))
+            return True, (), V2_FAST_ORIGIN_UNKNOWN
+        receivers = (
+            tuple(origin_options(arguments[0]))
+            if unbound_call
+            else tuple(candidate[1] for candidate in callable_options)
+        )
+        if len(receivers) != 1:
+            return False, (), None
+        receiver = receivers[0]
+        if (
+            len(receiver) < 5
+            or receiver[0] != "aggregate"
+            or receiver[1] != "BUILD_LIST"
+        ):
+            return False, (), None
+        members = receiver[2]
+        if type(members) is not tuple:
+            return False, (), None
+        if receiver[4] is True:
+            # A loop-carried list stores a bounded possibility set rather than
+            # positional members.  Popping can return any retained member; keep
+            # the receiver summary unchanged so a later iteration remains
+            # conservative and converges.
+            updated_receiver = receiver
+            result = (
+                merge_origins(members)
+                if members
+                else V2_FAST_ORIGIN_STATIC
+            )
+        else:
+            updated_receiver = (
+                "aggregate",
+                "BUILD_LIST",
+                members[:-1],
+                receiver[3],
+                False,
+            )
+            result = members[-1] if members else V2_FAST_ORIGIN_STATIC
+        return True, ((receiver, updated_receiver),), result
+
     def modeled_bound_list_append_targets(
         callable_options: set[tuple[Any, ...]],
         arguments: Sequence[tuple[Any, ...]],
@@ -51277,6 +51844,7 @@ def v2_fast_local_origin_dataflow(
         *,
         recognized_dict_setitem: bool,
         recognized_dict_pop: bool,
+        recognized_list_pop: bool,
         recognized_list_setitem: bool,
     ) -> bool:
         modeled_append_targets = modeled_bound_list_append_targets(
@@ -51346,6 +51914,8 @@ def v2_fast_local_origin_dataflow(
                     and binding_path[1] == ("__setitem__",)
                 ):
                     continue
+                if recognized_list_pop and binding_path[1] == ("pop",):
+                    continue
                 return True
             if (
                 binding_path is not None
@@ -51406,6 +51976,10 @@ def v2_fast_local_origin_dataflow(
                 and not (
                     candidate[2] == ("append",)
                     and candidate[1] in modeled_append_targets
+                )
+                and not (
+                    recognized_list_pop
+                    and candidate[2] == ("pop",)
                 )
             ):
                 return True
@@ -51813,10 +52387,20 @@ def v2_fast_local_origin_dataflow(
                 arguments,
                 call_keyword_names,
             )
+            (
+                recognized_list_pop,
+                list_pop_replacements,
+                list_pop_result,
+            ) = exact_list_pop_effect(
+                callable_options,
+                arguments,
+                call_keyword_names,
+            )
             for receiver, updated_receiver in (
                 *dict_setitem_replacements,
                 *list_setitem_replacements,
                 *dict_pop_replacements,
+                *list_pop_replacements,
             ):
                 for binding, origin in tuple(bindings.items()):
                     bindings[binding] = replace_origin_tree(
@@ -51838,6 +52422,7 @@ def v2_fast_local_origin_dataflow(
                 call_keyword_names,
                 recognized_dict_setitem=recognized_dict_setitem,
                 recognized_dict_pop=recognized_dict_pop,
+                recognized_list_pop=recognized_list_pop,
                 recognized_list_setitem=recognized_list_setitem,
             ):
                 dynamic_uses[index].add((
@@ -51923,6 +52508,7 @@ def v2_fast_local_origin_dataflow(
                 append_targets
                 or recognized_dict_setitem
                 or recognized_dict_pop
+                or recognized_list_pop
                 or recognized_list_setitem
                 or list_getitem_result is not None
                 or dict_get_result is not None
@@ -52179,6 +52765,7 @@ def v2_fast_local_origin_dataflow(
                 or append_targets
                 or recognized_dict_setitem
                 or recognized_dict_pop
+                or recognized_list_pop
                 or recognized_list_setitem
                 or callable_options
                 and all(
@@ -52267,6 +52854,7 @@ def v2_fast_local_origin_dataflow(
                     or dict_copy_result is not None
                     or exact_base_len_result is not None
                     or recognized_dict_pop
+                    or recognized_list_pop
                     or recognized_list_setitem
                 ):
                     exact_result_call_indices.add(index)
@@ -52276,6 +52864,8 @@ def v2_fast_local_origin_dataflow(
                     if recognized_dict_setitem or recognized_list_setitem
                     else dict_pop_result
                     if recognized_dict_pop
+                    else list_pop_result
+                    if recognized_list_pop
                     else nested_container_result
                     if nested_container_result is not None
                     else list_getitem_result
@@ -52414,8 +53004,32 @@ def v2_fast_local_origin_dataflow(
                 ) + (instruction.arg >> 8) + 1
             else:
                 count = 0
+            source_options = origin_options(source)
+            exact_tuple_unpack = bool(source_options) and all(
+                candidate
+                and candidate[0] == "aggregate"
+                and candidate[1] == "BUILD_TUPLE"
+                and len(candidate[2]) == count
+                for candidate in source_options
+            )
+            unpacked_members = (
+                tuple(
+                    merge_origins(
+                        candidate[2][item_index]
+                        for candidate in source_options
+                    )
+                    for item_index in range(count)
+                )
+                if exact_tuple_unpack
+                else None
+            )
             for item_index in reversed(range(count)):
-                list.append(stack, ("unpack", source, item_index))
+                list.append(
+                    stack,
+                    unpacked_members[item_index]
+                    if unpacked_members is not None
+                    else ("unpack", source, item_index),
+                )
         if (
             opname == "BINARY_SUBSCR"
             or opname == "BINARY_OP" and instruction.argrepr == "[]"
@@ -58202,7 +58816,7 @@ def v2_validate_operation_protocol_argument_value(
         "process-python-environment"
         in context["authorized_external_capabilities"]
         and value is V2_PROCESS_ENVIRONMENT_BYTES_BINDING
-        and mode == "iterate"
+        and mode in {"iterate", "length"}
     ):
         return
     if mode.startswith(V2_AUDITED_ENVIRONMENT_OPERATION_PREFIX):
@@ -100333,7 +100947,7 @@ def v2_execute_artifact_cases(
                 lambda callback=callback: (
                     v2_fixture_callback_data_projection(callback)
                 ),
-                contains="hook-bearing or non-exact type",
+                contains="refusal-state executable binding 'value'",
             )
             for name, callback in (
                 ("dict", protocol_dict_projection),
@@ -132264,6 +132878,21 @@ V2_LATE_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS += (
             "<iter-item>",
         }),
     ),
+    # The exact-wire traversal tuple-unpacks these helpers' fixed-shape scalar
+    # results.  Each helper exact-gates its input before returning, so only the
+    # derived tuple members—not a caller-controlled protocol object—continue.
+    (
+        v2_exact_wire_list_item,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
+    (
+        v2_exact_wire_dict_item,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
+    (
+        v2_exact_json_string_wire_lengths,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
     (
         v2_graph_node_index,
         frozenset({
@@ -132425,6 +133054,38 @@ V2_AUDITED_LOCAL_PURE_CALL_CODE_CONTRACTS += tuple(
     in V2_LATE_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS
 )
 V2_EXACT_CONTAINER_VALIDATOR_RESULT_CONTRACTS = (
+    # Bundle assembly exact-gates caller mappings, uses disposable detached
+    # validation copies for semantic consumers, and constructs its remaining
+    # maps locally.  These base descriptors expose only values or iterator
+    # members that are immediately type/schema checked or canonically encoded.
+    *(
+        (
+            v2_bundle_payloads,
+            v2_bundle_payloads.__code__,
+            descriptor,
+            allowed_paths,
+        )
+        for descriptor, allowed_paths in (
+            (
+                dict.__getitem__,
+                frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+            ),
+            (
+                dict.__iter__,
+                frozenset({
+                    V2_DERIVED_CALL_RESULT_PATH,
+                    ("<iter-item>",),
+                }),
+            ),
+            (
+                dict.get,
+                frozenset({
+                    V2_DERIVED_CALL_RESULT_PATH,
+                    ("<iter-item>",),
+                }),
+            ),
+        )
+    ),
     # The descriptor-slot closer exact-gates ``slot`` as a plain one-element
     # list before every base-descriptor read. The selected value is used only
     # as a descriptor scalar and is never invoked as a callable.
@@ -132503,6 +133164,17 @@ V2_EXACT_CONTAINER_VALIDATOR_RESULT_CONTRACTS = (
         for candidate in (
             v2_validate_source_graph,
         )
+    ),
+    # The graph validator indexes only its locally constructed, sorted exact
+    # node-ID list.  The selected string is subsequently used as a mapping key
+    # or scalar identity; no caller-owned list protocol remains reachable.
+    (
+        v2_validate_source_graph,
+        v2_validate_source_graph.__code__,
+        list.__getitem__,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH,
+        }),
     ),
     (
         v2_validate_source_graph_acyclic,
@@ -132788,6 +133460,23 @@ V2_EXACT_CONTAINER_VALIDATOR_RESULT_CONTRACTS = (
         v2_status_scopes,
         v2_status_scopes.__code__,
         dict.get,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    # The zero-set validator exact-gates its three rooted envelopes and every
+    # preflighted row before using base-dict optional reads. Returned values
+    # are consumed only as data and are independently type/root checked.
+    (
+        v2_validate_zero_sets,
+        v2_validate_zero_sets.__code__,
+        dict.get,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    # Source command events exact-gate the receipt and its closed key set,
+    # then exact-type every detached descriptor result before using it.
+    (
+        v2_source_command_event_row,
+        v2_source_command_event_row.__code__,
+        dict.__getitem__,
         frozenset({V2_DERIVED_CALL_RESULT_PATH}),
     ),
     *(
@@ -133076,10 +133765,13 @@ def v2_validate_runtime_code_contracts() -> None:
         or type(V2_AUDITED_LOCAL_FAST_RESULT_KINDS) is not frozenset
         or V2_AUDITED_LOCAL_FAST_RESULT_KINDS
         != frozenset({
+            "detached-json-dict",
+            "exact-bytes",
             "exact-int",
             "exact-json-dict",
             "exact-json-list",
             "exact-str",
+            "owned-json-dict",
         })
         or type(V2_AUDITED_LOCAL_FAST_RESULT_CONTRACTS) is not tuple
     ):
