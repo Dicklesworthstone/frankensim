@@ -426,3 +426,91 @@ fn aero_012_duplicate_correlation_identity_is_order_independent_refusal() {
         ));
     }
 }
+
+#[test]
+fn aero_013_edge_on_form_drag_uses_rim_silhouette_not_wetted_rim_area() {
+    let model = model("fixture.edge-on-silhouette", 1.1);
+    let mut edge_on = input(Vec3::ZERO);
+    edge_on.pose = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0)).expect("unit normal");
+    edge_on.kinematics.linear_velocity_world_m_per_s = Vec3::new(4.0, 0.0, 0.0);
+    edge_on.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    let wrench = model.evaluate(&edge_on).expect("edge-on wrench");
+
+    let rim_silhouette_m2 = 2.0 * edge_on.geometry.radius_m * edge_on.geometry.exterior_thickness_m;
+    let roughness_factor = 1.0 + edge_on.roughness.height_m / edge_on.geometry.radius_m;
+    let expected_force_n =
+        -0.5 * 1.2 * 1.1 * roughness_factor * rim_silhouette_m2 * 4.0_f64.powi(2);
+    assert!((wrench.force_world_n.x - expected_force_n).abs() <= 1.0e-14);
+    assert_eq!(wrench.force_world_n.y, 0.0);
+    assert_eq!(wrench.force_world_n.z, 0.0);
+}
+
+#[test]
+fn aero_014_forged_wrenches_and_overflow_do_not_consume_work_keys_or_totals() {
+    let wrench = model("fixture.transaction", 1.1)
+        .evaluate(&input(Vec3::ZERO))
+        .expect("candidate result");
+    let mut window = WorkWindow::default();
+
+    let mut forged_vector = wrench.clone();
+    forged_vector.force_world_n.x = f64::NAN;
+    assert!(matches!(
+        window.record_once(29, 0.25, &forged_vector),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.force_world_n"
+        })
+    ));
+    assert_eq!(window.body_work_j(), 0.0);
+    assert_eq!(window.relative_dissipation_j(), 0.0);
+
+    let mut overflowing_work = wrench.clone();
+    overflowing_work.receipt.relative_power_w = 0.0;
+    overflowing_work.receipt.dissipated_relative_power_w = 0.0;
+    overflowing_work.receipt.body_power_w = f64::MAX;
+    overflowing_work.receipt.ambient_boundary_power_w = f64::MAX;
+    assert!(matches!(
+        window.record_once(29, 2.0, &overflowing_work),
+        Err(ReducedAeroError::NonFiniteDerived {
+            field: "work.body_work_j"
+        })
+    ));
+    assert_eq!(window.body_work_j(), 0.0);
+    assert_eq!(window.relative_dissipation_j(), 0.0);
+
+    window
+        .record_once(29, 0.25, &wrench)
+        .expect("valid candidate must retain the unconsumed key");
+}
+
+#[test]
+fn aero_015_derived_overflow_and_passivity_are_checked_in_all_build_modes() {
+    let model = model("fixture.overflow", 1.1);
+    let mut overflowing = input(Vec3::ZERO);
+    overflowing.kinematics.linear_velocity_world_m_per_s = Vec3::new(f64::MAX, 0.0, 0.0);
+    assert!(matches!(
+        model.evaluate(&overflowing),
+        Err(ReducedAeroError::NonFiniteDerived {
+            field: "translational_reynolds"
+        })
+    ));
+
+    let wrench = model
+        .evaluate(&input(Vec3::ZERO))
+        .expect("passive candidate");
+    assert!(wrench.receipt.relative_power_w <= 0.0);
+    let mut forged_passivity = wrench.clone();
+    forged_passivity.receipt.relative_power_w = 1.0;
+    forged_passivity.receipt.dissipated_relative_power_w = -1.0;
+    forged_passivity.receipt.body_power_w = 1.0;
+    forged_passivity.receipt.ambient_boundary_power_w = 0.0;
+    let mut window = WorkWindow::default();
+    assert!(matches!(
+        window.record_once(31, 0.25, &forged_passivity),
+        Err(ReducedAeroError::PassivePowerViolation {
+            relative_power_w: 1.0
+        })
+    ));
+    window
+        .record_once(31, 0.25, &wrench)
+        .expect("passivity refusal must not consume the key");
+}
