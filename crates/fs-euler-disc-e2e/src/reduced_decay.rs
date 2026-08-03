@@ -35,6 +35,8 @@ pub const MAX_SMALL_ANGLE_THETA_RAD: f64 = 0.2;
 pub const BILDSTEN_PUBLISHED_POWER_COEFFICIENT: f64 = 4.0;
 /// Stable model identity retained in every numerical-reference run.
 pub const REDUCED_DECAY_MODEL_ID: &str = "euler-disc-small-angle-late-stage-v1";
+/// Fixed bisection count for the encoded-model channel-crossover diagnostic.
+pub const CHANNEL_CROSSOVER_BISECTION_STEPS: u32 = 64;
 
 /// Refusal from the bounded late-stage reference model.
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +189,9 @@ pub struct ReducedDecayInput {
     pub timestep_s: f64,
     /// Hard maximum retained integration steps.
     pub maximum_steps: u32,
+    /// Nonblank identity for the small-angle energy/precession oracle. This is
+    /// distinct from a dissipation-law source and upgrades no authority.
+    pub small_angle_oracle_source_id: String,
     /// Optional real dry contour channel.
     pub dry_contour: Option<DryContourChannel>,
     /// Optional energy-only boundary-layer channel.
@@ -205,6 +210,7 @@ impl ReducedDecayInput {
             validity_cutoff_theta_rad: 0.001,
             timestep_s: 1.0e-5,
             maximum_steps: 100_000,
+            small_angle_oracle_source_id: "analytic/euler-disc-small-angle-oracle-v1".to_owned(),
             dry_contour: Some(DryContourChannel {
                 interface: InterfaceSystemRef::new(
                     "reduced-decay/disc->support",
@@ -220,7 +226,7 @@ impl ReducedDecayInput {
                 contour_force_n: 0.002,
             }),
             bildsten_boundary_layer: Some(BildstenBoundaryLayerChannel {
-                source_id: "caller-declared/bildsten-energy-only-v1".to_owned(),
+                source_id: "doi:10.1103/PhysRevE.66.056309".to_owned(),
                 density_kg_per_m3: 1.2,
                 dynamic_viscosity_pa_s: 1.8e-5,
                 dimensionless_prefactor: 1.0,
@@ -235,6 +241,10 @@ impl ReducedDecayInput {
         finite_positive(self.initial_theta_rad, "initial_theta_rad")?;
         finite_positive(self.validity_cutoff_theta_rad, "validity_cutoff_theta_rad")?;
         finite_positive(self.timestep_s, "timestep_s")?;
+        nonblank(
+            &self.small_angle_oracle_source_id,
+            "small_angle_oracle_source_id",
+        )?;
         if self.maximum_steps == 0 || self.maximum_steps > MAX_REDUCED_DECAY_STEPS {
             return Err(ReducedDecayError::InvalidInput {
                 field: "maximum_steps",
@@ -373,6 +383,8 @@ pub struct ReducedDecayRun {
 pub struct ReducedDecayProvenance {
     /// Stable reduced-model identity.
     pub model_id: &'static str,
+    /// Identity of the small-angle energy/precession oracle.
+    pub small_angle_oracle_source_id: String,
     /// Model authority ceiling.
     pub model_authority: &'static str,
     /// Physical-validation disposition.
@@ -412,6 +424,88 @@ pub struct RefinementEvidence {
     pub total_work_difference_j: f64,
 }
 
+/// Why an encoded-model crossover cannot be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelCrossoverNotComparable {
+    /// No dry contour channel was declared.
+    MissingDryContour,
+    /// No Bildsten energy-only channel was declared.
+    MissingBildstenBoundaryLayer,
+}
+
+/// Deterministic dry/Bildsten channel-crossover diagnostic.
+///
+/// This is derived solely from the encoded reduced power functions. It is not
+/// independent mechanism evidence, model selection, or physical validation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChannelCrossoverDiagnostic {
+    /// The channel pair was not both declared.
+    NotComparable {
+        /// Typed reason no pairwise comparison exists.
+        reason: ChannelCrossoverNotComparable,
+    },
+    /// Both channels were declared but their power difference did not change
+    /// sign on the closed initial-to-cutoff inclination interval.
+    NoneWithinInterval,
+    /// The encoded power functions cross at this inclination [rad].
+    AtInclination {
+        /// Bisection-derived inclination [rad].
+        theta_rad: f64,
+    },
+}
+
+/// Computes the deterministic encoded-model dry/Bildsten crossover, if any.
+pub fn channel_crossover_diagnostic(
+    input: &ReducedDecayInput,
+) -> Result<ChannelCrossoverDiagnostic, ReducedDecayError> {
+    input.validate()?;
+    if input.dry_contour.is_none() {
+        return Ok(ChannelCrossoverDiagnostic::NotComparable {
+            reason: ChannelCrossoverNotComparable::MissingDryContour,
+        });
+    }
+    if input.bildsten_boundary_layer.is_none() {
+        return Ok(ChannelCrossoverDiagnostic::NotComparable {
+            reason: ChannelCrossoverNotComparable::MissingBildstenBoundaryLayer,
+        });
+    }
+    let mut lower_theta_rad = input.validity_cutoff_theta_rad;
+    let mut upper_theta_rad = input.initial_theta_rad;
+    let mut lower_difference_w = channel_power_difference_w(input, lower_theta_rad)?;
+    let upper_difference_w = channel_power_difference_w(input, upper_theta_rad)?;
+    if lower_difference_w == 0.0 {
+        return Ok(ChannelCrossoverDiagnostic::AtInclination {
+            theta_rad: lower_theta_rad,
+        });
+    }
+    if upper_difference_w == 0.0 {
+        return Ok(ChannelCrossoverDiagnostic::AtInclination {
+            theta_rad: upper_theta_rad,
+        });
+    }
+    if lower_difference_w.is_sign_negative() == upper_difference_w.is_sign_negative() {
+        return Ok(ChannelCrossoverDiagnostic::NoneWithinInterval);
+    }
+    for _ in 0..CHANNEL_CROSSOVER_BISECTION_STEPS {
+        let midpoint_theta_rad = 0.5 * (lower_theta_rad + upper_theta_rad);
+        let midpoint_difference_w = channel_power_difference_w(input, midpoint_theta_rad)?;
+        if midpoint_difference_w == 0.0 {
+            return Ok(ChannelCrossoverDiagnostic::AtInclination {
+                theta_rad: midpoint_theta_rad,
+            });
+        }
+        if midpoint_difference_w.is_sign_negative() == lower_difference_w.is_sign_negative() {
+            lower_theta_rad = midpoint_theta_rad;
+            lower_difference_w = midpoint_difference_w;
+        } else {
+            upper_theta_rad = midpoint_theta_rad;
+        }
+    }
+    Ok(ChannelCrossoverDiagnostic::AtInclination {
+        theta_rad: 0.5 * (lower_theta_rad + upper_theta_rad),
+    })
+}
+
 /// Produces the stable, single-record numerical-reference runner output.
 ///
 /// The record carries computed channel accounting and refinement differences;
@@ -423,8 +517,9 @@ pub fn structured_runner_output(
 ) -> Result<String, ReducedDecayError> {
     let final_sample = run.final_sample()?;
     Ok(format!(
-        "schema=reduced-decay-v1 model_id={} model_authority={} physical_validation={} cancellation_capability={} dry_interface_system_id={} dry_source_id={} dry_authority={:?} bildsten_source_id={} bildsten_multiplier_authority={} terminal={:?} time_s={:.12e} theta_rad={:.12e} energy_j={:.12e} dry_work_j={:.12e} bildsten_work_j={:.12e} closure_residual_j={:.12e}\nrefinement_terminal_time_difference_s={:.12e} refinement_total_work_difference_j={:.12e} evidence_scope=numerical-self-consistency-only",
+        "schema=reduced-decay-v1 model_id={} small_angle_oracle_source_id={} model_authority={} physical_validation={} cancellation_capability={} dry_interface_system_id={} dry_source_id={} dry_authority={:?} bildsten_source_id={} bildsten_multiplier_authority={} terminal={:?} time_s={:.12e} theta_rad={:.12e} energy_j={:.12e} dry_work_j={:.12e} bildsten_work_j={:.12e} closure_residual_j={:.12e}\nrefinement_terminal_time_difference_s={:.12e} refinement_total_work_difference_j={:.12e} evidence_scope=numerical-self-consistency-only",
         run.provenance.model_id,
+        run.provenance.small_angle_oracle_source_id,
         run.provenance.model_authority,
         run.provenance.physical_validation,
         run.provenance.cancellation_capability,
@@ -589,10 +684,25 @@ fn powers_at(
     })
 }
 
+fn channel_power_difference_w(
+    input: &ReducedDecayInput,
+    theta_rad: f64,
+) -> Result<f64, ReducedDecayError> {
+    let powers = powers_at(input, theta_rad)?;
+    let difference_w = powers.dry_contour_w - powers.bildsten_boundary_layer_w;
+    if !difference_w.is_finite() {
+        return Err(ReducedDecayError::NonFiniteDerived {
+            field: "channel_crossover_difference_w",
+        });
+    }
+    Ok(difference_w)
+}
+
 fn provenance(input: &ReducedDecayInput) -> ReducedDecayProvenance {
     let dry = input.dry_contour.as_ref();
     ReducedDecayProvenance {
         model_id: REDUCED_DECAY_MODEL_ID,
+        small_angle_oracle_source_id: input.small_angle_oracle_source_id.clone(),
         model_authority: "numerical-reference-only",
         physical_validation: "not-claimed",
         cancellation_capability: "not-implemented",

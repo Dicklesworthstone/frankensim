@@ -5,9 +5,10 @@
 //! experimental agreement, or physical validation.
 
 use fs_euler_disc_e2e::{
-    BildstenBoundaryLayerChannel, DryContourChannel, ReducedDecayError, ReducedDecayInput,
-    ReducedDecayTerminal, STANDARD_GRAVITY_M_PER_S2, refinement_evidence, run_reduced_decay,
-    structured_runner_output,
+    BildstenBoundaryLayerChannel, ChannelCrossoverDiagnostic, ChannelCrossoverNotComparable,
+    DryContourChannel, ReducedDecayError, ReducedDecayInput, ReducedDecayTerminal,
+    STANDARD_GRAVITY_M_PER_S2, channel_crossover_diagnostic, refinement_evidence,
+    run_reduced_decay, structured_runner_output,
 };
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
@@ -44,6 +45,7 @@ fn input(dry: Option<f64>, air: Option<f64>) -> ReducedDecayInput {
         validity_cutoff_theta_rad: 0.001,
         timestep_s: 1.0e-5,
         maximum_steps: 100_000,
+        small_angle_oracle_source_id: "synthetic/small-angle-oracle-v1".to_owned(),
         dry_contour: dry.map(dry_channel),
         bildsten_boundary_layer: air.map(air_channel),
     }
@@ -127,6 +129,38 @@ fn e2e_reduced_decay_combined_channels_cross_over_without_blending_identity() {
             > 0.0
     );
     assert!(run.energy_closure_residual_j.abs() < 1.0e-12);
+    assert!(matches!(
+        channel_crossover_diagnostic(&combined),
+        Ok(ChannelCrossoverDiagnostic::AtInclination { theta_rad })
+            if theta_rad > combined.validity_cutoff_theta_rad
+                && theta_rad < combined.initial_theta_rad
+    ));
+}
+
+#[test]
+fn e2e_reduced_decay_crossover_diagnostic_handles_ablations_and_no_crossing() {
+    assert_eq!(
+        channel_crossover_diagnostic(&input(None, Some(1.2))).expect("air-only diagnostic"),
+        ChannelCrossoverDiagnostic::NotComparable {
+            reason: ChannelCrossoverNotComparable::MissingDryContour,
+        }
+    );
+    assert_eq!(
+        channel_crossover_diagnostic(&input(Some(0.002), None)).expect("dry-only diagnostic"),
+        ChannelCrossoverDiagnostic::NotComparable {
+            reason: ChannelCrossoverNotComparable::MissingBildstenBoundaryLayer,
+        }
+    );
+    let mut dry_dominant = input(Some(1.0), Some(1.2));
+    dry_dominant
+        .bildsten_boundary_layer
+        .as_mut()
+        .expect("Bildsten channel")
+        .dimensionless_prefactor = 1.0e-8;
+    assert_eq!(
+        channel_crossover_diagnostic(&dry_dominant).expect("no-crossing diagnostic"),
+        ChannelCrossoverDiagnostic::NoneWithinInterval,
+    );
 }
 
 #[test]
@@ -332,6 +366,7 @@ fn e2e_reduced_decay_runner_output_is_structured_and_deterministic() {
     );
     assert!(first.contains("model_authority=numerical-reference-only"));
     assert!(first.contains("physical_validation=not-claimed"));
+    assert!(first.contains("small_angle_oracle_source_id=synthetic/small-angle-oracle-v1"));
     assert!(first.contains("dry_authority=SyntheticFixture"));
     assert!(first.contains("bildsten_source_id=synthetic/bildsten-energy-only"));
     assert!(first.contains("terminal=ValidityCutoff"));
@@ -340,4 +375,29 @@ fn e2e_reduced_decay_runner_output_is_structured_and_deterministic() {
     assert!(first.contains("closure_residual_j="));
     assert!(first.contains("\nrefinement_terminal_time_difference_s="));
     assert!(first.ends_with("evidence_scope=numerical-self-consistency-only"));
+}
+
+#[test]
+fn e2e_reduced_decay_distinguishes_oracle_and_bildsten_sources() {
+    let nominal = ReducedDecayInput::nominal_reference().expect("nominal reference");
+    assert_eq!(
+        nominal.small_angle_oracle_source_id,
+        "analytic/euler-disc-small-angle-oracle-v1"
+    );
+    assert_eq!(
+        nominal
+            .bildsten_boundary_layer
+            .as_ref()
+            .expect("Bildsten channel")
+            .source_id,
+        "doi:10.1103/PhysRevE.66.056309"
+    );
+    let mut blank_oracle = input(Some(0.002), None);
+    blank_oracle.small_angle_oracle_source_id = " \t".to_owned();
+    assert!(matches!(
+        run_reduced_decay(&blank_oracle),
+        Err(ReducedDecayError::MissingIdentity {
+            field: "small_angle_oracle_source_id"
+        })
+    ));
 }
