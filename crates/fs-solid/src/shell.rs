@@ -431,8 +431,8 @@ impl ShellPlate {
             }
         }
         let mut faces = BTreeSet::new();
-        let mut edge_incidence = BTreeMap::new();
-        let mut adjacency = vec![Vec::new(); self.triangles.len()];
+        let mut edge_incidence: BTreeMap<(usize, usize), (usize, i8, usize)> = BTreeMap::new();
+        let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); self.triangles.len()];
         let mut used_nodes = vec![false; self.nodes.len()];
         for (triangle_index, &triangle) in self.triangles.iter().enumerate() {
             if triangle.iter().any(|&node| node >= self.nodes.len())
