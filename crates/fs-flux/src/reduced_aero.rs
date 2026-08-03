@@ -122,6 +122,11 @@ pub enum ReducedAeroError {
     },
     /// Work duration must be finite and non-negative.
     InvalidWorkDuration,
+    /// Alternative candidates must retain distinct complete correlation identities.
+    DuplicateCorrelationIdentity {
+        /// Identity duplicated within one alternative set.
+        correlation: CorrelationIdentity,
+    },
 }
 
 impl fmt::Display for ReducedAeroError {
@@ -180,10 +185,15 @@ impl CorrelationIdentity {
             version: version.into(),
             source_id: source_id.into(),
         };
-        checked_identity(&identity.id, "correlation.id")?;
-        checked_identity(&identity.version, "correlation.version")?;
-        checked_identity(&identity.source_id, "correlation.source_id")?;
+        identity.validate()?;
         Ok(identity)
+    }
+
+    fn validate(&self) -> Result<(), ReducedAeroError> {
+        checked_identity(&self.id, "correlation.id")?;
+        checked_identity(&self.version, "correlation.version")?;
+        checked_identity(&self.source_id, "correlation.source_id")?;
+        Ok(())
     }
 }
 
@@ -292,16 +302,22 @@ impl DiscPose {
     /// Validate an explicitly unit disc normal.  The value is not silently
     /// normalized so malformed frame data cannot hide in a force coefficient.
     pub fn try_new(normal_world: Vec3) -> Result<Self, ReducedAeroError> {
-        if !normal_world.finite() {
+        let pose = Self { normal_world };
+        pose.validate()?;
+        Ok(pose)
+    }
+
+    fn validate(self) -> Result<(), ReducedAeroError> {
+        if !self.normal_world.finite() {
             return Err(ReducedAeroError::InvalidInput {
                 field: "pose.normal_world",
             });
         }
-        let norm = normal_world.norm();
+        let norm = self.normal_world.norm();
         if !(norm.is_finite() && (norm - 1.0).abs() <= UNIT_TOLERANCE) {
             return Err(ReducedAeroError::NonUnitDiscAxis { norm });
         }
-        Ok(Self { normal_world })
+        Ok(())
     }
 }
 
@@ -374,7 +390,21 @@ impl ClosedRange {
         Ok(Self { minimum, maximum })
     }
 
+    fn validate(self) -> Result<(), ReducedAeroError> {
+        if !(self.minimum.is_finite()
+            && self.maximum.is_finite()
+            && self.minimum >= 0.0
+            && self.maximum >= self.minimum)
+        {
+            return Err(ReducedAeroError::InvalidInput {
+                field: "correlation.range",
+            });
+        }
+        Ok(())
+    }
+
     fn require(self, quantity: &'static str, value: f64) -> Result<(), ReducedAeroError> {
+        self.validate()?;
         if !(self.minimum..=self.maximum).contains(&value) {
             return Err(ReducedAeroError::OutsideCorrelationDomain {
                 quantity,
@@ -423,6 +453,9 @@ impl CorrelationUncertainty {
 
 impl ApplicabilityEnvelope {
     fn validate(self) -> Result<(), ReducedAeroError> {
+        self.translational_reynolds.validate()?;
+        self.rotational_reynolds.validate()?;
+        self.relative_roughness.validate()?;
         finite_nonnegative(self.maximum_tip_mach, "correlation.maximum_tip_mach")
     }
 }
@@ -556,6 +589,7 @@ impl ReducedAeroModel {
         components: ReducedAeroComponents,
         declared_families: &[ContributionFamily],
     ) -> Result<Self, ReducedAeroError> {
+        correlation.validate()?;
         envelope.validate()?;
         uncertainty.validate()?;
         components.validate()?;
@@ -590,6 +624,7 @@ impl ReducedAeroModel {
 
     /// Evaluate this candidate.  Output authority is always Estimate-only.
     pub fn evaluate(&self, input: &ReducedAeroInput) -> Result<CandidateWrench, ReducedAeroError> {
+        self.validate()?;
         input.validate()?;
         let geometry = input.geometry;
         let density = input.gas.density_kg_per_m3;
@@ -705,6 +740,13 @@ impl ReducedAeroModel {
             || self.components.edge_flow.is_some()
             || self.components.orientation_rate_damping.is_some()
     }
+
+    fn validate(&self) -> Result<(), ReducedAeroError> {
+        self.correlation.validate()?;
+        self.envelope.validate()?;
+        self.uncertainty.validate()?;
+        self.components.validate()
+    }
 }
 
 /// Validated evaluation inputs, all in one named world frame.
@@ -728,6 +770,7 @@ impl ReducedAeroInput {
     fn validate(&self) -> Result<(), ReducedAeroError> {
         checked_identity(&self.world_frame_id, "world_frame_id")?;
         self.geometry.validate()?;
+        self.pose.validate()?;
         self.kinematics.validate()?;
         self.roughness.validate()
     }
@@ -810,6 +853,15 @@ impl AlternativeWrenchSet {
         models: &[ReducedAeroModel],
         input: &ReducedAeroInput,
     ) -> Result<Self, ReducedAeroError> {
+        let mut identities = BTreeSet::new();
+        for model in models {
+            model.validate()?;
+            if !identities.insert(model.correlation.clone()) {
+                return Err(ReducedAeroError::DuplicateCorrelationIdentity {
+                    correlation: model.correlation.clone(),
+                });
+            }
+        }
         let mut candidates = models
             .iter()
             .map(|model| model.evaluate(input))

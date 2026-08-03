@@ -340,3 +340,89 @@ fn aero_009_thin_gap_and_target_fits_are_hostile_admission_refusals() {
         );
     }
 }
+
+#[test]
+fn aero_010_mutated_public_pose_is_revalidated_at_evaluation() {
+    let model = model("fixture.hostile-pose", 1.0);
+    let mut nonfinite = input(Vec3::ZERO);
+    nonfinite.pose.normal_world = Vec3::new(f64::NAN, 0.0, 1.0);
+    assert!(matches!(
+        model.evaluate(&nonfinite),
+        Err(ReducedAeroError::InvalidInput {
+            field: "pose.normal_world"
+        })
+    ));
+
+    let mut nonunit = input(Vec3::ZERO);
+    nonunit.pose.normal_world = Vec3::new(0.0, 0.0, 2.0);
+    assert!(matches!(
+        model.evaluate(&nonunit),
+        Err(ReducedAeroError::NonUnitDiscAxis { .. })
+    ));
+}
+
+#[test]
+fn aero_011_public_identity_and_range_literals_are_revalidated_at_admission() {
+    let components = ReducedAeroComponents {
+        form_drag: Some(FormDrag { coefficient: 1.0 }),
+        ..ReducedAeroComponents::default()
+    };
+    let malformed_identity = CorrelationIdentity {
+        id: "".to_owned(),
+        version: "v1".to_owned(),
+        source_id: "source.reduced-aero.fixture".to_owned(),
+    };
+    assert!(matches!(
+        ReducedAeroModel::try_new(
+            malformed_identity,
+            envelope(),
+            uncertainty(),
+            components,
+            &[ContributionFamily::TranslationalFormDrag],
+        ),
+        Err(ReducedAeroError::InvalidIdentity {
+            field: "correlation.id"
+        })
+    ));
+
+    for malformed_range in [
+        ClosedRange {
+            minimum: f64::NAN,
+            maximum: 1.0,
+        },
+        ClosedRange {
+            minimum: 2.0,
+            maximum: 1.0,
+        },
+    ] {
+        let malformed_envelope = ApplicabilityEnvelope {
+            translational_reynolds: malformed_range,
+            ..envelope()
+        };
+        assert!(matches!(
+            ReducedAeroModel::try_new(
+                identity("fixture.malformed-range"),
+                malformed_envelope,
+                uncertainty(),
+                components,
+                &[ContributionFamily::TranslationalFormDrag],
+            ),
+            Err(ReducedAeroError::InvalidInput {
+                field: "correlation.range"
+            })
+        ));
+    }
+}
+
+#[test]
+fn aero_012_duplicate_correlation_identity_is_order_independent_refusal() {
+    let first = model("fixture.duplicate", 0.2);
+    let second = model("fixture.duplicate", 1.7);
+    for models in [vec![first.clone(), second.clone()], vec![second, first]] {
+        assert!(matches!(
+            AlternativeWrenchSet::evaluate(&models, &input(Vec3::ZERO)),
+            Err(ReducedAeroError::DuplicateCorrelationIdentity { correlation })
+                if correlation.id == "fixture.duplicate"
+        ));
+    }
+}
