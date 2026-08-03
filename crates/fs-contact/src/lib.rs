@@ -29,6 +29,9 @@ use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation
 /// Solver-independent finite-patch normal laws and their generic port embedding.
 pub mod normal_patch;
 
+/// Solver-facing tangential contact adapters.
+pub mod tangential;
+
 /// Hard bound on bodies per broad-phase call.
 pub const MAX_CONTACT_BODIES: usize = 1 << 16;
 

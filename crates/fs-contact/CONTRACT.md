@@ -64,6 +64,13 @@ checkpoint is the only rollback source. Eventful, stale, future, duplicate, and
 nonconverged samples refuse before publishing a port. The embedded transition
 retains the law receipt identities, uncertainty, and applicability fields.
 
+### Smooth tangential adapter (bead `frankensim-b8bxd.7.2`)
+
+`tangential::smooth` is a solver transaction adapter over the public
+`fs_tribo::partial_slip` law. Its regularization and fixed-branch derivative
+are local numerical controls, not a smoothness, friction-calibration, or
+cross-branch differentiability claim.
+
 ## Invariants
 
 - Broad-phase candidacy is conservative over the query window: a pair
