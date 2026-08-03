@@ -34,7 +34,13 @@
 //! proven by `is_exact` retain the exact-distance theorem and publish that
 //! enclosure directly as their abstract-distance certificate.
 
+mod axisymmetric;
 mod ival;
+
+pub use axisymmetric::{
+    AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricError,
+    AxisymmetricIdentity, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
+};
 
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;

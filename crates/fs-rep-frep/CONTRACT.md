@@ -166,6 +166,19 @@ the suite unchanged.
   the fs-geom admission layer refuses an unresolved infinite axis.
 - `d_value_d_param` is symmetric finite difference; exact parameter
   adjoints (chain rule through the DAG) join with fs-xform.
+- `AxisymmetricChart` is a separate, globally admitted ExactDistance surface:
+  a bounded simple counter-clockwise line/circular-arc loop in the `rho >= 0`
+  meridian half-plane, revolved about z. Cylindrical faces, conical chamfers,
+  circular fillets, bores, and axis closures are represented directly. Its
+  construction certificate checks finite coordinates, literal closure,
+  orientation, arc admissibility, half-plane containment, non-adjacent
+  intersections, exhaustive feature coverage, and the even-odd inside rule.
+  Evaluation searches every non-collapsed feature and returns no gradient at
+  ties, medial points, seams, or axis-degenerate closest sets. Unsupported
+  splines, open/non-CCW/self-crossing profiles, full-circle arcs, and failed
+  construction obligations refuse before the ExactDistance trait is exposed.
+  The retained v1 input fingerprint is deterministic provenance only, not an
+  authority or a substitute for a consumer's independent reconstruction.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.
