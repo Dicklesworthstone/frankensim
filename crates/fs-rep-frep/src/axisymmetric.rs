@@ -542,9 +542,11 @@ impl AxisymmetricChart {
         let point = if radial == 0.0 {
             Point3::new(0.0, 0.0, best.axial)
         } else {
+            let azimuth_x = unit.x / radial;
+            let azimuth_y = unit.y / radial;
             Point3::new(
-                -best.radius * unit.x / radial,
-                -best.radius * unit.y / radial,
+                -best.radius * azimuth_x,
+                -best.radius * azimuth_y,
                 best.axial,
             )
         };
@@ -863,6 +865,10 @@ fn validate_profile(
     for first in 0..segments.len() {
         for second in first + 1..segments.len() {
             if adjacent(first, second, segments.len()) {
+                let join = shared_adjacent_join(segments, first, second);
+                if adjacent_features_reintersect(segments[first], segments[second], join) {
+                    return Err(AxisymmetricError::SelfIntersection { first, second });
+                }
                 continue;
             }
             if segments_intersect(segments[first], segments[second]) {
@@ -901,7 +907,7 @@ fn validate_arc(index: usize, segment: MeridianSegment) -> Result<(), Axisymmetr
     let rs = squared_delta(start, center).sqrt();
     let re = squared_delta(end, center).sqrt();
     let tolerance = construction_tolerance(&[start, end, center]);
-    if rs <= tolerance || (rs - re).abs() > tolerance {
+    if rs <= tolerance || rs != re {
         return Err(AxisymmetricError::InvalidArc { index });
     }
     if arc_sweep(segment).abs() <= tolerance || TAU - arc_sweep(segment).abs() <= tolerance {
@@ -1137,6 +1143,107 @@ fn adjacent(first: usize, second: usize, len: usize) -> bool {
     second == first + 1 || (first == 0 && second + 1 == len)
 }
 
+fn shared_adjacent_join(
+    segments: &[MeridianSegment],
+    first: usize,
+    second: usize,
+) -> MeridianPoint {
+    if second == first + 1 {
+        segments[first].end()
+    } else {
+        segments[first].start()
+    }
+}
+
+fn nearby_point(a: MeridianPoint, b: MeridianPoint) -> bool {
+    squared_delta(a, b) <= query_tolerance(a, b).powi(2)
+}
+
+/// Adjacent features may meet only at their one literal loop join. Any other
+/// crossing, tangency, or overlapping interval makes the meridian invalid.
+fn adjacent_features_reintersect(
+    a: MeridianSegment,
+    b: MeridianSegment,
+    join: MeridianPoint,
+) -> bool {
+    match (a, b) {
+        (
+            MeridianSegment::Line { start: a0, end: a1 },
+            MeridianSegment::Line { start: b0, end: b1 },
+        ) => adjacent_line_line_reintersects(a0, a1, b0, b1, join),
+        (MeridianSegment::Line { start, end }, arc @ MeridianSegment::Arc { .. })
+        | (arc @ MeridianSegment::Arc { .. }, MeridianSegment::Line { start, end }) => {
+            line_arc_intersection_points(start, end, arc)
+                .into_iter()
+                .any(|point| !nearby_point(point, join))
+        }
+        (a @ MeridianSegment::Arc { .. }, b @ MeridianSegment::Arc { .. }) => {
+            adjacent_arc_arc_reintersects(a, b, join)
+        }
+    }
+}
+
+fn adjacent_line_line_reintersects(
+    a0: MeridianPoint,
+    a1: MeridianPoint,
+    b0: MeridianPoint,
+    b1: MeridianPoint,
+    join: MeridianPoint,
+) -> bool {
+    for (point, start, end) in [(a0, b0, b1), (a1, b0, b1), (b0, a0, a1), (b1, a0, a1)] {
+        if !nearby_point(point, join) && on_line(start, end, point) {
+            return true;
+        }
+    }
+    let o1 = cross(a0, a1, b0);
+    let o2 = cross(a0, a1, b1);
+    let o3 = cross(b0, b1, a0);
+    let o4 = cross(b0, b1, a1);
+    o1 != 0.0
+        && o2 != 0.0
+        && o3 != 0.0
+        && o4 != 0.0
+        && o1.signum() != o2.signum()
+        && o3.signum() != o4.signum()
+}
+
+fn adjacent_arc_arc_reintersects(
+    a: MeridianSegment,
+    b: MeridianSegment,
+    join: MeridianPoint,
+) -> bool {
+    let (MeridianSegment::Arc { center: ca, .. }, MeridianSegment::Arc { center: cb, .. }) = (a, b)
+    else {
+        unreachable!()
+    };
+    let coincident = nearby_point(ca, cb) && (arc_radius(a) - arc_radius(b)).abs() <= JOIN_ULPS;
+    if coincident {
+        for (point, other) in [(a.start(), b), (a.end(), b), (b.start(), a), (b.end(), a)] {
+            if !nearby_point(point, join) && point_on_arc(other, point) {
+                return true;
+            }
+        }
+        return false;
+    }
+    arc_arc_intersection_points(a, b)
+        .into_iter()
+        .any(|point| !nearby_point(point, join))
+}
+
+fn point_on_arc(arc: MeridianSegment, point: MeridianPoint) -> bool {
+    let MeridianSegment::Arc { center, .. } = arc else {
+        unreachable!();
+    };
+    let radius = arc_radius(arc);
+    if ((squared_delta(point, center).sqrt()) - radius).abs() > query_tolerance(point, center) {
+        return false;
+    }
+    arc_contains_angle(
+        arc,
+        (point.axial - center.axial).atan2(point.radius - center.radius),
+    )
+}
+
 fn segments_intersect(a: MeridianSegment, b: MeridianSegment) -> bool {
     match (a, b) {
         (
@@ -1179,6 +1286,14 @@ fn line_line_intersect(
         || on_line(b0, b1, a1)
 }
 fn line_arc_intersect(start: MeridianPoint, end: MeridianPoint, arc: MeridianSegment) -> bool {
+    !line_arc_intersection_points(start, end, arc).is_empty()
+}
+
+fn line_arc_intersection_points(
+    start: MeridianPoint,
+    end: MeridianPoint,
+    arc: MeridianSegment,
+) -> Vec<MeridianPoint> {
     let MeridianSegment::Arc { center, .. } = arc else {
         unreachable!()
     };
@@ -1191,19 +1306,25 @@ fn line_arc_intersect(start: MeridianPoint, end: MeridianPoint, arc: MeridianSeg
     let cc = fr.mul_add(fr, fz * fz) - arc_radius(arc).powi(2);
     let disc = bb.mul_add(bb, -4.0 * aa * cc);
     if disc < -query_tolerance(start, end) {
-        return false;
+        return Vec::new();
     }
     let root = disc.max(0.0).sqrt();
+    let mut intersections = Vec::with_capacity(2);
     for u in [(-bb - root) / (2.0 * aa), (-bb + root) / (2.0 * aa)] {
         if (0.0..=1.0).contains(&u) {
             let p = MeridianPoint::new(start.radius + u * dr, start.axial + u * dz);
             let angle = (p.axial - center.axial).atan2(p.radius - center.radius);
-            if arc_contains_angle(arc, angle) {
-                return true;
+            if arc_contains_angle(arc, angle)
+                && !intersections
+                    .iter()
+                    .copied()
+                    .any(|prior| nearby_point(prior, p))
+            {
+                intersections.push(p);
             }
         }
     }
-    false
+    intersections
 }
 fn arc_arc_intersect(a: MeridianSegment, b: MeridianSegment) -> bool {
     let (MeridianSegment::Arc { center: ca, .. }, MeridianSegment::Arc { center: cb, .. }) = (a, b)
@@ -1218,24 +1339,44 @@ fn arc_arc_intersect(a: MeridianSegment, b: MeridianSegment) -> bool {
     if d <= JOIN_ULPS {
         return (ra - rb).abs() <= JOIN_ULPS;
     }
-    if d > ra + rb + JOIN_ULPS || d < (ra - rb).abs() - JOIN_ULPS {
-        return false;
+    !arc_arc_intersection_points(a, b).is_empty()
+}
+
+fn arc_arc_intersection_points(a: MeridianSegment, b: MeridianSegment) -> Vec<MeridianPoint> {
+    let (MeridianSegment::Arc { center: ca, .. }, MeridianSegment::Arc { center: cb, .. }) = (a, b)
+    else {
+        unreachable!()
+    };
+    let ra = arc_radius(a);
+    let rb = arc_radius(b);
+    let dx = cb.radius - ca.radius;
+    let dy = cb.axial - ca.axial;
+    let d = dx.hypot(dy);
+    if d <= JOIN_ULPS || d > ra + rb + JOIN_ULPS || d < (ra - rb).abs() - JOIN_ULPS {
+        return Vec::new();
     }
     let x = (ra * ra - rb * rb + d * d) / (2.0 * d);
     let h = (ra * ra - x * x).max(0.0).sqrt();
     let ux = dx / d;
     let uy = dy / d;
+    let mut intersections = Vec::with_capacity(2);
     for p in [
         MeridianPoint::new(ca.radius + x * ux - h * uy, ca.axial + x * uy + h * ux),
         MeridianPoint::new(ca.radius + x * ux + h * uy, ca.axial + x * uy - h * ux),
     ] {
         let aa = (p.axial - ca.axial).atan2(p.radius - ca.radius);
         let ab = (p.axial - cb.axial).atan2(p.radius - cb.radius);
-        if arc_contains_angle(a, aa) && arc_contains_angle(b, ab) {
-            return true;
+        if arc_contains_angle(a, aa)
+            && arc_contains_angle(b, ab)
+            && !intersections
+                .iter()
+                .copied()
+                .any(|prior| nearby_point(prior, p))
+        {
+            intersections.push(p);
         }
     }
-    false
+    intersections
 }
 
 fn profile_identity(segments: &[MeridianSegment]) -> AxisymmetricIdentity {

@@ -107,6 +107,25 @@ fn g0_true_fillet_uses_an_arc_interior_extremum_not_a_polygon_corner() {
 }
 
 #[test]
+fn g0_subnormal_radial_direction_keeps_the_selected_azimuth_off_axis() {
+    let chart = AxisymmetricChart::try_new(vec![
+        line(point(0.25, 0.0), point(2.0, 1.0)),
+        line(point(2.0, 1.0), point(0.0, 1.0)),
+        line(point(0.0, 1.0), point(0.25, 0.0)),
+    ])
+    .expect("positive CCW triangular meridian");
+    let support = with_cx(false, |cx| {
+        chart
+            .minimum_support_point(Vec3::new(f64::from_bits(1), 0.0, 1.0), cx)
+            .expect("the bottom positive-radius vertex is unique")
+    });
+
+    assert_close(support.point.x, -0.25);
+    assert_close(support.point.y, 0.0);
+    assert_close(support.point.z, 0.0);
+}
+
+#[test]
 fn g3_axial_translation_and_z_rotation_transform_support_equivariantly() {
     let base = cylinder(2.0, 1.0, 0.0);
     let shifted = cylinder(2.0, 1.0, 7.0);

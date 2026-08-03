@@ -172,8 +172,10 @@ the suite unchanged.
   meridian half-plane, revolved about z. Cylindrical faces, conical chamfers,
   circular fillets, bores, and axis closures are represented directly. Its
   construction certificate checks finite coordinates, literal closure,
-  orientation, arc admissibility, half-plane containment, non-adjacent
-  intersections, exhaustive feature coverage, and the even-odd inside rule.
+  orientation, exact binary64 circle consistency at each arc endpoint,
+  half-plane containment, and intersections/retracing even between adjacent
+  features away from their one literal join. It also checks exhaustive feature
+  coverage and the even-odd inside rule.
   Evaluation searches every non-collapsed feature and returns no gradient at
   ties, medial points, seams, or axis-degenerate closest sets. Unsupported
   splines, open/non-CCW/self-crossing profiles, full-circle arcs, and failed

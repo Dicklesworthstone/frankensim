@@ -286,6 +286,36 @@ fn g0_hostile_profiles_refuse_before_a_chart_is_exposed() {
         Err(AxisymmetricError::NonPositiveOrientation)
     ));
 
+    let adjacent_overlap = AxisymmetricChart::try_new(vec![
+        line(point(0.0, 0.0), point(2.0, 0.0)),
+        line(point(2.0, 0.0), point(1.0, 0.0)),
+        line(point(1.0, 0.0), point(1.0, 1.0)),
+        line(point(1.0, 1.0), point(0.0, 1.0)),
+        line(point(0.0, 1.0), point(0.0, 0.0)),
+    ]);
+    assert!(matches!(
+        adjacent_overlap,
+        Err(AxisymmetricError::SelfIntersection {
+            first: 0,
+            second: 1
+        })
+    ));
+
+    let near_circle_mismatch = AxisymmetricChart::try_new(vec![
+        MeridianSegment::Arc {
+            start: point(1.0, 0.0),
+            end: point(0.0, 1.0 + 8.0 * f64::EPSILON),
+            center: point(0.0, 0.0),
+            clockwise: false,
+        },
+        line(point(0.0, 1.0 + 8.0 * f64::EPSILON), point(0.0, 0.0)),
+        line(point(0.0, 0.0), point(1.0, 0.0)),
+    ]);
+    assert!(matches!(
+        near_circle_mismatch,
+        Err(AxisymmetricError::InvalidArc { index: 0 })
+    ));
+
     let too_many = AxisymmetricChart::try_new(vec![
         line(point(0.0, 0.0), point(1.0, 0.0));
         MAX_AXISYMMETRIC_SEGMENTS + 1
@@ -336,12 +366,9 @@ fn g0_filleted_join_heights_keep_the_meridian_inside_rule_half_open() {
 
 #[test]
 fn g0_arc_endpoint_parity_uses_local_axial_derivative_for_major_and_equal_height_arcs() {
-    let major_start = point(3.0 + 2.5_f64.cos(), 2.5_f64.sin());
-    let major_end = point(3.0 + 2.2_f64.cos(), 2.2_f64.sin());
-    let major_mid = point(
-        0.5 * (major_start.radius + major_end.radius),
-        0.5 * (major_start.axial + major_end.axial),
-    );
+    let major_start = point(3.0, 1.0);
+    let major_end = point(4.0, 0.0);
+    let major_mid = point(3.5, 0.5);
     let major = AxisymmetricChart::try_new(vec![
         MeridianSegment::Arc {
             start: major_start,
