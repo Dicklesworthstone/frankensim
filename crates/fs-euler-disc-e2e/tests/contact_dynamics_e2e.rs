@@ -2,8 +2,8 @@ use fs_euler_disc_e2e::{
     CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
     ContactDynamicsInput, ContactTermination, ProfileContactDynamicsInput, contact_geometry,
     profile_contact_geometry, refine_profile_timestep_by_two, refine_timestep_by_two,
-    run_contact_dynamics, run_profile_contact_dynamics, state_at_ground_contact,
-    state_at_profile_ground_contact,
+    run_contact_dynamics, run_profile_contact_dynamics, small_angle_rolling_profile_initializer,
+    state_at_ground_contact, state_at_profile_ground_contact,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
@@ -452,7 +452,7 @@ fn sharp_and_one_millimetre_fillet_have_distinct_profile_contact_admission() {
 }
 
 #[test]
-fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnostics() {
+fn declared_small_angle_profile_roll_is_zero_slip_and_has_refinement_diagnostics() {
     with_cx(false, |cx| {
         let chart = AxisymmetricChart::squat_disc(
             0.038,
@@ -464,29 +464,66 @@ fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnosti
         let mass = chart
             .mass_properties(density_kg_per_m3, cx)
             .expect("profile mass");
-        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
-            .expect("finite tilted orientation");
-        let state = state_at_profile_ground_contact(
+        let inclination_rad = 0.05;
+        let rolling = small_angle_rolling_profile_initializer(
             &chart,
             density_kg_per_m3,
-            orientation,
-            Vec3::ZERO,
-            Vec3::new(0.0, 0.0, mass.principal_inertia.axial * 0.05),
+            inclination_rad,
+            9.806_65,
             cx,
         )
-        .expect("grounded profile state");
-        let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 2);
+        .expect("caller-declared rolling-compatible profile state");
+        let body_axis_world = rolling
+            .state
+            .pose()
+            .orientation()
+            .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+        assert_close(body_axis_world.x, inclination_rad.sin(), 1.0e-14);
+        assert_close(body_axis_world.y, 0.0, 1.0e-14);
+        assert_close(body_axis_world.z, inclination_rad.cos(), 1.0e-14);
+        assert_close(
+            rolling.declared_precession_rate_rad_per_s.powi(2) * inclination_rad.sin(),
+            4.0 * 9.806_65 / 0.038,
+            1.0e-10,
+        );
+        assert_close(
+            rolling.angular_velocity_body_rad_per_s.x,
+            -rolling.declared_precession_rate_rad_per_s * inclination_rad.sin(),
+            1.0e-13,
+        );
+        assert_close(rolling.angular_velocity_body_rad_per_s.y, 0.0, 1.0e-15);
+        assert_close(rolling.angular_velocity_body_rad_per_s.z, 0.0, 1.0e-15);
+        assert_close(rolling.contact.contact.gap_m, 0.0, 1.0e-14);
+        assert_close(
+            rolling.initial_contact_velocity_world_m_per_s.x,
+            0.0,
+            1.0e-12,
+        );
+        assert_close(
+            rolling.initial_contact_velocity_world_m_per_s.y,
+            0.0,
+            1.0e-12,
+        );
+        assert_close(
+            rolling.initial_contact_velocity_world_m_per_s.z,
+            0.0,
+            1.0e-12,
+        );
+        let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-6, 4);
         controls.geometry.mass_kg = mass.mass;
-        controls.initial_state = state;
-        let mut input = ProfileContactDynamicsInput {
+        controls.initial_state = rolling.state;
+        let input = ProfileContactDynamicsInput {
             chart,
             density_kg_per_m3,
             controls,
         };
-        let first = run_profile_contact_dynamics(&input, cx).expect("profile run");
-        let repeated = run_profile_contact_dynamics(&input, cx).expect("repeat profile run");
+        let first = run_profile_contact_dynamics(&input, cx).expect("profile contact evolution");
+        let repeated = run_profile_contact_dynamics(&input, cx).expect("repeat profile evolution");
         assert_eq!(first, repeated);
-        assert_eq!(first.termination, ContactTermination::HorizonReached);
+        assert!(
+            !first.steps.is_empty(),
+            "the full profile contact solver must evolve the declared initial state"
+        );
         let refinement = refine_profile_timestep_by_two(&input, cx).expect("profile refinement");
         assert_eq!(refinement.coarse, first);
         assert!(

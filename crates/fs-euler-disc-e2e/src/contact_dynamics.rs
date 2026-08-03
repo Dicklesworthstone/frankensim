@@ -30,6 +30,7 @@ use fs_tribo::{
 const GROUND_NORMAL: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 const MAX_STEPS: u32 = 20_000;
 const GEOMETRY_EPSILON: f64 = 128.0 * f64::EPSILON;
+const MAX_DECLARED_ROLLING_INCLINATION_RAD: f64 = 0.25;
 
 /// The explicit no-claim boundary of this mechanics rung.
 pub const NO_CLAIM_BOUNDARY: &str = "Point contact with a rigid horizontal plane; sticking only. \
@@ -171,6 +172,28 @@ pub struct ProfileContactDynamicsInput {
     /// Dynamics controls and a checked chart-consistent declaration; its
     /// `geometry` is never a fallback.
     pub controls: ContactDynamicsInput,
+}
+
+/// A caller-declared, small-angle rolling-compatible profile initial state.
+///
+/// This records an analytic initialization convention for a horizontal plane;
+/// it is not an equilibrium, stability, or filleted-body solution claim.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileRollingInitializer {
+    /// Full profile-grounded rigid-body state passed to the contact solver.
+    pub state: RigidBodyState,
+    /// Actual chart support point used to ground the state.
+    pub contact: ProfileContactGeometry,
+    /// Caller-declared y-tilt angle from world vertical [rad].
+    pub inclination_rad: f64,
+    /// Positive precession-rate magnitude from `Omega² sin(theta) = 4g/R` [rad/s].
+    pub declared_precession_rate_rad_per_s: f64,
+    /// Body angular velocity after cancelling the axial Euler-angle component [rad/s].
+    pub angular_velocity_body_rad_per_s: Vec3,
+    /// Center-of-mass velocity selected to make the initial material contact velocity zero [m/s].
+    pub linear_velocity_world_m_per_s: Vec3,
+    /// Measured material contact velocity at the initialized state [m/s].
+    pub initial_contact_velocity_world_m_per_s: Vec3,
 }
 
 impl ContactDynamicsInput {
@@ -688,6 +711,105 @@ pub fn state_at_profile_ground_contact(
         angular_momentum_body,
         cx,
     )
+}
+
+/// Builds a caller-declared, small-angle rolling-compatible profile state.
+///
+/// The y-tilt convention is derived by rotating body `z` through
+/// `orientation = exp(theta * body_y)`, then declaring
+/// `Omega² sin(theta) = 4g/R` with `R` from the profile AABB.  The axial
+/// Euler-angle component is cancelled, leaving
+/// `omega_body = (-Omega sin(theta), 0, 0)`.  Actual profile transverse
+/// inertia produces `L_body`; actual chart support produces
+/// `v_cm = -omega_world cross r_support_world`.  This is an initialization
+/// recipe only, not a claim that the filleted profile is in equilibrium.
+pub fn small_angle_rolling_profile_initializer(
+    chart: &AxisymmetricChart,
+    density_kg_per_m3: f64,
+    inclination_rad: f64,
+    gravity_m_per_s2: f64,
+    cx: &Cx<'_>,
+) -> Result<ProfileRollingInitializer, ContactDynamicsError> {
+    if !(inclination_rad.is_finite()
+        && inclination_rad > 0.0
+        && inclination_rad <= MAX_DECLARED_ROLLING_INCLINATION_RAD)
+    {
+        return Err(ContactDynamicsError::InvalidInput {
+            field: "inclination_rad",
+        });
+    }
+    positive_finite(gravity_m_per_s2, "gravity_m_per_s2")?;
+    let (radius_m, _) = profile_characteristic_dimensions_m(chart)?;
+    let sine = inclination_rad.sin();
+    positive_finite(sine, "inclination_sine")?;
+    let precession_squared = checked_div(
+        checked_mul(4.0, gravity_m_per_s2, "declared_precession_squared")?,
+        checked_mul(radius_m, sine, "declared_precession_squared")?,
+        "declared_precession_squared",
+    )?;
+    let declared_precession_rate_rad_per_s = precession_squared.sqrt();
+    positive_finite(
+        declared_precession_rate_rad_per_s,
+        "declared_precession_rate_rad_per_s",
+    )?;
+    let mass = chart
+        .mass_properties(density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    let mass_properties = profile_mass_to_mbd(mass)?;
+    let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), inclination_rad)
+        .map_err(rigid_refusal)?;
+    let angular_velocity_body_rad_per_s = Vec3::new(
+        -checked_mul(
+            declared_precession_rate_rad_per_s,
+            sine,
+            "declared_angular_velocity_body",
+        )?,
+        0.0,
+        0.0,
+    );
+    let angular_momentum_body = checked_scale(
+        angular_velocity_body_rad_per_s,
+        mass.principal_inertia.transverse,
+        "declared_angular_momentum_body",
+    )?;
+    let provisional = Pose::new(Vec3::ZERO, orientation).map_err(rigid_refusal)?;
+    let provisional_contact = profile_contact_geometry(chart, mass, provisional, cx)?;
+    let angular_velocity_world = orientation.rotate_body_to_world(angular_velocity_body_rad_per_s);
+    finite_vec(angular_velocity_world, "declared_angular_velocity_world")?;
+    let linear_velocity_world_m_per_s = checked_scale(
+        checked_cross(
+            angular_velocity_world,
+            provisional_contact.contact.radius_world_m,
+            "declared_contact_rotation_velocity",
+        )?,
+        -1.0,
+        "declared_center_of_mass_velocity",
+    )?;
+    let linear_momentum_world = checked_scale(
+        linear_velocity_world_m_per_s,
+        mass.mass,
+        "declared_linear_momentum_world",
+    )?;
+    let state = profile_state_at_ground_contact(
+        chart,
+        mass,
+        orientation,
+        linear_momentum_world,
+        angular_momentum_body,
+        cx,
+    )?;
+    let contact = profile_contact_geometry(chart, mass, state.pose(), cx)?;
+    let initial_contact_velocity_world_m_per_s =
+        contact_velocity(mass_properties, state, contact.contact.radius_world_m)?;
+    Ok(ProfileRollingInitializer {
+        state,
+        contact,
+        inclination_rad,
+        declared_precession_rate_rad_per_s,
+        angular_velocity_body_rad_per_s,
+        linear_velocity_world_m_per_s,
+        initial_contact_velocity_world_m_per_s,
+    })
 }
 
 /// Runs the fixed-step unilateral contact solver until its horizon or an honest terminal event.
