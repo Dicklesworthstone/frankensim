@@ -116,3 +116,9 @@ frankensim_illustration.png
 
 # Cloudflare wrangler CLI local state (already skipped by xtask traversal)
 /.wrangler/
+
+# === multi-repo ephemeral cleanup 2026-08-03 ===
+# Beads SQLite repair/backup snapshots (dotted suffix, distinct from
+# beads.db-wal / beads.db-shm which are covered by beads.db-*).
+.beads/beads.db.pre-*
+.beads/*.pre-repair*
