@@ -1,8 +1,8 @@
-//! G0/G3 checks for the globally admitted axisymmetric ExactDistance chart.
+//! G0/G3 checks for the validated axisymmetric line/arc chart.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::{Chart, Point3, TraceStepClaim};
+use fs_geom::{BettiBounds, Chart, Point3, TraceStepClaim};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricError, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint,
     MeridianSegment, SquatDiscEdgeTreatment,
@@ -80,7 +80,7 @@ fn g0_cylinder_axis_inside_outside_and_non_authoritative_distance_estimate() {
         assert_eq!(side.error.lo, side.signed_distance);
         assert_eq!(side.error.hi, side.signed_distance);
     });
-    assert_eq!(chart.trace_step_claim(), TraceStepClaim::ExactDistance);
+    assert_eq!(chart.trace_step_claim(), TraceStepClaim::NoClaim);
     assert_eq!(chart.construction_certificate().surfaced_feature_count, 3);
     assert!(chart.verify_construction().is_ok());
 }
@@ -112,7 +112,7 @@ fn g0_cancelled_search_refuses_without_promoting_a_partial_feature_scan() {
 }
 
 #[test]
-fn g0_squat_disc_sharp_and_zero_fillet_have_exact_distances() {
+fn g0_squat_disc_sharp_and_zero_fillet_match_closed_form_samples() {
     let sharp = AxisymmetricChart::squat_disc(2.0, 2.0, SquatDiscEdgeTreatment::Sharp)
         .expect("positive sharp disc");
     let zero = AxisymmetricChart::squat_disc(
@@ -251,11 +251,11 @@ fn g0_bore_is_supported_and_axis_closures_are_not_false_boundary_features() {
             -0.5
         );
     });
-    assert_eq!(bore.topology_hint().b1, (1, 1));
+    assert_eq!(bore.topology_hint(), BettiBounds::unknown());
 }
 
 #[test]
-fn g0_hostile_profiles_refuse_before_exact_distance_is_exposed() {
+fn g0_hostile_profiles_refuse_before_a_chart_is_exposed() {
     let open = AxisymmetricChart::try_new(vec![
         line(point(0.0, 0.0), point(1.0, 0.0)),
         line(point(1.0, 0.0), point(1.0, 1.0)),
@@ -313,6 +313,25 @@ fn g0_interior_arc_tangent_to_axis_refuses_singular_pinch_topology() {
         singular_pinch,
         Err(AxisymmetricError::AxisTangentArc { index: 0 })
     ));
+}
+
+#[test]
+fn g0_filleted_join_heights_keep_the_meridian_inside_rule_half_open() {
+    let chart = AxisymmetricChart::squat_disc(
+        2.0,
+        2.0,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 0.5 },
+    )
+    .expect("filleted disc");
+    with_cx(|cx| {
+        for axial in [-0.5, 0.5] {
+            let sample = chart.eval(Point3::new(1.75, 0.0, axial), cx);
+            assert!(
+                sample.signed_distance < 0.0,
+                "meridian point at fillet/vertical join z={axial} must stay inside"
+            );
+        }
+    });
 }
 
 #[test]

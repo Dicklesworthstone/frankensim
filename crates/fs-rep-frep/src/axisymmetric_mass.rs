@@ -217,6 +217,7 @@ impl AxisymmetricChart {
         // pass. Only the final boundary sum can leave a few negative ulps;
         // a material negative moment remains a hard refusal.
         let inertia_scale = density * PI * (0.25 * moments.r4_abs + centered_r2_z2_abs);
+        ensure_finite(inertia_scale, "principal transverse inertia scale")?;
         let roundoff = inertia_scale * 64.0 * f64::EPSILON;
         if principal_transverse < 0.0 && principal_transverse >= -roundoff {
             principal_transverse = 0.0;

@@ -40,7 +40,8 @@ mod ival;
 
 pub use axisymmetric::{
     AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricError,
-    AxisymmetricIdentity, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
+    AxisymmetricIdentity, AxisymmetricSupportAuthority, AxisymmetricSupportError,
+    AxisymmetricSupportPoint, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
     SquatDiscEdgeTreatment, squat_disc,
 };
 pub use axisymmetric_mass::{

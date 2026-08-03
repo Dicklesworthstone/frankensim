@@ -2,9 +2,10 @@
 //!
 //! This module deliberately admits a narrow, closed representation: a simple,
 //! counter-clockwise loop in the `rho >= 0` half-plane.  Its revolution is a
-//! compact solid and its signed distance is the planar signed distance at
-//! `(hypot(x, y), z)`.  That reduction is the global ExactDistance theorem;
-//! it is established at construction, never inferred from a fortunate query.
+//! compact solid and its geometric signed-distance formula is the planar
+//! signed distance at `(hypot(x, y), z)`. Construction establishes that real
+//! geometry, but v1 has no directed-rounding proof for binary64 evaluation;
+//! `Chart` therefore exposes no certified trace or topology claim.
 
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
@@ -76,6 +77,92 @@ pub enum SquatDiscEdgeTreatment {
     },
 }
 
+/// Authority attached to an [`AxisymmetricSupportPoint`].
+///
+/// The feature optimization is analytic, but this v1 result is a binary64
+/// mechanics input without directed-rounding certification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisymmetricSupportAuthority {
+    /// Deterministic analytic evaluation, not a numerical certificate.
+    Estimate,
+}
+
+/// A deterministic minimizer of a normalized body-frame support functional.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricSupportPoint {
+    /// Unique body-frame point selected by the requested direction.
+    pub point: Point3,
+    /// `unit_direction dot point`; minimizing the original nonzero direction
+    /// yields the same point.
+    pub support_value: f64,
+    /// Retained meridian feature that supplied the deterministic minimizer.
+    pub source_feature: usize,
+    /// Explicit non-certificate authority label.
+    pub authority: AxisymmetricSupportAuthority,
+}
+
+/// Refusal from [`AxisymmetricChart::minimum_support_point`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisymmetricSupportError {
+    /// Input direction has a non-finite component.
+    NonFiniteDirection {
+        /// Rejected body-frame direction.
+        direction: Vec3,
+    },
+    /// A zero direction has no support ordering.
+    ZeroDirection,
+    /// Retained construction evidence no longer verifies.
+    InvalidChart(AxisymmetricError),
+    /// Cancellation was observed before every retained feature was considered.
+    Cancelled,
+    /// A selected line feature is flat under the support functional and has a
+    /// continuum of minimizing meridian points.
+    NonUniqueFeatureSupport {
+        /// Source feature with the continuum of minimizers.
+        source_feature: usize,
+    },
+    /// An axial direction selected a positive-radius point, whose azimuthal
+    /// revolution is a non-unique ring or face support.
+    NonUniqueAzimuthalSupport {
+        /// Feature supplying the non-unique support.
+        source_feature: usize,
+    },
+    /// A finite input produced a non-finite candidate or support value.
+    NonFiniteResult,
+}
+
+impl core::fmt::Display for AxisymmetricSupportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NonFiniteDirection { direction } => write!(
+                f,
+                "axisymmetric support direction must be finite, got ({}, {}, {})",
+                direction.x, direction.y, direction.z
+            ),
+            Self::ZeroDirection => write!(f, "axisymmetric support direction must be nonzero"),
+            Self::InvalidChart(error) => write!(
+                f,
+                "axisymmetric support requires a still-valid meridian: {error}"
+            ),
+            Self::Cancelled => write!(
+                f,
+                "axisymmetric support search was cancelled before publication"
+            ),
+            Self::NonUniqueFeatureSupport { source_feature } => write!(
+                f,
+                "axisymmetric support feature {source_feature} is flat in this direction"
+            ),
+            Self::NonUniqueAzimuthalSupport { source_feature } => write!(
+                f,
+                "axisymmetric support feature {source_feature} selects a non-unique axial ring or face"
+            ),
+            Self::NonFiniteResult => write!(f, "axisymmetric support evaluation became non-finite"),
+        }
+    }
+}
+
+impl std::error::Error for AxisymmetricSupportError {}
+
 impl MeridianSegment {
     fn start(self) -> MeridianPoint {
         match self {
@@ -109,8 +196,8 @@ pub struct AxisymmetricConstructionCertificate {
     pub surfaced_feature_count: usize,
     /// Positive oriented meridian area used to establish the inside rule.
     pub signed_meridian_area: f64,
-    /// Whether the validated loop reaches the axis, which determines the
-    /// topology hint for the solid of revolution.
+    /// Whether the validated loop reaches the axis. This is descriptive
+    /// construction data only; v1 publishes no topology certificate.
     pub touches_axis: bool,
 }
 
@@ -239,7 +326,7 @@ impl core::fmt::Display for AxisymmetricError {
 
 impl std::error::Error for AxisymmetricError {}
 
-/// A globally validated exact-distance chart of revolution.
+/// A globally validated line/arc chart of revolution.
 #[derive(Debug, Clone)]
 pub struct AxisymmetricChart {
     segments: Vec<MeridianSegment>,
@@ -335,9 +422,9 @@ impl AxisymmetricChart {
         Self::try_new(segments)
     }
 
-    /// Validate a closed oriented line/arc loop and publish its global
-    /// ExactDistance theorem. Unsupported topology or malformed geometry is a
-    /// typed refusal; there is no estimate-only constructor hidden here.
+    /// Validate a closed oriented line/arc loop. Unsupported topology or
+    /// malformed geometry is a typed refusal; binary64 trace/topology
+    /// authority remains explicitly unavailable in v1.
     pub fn try_new(segments: Vec<MeridianSegment>) -> Result<Self, AxisymmetricError> {
         let certificate = validate_profile(&segments)?;
         let mut r_max: f64 = 0.0;
@@ -378,6 +465,88 @@ impl AxisymmetricChart {
     #[must_use]
     pub fn segments(&self) -> &[MeridianSegment] {
         &self.segments
+    }
+
+    /// Analytically minimize the body-frame linear support functional over
+    /// every retained line/arc feature.
+    ///
+    /// The input is normalized internally, so scaling a finite nonzero
+    /// direction cannot change the selected point. A nonzero radial component
+    /// selects one azimuthal point. Purely axial requests are refused when
+    /// their minimizer has positive radius, rather than inventing a rim point
+    /// for a non-unique ring or face support.
+    pub fn minimum_support_point(
+        &self,
+        direction: Vec3,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricSupportPoint, AxisymmetricSupportError> {
+        let unit = normalized_support_direction(direction)?;
+        self.verify_construction()
+            .map_err(AxisymmetricSupportError::InvalidChart)?;
+        let radial = unit.x.hypot(unit.y);
+        let radial_coefficient = -radial;
+        let mut best: Option<SupportCandidate> = None;
+        let mut flat_best_feature = None;
+        for (index, segment) in self.segments.iter().copied().enumerate() {
+            if index % 16 == 0 && cx.checkpoint().is_err() {
+                return Err(AxisymmetricSupportError::Cancelled);
+            }
+            let candidate = support_candidate(segment, index, radial_coefficient, unit.z);
+            if !candidate.radius.is_finite()
+                || !candidate.axial.is_finite()
+                || !candidate.value.is_finite()
+            {
+                return Err(AxisymmetricSupportError::NonFiniteResult);
+            }
+            let ordering = match best {
+                None => core::cmp::Ordering::Less,
+                Some(current) => candidate.value.total_cmp(&current.value),
+            };
+            if ordering.is_lt() {
+                flat_best_feature = if candidate.flat_feature {
+                    Some(candidate.source_feature)
+                } else {
+                    None
+                };
+                best = Some(candidate);
+            } else if ordering.is_eq() && candidate.flat_feature {
+                flat_best_feature = Some(candidate.source_feature);
+            }
+        }
+        if cx.checkpoint().is_err() {
+            return Err(AxisymmetricSupportError::Cancelled);
+        }
+        let Some(best) = best else {
+            return Err(AxisymmetricSupportError::InvalidChart(
+                AxisymmetricError::DegenerateFeature { index: 0 },
+            ));
+        };
+        if let Some(source_feature) = flat_best_feature {
+            return Err(AxisymmetricSupportError::NonUniqueFeatureSupport { source_feature });
+        }
+        if radial == 0.0 && best.radius > 0.0 {
+            return Err(AxisymmetricSupportError::NonUniqueAzimuthalSupport {
+                source_feature: best.source_feature,
+            });
+        }
+        let point = if radial == 0.0 {
+            Point3::new(0.0, 0.0, best.axial)
+        } else {
+            Point3::new(
+                -best.radius * unit.x / radial,
+                -best.radius * unit.y / radial,
+                best.axial,
+            )
+        };
+        if !finite3(point) {
+            return Err(AxisymmetricSupportError::NonFiniteResult);
+        }
+        Ok(AxisymmetricSupportPoint {
+            point,
+            support_value: best.value,
+            source_feature: best.source_feature,
+            authority: AxisymmetricSupportAuthority::Estimate,
+        })
     }
 
     fn query(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
@@ -433,9 +602,9 @@ impl AxisymmetricChart {
             signed_distance: signed,
             gradient,
             lipschitz: Some(1.0),
-            // ExactDistance is a geometric theorem. The current binary64
-            // evaluation has no directed-rounding proof, so publishing a
-            // one-ULP enclosure here would overclaim numerical authority.
+            // The closed-form real geometry has no directed-rounding proof
+            // for this binary64 evaluation, so it must not expose an exact
+            // trace theorem or a one-ULP enclosure.
             error: NumericalCertificate::estimate(signed, signed),
         }
     }
@@ -460,22 +629,18 @@ impl Chart for AxisymmetricChart {
         self.support
     }
     fn trace_step_claim(&self) -> TraceStepClaim {
-        TraceStepClaim::ExactDistance
+        TraceStepClaim::NoClaim
     }
     fn trace_value_enclosure(
         &self,
         _x: Point3,
-        sample: &ChartSample,
+        _sample: &ChartSample,
         _cx: &Cx<'_>,
     ) -> NumericalCertificate {
-        sample.error
+        NumericalCertificate::no_claim()
     }
     fn topology_hint(&self) -> BettiBounds {
-        if self.certificate.touches_axis {
-            BettiBounds::exact(1, 0, 0)
-        } else {
-            BettiBounds::exact(1, 1, 0)
-        }
+        BettiBounds::unknown()
     }
     fn name(&self) -> &'static str {
         "frep/axisymmetric-line-arc"
@@ -496,6 +661,102 @@ fn refused_sample() -> ChartSample {
 
 fn finite3(p: Point3) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SupportCandidate {
+    radius: f64,
+    axial: f64,
+    value: f64,
+    source_feature: usize,
+    flat_feature: bool,
+}
+
+fn normalized_support_direction(direction: Vec3) -> Result<Vec3, AxisymmetricSupportError> {
+    if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
+        return Err(AxisymmetricSupportError::NonFiniteDirection { direction });
+    }
+    let scale = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if scale == 0.0 {
+        return Err(AxisymmetricSupportError::ZeroDirection);
+    }
+    let scaled = Vec3::new(
+        direction.x / scale,
+        direction.y / scale,
+        direction.z / scale,
+    );
+    let norm = scaled.x.hypot(scaled.y).hypot(scaled.z);
+    if !norm.is_finite() || norm == 0.0 {
+        return Err(AxisymmetricSupportError::NonFiniteDirection { direction });
+    }
+    Ok(Vec3::new(scaled.x / norm, scaled.y / norm, scaled.z / norm))
+}
+
+fn support_candidate(
+    segment: MeridianSegment,
+    source_feature: usize,
+    radial_coefficient: f64,
+    axial_coefficient: f64,
+) -> SupportCandidate {
+    match segment {
+        MeridianSegment::Line { start, end } => {
+            let slope = radial_coefficient * (end.radius - start.radius)
+                + axial_coefficient * (end.axial - start.axial);
+            let point = if slope < 0.0 { end } else { start };
+            SupportCandidate {
+                radius: point.radius,
+                axial: point.axial,
+                value: radial_coefficient * point.radius + axial_coefficient * point.axial,
+                source_feature,
+                flat_feature: slope == 0.0,
+            }
+        }
+        MeridianSegment::Arc { start, end, .. } => {
+            let mut best = support_point_candidate(
+                start,
+                source_feature,
+                radial_coefficient,
+                axial_coefficient,
+            );
+            let end_candidate =
+                support_point_candidate(end, source_feature, radial_coefficient, axial_coefficient);
+            if end_candidate.value.total_cmp(&best.value).is_lt() {
+                best = end_candidate;
+            }
+            let interior_angle = (-axial_coefficient).atan2(-radial_coefficient);
+            if arc_contains_angle(segment, interior_angle) {
+                let interior = support_point_candidate(
+                    arc_point_at_angle(segment, interior_angle),
+                    source_feature,
+                    radial_coefficient,
+                    axial_coefficient,
+                );
+                if interior.value.total_cmp(&best.value).is_lt() {
+                    best = interior;
+                }
+            }
+            best
+        }
+    }
+}
+
+fn support_point_candidate(
+    point: MeridianPoint,
+    source_feature: usize,
+    radial_coefficient: f64,
+    axial_coefficient: f64,
+) -> SupportCandidate {
+    SupportCandidate {
+        radius: point.radius,
+        axial: point.axial,
+        value: radial_coefficient * point.radius + axial_coefficient * point.axial,
+        source_feature,
+        flat_feature: false,
+    }
 }
 fn point(radius: f64, axial: f64) -> MeridianPoint {
     MeridianPoint::new(radius, axial)
@@ -785,25 +1046,20 @@ fn inside_even_odd(segments: &[MeridianSegment], q: MeridianPoint) -> bool {
             MeridianSegment::Arc { center, .. } => {
                 let radius = arc_radius(segment);
                 let v = (q.axial - center.axial) / radius;
-                if v.abs() >= 1.0 {
+                if !(-1.0..=1.0).contains(&v) {
                     continue;
                 }
                 let a = v.asin();
-                for angle in [a, core::f64::consts::PI - a] {
+                let angles = if a.abs() == core::f64::consts::FRAC_PI_2 {
+                    [Some(a), None]
+                } else {
+                    [Some(a), Some(core::f64::consts::PI - a)]
+                };
+                for angle in angles.into_iter().flatten() {
                     if !arc_contains_angle(segment, angle) {
                         continue;
                     }
-                    let sweep = arc_sweep(segment);
-                    let start = arc_start_angle(segment);
-                    let delta = if sweep >= 0.0 {
-                        (angle - start).rem_euclid(TAU)
-                    } else {
-                        (start - angle).rem_euclid(TAU)
-                    };
-                    if delta <= JOIN_ULPS
-                        || delta > sweep.abs() + JOIN_ULPS
-                        || angle.cos().abs() <= JOIN_ULPS
-                    {
+                    if !arc_half_open_crossing(segment, angle) {
                         continue;
                     }
                     if center.radius + radius * angle.cos() > q.radius {
@@ -814,6 +1070,30 @@ fn inside_even_odd(segments: &[MeridianSegment], q: MeridianPoint) -> bool {
         }
     }
     crossings % 2 == 1
+}
+
+/// Match line crossings' lower-inclusive/upper-exclusive axial convention at
+/// every line/arc join. Arc starts and ends are classified by their axial
+/// order, not by traversal order; interior horizontal extrema are tangent
+/// contacts and contribute no parity crossing.
+fn arc_half_open_crossing(segment: MeridianSegment, angle: f64) -> bool {
+    let sweep = arc_sweep(segment);
+    let start_angle = arc_start_angle(segment);
+    let travel = if sweep >= 0.0 {
+        (angle - start_angle).rem_euclid(TAU)
+    } else {
+        (start_angle - angle).rem_euclid(TAU)
+    };
+    let end_distance = sweep.abs() - travel;
+    let start = segment.start();
+    let end = segment.end();
+    if travel <= JOIN_ULPS {
+        return start.axial < end.axial;
+    }
+    if end_distance <= JOIN_ULPS {
+        return end.axial < start.axial;
+    }
+    angle.cos().abs() > JOIN_ULPS
 }
 
 fn signed_area(segments: &[MeridianSegment]) -> f64 {

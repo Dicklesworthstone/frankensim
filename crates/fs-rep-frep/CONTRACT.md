@@ -166,7 +166,8 @@ the suite unchanged.
   the fs-geom admission layer refuses an unresolved infinite axis.
 - `d_value_d_param` is symmetric finite difference; exact parameter
   adjoints (chain rule through the DAG) join with fs-xform.
-- `AxisymmetricChart` is a separate, globally admitted ExactDistance surface:
+- `AxisymmetricChart` is a separate, globally admitted bounded line/arc
+  surface of revolution:
   a bounded simple counter-clockwise line/circular-arc loop in the `rho >= 0`
   meridian half-plane, revolved about z. Cylindrical faces, conical chamfers,
   circular fillets, bores, and axis closures are represented directly. Its
@@ -176,7 +177,10 @@ the suite unchanged.
   Evaluation searches every non-collapsed feature and returns no gradient at
   ties, medial points, seams, or axis-degenerate closest sets. Unsupported
   splines, open/non-CCW/self-crossing profiles, full-circle arcs, and failed
-  construction obligations refuse before the ExactDistance trait is exposed.
+  construction obligations refuse before a chart is exposed. Its closed-form
+  real geometry is not a binary64 trace certificate: `trace_step_claim()` is
+  `NoClaim`, samples retain `Estimate` distance metadata, and topology is
+  `unknown()` until directed rounding and robust predicates exist.
   The retained v1 input fingerprint is deterministic provenance only, not an
   authority or a substitute for a consumer's independent reconstruction.
 - `squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment)` is the
@@ -185,6 +189,12 @@ the suite unchanged.
   circular arcs, with `0 <= radius <= min(outer_radius, thickness / 2)`;
   zero is exactly sharp and equality boundaries omit collapsed tangent lines.
   Invalid dimensions or radii refuse before a chart is returned.
+- `minimum_support_point(direction, cx)` analytically minimizes the normalized
+  body-frame linear functional over every retained line/arc feature, including
+  circular-arc interior extrema. A radial direction reconstructs the unique
+  azimuthal body point; zero/non-finite directions, flat meridian support, and
+  positive-radius purely axial ring/face support refuse. Results identify the
+  source feature and carry `Estimate` authority only, never a certificate.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.
