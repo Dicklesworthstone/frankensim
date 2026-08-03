@@ -78,7 +78,9 @@ fn executable_runs_the_production_baseline_and_reports_structured_output() {
         .expect("execute Euler baseline binary");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 structured output");
-    assert!(stdout.contains("\"model\":\"ideal_conservative_no_slip_rolling_disc\""));
+    assert!(
+        stdout.contains("\"model\":\"ideal_conservative_thin_homogeneous_steady_rolling_disc\"")
+    );
     assert!(stdout.contains("\"disposition\":\"completed\""));
     assert!(stdout.contains("\"samples\":101"));
 }
