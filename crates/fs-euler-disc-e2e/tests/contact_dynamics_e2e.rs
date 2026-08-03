@@ -248,8 +248,7 @@ fn impulse_work_uses_free_contact_velocity_and_projection_is_separate() {
         receipt.energy.contact_impulse_work_estimate_j < 0.0,
         "gravity makes the free contact velocity negative before the restoring impulse"
     );
-    let recomposed = receipt.energy.gravity_work_j
-        + receipt.energy.contact_impulse_work_estimate_j
+    let recomposed = receipt.energy.contact_impulse_work_estimate_j
         + receipt.energy.geometric_projection_work_j
         + receipt.energy.mechanical_balance_residual_j;
     assert_close(

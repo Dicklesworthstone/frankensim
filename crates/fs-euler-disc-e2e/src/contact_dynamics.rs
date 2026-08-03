@@ -315,6 +315,10 @@ pub struct EnergyLedger {
     /// `after - before` [J].
     pub mechanical_energy_delta_j: f64,
     /// Gravity force dotted with the center-of-mass displacement [J].
+    ///
+    /// This is a separate work diagnostic. It is not subtracted from
+    /// `mechanical_balance_residual_j`, because gravitational potential
+    /// `m g z` is already included in both total mechanical energies.
     pub gravity_work_j: f64,
     /// Midpoint estimate of the solved contact-impulse work [J].
     pub contact_impulse_work_estimate_j: f64,
@@ -329,7 +333,8 @@ pub struct EnergyLedger {
     pub projection_potential_shift_j: f64,
     /// `mechanical_delta - contact_impulse_work_estimate - geometric_projection_work` [J].
     ///
-    /// This exposes the discrete defect; it is not a conservation certificate.
+    /// This total-mechanical residual already includes conservative gravity
+    /// through potential energy; it is not a conservation certificate.
     pub mechanical_balance_residual_j: f64,
 }
 
@@ -1589,11 +1594,7 @@ fn energy_ledger(
     )?;
     let mechanical_balance_residual_j = checked_scalar_sub(
         checked_scalar_sub(
-            checked_scalar_sub(
-                mechanical_energy_delta_j,
-                gravity_work_j,
-                "mechanical_balance_residual",
-            )?,
+            mechanical_energy_delta_j,
             contact_impulse_work_estimate_j,
             "mechanical_balance_residual",
         )?,
