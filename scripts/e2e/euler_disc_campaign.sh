@@ -48,9 +48,10 @@ usage() {
     '                          do not create files, invoke RCH, Cargo, or the binary.' \
     '  -h, --help              Show this help.' \
     '' \
-    'The RCH path requires the fs-euler-disc-e2e crate tree to be tracked and clean,' \
-    'so it does not silently compile an uncommitted campaign producer. In a shared' \
-    'dirty tree, supply an explicitly built committed binary with --prebuilt-binary.' \
+    'The RCH path requires root Cargo.toml, Cargo.lock, and crates/ to be tracked' \
+    'and clean, so no transitive dirty Cargo input can masquerade as HEAD. A' \
+    'prebuilt run records the binary SHA-256 as a digest-only source identity;' \
+    'it does not establish the source revision that produced the binary.' \
     '' \
     'This runner is numerical/software validation only. It performs no experimental' \
     'validation and makes no physical-validation, mechanism, or video-fit claim.'
@@ -63,6 +64,16 @@ die() {
 
 stage() {
   printf 'euler_disc_campaign stage=%s elapsed_s=%s %s\n' "$1" "$SECONDS" "$2" >&2
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    die 'prebuilt provenance requires shasum or sha256sum for SHA-256'
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -105,31 +116,40 @@ done
 if [[ -n "$PREBUILT_BINARY" ]]; then
   [[ -f "$PREBUILT_BINARY" && -x "$PREBUILT_BINARY" ]] || \
     die "--prebuilt-binary must name an executable file: $PREBUILT_BINARY"
+  BINARY_SHA256="$(sha256_file "$PREBUILT_BINARY")"
+  [[ "$BINARY_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || \
+    die "could not obtain a SHA-256 digest for prebuilt binary: $PREBUILT_BINARY"
   EXECUTION="prebuilt"
-  SOURCE_REVISION="prebuilt-caller-declared"
+  SOURCE_IDENTITY="prebuilt-binary-sha256:$BINARY_SHA256"
 else
   command -v rch >/dev/null 2>&1 || die 'rch is required unless --prebuilt-binary is supplied'
   command -v git >/dev/null 2>&1 || die 'git is required for committed-source admission'
   git ls-files --error-unmatch crates/fs-euler-disc-e2e/src/bin/euler_disc_campaign.rs \
     >/dev/null 2>&1 || die 'campaign binary source is not committed/tracked; use --prebuilt-binary'
-  if [[ -n "$(git status --porcelain --untracked-files=all -- crates/fs-euler-disc-e2e)" ]]; then
-    die 'fs-euler-disc-e2e has uncommitted or untracked content; use --prebuilt-binary'
+  git ls-files --error-unmatch Cargo.toml Cargo.lock >/dev/null 2>&1 || \
+    die 'root Cargo.toml and Cargo.lock must be committed/tracked for RCH admission'
+  if [[ -n "$(git status --porcelain --untracked-files=all -- Cargo.toml Cargo.lock crates)" ]]; then
+    die 'Cargo.toml, Cargo.lock, or crates/ has uncommitted or untracked content; use --prebuilt-binary'
   fi
   SOURCE_REVISION="$(git rev-parse --verify HEAD)"
+  SOURCE_IDENTITY="git-head:$SOURCE_REVISION;cargo-inputs=clean:Cargo.toml,Cargo.lock,crates"
+  BINARY_SHA256="not-applicable-rch-build"
   EXECUTION="rch"
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  stage plan "result=ready execution=$EXECUTION source_revision=$SOURCE_REVISION output=$OUTPUT stderr_log=$STDERR_LOG schema=$SCHEMA"
+  stage plan "result=ready execution=$EXECUTION source_identity=$SOURCE_IDENTITY binary_sha256=$BINARY_SHA256 output=$OUTPUT stderr_log=$STDERR_LOG schema=$SCHEMA"
   printf '%s\n' 'euler_disc_campaign result=dry-run numerical_software_validation_only=true' >&2
   exit 0
 fi
 
 mkdir -p "$(dirname "$OUTPUT")" "$(dirname "$STDERR_LOG")"
+printf 'euler_disc_campaign provenance execution=%s source_identity=%s binary_sha256=%s numerical_software_validation_only=true\n' \
+  "$EXECUTION" "$SOURCE_IDENTITY" "$BINARY_SHA256" >"$STDERR_LOG"
 
-stage execute "execution=$EXECUTION source_revision=$SOURCE_REVISION output=$OUTPUT stderr_log=$STDERR_LOG"
+stage execute "execution=$EXECUTION source_identity=$SOURCE_IDENTITY binary_sha256=$BINARY_SHA256 output=$OUTPUT stderr_log=$STDERR_LOG"
 if [[ -n "$PREBUILT_BINARY" ]]; then
-  if "$PREBUILT_BINARY" >"$OUTPUT" 2>"$STDERR_LOG"; then
+  if "$PREBUILT_BINARY" >"$OUTPUT" 2>>"$STDERR_LOG"; then
     RUN_STATUS=0
   else
     RUN_STATUS=$?
@@ -139,7 +159,7 @@ else
   if RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch --no-self-healing exec -- \
     env CARGO_TARGET_DIR="$RCH_TARGET_DIR" \
     cargo run --locked -p fs-euler-disc-e2e --bin euler_disc_campaign -- \
-    >"$OUTPUT" 2>"$STDERR_LOG"; then
+    >"$OUTPUT" 2>>"$STDERR_LOG"; then
     RUN_STATUS=0
   else
     RUN_STATUS=$?
