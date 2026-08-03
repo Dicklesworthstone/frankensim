@@ -1,0 +1,9 @@
+[package]
+name = "fs-tribo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed dry-contact and tribology baseline for FrankenSim"
+
+[lints]
+workspace = true
