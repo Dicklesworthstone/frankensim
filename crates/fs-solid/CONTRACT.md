@@ -146,15 +146,22 @@ constructor facade.
   rotations; its normal identifies the plate side and it does not claim a
   frictional or rotational support law. Inputs carry model,
   source, and state IDs and fixed SI/right-handed-Cartesian interpretation.
-  Assembly bounds node, element, dense-memory, work, and diagnostic sizes
-  before allocation; it returns no partial operator. Small assemblies report
+  Assembly bounds node, element, dense-memory, deterministic
+  validation-and-assembly work, and diagnostic sizes before allocation; it
+  returns no partial operator. Validation charges finite-node scans,
+  scale-relative coincident-node pairs, canonical face insertion, oriented
+  edge incidence/adjacency, connectivity traversal, used-node marking, and
+  triangle assembly against the declared work budget. Small assemblies report
   raw algebraic mass-array definiteness, stiffness-array nullity, and symmetry
   residue via a deterministic Jacobi eigensweep. Its raw mixed-unit spectral
   spread is diagnostic only, not a physical condition number or continuum
   certificate; larger valid assemblies explicitly report that those bounded
   algebraic diagnostics were not computed.
-  Duplicate triangles and components disconnected by an edge are refused before
-  assembly; callers requiring several components must model separate plates.
+  Scale-relative coincident nodes, duplicate index faces, geometrically
+  duplicated faces through coincident nodes, non-manifold edges (more than two
+  incident faces), same-orientation shared edges, and components disconnected
+  by an edge are refused before assembly; callers requiring several components
+  must model separate plates.
 
 ## Invariants
 

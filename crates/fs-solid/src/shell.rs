@@ -8,6 +8,7 @@
 //! does not integrate in time or claim curved, multi-patch IGA shell behavior.
 
 use core::marker::PhantomData;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A point of a plate mid-surface, in the declared Cartesian SI frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +53,7 @@ pub struct AssemblyBudget {
     pub max_triangles: usize,
     /// Largest admissible dense matrix entry count per operator.
     pub max_matrix_entries: usize,
-    /// Maximum triangle visits; bounds assembly work before allocation.
+    /// Maximum deterministic validation-and-assembly work units.
     pub max_work_units: usize,
     /// Largest operator dimension for exact Jacobi conditioning diagnostics.
     pub max_conditioning_dofs: usize,
@@ -64,7 +65,7 @@ impl Default for AssemblyBudget {
             max_nodes: 64,
             max_triangles: 128,
             max_matrix_entries: 64 * 6 * 64 * 6,
-            max_work_units: 128,
+            max_work_units: 16_384,
             max_conditioning_dofs: 48,
         }
     }
@@ -360,11 +361,13 @@ impl ShellPlate {
             .ok_or_else(|| ShellError::BudgetExceeded {
                 what: "matrix size overflow".into(),
             })?;
+        let validation_and_assembly_work =
+            estimated_work_units(self.nodes.len(), self.triangles.len())?;
         if entries > self.budget.max_matrix_entries
-            || self.triangles.len() > self.budget.max_work_units
+            || validation_and_assembly_work > self.budget.max_work_units
         {
             return Err(ShellError::BudgetExceeded {
-                what: "matrix memory or element-work limit".into(),
+                what: "matrix memory or validation-and-assembly work limit".into(),
             });
         }
         if !self.thickness_m.is_finite() || self.thickness_m <= 0.0 {
@@ -392,16 +395,46 @@ impl ShellPlate {
                 what: "model_id, source_id, and state_id are required".into(),
             });
         }
-        if self
-            .nodes
-            .iter()
-            .any(|node| node.position_m.iter().any(|value| !value.is_finite()))
-        {
-            return Err(ShellError::InvalidInput {
-                what: "node position must be finite".into(),
-            });
+        let mut lower = [f64::INFINITY; 3];
+        let mut upper = [f64::NEG_INFINITY; 3];
+        for node in &self.nodes {
+            for component in 0..3 {
+                let value = node.position_m[component];
+                if !value.is_finite() {
+                    return Err(ShellError::InvalidInput {
+                        what: "node position must be finite".into(),
+                    });
+                }
+                lower[component] = lower[component].min(value);
+                upper[component] = upper[component].max(value);
+            }
         }
-        for triangle in &self.triangles {
+        let geometric_scale = norm([
+            upper[0] - lower[0],
+            upper[1] - lower[1],
+            upper[2] - lower[2],
+        ])
+        .max(f64::MIN_POSITIVE);
+        let coincident_tolerance = 128.0 * f64::EPSILON * geometric_scale;
+        for left in 0..self.nodes.len() {
+            for right in (left + 1)..self.nodes.len() {
+                if norm(sub(
+                    self.nodes[left].position_m,
+                    self.nodes[right].position_m,
+                )) <= coincident_tolerance
+                {
+                    return Err(ShellError::InvalidInput {
+                        what: "coincident or scale-indistinguishable plate nodes are not admitted"
+                            .into(),
+                    });
+                }
+            }
+        }
+        let mut faces = BTreeSet::new();
+        let mut edge_incidence = BTreeMap::new();
+        let mut adjacency = vec![Vec::new(); self.triangles.len()];
+        let mut used_nodes = vec![false; self.nodes.len()];
+        for (triangle_index, &triangle) in self.triangles.iter().enumerate() {
             if triangle.iter().any(|&node| node >= self.nodes.len())
                 || triangle[0] == triangle[1]
                 || triangle[1] == triangle[2]
@@ -411,39 +444,54 @@ impl ShellPlate {
                     what: "triangle indices must be distinct in range".into(),
                 });
             }
-        }
-        for (index, triangle) in self.triangles.iter().enumerate() {
             let mut canonical = *triangle;
             canonical.sort_unstable();
-            if self.triangles[..index].iter().any(|other| {
-                let mut other_canonical = *other;
-                other_canonical.sort_unstable();
-                other_canonical == canonical
-            }) {
+            if !faces.insert(canonical) {
                 return Err(ShellError::InvalidInput {
                     what: "duplicate triangles are not admitted by the flat plate surrogate".into(),
                 });
             }
+            for &node in &triangle {
+                used_nodes[node] = true;
+            }
+            for (from, to) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                let edge = (from.min(to), from.max(to));
+                let direction = if from < to { 1_i8 } else { -1_i8 };
+                if let Some((first_triangle, first_direction, incidence)) =
+                    edge_incidence.get(&edge).copied()
+                {
+                    if incidence >= 2 {
+                        return Err(ShellError::UnsupportedGeometry {
+                            what: "non-manifold plate edge has more than two incident triangles"
+                                .into(),
+                        });
+                    }
+                    if direction == first_direction {
+                        return Err(ShellError::UnsupportedGeometry {
+                            what: "shared plate edge must have opposite triangle orientations"
+                                .into(),
+                        });
+                    }
+                    adjacency[first_triangle].push(triangle_index);
+                    adjacency[triangle_index].push(first_triangle);
+                    edge_incidence.insert(edge, (first_triangle, first_direction, incidence + 1));
+                } else {
+                    edge_incidence.insert(edge, (triangle_index, direction, 1_usize));
+                }
+            }
         }
         let mut connected = vec![false; self.triangles.len()];
+        let mut pending = vec![0_usize];
         connected[0] = true;
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for (index, triangle) in self.triangles.iter().enumerate() {
-                if connected[index] {
-                    continue;
-                }
-                if self
-                    .triangles
-                    .iter()
-                    .enumerate()
-                    .any(|(other_index, other)| {
-                        connected[other_index] && triangles_share_edge(*triangle, *other)
-                    })
-                {
-                    connected[index] = true;
-                    changed = true;
+        while let Some(triangle) = pending.pop() {
+            for &neighbour in &adjacency[triangle] {
+                if !connected[neighbour] {
+                    connected[neighbour] = true;
+                    pending.push(neighbour);
                 }
             }
         }
@@ -452,12 +500,6 @@ impl ShellPlate {
                 what: "disconnected triangles require separate plate assemblies".into(),
             });
         }
-        let mut used_nodes = vec![false; self.nodes.len()];
-        for triangle in &self.triangles {
-            for &node in triangle {
-                used_nodes[node] = true;
-            }
-        }
         if used_nodes.iter().any(|used| !used) {
             return Err(ShellError::InvalidInput {
                 what: "every plate node must be used by a triangle".into(),
@@ -465,11 +507,6 @@ impl ShellPlate {
         }
         let (_, _, reference_normal) = triangle_geometry(self, self.triangles[0])?;
         let reference_point = self.nodes[self.triangles[0][0]].position_m;
-        let geometric_scale = self
-            .nodes
-            .iter()
-            .map(|node| norm(sub(node.position_m, reference_point)))
-            .fold(1.0_f64, f64::max);
         let coplanarity_tolerance = 1.0e-10 * geometric_scale;
         if self.nodes.iter().any(|node| {
             dot(sub(node.position_m, reference_point), reference_normal).abs()
@@ -723,8 +760,28 @@ fn validate_derived_matrix(name: &str, values: &[f64]) -> Result<(), ShellError>
     }
 }
 
-fn triangles_share_edge(left: [usize; 3], right: [usize; 3]) -> bool {
-    left.iter().filter(|node| right.contains(*node)).count() >= 2
+fn estimated_work_units(nodes: usize, triangles: usize) -> Result<usize, ShellError> {
+    // Node scans, all unordered coincident-node checks, one canonical-face
+    // insertion, three edge incidences, three used-node marks, DFS adjacency,
+    // and the final triangle assembly are all charged before allocation.
+    let node_pairs = nodes
+        .checked_mul(nodes.saturating_sub(1))
+        .and_then(|value| value.checked_div(2))
+        .ok_or_else(|| ShellError::BudgetExceeded {
+            what: "coincident-node validation work overflow".into(),
+        })?;
+    let triangle_work = triangles
+        .checked_mul(16)
+        .ok_or_else(|| ShellError::BudgetExceeded {
+            what: "triangle validation-and-assembly work overflow".into(),
+        })?;
+    nodes
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(node_pairs))
+        .and_then(|value| value.checked_add(triangle_work))
+        .ok_or_else(|| ShellError::BudgetExceeded {
+            what: "validation-and-assembly work overflow".into(),
+        })
 }
 
 fn validate_support_geometry(

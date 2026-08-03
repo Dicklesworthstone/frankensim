@@ -261,6 +261,41 @@ fn shell_003_refuses_malformed_budgeted_and_out_of_applicability_requests() {
         Err(ShellError::InvalidInput { .. })
     ));
 
+    let mut coincident = plate();
+    coincident.nodes.push(ShellNode {
+        position_m: [0.0, 0.0, 0.0],
+    });
+    coincident.triangles = vec![[0, 1, 3], [1, 2, 3], [2, 0, 3]];
+    assert!(matches!(
+        coincident.assemble(),
+        Err(ShellError::InvalidInput { .. })
+    ));
+
+    let mut same_oriented_edge = plate();
+    same_oriented_edge.nodes.push(ShellNode {
+        position_m: [1.0, 1.0, 0.0],
+    });
+    same_oriented_edge.triangles.push([0, 1, 3]);
+    assert!(matches!(
+        same_oriented_edge.assemble(),
+        Err(ShellError::UnsupportedGeometry { .. })
+    ));
+
+    let mut non_manifold = plate();
+    non_manifold.nodes.extend([
+        ShellNode {
+            position_m: [1.0, 1.0, 0.0],
+        },
+        ShellNode {
+            position_m: [0.5, -1.0, 0.0],
+        },
+    ]);
+    non_manifold.triangles.extend([[1, 0, 3], [1, 0, 4]]);
+    assert!(matches!(
+        non_manifold.assemble(),
+        Err(ShellError::UnsupportedGeometry { .. })
+    ));
+
     let mut disconnected = plate();
     disconnected.nodes.extend([
         ShellNode {
@@ -304,6 +339,13 @@ fn shell_003_refuses_malformed_budgeted_and_out_of_applicability_requests() {
     over_budget.budget.max_matrix_entries = 17 * 18;
     assert!(matches!(
         over_budget.assemble(),
+        Err(ShellError::BudgetExceeded { .. })
+    ));
+
+    let mut validation_over_budget = plate();
+    validation_over_budget.budget.max_work_units = 1;
+    assert!(matches!(
+        validation_over_budget.assemble(),
         Err(ShellError::BudgetExceeded { .. })
     ));
 
