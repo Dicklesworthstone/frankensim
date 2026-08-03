@@ -122,6 +122,8 @@ pub enum ReducedAeroError {
     },
     /// Work duration must be finite and non-negative.
     InvalidWorkDuration,
+    /// At least one explicitly identified correlation candidate is required.
+    EmptyAlternativeWrenchSet,
     /// A derived aerodynamic quantity overflowed or became non-finite.
     NonFiniteDerived {
         /// Stable derived quantity name.
@@ -1126,6 +1128,10 @@ impl AlternativeWrenchSet {
         models: &[ReducedAeroModel],
         input: &ReducedAeroInput,
     ) -> Result<Self, ReducedAeroError> {
+        input.validate()?;
+        if models.is_empty() {
+            return Err(ReducedAeroError::EmptyAlternativeWrenchSet);
+        }
         let mut identities = BTreeSet::new();
         for model in models {
             model.validate()?;
@@ -1158,9 +1164,11 @@ impl AlternativeWrenchSet {
 
 /// Caller-owned, exact-once work accumulation for one accounting window.
 ///
-/// This small receipt is intentionally not a replacement for `fs-couple`'s
-/// closed-window audit.  It prevents duplicate application at this domain seam;
-/// a coupling driver must still submit it to its selected gas/boundary chart.
+/// This small receipt validates public candidate arithmetic and internal
+/// self-consistency before preventing duplicate application at this domain
+/// seam. It does not validate correlation authority or replace `fs-couple`'s
+/// closed-window audit; a coupling driver must still submit the selected
+/// gas/boundary chart there.
 #[derive(Debug, Default)]
 pub struct WorkWindow {
     recorded_keys: BTreeSet<u64>,

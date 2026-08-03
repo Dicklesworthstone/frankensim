@@ -478,6 +478,49 @@ fn aero_016_near_unit_pose_is_projected_at_admission_and_evaluation() {
 }
 
 #[test]
+fn aero_017_orientation_only_near_unit_pose_cannot_inject_power() {
+    let orientation_only = ReducedAeroModel::try_new(
+        identity("fixture.orientation-near-unit"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            orientation_rate_damping: Some(OrientationRateDamping { coefficient: 0.2 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::OrientationRateDamping],
+    )
+    .expect("orientation-only fixture is admitted");
+    let mut near_unit = input(Vec3::ZERO);
+    near_unit.pose.normal_world = Vec3::new(0.0, 0.0, 1.0 + 5.0e-13);
+    near_unit.kinematics.linear_velocity_world_m_per_s = Vec3::ZERO;
+    near_unit.kinematics.angular_velocity_world_rad_per_s = Vec3::new(0.0, 0.0, 7.0);
+
+    let wrench = orientation_only
+        .evaluate(&near_unit)
+        .expect("near-unit normal is projected before orientation damping");
+    assert_eq!(wrench.torque_world_n_m, Vec3::ZERO);
+    assert!(
+        wrench.receipt.relative_power_w <= 0.0,
+        "near-unit orientation-only relative power must be passive, got {} W",
+        wrench.receipt.relative_power_w
+    );
+}
+
+#[test]
+fn aero_018_alternatives_validate_input_first_and_refuse_empty_sets() {
+    let mut malformed = input(Vec3::ZERO);
+    malformed.pose.normal_world = Vec3::new(0.0, 0.0, 2.0);
+    assert!(matches!(
+        AlternativeWrenchSet::evaluate(&[], &malformed),
+        Err(ReducedAeroError::NonUnitDiscAxis { .. })
+    ));
+    assert!(matches!(
+        AlternativeWrenchSet::evaluate(&[], &input(Vec3::ZERO)),
+        Err(ReducedAeroError::EmptyAlternativeWrenchSet)
+    ));
+}
+
+#[test]
 fn aero_014_forged_wrenches_and_overflow_do_not_consume_work_keys_or_totals() {
     let wrench = model("fixture.transaction", 1.1)
         .evaluate(&input(Vec3::ZERO))
