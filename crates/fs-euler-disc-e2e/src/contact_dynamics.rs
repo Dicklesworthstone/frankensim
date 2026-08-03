@@ -17,11 +17,11 @@
 use core::fmt;
 
 use fs_exec::Cx;
-use fs_geom::{Point3, Vec3 as GeomVec3};
+use fs_geom::{Chart, Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricMassError, AxisymmetricMassProperties,
-    AxisymmetricSupportAuthority, AxisymmetricSupportError, MeridianSegment,
+    AxisymmetricSupportAuthority, AxisymmetricSupportError,
 };
 use fs_tribo::{
     ContactFrame, FrictionLaw, FrictionRegime, InputAuthority, InterfaceSystemRef, TangentialSlip,
@@ -73,6 +73,16 @@ pub enum ContactDynamicsError {
     ProfileMassRefusal { detail: AxisymmetricMassError },
     /// The actual profile's support query refused publication, including cancellation.
     ProfileSupportRefusal { detail: AxisymmetricSupportError },
+    /// The retained legacy cylinder declaration disagrees with the chart that
+    /// actually supplies profile mass, inertia, and support.
+    ProfileControlMismatch {
+        /// Inconsistent legacy declaration field.
+        field: &'static str,
+        /// Caller-declared value.
+        declared: f64,
+        /// Chart-derived value that the profile path uses.
+        derived: f64,
+    },
 }
 
 impl fmt::Display for ContactDynamicsError {
@@ -150,15 +160,16 @@ pub struct ContactDynamicsInput {
 /// A true axisymmetric-profile contact setup.
 ///
 /// `controls` supplies state, gravity, friction, and fixed-step bounds. Its
-/// cylinder geometry is retained for source compatibility only: it is not read
-/// by the profile dynamics path for mass, inertia, support, or tolerance scale.
+/// cylinder geometry is a checked declaration of the chart AABB radius,
+/// thickness, and chart-derived mass; it is never a dynamics fallback.
 #[derive(Debug, Clone)]
 pub struct ProfileContactDynamicsInput {
     /// Exact sharp or circular-filleted body profile.
     pub chart: AxisymmetricChart,
     /// Homogeneous material density in kg/m³.
     pub density_kg_per_m3: f64,
-    /// Dynamics controls and initial state; its `geometry` is never a fallback.
+    /// Dynamics controls and a checked chart-consistent declaration; its
+    /// `geometry` is never a fallback.
     pub controls: ContactDynamicsInput,
 }
 
@@ -524,29 +535,96 @@ fn point_difference(point: Point3, center: Point3) -> Result<Vec3, ContactDynami
     Ok(relative)
 }
 
-fn profile_contact_length_scale_m(chart: &AxisymmetricChart) -> Result<f64, ContactDynamicsError> {
-    let mut radius_m: f64 = 0.0;
-    let mut axial_min_m = f64::INFINITY;
-    let mut axial_max_m = f64::NEG_INFINITY;
-    for segment in chart.segments() {
-        let points = match *segment {
-            MeridianSegment::Line { start, end } => [start, end, start],
-            MeridianSegment::Arc {
-                start, end, center, ..
-            } => [start, end, center],
-        };
-        for point in points {
-            finite_scalar(point.radius, "profile_meridian_radius")?;
-            finite_scalar(point.axial, "profile_meridian_axial")?;
-            radius_m = radius_m.max(point.radius);
-            axial_min_m = axial_min_m.min(point.axial);
-            axial_max_m = axial_max_m.max(point.axial);
-        }
+fn profile_characteristic_dimensions_m(
+    chart: &AxisymmetricChart,
+) -> Result<(f64, f64), ContactDynamicsError> {
+    let support = chart.support();
+    if !support.is_finite() {
+        return Err(ContactDynamicsError::NonFiniteDerived {
+            field: "profile_chart_aabb",
+        });
     }
-    let axial_extent_m = checked_scalar_sub(axial_max_m, axial_min_m, "profile_axial_extent_m")?;
-    let scale_m = radius_m.min(axial_extent_m);
-    positive_finite(scale_m, "profile_contact_length_scale_m")?;
-    Ok(scale_m)
+    let radius_m = support
+        .min
+        .x
+        .abs()
+        .max(support.max.x.abs())
+        .max(support.min.y.abs())
+        .max(support.max.y.abs());
+    let thickness_m =
+        checked_scalar_sub(support.max.z, support.min.z, "profile_chart_thickness_m")?;
+    positive_finite(radius_m, "profile_chart_radius_m")?;
+    positive_finite(thickness_m, "profile_chart_thickness_m")?;
+    Ok((radius_m, thickness_m))
+}
+
+fn verify_profile_control_declaration(
+    declaration: DiscGeometry,
+    profile_mass_kg: f64,
+    profile_radius_m: f64,
+    profile_thickness_m: f64,
+) -> Result<(), ContactDynamicsError> {
+    positive_finite(declaration.radius_m, "controls.geometry.radius_m")?;
+    positive_finite(declaration.thickness_m, "controls.geometry.thickness_m")?;
+    positive_finite(declaration.mass_kg, "controls.geometry.mass_kg")?;
+    verify_profile_declaration_scalar(
+        declaration.radius_m,
+        profile_radius_m,
+        "controls.geometry.radius_m",
+    )?;
+    verify_profile_declaration_scalar(
+        declaration.thickness_m,
+        profile_thickness_m,
+        "controls.geometry.thickness_m",
+    )?;
+    verify_profile_declaration_scalar(
+        declaration.mass_kg,
+        profile_mass_kg,
+        "controls.geometry.mass_kg",
+    )
+}
+
+fn verify_profile_declaration_scalar(
+    declared: f64,
+    derived: f64,
+    field: &'static str,
+) -> Result<(), ContactDynamicsError> {
+    finite_scalar(derived, field)?;
+    let tolerance = checked_mul(
+        1024.0 * f64::EPSILON,
+        declared.abs().max(derived.abs()).max(1.0),
+        "profile_control_declaration_tolerance",
+    )?;
+    if (declared - derived).abs() > tolerance {
+        return Err(ContactDynamicsError::ProfileControlMismatch {
+            field,
+            declared,
+            derived,
+        });
+    }
+    Ok(())
+}
+
+fn profile_mass_and_validate_controls(
+    input: &ProfileContactDynamicsInput,
+    cx: &Cx<'_>,
+) -> Result<(AxisymmetricMassProperties, MassProperties), ContactDynamicsError> {
+    let (radius_m, thickness_m) = profile_characteristic_dimensions_m(&input.chart)?;
+    input
+        .controls
+        .validate_controls(radius_m.min(thickness_m))?;
+    let profile_mass = input
+        .chart
+        .mass_properties(input.density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    verify_profile_control_declaration(
+        input.controls.geometry,
+        profile_mass.mass,
+        radius_m,
+        thickness_m,
+    )?;
+    let mass_properties = profile_mass_to_mbd(profile_mass)?;
+    Ok((profile_mass, mass_properties))
 }
 
 /// Places a supplied orientation and momentum state exactly on the plane.
@@ -585,6 +663,33 @@ pub fn profile_state_at_ground_contact(
     RigidBodyState::new(pose, linear_momentum_world, angular_momentum_body).map_err(rigid_refusal)
 }
 
+/// Places a density-defined axisymmetric profile at its unique ground support.
+///
+/// This is the profile-run initializer: it obtains the same chart mass and
+/// support geometry as [`run_profile_contact_dynamics`], rather than using a
+/// finite-cylinder placement that can begin a filleted run with a gap or
+/// penetration.
+pub fn state_at_profile_ground_contact(
+    chart: &AxisymmetricChart,
+    density_kg_per_m3: f64,
+    orientation: UnitQuaternion,
+    linear_momentum_world: Vec3,
+    angular_momentum_body: Vec3,
+    cx: &Cx<'_>,
+) -> Result<RigidBodyState, ContactDynamicsError> {
+    let mass = chart
+        .mass_properties(density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    profile_state_at_ground_contact(
+        chart,
+        mass,
+        orientation,
+        linear_momentum_world,
+        angular_momentum_body,
+        cx,
+    )
+}
+
 /// Runs the fixed-step unilateral contact solver until its horizon or an honest terminal event.
 pub fn run_contact_dynamics(
     input: &ContactDynamicsInput,
@@ -601,14 +706,7 @@ pub fn run_profile_contact_dynamics(
     input: &ProfileContactDynamicsInput,
     cx: &Cx<'_>,
 ) -> Result<ContactDynamicsRun, ContactDynamicsError> {
-    input
-        .controls
-        .validate_controls(profile_contact_length_scale_m(&input.chart)?)?;
-    let profile_mass = input
-        .chart
-        .mass_properties(input.density_kg_per_m3, cx)
-        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
-    let mass_properties = profile_mass_to_mbd(profile_mass)?;
+    let (profile_mass, mass_properties) = profile_mass_and_validate_controls(input, cx)?;
     let mut query = |pose| {
         profile_contact_geometry(&input.chart, profile_mass, pose, cx).map(|detail| detail.contact)
     };
@@ -635,13 +733,15 @@ where
             });
         }
         if geometry.gap_m > input.contact_tolerance_m {
+            let present_contact_velocity =
+                contact_velocity(mass_properties, state, geometry.radius_world_m)?;
             return Ok(ContactDynamicsRun {
                 steps,
                 final_state: state,
                 termination: ContactTermination::ContactLost {
                     step_index,
                     gap_m: geometry.gap_m,
-                    normal_velocity_m_per_s: 0.0,
+                    normal_velocity_m_per_s: present_contact_velocity.z,
                 },
             });
         }
@@ -713,6 +813,9 @@ pub fn refine_timestep_by_two(
         input.gravity_m_per_s2,
         input.geometry.mass_kg,
         mass_properties,
+        input.timestep_s,
+        fine_input.timestep_s,
+        reference_input.timestep_s,
     )
 }
 
@@ -725,14 +828,7 @@ pub fn refine_profile_timestep_by_two(
     input: &ProfileContactDynamicsInput,
     cx: &Cx<'_>,
 ) -> Result<TimestepRefinement, ContactDynamicsError> {
-    input
-        .controls
-        .validate_controls(profile_contact_length_scale_m(&input.chart)?)?;
-    let profile_mass = input
-        .chart
-        .mass_properties(input.density_kg_per_m3, cx)
-        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
-    let mass_properties = profile_mass_to_mbd(profile_mass)?;
+    let (profile_mass, mass_properties) = profile_mass_and_validate_controls(input, cx)?;
     let (fine_controls, reference_controls) = refinement_inputs(&input.controls)?;
     let mut fine_input = input.clone();
     fine_input.controls = fine_controls;
@@ -748,6 +844,9 @@ pub fn refine_profile_timestep_by_two(
         input.controls.gravity_m_per_s2,
         profile_mass.mass,
         mass_properties,
+        input.controls.timestep_s,
+        fine_input.controls.timestep_s,
+        reference_input.controls.timestep_s,
     )
 }
 
@@ -780,9 +879,17 @@ fn build_refinement(
     gravity_m_per_s2: f64,
     mass_kg: f64,
     mass_properties: MassProperties,
+    coarse_timestep_s: f64,
+    fine_timestep_s: f64,
+    reference_timestep_s: f64,
 ) -> Result<TimestepRefinement, ContactDynamicsError> {
-    if terminal_class(&coarse.termination) != terminal_class(&fine.termination)
-        || terminal_class(&coarse.termination) != terminal_class(&reference.termination)
+    if !equivalent_refinement_terminal(&coarse, coarse_timestep_s, &fine, fine_timestep_s)?
+        || !equivalent_refinement_terminal(
+            &coarse,
+            coarse_timestep_s,
+            &reference,
+            reference_timestep_s,
+        )?
     {
         return Err(ContactDynamicsError::IncomparableRefinement);
     }
@@ -1360,7 +1467,11 @@ fn energy_ledger(
     )?;
     let mechanical_balance_residual_j = checked_scalar_sub(
         checked_scalar_sub(
-            mechanical_energy_delta_j,
+            checked_scalar_sub(
+                mechanical_energy_delta_j,
+                gravity_work_j,
+                "mechanical_balance_residual",
+            )?,
             contact_impulse_work_estimate_j,
             "mechanical_balance_residual",
         )?,
@@ -1415,6 +1526,33 @@ fn terminal_class(termination: &ContactTermination) -> u8 {
         ContactTermination::StickInfeasible { .. } => 2,
         ContactTermination::UnilateralReactionInfeasible { .. } => 3,
     }
+}
+
+fn equivalent_refinement_terminal(
+    left: &ContactDynamicsRun,
+    left_timestep_s: f64,
+    right: &ContactDynamicsRun,
+    right_timestep_s: f64,
+) -> Result<bool, ContactDynamicsError> {
+    if terminal_class(&left.termination) != terminal_class(&right.termination) {
+        return Ok(false);
+    }
+    let left_time_s = checked_mul(
+        left.steps.len() as f64,
+        left_timestep_s,
+        "refinement_left_terminal_time_s",
+    )?;
+    let right_time_s = checked_mul(
+        right.steps.len() as f64,
+        right_timestep_s,
+        "refinement_right_terminal_time_s",
+    )?;
+    let time_tolerance_s = checked_mul(
+        1024.0 * f64::EPSILON,
+        left_time_s.abs().max(right_time_s.abs()).max(1.0),
+        "refinement_terminal_time_tolerance_s",
+    )?;
+    Ok((left_time_s - right_time_s).abs() <= time_tolerance_s)
 }
 
 fn endpoint_position_difference(

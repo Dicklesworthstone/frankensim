@@ -1,9 +1,9 @@
 use fs_euler_disc_e2e::{
     CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
     ContactDynamicsInput, ContactTermination, ProfileContactDynamicsInput, contact_geometry,
-    profile_contact_geometry, profile_state_at_ground_contact, refine_profile_timestep_by_two,
-    refine_timestep_by_two, run_contact_dynamics, run_profile_contact_dynamics,
-    state_at_ground_contact,
+    profile_contact_geometry, refine_profile_timestep_by_two, refine_timestep_by_two,
+    run_contact_dynamics, run_profile_contact_dynamics, state_at_ground_contact,
+    state_at_profile_ground_contact,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
@@ -250,7 +250,8 @@ fn impulse_work_uses_free_contact_velocity_and_projection_is_separate() {
         receipt.energy.contact_impulse_work_estimate_j < 0.0,
         "gravity makes the free contact velocity negative before the restoring impulse"
     );
-    let recomposed = receipt.energy.contact_impulse_work_estimate_j
+    let recomposed = receipt.energy.gravity_work_j
+        + receipt.energy.contact_impulse_work_estimate_j
         + receipt.energy.geometric_projection_work_j
         + receipt.energy.mechanical_balance_residual_j;
     assert_close(
@@ -281,6 +282,39 @@ fn separating_contact_terminates_without_a_fake_reaction() {
             assert!(normal_velocity_m_per_s > input.release_speed_tolerance_m_per_s);
         }
         other => panic!("expected contact loss, got {other:?}"),
+    }
+}
+
+#[test]
+fn initially_separated_contact_reports_its_present_normal_velocity() {
+    let mut input = tilted_input(2.0, Vec3::new(0.0, 0.0, 0.2), 0.0, 1.0e-4, 4);
+    let state = input.initial_state;
+    let separated_pose = Pose::new(
+        state
+            .pose()
+            .position_world()
+            .add(Vec3::new(0.0, 0.0, 1.0e-3)),
+        state.pose().orientation(),
+    )
+    .expect("finite separated pose");
+    input.initial_state = RigidBodyState::new(
+        separated_pose,
+        state.linear_momentum_world(),
+        state.angular_momentum_body(),
+    )
+    .expect("finite separated state");
+    let run = run_contact_dynamics(&input).expect("separation is a terminal result");
+    match run.termination {
+        ContactTermination::ContactLost {
+            step_index,
+            gap_m,
+            normal_velocity_m_per_s,
+        } => {
+            assert_eq!(step_index, 0);
+            assert!(gap_m > input.contact_tolerance_m);
+            assert_close(normal_velocity_m_per_s, 0.2, 1.0e-12);
+        }
+        other => panic!("expected already-separated contact loss, got {other:?}"),
     }
 }
 
@@ -432,9 +466,9 @@ fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnosti
             .expect("profile mass");
         let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
             .expect("finite tilted orientation");
-        let state = profile_state_at_ground_contact(
+        let state = state_at_profile_ground_contact(
             &chart,
-            mass,
+            density_kg_per_m3,
             orientation,
             Vec3::ZERO,
             Vec3::new(0.0, 0.0, mass.principal_inertia.axial * 0.05),
@@ -442,8 +476,9 @@ fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnosti
         )
         .expect("grounded profile state");
         let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 2);
+        controls.geometry.mass_kg = mass.mass;
         controls.initial_state = state;
-        let input = ProfileContactDynamicsInput {
+        let mut input = ProfileContactDynamicsInput {
             chart,
             density_kg_per_m3,
             controls,
@@ -486,6 +521,108 @@ fn filleted_profile_run_is_repeatable_and_has_componentwise_refinement_diagnosti
                 .is_finite()
         );
         assert!(refinement.fine_reference_orientation_angle_rad.is_finite());
+    });
+}
+
+#[test]
+fn profile_initializer_has_zero_fillet_gap_and_cylinder_initializer_does_not() {
+    with_cx(false, |cx| {
+        let chart = AxisymmetricChart::squat_disc(
+            0.038,
+            0.006,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        )
+        .expect("physical 1 mm fillet");
+        let density_kg_per_m3 = 7_800.0;
+        let mass = chart
+            .mass_properties(density_kg_per_m3, cx)
+            .expect("profile mass");
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let profile_state = state_at_profile_ground_contact(
+            &chart,
+            density_kg_per_m3,
+            orientation,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            cx,
+        )
+        .expect("profile ground initialization");
+        let profile_gap = profile_contact_geometry(&chart, mass, profile_state.pose(), cx)
+            .expect("unique profile contact")
+            .contact
+            .gap_m;
+        assert_close(profile_gap, 0.0, 1.0e-14);
+
+        let cylinder_geometry = DiscGeometry {
+            radius_m: 0.038,
+            thickness_m: 0.006,
+            mass_kg: mass.mass,
+        };
+        let cylinder_state =
+            state_at_ground_contact(cylinder_geometry, orientation, Vec3::ZERO, Vec3::ZERO)
+                .expect("legacy cylinder ground initialization");
+        let cylinder_gap = profile_contact_geometry(&chart, mass, cylinder_state.pose(), cx)
+            .expect("unique profile contact")
+            .contact
+            .gap_m;
+        assert!(
+            cylinder_gap.abs() > 1.0e-6,
+            "a cylinder initializer must not be accepted as a fillet initializer"
+        );
+    });
+}
+
+#[test]
+fn profile_run_rejects_inconsistent_legacy_geometry_declaration() {
+    with_cx(false, |cx| {
+        let chart = AxisymmetricChart::squat_disc(
+            0.038,
+            0.006,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        )
+        .expect("physical 1 mm fillet");
+        let density_kg_per_m3 = 7_800.0;
+        let mass = chart
+            .mass_properties(density_kg_per_m3, cx)
+            .expect("profile mass");
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let state = state_at_profile_ground_contact(
+            &chart,
+            density_kg_per_m3,
+            orientation,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            cx,
+        )
+        .expect("profile ground initialization");
+        let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
+        controls.initial_state = state;
+        assert_ne!(controls.geometry.mass_kg, mass.mass);
+        let input = ProfileContactDynamicsInput {
+            chart,
+            density_kg_per_m3,
+            controls,
+        };
+        match run_profile_contact_dynamics(&input, cx) {
+            Err(ContactDynamicsError::ProfileControlMismatch {
+                field: "controls.geometry.mass_kg",
+                declared,
+                derived,
+            }) => assert_ne!(declared, derived),
+            other => panic!("expected profile-control declaration refusal, got {other:?}"),
+        }
+        input.controls.geometry.mass_kg = mass.mass;
+        input.controls.geometry.radius_m = 0.037;
+        match run_profile_contact_dynamics(&input, cx) {
+            Err(ContactDynamicsError::ProfileControlMismatch {
+                field: "controls.geometry.radius_m",
+                declared,
+                derived,
+            }) => assert_ne!(declared, derived),
+            other => panic!("expected profile-dimension declaration refusal, got {other:?}"),
+        }
     });
 }
 
