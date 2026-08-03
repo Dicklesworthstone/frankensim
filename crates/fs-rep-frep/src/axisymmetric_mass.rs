@@ -97,6 +97,12 @@ pub enum AxisymmetricMassError {
         /// Reconstructed volume.
         volume: f64,
     },
+    /// A positive finite density and volume underflowed to a non-positive
+    /// representable mass, so no mechanics properties can be published.
+    NonPositiveMass {
+        /// Reconstructed representable mass.
+        mass: f64,
+    },
     /// A central inertia violated non-negativity beyond rounding tolerance.
     InvalidInertia {
         /// Reconstructed transverse central inertia.
@@ -128,6 +134,10 @@ impl core::fmt::Display for AxisymmetricMassError {
             Self::NonPositiveVolume { volume } => write!(
                 f,
                 "axisymmetric mass reconstructed non-positive volume {volume} from its CCW meridian"
+            ),
+            Self::NonPositiveMass { mass } => write!(
+                f,
+                "axisymmetric mass underflowed to non-positive representable mass {mass}"
             ),
             Self::InvalidInertia { transverse, axial } => write!(
                 f,
@@ -182,6 +192,10 @@ impl AxisymmetricChart {
         }
 
         let mass = density * volume;
+        ensure_finite(mass, "mass")?;
+        if mass <= 0.0 {
+            return Err(AxisymmetricMassError::NonPositiveMass { mass });
+        }
         let center_axial = first_axial / volume;
         let mut centered_r2_z2 = 0.0;
         let mut centered_r2_z2_abs = 0.0;
@@ -207,7 +221,6 @@ impl AxisymmetricChart {
         let mut principal_transverse = density * PI * (0.25 * moments.r4 + centered_r2_z2);
         let principal_axial = origin_axial;
         let origin_transverse = principal_transverse + mass * center_axial * center_axial;
-        ensure_finite(mass, "mass")?;
         ensure_finite(center_axial, "center axial coordinate")?;
         ensure_finite(principal_transverse, "principal transverse inertia")?;
         ensure_finite(principal_axial, "principal axial inertia")?;

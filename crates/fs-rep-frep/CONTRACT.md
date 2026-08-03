@@ -192,9 +192,10 @@ the suite unchanged.
 - `minimum_support_point(direction, cx)` analytically minimizes the normalized
   body-frame linear functional over every retained line/arc feature, including
   circular-arc interior extrema. A radial direction reconstructs the unique
-  azimuthal body point; zero/non-finite directions, flat meridian support, and
-  positive-radius purely axial ring/face support refuse. Results identify the
-  source feature and carry `Estimate` authority only, never a certificate.
+  azimuthal body point; zero/non-finite directions, a flat or distinct
+  co-minimizing meridian feature, and positive-radius purely axial ring/face
+  support refuse. Results identify the source feature and carry `Estimate`
+  authority only, never a certificate.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.

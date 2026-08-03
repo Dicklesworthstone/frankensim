@@ -325,3 +325,14 @@ fn g0_invalid_density_and_cancelled_work_refuse_without_partial_properties() {
         ));
     });
 }
+
+#[test]
+fn g0_positive_density_with_representational_mass_underflow_refuses() {
+    let chart = cylinder(1.0e-8, 1.0e-8, 0.0);
+    with_cx(false, |cx| {
+        assert!(matches!(
+            chart.mass_properties(f64::MIN_POSITIVE, cx),
+            Err(AxisymmetricMassError::NonPositiveMass { mass: 0.0 })
+        ));
+    });
+}

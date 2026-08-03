@@ -73,7 +73,7 @@ fn g0_sharp_cylinder_support_selects_the_closed_form_rim_point() {
     let chart = cylinder(2.0, 1.0, 0.0);
     let support = with_cx(false, |cx| {
         chart
-            .minimum_support_point(Vec3::new(3.0, 4.0, -5.0), cx)
+            .minimum_support_point(Vec3::new(3.0e200, 4.0e200, -5.0e200), cx)
             .expect("tipped direction has a unique sharp rim")
     });
 
@@ -149,7 +149,7 @@ fn g3_axial_translation_and_z_rotation_transform_support_equivariantly() {
 }
 
 #[test]
-fn g0_non_unique_and_hostile_support_requests_refuse() {
+fn g0_sharp_cylinder_radial_and_cap_normal_support_are_non_unique() {
     let chart = cylinder(2.0, 1.0, 0.0);
     with_cx(false, |cx| {
         assert!(matches!(
@@ -160,6 +160,13 @@ fn g0_non_unique_and_hostile_support_requests_refuse() {
             chart.minimum_support_point(Vec3::new(0.0, 0.0, 1.0), cx),
             Err(AxisymmetricSupportError::NonUniqueFeatureSupport { .. })
         ));
+    });
+}
+
+#[test]
+fn g0_hostile_and_cancelled_support_requests_refuse() {
+    let chart = cylinder(2.0, 1.0, 0.0);
+    with_cx(false, |cx| {
         assert!(matches!(
             chart.minimum_support_point(Vec3::new(0.0, 0.0, 0.0), cx),
             Err(AxisymmetricSupportError::ZeroDirection)

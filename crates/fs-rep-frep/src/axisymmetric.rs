@@ -115,10 +115,10 @@ pub enum AxisymmetricSupportError {
     InvalidChart(AxisymmetricError),
     /// Cancellation was observed before every retained feature was considered.
     Cancelled,
-    /// A selected line feature is flat under the support functional and has a
-    /// continuum of minimizing meridian points.
+    /// A co-minimizing feature leaves the support point non-unique: it is
+    /// flat under the functional or selects a distinct meridian point.
     NonUniqueFeatureSupport {
-        /// Source feature with the continuum of minimizers.
+        /// Source feature that establishes the non-uniqueness.
         source_feature: usize,
     },
     /// An axial direction selected a positive-radius point, whose azimuthal
@@ -150,7 +150,7 @@ impl core::fmt::Display for AxisymmetricSupportError {
             ),
             Self::NonUniqueFeatureSupport { source_feature } => write!(
                 f,
-                "axisymmetric support feature {source_feature} is flat in this direction"
+                "axisymmetric support feature {source_feature} leaves no unique support point"
             ),
             Self::NonUniqueAzimuthalSupport { source_feature } => write!(
                 f,
@@ -486,7 +486,7 @@ impl AxisymmetricChart {
         let radial = unit.x.hypot(unit.y);
         let radial_coefficient = -radial;
         let mut best: Option<SupportCandidate> = None;
-        let mut flat_best_feature = None;
+        let mut non_unique_feature = None;
         for (index, segment) in self.segments.iter().copied().enumerate() {
             if index % 16 == 0 && cx.checkpoint().is_err() {
                 return Err(AxisymmetricSupportError::Cancelled);
@@ -498,19 +498,29 @@ impl AxisymmetricChart {
             {
                 return Err(AxisymmetricSupportError::NonFiniteResult);
             }
-            let ordering = match best {
-                None => core::cmp::Ordering::Less,
-                Some(current) => candidate.value.total_cmp(&current.value),
-            };
-            if ordering.is_lt() {
-                flat_best_feature = if candidate.flat_feature {
-                    Some(candidate.source_feature)
-                } else {
-                    None
-                };
-                best = Some(candidate);
-            } else if ordering.is_eq() && candidate.flat_feature {
-                flat_best_feature = Some(candidate.source_feature);
+            match best {
+                None => {
+                    non_unique_feature = if candidate.flat_feature {
+                        Some(candidate.source_feature)
+                    } else {
+                        None
+                    };
+                    best = Some(candidate);
+                }
+                Some(current) => {
+                    if support_values_tied(candidate.value, current.value) {
+                        if candidate.flat_feature || !same_support_candidate(candidate, current) {
+                            non_unique_feature = Some(candidate.source_feature);
+                        }
+                    } else if candidate.value.total_cmp(&current.value).is_lt() {
+                        non_unique_feature = if candidate.flat_feature {
+                            Some(candidate.source_feature)
+                        } else {
+                            None
+                        };
+                        best = Some(candidate);
+                    }
+                }
             }
         }
         if cx.checkpoint().is_err() {
@@ -521,7 +531,7 @@ impl AxisymmetricChart {
                 AxisymmetricError::DegenerateFeature { index: 0 },
             ));
         };
-        if let Some(source_feature) = flat_best_feature {
+        if let Some(source_feature) = non_unique_feature {
             return Err(AxisymmetricSupportError::NonUniqueFeatureSupport { source_feature });
         }
         if radial == 0.0 && best.radius > 0.0 {
@@ -670,6 +680,14 @@ struct SupportCandidate {
     value: f64,
     source_feature: usize,
     flat_feature: bool,
+}
+
+fn same_support_candidate(a: SupportCandidate, b: SupportCandidate) -> bool {
+    a.radius == b.radius && a.axial == b.axial
+}
+
+fn support_values_tied(a: f64, b: f64) -> bool {
+    (a - b).abs() <= tie_tolerance(a, b)
 }
 
 fn normalized_support_direction(direction: Vec3) -> Result<Vec3, AxisymmetricSupportError> {
@@ -1073,9 +1091,10 @@ fn inside_even_odd(segments: &[MeridianSegment], q: MeridianPoint) -> bool {
 }
 
 /// Match line crossings' lower-inclusive/upper-exclusive axial convention at
-/// every line/arc join. Arc starts and ends are classified by their axial
-/// order, not by traversal order; interior horizontal extrema are tangent
-/// contacts and contribute no parity crossing.
+/// every line/arc join. Endpoint inclusion follows the local axial derivative
+/// under the oriented sweep, not the endpoints' global axial ordering; major
+/// arcs can reverse direction between their endpoints. Interior horizontal
+/// extrema are tangent contacts and contribute no parity crossing.
 fn arc_half_open_crossing(segment: MeridianSegment, angle: f64) -> bool {
     let sweep = arc_sweep(segment);
     let start_angle = arc_start_angle(segment);
@@ -1085,13 +1104,12 @@ fn arc_half_open_crossing(segment: MeridianSegment, angle: f64) -> bool {
         (start_angle - angle).rem_euclid(TAU)
     };
     let end_distance = sweep.abs() - travel;
-    let start = segment.start();
-    let end = segment.end();
+    let axial_derivative = sweep.signum() * angle.cos();
     if travel <= JOIN_ULPS {
-        return start.axial < end.axial;
+        return axial_derivative > JOIN_ULPS;
     }
     if end_distance <= JOIN_ULPS {
-        return end.axial < start.axial;
+        return axial_derivative < -JOIN_ULPS;
     }
     angle.cos().abs() > JOIN_ULPS
 }

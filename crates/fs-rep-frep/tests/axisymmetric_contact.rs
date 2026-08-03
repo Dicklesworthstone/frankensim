@@ -335,6 +335,61 @@ fn g0_filleted_join_heights_keep_the_meridian_inside_rule_half_open() {
 }
 
 #[test]
+fn g0_arc_endpoint_parity_uses_local_axial_derivative_for_major_and_equal_height_arcs() {
+    let major_start = point(3.0 + 2.5_f64.cos(), 2.5_f64.sin());
+    let major_end = point(3.0 + 2.2_f64.cos(), 2.2_f64.sin());
+    let major_mid = point(
+        0.5 * (major_start.radius + major_end.radius),
+        0.5 * (major_start.axial + major_end.axial),
+    );
+    let major = AxisymmetricChart::try_new(vec![
+        MeridianSegment::Arc {
+            start: major_start,
+            end: major_end,
+            center: point(3.0, 0.0),
+            clockwise: false,
+        },
+        line(major_end, major_mid),
+        line(major_mid, major_start),
+    ])
+    .expect("valid CCW major arc cap");
+
+    let equal_right = point(3.0 + core::f64::consts::FRAC_PI_6.cos(), 0.5);
+    let equal_left = point(3.0 - core::f64::consts::FRAC_PI_6.cos(), 0.5);
+    let equal_height = AxisymmetricChart::try_new(vec![
+        MeridianSegment::Arc {
+            start: equal_right,
+            end: equal_left,
+            center: point(3.0, 0.0),
+            clockwise: false,
+        },
+        line(equal_left, point(equal_left.radius, -1.0)),
+        line(
+            point(equal_left.radius, -1.0),
+            point(equal_right.radius, -1.0),
+        ),
+        line(point(equal_right.radius, -1.0), equal_right),
+    ])
+    .expect("valid CCW equal-height arc cap");
+
+    with_cx(|cx| {
+        for axial in [major_start.axial, major_end.axial] {
+            assert!(
+                major.eval(Point3::new(1.0, 0.0, axial), cx).signed_distance > 0.0,
+                "major-arc join z={axial} must remain outside"
+            );
+        }
+        assert!(
+            equal_height
+                .eval(Point3::new(3.0, 0.0, 0.5), cx)
+                .signed_distance
+                < 0.0,
+            "equal-height arc joins must include both local lower crossings"
+        );
+    });
+}
+
+#[test]
 fn g3_axial_translation_unit_rescaling_and_z_rotation_preserve_distance_laws() {
     let base = cylinder(2.0, 1.0, 0.0);
     let translated = cylinder(2.0, 1.0, 7.0);
