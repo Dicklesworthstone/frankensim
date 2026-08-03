@@ -1051,6 +1051,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-ga",
@@ -1058,6 +1059,7 @@ dependencies = [
  "fs-ivl",
  "fs-motion",
  "fs-query",
+ "fs-tribo",
 ]
 
 [[package]]
@@ -1200,6 +1202,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-couple",
  "fs-evidence",
  "fs-exec",
  "fs-flux",
