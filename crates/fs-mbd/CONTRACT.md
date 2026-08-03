@@ -17,27 +17,33 @@ lanes.
 
 - `Vec3` is a small Cartesian vector. Every public field that carries a vector
   names its frame in the field name or documentation.
-- `UnitQuaternion` is a normalized body-to-world quaternion. Construction
-  rejects zero/non-finite norm, normalizes, and chooses the representative for
-  which the first nonzero component of `(w, x, y, z)` is positive. This makes
-  the quaternion double cover deterministic.
-- `Pose` combines a world-space centre-of-mass position with that orientation.
+- `UnitQuaternion` is a normalized body-to-world quaternion. Construction uses
+  scaled normalization, so finite huge and subnormal components do not overflow
+  or underflow the normalization intermediate; it rejects only zero/non-finite
+  input. The representative has the first nonzero component of `(w, x, y, z)`
+  positive, making the double cover deterministic.
+- `Pose::new` combines a finite world-space centre-of-mass position with that
+  orientation. Its fields are private; `position_world()` and `orientation()`
+  expose copies of the validated values.
 - `MassProperties::new(mass, center_of_mass_body, principal_inertia_body)`
   accepts finite positive mass and principal moments satisfying the rigid-body
   triangle inequalities. The centre of mass must be exactly zero in the
   principal frame; offset-reference spatial inertia is refused.
 - `RigidBodyState` stores world-frame linear momentum and body-frame angular
-  momentum. It has no independent velocity or angular-velocity state.
+  momentum. Its fields are private and exposed through frame-named getters; it
+  has no independent velocity or angular-velocity state.
 - `Wrench` carries a constant world-frame force and principal-body-frame torque
-  for one step. `Gravity` is a uniform world-frame acceleration.
+  for one step. `Gravity` is a validated uniform world-frame acceleration with
+  a private field and `acceleration_world()` getter.
 - `RigidBodyIntegrator::step` returns a `StepReceipt` with the before/after
   states and diagnostics. Translation uses the midpoint linear momentum under
   the constant total force. Body angular momentum uses midpoint RK2 for
   `Ldot = L × I⁻¹L + tau`; attitude uses the body midpoint angular velocity in
   a right-composed quaternion exponential update.
-- `DynamicsDiagnostics` reports translational/rotational kinetic energy,
-  gravity potential with zero at the world origin, total mechanical energy,
-  world linear momentum, and world angular momentum about that origin.
+- `RigidBodyIntegrator::diagnostics` returns
+  `Result<DynamicsDiagnostics, DynamicsError>`. It revalidates its state,
+  gravity, and mass properties and refuses non-finite derived energies or world
+  angular momentum rather than publishing an `inf`/`NaN` ledger.
 - `RigidBodyIntegrator::advance` invokes its cancellation callback before each
   whole step. It returns `AdvanceOutcome::Cancelled` with the last fully
   committed state and diagnostics when cancellation is observed.
@@ -45,7 +51,9 @@ lanes.
 ## Invariants
 
 - Public construction rejects non-finite mass-property, state, gravity, wrench,
-  duration, and quaternion inputs at the relevant boundary.
+  duration, and quaternion inputs at the relevant boundary. State, pose, and
+  gravity fields cannot be forged externally; public integrator operations also
+  revalidate their inputs before producing a receipt or diagnostic.
 - The public orientation remains normalized and uses a canonical quaternion
   sign after every successful attitude update.
 - The declared force and gravity are world-frame quantities; the declared
@@ -57,12 +65,13 @@ lanes.
 
 ## Error model
 
-`DynamicsError` is the refusal channel for non-finite input, invalid mass,
-invalid or physically inconsistent principal inertia, invalid orientation,
-unsupported non-centre-of-mass reference point, and invalid duration. There
-are no panics in production paths for those invalid inputs. Arithmetic overflow
-or a non-finite attitude update is returned through the same checked state and
-orientation construction; already completed earlier steps of `advance` remain
+`DynamicsError` is the refusal channel for non-finite input or derived result,
+unrepresentable finite magnitude, invalid mass, invalid or physically
+inconsistent principal inertia, invalid orientation, unsupported
+non-centre-of-mass reference point, and invalid duration. There are no panics
+in production paths for those invalid inputs. Arithmetic overflow or a
+non-finite attitude update is returned through the checked state, orientation,
+or diagnostics boundary; already completed earlier steps of `advance` remain
 committed.
 
 ## Determinism class
@@ -73,7 +82,7 @@ implementation currently uses the Rust standard library's floating-point
 `sqrt`, `sin`, and `cos`; therefore this contract makes no cross-ISA bitwise
 claim and retains no cross-ISA evidence. Same-platform repeatability is an
 implementation property to be exercised by consumers, not a retained G5
-promotion from this seven-test foundation.
+promotion from this eleven-test foundation.
 
 ## Cancellation behavior
 
@@ -94,15 +103,22 @@ None. This initial core depends only on `std`/`core` and has no feature flags.
 
 ## Focused evidence
 
-The inline test module in `src/lib.rs` contains seven focused checks:
+The inline test module in `src/lib.rs` contains eleven focused checks:
 
 1. mass, inertia, and centre-of-mass-reference refusals;
-2. canonical quaternion double-cover selection and a known rotation;
-3. analytic constant-gravity translation plus energy conservation;
-4. constant force/torque updates in their declared frames;
-5. torque-free spherical-body energy and world angular-momentum conservation;
-6. refinement reducing the measured energy defect for an asymmetric free body;
-7. cancellation before a whole step, preserving the last completed state.
+2. canonical quaternion double-cover selection and a known 180-degree rotation;
+3. right-handed 90-degree z rotation plus nontrivial quaternion composition;
+4. scaled normalization for finite huge/subnormal quaternion, axis, and
+   rotation-vector inputs;
+5. analytic constant-gravity translation plus energy conservation;
+6. constant force/torque updates in their declared frames;
+7. torque-free spherical-body energy and world angular-momentum conservation;
+8. axisymmetric Euler-top phase sign and refinement toward its analytic body
+   angular-velocity solution;
+9. refinement reducing the measured energy defect for an asymmetric free body;
+10. cancellation before a whole step, preserving the last completed state;
+11. refusal of overflowing diagnostics, including an already-cancelled advance,
+    without a false successful diagnostic receipt.
 
 These are local G0-style checks. They do not constitute full multibody,
 constraint, contact, physical-validation, performance, G4 fault-injection, or

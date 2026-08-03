@@ -67,6 +67,35 @@ impl Vec3 {
         self.dot(self)
     }
 
+    fn stable_norm(self, field: &'static str) -> Result<f64, DynamicsError> {
+        if !self.is_finite() {
+            return Err(DynamicsError::NonFinite(field));
+        }
+        let scale = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if scale == 0.0 {
+            return Ok(0.0);
+        }
+        let scaled = Self::new(self.x / scale, self.y / scale, self.z / scale);
+        let magnitude = scale * scaled.dot(scaled).sqrt();
+        if !magnitude.is_finite() {
+            return Err(DynamicsError::UnrepresentableMagnitude(field));
+        }
+        Ok(magnitude)
+    }
+
+    fn normalized(self, field: &'static str) -> Result<Self, DynamicsError> {
+        if !self.is_finite() {
+            return Err(DynamicsError::NonFinite(field));
+        }
+        let scale = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if scale == 0.0 {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        let scaled = Self::new(self.x / scale, self.y / scale, self.z / scale);
+        let inverse_norm = scaled.dot(scaled).sqrt().recip();
+        Ok(scaled.scale(inverse_norm))
+    }
+
     /// Scalar multiplication.
     #[must_use]
     pub fn scale(self, scalar: f64) -> Self {
@@ -99,6 +128,8 @@ pub enum DynamicsError {
     InconsistentPrincipalInertia,
     /// A quaternion with zero or non-finite norm cannot define an orientation.
     InvalidOrientation,
+    /// A finite vector's mathematical magnitude cannot be represented in `f64`.
+    UnrepresentableMagnitude(&'static str),
     /// This core admits center-of-mass reference frames only.
     UnsupportedReferenceOffset,
     /// A step duration must be finite and strictly positive.
@@ -117,6 +148,9 @@ impl fmt::Display for DynamicsError {
                 .write_str("principal moments must satisfy rigid-body triangle inequalities"),
             Self::InvalidOrientation => {
                 formatter.write_str("orientation must have a finite nonzero norm")
+            }
+            Self::UnrepresentableMagnitude(field) => {
+                write!(formatter, "{field} magnitude is not representable as f64")
             }
             Self::UnsupportedReferenceOffset => formatter
                 .write_str("this rigid-body core requires a center-of-mass reference point"),
@@ -154,16 +188,29 @@ impl UnitQuaternion {
     /// The first nonzero component in `(w, x, y, z)` is always positive,
     /// providing a deterministic representative of the double cover.
     pub fn new(w: f64, x: f64, y: f64, z: f64) -> Result<Self, DynamicsError> {
-        let norm_squared = w.mul_add(w, x.mul_add(x, y.mul_add(y, z * z)));
-        if !norm_squared.is_finite() || norm_squared <= 0.0 {
+        if !w.is_finite() || !x.is_finite() || !y.is_finite() || !z.is_finite() {
             return Err(DynamicsError::InvalidOrientation);
         }
-        let inverse_norm = norm_squared.sqrt().recip();
+        let scale = w.abs().max(x.abs()).max(y.abs()).max(z.abs());
+        if scale == 0.0 {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        let scaled_w = w / scale;
+        let scaled_x = x / scale;
+        let scaled_y = y / scale;
+        let scaled_z = z / scale;
+        let inverse_norm = scaled_w
+            .mul_add(
+                scaled_w,
+                scaled_x.mul_add(scaled_x, scaled_y.mul_add(scaled_y, scaled_z * scaled_z)),
+            )
+            .sqrt()
+            .recip();
         Ok(Self::canonical(
-            w * inverse_norm,
-            x * inverse_norm,
-            y * inverse_norm,
-            z * inverse_norm,
+            scaled_w * inverse_norm,
+            scaled_x * inverse_norm,
+            scaled_y * inverse_norm,
+            scaled_z * inverse_norm,
         ))
     }
 
@@ -172,17 +219,13 @@ impl UnitQuaternion {
         if !axis_body.is_finite() || !angle_radians.is_finite() {
             return Err(DynamicsError::NonFinite("axis or angle"));
         }
-        let axis_norm = axis_body.norm_squared().sqrt();
-        if axis_norm == 0.0 {
-            return Err(DynamicsError::InvalidOrientation);
-        }
+        let axis = axis_body.normalized("axis_body")?;
         let half_angle = 0.5 * angle_radians;
-        let scale = half_angle.sin() / axis_norm;
         Self::new(
             half_angle.cos(),
-            scale * axis_body.x,
-            scale * axis_body.y,
-            scale * axis_body.z,
+            half_angle.sin() * axis.x,
+            half_angle.sin() * axis.y,
+            half_angle.sin() * axis.z,
         )
     }
 
@@ -212,9 +255,9 @@ impl UnitQuaternion {
             return Err(DynamicsError::NonFinite("rotation_vector_body"));
         }
         let half = rotation_vector_body.scale(0.5);
-        let theta_squared = half.norm_squared();
-        let theta = theta_squared.sqrt();
+        let theta = half.stable_norm("rotation_vector_body")?;
         let (cosine, sine_over_theta) = if theta < 1e-6 {
+            let theta_squared = theta * theta;
             (
                 1.0 - 0.5 * theta_squared + theta_squared * theta_squared / 24.0,
                 1.0 - theta_squared / 6.0 + theta_squared * theta_squared / 120.0,
@@ -286,12 +329,24 @@ impl UnitQuaternion {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     /// Reference-point location in the world frame.
-    pub position_world: Vec3,
+    position_world: Vec3,
     /// Body-to-world orientation.
-    pub orientation: UnitQuaternion,
+    orientation: UnitQuaternion,
 }
 
 impl Pose {
+    /// Constructs a center-of-mass pose from a finite world position and a
+    /// previously validated body-to-world orientation.
+    pub fn new(position_world: Vec3, orientation: UnitQuaternion) -> Result<Self, DynamicsError> {
+        if !position_world.is_finite() {
+            return Err(DynamicsError::NonFinite("pose.position_world"));
+        }
+        Ok(Self {
+            position_world,
+            orientation,
+        })
+    }
+
     /// The world-origin pose.
     #[must_use]
     pub const fn identity() -> Self {
@@ -299,6 +354,25 @@ impl Pose {
             position_world: Vec3::ZERO,
             orientation: UnitQuaternion::IDENTITY,
         }
+    }
+
+    /// Returns the center-of-mass position in the world frame.
+    #[must_use]
+    pub const fn position_world(self) -> Vec3 {
+        self.position_world
+    }
+
+    /// Returns the body-to-world orientation.
+    #[must_use]
+    pub const fn orientation(self) -> UnitQuaternion {
+        self.orientation
+    }
+
+    fn validate(self) -> Result<(), DynamicsError> {
+        if !self.position_world.is_finite() {
+            return Err(DynamicsError::NonFinite("pose.position_world"));
+        }
+        Ok(())
     }
 }
 
@@ -378,17 +452,26 @@ impl MassProperties {
             angular_momentum_body.z / self.principal_inertia_body.z,
         )
     }
+
+    fn validate(self) -> Result<(), DynamicsError> {
+        Self::new(
+            self.mass,
+            self.center_of_mass_body,
+            self.principal_inertia_body,
+        )
+        .map(|_| ())
+    }
 }
 
 /// Momentum-form state of one unconstrained rigid body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidBodyState {
     /// Center-of-mass pose.
-    pub pose: Pose,
+    pose: Pose,
     /// Linear momentum in kg m/s, expressed in the world frame.
-    pub linear_momentum_world: Vec3,
+    linear_momentum_world: Vec3,
     /// Angular momentum in kg m²/s, expressed in the principal body frame.
-    pub angular_momentum_body: Vec3,
+    angular_momentum_body: Vec3,
 }
 
 impl RigidBodyState {
@@ -398,9 +481,7 @@ impl RigidBodyState {
         linear_momentum_world: Vec3,
         angular_momentum_body: Vec3,
     ) -> Result<Self, DynamicsError> {
-        if !pose.position_world.is_finite() {
-            return Err(DynamicsError::NonFinite("pose.position_world"));
-        }
+        pose.validate()?;
         if !linear_momentum_world.is_finite() {
             return Err(DynamicsError::NonFinite("linear_momentum_world"));
         }
@@ -412,6 +493,33 @@ impl RigidBodyState {
             linear_momentum_world,
             angular_momentum_body,
         })
+    }
+
+    /// Returns the center-of-mass pose.
+    #[must_use]
+    pub const fn pose(self) -> Pose {
+        self.pose
+    }
+
+    /// Returns world-frame linear momentum.
+    #[must_use]
+    pub const fn linear_momentum_world(self) -> Vec3 {
+        self.linear_momentum_world
+    }
+
+    /// Returns principal-body-frame angular momentum.
+    #[must_use]
+    pub const fn angular_momentum_body(self) -> Vec3 {
+        self.angular_momentum_body
+    }
+
+    fn validate(self) -> Result<(), DynamicsError> {
+        Self::new(
+            self.pose,
+            self.linear_momentum_world,
+            self.angular_momentum_body,
+        )
+        .map(|_| ())
     }
 }
 
@@ -446,7 +554,7 @@ impl Wrench {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gravity {
     /// Acceleration in m/s², expressed in the world frame.
-    pub acceleration_world: Vec3,
+    acceleration_world: Vec3,
 }
 
 impl Gravity {
@@ -461,6 +569,16 @@ impl Gravity {
             return Err(DynamicsError::NonFinite("gravity.acceleration_world"));
         }
         Ok(Self { acceleration_world })
+    }
+
+    /// Returns world-frame gravitational acceleration.
+    #[must_use]
+    pub const fn acceleration_world(self) -> Vec3 {
+        self.acceleration_world
+    }
+
+    fn validate(self) -> Result<(), DynamicsError> {
+        Self::new(self.acceleration_world).map(|_| ())
     }
 }
 
@@ -540,34 +658,58 @@ impl RigidBodyIntegrator {
         self,
         state: RigidBodyState,
         properties: MassProperties,
-    ) -> DynamicsDiagnostics {
-        let translational_kinetic_energy =
-            state.linear_momentum_world.norm_squared() / (2.0 * properties.mass);
+    ) -> Result<DynamicsDiagnostics, DynamicsError> {
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
+        let translational_kinetic_energy = finite_derived(
+            state.linear_momentum_world.norm_squared() / (2.0 * properties.mass),
+            "diagnostics.translational_kinetic_energy",
+        )?;
         let angular_velocity_body = properties.angular_velocity_body(state.angular_momentum_body);
-        let rotational_kinetic_energy =
-            0.5 * state.angular_momentum_body.dot(angular_velocity_body);
-        let gravitational_potential_energy = -properties.mass
-            * self
-                .gravity
-                .acceleration_world
-                .dot(state.pose.position_world);
+        if !angular_velocity_body.is_finite() {
+            return Err(DynamicsError::NonFinite(
+                "diagnostics.angular_velocity_body",
+            ));
+        }
+        let rotational_kinetic_energy = finite_derived(
+            0.5 * state.angular_momentum_body.dot(angular_velocity_body),
+            "diagnostics.rotational_kinetic_energy",
+        )?;
+        let gravitational_potential_energy = finite_derived(
+            -properties.mass
+                * self
+                    .gravity
+                    .acceleration_world
+                    .dot(state.pose.position_world),
+            "diagnostics.gravitational_potential_energy",
+        )?;
         let linear_angular_momentum_world = state
             .pose
             .orientation
             .rotate_body_to_world(state.angular_momentum_body);
         let orbital_angular_momentum_world =
             state.pose.position_world.cross(state.linear_momentum_world);
-        DynamicsDiagnostics {
+        let angular_momentum_world =
+            orbital_angular_momentum_world.add(linear_angular_momentum_world);
+        if !angular_momentum_world.is_finite() {
+            return Err(DynamicsError::NonFinite(
+                "diagnostics.angular_momentum_world",
+            ));
+        }
+        Ok(DynamicsDiagnostics {
             translational_kinetic_energy,
             rotational_kinetic_energy,
             gravitational_potential_energy,
-            mechanical_energy: translational_kinetic_energy
-                + rotational_kinetic_energy
-                + gravitational_potential_energy,
+            mechanical_energy: finite_derived(
+                translational_kinetic_energy
+                    + rotational_kinetic_energy
+                    + gravitational_potential_energy,
+                "diagnostics.mechanical_energy",
+            )?,
             linear_momentum_world: state.linear_momentum_world,
-            angular_momentum_world: orbital_angular_momentum_world
-                .add(linear_angular_momentum_world),
-        }
+            angular_momentum_world,
+        })
     }
 
     /// Performs one deterministic midpoint Lie-group step.
@@ -585,11 +727,14 @@ impl RigidBodyIntegrator {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(DynamicsError::InvalidStepDuration);
         }
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
         wrench.validate()?;
-        let diagnostics_before = self.diagnostics(state, properties);
+        let diagnostics_before = self.diagnostics(state, properties)?;
         let total_force_world = wrench
             .force_world
-            .add(self.gravity.acceleration_world.scale(properties.mass));
+            .add(self.gravity.acceleration_world().scale(properties.mass));
         let linear_momentum_mid = state
             .linear_momentum_world
             .add(total_force_world.scale(0.5 * duration_seconds));
@@ -618,14 +763,11 @@ impl RigidBodyIntegrator {
             .right_exp(angular_velocity_mid.scale(duration_seconds))?;
 
         let state_after = RigidBodyState::new(
-            Pose {
-                position_world: position_after,
-                orientation: orientation_after,
-            },
+            Pose::new(position_after, orientation_after)?,
             linear_momentum_after,
             angular_momentum_after,
         )?;
-        let diagnostics_after = self.diagnostics(state_after, properties);
+        let diagnostics_after = self.diagnostics(state_after, properties)?;
         Ok(StepReceipt {
             duration_seconds,
             state_before: state,
@@ -654,7 +796,7 @@ impl RigidBodyIntegrator {
             if is_cancelled(completed_steps) {
                 return Ok(AdvanceOutcome::Cancelled {
                     completed_steps,
-                    final_diagnostics: self.diagnostics(*state, properties),
+                    final_diagnostics: self.diagnostics(*state, properties)?,
                 });
             }
             *state = self
@@ -663,8 +805,16 @@ impl RigidBodyIntegrator {
         }
         Ok(AdvanceOutcome::Completed {
             completed_steps: step_count,
-            final_diagnostics: self.diagnostics(*state, properties),
+            final_diagnostics: self.diagnostics(*state, properties)?,
         })
+    }
+}
+
+fn finite_derived(value: f64, field: &'static str) -> Result<f64, DynamicsError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(DynamicsError::NonFinite(field))
     }
 }
 
@@ -732,15 +882,67 @@ mod tests {
     }
 
     #[test]
+    fn right_handed_z_rotation_and_composition_match_known_oracles() {
+        let quarter_turn =
+            UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), core::f64::consts::FRAC_PI_2)
+                .unwrap();
+        let rotated = quarter_turn.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+        assert_close(rotated.x, 0.0, EPSILON);
+        assert_close(rotated.y, 1.0, EPSILON);
+        assert_close(rotated.z, 0.0, EPSILON);
+
+        let half_turn = quarter_turn
+            .right_exp(Vec3::new(0.0, 0.0, core::f64::consts::FRAC_PI_2))
+            .unwrap();
+        let composed = half_turn.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+        assert_close(composed.x, -1.0, EPSILON);
+        assert_close(composed.y, 0.0, EPSILON);
+        assert_close(composed.z, 0.0, EPSILON);
+    }
+
+    #[test]
+    fn scaled_normalization_admits_extreme_finite_quaternion_axis_and_rotation_inputs() {
+        let huge = UnitQuaternion::new(f64::MAX, f64::MAX, -f64::MAX, f64::MAX).unwrap();
+        for component in huge.components() {
+            assert!(component.is_finite());
+        }
+        let tiny = f64::from_bits(1);
+        let tiny_quaternion = UnitQuaternion::new(tiny, -tiny, tiny, -tiny).unwrap();
+        for component in tiny_quaternion.components() {
+            assert!(component.is_finite());
+        }
+        let huge_axis = UnitQuaternion::from_axis_angle(
+            Vec3::new(f64::MAX, 0.5 * f64::MAX, -0.25 * f64::MAX),
+            core::f64::consts::FRAC_PI_2,
+        )
+        .unwrap();
+        assert!(
+            huge_axis
+                .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0))
+                .is_finite()
+        );
+        let huge_rotation = UnitQuaternion::IDENTITY
+            .right_exp(Vec3::new(f64::MAX, f64::MAX, f64::MAX))
+            .unwrap();
+        for component in huge_rotation.components() {
+            assert!(component.is_finite());
+        }
+    }
+
+    #[test]
     fn gravity_matches_the_constant_acceleration_solution() {
         let gravity = Gravity::new(Vec3::new(0.0, 0.0, -9.81)).unwrap();
         let integrator = RigidBodyIntegrator::new(gravity);
         let receipt = integrator
             .step(state(), disc_properties(), Wrench::ZERO, 0.25)
             .unwrap();
-        assert_close(receipt.state_after.linear_momentum_world.z, -4.905, EPSILON);
         assert_close(
-            receipt.state_after.pose.position_world.z,
+            receipt.state_after.linear_momentum_world().z,
+            -4.905,
+            EPSILON,
+        );
+        assert_close(
+            receipt.state_after.pose().position_world().z,
             -0.3065625,
             EPSILON,
         );
@@ -761,9 +963,9 @@ mod tests {
         let receipt = integrator
             .step(state(), disc_properties(), wrench, 0.5)
             .unwrap();
-        assert_close(receipt.state_after.linear_momentum_world.x, 2.0, EPSILON);
-        assert_close(receipt.state_after.pose.position_world.x, 0.25, EPSILON);
-        assert_close(receipt.state_after.angular_momentum_body.z, 1.5, EPSILON);
+        assert_close(receipt.state_after.linear_momentum_world().x, 2.0, EPSILON);
+        assert_close(receipt.state_after.pose().position_world().x, 0.25, EPSILON);
+        assert_close(receipt.state_after.angular_momentum_body().z, 1.5, EPSILON);
     }
 
     #[test]
@@ -776,7 +978,7 @@ mod tests {
         )
         .unwrap();
         let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
-        let initial_diagnostics = integrator.diagnostics(initial, properties);
+        let initial_diagnostics = integrator.diagnostics(initial, properties).unwrap();
         let mut current = initial;
         for _ in 0..1_000 {
             current = integrator
@@ -784,7 +986,7 @@ mod tests {
                 .unwrap()
                 .state_after;
         }
-        let final_diagnostics = integrator.diagnostics(current, properties);
+        let final_diagnostics = integrator.diagnostics(current, properties).unwrap();
         assert_close(
             final_diagnostics.mechanical_energy,
             initial_diagnostics.mechanical_energy,
@@ -808,6 +1010,60 @@ mod tests {
     }
 
     #[test]
+    fn axisymmetric_euler_top_phase_has_the_right_sign_and_refines() {
+        let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 3.5)).unwrap();
+        let initial_omega = Vec3::new(1.1, 0.0, 0.8);
+        let initial = RigidBodyState::new(
+            Pose::identity(),
+            Vec3::ZERO,
+            Vec3::new(
+                2.0 * initial_omega.x,
+                2.0 * initial_omega.y,
+                3.5 * initial_omega.z,
+            ),
+        )
+        .unwrap();
+        let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+        let phase_rate = (3.5 - 2.0) * initial_omega.z / 2.0;
+        let duration = 1.0;
+        let expected = Vec3::new(
+            initial_omega.x * (phase_rate * duration).cos(),
+            initial_omega.x * (phase_rate * duration).sin(),
+            initial_omega.z,
+        );
+
+        let mut coarse = initial;
+        for _ in 0..100 {
+            coarse = integrator
+                .step(coarse, properties, Wrench::ZERO, 0.01)
+                .unwrap()
+                .state_after;
+        }
+        let mut fine = initial;
+        for _ in 0..200 {
+            fine = integrator
+                .step(fine, properties, Wrench::ZERO, 0.005)
+                .unwrap()
+                .state_after;
+        }
+        let coarse_error = properties
+            .angular_velocity_body(coarse.angular_momentum_body())
+            .sub(expected)
+            .stable_norm("coarse_error")
+            .unwrap();
+        let fine_omega = properties.angular_velocity_body(fine.angular_momentum_body());
+        let fine_error = fine_omega.sub(expected).stable_norm("fine_error").unwrap();
+        assert!(
+            fine_omega.y > 0.0,
+            "positive axial spin must advance the phase toward +y"
+        );
+        assert!(
+            fine_error < coarse_error,
+            "fine {fine_error:e} must improve coarse {coarse_error:e}"
+        );
+    }
+
+    #[test]
     fn torque_free_refinement_reduces_energy_defect_for_an_asymmetric_body() {
         let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.5, 2.0)).unwrap();
         let initial =
@@ -815,6 +1071,7 @@ mod tests {
         let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
         let initial_energy = integrator
             .diagnostics(initial, properties)
+            .unwrap()
             .mechanical_energy;
         let mut coarse = initial;
         let mut fine = initial;
@@ -830,10 +1087,18 @@ mod tests {
                 .unwrap()
                 .state_after;
         }
-        let coarse_defect =
-            (integrator.diagnostics(coarse, properties).mechanical_energy - initial_energy).abs();
-        let fine_defect =
-            (integrator.diagnostics(fine, properties).mechanical_energy - initial_energy).abs();
+        let coarse_defect = (integrator
+            .diagnostics(coarse, properties)
+            .unwrap()
+            .mechanical_energy
+            - initial_energy)
+            .abs();
+        let fine_defect = (integrator
+            .diagnostics(fine, properties)
+            .unwrap()
+            .mechanical_energy
+            - initial_energy)
+            .abs();
         assert!(
             fine_defect < coarse_defect,
             "fine {fine_defect:e} must improve coarse {coarse_defect:e}"
@@ -864,7 +1129,36 @@ mod tests {
                 ..
             }
         ));
-        assert_close(current.linear_momentum_world.x, 2.0, EPSILON);
-        assert_close(current.pose.position_world.x, 0.5, EPSILON);
+        assert_close(current.linear_momentum_world().x, 2.0, EPSILON);
+        assert_close(current.pose().position_world().x, 0.5, EPSILON);
+    }
+
+    #[test]
+    fn overflowing_diagnostics_and_cancelled_advance_refuse_without_a_false_receipt() {
+        let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+        let state =
+            RigidBodyState::new(Pose::identity(), Vec3::new(f64::MAX, 0.0, 0.0), Vec3::ZERO)
+                .unwrap();
+        assert_eq!(
+            integrator.diagnostics(state, disc_properties()),
+            Err(DynamicsError::NonFinite(
+                "diagnostics.translational_kinetic_energy"
+            ))
+        );
+        let mut cancelled_state = state;
+        assert_eq!(
+            integrator.advance(
+                &mut cancelled_state,
+                disc_properties(),
+                Wrench::ZERO,
+                0.1,
+                1,
+                |_| true,
+            ),
+            Err(DynamicsError::NonFinite(
+                "diagnostics.translational_kinetic_energy"
+            ))
+        );
+        assert_eq!(cancelled_state, state);
     }
 }
