@@ -3,6 +3,9 @@
 //!
 //! This crate never queries a material database or upgrades caller input into an admitted claim.
 
+/// Solver-independent finite-patch tangential partial-slip rung.
+pub mod partial_slip;
+
 use core::fmt;
 
 const EPSILON: f64 = 64.0 * f64::EPSILON;
@@ -182,6 +185,15 @@ pub enum TriboError {
     InvalidHeatPartition { sum: f64 },
     /// A forged or derived dissipation increment breaks an invariant.
     InvalidDissipationStep { field: &'static str },
+    /// A closed applicability interval is malformed.
+    InvalidApplicabilityRange { field: &'static str },
+    /// A query value lies outside the named card interval.
+    OutsideApplicability {
+        field: &'static str,
+        value: f64,
+        minimum: f64,
+        maximum: f64,
+    },
 }
 
 impl fmt::Display for TriboError {
@@ -202,6 +214,18 @@ impl fmt::Display for TriboError {
             Self::InvalidDissipationStep { field } => {
                 write!(f, "invalid dissipation step: {field}")
             }
+            Self::InvalidApplicabilityRange { field } => {
+                write!(f, "invalid applicability range: {field}")
+            }
+            Self::OutsideApplicability {
+                field,
+                value,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "{field}={value} lies outside declared applicability [{minimum}, {maximum}]"
+            ),
         }
     }
 }
@@ -384,6 +408,246 @@ impl FrictionResponse {
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
+    }
+}
+
+/// Closed non-negative applicability interval in the SI unit of its owning field.
+///
+/// The range itself carries no material admission or uncertainty authority.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApplicabilityRange {
+    minimum: f64,
+    maximum: f64,
+}
+
+impl ApplicabilityRange {
+    /// Builds a finite closed interval with `0 <= minimum <= maximum`.
+    pub fn new(minimum: f64, maximum: f64) -> Result<Self, TriboError> {
+        nonnegative_finite(minimum, "applicability.minimum")?;
+        nonnegative_finite(maximum, "applicability.maximum")?;
+        if minimum > maximum {
+            return Err(TriboError::InvalidApplicabilityRange {
+                field: "minimum > maximum",
+            });
+        }
+        Ok(Self { minimum, maximum })
+    }
+
+    /// Inclusive lower bound.
+    #[must_use]
+    pub const fn minimum(&self) -> f64 {
+        self.minimum
+    }
+
+    /// Inclusive upper bound.
+    #[must_use]
+    pub const fn maximum(&self) -> f64 {
+        self.maximum
+    }
+
+    fn require_contains(self, value: f64, field: &'static str) -> Result<(), TriboError> {
+        nonnegative_finite(value, field)?;
+        if value < self.minimum || value > self.maximum {
+            return Err(TriboError::OutsideApplicability {
+                field,
+                value,
+                minimum: self.minimum,
+                maximum: self.maximum,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Validity domain declared by a dry-friction system card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DryFrictionApplicability {
+    temperature_kelvin: ApplicabilityRange,
+    contact_pressure_pa: ApplicabilityRange,
+    slip_speed_mps: ApplicabilityRange,
+}
+
+impl DryFrictionApplicability {
+    /// Builds an ordered dry-law validity domain. Temperature is absolute and
+    /// therefore has a strictly positive lower bound.
+    pub fn new(
+        temperature_kelvin: ApplicabilityRange,
+        contact_pressure_pa: ApplicabilityRange,
+        slip_speed_mps: ApplicabilityRange,
+    ) -> Result<Self, TriboError> {
+        if temperature_kelvin.minimum == 0.0 {
+            return Err(TriboError::InvalidApplicabilityRange {
+                field: "temperature_kelvin.minimum",
+            });
+        }
+        Ok(Self {
+            temperature_kelvin,
+            contact_pressure_pa,
+            slip_speed_mps,
+        })
+    }
+
+    /// Declared absolute-temperature domain [K].
+    #[must_use]
+    pub const fn temperature_kelvin(&self) -> ApplicabilityRange {
+        self.temperature_kelvin
+    }
+
+    /// Declared nominal-contact-pressure domain [Pa].
+    #[must_use]
+    pub const fn contact_pressure_pa(&self) -> ApplicabilityRange {
+        self.contact_pressure_pa
+    }
+
+    /// Declared tangential slip-speed domain [m/s].
+    #[must_use]
+    pub const fn slip_speed_mps(&self) -> ApplicabilityRange {
+        self.slip_speed_mps
+    }
+
+    fn require_contains(self, state: DryFrictionState) -> Result<(), TriboError> {
+        positive_finite(state.temperature_kelvin, "temperature_kelvin")?;
+        self.temperature_kelvin
+            .require_contains(state.temperature_kelvin, "temperature_kelvin")?;
+        self.contact_pressure_pa
+            .require_contains(state.contact_pressure_pa, "contact_pressure_pa")?;
+        self.slip_speed_mps
+            .require_contains(state.slip_speed_mps, "slip_speed_mps")
+    }
+}
+
+/// Runtime state checked against a `DryFrictionApplicability` domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DryFrictionState {
+    temperature_kelvin: f64,
+    contact_pressure_pa: f64,
+    slip_speed_mps: f64,
+}
+
+impl DryFrictionState {
+    /// Creates a finite SI state. Domain admission happens through the card.
+    pub fn new(
+        temperature_kelvin: f64,
+        contact_pressure_pa: f64,
+        slip_speed_mps: f64,
+    ) -> Result<Self, TriboError> {
+        positive_finite(temperature_kelvin, "temperature_kelvin")?;
+        nonnegative_finite(contact_pressure_pa, "contact_pressure_pa")?;
+        nonnegative_finite(slip_speed_mps, "slip_speed_mps")?;
+        Ok(Self {
+            temperature_kelvin,
+            contact_pressure_pa,
+            slip_speed_mps,
+        })
+    }
+
+    /// Absolute temperature [K].
+    #[must_use]
+    pub const fn temperature_kelvin(&self) -> f64 {
+        self.temperature_kelvin
+    }
+
+    /// Nominal contact pressure [Pa].
+    #[must_use]
+    pub const fn contact_pressure_pa(&self) -> f64 {
+        self.contact_pressure_pa
+    }
+
+    /// Tangential slip-speed magnitude [m/s].
+    #[must_use]
+    pub const fn slip_speed_mps(&self) -> f64 {
+        self.slip_speed_mps
+    }
+}
+
+/// Dependency-independent, ordered dry-interface card.
+///
+/// This is deliberately card-*style*, rather than an alias of the pending
+/// `fs-matdb` card: no seed-data admission is available in this leaf. It binds
+/// the existing ordered surface/history identity, caller authority, law, and
+/// validity domain so consumers cannot silently use a scalar coefficient beyond
+/// the declared state regime.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DryInterfaceSystemCard {
+    interface: InterfaceSystemRef,
+    friction_law: FrictionLaw,
+    applicability: DryFrictionApplicability,
+}
+
+impl DryInterfaceSystemCard {
+    /// Creates an immutable ordered interface card without upgrading caller authority.
+    pub fn new(
+        interface: InterfaceSystemRef,
+        friction_law: FrictionLaw,
+        applicability: DryFrictionApplicability,
+    ) -> Result<Self, TriboError> {
+        interface.validate()?;
+        friction_law.validate()?;
+        Ok(Self {
+            interface,
+            friction_law,
+            applicability,
+        })
+    }
+
+    /// The ordered surface/history identity retained by the card.
+    #[must_use]
+    pub const fn interface(&self) -> &InterfaceSystemRef {
+        &self.interface
+    }
+
+    /// The caller-declared friction rung.
+    #[must_use]
+    pub const fn friction_law(&self) -> &FrictionLaw {
+        &self.friction_law
+    }
+
+    /// The closed state domain required for queries.
+    #[must_use]
+    pub const fn applicability(&self) -> DryFrictionApplicability {
+        self.applicability
+    }
+
+    /// Evaluates only after state-domain and tangential-speed consistency checks.
+    pub fn query(
+        &self,
+        state: DryFrictionState,
+        normal_force_n: f64,
+        slip: TangentialSlip,
+    ) -> Result<FrictionQueryReceipt, TriboError> {
+        self.applicability.require_contains(state)?;
+        let slip_speed_mps = slip.speed()?;
+        let mismatch = (slip_speed_mps - state.slip_speed_mps).abs();
+        if mismatch > EPSILON * slip_speed_mps.max(state.slip_speed_mps).max(1.0) {
+            return Err(TriboError::InvalidInput {
+                field: "state.slip_speed_mps",
+            });
+        }
+        let response = self
+            .friction_law
+            .evaluate(&self.interface, normal_force_n, slip)?;
+        Ok(FrictionQueryReceipt { state, response })
+    }
+}
+
+/// A card-checked friction response with the exact admitted runtime state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrictionQueryReceipt {
+    state: DryFrictionState,
+    response: FrictionResponse,
+}
+
+impl FrictionQueryReceipt {
+    /// State checked against the immutable card domain.
+    #[must_use]
+    pub const fn state(&self) -> DryFrictionState {
+        self.state
+    }
+
+    /// Friction response retaining the card interface provenance.
+    #[must_use]
+    pub const fn response(&self) -> &FrictionResponse {
+        &self.response
     }
 }
 
@@ -671,6 +935,251 @@ impl HeatPartition {
     }
 }
 
+/// Thermal properties required by the bounded semi-infinite flash-temperature
+/// candidate. They are caller data and carry no material-card admission.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceThermalProperties {
+    conductivity_w_per_m_k: f64,
+    diffusivity_m2_per_s: f64,
+}
+
+impl SurfaceThermalProperties {
+    /// Creates a finite, positive thermal-property pair in SI units.
+    pub fn new(conductivity_w_per_m_k: f64, diffusivity_m2_per_s: f64) -> Result<Self, TriboError> {
+        positive_finite(conductivity_w_per_m_k, "conductivity_w_per_m_k")?;
+        positive_finite(diffusivity_m2_per_s, "diffusivity_m2_per_s")?;
+        Ok(Self {
+            conductivity_w_per_m_k,
+            diffusivity_m2_per_s,
+        })
+    }
+
+    /// Thermal conductivity [W/(m K)].
+    #[must_use]
+    pub const fn conductivity_w_per_m_k(&self) -> f64 {
+        self.conductivity_w_per_m_k
+    }
+
+    /// Thermal diffusivity [m²/s].
+    #[must_use]
+    pub const fn diffusivity_m2_per_s(&self) -> f64 {
+        self.diffusivity_m2_per_s
+    }
+}
+
+/// Inputs for a bounded, uniform-flux, semi-infinite-body flash-temperature
+/// candidate. `surface_*` may be absent, which yields a typed `Unknown` rather
+/// than inventing a thermal material property.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlashTemperatureInput {
+    dissipated_power_w: f64,
+    partition: HeatPartition,
+    contact_area_m2: f64,
+    traverse_length_m: f64,
+    slip_speed_mps: f64,
+    surface_a: Option<SurfaceThermalProperties>,
+    surface_b: Option<SurfaceThermalProperties>,
+}
+
+impl FlashTemperatureInput {
+    /// Builds a flash candidate request. The dwell time is
+    /// `traverse_length_m / slip_speed_mps`.
+    pub fn new(
+        dissipated_power_w: f64,
+        partition: HeatPartition,
+        contact_area_m2: f64,
+        traverse_length_m: f64,
+        slip_speed_mps: f64,
+        surface_a: Option<SurfaceThermalProperties>,
+        surface_b: Option<SurfaceThermalProperties>,
+    ) -> Result<Self, TriboError> {
+        nonnegative_finite(dissipated_power_w, "dissipated_power_w")?;
+        partition.validate()?;
+        positive_finite(contact_area_m2, "contact_area_m2")?;
+        positive_finite(traverse_length_m, "traverse_length_m")?;
+        positive_finite(slip_speed_mps, "slip_speed_mps")?;
+        Ok(Self {
+            dissipated_power_w,
+            partition,
+            contact_area_m2,
+            traverse_length_m,
+            slip_speed_mps,
+            surface_a,
+            surface_b,
+        })
+    }
+}
+
+/// Reason a flash-temperature request has no physical-property closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashTemperatureUnknown {
+    /// Nonzero allocated heat reaches surface A without its thermal properties.
+    MissingSurfaceAThermalProperties,
+    /// Nonzero allocated heat reaches surface B without its thermal properties.
+    MissingSurfaceBThermalProperties,
+}
+
+/// Explicit model-form result of a flash-temperature request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlashTemperatureEstimate {
+    /// A bounded-model candidate, not an error enclosure or temperature-port solution.
+    Candidate(FlashTemperatureCandidate),
+    /// Insufficient thermal data; no candidate was fabricated.
+    Unknown(FlashTemperatureUnknown),
+}
+
+/// Uniform-flux, semi-infinite-body temperature-rise candidate.
+///
+/// For each receiving surface the reported rise is
+/// `2 q'' sqrt(alpha * t / pi) / k`, where `q''` is that surface's explicit
+/// partition of frictional power divided by contact area and
+/// `t = traverse_length / slip_speed`. This is a model-form estimate under the
+/// stated assumptions, never a flash-temperature bound or a thermal solve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlashTemperatureCandidate {
+    surface_a_rise_k: f64,
+    surface_b_rise_k: f64,
+    dwell_time_s: f64,
+    surface_a_heat_flux_w_per_m2: f64,
+    surface_b_heat_flux_w_per_m2: f64,
+    provenance: InputProvenance,
+}
+
+impl FlashTemperatureCandidate {
+    /// Surface-A temperature-rise candidate [K].
+    #[must_use]
+    pub const fn surface_a_rise_k(&self) -> f64 {
+        self.surface_a_rise_k
+    }
+
+    /// Surface-B temperature-rise candidate [K].
+    #[must_use]
+    pub const fn surface_b_rise_k(&self) -> f64 {
+        self.surface_b_rise_k
+    }
+
+    /// Uniform heat-flux dwell time [s].
+    #[must_use]
+    pub const fn dwell_time_s(&self) -> f64 {
+        self.dwell_time_s
+    }
+
+    /// Explicit surface-A flux share [W/m²].
+    #[must_use]
+    pub const fn surface_a_heat_flux_w_per_m2(&self) -> f64 {
+        self.surface_a_heat_flux_w_per_m2
+    }
+
+    /// Explicit surface-B flux share [W/m²].
+    #[must_use]
+    pub const fn surface_b_heat_flux_w_per_m2(&self) -> f64 {
+        self.surface_b_heat_flux_w_per_m2
+    }
+
+    /// Caller provenance from the ordered dry interface.
+    #[must_use]
+    pub fn provenance(&self) -> &InputProvenance {
+        &self.provenance
+    }
+}
+
+/// Computes a flash-temperature candidate or reports exactly which receiving
+/// surface lacks data. The ordered dry interface is validated first.
+pub fn flash_temperature_candidate(
+    interface: &InterfaceSystemRef,
+    input: FlashTemperatureInput,
+) -> Result<FlashTemperatureEstimate, TriboError> {
+    interface.validate()?;
+    let dwell_time_s = checked_div(
+        input.traverse_length_m,
+        input.slip_speed_mps,
+        "flash_dwell_time_s",
+    )?;
+    let surface_a_heat_flux_w_per_m2 = checked_div(
+        checked_mul(
+            input.dissipated_power_w,
+            input.partition.surface_a,
+            "surface_a_heat_power",
+        )?,
+        input.contact_area_m2,
+        "surface_a_heat_flux",
+    )?;
+    let surface_b_heat_flux_w_per_m2 = checked_div(
+        checked_mul(
+            input.dissipated_power_w,
+            input.partition.surface_b,
+            "surface_b_heat_power",
+        )?,
+        input.contact_area_m2,
+        "surface_b_heat_flux",
+    )?;
+    let surface_a = match (surface_a_heat_flux_w_per_m2 == 0.0, input.surface_a) {
+        (true, _) => 0.0,
+        (false, Some(properties)) => flash_rise_k(
+            surface_a_heat_flux_w_per_m2,
+            dwell_time_s,
+            properties,
+            "surface_a_flash_temperature",
+        )?,
+        (false, None) => {
+            return Ok(FlashTemperatureEstimate::Unknown(
+                FlashTemperatureUnknown::MissingSurfaceAThermalProperties,
+            ));
+        }
+    };
+    let surface_b = match (surface_b_heat_flux_w_per_m2 == 0.0, input.surface_b) {
+        (true, _) => 0.0,
+        (false, Some(properties)) => flash_rise_k(
+            surface_b_heat_flux_w_per_m2,
+            dwell_time_s,
+            properties,
+            "surface_b_flash_temperature",
+        )?,
+        (false, None) => {
+            return Ok(FlashTemperatureEstimate::Unknown(
+                FlashTemperatureUnknown::MissingSurfaceBThermalProperties,
+            ));
+        }
+    };
+    Ok(FlashTemperatureEstimate::Candidate(
+        FlashTemperatureCandidate {
+            surface_a_rise_k: surface_a,
+            surface_b_rise_k: surface_b,
+            dwell_time_s,
+            surface_a_heat_flux_w_per_m2,
+            surface_b_heat_flux_w_per_m2,
+            provenance: interface.provenance.clone(),
+        },
+    ))
+}
+
+fn flash_rise_k(
+    heat_flux_w_per_m2: f64,
+    dwell_time_s: f64,
+    properties: SurfaceThermalProperties,
+    field: &'static str,
+) -> Result<f64, TriboError> {
+    let diffusion_length_m = checked_sqrt(
+        checked_div(
+            checked_mul(properties.diffusivity_m2_per_s, dwell_time_s, field)?,
+            core::f64::consts::PI,
+            field,
+        )?,
+        field,
+    )?;
+    let rise_k = checked_div(
+        checked_mul(
+            2.0,
+            checked_mul(heat_flux_w_per_m2, diffusion_length_m, field)?,
+            field,
+        )?,
+        properties.conductivity_w_per_m_k,
+        field,
+    )?;
+    nonnegative_finite(rise_k, field)?;
+    Ok(rise_k)
+}
+
 /// A closed, validated dissipative-work increment in joules.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DissipationStep {
@@ -758,22 +1267,67 @@ impl DissipationStep {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WorkLedger {
     dissipated_work_j: f64,
+    surface_a_heat_j: f64,
+    surface_b_heat_j: f64,
+    other_work_j: f64,
 }
 impl WorkLedger {
     #[must_use]
     pub const fn dissipated_work_j(&self) -> f64 {
         self.dissipated_work_j
     }
+    /// Cumulative heat assigned to surface A [J].
+    #[must_use]
+    pub const fn surface_a_heat_j(&self) -> f64 {
+        self.surface_a_heat_j
+    }
+    /// Cumulative heat assigned to surface B [J].
+    #[must_use]
+    pub const fn surface_b_heat_j(&self) -> f64 {
+        self.surface_b_heat_j
+    }
+    /// Cumulative declared non-surface work share [J].
+    #[must_use]
+    pub const fn other_work_j(&self) -> f64 {
+        self.other_work_j
+    }
     /// Validates the complete increment and candidate total before changing state.
     pub fn record(&mut self, step: DissipationStep) -> Result<(), TriboError> {
         step.validate()?;
-        let candidate = checked_add(
+        let dissipated_work_j = checked_add(
             self.dissipated_work_j,
             step.total_work_j,
             "dissipated_work_j",
         )?;
-        nonnegative_finite(candidate, "dissipated_work_j")?;
-        self.dissipated_work_j = candidate;
+        let surface_a_heat_j = checked_add(
+            self.surface_a_heat_j,
+            step.surface_a_heat_j,
+            "surface_a_heat_j",
+        )?;
+        let surface_b_heat_j = checked_add(
+            self.surface_b_heat_j,
+            step.surface_b_heat_j,
+            "surface_b_heat_j",
+        )?;
+        let other_work_j = checked_add(self.other_work_j, step.other_work_j, "other_work_j")?;
+        nonnegative_finite(dissipated_work_j, "dissipated_work_j")?;
+        nonnegative_finite(surface_a_heat_j, "surface_a_heat_j")?;
+        nonnegative_finite(surface_b_heat_j, "surface_b_heat_j")?;
+        nonnegative_finite(other_work_j, "other_work_j")?;
+        let channels = checked_add(
+            checked_add(surface_a_heat_j, surface_b_heat_j, "work_ledger_channels")?,
+            other_work_j,
+            "work_ledger_channels",
+        )?;
+        if (channels - dissipated_work_j).abs() > EPSILON * dissipated_work_j.max(1.0) {
+            return Err(TriboError::InvalidDissipationStep {
+                field: "ledger_closure",
+            });
+        }
+        self.dissipated_work_j = dissipated_work_j;
+        self.surface_a_heat_j = surface_a_heat_j;
+        self.surface_b_heat_j = surface_b_heat_j;
+        self.other_work_j = other_work_j;
         Ok(())
     }
 }
@@ -888,6 +1442,12 @@ fn checked_mul(a: f64, b: f64, field: &'static str) -> Result<f64, TriboError> {
 }
 fn checked_add(a: f64, b: f64, field: &'static str) -> Result<f64, TriboError> {
     let value = a + b;
+    finite(value, field)?;
+    Ok(value)
+}
+fn checked_div(a: f64, b: f64, field: &'static str) -> Result<f64, TriboError> {
+    positive_finite(b, field)?;
+    let value = a / b;
     finite(value, field)?;
     Ok(value)
 }
@@ -1062,6 +1622,7 @@ mod tests {
         ));
         let mut ledger = WorkLedger {
             dissipated_work_j: f64::MAX,
+            ..WorkLedger::default()
         };
         let step = DissipationStep::from_power(f64::MAX, 1.0, partition).unwrap();
         assert!(ledger.record(step).is_err());
