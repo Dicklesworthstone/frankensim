@@ -26,7 +26,7 @@ use fs_ivl::Interval;
 use fs_motion::{CertifiedMotorTube, MotionError};
 use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation};
 
-/// Solver-independent finite-patch normal constitutive laws.
+/// Solver-independent finite-patch normal laws and their generic port embedding.
 pub mod normal_patch;
 
 /// Hard bound on bodies per broad-phase call.

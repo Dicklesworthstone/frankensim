@@ -53,6 +53,17 @@ nonadhesion applicability ratios. `ConstraintBarrierReceipt` is deliberately a
 different type with no force, patch, or energy fields, so IPC/barrier output
 cannot masquerade as physical compliance.
 
+### Generic normal-patch embedding (bead `frankensim-b8bxd.5.2`)
+
+`normal_patch::embed` maps public constitutive requests into a generic contact
+port without accessing law internals or depending on multibody dynamics. A
+`SmoothFixed` and converged solver sample alone can publish a typed point or
+line action/reaction wrench, zero action/reaction residual, and tangent. The
+immutable successor state records a deterministic exactly-once work key; a
+checkpoint is the only rollback source. Eventful, stale, future, duplicate, and
+nonconverged samples refuse before publishing a port. The embedded transition
+retains the law receipt identities, uncertainty, and applicability fields.
+
 ## Invariants
 
 - Broad-phase candidacy is conservative over the query window: a pair
@@ -69,6 +80,10 @@ cannot masquerade as physical compliance.
 - The request declares a local geometry. A sphere law cannot be evaluated as a
   cylinder, and toroidal or highly elliptical contact is a typed refusal rather
   than an effective-radius approximation.
+- Embedding does not upgrade a constitutive receipt into a solved contact
+  complementarity claim. Its residual is only the explicit action/reaction
+  closure of an admitted fixed branch; active-set, global convergence, and
+  event resolution stay with the consuming solver.
 
 ## Error model
 
@@ -112,6 +127,12 @@ loading/unloading passivity; zero/grazing and adhesion/layer/yield/rate/
 temperature refusals; typed point-versus-line receipts; and deterministic
 identity/authority replay. Test cards are synthetic and do not admit materials
 or a contact configuration.
+
+`tests/normal_patch_embed.rs` supplies manufactured prescribed-approach and
+point/line unit checks; action/reaction and moment reconstruction; exactly-once
+power/work, checkpoint rollback/retry, fixed-branch tangent difference,
+stale/future/duplicate/event/nonconverged refusals, toroidal-refusal
+propagation, and embedding identity mutation.
 
 ## Certified CCD (bead tqag, increment 2)
 
@@ -192,7 +213,9 @@ through-shot's sphere-entry window survives as Retained).
   optimum/ranking claim. Hunt--Crossley dissipation is a declared model rung,
   not a measured loss mechanism. Toroidal and highly elliptical patches have
   no physical-compliance claim in this module; they require a separately
-  validated two-curvature law.
+  validated two-curvature law. The generic embedding is not a port-schema-v2
+  implementation, cancellation proof, global solve, or a replacement for the
+  upstream coupled-port contract.
 
 - Certified CCD verdicts remain ENCLOSURE verdicts: `PossibleContact` /
   `Retained` windows localize in time but never adjudicate contact;
