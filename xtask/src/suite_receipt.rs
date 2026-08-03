@@ -834,6 +834,10 @@ pub(crate) struct SuiteReceipt {
     build_failures: usize,
     known_red: Vec<(KnownRedEntry, bool)>,
     unexpected_red: usize,
+    /// Crates whose run ended with a target error (watchdog timeout or a
+    /// missing suite summary): a known-red test on one of these crates is
+    /// UNKNOWN, never "repaired".
+    target_error_crates: std::collections::BTreeSet<String>,
 }
 
 fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
@@ -875,9 +879,10 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
     let ignored = json_count(totals, "ignored")?;
     let mut crate_count = 0usize;
     let mut crate_sum = (0usize, 0usize, 0usize);
+    let mut target_error_crates = std::collections::BTreeSet::new();
     match json_obj_field(map, "crates") {
         Some(JsonValue::Object(crates)) => {
-            for (_, value) in crates {
+            for (krate, value) in crates {
                 let JsonValue::Object(value) = value else {
                     return Err(format!("{RECEIPT_PATH} crate row is not an object"));
                 };
@@ -885,6 +890,9 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
                 crate_sum.0 += json_count(value, "passed")?;
                 crate_sum.1 += json_count(value, "failed")?;
                 crate_sum.2 += json_count(value, "ignored")?;
+                if matches!(json_obj_field(value, "target_error"), Some(JsonValue::Bool)) {
+                    target_error_crates.insert(krate.clone());
+                }
             }
         }
         _ => return Err(format!("{RECEIPT_PATH} has no crates object")),
@@ -956,6 +964,7 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
         build_failures,
         known_red,
         unexpected_red,
+        target_error_crates,
     })
 }
 
@@ -1022,9 +1031,22 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
         Err(error) => violations.push(violation(error)),
     }
     // A registered test that passes again is repair evidence: visible, and
-    // the registry row must leave deliberately.
+    // the registry row must leave deliberately. But a crate that ended in a
+    // target error (watchdog timeout, no suite summary) proves NOTHING about
+    // its known-red tests — "unknown", never "repaired".
     for (entry, observed) in &receipt.known_red {
-        if !observed {
+        if receipt.target_error_crates.contains(&entry.krate) {
+            notes.push(PolicyNote {
+                check: CHECK,
+                crate_name: RECEIPT_PATH.to_string(),
+                verdict: "known-red-unknown",
+                detail: format!(
+                    "{}::{} state is UNKNOWN: the crate's run ended in a target error \
+                     (watchdog timeout or no suite summary); not a pass, not a failure (owner {})",
+                    entry.krate, entry.test, entry.owner_bead
+                ),
+            });
+        } else if !observed {
             notes.push(PolicyNote {
                 check: CHECK,
                 crate_name: RECEIPT_PATH.to_string(),
