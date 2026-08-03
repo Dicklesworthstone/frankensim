@@ -1,9 +1,12 @@
 # fs-euler-disc-e2e contract
 
-Status: [S] structural scientific-contract infrastructure. The physical
-Euler-disc model, material laws, contact/base/gas coupling, experimental data,
-and claims about Steve Mould's reported observations are not implemented or
-validated here.
+Status: [S] structural scientific-contract infrastructure plus a bounded,
+deterministic numerical/software campaign slice. The slice composes real
+squat-disc line/arc geometry and mass properties, a profile unilateral-sticking
+micro-trajectory, a one-way flexible-base load response, encoded reduced-decay
+ablations, and a one-way exterior passivity probe. It is not a closed coupled
+Euler-disc model, an experiment or video validation, or support for claims
+about Steve Mould's reported observations.
 
 ## Purpose and layer
 
@@ -11,6 +14,12 @@ fs-euler-disc-e2e is an L6 HELM leaf for the Euler-disc emergent-prediction
 flagship. Its first schema freezes what questions may eventually be asked
 before geometry, solver, calibration, or experiment choices can bias those
 questions.
+
+The committed `euler_disc_campaign` binary is a deterministic JSONL runner for
+the bounded slice. It is deliberately composition-only: each rung consumes a
+declared snapshot or one-way input from its owning production operator. It does
+not solve mutual contact/base/exterior feedback or identify a physical decay
+law.
 
 The crate composes 15 artifact roles across four ownership surfaces. Their
 rows live in a separately versioned, domain-separated owner-matrix routing
@@ -43,6 +52,31 @@ generic V&V artifacts, instantiate a fictional ValidationPlan, construct a
 full experiment campaign, or mint a governance grant. Those operations need
 real, content-bound experiment, split, diagnostic, custody, and review
 artifacts from later work.
+
+## Bounded campaign runner
+
+Run the committed executable through its retaining wrapper with new output
+paths:
+
+```bash
+scripts/e2e/euler_disc_campaign.sh \
+  --output target/euler-disc-campaign/campaign.jsonl \
+  --stderr-log target/euler-disc-campaign/campaign.stderr.log
+```
+
+The wrapper requires committed, clean `Cargo.toml`, `Cargo.lock`, and `crates/`
+inputs, runs the binary through strict remote RCH, refuses output or stderr
+paths that already exist, and rejects partial or malformed JSONL. It emits, in
+order: sharp and 1-mm-filleted squat-disc line/arc geometry-plus-mass records;
+a conservative steady oracle; a profile unilateral-sticking micro-trajectory;
+a one-way reduced flexible-base record; contour-only, boundary-layer-only, and
+combined reduced-decay records; a one-way reduced exterior-wrench passivity
+record; and a campaign manifest. The manifest is a deterministic digest of the
+preceding records, not a validation certificate.
+
+This contract deliberately records no output path, digest, or numerical value
+until an actual retained run supplies them. The runner's receipts demonstrate
+only the encoded numerical/software composition and its input/record checks.
 
 ## Public types and semantics
 
@@ -345,9 +379,10 @@ physical validation.
 
 ## Cancellation behavior
 
-V1 operations are bounded metadata transformations and contain no admitted
-long-running work, task spawning, blocking I/O, solver iteration, or partial
-publication. Therefore no asynchronous cancellation surface is exposed.
+V1 contract operations are bounded metadata transformations and contain no
+admitted long-running work, task spawning, blocking I/O, solver iteration, or
+partial publication. Therefore no asynchronous cancellation surface is
+exposed.
 Caller-controlled cardinality limits are checked before sorting. Before the
 packet writer allocates its canonical output buffer, it computes the complete
 packet length with checked arithmetic, including every nested Color-v2 payload,
@@ -355,9 +390,11 @@ and refuses a result above `MAX_EVIDENCE_PACKET_BYTES`. Caller-owned validity
 axes are likewise counted and their exact Color-v2 canonical length is checked
 without cloning or serializing the regime.
 
-When later campaign execution is added, it must run under explicit asupersync
-scopes, poll at bounded tile/run boundaries, drain cancelled work, and publish
-no partial evidence or authority. That future behavior is not claimed here.
+The current campaign binary is synchronous and step-bounded, but exposes no
+`Cx` or cancellation API. It therefore does not claim the project's general
+hot-kernel cancellation invariant or conformance to it. A future cancellable
+campaign must run under explicit asupersync scopes, poll at bounded tile/run
+boundaries, drain cancellation, and publish no partial evidence or authority.
 
 ## Unsafe boundary
 
@@ -367,10 +404,13 @@ kernel, memory mapping, platform-specific dispatch, or unchecked deserializer.
 
 ## Feature flags
 
-There are no feature flags and no default-on experimental physics. The v1
-scientific contract is a solid structural spine. Frontier contact, base
-compliance, rarefied-gas, fluid-film, and inverse-model capabilities remain in
-their owning later beads and must stay gated according to their own contracts.
+There are no feature flags. The v1 scientific contract is a solid structural
+spine, and the committed runner is a bounded numerical/software slice rather
+than default-on experimental physics. Its profile contact, flexible-base, and
+exterior records remain one-way bounded operators. Closed fluid/solid/contact
+coupling, rarefied-gas or fluid-film claims, calibration, and inverse-model
+capabilities remain out of scope and require their owning contracts and
+evidence.
 
 ## Conformance tests
 
@@ -736,3 +776,11 @@ positive fixtures are synthetic state-machine tests only. Those questions
 require later preregistration, exact measurement/custody artifacts, admitted
 criterion-evaluation receipts, solver and model verification, blind
 experiments, and candid comparison against negative or inconclusive outcomes.
+
+The bounded campaign additionally makes no claim that its one-way snapshot
+composition is closed multiphysics; that its encoded reduced decay exponents or
+channel laws were identified from data; that any result ranks sharp versus
+filleted edges, glass versus steel, rings versus discs, or other configurations;
+or that it predicts a spin time. Its geometry, contact, base, decay, and
+exterior records are numerical/software rungs, not experiment-, video-, or
+Mould-backed evidence.

@@ -59,9 +59,36 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Thermal and airflow | `fs-conduction` provides a steady P1 FEM kernel, card-backed thermal contact on exact matching traces, card-backed linearized surface radiation, and deterministic gray-diffuse enclosure exchange over admitted view-factor matrices; `fs-convection` provides 12 validity-gated Nusselt cards, including one narrow Shah-London developing-rectangular table slice at `Pr=0.72` and aspect ratio 0.5; and `fs-airflow` provides typed fan curves, series/parallel quadratic loss networks with explicit leakage, nominal-model interval-Newton operating-point brackets, and an evidence-preserving branch-flow handoff to convection. Only conduction is currently registered for capability maturity |
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
-| Euler-disc flagship contract | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its highest local state-machine disposition is deliberately only an unreadmitted reference-complete candidate. It does not yet implement or validate Euler-disc physics, experiments, or the effects reported in the motivating video |
+| Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its bounded numerical/software runner composes squat-disc line/arc geometry and mass, a profile unilateral-sticking micro-trajectory, a one-way flexible-base load response, encoded reduced-decay ablations, and a one-way exterior passivity probe into deterministic JSONL. This is not closed coupled Euler-disc physics, experimental or video validation, a calibrated decay law, a ranking, or a spin-time prediction |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
 | Tests | 594 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+
+### Bounded Euler-disc campaign
+
+The committed, deterministic numerical/software campaign is invoked with fresh
+output paths:
+
+```bash
+scripts/e2e/euler_disc_campaign.sh \
+  --output target/euler-disc-campaign/campaign.jsonl \
+  --stderr-log target/euler-disc-campaign/campaign.stderr.log
+```
+
+The script uses strict remote RCH for the committed campaign executable and
+refuses existing output paths or dirty/untracked Cargo inputs. It emits JSONL
+rungs for sharp and 1-mm-filleted squat-disc line/arc geometry plus mass,
+the conservative steady oracle, a profile unilateral-sticking contact
+micro-trajectory, a one-way flexible-base response, contour-only,
+boundary-layer-only, and combined reduced-decay ablations, a one-way exterior
+passivity probe, and a final campaign manifest. The JSONL and stderr log are
+the retained software receipts; their actual paths, digests, and values are
+intentionally not recorded here until root retains an actual run.
+
+This executable composition is one-way and snapshot-based, not closed
+multiphysics. Its reduced decay exponents and channel laws are encoded model
+inputs, not experimentally identified laws. It makes no experiment- or
+video-backed Mould claim, no edge-optimum or material/configuration ranking,
+and no spin-time prediction.
 
 ### Capability Maturity, Not Crate Count
 
@@ -282,9 +309,10 @@ Five frozen schemas carry explicit lockstep obligations:
 | FSMATPK material pack family | `SPECIES_PACK_SCHEMA_VERSION=1`, `INTERFACE_PACK_SCHEMA_VERSION=1`, `MODEL_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_PACK_SCHEMA_VERSION=1` |
 | Source manifest + SPDX projection | `SPDX_VERSION="SPDX-2.3"` |
 
-The four Euler entries freeze structural compatibility boundaries only. They
-do not yet implement or validate Euler-disc physics, experiments, or the effects
-reported in the motivating video.
+The four Euler schema entries freeze structural compatibility boundaries. The
+separate bounded campaign runner supplies deterministic numerical/software
+rungs only; neither surface validates Euler-disc physics, experiments, or the
+effects reported in the motivating video.
 
 `cargo run -p xtask -- check-schemas` reads each version constant out of its
 declared source file, so a promise cannot describe a format that no longer
