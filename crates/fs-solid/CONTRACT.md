@@ -131,6 +131,23 @@ constructor facade.
 - `accept_scenario_bc`: fs-scenario integration — `Dirichlet` and
   `Traction` under `Physics::Elasticity` accepted; dimensioned-value
   resolution stays with the scenario consumer.
+- `shell` (bead frankensim-b8bxd.9.1): a safe-Rust, deterministic,
+  flat, single-patch triangular Kirchhoff--Love-style spatial slice for the
+  Euler-disc base. `ShellPlate::assemble` returns type-separated dense
+  `ShellMatrix<Mass>`, `ShellMatrix<Stiffness>`, and optional Rayleigh
+  `ShellMatrix<Damping>` operators in node-major `(x,y,z,rx,ry,rz)` order.
+  Each triangle contributes axial membrane, normal-slope bending, and rotation
+  gradient energy; translational and rotary inertia are lumped from the
+  material card. `ShellSupport` applies three distinct, normal-aligned point
+  pinned supports by reducing all translations at those nodes while retaining
+  rotations; its normal identifies the plate side and it does not claim a
+  frictional or rotational support law. Inputs carry model,
+  source, and state IDs and fixed SI/right-handed-Cartesian interpretation.
+  Assembly bounds node, element, dense-memory, work, and diagnostic sizes
+  before allocation; it returns no partial operator. Small assemblies report
+  mass definiteness, stiffness nullity, symmetric residue, and condition ratio
+  via a deterministic Jacobi eigensweep; larger valid assemblies explicitly
+  report that exact conditioning was not computed within budget.
 
 ## Invariants
 
@@ -175,6 +192,13 @@ constructor facade.
     prediction on the compressed column; null-direction switching
     lands on the bent branch (transverse growth ≥ 20× measured,
     stab-004).
+12. Flat shell energy consistency: each assembled stiffness contribution is a
+    positive weighted outer product, so the free operator is symmetric
+    positive-semidefinite while positive lumped translational/rotary inertia
+    makes mass positive-definite. A single free triangular panel has the six
+    infinitesimal rigid motions in its stiffness null space; the focused
+    `shell_operator` battery verifies this and independently reconstructs the
+    quadratic energy from `Kx`.
 
 ## Error model
 
@@ -340,6 +364,12 @@ reversal dissipation, G4 bitwise resume.
   integration successor); LOBPCG preconditioning hooks.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
+- Curved shells, multi-patch/mortar joins, NURBS geometry, transverse-shear
+  (thick/Reissner--Mindlin) behavior, nonlinear/finite-rotation response,
+  loads, time integration, constraint multipliers for oblique support normals,
+  shell error enclosures, and NAFEMS qualification. The `shell` operator is a
+  flat, linear spatial base only; fs-iga's dedicated surface-shell frontend
+  remains the required successor for those claims.
 - Koiter coefficients versus LITERATURE tables (v1 validates
   classification + the sampled oracle; quantitative a/b benchmarking
   awaits the shell fixtures where the classic tables live).

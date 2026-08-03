@@ -39,6 +39,7 @@ pub mod koiter;
 pub mod linear;
 pub mod mesh2;
 pub mod rod;
+pub mod shell;
 pub mod stability;
 
 pub use beamcol::{ForceBasedElement, PushoverStep};
@@ -49,6 +50,10 @@ pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use linear::{Formulation, LinearProblem, PlaneKind};
 pub use mesh2::{Mesh2, Patch};
 pub use rod::{Rod, RodSection, TipLoad};
+pub use shell::{
+    AssemblyBudget, Damping, DampingModel, Mass, OperatorDiagnostics, ShellAssembly, ShellError,
+    ShellIdentity, ShellMaterial, ShellMatrix, ShellNode, ShellPlate, ShellSupport, Stiffness,
+};
 pub use stability::{
     BucklingResult, buckling_loads, eigenvalue_derivative, expand_mode, group_stiffness,
     ks_aggregate, ks_aggregate_derivative, lambda_indicator, reduced_pencil,
