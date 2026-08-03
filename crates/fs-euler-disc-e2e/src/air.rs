@@ -122,6 +122,14 @@ pub struct AirFilmIdentity {
     pub frame_id: String,
     /// Named prescribed-base source.
     pub base_motion_id: String,
+    /// Caller canonical gas-species identity.
+    pub gas_species_id: String,
+    /// Caller canonical EOS identity.
+    pub eos_id: String,
+    /// Caller canonical viscosity source identity.
+    pub viscosity_source_id: String,
+    /// Caller canonical isothermal-model identity.
+    pub thermal_model_id: String,
     /// Caller-owned identity for frozen gas/boundary/applicability inputs.
     pub configuration_id: String,
     /// Deterministic replay seed.
@@ -175,6 +183,9 @@ pub struct TiltedDiscAirFilmInput {
     pub identity: AirFilmIdentity,
     /// Disc radius [m].
     pub disc_radius_m: f64,
+    /// Positive disc half thickness [m]. The adapter samples only the flat
+    /// base-facing face; chamfers and rim geometry are unavailable.
+    pub disc_half_thickness_m: f64,
     /// Rigid disc pose/rates.
     pub disc: TiltedDiscKinematics,
     /// Prescribed plane base.
@@ -220,6 +231,8 @@ pub struct AirFilmSample {
     pub gap_rate_m_per_s: f64,
     /// Relative radial wall speed [m s^-1].
     pub radial_relative_velocity_m_per_s: f64,
+    /// Relative circumferential wall speed [m s^-1].
+    pub circumferential_relative_velocity_m_per_s: f64,
     /// Whether the sample was handed to contact rather than gas.
     pub excluded_by_contact: bool,
 }
@@ -252,6 +265,15 @@ pub struct AirFilmReceipt {
     pub wall_power_to_gas_w: f64,
     /// Explicit isothermal viscous heat receipt [W]; not a total energy closure.
     pub viscous_heat_w: f64,
+    /// Circumferential no-cross-sector Couette contribution to wall power [W].
+    pub circumferential_couette_power_w: f64,
+    /// Circumferential no-cross-sector Couette contribution to heat [W].
+    pub circumferential_couette_heat_w: f64,
+    /// Equivalent rectangular strip width per sector [m].
+    pub equal_area_strip_width_m: f64,
+    /// `surrogate - exact` integral of radial lever over area [m^3]. It is
+    /// exactly negative one quarter of the exact polar-disc first moment.
+    pub signed_first_radial_moment_discrepancy_m3: f64,
     /// Largest delegated sector residual [kg m^-2 s^-1].
     pub max_sector_mass_residual_kg_m2_s: f64,
     /// Declared reference used for the body pressure wrench [Pa absolute].
@@ -361,6 +383,19 @@ impl TiltedDiscAirFilmInput {
                 self.identity.base_motion_id.as_str(),
             ),
             (
+                "identity.gas_species_id",
+                self.identity.gas_species_id.as_str(),
+            ),
+            ("identity.eos_id", self.identity.eos_id.as_str()),
+            (
+                "identity.viscosity_source_id",
+                self.identity.viscosity_source_id.as_str(),
+            ),
+            (
+                "identity.thermal_model_id",
+                self.identity.thermal_model_id.as_str(),
+            ),
+            (
                 "identity.configuration_id",
                 self.identity.configuration_id.as_str(),
             ),
@@ -373,6 +408,7 @@ impl TiltedDiscAirFilmInput {
             });
         }
         positive(self.disc_radius_m, "disc_radius_m")?;
+        positive(self.disc_half_thickness_m, "disc_half_thickness_m")?;
         positive(
             self.contact_exclusion.handoff_gap_m,
             "contact_exclusion.handoff_gap_m",
@@ -441,9 +477,11 @@ pub fn sample_tilted_disc_gap(
     let sectors = input.discretization.azimuthal_sectors as f64;
     let radial_cells = input.discretization.radial_cells as f64;
     let angle = 2.0 * core::f64::consts::PI * (sector_index as f64 + 0.5) / sectors;
-    let (radial, _) = sector_basis(normal, angle)?;
+    let (radial, circumferential) = sector_basis(normal, angle)?;
     let radius = input.disc_radius_m * (radial_index as f64 + 0.5) / radial_cells;
-    let lever = radial.scale(radius);
+    let lever = radial
+        .scale(radius)
+        .add(normal.scale(-input.disc_half_thickness_m));
     let point_velocity = input
         .disc
         .center_velocity_world_m_per_s
@@ -457,6 +495,10 @@ pub fn sample_tilted_disc_gap(
         "sample_gap_rate_m_per_s",
     )?;
     let radial_speed = checked(point_velocity.dot(radial), "sample_radial_speed_m_per_s")?;
+    let circumferential_speed = checked(
+        point_velocity.dot(circumferential),
+        "sample_circumferential_speed_m_per_s",
+    )?;
     Ok(AirFilmSample {
         sector_index,
         radial_index,
@@ -464,6 +506,7 @@ pub fn sample_tilted_disc_gap(
         gap_m: gap,
         gap_rate_m_per_s: gap_rate,
         radial_relative_velocity_m_per_s: radial_speed,
+        circumferential_relative_velocity_m_per_s: circumferential_speed,
         excluded_by_contact: gap <= input.contact_exclusion.handoff_gap_m,
     })
 }
@@ -497,7 +540,14 @@ pub fn solve_tilted_disc_air_film(
         }
     }
     let sector_angle = 2.0 * core::f64::consts::PI / input.discretization.azimuthal_sectors as f64;
+    // Equal-area rectangular surrogate; it deliberately does not preserve the
+    // polar-disc first radial moment.
     let strip_width = 0.5 * input.disc_radius_m * sector_angle;
+    let first_moment_discrepancy = checked(
+        core::f64::consts::PI * input.disc_radius_m.powi(3) / 2.0
+            - 2.0 * core::f64::consts::PI * input.disc_radius_m.powi(3) / 3.0,
+        "equal_area_surrogate_first_radial_moment_discrepancy",
+    )?;
     let mut samples = Vec::with_capacity(
         input.discretization.azimuthal_sectors * input.discretization.radial_cells,
     );
@@ -510,6 +560,7 @@ pub fn solve_tilted_disc_air_film(
     let mut closure = 0.0;
     let mut wall_power = 0.0;
     let mut heat = 0.0;
+    let mut circumferential_power = 0.0;
     let mut max_residual = 0.0;
     let mut sector_checkpoints = Vec::with_capacity(input.discretization.azimuthal_sectors);
     for sector in 0..input.discretization.azimuthal_sectors {
@@ -573,15 +624,15 @@ pub fn solve_tilted_disc_air_film(
             .collect::<Vec<_>>();
         let radial_angle = 2.0 * core::f64::consts::PI * (sector as f64 + 0.5)
             / input.discretization.azimuthal_sectors as f64;
-        let (radial_direction, _) = sector_basis(normal, radial_angle)?;
+        let (radial_direction, circumferential_direction) = sector_basis(normal, radial_angle)?;
         let gas_input = GasFilmInput {
             identity: GasFilmIdentity {
                 case_id: format!("{}:sector:{sector}", input.identity.case_id),
                 model_id: isothermal_compressible_reynolds_model_id().to_owned(),
-                gas_species_id: "caller-declared-gas".to_owned(),
-                eos_id: "caller-declared-isothermal-eos".to_owned(),
-                viscosity_source_id: "caller-declared-viscosity".to_owned(),
-                thermal_model_id: "caller-declared-isothermal".to_owned(),
+                gas_species_id: input.identity.gas_species_id.clone(),
+                eos_id: input.identity.eos_id.clone(),
+                viscosity_source_id: input.identity.viscosity_source_id.clone(),
+                thermal_model_id: input.identity.thermal_model_id.clone(),
                 frame_id: input.identity.frame_id.clone(),
                 deterministic_seed: input
                     .identity
@@ -644,12 +695,37 @@ pub fn solve_tilted_disc_air_film(
                 })?;
             let shear_force =
                 radial_direction.scale(checked(-shear * area, "shear_reaction_force")?);
-            let local_force = pressure_force.add(shear_force);
+            let circumferential_shear = checked(
+                input.gas.dynamic_viscosity_pa_s
+                    * sector_samples[radial].circumferential_relative_velocity_m_per_s
+                    / sector_samples[radial].gap_m,
+                "circumferential_wall_on_gas_shear",
+            )?;
+            let circumferential_force = circumferential_direction.scale(checked(
+                -circumferential_shear * area,
+                "circumferential_gas_on_body_force",
+            )?);
+            let local_power = checked(
+                circumferential_shear
+                    * sector_samples[radial].circumferential_relative_velocity_m_per_s
+                    * area,
+                "circumferential_couette_power",
+            )?;
+            circumferential_power = checked(
+                circumferential_power + local_power,
+                "circumferential_couette_power",
+            )?;
+            let local_force = pressure_force.add(shear_force).add(circumferential_force);
             force = force.add(local_force);
             moment = moment.add(sector_samples[radial].lever_arm_world_m.cross(local_force));
         }
         sector_checkpoints.push(step.checkpoint);
     }
+    wall_power = checked(
+        wall_power + circumferential_power,
+        "total_wall_power_to_gas",
+    )?;
+    heat = checked(heat + circumferential_power, "total_viscous_heat")?;
     force = checked_vec(force, "net_air_force_world_n")?;
     moment = checked_vec(moment, "net_air_moment_about_com_world_n_m")?;
     Ok(AirFilmStep {
@@ -666,6 +742,10 @@ pub fn solve_tilted_disc_air_film(
             mass_closure_residual_kg_per_s: closure,
             wall_power_to_gas_w: wall_power,
             viscous_heat_w: heat,
+            circumferential_couette_power_w: circumferential_power,
+            circumferential_couette_heat_w: circumferential_power,
+            equal_area_strip_width_m: strip_width,
+            signed_first_radial_moment_discrepancy_m3: first_moment_discrepancy,
             max_sector_mass_residual_kg_m2_s: max_residual,
             gauge_reference_absolute_pressure_pa: input.gauge_reference_absolute_pressure_pa,
             input_authority: input.identity.authority,

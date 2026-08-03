@@ -23,11 +23,16 @@ fn fixture() -> TiltedDiscAirFilmInput {
             adapter_model_id: TILTED_DISC_GAS_FILM_ADAPTER_ID.to_owned(),
             frame_id: "fixture-world-z-up".to_owned(),
             base_motion_id: "prescribed-horizontal-plane-v1".to_owned(),
+            gas_species_id: "synthetic-air".to_owned(),
+            eos_id: "synthetic-isothermal-ideal-gas-v1".to_owned(),
+            viscosity_source_id: "synthetic-viscosity-v1".to_owned(),
+            thermal_model_id: "synthetic-isothermal-v1".to_owned(),
             configuration_id: "synthetic-air-film-config-v1".to_owned(),
             deterministic_seed: 17,
             authority: GasFilmInputAuthority::SyntheticFixture,
         },
         disc_radius_m: 1.0e-2,
+        disc_half_thickness_m: 1.0e-4,
         disc: TiltedDiscKinematics {
             center_world_m: AirVec3::new(0.0, 0.0, 1.0e-3),
             normal_away_from_base_world: AirVec3::new(0.0, 0.0, 1.0),
@@ -152,6 +157,64 @@ fn g3_tilted_sector_permutation_preserves_sorted_gaps_and_vertical_load() {
 }
 
 #[test]
+fn g1_half_thickness_moves_horizontal_and_tilted_face_gap_exactly() {
+    let input = fixture();
+    let horizontal = sample_tilted_disc_gap(&input, 0, 0).expect("horizontal sample");
+    assert_eq!(
+        horizontal.gap_m,
+        input.disc.center_world_m.z - input.disc_half_thickness_m
+    );
+    let mut tilted = input.clone();
+    tilted.disc.normal_away_from_base_world = AirVec3::new(0.02, 0.0, (1.0 - 0.0004_f64).sqrt());
+    let sample = sample_tilted_disc_gap(&tilted, 0, 3).expect("tilted sample");
+    assert!(
+        sample.lever_arm_world_m.z < 0.0,
+        "gas-facing arm must include negative face offset"
+    );
+    assert_eq!(
+        sample.gap_m,
+        tilted.disc.center_world_m.z + sample.lever_arm_world_m.z - tilted.base.height_m
+    );
+}
+
+#[test]
+fn g1_normal_axis_spin_has_circumferential_heat_and_opposing_torque_without_radial_drive() {
+    let mut input = fixture();
+    input.disc.angular_velocity_world_rad_per_s = AirVec3::new(0.0, 0.0, 40.0);
+    let sample = sample_tilted_disc_gap(&input, 0, 3).expect("spin sample");
+    assert!(
+        sample.radial_relative_velocity_m_per_s.abs() < 1.0e-14,
+        "normal-axis spin has no radial strip drive: {}",
+        sample.radial_relative_velocity_m_per_s
+    );
+    assert!(sample.circumferential_relative_velocity_m_per_s.abs() > 0.0);
+    let step = solve_tilted_disc_air_film(&input, None).expect("spin admitted");
+    assert!(step.receipt.circumferential_couette_heat_w > 0.0);
+    assert!(
+        step.receipt.wrench.moment_about_com_world_n_m.z < 0.0,
+        "gas torque must oppose positive spin"
+    );
+}
+
+#[test]
+fn g0_equal_area_surrogate_reports_exact_negative_quarter_first_moment_defect() {
+    let input = fixture();
+    let step = solve_tilted_disc_air_film(&input, None).expect("surrogate admitted");
+    let exact = 2.0 * core::f64::consts::PI * input.disc_radius_m.powi(3) / 3.0;
+    let expected = -0.25 * exact;
+    assert_eq!(
+        step.receipt.equal_area_strip_width_m,
+        0.5 * input.disc_radius_m
+            * (2.0 * core::f64::consts::PI / input.discretization.azimuthal_sectors as f64)
+    );
+    assert!(
+        (step.receipt.signed_first_radial_moment_discrepancy_m3 - expected).abs() < 1.0e-20,
+        "reported={} expected={expected:e}",
+        step.receipt.signed_first_radial_moment_discrepancy_m3
+    );
+}
+
+#[test]
 fn g0_action_work_sign_and_checkpoint_replay_are_deterministic() {
     let mut input = fixture();
     input.disc.center_velocity_world_m_per_s.z = -2.0e-3;
@@ -171,7 +234,7 @@ fn g0_action_work_sign_and_checkpoint_replay_are_deterministic() {
 #[test]
 fn g0_contact_and_boundary_topology_are_explicit() {
     let mut contact = fixture();
-    contact.disc.center_world_m.z = 1.1e-6;
+    contact.disc.center_world_m.z = contact.disc_half_thickness_m + 1.1e-6;
     contact.disc.normal_away_from_base_world =
         AirVec3::new(2.0e-5, 0.0, (1.0 - 4.0e-10_f64).sqrt());
     let step =
@@ -253,5 +316,15 @@ fn hostile_invalid_contact_rarefied_roughness_and_topology_refuse() {
     assert_eq!(
         solve_tilted_disc_air_film(&other, Some(&valid.checkpoint)),
         Err(AirFilmError::CheckpointMismatch { field: "case_id" })
+    );
+
+    let mut provenance_mutation = fixture();
+    provenance_mutation.identity.viscosity_source_id = "other-viscosity-card".to_owned();
+    provenance_mutation.identity.configuration_id = "different-config".to_owned();
+    assert_eq!(
+        solve_tilted_disc_air_film(&provenance_mutation, Some(&valid.checkpoint)),
+        Err(AirFilmError::CheckpointMismatch {
+            field: "configuration_id"
+        })
     );
 }
