@@ -37,6 +37,19 @@ those consume adapters; reusable contact protocols live here.
   overlapping pair beyond the budget so the resolved prefix is never
   mistaken for the complete candidate set.
 
+### Finite-patch normal response (bead `frankensim-b8bxd.5.1`)
+
+`normal_patch` is a solver-independent, SI-only finite-patch constitutive
+surface. Elastic Hertz sphere/plane and cylinder/plane rungs retain force,
+patch dimension, peak pressure, pressure second moment, reversible energy, and
+tangent. The Hunt--Crossley sphere rung adds explicitly passive rate-dependent
+work for a bounded loading/unloading step. Receipts carry canonical request and
+receipt identities, caller input-authority ceiling, uncertainty, and checked
+half-space, curvature, small-strain, layer, yield, rate, temperature, and
+nonadhesion applicability ratios. `ConstraintBarrierReceipt` is deliberately a
+different type with no force, patch, or energy fields, so IPC/barrier output
+cannot masquerade as physical compliance.
+
 ## Invariants
 
 - Broad-phase candidacy is conservative over the query window: a pair
@@ -45,6 +58,11 @@ those consume adapters; reusable contact protocols live here.
   sort keys everywhere; no HashMap iteration).
 - Refusals leave no partial claim: budget exhaustion returns the
   unresolved remainder, capability gaps name the pair.
+- Normal-patch laws refuse non-finite/negative and overflowing inputs, invalid
+  curvature/modulus, adhesive, plastic, layered, out-of-rate, or out-of-
+  temperature requests rather than silently extrapolating. Solver
+  complementarity, residual assembly, and resolved contact state remain
+  consumer responsibilities.
 
 ## Error model
 
@@ -80,6 +98,12 @@ hand-computed enclosure geometry); determinism replay; budget
 exhaustion listing exact unresolved pairs; capability refusal; convex
 narrow-phase distance containment at a frozen time against the
 analytic value.
+
+`tests/normal_patch_law.rs` supplies G0/G1/G3 independent reconstruction of
+Hertz resultants, pressure moments, reversible energy, and numerical tangent;
+cylinder scaling; Hunt--Crossley loading/unloading passivity; zero/grazing and
+adhesion/layer refusals; and deterministic identity/authority replay. Test
+cards are synthetic and do not admit materials or a contact configuration.
 
 ## Certified CCD (bead tqag, increment 2)
 
@@ -152,6 +176,13 @@ with a weaker claim refuses at entry) and ct-012 the soundness arm (a
 through-shot's sphere-entry window survives as Retained).
 
 ## No-claim boundaries
+
+- Normal-patch receipts are local analytic constitutive evaluations, not
+  finite-element contact solutions, material-card admission, friction or heat
+  partitioning, lubrication/EHL, plasticity, adhesion, roughness, calibration,
+  experimental validation, Euler-disc target fitting, or any one-millimetre
+  optimum/ranking claim. Hunt--Crossley dissipation is a declared model rung,
+  not a measured loss mechanism.
 
 - Certified CCD verdicts remain ENCLOSURE verdicts: `PossibleContact` /
   `Retained` windows localize in time but never adjudicate contact;

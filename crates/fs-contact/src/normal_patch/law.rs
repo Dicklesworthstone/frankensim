@@ -1,0 +1,614 @@
+//! Analytic Hertz and Hunt--Crossley normal-patch laws in SI units.
+//!
+//! The physical receipt type is intentionally distinct from the nonphysical
+//! constraint/barrier marker: an IPC/barrier result cannot be passed where a
+//! compliance response is required.
+
+use core::fmt;
+
+use fs_blake3::{ContentHash, hash_domain};
+use fs_tribo::{InputAuthority, InterfaceSystemRef};
+
+/// Fixed unit declaration carried by every request and receipt.
+pub const SI_UNITS: &str = "SI:m,s,N,Pa,J";
+const DOMAIN: &str = "org.frankensim.fs-contact.normal-patch.v1";
+
+/// Explicit identity for a reproducible law request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalPatchIdentity {
+    /// Stable law/model identifier.
+    pub model_id: String,
+    /// Caller-provided source identifier.
+    pub source_id: String,
+    /// State/history identity.
+    pub state_id: String,
+}
+
+/// Analytic normal law rung.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NormalPatchLaw {
+    /// Elastic Hertz sphere against a half space.
+    HertzSpherePlane {
+        effective_radius_m: f64,
+        reduced_modulus_pa: f64,
+    },
+    /// Elastic Hertz cylinder against a half space, per unit cylinder length.
+    HertzCylinderPlane {
+        effective_radius_m: f64,
+        reduced_modulus_pa: f64,
+    },
+    /// Passive Hunt--Crossley augmentation of the Hertz sphere rung.
+    HuntCrossleySphere {
+        effective_radius_m: f64,
+        reduced_modulus_pa: f64,
+        dissipation_s_per_m: f64,
+    },
+}
+
+/// Inputs governing the validity envelope. All ratios are dimensionless.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApplicabilityInput {
+    pub half_space_depth_m: f64,
+    pub layer_thickness_m: f64,
+    pub yield_strength_pa: f64,
+    pub characteristic_rate_m_per_s: f64,
+    pub temperature_k: f64,
+    pub adhesion_energy_j_per_m2: f64,
+}
+
+/// Declared refusal limits for the small-strain, nonadhesive half-space law.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApplicabilityLimits {
+    pub max_patch_to_radius: f64,
+    pub max_strain: f64,
+    pub max_patch_to_depth: f64,
+    pub max_patch_to_layer: f64,
+    pub max_pressure_to_yield: f64,
+    pub max_rate_ratio: f64,
+    pub min_temperature_k: f64,
+    pub max_temperature_k: f64,
+}
+
+/// Caller-declared relative input uncertainty; preserved without promotion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InputUncertainty {
+    pub radius_relative: f64,
+    pub modulus_relative: f64,
+    pub load_relative: f64,
+}
+
+/// One finite, bounded request. `line_load_n_per_m` applies only to cylinder contact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalPatchRequest {
+    pub identity: NormalPatchIdentity,
+    pub interface: InterfaceSystemRef,
+    pub law: NormalPatchLaw,
+    pub indentation_m: f64,
+    pub indentation_rate_m_per_s: f64,
+    pub step_s: f64,
+    pub line_load_n_per_m: f64,
+    pub applicability: ApplicabilityInput,
+    pub limits: ApplicabilityLimits,
+    pub uncertainty: InputUncertainty,
+}
+
+/// Derived ratios retained in a successful physical receipt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApplicabilityRatios {
+    pub patch_to_radius: f64,
+    pub strain: f64,
+    pub patch_to_depth: f64,
+    pub patch_to_layer: f64,
+    pub pressure_to_yield: f64,
+    pub rate_ratio: f64,
+}
+
+/// Pressure moments for axisymmetric area contact or line contact per unit length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureMoments {
+    pub peak_pressure_pa: f64,
+    pub resultant_n_or_n_per_m: f64,
+    pub second_moment_m2: f64,
+}
+
+/// Physical compliant normal response; only this type carries force and energy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalPatchReceipt {
+    pub request_id: ContentHash,
+    pub receipt_id: ContentHash,
+    pub units: &'static str,
+    pub authority: InputAuthority,
+    pub approach_m: f64,
+    pub normal_force_n_or_n_per_m: f64,
+    pub tangent_n_per_m_or_pa: f64,
+    pub patch_radius_or_half_width_m: f64,
+    pub pressure: PressureMoments,
+    pub reversible_energy_j_or_j_per_m: f64,
+    pub irreversible_work_j: f64,
+    pub dissipated_power_w: f64,
+    pub ratios: ApplicabilityRatios,
+    pub uncertainty: InputUncertainty,
+}
+
+/// A nonphysical constraint/barrier marker. It has no force, patch, or energy fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintBarrierReceipt {
+    pub request_id: ContentHash,
+    pub scheme_id: String,
+}
+
+/// Total refusal surface for finite-patch law admission/evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalPatchError {
+    MissingIdentity {
+        field: &'static str,
+    },
+    InvalidInput {
+        field: &'static str,
+    },
+    OutsideApplicability {
+        ratio: &'static str,
+        value: f64,
+        limit: f64,
+    },
+    AdhesionUnsupported {
+        adhesion_energy_j_per_m2: f64,
+    },
+    Overflow {
+        field: &'static str,
+    },
+}
+
+impl fmt::Display for NormalPatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingIdentity { field } => write!(f, "nonblank identity required: {field}"),
+            Self::InvalidInput { field } => write!(f, "invalid finite-patch input: {field}"),
+            Self::OutsideApplicability {
+                ratio,
+                value,
+                limit,
+            } => write!(f, "{ratio}={value} exceeds declared limit {limit}"),
+            Self::AdhesionUnsupported {
+                adhesion_energy_j_per_m2,
+            } => write!(
+                f,
+                "nonadhesive Hertz/Hunt-Crossley rung refuses adhesion energy {adhesion_energy_j_per_m2}"
+            ),
+            Self::Overflow { field } => write!(f, "finite-patch derived value overflowed: {field}"),
+        }
+    }
+}
+impl std::error::Error for NormalPatchError {}
+
+impl NormalPatchRequest {
+    /// Evaluates one bounded request without mutating solver or history state.
+    pub fn evaluate(&self) -> Result<NormalPatchReceipt, NormalPatchError> {
+        self.validate()?;
+        let request_id = hash_domain(DOMAIN, self.canonical().as_bytes());
+        let (radius, modulus, dissipative) = match self.law {
+            NormalPatchLaw::HertzSpherePlane {
+                effective_radius_m,
+                reduced_modulus_pa,
+            } => (effective_radius_m, reduced_modulus_pa, None),
+            NormalPatchLaw::HertzCylinderPlane {
+                effective_radius_m,
+                reduced_modulus_pa,
+            } => return self.cylinder(request_id, effective_radius_m, reduced_modulus_pa),
+            NormalPatchLaw::HuntCrossleySphere {
+                effective_radius_m,
+                reduced_modulus_pa,
+                dissipation_s_per_m,
+            } => (
+                effective_radius_m,
+                reduced_modulus_pa,
+                Some(dissipation_s_per_m),
+            ),
+        };
+        self.sphere(request_id, radius, modulus, dissipative)
+    }
+
+    fn sphere(
+        &self,
+        request_id: ContentHash,
+        radius: f64,
+        modulus: f64,
+        dissipative: Option<f64>,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        let d = self.indentation_m;
+        let a = checked((radius * d).sqrt(), "sphere_patch")?;
+        let elastic_force = checked(
+            (4.0 / 3.0) * modulus * radius.sqrt() * d.powf(1.5),
+            "sphere_force",
+        )?;
+        let tangent = if d == 0.0 {
+            0.0
+        } else {
+            checked(2.0 * modulus * (radius * d).sqrt(), "sphere_tangent")?
+        };
+        let factor = dissipative.map_or(1.0, |c| 1.0 + c * self.indentation_rate_m_per_s);
+        if factor < 0.0 {
+            return Err(NormalPatchError::OutsideApplicability {
+                ratio: "Hunt-Crossley force factor",
+                value: factor,
+                limit: 0.0,
+            });
+        }
+        let force = checked(elastic_force * factor, "normal_force")?;
+        let p0 = if a == 0.0 {
+            0.0
+        } else {
+            checked(
+                1.5 * force / (core::f64::consts::PI * a * a),
+                "peak_pressure",
+            )?
+        };
+        let ratios = self.ratios(a, radius, d, p0)?;
+        let irreversible_power = dissipative.map_or(0.0, |c| {
+            elastic_force * c * self.indentation_rate_m_per_s.powi(2)
+        });
+        let irreversible_work = checked(irreversible_power * self.step_s, "irreversible_work")?;
+        let reversible = checked(0.4 * elastic_force * d, "reversible_energy")?;
+        self.receipt(
+            request_id,
+            d,
+            force,
+            tangent,
+            a,
+            p0,
+            0.4 * a * a,
+            reversible,
+            irreversible_work,
+            irreversible_power,
+            ratios,
+        )
+    }
+
+    fn cylinder(
+        &self,
+        request_id: ContentHash,
+        radius: f64,
+        modulus: f64,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        let q = self.line_load_n_per_m;
+        let a = checked(
+            (4.0 * q * radius / (core::f64::consts::PI * modulus)).sqrt(),
+            "cylinder_patch",
+        )?;
+        let log = checked(
+            (4.0 * radius / a.max(f64::MIN_POSITIVE)).ln(),
+            "cylinder_log",
+        )?;
+        if log <= 0.0 {
+            return Err(NormalPatchError::OutsideApplicability {
+                ratio: "cylinder logarithmic reach",
+                value: log,
+                limit: 0.0,
+            });
+        }
+        let approach = if q == 0.0 {
+            0.0
+        } else {
+            checked(
+                q * (log + 0.5) / (core::f64::consts::PI * modulus),
+                "cylinder_approach",
+            )?
+        };
+        let tangent = if q == 0.0 {
+            0.0
+        } else {
+            checked(core::f64::consts::PI * modulus / log, "cylinder_tangent")?
+        };
+        let p0 = if a == 0.0 {
+            0.0
+        } else {
+            checked(2.0 * q / (core::f64::consts::PI * a), "cylinder_pressure")?
+        };
+        let ratios = self.ratios(a, radius, approach, p0)?;
+        let energy = if q == 0.0 {
+            0.0
+        } else {
+            checked(
+                q * q * (log + 0.75) / (2.0 * core::f64::consts::PI * modulus),
+                "cylinder_energy",
+            )?
+        };
+        self.receipt(
+            request_id,
+            approach,
+            q,
+            tangent,
+            a,
+            p0,
+            0.25 * a * a,
+            energy,
+            0.0,
+            0.0,
+            ratios,
+        )
+    }
+
+    fn receipt(
+        &self,
+        request_id: ContentHash,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        patch: f64,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        irreversible: f64,
+        power: f64,
+        ratios: ApplicabilityRatios,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        for (value, field) in [
+            (approach, "approach"),
+            (force, "force"),
+            (tangent, "tangent"),
+            (patch, "patch"),
+            (peak, "pressure"),
+            (reversible, "energy"),
+            (irreversible, "work"),
+            (power, "power"),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(NormalPatchError::Overflow { field });
+            }
+        }
+        let authority = self.interface.provenance().authority();
+        let receipt_id = hash_domain(
+            DOMAIN,
+            format!(
+                "{}|{}|{force:.17e}|{approach:.17e}|{reversible:.17e}|{irreversible:.17e}",
+                request_id.to_hex(),
+                self.identity.state_id
+            )
+            .as_bytes(),
+        );
+        Ok(NormalPatchReceipt {
+            request_id,
+            receipt_id,
+            units: SI_UNITS,
+            authority,
+            approach_m: approach,
+            normal_force_n_or_n_per_m: force,
+            tangent_n_per_m_or_pa: tangent,
+            patch_radius_or_half_width_m: patch,
+            pressure: PressureMoments {
+                peak_pressure_pa: peak,
+                resultant_n_or_n_per_m: force,
+                second_moment_m2: moment,
+            },
+            reversible_energy_j_or_j_per_m: reversible,
+            irreversible_work_j: irreversible,
+            dissipated_power_w: power,
+            ratios,
+            uncertainty: self.uncertainty,
+        })
+    }
+
+    fn ratios(
+        &self,
+        patch: f64,
+        radius: f64,
+        approach: f64,
+        pressure: f64,
+    ) -> Result<ApplicabilityRatios, NormalPatchError> {
+        let r = ApplicabilityRatios {
+            patch_to_radius: patch / radius,
+            strain: approach / radius,
+            patch_to_depth: patch / self.applicability.half_space_depth_m,
+            patch_to_layer: patch / self.applicability.layer_thickness_m,
+            pressure_to_yield: pressure / self.applicability.yield_strength_pa,
+            rate_ratio: self.indentation_rate_m_per_s.abs()
+                / self.applicability.characteristic_rate_m_per_s,
+        };
+        for (name, value, limit) in [
+            (
+                "patch_to_radius",
+                r.patch_to_radius,
+                self.limits.max_patch_to_radius,
+            ),
+            ("strain", r.strain, self.limits.max_strain),
+            (
+                "patch_to_depth",
+                r.patch_to_depth,
+                self.limits.max_patch_to_depth,
+            ),
+            (
+                "patch_to_layer",
+                r.patch_to_layer,
+                self.limits.max_patch_to_layer,
+            ),
+            (
+                "pressure_to_yield",
+                r.pressure_to_yield,
+                self.limits.max_pressure_to_yield,
+            ),
+            ("rate_ratio", r.rate_ratio, self.limits.max_rate_ratio),
+        ] {
+            if !value.is_finite() {
+                return Err(NormalPatchError::Overflow { field: name });
+            }
+            if value > limit {
+                return Err(NormalPatchError::OutsideApplicability {
+                    ratio: name,
+                    value,
+                    limit,
+                });
+            }
+        }
+        Ok(r)
+    }
+
+    fn validate(&self) -> Result<(), NormalPatchError> {
+        for (s, name) in [
+            (&self.identity.model_id, "model_id"),
+            (&self.identity.source_id, "source_id"),
+            (&self.identity.state_id, "state_id"),
+        ] {
+            if s.trim().is_empty() {
+                return Err(NormalPatchError::MissingIdentity { field: name });
+            }
+        }
+        for (value, name) in [
+            (self.indentation_m, "indentation_m"),
+            (self.step_s, "step_s"),
+            (self.line_load_n_per_m, "line_load_n_per_m"),
+            (self.applicability.half_space_depth_m, "half_space_depth_m"),
+            (self.applicability.layer_thickness_m, "layer_thickness_m"),
+            (self.applicability.yield_strength_pa, "yield_strength_pa"),
+            (
+                self.applicability.characteristic_rate_m_per_s,
+                "characteristic_rate",
+            ),
+            (self.applicability.temperature_k, "temperature_k"),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(NormalPatchError::InvalidInput { field: name });
+            }
+        }
+        if self.applicability.half_space_depth_m == 0.0
+            || self.applicability.layer_thickness_m == 0.0
+            || self.applicability.yield_strength_pa == 0.0
+            || self.applicability.characteristic_rate_m_per_s == 0.0
+        {
+            return Err(NormalPatchError::InvalidInput {
+                field: "applicability denominator",
+            });
+        }
+        if !self.indentation_rate_m_per_s.is_finite() {
+            return Err(NormalPatchError::InvalidInput {
+                field: "indentation_rate",
+            });
+        }
+        if self.applicability.adhesion_energy_j_per_m2 != 0.0 {
+            return Err(NormalPatchError::AdhesionUnsupported {
+                adhesion_energy_j_per_m2: self.applicability.adhesion_energy_j_per_m2,
+            });
+        }
+        if self.applicability.temperature_k < self.limits.min_temperature_k
+            || self.applicability.temperature_k > self.limits.max_temperature_k
+        {
+            return Err(NormalPatchError::OutsideApplicability {
+                ratio: "temperature_k",
+                value: self.applicability.temperature_k,
+                limit: self.limits.max_temperature_k,
+            });
+        }
+        for (value, name) in [
+            (self.limits.max_patch_to_radius, "max_patch_to_radius"),
+            (self.limits.max_strain, "max_strain"),
+            (self.limits.max_patch_to_depth, "max_patch_to_depth"),
+            (self.limits.max_patch_to_layer, "max_patch_to_layer"),
+            (self.limits.max_pressure_to_yield, "max_pressure_to_yield"),
+            (self.limits.max_rate_ratio, "max_rate_ratio"),
+            (self.limits.min_temperature_k, "min_temperature_k"),
+            (self.limits.max_temperature_k, "max_temperature_k"),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(NormalPatchError::InvalidInput { field: name });
+            }
+        }
+        if self.limits.min_temperature_k > self.limits.max_temperature_k {
+            return Err(NormalPatchError::InvalidInput {
+                field: "temperature limits",
+            });
+        }
+        for (v, n) in [
+            (self.uncertainty.radius_relative, "radius_uncertainty"),
+            (self.uncertainty.modulus_relative, "modulus_uncertainty"),
+            (self.uncertainty.load_relative, "load_uncertainty"),
+        ] {
+            if !v.is_finite() || v < 0.0 {
+                return Err(NormalPatchError::InvalidInput { field: n });
+            }
+        }
+        match self.law {
+            NormalPatchLaw::HertzSpherePlane {
+                effective_radius_m,
+                reduced_modulus_pa,
+            }
+            | NormalPatchLaw::HuntCrossleySphere {
+                effective_radius_m,
+                reduced_modulus_pa,
+                ..
+            }
+            | NormalPatchLaw::HertzCylinderPlane {
+                effective_radius_m,
+                reduced_modulus_pa,
+            } => {
+                if !(effective_radius_m.is_finite()
+                    && effective_radius_m > 0.0
+                    && reduced_modulus_pa.is_finite()
+                    && reduced_modulus_pa > 0.0)
+                {
+                    return Err(NormalPatchError::InvalidInput {
+                        field: "curvature_or_modulus",
+                    });
+                }
+            }
+        }
+        if let NormalPatchLaw::HuntCrossleySphere {
+            dissipation_s_per_m,
+            ..
+        } = self.law
+        {
+            if !dissipation_s_per_m.is_finite() || dissipation_s_per_m < 0.0 {
+                return Err(NormalPatchError::InvalidInput {
+                    field: "dissipation",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical(&self) -> String {
+        format!(
+            concat!(
+                "v1|{}|{}|{}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{}|{}|{:?}"
+            ),
+            self.identity.model_id,
+            self.identity.source_id,
+            self.identity.state_id,
+            self.law,
+            self.indentation_m,
+            self.indentation_rate_m_per_s,
+            self.step_s,
+            self.line_load_n_per_m,
+            self.applicability.half_space_depth_m,
+            self.applicability.layer_thickness_m,
+            self.applicability.yield_strength_pa,
+            self.applicability.characteristic_rate_m_per_s,
+            self.applicability.temperature_k,
+            self.applicability.adhesion_energy_j_per_m2,
+            self.limits.max_patch_to_radius,
+            self.limits.max_strain,
+            self.limits.max_patch_to_depth,
+            self.limits.max_patch_to_layer,
+            self.limits.max_pressure_to_yield,
+            self.limits.max_rate_ratio,
+            self.limits.min_temperature_k,
+            self.limits.max_temperature_k,
+            self.uncertainty.radius_relative,
+            self.uncertainty.modulus_relative,
+            self.uncertainty.load_relative,
+            self.interface.ordered_system_id(),
+            self.interface.history_id(),
+            self.interface.provenance().source_id(),
+            self.interface.provenance().authority(),
+        )
+    }
+}
+
+fn checked(value: f64, field: &'static str) -> Result<f64, NormalPatchError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(NormalPatchError::Overflow { field })
+    }
+}
