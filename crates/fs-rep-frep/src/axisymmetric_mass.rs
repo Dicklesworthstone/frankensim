@@ -103,6 +103,14 @@ pub enum AxisymmetricMassError {
         /// Reconstructed representable mass.
         mass: f64,
     },
+    /// A positive-volume 3D solid reconstructed a zero principal moment after
+    /// finite binary64 evaluation, so it cannot be published as a rigid body.
+    NonPositivePrincipalInertia {
+        /// Reconstructed transverse centroidal moment.
+        transverse: f64,
+        /// Reconstructed axial centroidal moment.
+        axial: f64,
+    },
     /// A central inertia violated non-negativity beyond rounding tolerance.
     InvalidInertia {
         /// Reconstructed transverse central inertia.
@@ -138,6 +146,10 @@ impl core::fmt::Display for AxisymmetricMassError {
             Self::NonPositiveMass { mass } => write!(
                 f,
                 "axisymmetric mass underflowed to non-positive representable mass {mass}"
+            ),
+            Self::NonPositivePrincipalInertia { transverse, axial } => write!(
+                f,
+                "axisymmetric mass reconstructed non-positive principal inertia for a positive-volume solid (transverse={transverse}, axial={axial})"
             ),
             Self::InvalidInertia { transverse, axial } => write!(
                 f,
@@ -237,6 +249,12 @@ impl AxisymmetricChart {
         }
         if principal_transverse < 0.0 || principal_axial < 0.0 {
             return Err(AxisymmetricMassError::InvalidInertia {
+                transverse: principal_transverse,
+                axial: principal_axial,
+            });
+        }
+        if principal_transverse == 0.0 || principal_axial == 0.0 {
+            return Err(AxisymmetricMassError::NonPositivePrincipalInertia {
                 transverse: principal_transverse,
                 axial: principal_axial,
             });

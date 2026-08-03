@@ -336,3 +336,16 @@ fn g0_positive_density_with_representational_mass_underflow_refuses() {
         ));
     });
 }
+
+#[test]
+fn g0_positive_mass_with_underflowed_principal_inertia_refuses() {
+    // The tiny radial scale leaves a positive finite mass at this density,
+    // but its axial inertia is smaller than the least binary64 subnormal.
+    let chart = cylinder(5.0e-9, 1.0e16, 0.0);
+    with_cx(false, |cx| {
+        assert!(matches!(
+            chart.mass_properties(f64::MIN_POSITIVE, cx),
+            Err(AxisymmetricMassError::NonPositivePrincipalInertia { .. })
+        ));
+    });
+}

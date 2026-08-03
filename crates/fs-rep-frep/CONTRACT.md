@@ -196,6 +196,11 @@ the suite unchanged.
   co-minimizing meridian feature, and positive-radius purely axial ring/face
   support refuse. Results identify the source feature and carry `Estimate`
   authority only, never a certificate.
+- `mass_properties(density, cx)` refuses a finite positive density/volume
+  product that underflows to zero mass, and also refuses a zero centroidal
+  principal moment for a positive-volume 3D solid. These are geometry-boundary
+  refusals, not a relaxation of the non-authoritative roundoff diagnostics or
+  their narrow negative-roundoff clamp.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.
