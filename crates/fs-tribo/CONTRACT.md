@@ -1,61 +1,91 @@
 # CONTRACT: fs-tribo
 
-> Status: baseline implementation for `frankensim-ext-tribo-dry-baseline-tgbj`; it is not an
-> admitted material-data or Euler-disc result.
+> Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
+> admitted material-data result or an Euler-disc validation result.
 
 ## Purpose and layer
 
-`fs-tribo` is an L3 dry-contact constitutive leaf. It supplies typed friction, Hertz reference
-responses, optional rolling/contour loss laws, heat/work accounting, and Archard wear evolution.
-It does not depend on contact-solver internals. A solver owns contact complementarity and embeds
-the returned traction, state, tangent, and accounting records into its residual.
+`fs-tribo` is an L3 dry-contact constitutive leaf. It provides typed dry
+friction, elastic Hertz reference forms, scalar rolling/contour loss laws,
+explicit dissipated-work accounting, and caller-owned Archard wear state. It
+does not depend on contact-solver internals: the consuming solver owns contact
+complementarity, tangent reactions, and residual embedding.
 
-## Public semantics
+## Public types and semantics
 
-- `InterfaceSystemRef` names an **ordered** surface/system/history identity. The caller may bind it
-  to an admitted material card or explicitly declare a synthetic fixture. The latter remains
-  `Synthetic` and cannot become material authority.
-- `FrictionLaw` provides Coulomb, affine velocity-dependent, and Stribeck-plus-viscous rungs.
-  At zero slip the law reports a stick capacity rather than fabricating a tangential reaction;
-  contact owns that solve.
-- `HertzSpherePlane` and `HertzCylinderPlane` are G1 analytic reference forms. They require
-  `AnalyticReference` authority plus caller-supplied finite positive reduced modulus and radius.
-  They are not plastic, rough-surface, adhesive, layered, or finite-patch claims.
-- `ResistanceLaw` is the generic rolling/contour loss interface. The supplied constant-moment and
-  constant-contour-force laws dissipate non-negative power; their coefficients are caller-declared
-  and never calibrated here.
-- `DissipationStep` conserves declared frictional work into surface-A heat, surface-B heat, and an
-  explicit other channel. `WorkLedger` accumulates only non-negative declared work.
-- `ArchardLaw` evolves a caller-owned `WearState` by `dV = k F ds / H`. Hardness appears only in
-  this wear law; no ductility, plastic-contact, damage, fracture, or life claim is inferred.
+- `InterfaceSystemRef` names ordered surfaces, history, medium, and a nonblank
+  caller `source_id`. `InputAuthority` is a caller-declared ceiling
+  (`CallerDeclared`, `SyntheticFixture`, or `Estimated`), never an admission or
+  verification receipt. Every constitutive response returns this provenance.
+- `ContactFrame` normalizes a finite contact normal. `TangentialSlip` accepts
+  only a finite velocity with no material normal component; it refuses rather
+  than silently projects a closing/separating velocity into friction.
+- `FrictionLaw` provides Coulomb, velocity-dependent, and Stribeck rungs. At
+  zero slip it reports static capacity only; it never invents a stick reaction.
+- `HertzSpherePlane` and `HertzCylinderPlane` are G1 elastic closed forms,
+  expressed in SI. They use caller-supplied radius/modulus and retain the
+  caller ceiling; a mathematical closed form does not validate its inputs.
+- `ConstantRollingMoment` uses `M = -sign(omega) N a` (N m) and
+  `P = N a |omega|` (W). `ConstantContourForce` uses
+  `F = -sign(v) F_c` (N) and `P = F_c |v|` (W). They are separate mechanisms;
+  callers must not combine them without independent source support.
+- `HeatPartition`, `DissipationStep`, `WorkLedger`, and `WearState` have
+  private invariant fields and checked getters. `ArchardLaw` computes
+  `dV = k F ds/H` in m3 and commits only a validated candidate state.
 
 ## Invariants
 
-- Every public constructor and evaluation refuses non-finite, negative, missing, or incompatible
-  inputs. A dry law refuses a wet or undeclared-medium context.
-- The interface order and history are non-empty, identity-bearing strings. Coefficients require an
-  explicit authority source; no material-pair lookup or default coefficient exists.
-- Traction and resistance oppose their corresponding velocity. Reported dissipated power and work
-  are non-negative. Heat partitions close to one within floating-point roundoff.
-- Evaluation is pure apart from an explicit caller-owned `WearState` or `WorkLedger`; neither
-  material data nor hidden global state is mutated.
+- All public construction and evaluation paths refuse missing identity,
+  non-dry medium, negative/non-finite input, and every non-finite derived
+  candidate from finite extreme inputs.
+- Tangential traction and scalar resistance oppose their declared relative
+  rates; output dissipated power/work is finite and non-negative.
+- Heat shares are finite, non-negative, and sum to one. A dissipation step's
+  channels are finite, non-negative, and close to its total before a ledger can
+  mutate. Ledger and wear candidate totals are checked before assignment.
+- No mutable material table, hidden state, or unordered material-pair lookup
+  exists. Ordered interface and history identities remain explicit.
 
-## Error model and no-claim boundary
+## Error model
 
-`TriboError` is a total refusal surface. `UnsupportedAuthority`, `SyntheticInput`, and
-`NotDryInterface` are ordinary outcomes, not fallback modes. The crate carries no material-card
-adapter until the seed interface data is admitted. It has no calibration, temperature evolution,
-roughness, mixed/EHL lubrication, flash-temperature solution, wear-volume geometry update,
-contact-patch solution, plasticity, or Euler-disc prediction claim.
+`TriboError` is a total refusal surface for missing identity, non-dry media,
+invalid/overflowing physical input, non-finite vectors, normal slip, invalid
+partitions, and forged/invalid dissipation states. A refusal makes no partial
+state change to `WorkLedger` or `WearState`.
 
-## Determinism, cancellation, unsafe
+## Determinism class
 
-The functions are deterministic pure scalar arithmetic on one ISA; no cross-ISA bit claim is made.
-There is no asynchronous work or cancellation scope in this bounded leaf. There are no unsafe
-blocks.
+Pure scalar operations are deterministic for the same input and ISA. Norms use
+the platform `hypot` sequence to avoid avoidable intermediate overflow. No
+cross-ISA bit-stability claim is made.
 
-## Evidence
+## Cancellation behavior
 
-Inline tests cover G0 admission/refusal and accounting laws, G1 Hertz closed forms and rigid-block
-stick/slip threshold, plus G3 scaling, reversal, partition, and replay metamorphics. All numerical
-coefficients used by tests are declared `SyntheticFixture` inputs only.
+This bounded scalar leaf has no asynchronous work and no cancellation scope.
+Callers scheduling many contact points own cancellation between calls.
+
+## Unsafe boundary
+
+None. The crate forbids unsafe code.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+Inline G0/G1/G3 tests cover identity/dry/tangent refusals; analytic rigid-block
+equilibrium; independent numerical Hertz values and force-pressure-radius
+cross-relations; reversal/scaling/provenance; resistance sign; partition
+closure; forged negative/non-finite work rejection; and rollback on work/wear
+overflow. Test coefficients are explicitly synthetic fixtures.
+
+## No-claim boundaries
+
+This crate does not mint material admission, calibration, InterfaceSystemCard
+query receipts, flash-temperature or thermal-port solutions, roughness,
+adhesion, plasticity, finite-patch partial slip, lubrication/EHL, contact
+geometry evolution, wear geometry updates, stop time, Euler-disc ranking,
+one-millimetre optimum, or experimental/video correspondence. A caller may
+record an estimated or synthetic result, but must not promote it based on this
+crate alone.
