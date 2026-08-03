@@ -270,9 +270,9 @@ Two rules bind day-to-day work:
   declared source file, so the registry cannot describe a format that no longer
   exists.
 - Adding a `pub const *_VERSION` integer to a product-boundary crate
-  (`fs-checker`, `fs-crosswalk`, `fs-ledger`, `fs-matdb`, `fs-package`,
-  `fs-project`, `fs-scenario`) requires classifying it: `frozen` if it is a
-  promise, `not_promised` with a reason class if it is internal. An
+  (`fs-checker`, `fs-crosswalk`, `fs-euler-disc-e2e`, `fs-ledger`, `fs-matdb`,
+  `fs-package`, `fs-project`, `fs-scenario`) requires classifying it: `frozen`
+  if it is a promise, `not_promised` with a reason class if it is internal. An
   unclassified constant is accretion and fails the gate.
 
 ## Working in the shared tree (learned the hard way, 2026-07-24/25)

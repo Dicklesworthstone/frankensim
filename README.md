@@ -8,16 +8,16 @@
 
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
-[![Crates](https://img.shields.io/badge/workspace-141%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-142%20of%20142%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-593%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Crates](https://img.shields.io/badge/workspace-142%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
+[![Contracts](https://img.shields.io/badge/contracts-143%20of%20143%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-594%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
 FrankenSim is an active Rust source workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains 142 `fs-*` crate directories: 141 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains 143 `fs-*` crate directories: 142 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
 The inventory numbers in this README are derived from the root workspace
 manifest, each crate's declared layer metadata, and the portable tracked-input
@@ -32,12 +32,12 @@ edge is valid.
 <!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->
 | Derived repository fact | Value |
 |-------------------------|-------|
-| Native workspace `fs-*` crates | 141 |
+| Native workspace `fs-*` crates | 142 |
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
-| Tracked `fs-*` crate directories | 142 |
-| Tracked `CONTRACT.md` files | 142 of 142 |
-| Tracked crate integration-test files | 593 |
-| `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=13`, `L2=18`, `L3=27`, `L4=32`, `L5=4`, `L6=25`, `TOOL=1` |
+| Tracked `fs-*` crate directories | 143 |
+| Tracked `CONTRACT.md` files | 143 of 143 |
+| Tracked crate integration-test files | 594 |
+| `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=13`, `L2=18`, `L3=27`, `L4=32`, `L5=4`, `L6=26`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
 An initial stable validation CLI now exists, but there is not yet an integrated end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
@@ -52,15 +52,16 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 141 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
-| Contracts | 142 of 142 `fs-*` crate directories have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 142 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
+| Contracts | 143 of 143 `fs-*` crate directories have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Thermal and airflow | `fs-conduction` provides a steady P1 FEM kernel, card-backed thermal contact on exact matching traces, card-backed linearized surface radiation, and deterministic gray-diffuse enclosure exchange over admitted view-factor matrices; `fs-convection` provides 12 validity-gated Nusselt cards, including one narrow Shah-London developing-rectangular table slice at `Pr=0.72` and aspect ratio 0.5; and `fs-airflow` provides typed fan curves, series/parallel quadratic loss networks with explicit leakage, nominal-model interval-Newton operating-point brackets, and an evidence-preserving branch-flow handoff to convection. Only conduction is currently registered for capability maturity |
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
+| Euler-disc flagship contract | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its highest local state-machine disposition is deliberately only an unreadmitted reference-complete candidate. It does not yet implement or validate Euler-disc physics, experiments, or the effects reported in the motivating video |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 593 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+| Tests | 594 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
 ### Capability Maturity, Not Crate Count
 
@@ -261,11 +262,29 @@ per-schema compatibility and deprecation rules, is
 | `.fsim` project schema | `fs-project` | 1 | migrates, with a receipt |
 | Evidence-package format | `fs-package` | 9 | refused by name |
 | Checker protocol | `fs-checker` | 7 | refused by name |
+| Euler scientific Context and composite contract | `fs-euler-disc-e2e` | 1 | no predecessor yet; every other version refuses |
+| Euler artifact owner and schema-routing matrix | `fs-euler-disc-e2e` | 1 | no predecessor yet; every other version refuses |
+| Euler claim and minimum-evidence policy | `fs-euler-disc-e2e` | 1 | no predecessor yet; unknown versions refuse |
+| Euler structural checker and local evidence-reference assessment protocol | `fs-euler-disc-e2e` | 1 | no predecessor; the receipt decoder and complete canonical assessment-log reader refuse mismatches, while other bytes are identity preimages |
 | Scenario IR | `fs-scenario` | 2 | migrates, with a receipt |
 | FSMATPK material pack family | `fs-matdb` | 1 | no predecessor yet |
 | Design-ledger schema | `fs-ledger` | 20 | migrates in place, history intact |
-| Source manifest + SPDX projection | `xtask` | `-v1` | no predecessor yet |
-| Capability-maturity registry | `xtask` | `-v1` | no predecessor yet |
+| Source manifest + SPDX projection | `xtask` | `frankensim-source-manifest-v1` | no predecessor yet |
+| Capability-maturity registry | `xtask` | `frankensim-capability-maturity-v1` | no predecessor yet |
+
+Five frozen schemas carry explicit lockstep obligations:
+
+| Frozen schema | Lockstep constants and recorded values |
+|---------------|----------------------------------------|
+| Evidence-package format | `CHECKER_SUPPORTED_PACKAGE_FORMAT=9`, `CHECKER_DECISION_IDENTITY_VERSION=9`, `SUPPORTED_PACKAGE_FORMAT=9` |
+| Euler scientific Context and composite contract | `VV_SCHEMA_VERSION=3`, `VV_ARTIFACT_FAMILY="org.frankensim.fs-evidence.vv-artifact.v3"`, `AUTHORITY_ALGEBRA_VERSION=2`, `EXPERIMENT_CAMPAIGN_SCHEMA_VERSION_V1=1` |
+| Scenario IR | `LEGACY_SCENARIO_IR_VERSION=1` |
+| FSMATPK material pack family | `SPECIES_PACK_SCHEMA_VERSION=1`, `INTERFACE_PACK_SCHEMA_VERSION=1`, `MODEL_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_PACK_SCHEMA_VERSION=1` |
+| Source manifest + SPDX projection | `SPDX_VERSION="SPDX-2.3"` |
+
+The four Euler entries freeze structural compatibility boundaries only. They
+do not yet implement or validate Euler-disc physics, experiments, or the effects
+reported in the motivating video.
 
 `cargo run -p xtask -- check-schemas` reads each version constant out of its
 declared source file, so a promise cannot describe a format that no longer
@@ -279,7 +298,10 @@ absence of one**: the evidence-package format and checker protocol deliberately
 have no migration path, because silently reinterpreting a stale package is worse
 than refusing it. And a `no-predecessor` schema is *not* a claim that migration
 works — it records that the schema has never been bumped, and the gate refuses
-the first bump until the record declares how the predecessor is handled.
+the first bump until the record declares how the predecessor is handled. The seven
+such promises are `euler.scientific-contract`, `euler.owner-matrix`,
+`euler.claim-policy`, `euler.protocol`, `matdb.pack`, `sbom.source_manifest`, and
+`maturity.registry`.
 
 Because there is no crates.io release yet, these records currently bind the
 tree and the `check-all` gate rather than a published artifact; they become the
@@ -1226,10 +1248,11 @@ Different readers should start in different places.
 | Study physics and solvers | `crates/fs-feec`, `crates/fs-cutfem`, `crates/fs-solid`, `crates/fs-material`, `crates/fs-conduction`, `crates/fs-convection`, `crates/fs-airflow`, `crates/fs-solver` |
 | Study gradients and optimization | `crates/fs-ad`, `crates/fs-adjoint`, `crates/fs-ascent`, `crates/fs-dfo`, `crates/fs-constraint` |
 | Study audit and packaging | `crates/fs-evidence`, `crates/fs-ledger`, `crates/fs-package`, `crates/fs-checker`, `crates/fs-crosswalk` |
+| Study the Euler-disc scientific boundary | `crates/fs-euler-disc-e2e/CONTRACT.md`, then its `contract` and `protocol` modules |
 
 ## Contracts and Verification
 
-The tree currently has 142 `CONTRACT.md` files for 142 `fs-*` crate directories.
+The tree currently has 143 `CONTRACT.md` files for 143 `fs-*` crate directories.
 The contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
@@ -1271,7 +1294,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 142 fs-* crates; selected entries shown below
+|-- crates/                            # 143 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers
@@ -1288,6 +1311,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |   |-- fs-rand/                       # Counter-based RNG and QMC
 |   |-- fs-ad/                         # Automatic differentiation
 |   |-- fs-eproc/                      # E-process inference
+|   |-- fs-euler-disc-e2e/             # Euler-disc scientific contract and no-claim boundary
 |   |-- fs-geom/                       # Chart/region abstractions
 |   |-- fs-rep-sdf/                    # Signed-distance-field charts
 |   |-- fs-rep-mesh/                   # Mesh charts and repair

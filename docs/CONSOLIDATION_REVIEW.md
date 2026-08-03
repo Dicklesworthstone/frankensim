@@ -9,9 +9,11 @@ The record is not a hand-maintained list. `check-consolidation` re-derives the
 usage sweep from the manifests on every run, so a disposition that the tree has
 outgrown fails the gate instead of quietly becoming fiction.
 
-In a 141-crate workspace, an abstraction that no supported workflow exercises is
-not neutral. It costs comprehension, maintenance, and CI time, and it dilutes
-the signal of what the product actually is. The moonshot WIP cap
+Across the current 143 `fs-*` crate directories (142 native root-workspace
+members plus the standalone nested `fs-wasm` workspace), an abstraction that no
+supported workflow exercises is not neutral. It costs comprehension,
+maintenance, and CI time, and it dilutes the signal of what the product actually
+is. The moonshot WIP cap
 (`docs/CONVENTIONS.md`, bead 16.3) governs **new** speculative work; this review
 governs the **existing** inventory's slow accretion.
 

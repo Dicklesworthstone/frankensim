@@ -1195,6 +1195,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-euler-disc-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-govern",
+ "fs-ir",
+]
+
+[[package]]
 name = "fs-evidence"
 version = "0.0.1"
 dependencies = [

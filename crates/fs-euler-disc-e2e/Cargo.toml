@@ -1,0 +1,20 @@
+[package]
+name = "fs-euler-disc-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Euler-disc scientific contract and emergent-prediction campaign integration boundary"
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-govern = { path = "../fs-govern" }
+fs-ir = { path = "../fs-ir" }
+
+[lints]
+workspace = true

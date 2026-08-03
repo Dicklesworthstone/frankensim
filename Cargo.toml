@@ -138,6 +138,7 @@ members = [
     "crates/fs-adaptbo-e2e",
     "crates/fs-flagship-e2e",
     "crates/fs-flowcert-e2e",
+    "crates/fs-euler-disc-e2e",
     "crates/fs-vvreg",
     "crates/fs-vmanifest",
     "crates/fs-conduction",

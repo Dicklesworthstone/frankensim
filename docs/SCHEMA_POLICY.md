@@ -15,7 +15,7 @@ matter how stable it looks or how many consumers have started reading it.
 
 ## The frozen set
 
-Eight schemas are promised. Each has a policy record in `schema-policy.json`
+Twelve schemas are promised. Each has a policy record in `schema-policy.json`
 carrying its version location, compatibility promise, migration obligation, and
 deprecation horizon.
 
@@ -24,6 +24,10 @@ deprecation horizon.
 | `project.fsim` | `fs-project` | `FSIM_VERSION` | 1 |
 | `package.format` | `fs-package` | `FORMAT_VERSION` | 9 |
 | `checker.protocol` | `fs-checker` | `CHECKER_PROTOCOL_VERSION` | 7 |
+| `euler.scientific-contract` | `fs-euler-disc-e2e` | `EULER_CONTRACT_SCHEMA_VERSION` | 1 |
+| `euler.owner-matrix` | `fs-euler-disc-e2e` | `EULER_OWNER_MATRIX_SCHEMA_VERSION` | 1 |
+| `euler.claim-policy` | `fs-euler-disc-e2e` | `EULER_CLAIM_POLICY_SCHEMA_VERSION` | 1 |
+| `euler.protocol` | `fs-euler-disc-e2e` | `EULER_PROTOCOL_SCHEMA_VERSION` | 1 |
 | `scenario.ir` | `fs-scenario` | `SCENARIO_IR_VERSION` | 2 |
 | `matdb.pack` | `fs-matdb` | `MATDB_PACK_SCHEMA_VERSION` | 1 |
 | `ledger.schema` | `fs-ledger` | `SCHEMA_VERSION` | 20 |
@@ -35,12 +39,20 @@ reads each constant out of its declared source file and refuses if the recorded
 value has drifted, so the promise cannot describe a format that no longer
 exists.
 
-Two of these carry a **lockstep set**: constants in other crates that must move
-in the same commit. The evidence-package format binds
-`CHECKER_SUPPORTED_PACKAGE_FORMAT`, `CHECKER_DECISION_IDENTITY_VERSION`, and the
-crosswalk's `SUPPORTED_PACKAGE_FORMAT`; the FSMATPK family binds the species,
-interface, and model pack versions. Lockstep values are verified against source
-in the same way.
+Five of these carry a **lockstep set**: constants that must move in the same
+commit. The registry records every current binding:
+
+| Frozen schema | Lockstep constants and recorded values |
+|---------------|----------------------------------------|
+| `package.format` | `CHECKER_SUPPORTED_PACKAGE_FORMAT=9`, `CHECKER_DECISION_IDENTITY_VERSION=9`, `SUPPORTED_PACKAGE_FORMAT=9` |
+| `euler.scientific-contract` | `VV_SCHEMA_VERSION=3`, `VV_ARTIFACT_FAMILY="org.frankensim.fs-evidence.vv-artifact.v3"`, `AUTHORITY_ALGEBRA_VERSION=2`, `EXPERIMENT_CAMPAIGN_SCHEMA_VERSION_V1=1` |
+| `scenario.ir` | `LEGACY_SCENARIO_IR_VERSION=1` |
+| `matdb.pack` | `SPECIES_PACK_SCHEMA_VERSION=1`, `INTERFACE_PACK_SCHEMA_VERSION=1`, `MODEL_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_PACK_SCHEMA_VERSION=1` |
+| `sbom.source_manifest` | `SPDX_VERSION="SPDX-2.3"` |
+
+Lockstep values are verified against their declared source locations in the
+same way as the primary version constants. This is a compatibility constraint,
+not evidence that any scientific result is correct.
 
 ## Migration obligations
 
@@ -57,8 +69,9 @@ enforces the matching evidence.
   This is a real obligation, not an absence of one: silently accepting a stale
   package would be worse than refusing it.
 - **`no-predecessor`** — the schema has never been bumped, so there is nothing
-  to migrate from. Held by `matdb.pack`, `sbom.source_manifest`, and
-  `maturity.registry`.
+  to migrate from. Held by `euler.scientific-contract`,
+  `euler.owner-matrix`, `euler.claim-policy`, `euler.protocol`, `matdb.pack`,
+  `sbom.source_manifest`, and `maturity.registry`.
 
 `no-predecessor` is the load-bearing case. It may cite no evidence, and the
 check additionally refuses any `no-predecessor` record whose current version has
@@ -68,11 +81,12 @@ moved past its first. A first bump therefore **cannot** land quietly: it fails
 
 ### The honest boundary
 
-Three frozen schemas have no cross-version migration test because they have no
+Seven frozen schemas have no cross-version migration test because they have no
 predecessor, and two have a refusal test rather than a migration path. This
-document does not claim that all eight schemas have exercised migrations. It
-claims that each declares how its predecessor is handled, that the declaration
-matches a test that exists, and that the declaration cannot silently expire.
+document does not claim that all twelve schemas have exercised migrations. It
+claims that each declares how its predecessor is handled, that obligations
+which require evidence name a test that exists, and that no declaration can
+silently expire.
 
 ## Compatibility promise
 
@@ -80,9 +94,20 @@ Each record states what a minor and a major bump may change. The general shape:
 
 - A **minor** bump may add optional fields that an older reader can ignore. It
   may not change an existing value, verdict, or canonical hash for unchanged
-  input. Some records have no minor channel at all — the evidence-package format
-  and the ledger schema each carry a single integer that a consumer binds
-  exactly — and say so.
+  input. Some records have no minor channel at all — the evidence-package
+  format and the Euler scientific-contract, owner-matrix, and protocol
+  identity/receipt formats carry exact versions, while the ledger schema
+  carries a single integer that a consumer binds exactly — and say so. Euler
+  packet, prerequisite, and assessment bytes are frozen identity preimages,
+  not promised public rehydration transports; the contract-check receipt and
+  the complete canonical assessment log provide strict v1 readers in this leaf.
+  The log reader enforces every field, type, order, closed value, bound,
+  canonical escape, and locally checkable cross-field binding rather than
+  accepting a JSON or version/domain envelope. It does not re-evaluate or
+  authenticate the absent packet, prerequisites, referenced artifacts, or
+  producers. The
+  Euler claim policy permits only nonsemantic documentation changes without a
+  version bump.
 - A **major** bump may remove or retype fields, change canonical bytes, or
   change identity construction. It requires a migration path, a lockstep sweep,
   and a new **deprecation horizon**.
@@ -104,7 +129,8 @@ anyone deciding that it should be.
 
 `check-schemas` scans every public integer version constant declared in the
 crates named by `accretion_scope` — currently `fs-checker`, `fs-crosswalk`,
-`fs-ledger`, `fs-matdb`, `fs-package`, `fs-project`, and `fs-scenario` — and
+`fs-euler-disc-e2e`, `fs-ledger`, `fs-matdb`, `fs-package`, `fs-project`, and
+`fs-scenario` — and
 requires each to be classified exactly once, either in `frozen` (a promise) or
 in `not_promised` (internal and breakable, with a stated reason). A new constant
 that is neither fails the gate.

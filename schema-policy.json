@@ -6,6 +6,7 @@
   "accretion_scope": [
     "fs-checker",
     "fs-crosswalk",
+    "fs-euler-disc-e2e",
     "fs-ledger",
     "fs-matdb",
     "fs-package",
@@ -106,6 +107,106 @@
         }
       ],
       "deprecation_horizon": "none: a mismatched protocol is refused, never negotiated down"
+    },
+    {
+      "id": "euler.scientific-contract",
+      "title": "The Euler-disc scientific Context and composite contract",
+      "owner": "fs-euler-disc-e2e",
+      "version_kind": "integer-const",
+      "version_constant": "EULER_CONTRACT_SCHEMA_VERSION",
+      "version_location": "crates/fs-euler-disc-e2e/src/contract.rs",
+      "current_version": "1",
+      "lockstep": [
+        {
+          "constant": "VV_SCHEMA_VERSION",
+          "location": "crates/fs-evidence/src/vv/model.rs",
+          "value": "3"
+        },
+        {
+          "constant": "VV_ARTIFACT_FAMILY",
+          "location": "crates/fs-evidence/src/vv/model.rs",
+          "value": "org.frankensim.fs-evidence.vv-artifact.v3"
+        },
+        {
+          "constant": "AUTHORITY_ALGEBRA_VERSION",
+          "location": "crates/fs-govern/src/evidence_contract.rs",
+          "value": "2"
+        },
+        {
+          "constant": "EXPERIMENT_CAMPAIGN_SCHEMA_VERSION_V1",
+          "location": "crates/fs-ir/src/campaign.rs",
+          "value": "1"
+        }
+      ],
+      "surface": [
+        "the whole-contract canonical transport and domain-separated composite identity",
+        "the exact generic Context bytes/hash, Euler population/risk/hypothesis-source extension, nine-claim policy graph, seven binding no-claims, and separately versioned owner-matrix registry",
+        "strict fixed-point decoding and refusal of unknown, predecessor, and future versions"
+      ],
+      "minor_bump": "not available: any new semantic field changes the exact content coordinate and requires an explicit schema version",
+      "major_bump": "any change to the canonical bytes, Context binding, extension or hypothesis-source semantics, claim-policy graph, no-claim set, owner matrix, or identity domain",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "not yet applicable: v1 has no predecessor and every other version refuses"
+    },
+    {
+      "id": "euler.owner-matrix",
+      "title": "The Euler-disc artifact owner and schema-routing matrix",
+      "owner": "fs-euler-disc-e2e",
+      "version_kind": "integer-const",
+      "version_constant": "EULER_OWNER_MATRIX_SCHEMA_VERSION",
+      "version_location": "crates/fs-euler-disc-e2e/src/contract.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "the canonical owner-matrix transport and domain-separated registry identity",
+        "the closed artifact-role tags, exact owning crates, opaque source-schema routing addresses, and non-widening authority ceilings",
+        "the cycle-free routing anchor used by the scientific contract and claim-policy assessment-log links"
+      ],
+      "minor_bump": "not available: any row, role, tag, routing address, authority ceiling, field order, or transport change requires an explicit schema version",
+      "major_bump": "any semantic change to ownership, role-link meaning, canonical bytes, identity domain, or the closed role set",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "none: v1 has no predecessor and every other version refuses rather than reinterpreting authority routing"
+    },
+    {
+      "id": "euler.claim-policy",
+      "title": "The nine-kind Euler-disc claim and minimum-evidence policy",
+      "owner": "fs-euler-disc-e2e",
+      "version_kind": "integer-const",
+      "version_constant": "EULER_CLAIM_POLICY_SCHEMA_VERSION",
+      "version_location": "crates/fs-euler-disc-e2e/src/contract.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "the nine closed claim kinds, stable IDs, acceptance families, and exact QoI bindings",
+        "the categorical minimum evidence sets, target-fitting guard, and claim dependency semantics"
+      ],
+      "minor_bump": "may only add nonsemantic documentation; changing a claim, QoI, evidence minimum, dependency meaning, or acceptance-family binding requires a new integer version",
+      "major_bump": "any semantic policy change, including a new claim kind or an authority widening",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "none: an unknown claim-policy version refuses rather than negotiating down"
+    },
+    {
+      "id": "euler.protocol",
+      "title": "The Euler-disc structural checker and local evidence-reference assessment protocol",
+      "owner": "fs-euler-disc-e2e",
+      "version_kind": "integer-const",
+      "version_constant": "EULER_PROTOCOL_SCHEMA_VERSION",
+      "version_location": "crates/fs-euler-disc-e2e/src/protocol.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "the exact evidence-role source schemas, caller-declared access classes, bindings, and explicitly unre-admitted local candidate dispositions",
+        "the separately encoded structural contract-check receipt canonical bytes and identity",
+        "the deterministic bounded policy-redacted claim-policy assessment JSON-lines fields, complete canonical reader, locally checkable cross-field bindings, and identity; absent packets, prerequisites, referenced artifacts, and producers are not re-evaluated or authenticated, and the campaign-wide retained-log contract remains downstream"
+      ],
+      "minor_bump": "not available: the single exact protocol integer binds packet, prerequisite, assessment identity preimages, the contract-check receipt transport, and assessment-log bytes; even optional assessment-log fields require an explicit version and predecessor policy",
+      "major_bump": "any change to evidence-reference sufficiency, refusal/demotion semantics, identity preimages, receipt bytes, any added, removed, or retyped assessment-log field, or log identity",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "none: v1 has no predecessor; the strict receipt decoder and complete canonical assessment-log reader refuse mismatched versions or malformed fields, while packet/prerequisite/assessment bytes are identity preimages rather than promised public rehydration transports"
     },
     {
       "id": "scenario.ir",
