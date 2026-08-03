@@ -547,12 +547,12 @@ impl PartialSlipLaw {
             )?,
         };
         next_state.validate()?;
-        let checkpoint = PartialSlipCheckpoint {
-            patch_id: patch.patch_id.clone(),
-            history_id: interface.history_id.clone(),
-            law_model_id: self.model_id.clone(),
-            state: next_state.clone(),
-        };
+        let checkpoint = PartialSlipCheckpoint::new(
+            patch.clone(),
+            interface.clone(),
+            self.clone(),
+            next_state.clone(),
+        )?;
         Ok(PartialSlipStep {
             state: state_kind,
             slip_partition: SlipPartition {
@@ -584,7 +584,13 @@ impl PartialSlipLaw {
         })
     }
 
-    /// Restores a state only when the law, patch, and ordered history identities match.
+    /// Restores state only when every constitutive and admitted-input datum matches.
+    ///
+    /// In particular, a matching model name alone is insufficient: source identity,
+    /// caller authority, every coefficient, the normal patch data, and ordered
+    /// interface provenance all bind a checkpoint.  This law does not claim that
+    /// matching values establish external physical validity; it merely refuses an
+    /// ambiguous deterministic replay.
     pub fn restore_checkpoint(
         &self,
         patch: &NormalPatchView,
@@ -595,17 +601,66 @@ impl PartialSlipLaw {
         patch.validate()?;
         interface.validate()?;
         checkpoint.validate()?;
-        if checkpoint.law_model_id != self.model_id {
+        if checkpoint.law.model_id != self.model_id {
             return Err(PartialSlipError::CheckpointIdentityMismatch {
                 field: "law_model_id",
             });
         }
-        if checkpoint.patch_id != patch.patch_id {
+        if checkpoint.law.source_id != self.source_id {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "law_source_id",
+            });
+        }
+        if checkpoint.law.parameters != self.parameters {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "law_parameters",
+            });
+        }
+        if checkpoint.patch.patch_id != patch.patch_id {
             return Err(PartialSlipError::CheckpointIdentityMismatch { field: "patch_id" });
         }
-        if checkpoint.history_id != interface.history_id {
+        if checkpoint.patch.normal_model_id != patch.normal_model_id {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "normal_model_id",
+            });
+        }
+        if checkpoint.patch.source_id != patch.source_id {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "normal_patch_source_id",
+            });
+        }
+        if checkpoint.patch.authority != patch.authority {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "normal_patch_authority",
+            });
+        }
+        if checkpoint.patch.normal_load_n != patch.normal_load_n
+            || checkpoint.patch.semi_axis_longitudinal_m != patch.semi_axis_longitudinal_m
+            || checkpoint.patch.semi_axis_lateral_m != patch.semi_axis_lateral_m
+            || checkpoint.patch.pressure_second_moment_m2 != patch.pressure_second_moment_m2
+        {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "normal_patch_geometry_or_load",
+            });
+        }
+        if checkpoint.interface.ordered_interface_id != interface.ordered_interface_id {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "ordered_interface_id",
+            });
+        }
+        if checkpoint.interface.history_id != interface.history_id {
             return Err(PartialSlipError::CheckpointIdentityMismatch {
                 field: "history_id",
+            });
+        }
+        if checkpoint.interface.source_id != interface.source_id {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "interface_source_id",
+            });
+        }
+        if checkpoint.interface.authority != interface.authority {
+            return Err(PartialSlipError::CheckpointIdentityMismatch {
+                field: "interface_authority",
             });
         }
         Ok(checkpoint.state.clone())
@@ -687,27 +742,31 @@ impl PartialSlipState {
     }
 }
 
-/// Identity-bound snapshot of reversible partial-slip history.
+/// Full-input-bound snapshot of reversible partial-slip history.
+///
+/// The snapshot retains the complete admitted inputs instead of a lossy hash so
+/// a decoder can retain a transparent replay receipt.  It does not validate the
+/// physical truth of those caller-declared inputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialSlipCheckpoint {
-    patch_id: String,
-    history_id: String,
-    law_model_id: String,
+    patch: NormalPatchView,
+    interface: PartialSlipInterface,
+    law: PartialSlipLaw,
     state: PartialSlipState,
 }
 
 impl PartialSlipCheckpoint {
-    /// Reconstructs an identity-bound checkpoint from validated decoded state.
+    /// Reconstructs a replay-bound checkpoint from validated decoded inputs.
     pub fn new(
-        patch_id: impl Into<String>,
-        history_id: impl Into<String>,
-        law_model_id: impl Into<String>,
+        patch: NormalPatchView,
+        interface: PartialSlipInterface,
+        law: PartialSlipLaw,
         state: PartialSlipState,
     ) -> Result<Self, PartialSlipError> {
         let value = Self {
-            patch_id: patch_id.into(),
-            history_id: history_id.into(),
-            law_model_id: law_model_id.into(),
+            patch,
+            interface,
+            law,
             state,
         };
         value.validate()?;
@@ -717,19 +776,37 @@ impl PartialSlipCheckpoint {
     /// Patch identity bound into this checkpoint.
     #[must_use]
     pub fn patch_id(&self) -> &str {
-        &self.patch_id
+        self.patch.patch_id()
     }
 
     /// History identity bound into this checkpoint.
     #[must_use]
     pub fn history_id(&self) -> &str {
-        &self.history_id
+        self.interface.history_id()
     }
 
     /// Law identity bound into this checkpoint.
     #[must_use]
     pub fn law_model_id(&self) -> &str {
-        &self.law_model_id
+        self.law.model_id()
+    }
+
+    /// Complete neutral normal-patch receipt bound into this checkpoint.
+    #[must_use]
+    pub fn normal_patch(&self) -> &NormalPatchView {
+        &self.patch
+    }
+
+    /// Complete ordered-interface receipt bound into this checkpoint.
+    #[must_use]
+    pub fn interface(&self) -> &PartialSlipInterface {
+        &self.interface
+    }
+
+    /// Complete law/source/coefficient receipt bound into this checkpoint.
+    #[must_use]
+    pub fn law(&self) -> &PartialSlipLaw {
+        &self.law
     }
 
     /// Stored reversible state.
@@ -739,9 +816,9 @@ impl PartialSlipCheckpoint {
     }
 
     fn validate(&self) -> Result<(), PartialSlipError> {
-        nonblank(&self.patch_id, "checkpoint_patch_id")?;
-        nonblank(&self.history_id, "checkpoint_history_id")?;
-        nonblank(&self.law_model_id, "checkpoint_law_model_id")?;
+        self.patch.validate()?;
+        self.interface.validate()?;
+        self.law.validate()?;
         self.state.validate()
     }
 }
@@ -1401,25 +1478,202 @@ mod tests {
         );
     }
 
-    /// G3 restart and identity mutation: only matching law/patch/history may restore state.
+    /// G3 restart: exact caller inputs restore the deterministic reversible history.
     #[test]
-    fn checkpoint_restart_is_exact_and_identity_bound() {
+    fn checkpoint_restart_is_exact_with_full_receipt() {
         let response = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 1.0);
         let restored = law()
             .restore_checkpoint(&patch(), &interface(), &response.checkpoint)
             .expect("matching checkpoint");
         assert_eq!(restored, response.next_state);
-        let wrong = PartialSlipCheckpoint::new(
+
+        let wrong_patch = NormalPatchView::new(
             "other-patch",
-            response.checkpoint.history_id(),
-            response.checkpoint.law_model_id(),
-            restored,
+            "normal-card-v1",
+            "synthetic/normal-patch",
+            NormalPatchAuthority::SyntheticFixture,
+            100.0,
+            0.02,
+            0.01,
+            1.0e-4,
         )
-        .expect("syntactically valid mutation");
+        .expect("valid mutation");
+        let wrong = PartialSlipCheckpoint::new(wrong_patch, interface(), law(), restored)
+            .expect("syntactically valid checkpoint mutation");
         assert_eq!(
             law().restore_checkpoint(&patch(), &interface(), &wrong),
             Err(PartialSlipError::CheckpointIdentityMismatch { field: "patch_id" })
         );
+    }
+
+    /// G3: replay refuses every law/source/authority receipt mutation, not only display IDs.
+    #[test]
+    fn checkpoint_rejects_coefficients_and_admitted_provenance_mutations() {
+        let response = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 1.0);
+        let state = response.next_state;
+        let expect_refusal = |current_law: PartialSlipLaw,
+                              current_patch: NormalPatchView,
+                              current_interface: PartialSlipInterface,
+                              field| {
+            assert_eq!(
+                current_law.restore_checkpoint(
+                    &current_patch,
+                    &current_interface,
+                    &response.checkpoint,
+                ),
+                Err(PartialSlipError::CheckpointIdentityMismatch { field })
+            );
+        };
+
+        expect_refusal(
+            PartialSlipLaw::new(
+                PARTIAL_SLIP_MODEL_ID,
+                "different-law-source",
+                law().parameters(),
+            )
+            .expect("valid source mutation"),
+            patch(),
+            interface(),
+            "law_source_id",
+        );
+        for parameters in [
+            PartialSlipParameters {
+                static_mu: 0.81,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                kinetic_mu: 0.41,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                tangential_stiffness_n_per_m: 10_001.0,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                torsional_stiffness_nm_per_rad: 101.0,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                torsional_capacity_factor: 0.6,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                partial_slip_onset_fraction: 0.6,
+                ..law().parameters()
+            },
+            PartialSlipParameters {
+                partial_slip_hardening_fraction: 0.5,
+                ..law().parameters()
+            },
+        ] {
+            expect_refusal(
+                PartialSlipLaw::new(PARTIAL_SLIP_MODEL_ID, law().source_id(), parameters)
+                    .expect("valid coefficient mutation"),
+                patch(),
+                interface(),
+                "law_parameters",
+            );
+        }
+
+        for (current_patch, field) in [
+            (
+                NormalPatchView::new(
+                    "patch-a",
+                    "other-normal-model",
+                    "synthetic/normal-patch",
+                    NormalPatchAuthority::SyntheticFixture,
+                    100.0,
+                    0.02,
+                    0.01,
+                    1.0e-4,
+                )
+                .expect("valid model mutation"),
+                "normal_model_id",
+            ),
+            (
+                NormalPatchView::new(
+                    "patch-a",
+                    "normal-card-v1",
+                    "other-normal-source",
+                    NormalPatchAuthority::SyntheticFixture,
+                    100.0,
+                    0.02,
+                    0.01,
+                    1.0e-4,
+                )
+                .expect("valid source mutation"),
+                "normal_patch_source_id",
+            ),
+            (
+                NormalPatchView::new(
+                    "patch-a",
+                    "normal-card-v1",
+                    "synthetic/normal-patch",
+                    NormalPatchAuthority::Estimated,
+                    100.0,
+                    0.02,
+                    0.01,
+                    1.0e-4,
+                )
+                .expect("valid authority mutation"),
+                "normal_patch_authority",
+            ),
+            (
+                NormalPatchView::new(
+                    "patch-a",
+                    "normal-card-v1",
+                    "synthetic/normal-patch",
+                    NormalPatchAuthority::SyntheticFixture,
+                    101.0,
+                    0.02,
+                    0.01,
+                    1.0e-4,
+                )
+                .expect("valid load mutation"),
+                "normal_patch_geometry_or_load",
+            ),
+        ] {
+            expect_refusal(law(), current_patch, interface(), field);
+        }
+
+        for (current_interface, field) in [
+            (
+                PartialSlipInterface::new(
+                    "other-body->support-b",
+                    "history-a",
+                    "synthetic/dry-interface",
+                    NormalPatchAuthority::SyntheticFixture,
+                )
+                .expect("valid ordered-interface mutation"),
+                "ordered_interface_id",
+            ),
+            (
+                PartialSlipInterface::new(
+                    "body-a->support-b",
+                    "history-a",
+                    "other-interface-source",
+                    NormalPatchAuthority::SyntheticFixture,
+                )
+                .expect("valid interface source mutation"),
+                "interface_source_id",
+            ),
+            (
+                PartialSlipInterface::new(
+                    "body-a->support-b",
+                    "history-a",
+                    "synthetic/dry-interface",
+                    NormalPatchAuthority::Estimated,
+                )
+                .expect("valid interface authority mutation"),
+                "interface_authority",
+            ),
+        ] {
+            expect_refusal(law(), patch(), current_interface, field);
+        }
+
+        let replacement = PartialSlipCheckpoint::new(patch(), interface(), law(), state)
+            .expect("replacement checkpoint");
+        assert_eq!(replacement, response.checkpoint);
     }
 
     /// G0 hostile admission: unknown/invalid normal, rate, ownership, and maximum-plus-one state refuse.
