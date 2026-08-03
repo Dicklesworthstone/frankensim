@@ -194,3 +194,62 @@ work; aero-009 hostile thin-gap/target-fit refusal.
   validation. `WorkWindow` prevents duplicate application inside one caller
   window but is not an `fs-couple` closed first-law/entropy audit; a moving
   ambient/boundary specifically needs that separate total accounting closure.
+
+### Bounded gas-film foundation (bead frankensim-b8bxd.10)
+
+`gas_film` adds `solve_isothermal_gas_film_1d`, a deterministic, safe-Rust
+structured one-dimensional finite-volume foundation for the **isothermal ideal
+gas** Reynolds mass balance, at unit out-of-plane width.  Its fields use SI:
+absolute pressure [Pa], gap [m], temperature [K], viscosity [Pa s], gas mass
+per width [kg m^-1], mass flux per width [kg m^-1 s^-1], and wall power/heat
+per width [W m^-1].  It retains canonical case/model/species/EOS/viscosity/
+thermal/frame identities, a caller or synthetic input authority, a deterministic
+seed, and a bounded iteration budget.  The input checks a caller-declared
+density against the same ideal-gas EOS used in storage; density is not silently
+treated as an independent incompressible property.
+Caller-declared viscosity/gap/pressure uncertainty bounds are retained in the
+receipt but are deliberately not propagated, calibrated, or certified.
+
+The discretization retains pressure-driven Poiseuille mass flux plus moving-wall
+Couette mass flux, implicit storage, uniform squeeze through exact old/new gap
+values, upper-wall Couette shear/relative dissipation heat, and signed normal
+moving-gap power `-integral(p dh/dt dx)`. It also carries
+signed boundary/vent enthalpy transport from a caller-declared specific
+enthalpy; this transport receipt is not a thermochemical calculation. `Sealed`,
+two-reservoir `Open`, and one named-cell `Vented` topology are admitted.  The
+receipt retains gas storage, every boundary/vent mass flux, their global closure
+defect, pressure load, wall shear, wall work/heat, residual, iteration count,
+and continuum-envelope maxima. A checkpoint binds active pressure and previous
+gap values to its model/case/authority identity only after a converged step; no
+partial state is published.
+
+`ContactExclusionMask` is an explicit contact handoff, not a gap floor: this
+first slice admits only a contiguous active prefix followed by excluded cells.
+An interior hole, topology change, too-few active cells, non-positive gap or
+absolute pressure, EOS-density mismatch, excessive slope/Mach/Knudsen number,
+or requested slip/rarefied/roughness model is refused with `GasFilmError`.
+Smooth-wall admission requires a named roughness bound strictly below every
+active gap. There is no
+anonymous `h_min`, pressure clamp, liquid cavitation substitution, or
+Elrod--Adams semantics.
+
+The implementation is bit-deterministic on one ISA by fixed cell/face order and
+bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
+entropy model, and no thermochemical or material-data admission; the
+retained source identities and `GasFilmInputAuthority` state those limits rather
+than minting material/EOS authority.
+
+`tests/gas_film.rs` supplies G0/G1/G3 coverage for uniform sealed equilibrium,
+analytic planar Couette shear/heat, uniform squeeze mass preservation,
+open Poiseuille direction/closure, vent closure, spatial/time refinement of
+analytic limits, reversal and pressure-density scaling, static contact
+exclusion, rarefaction/negative/slip/roughness refusal,
+iteration-budget refusal, and deterministic checkpoint replay.  These are
+software/numerical checks of declared equations only.
+
+No gas-film result establishes thermochemical validity, lubrication-regime
+selection, roughness or slip closure, continuum validity outside the stated
+gates, liquid/mixed/EHL/cavitation behavior, moving-domain topology changes,
+2-D/axisymmetric geometry, energy/entropy closure, coupled contact, or any
+device outcome.  The blocked fs-matdb, fs-thermochem, fs-tribo lubrication, and
+fs-couple port-schema prerequisites remain required for those claims.

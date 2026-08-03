@@ -13,10 +13,18 @@
 
 pub mod ale;
 pub mod bdm;
+pub mod gas_film;
 pub mod ns;
 pub mod reduced_aero;
 pub mod trimesh;
 
+pub use gas_film::{
+    ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,
+    GasFilmCheckpoint, GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput,
+    GasFilmInputAuthority, GasFilmReceipt, GasFilmStep, GasFilmUncertainty, IsothermalIdealGas,
+    MovingWallInput, RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
+    solve_isothermal_gas_film_1d,
+};
 pub use ns::{FluxParams, FluxSolution, FluxSystem};
 pub use reduced_aero::{
     AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,
