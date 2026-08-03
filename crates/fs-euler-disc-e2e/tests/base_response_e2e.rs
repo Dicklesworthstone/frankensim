@@ -1,9 +1,7 @@
-#[path = "../src/base_response.rs"]
-mod base_response;
-
-use base_response::{
+use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseError, BaseResponseInput, ContactLoadScope, LevelSupportInput,
-    MovingContactLoad, refine_reduced_base_response, run_reduced_base_response,
+    MAX_BASE_RESPONSE_STEPS, MovingContactLoad, refine_reduced_base_response,
+    run_reduced_base_response,
 };
 use fs_solid::{
     AssemblyBudget, DampingModel, OperatorDiagnostics, ShellIdentity, ShellMaterial, ShellNode,
@@ -136,6 +134,10 @@ fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_
     assert!(run.diagnostics.modal_mass_kg > 0.0);
     assert!(run.diagnostics.modal_stiffness_n_per_m > 0.0);
     assert!(run.diagnostics.modal_damping_n_s_per_m > 0.0);
+    assert!(
+        run.diagnostics.reduced_solve_scaled_residual
+            <= run.diagnostics.reduced_solve_scaled_residual_limit
+    );
     assert_eq!(run.diagnostics.level_tilt_rad, 0.0);
     let OperatorDiagnostics::Computed {
         raw_mass_min_eigenvalue,
@@ -156,6 +158,7 @@ fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_
     assert!(terminal.damping_work_j > 0.0);
     assert!(terminal.support_reaction_norm_n > 0.0);
     assert!(run.energy_closure_residual_j.abs() < 2.0e-6);
+    assert!(run.normalized_energy_closure_residual < 1.0e-4);
 }
 
 #[test]
@@ -169,6 +172,7 @@ fn e2e_reduced_flexible_base_moving_load_and_dimensioned_scaling_are_consistent(
     );
     assert!(run.diagnostics.modal_shape_translation_scale_m > 0.0);
     assert!(run.energy_closure_residual_j.abs() < 2.0e-6);
+    assert!(run.normalized_energy_closure_residual < 1.0e-4);
 
     let mut doubled = unit.clone();
     doubled.load.normal_force_n = 2.0;
@@ -218,6 +222,7 @@ fn e2e_reduced_flexible_base_zero_damping_preserves_free_modal_energy() {
         0.0
     );
     assert!(run.energy_closure_residual_j.abs() < 1.0e-8);
+    assert!(run.normalized_energy_closure_residual < 1.0e-5);
 }
 
 #[test]
@@ -231,6 +236,28 @@ fn e2e_reduced_flexible_base_timestep_refinement_is_retained() {
     assert!(evidence.terminal_elastic_energy_difference_j < 1.0e-6);
     assert!(evidence.coarse.energy_closure_residual_j.abs() < 2.0e-6);
     assert!(evidence.fine.energy_closure_residual_j.abs() < 2.0e-6);
+    assert!(evidence.coarse.normalized_energy_closure_residual < 1.0e-4);
+    assert!(evidence.fine.normalized_energy_closure_residual < 1.0e-4);
+    assert!(evidence.terminal_normalized_energy_difference < 1.0e-4);
+}
+
+#[test]
+fn e2e_public_base_response_api_refuses_unstable_damping_and_long_synchronous_runs() {
+    let unstable = input(DampingModel::Rayleigh {
+        mass_proportional_per_s: 1.0e6,
+        stiffness_proportional_s: 0.0,
+    });
+    assert!(matches!(
+        run_reduced_base_response(&unstable),
+        Err(BaseResponseError::TimestepOutsideStability { .. })
+    ));
+
+    let mut too_long = input(DampingModel::None);
+    too_long.steps = MAX_BASE_RESPONSE_STEPS + 1;
+    assert!(matches!(
+        run_reduced_base_response(&too_long),
+        Err(BaseResponseError::StepBudgetExceeded)
+    ));
 }
 
 #[test]

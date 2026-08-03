@@ -3,14 +3,29 @@
 //! The rung projects the production `fs-solid` flat plate operators onto one
 //! deterministic, load-shaped mode and advances that scalar state under a
 //! moving *nodal* normal load. It is deliberately not a resolved finite-patch
-//! contact solve, curved shell solve, or multi-patch coupling path.
+//! contact solve, curved shell solve, or multi-patch coupling path. This
+//! synchronous bounded rung has no `Cx`/cancellation surface and therefore
+//! does not conform to FrankenSim's cancellable hot-kernel invariant; a future
+//! cancellable API is required before it can make that project-level claim.
 
 use core::fmt;
 
 use fs_solid::{OperatorDiagnostics, ShellAssembly, ShellError, ShellPlate, ShellSupport};
 
-/// Largest retained integration length for this fixture-scale rung.
-pub const MAX_BASE_RESPONSE_STEPS: u32 = 200_000;
+/// Largest retained integration length for this synchronous campaign rung.
+///
+/// The campaign's 200-step coarse trajectory and its 400-step half-timestep
+/// refinement are the only admitted horizons. This is deliberately not a
+/// general long-running integration API because it has no cancellation point.
+pub const MAX_BASE_RESPONSE_STEPS: u32 = 400;
+
+/// Largest accepted dimensionless residual of the scaled supported static solve.
+///
+/// With translation scale `L`, the reported residual is
+/// `||D (K u - f)||_2 / ||D f||_2`, where `D` has `L` on translational DOFs and
+/// one on rotational DOFs. Both norms are energies, so the quotient is
+/// dimensionless.
+pub const MAX_REDUCED_SOLVE_SCALED_RESIDUAL: f64 = 1.0e-8;
 
 /// Explicit geometry scope of the reduced response request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +109,12 @@ pub enum BaseResponseError {
     /// The retained trajectory would exceed the declared bounded work budget.
     StepBudgetExceeded,
     /// The timestep is outside the conservative modal stability envelope.
-    TimestepOutsideStability { nondimensional_step: f64 },
+    TimestepOutsideStability {
+        nondimensional_step: f64,
+        limit: f64,
+    },
+    /// The reduced supported static solve did not meet its scaled residual bound.
+    ReducedSolveResidual { scaled_residual: f64, limit: f64 },
     /// A derived quantity became non-finite.
     NonFiniteDerived { field: &'static str },
 }
@@ -151,6 +171,14 @@ pub struct BaseResponseDiagnostics {
     /// in 1/m, so multiplying the shape by the generalized displacement gives
     /// physical translations [m] and small rotations [rad].
     pub modal_shape_translation_scale_m: f64,
+    /// Dimensionless damping ratio `C / (2 sqrt(K M))` for the retained mode.
+    pub modal_damping_ratio: f64,
+    /// Largest admitted dimensionless timestep for the retained damping ratio.
+    pub nondimensional_timestep_limit: f64,
+    /// Dimensionless residual of the scaled supported static load-shape solve.
+    pub reduced_solve_scaled_residual: f64,
+    /// Declared dimensionless acceptance limit for `reduced_solve_scaled_residual`.
+    pub reduced_solve_scaled_residual_limit: f64,
     /// Undamped angular frequency [rad/s].
     pub modal_frequency_rad_s: f64,
 }
@@ -163,6 +191,10 @@ pub struct BaseResponseRun {
     pub samples: Vec<BaseResponseSample>,
     /// Energy closure residual [J].
     pub energy_closure_residual_j: f64,
+    /// Positive energy scale used to normalize the closure residual [J].
+    pub energy_closure_scale_j: f64,
+    /// Dimensionless `abs(energy_closure_residual_j) / energy_closure_scale_j`.
+    pub normalized_energy_closure_residual: f64,
     /// Damping applicability and conditioning/support information.
     pub diagnostics: BaseResponseDiagnostics,
 }
@@ -186,6 +218,8 @@ pub struct BaseResponseRefinement {
     pub terminal_displacement_difference_m: f64,
     /// Absolute difference in terminal elastic energy [J].
     pub terminal_elastic_energy_difference_j: f64,
+    /// Dimensionless difference in terminal total modal energy.
+    pub terminal_normalized_energy_difference: f64,
 }
 
 /// Assemble and integrate the one-mode production flexible-base rung.
@@ -201,6 +235,11 @@ pub fn run_reduced_base_response(
         })?;
     let level_tilt_rad = validate_level_support(input)?;
     let mode = load_shaped_mode(input, &assembly)?;
+    let modal_frequency_rad_s = (mode.stiffness / mode.mass).sqrt();
+    let modal_damping_ratio = mode.damping / (2.0 * (mode.stiffness * mode.mass).sqrt());
+    finite(modal_frequency_rad_s, "modal_frequency")?;
+    finite(modal_damping_ratio, "modal_damping_ratio")?;
+    let nondimensional_timestep_limit = 0.2 / (1.0 + modal_damping_ratio);
     let diagnostics = BaseResponseDiagnostics {
         operator: assembly.diagnostics.clone(),
         level_tilt_rad,
@@ -208,12 +247,19 @@ pub fn run_reduced_base_response(
         modal_stiffness_n_per_m: mode.stiffness,
         modal_damping_n_s_per_m: mode.damping,
         modal_shape_translation_scale_m: mode.translation_scale_m,
-        modal_frequency_rad_s: (mode.stiffness / mode.mass).sqrt(),
+        modal_damping_ratio,
+        nondimensional_timestep_limit,
+        reduced_solve_scaled_residual: mode.scaled_solve_residual,
+        reduced_solve_scaled_residual_limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
+        modal_frequency_rad_s,
     };
     let nondimensional_step = input.timestep_s * diagnostics.modal_frequency_rad_s;
-    if !(nondimensional_step.is_finite() && nondimensional_step <= 0.2) {
+    if !(nondimensional_step.is_finite()
+        && nondimensional_step <= diagnostics.nondimensional_timestep_limit)
+    {
         return Err(BaseResponseError::TimestepOutsideStability {
             nondimensional_step,
+            limit: diagnostics.nondimensional_timestep_limit,
         });
     }
 
@@ -278,9 +324,23 @@ pub fn run_reduced_base_response(
         .ok_or(BaseResponseError::NonFiniteDerived { field: "samples" })?;
     let energy_closure_residual_j = final_energy - initial_energy - external_work + damping_work;
     finite(energy_closure_residual_j, "energy_closure_residual")?;
+    let energy_closure_scale_j = initial_energy
+        .abs()
+        .max(final_energy.abs())
+        .max(external_work.abs())
+        .max(damping_work.abs())
+        .max(f64::MIN_POSITIVE);
+    let normalized_energy_closure_residual =
+        energy_closure_residual_j.abs() / energy_closure_scale_j;
+    finite(
+        normalized_energy_closure_residual,
+        "normalized_energy_closure_residual",
+    )?;
     Ok(BaseResponseRun {
         samples,
         energy_closure_residual_j,
+        energy_closure_scale_j,
+        normalized_energy_closure_residual,
         diagnostics,
     })
 }
@@ -297,33 +357,38 @@ pub fn refine_reduced_base_response(
     fine_input.timestep_s *= 0.5;
     fine_input.steps *= 2;
     let fine = run_reduced_base_response(&fine_input)?;
+    let coarse_terminal = coarse
+        .final_sample()
+        .ok_or(BaseResponseError::NonFiniteDerived {
+            field: "coarse samples",
+        })?;
+    let fine_terminal = fine
+        .final_sample()
+        .ok_or(BaseResponseError::NonFiniteDerived {
+            field: "fine samples",
+        })?;
+    let coarse_terminal_energy =
+        coarse_terminal.modal_kinetic_energy_j + coarse_terminal.elastic_energy_j;
+    let fine_terminal_energy =
+        fine_terminal.modal_kinetic_energy_j + fine_terminal.elastic_energy_j;
+    let terminal_normalized_energy_difference = (coarse_terminal_energy - fine_terminal_energy)
+        .abs()
+        / coarse_terminal_energy
+            .abs()
+            .max(fine_terminal_energy.abs())
+            .max(f64::MIN_POSITIVE);
+    finite(
+        terminal_normalized_energy_difference,
+        "terminal_normalized_energy_difference",
+    )?;
     Ok(BaseResponseRefinement {
-        terminal_displacement_difference_m: (coarse
-            .final_sample()
-            .ok_or(BaseResponseError::NonFiniteDerived {
-                field: "coarse samples",
-            })?
-            .modal_displacement_m
-            - fine
-                .final_sample()
-                .ok_or(BaseResponseError::NonFiniteDerived {
-                    field: "fine samples",
-                })?
-                .modal_displacement_m)
+        terminal_displacement_difference_m: (coarse_terminal.modal_displacement_m
+            - fine_terminal.modal_displacement_m)
             .abs(),
-        terminal_elastic_energy_difference_j: (coarse
-            .final_sample()
-            .ok_or(BaseResponseError::NonFiniteDerived {
-                field: "coarse samples",
-            })?
-            .elastic_energy_j
-            - fine
-                .final_sample()
-                .ok_or(BaseResponseError::NonFiniteDerived {
-                    field: "fine samples",
-                })?
-                .elastic_energy_j)
+        terminal_elastic_energy_difference_j: (coarse_terminal.elastic_energy_j
+            - fine_terminal.elastic_energy_j)
             .abs(),
+        terminal_normalized_energy_difference,
         coarse,
         fine,
     })
@@ -333,6 +398,7 @@ pub fn refine_reduced_base_response(
 struct ReducedMode {
     full_shape: Vec<f64>,
     translation_scale_m: f64,
+    scaled_solve_residual: f64,
     mass: f64,
     stiffness: f64,
     damping: f64,
@@ -436,14 +502,22 @@ fn load_shaped_mode(
             detail: "load is entirely constrained",
         });
     }
-    let reduced_shape = solve_dense(
+    let mixed_unit_scales = mixed_unit_scales(input, &assembly.free_dofs)?;
+    let (reduced_shape, scaled_solve_residual) = solve_mixed_unit_system(
         assembly.stiffness.values(),
         assembly.stiffness.dimension(),
         &reduced_load,
+        &mixed_unit_scales,
     )
     .ok_or(BaseResponseError::ModalReduction {
         detail: "reduced stiffness is singular",
     })?;
+    if scaled_solve_residual > MAX_REDUCED_SOLVE_SCALED_RESIDUAL {
+        return Err(BaseResponseError::ReducedSolveResidual {
+            scaled_residual: scaled_solve_residual,
+            limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
+        });
+    }
     let translation_scale_m = reduced_shape
         .iter()
         .zip(&assembly.free_dofs)
@@ -486,6 +560,7 @@ fn load_shaped_mode(
     Ok(ReducedMode {
         full_shape,
         translation_scale_m,
+        scaled_solve_residual,
         mass,
         stiffness,
         damping,
@@ -591,6 +666,86 @@ fn full_load_with_magnitude(
         }
     }
     force
+}
+
+fn mixed_unit_scales(
+    input: &BaseResponseInput,
+    free_dofs: &[usize],
+) -> Result<Vec<f64>, BaseResponseError> {
+    let mut translation_scale_m = 0.0_f64;
+    for (index, node) in input.plate.nodes.iter().enumerate() {
+        for other in input.plate.nodes.iter().skip(index + 1) {
+            let separation = [
+                node.position_m[0] - other.position_m[0],
+                node.position_m[1] - other.position_m[1],
+                node.position_m[2] - other.position_m[2],
+            ];
+            translation_scale_m = translation_scale_m.max(norm(separation));
+        }
+    }
+    if !(translation_scale_m.is_finite() && translation_scale_m > 0.0) {
+        return Err(BaseResponseError::ModalReduction {
+            detail: "plate has no finite translational scaling length",
+        });
+    }
+    Ok(free_dofs
+        .iter()
+        .map(|dof| {
+            if *dof % 6 < 3 {
+                translation_scale_m
+            } else {
+                1.0
+            }
+        })
+        .collect())
+}
+
+fn solve_mixed_unit_system(
+    values: &[f64],
+    dimension: usize,
+    rhs: &[f64],
+    scales: &[f64],
+) -> Option<(Vec<f64>, f64)> {
+    if values.len() != dimension * dimension || rhs.len() != dimension || scales.len() != dimension
+    {
+        return None;
+    }
+    let scaled_rhs: Vec<f64> = rhs
+        .iter()
+        .zip(scales)
+        .map(|(value, scale)| value * scale)
+        .collect();
+    let scaled_values: Vec<f64> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| value * scales[index / dimension] * scales[index % dimension])
+        .collect();
+    let scaled_shape = solve_dense(&scaled_values, dimension, &scaled_rhs)?;
+    let shape: Vec<f64> = scaled_shape
+        .iter()
+        .zip(scales)
+        .map(|(value, scale)| value * scale)
+        .collect();
+    let residual_norm_sq: f64 = (0..dimension)
+        .map(|row| {
+            let residual = values[(row * dimension)..((row + 1) * dimension)]
+                .iter()
+                .zip(&shape)
+                .map(|(value, shape_value)| value * shape_value)
+                .sum::<f64>()
+                - rhs[row];
+            let scaled_residual = scales[row] * residual;
+            scaled_residual * scaled_residual
+        })
+        .sum();
+    let force_norm_sq: f64 = scaled_rhs.iter().map(|value| value * value).sum();
+    if !(force_norm_sq.is_finite() && force_norm_sq > 0.0) {
+        return None;
+    }
+    let scaled_residual = residual_norm_sq.sqrt() / force_norm_sq.sqrt();
+    scaled_residual
+        .is_finite()
+        .then_some((shape, scaled_residual))
 }
 
 fn solve_dense(values: &[f64], dimension: usize, rhs: &[f64]) -> Option<Vec<f64>> {
