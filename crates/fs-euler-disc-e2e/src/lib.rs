@@ -12,6 +12,7 @@ pub mod base_response;
 pub mod baseline;
 pub mod contact_dynamics;
 pub mod contract;
+pub mod ports;
 pub mod protocol;
 pub mod reduced_decay;
 
@@ -36,6 +37,13 @@ pub use contact_dynamics::{
     refine_profile_timestep_by_two, refine_timestep_by_two, run_contact_dynamics,
     run_profile_contact_dynamics, small_angle_rolling_profile_initializer, state_at_ground_contact,
     state_at_profile_ground_contact,
+};
+pub use ports::{
+    ChannelActivity, ContributionDomain, ContributionOwnership, DecompositionReceipt,
+    EULER_COMPOSITION_PORT_SCHEMA_VERSION, EnergyClosureDisposition, EnergyContribution,
+    EnergyLedgerCheckpoint, EnergyTerms, EulerChannel, EulerEnergyLedger, EulerPortError,
+    EulerPortRegistry, GeneralizedVelocityCoordinate, MAX_EULER_PORT_DECLARATIONS, PatchRegion,
+    PortDeclaration, PortInterval, SurfacePair,
 };
 
 pub use contract::{

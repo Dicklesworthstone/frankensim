@@ -12,6 +12,7 @@ layer = "L6"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-flux = { path = "../fs-flux" }

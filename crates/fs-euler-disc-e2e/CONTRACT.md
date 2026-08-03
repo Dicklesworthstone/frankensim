@@ -221,6 +221,15 @@ only the encoded numerical/software composition and its input/record checks.
   V1 does not persist or resolve the referenced artifacts themselves, so that
   command verifies the log/receipt contract and cannot replay the named physical
   or numerical case.
+- `ports` is an Euler-local composition and accounting surface. A
+  `PortDeclaration` binds one typed channel (gravity, normal, tangential,
+  rolling/contour/spin, impact, base, exterior gas, or gas film) to an explicit
+  effort/flow kind, active/inactive/unavailable state, law and source
+  identities, canonical surface pair, patch interval, clock interval, and
+  generalized-coordinate basis/frame/sign binding. `EulerPortRegistry` admits
+  only deterministic, non-ambiguous ownership. `EulerEnergyLedger` records
+  caller-supplied finite energy changes exactly once by contribution identity,
+  with identity-bound checkpoints and rollback.
 
 ## Invariants
 
@@ -296,6 +305,18 @@ only the encoded numerical/software composition and its input/record checks.
     `retain-as-terminal-non-promotion` decision alternative, never to candidate
     review. This response is part of the frozen risk registry and contract
     identity.
+17. Active ports that overlap in canonical surface pair, patch region, clock
+    interval, and generalized-coordinate identity refuse unless both carry the
+    same exact additive decomposition receipt covering both named ports. Surface
+    order and coordinate-frame/sign disagreement cannot create distinct
+    ownership domains.
+18. The ledger accepts a contribution only once, only from an active declared
+    port of the matching channel, and only at a timestamp in that port's
+    half-open interval. Entries are canonicalized by clock, tick, and stable
+    contribution identity; invalid entries and invalid checkpoints leave the
+    visible ledger unchanged. Kinetic, potential, recoverable, and numerical
+    terms are signed; dissipated, heat, and unresolved magnitudes are finite
+    and non-negative.
 
 ## Error model
 
@@ -365,6 +386,13 @@ rehydration transports in this leaf. A future version must define an explicit
 semantic migration and receipt or continue refusing predecessor bytes. It must
 never reinterpret v1 approximately.
 
+The local port surface refuses malformed surface/patch/time domains, duplicate
+port or contribution identities, active ownership overlap, unproved additive
+overlap, unavailable/inactive or channel-mismatched energy records,
+out-of-window or out-of-order receipts, non-finite/negative constrained energy
+terms, cumulative non-finiteness, and checkpoints from another ledger, registry,
+or retained prefix. It has no implicit channel default or fallback.
+
 ## Determinism class
 
 Contract and owner-matrix construction, canonical encoding, decoding, hashing,
@@ -385,6 +413,13 @@ The crate makes no cross-ISA claim about later floating-point simulation.
 Deterministic metadata proof is not deterministic solver proof and neither is
 physical validation.
 
+Euler-local port declarations are sorted by stable declaration identity and
+their remaining domain tuple; additive receipts sort contributor identities;
+energy receipts are retained only in canonical clock/tick/identity order.
+The resulting registry and accepted ledger order are deterministic for equal
+inputs and dependency versions, but do not establish a deterministic contact or
+multiphysics solver.
+
 ## Cancellation behavior
 
 V1 contract operations are bounded metadata transformations and contain no
@@ -403,6 +438,10 @@ The current campaign binary is synchronous and step-bounded, but exposes no
 hot-kernel cancellation invariant or conformance to it. A future cancellable
 campaign must run under explicit asupersync scopes, poll at bounded tile/run
 boundaries, drain cancellation, and publish no partial evidence or authority.
+
+Port and ledger operations are bounded in-memory metadata operations and expose
+no `Cx`. Record and rollback validate their complete next state before mutation,
+so refusal does not publish a partial receipt or partial checkpoint rollback.
 
 ## Unsafe boundary
 
@@ -484,6 +523,14 @@ The G0/G3 contract suite must cover:
 - compile/manifest direction through workspace layer/dependency gates and an
   API boundary in which a generic lookalike cannot enter the concrete Context
   constructor.
+- port-registry permutation invariance; all eight typed channels; canonical
+  action/reaction surface pairs; duplicate identities; partial temporal/patch
+  overlap; contradictory coordinate frame/sign bindings; and additive receipt
+  exact-domain/contributor refusal;
+- exactly-once ledger receipt, inactive/unavailable/channel/timestamp refusal,
+  canonical receipt-order refusal without partial mutation, checkpoint identity
+  and prefix rollback, finite-energy validation, and explicit no-closure
+  dispositions when a channel is unavailable or merely absent.
 
 Focused tests are necessary software evidence only. Repository DSR, separately
 custodied blind physical evidence, model comparison, and maturity promotion are
@@ -792,3 +839,13 @@ filleted edges, glass versus steel, rings versus discs, or other configurations;
 or that it predicts a spin time. Its geometry, contact, base, decay, and
 exterior records are numerical/software rungs, not experiment-, video-, or
 Mould-backed evidence.
+
+The Euler-local port registry does not implement any gravity, contact,
+partial-slip, rolling/contour/spin, impact, base, exterior-gas, or gas-film
+physics. Its structural additive receipt is not a signed decomposition proof;
+it neither authenticates a source nor establishes action/reaction balance. Its
+ledger neither derives energy from forces or impulses nor closes an energy
+window: unavailable and undeclared channels always retain an explicit
+no-closure boundary. It does not satisfy the blocked generic `PortSchema`,
+manifest, constraint/impact-law, RATTLE/generalized-alpha/nonholonomic, or DSR
+lanes.
