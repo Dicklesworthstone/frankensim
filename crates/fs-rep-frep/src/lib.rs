@@ -35,12 +35,17 @@
 //! enclosure directly as their abstract-distance certificate.
 
 mod axisymmetric;
+mod axisymmetric_mass;
 mod ival;
 
 pub use axisymmetric::{
     AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricError,
     AxisymmetricIdentity, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
     SquatDiscEdgeTreatment, squat_disc,
+};
+pub use axisymmetric_mass::{
+    AxisymmetricMassError, AxisymmetricMassErrorBounds, AxisymmetricMassProperties,
+    AxisymmetricPrincipalInertia,
 };
 
 use fs_evidence::NumericalCertificate;
