@@ -128,6 +128,12 @@ fn np_004_zero_and_hostile_applicability_refuse_without_receipt() {
     zero.indentation_m = 0.0;
     let response = zero.evaluate().unwrap();
     assert_eq!(response.normal_force_n_or_n_per_m, 0.0);
+    let mut zero_line = request(NormalPatchLaw::HertzCylinderPlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    });
+    zero_line.line_load_n_per_m = 0.0;
+    assert_eq!(zero_line.evaluate().unwrap().normal_force_n_or_n_per_m, 0.0);
     let mut adhesive = zero.clone();
     adhesive.applicability.adhesion_energy_j_per_m2 = 1.0;
     assert!(matches!(
@@ -157,6 +163,9 @@ fn np_005_identity_authority_and_barrier_are_deterministic_and_distinct() {
     assert_eq!(a.request_id, b.request_id);
     assert_eq!(a.receipt_id, b.receipt_id);
     assert_eq!(a.authority, InputAuthority::SyntheticFixture);
+    assert_eq!(a.interface_system_id, "test/a->b");
+    assert_eq!(a.history_id, "test/history");
+    assert_eq!(a.input_source_id, "test/source");
     let barrier = ConstraintBarrierReceipt {
         request_id: a.request_id,
         scheme_id: "ipc/barrier".into(),

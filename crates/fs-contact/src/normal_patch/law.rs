@@ -117,6 +117,9 @@ pub struct NormalPatchReceipt {
     pub request_id: ContentHash,
     pub receipt_id: ContentHash,
     pub units: &'static str,
+    pub interface_system_id: String,
+    pub history_id: String,
+    pub input_source_id: String,
     pub authority: InputAuthority,
     pub approach_m: f64,
     pub normal_force_n_or_n_per_m: f64,
@@ -271,6 +274,12 @@ impl NormalPatchRequest {
         modulus: f64,
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
         let q = self.line_load_n_per_m;
+        if q == 0.0 {
+            let ratios = self.ratios(0.0, radius, 0.0, 0.0)?;
+            return self.receipt(
+                request_id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ratios,
+            );
+        }
         let a = checked(
             (4.0 * q * radius / (core::f64::consts::PI * modulus)).sqrt(),
             "cylinder_patch",
@@ -286,33 +295,17 @@ impl NormalPatchRequest {
                 limit: 0.0,
             });
         }
-        let approach = if q == 0.0 {
-            0.0
-        } else {
-            checked(
-                q * (log + 0.5) / (core::f64::consts::PI * modulus),
-                "cylinder_approach",
-            )?
-        };
-        let tangent = if q == 0.0 {
-            0.0
-        } else {
-            checked(core::f64::consts::PI * modulus / log, "cylinder_tangent")?
-        };
-        let p0 = if a == 0.0 {
-            0.0
-        } else {
-            checked(2.0 * q / (core::f64::consts::PI * a), "cylinder_pressure")?
-        };
+        let approach = checked(
+            q * (log + 0.5) / (core::f64::consts::PI * modulus),
+            "cylinder_approach",
+        )?;
+        let tangent = checked(core::f64::consts::PI * modulus / log, "cylinder_tangent")?;
+        let p0 = checked(2.0 * q / (core::f64::consts::PI * a), "cylinder_pressure")?;
         let ratios = self.ratios(a, radius, approach, p0)?;
-        let energy = if q == 0.0 {
-            0.0
-        } else {
-            checked(
-                q * q * (log + 0.75) / (2.0 * core::f64::consts::PI * modulus),
-                "cylinder_energy",
-            )?
-        };
+        let energy = checked(
+            q * q * (log + 0.75) / (2.0 * core::f64::consts::PI * modulus),
+            "cylinder_energy",
+        )?;
         self.receipt(
             request_id,
             approach,
@@ -360,9 +353,22 @@ impl NormalPatchRequest {
         let receipt_id = hash_domain(
             DOMAIN,
             format!(
-                "{}|{}|{force:.17e}|{approach:.17e}|{reversible:.17e}|{irreversible:.17e}",
+                concat!(
+                    "{}|{}|{approach:.17e}|{force:.17e}|{tangent:.17e}|",
+                    "{patch:.17e}|{peak:.17e}|{moment:.17e}|{reversible:.17e}|",
+                    "{irreversible:.17e}|{power:.17e}|{:?}|{:.17e}|{:.17e}|",
+                    "{:.17e}|{:?}|{}|{}|{}"
+                ),
                 request_id.to_hex(),
-                self.identity.state_id
+                self.identity.state_id,
+                ratios,
+                self.uncertainty.radius_relative,
+                self.uncertainty.modulus_relative,
+                self.uncertainty.load_relative,
+                self.interface.provenance().authority(),
+                self.interface.ordered_system_id(),
+                self.interface.history_id(),
+                self.interface.provenance().source_id(),
             )
             .as_bytes(),
         );
@@ -370,6 +376,9 @@ impl NormalPatchRequest {
             request_id,
             receipt_id,
             units: SI_UNITS,
+            interface_system_id: self.interface.ordered_system_id().to_owned(),
+            history_id: self.interface.history_id().to_owned(),
+            input_source_id: self.interface.provenance().source_id().to_owned(),
             authority,
             approach_m: approach,
             normal_force_n_or_n_per_m: force,
